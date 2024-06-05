@@ -13,6 +13,9 @@ uvicorn = "^0.30.1"
 pydantic = "^2.7.3"
 alembic = "^1.13.1"
 pydantic-settings = "^2.3.0"
+sqlmodel = "^0.0.19"
+python-dotenv = "^1.0.1"
+psycopg2 = "^2.9.9"
 
 
 [build-system]
