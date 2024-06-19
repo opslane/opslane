@@ -1,7 +1,9 @@
 """Routes for alerts."""
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, Depends
 
+from app.dependencies import get_notification_manager
+from app.managers.notification_manager import NotificationManager
 from app.integrations.factory import IntegrationSourceFactory
 
 router = APIRouter()
@@ -14,12 +16,17 @@ async def get() -> dict:
 
 
 @router.post("/{source}")
-async def receive(source: str, request: Request) -> dict:
+async def receive(
+    source: str,
+    request: Request,
+    notification_manager: NotificationManager = Depends(get_notification_manager),
+) -> dict:
     """Receive an alert."""
     alert = await request.json()
     try:
         integration = IntegrationSourceFactory.get_integration(source)
         integration.process_alert(alert)
+        notification_manager.send_notifications(alert)
         return {"message": "Alert received and processed!"}
     except ValueError as e:
         return {"error": str(e)}, 404

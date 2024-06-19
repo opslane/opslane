@@ -16,6 +16,7 @@ pydantic-settings = "^2.3.0"
 sqlmodel = "^0.0.19"
 python-dotenv = "^1.0.1"
 psycopg2 = "^2.9.9"
+slack-sdk = "^3.29.0"
 
 
 [build-system]
