@@ -27,7 +27,7 @@ class BaseIntegration(ABC):
             session.commit()
             print("Alert stored in the database!")
 
-    def process_alert(self, alert: dict):
+    def process_alert(self, alert: dict) -> Alert:
         """Process received alert."""
         normalized_alert = self.normalize_alert(alert)
         enriched_alert = self.enrich_alert(normalized_alert)

@@ -25,8 +25,8 @@ async def receive(
     alert = await request.json()
     try:
         integration = IntegrationSourceFactory.get_integration(source)
-        integration.process_alert(alert)
-        notification_manager.send_notifications(alert)
+        processed_alert = integration.process_alert(alert)
+        notification_manager.send_notifications(processed_alert)
         return {"message": "Alert received and processed!"}
     except ValueError as e:
         return {"error": str(e)}, 404
