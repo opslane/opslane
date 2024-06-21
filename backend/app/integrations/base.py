@@ -1,7 +1,9 @@
 """Base class for integrations."""
 
 from abc import ABC, abstractmethod
+from sqlmodel import Session
 
+from app.core.db import engine
 from app.models.alert import Alert
 
 
@@ -18,9 +20,12 @@ class BaseIntegration(ABC):
         """Enrich alert with additional data."""
         raise NotImplementedError("enrich_alert not implemented")
 
-    def store_alert(self, alert: dict):
+    def store_alert(self, alert: Alert):
         """Store alert in the database."""
-        print("storing alert to db:", alert)
+        with Session(engine) as session:
+            session.add(alert)
+            session.commit()
+            print("Alert stored in the database!")
 
     def process_alert(self, alert: dict):
         """Process received alert."""

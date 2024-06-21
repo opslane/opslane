@@ -13,9 +13,25 @@ class DatadogOrganization(BaseModel):
 class DatadogAlert(BaseModel):
     """Datadog alert model."""
 
+    alert_id: str
+    event_message: str
     title: str
-    last_updated: str
-    event_type: str
-    date: str
-    body: str
+    url: str
+    alert_transition: str
+    hostname: str
     org: DatadogOrganization
+    priority: str
+    snapshot: str
+    alert_query: str
+    alert_scope: str
+    alert_status: str
+    event_type: str
+    event_id: str
+    alert_metric: str
+    alert_priority: str
+    alert_title: str
+    alert_type: str
+    event_msg: str
+    tags: str
+    last_updated: str
+    date: str

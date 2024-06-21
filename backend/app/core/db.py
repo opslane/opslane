@@ -4,7 +4,7 @@ from sqlmodel import create_engine
 
 from app.core.config import settings
 
-engine = create_engine(str(settings.SQLALCHEMY_DATABASE_URI))
+engine = create_engine(str(settings.DATABASE_URL))
 
 
 # make sure all SQLModel models are imported (app.models) before initializing DB
