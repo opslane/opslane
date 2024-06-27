@@ -3,8 +3,8 @@
 from abc import ABC, abstractmethod
 from sqlmodel import Session
 
-from app.core.db import engine
-from app.models.alert import Alert
+from app.db import engine
+from app.db.models.alert import Alert
 
 
 class BaseIntegration(ABC):
@@ -24,12 +24,14 @@ class BaseIntegration(ABC):
         """Store alert in the database."""
         with Session(engine) as session:
             session.add(alert)
+            session.flush()
             session.commit()
-            print("Alert stored in the database!")
+            session.refresh(alert)
+        return alert
 
     def process_alert(self, alert: dict) -> Alert:
         """Process received alert."""
         normalized_alert = self.normalize_alert(alert)
         enriched_alert = self.enrich_alert(normalized_alert)
-        self.store_alert(enriched_alert)
-        return enriched_alert
+        stored_alert = self.store_alert(enriched_alert)
+        return stored_alert

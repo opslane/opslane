@@ -16,6 +16,9 @@ class Settings(BaseSettings):
     SECRET_KEY: str = secrets.token_urlsafe(32)
     DATABASE_URL: str
     SLACK_BOT_TOKEN: str
+    DATADOG_API_KEY: str
+    DATADOG_APP_KEY: str
+    DATADOG_BOT_SLACK_ID: str
 
 
 settings = Settings()  # type: ignore

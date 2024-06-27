@@ -1,6 +1,6 @@
 """This module contains the NotificationManager class."""
 
-from app.models.alert import Alert
+from app.db.models.alert import Alert
 
 
 class NotificationManager:

@@ -2,8 +2,8 @@
 
 from datetime import datetime
 
-from app.models.alert import Alert, AlertSource
-from app.models.providers.datadog import DatadogAlert
+from app.db.models.alert import Alert, AlertSource
+from app.db.models.providers.datadog import DatadogAlert
 from .base import BaseIntegration
 
 
@@ -53,13 +53,13 @@ class DatadogIntegration(BaseIntegration):
         # Create an instance of the Alert model
         normalized_alert = Alert(
             title=datadog_alert.title,
-            description=datadog_alert.event_message,  # Assuming event_message is the detailed description
+            description=datadog_alert.event_message,
             severity=self._map_severity(datadog_alert.event_type),
-            status="new",  # Assuming a new alert status
+            status="new",
             created_at=self.convert_timestamp(datadog_alert.date),
             updated_at=self.convert_timestamp(datadog_alert.last_updated),
-            alert_source=AlertSource.DATADOG,  # Assuming the source is always Datadog for this normalization
-            tags=datadog_alert.tags,  # Ensure this is in JSON format if necessary
+            alert_source=AlertSource.DATADOG,
+            tags=datadog_alert.tags,
             additional_data={
                 "url": datadog_alert.url,
                 "alert_transition": datadog_alert.alert_transition,
@@ -79,7 +79,7 @@ class DatadogIntegration(BaseIntegration):
                 "alert_type": datadog_alert.alert_type,
                 "event_msg": datadog_alert.event_msg,
                 "last_updated": datadog_alert.last_updated,
-            },  # Assuming additional_data can store these extra fields
+            },
         )
         return normalized_alert
 

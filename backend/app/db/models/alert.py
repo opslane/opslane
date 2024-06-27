@@ -1,8 +1,12 @@
+"""Alert related models"""
+
 import enum
 from sqlmodel import Field, SQLModel, Column, Enum, JSON
 
 
 class SeverityLevel(str, enum.Enum):
+    """Severity levels for the alert."""
+
     LOW = "low"
     MEDIUM = "medium"
     HIGH = "high"
@@ -10,6 +14,8 @@ class SeverityLevel(str, enum.Enum):
 
 
 class AlertSource(str, enum.Enum):
+    """Source of the alert."""
+
     DATADOG = "Datadog"
 
 
