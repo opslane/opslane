@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     DATADOG_API_KEY: str
     DATADOG_APP_KEY: str
     DATADOG_BOT_SLACK_ID: str
+    OPENAI_API_KEY: str
 
 
 settings = Settings()  # type: ignore
