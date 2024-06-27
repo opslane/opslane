@@ -1,7 +1,7 @@
 """Integration source factory to get integration class for a given source."""
 
 import importlib
-from .base import BaseIntegration
+from app.integrations.providers.base import BaseIntegration
 
 
 class IntegrationSourceFactory:
@@ -14,7 +14,9 @@ class IntegrationSourceFactory:
             # Convert source to proper class name convention
             class_name = f"{source.capitalize()}Integration"
             # Dynamically import the module where the class should be located
-            module = importlib.import_module(f"app.integrations.{source.lower()}")
+            module = importlib.import_module(
+                f"app.integrations.providers.{source.lower()}"
+            )
             # Get the class from the module
             integration_class = getattr(module, class_name)
             if issubclass(integration_class, BaseIntegration):

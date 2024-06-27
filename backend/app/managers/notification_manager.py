@@ -13,7 +13,7 @@ class NotificationManager:
         """Register a notifier."""
         self.notifiers.append(notifier)
 
-    def send_notifications(self, alert: Alert):
+    def send_notification(self, alert: Alert):
         """Send notifications to all registered notifiers."""
         for notifier in self.notifiers:
             notifier.notify(alert)
