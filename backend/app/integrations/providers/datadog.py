@@ -1,10 +1,33 @@
 """Datadog integration for alerting."""
 
-from datetime import datetime
+import re
+from datetime import datetime, timedelta
+from typing import Tuple, Optional
 
-from app.db.models.alert import Alert, AlertSource
-from app.db.models.providers.datadog import DatadogAlert
-from .base import BaseIntegration
+from datadog_api_client import ApiClient, Configuration
+from datadog_api_client.v1.api.events_api import EventsApi
+from datadog_api_client.v1.api.monitors_api import MonitorsApi
+from datadog_api_client.v1.model.event import Event
+from datadog_api_client.v1.model.monitor import Monitor
+from datadog_api_client.v2.api.events_api import EventsApi as EventsApiV2
+from datadog_api_client.v2.model.events_list_request import EventsListRequest
+from datadog_api_client.v2.model.events_query_filter import EventsQueryFilter
+from datadog_api_client.v2.model.events_query_options import EventsQueryOptions
+from datadog_api_client.v2.model.events_request_page import EventsRequestPage
+from datadog_api_client.v2.model.events_sort import EventsSort
+
+from app.core.config import settings
+from app.schemas.alert import (
+    AlertConfigurationSchema,
+    AlertSchema,
+    AlertSource,
+    AlertStatus,
+    SeverityLevel,
+)
+from app.schemas.providers.datadog import DatadogAlert
+from app.integrations.providers.base import BaseIntegration
+
+from app.db.models.alert import Alert
 
 
 class DatadogIntegration(BaseIntegration):
@@ -33,54 +56,196 @@ class DatadogIntegration(BaseIntegration):
         "tags": "$TAGS",
         "last_updated": "$LAST_UPDATED",
         "date": "$DATE",
+        "aggregation_key": "$AGGREG_KEY",
     }
 
-    def _map_severity(self, event_type: str) -> str:
-        """Map Datadog event type to a severity level."""
-        # Example mapping, needs to be adjusted according to actual use case
-        return {"query_alert_monitor": "high", "log_alert": "medium"}.get(
-            event_type, "unknown"
+    SEVERITY_MAP = {
+        "P1": SeverityLevel.CRITICAL,
+        "P2": SeverityLevel.HIGH,
+        "P3": SeverityLevel.MEDIUM,
+        "P4": SeverityLevel.LOW,
+    }
+
+    STATUS_MAP = {
+        "Triggered": AlertStatus.OPEN,
+        "Recovered": AlertStatus.RESOLVED,
+        "Muted": AlertStatus.SUPPRESSED,
+    }
+
+    ALERTS_HISTORY_WINDOW = timedelta(days=14)
+
+    def __init__(self):
+        self.configuration = Configuration()
+        self.configuration.api_key["apiKeyAuth"] = settings.DATADOG_API_KEY
+        self.configuration.api_key["appKeyAuth"] = settings.DATADOG_APP_KEY
+
+    def _should_ignore_alert(self, alert: Event) -> bool:
+        """Check if alert should be ignored."""
+        return "[TEST]" in alert.title
+
+    def _parse_title(self, title: str) -> Tuple[Optional[str], str, str]:
+        """Parse the Datadog alert title to extract severity, status, and title.
+
+        Args:
+            title (str): The Datadog alert title.
+
+        Returns:
+            Tuple[Optional[str], str, str]: A tuple containing severity (or None), status, and title.
+        """
+        pattern = r"^\[(P\d+)\] \[(\w+)\] (.+)$|^\[(\w+)\] (.+)$"
+        match = re.match(pattern, title)
+
+        if not match:
+            raise ValueError("Title format is not recognized")
+
+        if match.group(1):
+            # Format: [P2] [Warn] CPU load is very high
+            severity = match.group(1)
+            status = match.group(2)
+            alert_title = match.group(3)
+        else:
+            # Format: [Warn] CPU load is very high
+            severity = None
+            status = match.group(4)
+            alert_title = match.group(5)
+
+        return severity, status, alert_title
+
+    def _normalize_alert(
+        self, alert: Event, aggregation_key: str, duration_nanoseconds: int
+    ) -> AlertSchema:
+        """Format alert to be sent to notifiers."""
+
+        duration_seconds = duration_nanoseconds / 1e9 if duration_nanoseconds else None
+
+        severity, status, alert_title = self._parse_title(alert.title)
+        if severity:
+            severity = severity.lstrip("[").rstrip("]")
+            severity = (self.SEVERITY_MAP.get(severity, SeverityLevel.LOW),)
+        else:
+            severity = SeverityLevel.LOW
+
+        status = status.lstrip("[").rstrip("]")
+        status = self.STATUS_MAP.get(status, AlertStatus.OPEN)
+
+        tags = {
+            k: v
+            for k, v in map(
+                lambda tag: tag.split(":", 1), [tag for tag in alert.tags if ":" in tag]
+            )
+        }
+
+        normalized_alert = AlertSchema(
+            title=alert_title,
+            description=alert.text,
+            severity=severity,
+            status=status,
+            alert_source=AlertSource.DATADOG,
+            provider_event_id=str(alert.id),
+            configuration_id=str(alert.monitor_id),
+            host=alert.host,
+            tags=tags,
+            service=tags.get("service"),
+            env=tags.get("env"),
+            created_at=datetime.fromtimestamp(alert.get("date_happened")).isoformat(),
+            provider_aggregation_key=aggregation_key,
+            duration_seconds=duration_seconds,
         )
 
-    def convert_timestamp(self, timestamp: str) -> str:
-        """Convert Datadog timestamp to a human-readable format."""
-        return datetime.fromtimestamp(int(timestamp) / 1000).isoformat()
+        return normalized_alert
 
-    def normalize_alert(self, alert: dict) -> Alert:
+    def _normalize_alert_configuration(
+        self, monitor: Monitor
+    ) -> AlertConfigurationSchema:
+        """Format alert configuration to be stored in the database."""
+        alert_configuration = AlertConfigurationSchema(
+            name=monitor.name,
+            description=monitor.message,
+            query=monitor.query,
+            provider=AlertSource.DATADOG,
+            provider_id=str(monitor.id),
+            is_noisy=False,
+        )
+
+        return alert_configuration
+
+    def get_alerts(self):
+        """Get alerts from Datadog."""
+
+        normalized_alerts = []
+        normalized_configurations = []
+
+        with ApiClient(configuration=self.configuration) as api_client:
+            monitors_api = MonitorsApi(api_client)
+            for monitor in monitors_api.list_monitors():
+                normalized_configurations.append(
+                    self._normalize_alert_configuration(monitor)
+                )
+
+            events_api = EventsApi(api_client)
+
+            end_ts = datetime.now()
+            start_ts = end_ts - self.ALERTS_HISTORY_WINDOW
+
+            response = events_api.list_events(
+                start=int(start_ts.timestamp()),
+                end=int(end_ts.timestamp()),
+                tags="source:alert",
+            )
+            events = response.get("events", [])
+
+            body = EventsListRequest(
+                filter=EventsQueryFilter(
+                    _from=start_ts.isoformat() + "Z",
+                    to=end_ts.isoformat() + "Z",
+                    query="source:alert",
+                ),
+                options=EventsQueryOptions(
+                    timezone="GMT",
+                ),
+                page=EventsRequestPage(
+                    limit=1000,
+                ),
+                sort=EventsSort.TIMESTAMP_ASCENDING,
+            )
+
+            # We use Events API v2 to get the aggregation key
+            # for each event to group them together
+            events_api_v2 = EventsApiV2(api_client)
+            events_v2 = events_api_v2.search_events(body=body)["data"]
+            events_to_aggregation_key = {}
+            events_to_duration = {}
+
+            for e in events_v2:
+                attributes = e["attributes"]["attributes"]
+                event_id = attributes["evt"]["id"]
+                aggregation_key = attributes.get("aggregation_key")
+                duration = attributes.get("duration")
+
+                if duration:
+                    events_to_duration[event_id] = duration
+
+                if aggregation_key:
+                    events_to_aggregation_key[event_id] = aggregation_key
+
+            for event in events:
+                if self._should_ignore_alert(event):
+                    continue
+
+                aggregation_key = events_to_aggregation_key.get(str(event["id"]), "")
+                duration_nanoseconds = events_to_duration.get(str(event["id"]))
+                normalized_alerts.append(
+                    self._normalize_alert(event, aggregation_key, duration_nanoseconds)
+                )
+
+        return normalized_alerts, normalized_configurations
+
+    def normalize_alert(self, alert: dict) -> AlertSchema:
         """Format alert to be sent to notifiers."""
         datadog_alert = DatadogAlert(**alert)
 
-        # Create an instance of the Alert model
-        normalized_alert = Alert(
-            title=datadog_alert.title,
-            description=datadog_alert.event_message,
-            severity=self._map_severity(datadog_alert.event_type),
-            status="new",
-            created_at=self.convert_timestamp(datadog_alert.date),
-            updated_at=self.convert_timestamp(datadog_alert.last_updated),
-            alert_source=AlertSource.DATADOG,
-            tags=datadog_alert.tags,
-            additional_data={
-                "url": datadog_alert.url,
-                "alert_transition": datadog_alert.alert_transition,
-                "hostname": datadog_alert.hostname,
-                "org_id": datadog_alert.org.id,
-                "org_name": datadog_alert.org.name,
-                "priority": datadog_alert.priority,
-                "snapshot": datadog_alert.snapshot,
-                "alert_query": datadog_alert.alert_query,
-                "alert_scope": datadog_alert.alert_scope,
-                "alert_status": datadog_alert.alert_status,
-                "event_type": datadog_alert.event_type,
-                "event_id": datadog_alert.event_id,
-                "alert_metric": datadog_alert.alert_metric,
-                "alert_priority": datadog_alert.alert_priority,
-                "alert_title": datadog_alert.alert_title,
-                "alert_type": datadog_alert.alert_type,
-                "event_msg": datadog_alert.event_msg,
-                "last_updated": datadog_alert.last_updated,
-            },
-        )
+        normalized_alert = AlertSchema()
+
         return normalized_alert
 
     def enrich_alert(self, alert: Alert) -> Alert:

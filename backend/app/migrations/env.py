@@ -2,6 +2,7 @@ import os
 from dotenv import load_dotenv
 from logging.config import fileConfig
 
+import sqlmodel
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 from sqlmodel import SQLModel
@@ -44,7 +45,10 @@ def run_migrations_offline():
     """
     url = get_url()
     context.configure(
-        url=url, target_metadata=target_metadata, literal_binds=True, compare_type=True
+        url=url,
+        target_metadata=target_metadata,
+        literal_binds=True,
+        compare_type=True,
     )
 
     with context.begin_transaction():
