@@ -22,5 +22,7 @@ class Settings(BaseSettings):
     DATADOG_BOT_SLACK_ID: str
     OPENAI_API_KEY: str
 
+    PREDICTION_CONFIDENCE_THRESHOLD: float = 0.5
+
 
 settings = Settings()  # type: ignore
