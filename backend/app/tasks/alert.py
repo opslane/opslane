@@ -46,7 +46,3 @@ async def process_alert(source: str, raw_alert: dict) -> None:
 
     # 2. Check if alert is actionable
     is_actionable = await _check_actionable(raw_alert)
-
-    # 3. Send notifications
-    if is_actionable:
-        _send_notifications(processed_alert, notification_manager)
