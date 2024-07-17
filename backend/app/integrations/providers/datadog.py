@@ -84,7 +84,7 @@ class DatadogIntegration(BaseIntegration):
         return "[TEST]" in alert.title
 
     def _parse_title(self, title: str) -> Tuple[Optional[str], str, str]:
-        """Parse the Datadog alert title to extract severity, status, and title.
+        """Parse the Datadog alert to extract severity, status, and title.
 
         Args:
             title (str): The Datadog alert title.
@@ -114,7 +114,16 @@ class DatadogIntegration(BaseIntegration):
     def _normalize_alert(
         self, alert: Event, aggregation_key: str, duration_nanoseconds: int
     ) -> AlertSchema:
-        """Format alert to be sent to notifiers."""
+        """Normalize Datadog alert to AlertSchema format.
+
+        Args:
+            alert (Event): Raw Datadog event object.
+            aggregation_key (str): Key for grouping related alerts.
+            duration_nanoseconds (int): Alert duration in nanoseconds.
+
+        Returns:
+            AlertSchema: Normalized alert object.
+        """
 
         duration_seconds = duration_nanoseconds / 1e9 if duration_nanoseconds else None
 
@@ -128,12 +137,7 @@ class DatadogIntegration(BaseIntegration):
         status = status.lstrip("[").rstrip("]")
         status = self.STATUS_MAP.get(status, AlertStatus.OPEN)
 
-        tags = {
-            k: v
-            for k, v in map(
-                lambda tag: tag.split(":", 1), [tag for tag in alert.tags if ":" in tag]
-            )
-        }
+        tags = dict(tag.split(":", 1) for tag in alert.tags if ":" in tag)
 
         normalized_alert = AlertSchema(
             title=alert_title,
@@ -170,7 +174,27 @@ class DatadogIntegration(BaseIntegration):
         return alert_configuration
 
     def get_alerts(self):
-        """Get alerts from Datadog."""
+        """
+        Retrieve and normalize alerts and monitor configurations from Datadog.
+
+        This method performs the following operations:
+        1. Fetches and normalizes monitor configurations.
+        2. Retrieves alert events from the past ALERTS_HISTORY_WINDOW.
+        3. Uses Events API v2 to get additional metadata (aggregation keys and durations).
+        4. Normalizes alert events, excluding those that should be ignored.
+
+        Returns:
+            tuple: A tuple containing two lists:
+                - normalized_alerts (list): Normalized alert events.
+                - normalized_configurations (list): Normalized monitor configurations.
+
+        Raises:
+            DatadogAPIException: If there's an error in API communication with Datadog.
+
+        Note:
+            This method uses both Events API v1 and v2 to gather comprehensive alert data.
+            The ALERTS_HISTORY_WINDOW class attribute determines how far back to fetch alerts.
+        """
 
         normalized_alerts = []
         normalized_configurations = []
@@ -244,7 +268,55 @@ class DatadogIntegration(BaseIntegration):
         """Format alert to be sent to notifiers."""
         datadog_alert = DatadogAlert(**alert)
 
-        normalized_alert = AlertSchema()
+        # Map severity
+        severity_map = {
+            "low": SeverityLevel.LOW,
+            "normal": SeverityLevel.MEDIUM,
+            "warning": SeverityLevel.HIGH,
+            "critical": SeverityLevel.CRITICAL,
+        }
+        severity = severity_map.get(
+            datadog_alert.priority.lower(), SeverityLevel.MEDIUM
+        )
+
+        # Map status
+        status_map = {
+            "triggered": AlertStatus.OPEN,
+            "resolved": AlertStatus.RESOLVED,
+        }
+        status = status_map.get(
+            datadog_alert.alert_transition.lower(), AlertStatus.OPEN
+        )
+
+        # Parse tags
+        tags = dict(
+            tag.split(":", 1) for tag in datadog_alert.tags.split(",") if ":" in tag
+        )
+
+        normalized_alert = AlertSchema(
+            title=datadog_alert.alert_title,
+            description=datadog_alert.event_message,
+            severity=severity,
+            status=status,
+            alert_source=AlertSource.DATADOG,
+            tags=tags,
+            service=tags.get("service"),
+            env=tags.get("env"),
+            additional_data={
+                "priority": datadog_alert.priority,
+                "alert_query": datadog_alert.alert_query,
+                "alert_scope": datadog_alert.alert_scope,
+                "alert_metric": datadog_alert.alert_metric,
+                "snapshot": datadog_alert.snapshot,
+                "url": datadog_alert.url,
+            },
+            provider_event_id=datadog_alert.event_id,
+            provider_aggregation_key=None,  # Datadog doesn't provide this in the initial alert
+            configuration_id=datadog_alert.alert_id,
+            host=datadog_alert.hostname,
+            created_at=datetime.strptime(datadog_alert.date, "%Y-%m-%d %H:%M:%S %Z"),
+            duration_seconds=None,  # Datadog doesn't provide duration in the initial alert
+        )
 
         return normalized_alert
 

@@ -13,7 +13,7 @@ class BaseIntegration(ABC):
     @abstractmethod
     def normalize_alert(self, alert: dict) -> Alert:
         """Format alert to be sent to notifiers."""
-        raise NotImplementedError("format_alert not implemented")
+        raise NotImplementedError("normalize_alert not implemented")
 
     @abstractmethod
     def enrich_alert(self, alert: Alert) -> Alert:
