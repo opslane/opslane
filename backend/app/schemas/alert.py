@@ -61,10 +61,11 @@ class AlertSchema(BaseModel):
     env: Optional[str] = None
     additional_data: dict = {}
     provider_event_id: str
-    provider_aggregation_key: str = None
+    provider_aggregation_key: Optional[str] = None
+    provider_cycle_key: Optional[str] = None
     configuration_id: Optional[str] = None
     host: Optional[str] = None
-    created_at: Optional[datetime] = None
+    created_at: Optional[str] = None
     duration_seconds: Optional[int] = None
 
     model_config = ConfigDict(from_attributes=True)

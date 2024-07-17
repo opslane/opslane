@@ -35,3 +35,5 @@ class DatadogAlert(BaseModel):
     tags: str
     last_updated: str
     date: str
+    aggregation_key: str
+    alert_cycle_key: str

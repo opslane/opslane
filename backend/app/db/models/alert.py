@@ -38,8 +38,11 @@ class Alert(SQLModel, table=True):
     env: Optional[str] = Field(default=None, sa_column=Column(String))
     additional_data: dict = Field(default={}, sa_column=Column(JSON))
     provider_event_id: str = Field(description="The event ID in the provider's system")
-    provider_aggregation_key: str = Field(
+    provider_aggregation_key: Optional[str] = Field(
         description="The aggregation key in the provider's system"
+    )
+    provider_cycle_key: Optional[str] = Field(
+        description="The cycle key in the provider's system"
     )
     duration_seconds: Optional[int] = Field(
         default=None, description="The duration of the alert in seconds"

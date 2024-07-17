@@ -25,6 +25,7 @@ from app.schemas.alert import (
     SeverityLevel,
 )
 from app.schemas.providers.datadog import DatadogAlert
+from app.services.alert import calculate_alert_duration
 from app.integrations.providers.base import BaseIntegration
 
 from app.db.models.alert import Alert
@@ -39,6 +40,7 @@ class DatadogIntegration(BaseIntegration):
         "title": "$EVENT_TITLE",
         "url": "$LINK",
         "alert_transition": "$ALERT_TRANSITION",
+        "alert_cycle_key": "$ALERT_CYCLE_KEY",
         "hostname": "$HOSTNAME",
         "org": {"id": "$ORG_ID", "name": "$ORG_NAME"},
         "priority": "$PRIORITY",
@@ -57,6 +59,7 @@ class DatadogIntegration(BaseIntegration):
         "last_updated": "$LAST_UPDATED",
         "date": "$DATE",
         "aggregation_key": "$AGGREG_KEY",
+        "logs": "$LOGS_SAMPLE",
     }
 
     SEVERITY_MAP = {
@@ -268,23 +271,11 @@ class DatadogIntegration(BaseIntegration):
         """Format alert to be sent to notifiers."""
         datadog_alert = DatadogAlert(**alert)
 
-        # Map severity
-        severity_map = {
-            "low": SeverityLevel.LOW,
-            "normal": SeverityLevel.MEDIUM,
-            "warning": SeverityLevel.HIGH,
-            "critical": SeverityLevel.CRITICAL,
-        }
-        severity = severity_map.get(
-            datadog_alert.priority.lower(), SeverityLevel.MEDIUM
+        severity = self.SEVERITY_MAP.get(
+            datadog_alert.priority.lower(), SeverityLevel.LOW
         )
 
-        # Map status
-        status_map = {
-            "triggered": AlertStatus.OPEN,
-            "resolved": AlertStatus.RESOLVED,
-        }
-        status = status_map.get(
+        status = self.STATUS_MAP.get(
             datadog_alert.alert_transition.lower(), AlertStatus.OPEN
         )
 
@@ -292,6 +283,14 @@ class DatadogIntegration(BaseIntegration):
         tags = dict(
             tag.split(":", 1) for tag in datadog_alert.tags.split(",") if ":" in tag
         )
+
+        created_at = datetime.fromtimestamp(int(datadog_alert.date) / 1000).isoformat()
+
+        duration_seconds = None
+        if status == AlertStatus.RESOLVED:
+            duration_seconds = calculate_alert_duration(
+                datadog_alert.alert_cycle_key, created_at
+            )
 
         normalized_alert = AlertSchema(
             title=datadog_alert.alert_title,
@@ -311,11 +310,12 @@ class DatadogIntegration(BaseIntegration):
                 "url": datadog_alert.url,
             },
             provider_event_id=datadog_alert.event_id,
-            provider_aggregation_key=None,  # Datadog doesn't provide this in the initial alert
+            provider_aggregation_key=datadog_alert.aggregation_key,
+            provider_cycle_key=datadog_alert.alert_cycle_key,
             configuration_id=datadog_alert.alert_id,
             host=datadog_alert.hostname,
-            created_at=datetime.strptime(datadog_alert.date, "%Y-%m-%d %H:%M:%S %Z"),
-            duration_seconds=None,  # Datadog doesn't provide duration in the initial alert
+            created_at=created_at,
+            duration_seconds=duration_seconds,
         )
 
         return normalized_alert

@@ -7,7 +7,6 @@ from sqlmodel import select, func, Session
 
 from app.db import engine
 from app.db.models.alert import Alert, AlertConfiguration, AlertSource, AlertStatus
-from app.integrations.providers.factory import IntegrationSourceFactory
 from app.schemas.alert import AlertConfigurationSchema, AlertSchema
 
 
@@ -119,6 +118,9 @@ def pull_and_store_alerts_from_source(alert_source: AlertSource) -> Tuple[int, i
     Returns:
         Tuple[int, int]: A tuple containing the number of configurations and alerts stored.
     """
+
+    from app.integrations.providers.factory import IntegrationSourceFactory
+
     try:
         integration = IntegrationSourceFactory.get_integration(alert_source.value)
     except ValueError as e:
@@ -220,3 +222,21 @@ def get_alert_report_data(days: int = 7):
         "end_date": end_date,
         "noisy_alerts_count": noisy_alerts_count,
     }
+
+
+def calculate_alert_duration(
+    alert_cycle_key: str, resolved_at: datetime
+) -> Optional[int]:
+    """Calculate the duration of an alert in seconds."""
+    with Session(engine) as session:
+        triggered_alert = session.exec(
+            select(Alert)
+            .where(Alert.provider_cycle_key == alert_cycle_key)
+            .where(Alert.status == AlertStatus.OPEN.value)
+            .order_by(Alert.created_at.desc())
+        ).first()
+
+        if triggered_alert and triggered_alert.created_at:
+            return int((resolved_at - triggered_alert.created_at).total_seconds())
+
+    return None
