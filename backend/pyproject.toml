@@ -30,6 +30,7 @@ slack-bolt = "^1.19.0"
 aiohttp = "^3.9.5"
 matplotlib = "^3.9.0"
 ipdb = "^0.13.13"
+litellm = "^1.41.23"
 
 
 [build-system]

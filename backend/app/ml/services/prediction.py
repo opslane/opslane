@@ -2,7 +2,7 @@
 
 import json
 
-from app.integrations.prediction.openai import OpenAIClient
+from app.integrations.prediction.llm import LLMClient
 
 PROMPT = """Analyze this alert and return a score between 0 and 1.
 0 denotes that the alert is not actionable, while 1 denotes that the alert is actionable.
@@ -81,16 +81,14 @@ class AlertPredictor:
     """Alert prediction service."""
 
     def __init__(self):
-        self.openai_client = OpenAIClient()
+        self.llm_client = LLMClient()
 
     async def predict(self, input_data: dict):
         """Make a prediction based on input_data"""
-        # Get prediction from OpenAI
         prompt = self._create_prompt(input_data)
-        openai_prediction = await self.openai_client.get_completion(prompt)
+        openai_prediction = await self.llm_client.get_completion(prompt)
 
         return json.loads(openai_prediction)
 
     def _create_prompt(self, alert_data: dict) -> str:
-        # Create a prompt for OpenAI based on input_data
         return PROMPT.format(alert_text=json.dumps(alert_data))

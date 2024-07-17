@@ -20,9 +20,10 @@ class Settings(BaseSettings):
     DATADOG_API_KEY: str
     DATADOG_APP_KEY: str
     DATADOG_BOT_SLACK_ID: str
-    OPENAI_API_KEY: str
 
     PREDICTION_CONFIDENCE_THRESHOLD: float = 0.5
+    LLM_PROVIDER: str = "openai"
+    LLM_API_KEY: str
 
 
 settings = Settings()  # type: ignore
