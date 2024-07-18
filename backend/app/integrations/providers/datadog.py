@@ -269,22 +269,21 @@ class DatadogIntegration(BaseIntegration):
 
     def normalize_alert(self, alert: dict) -> AlertSchema:
         """Format alert to be sent to notifiers."""
+
         datadog_alert = DatadogAlert(**alert)
 
         severity = self.SEVERITY_MAP.get(
-            datadog_alert.priority.lower(), SeverityLevel.LOW
+            datadog_alert.alert_priority.lower(), SeverityLevel.LOW
         )
 
-        status = self.STATUS_MAP.get(
-            datadog_alert.alert_transition.lower(), AlertStatus.OPEN
-        )
+        status = self.STATUS_MAP.get(datadog_alert.alert_transition, AlertStatus.OPEN)
 
         # Parse tags
         tags = dict(
             tag.split(":", 1) for tag in datadog_alert.tags.split(",") if ":" in tag
         )
 
-        created_at = datetime.fromtimestamp(int(datadog_alert.date) / 1000).isoformat()
+        created_at = datetime.fromtimestamp(int(datadog_alert.date) / 1000)
 
         duration_seconds = None
         if status == AlertStatus.RESOLVED:
@@ -314,7 +313,7 @@ class DatadogIntegration(BaseIntegration):
             provider_cycle_key=datadog_alert.alert_cycle_key,
             configuration_id=datadog_alert.alert_id,
             host=datadog_alert.hostname,
-            created_at=created_at,
+            created_at=created_at.isoformat(),
             duration_seconds=duration_seconds,
         )
 

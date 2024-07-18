@@ -22,6 +22,7 @@ class BaseIntegration(ABC):
 
     def store_alert(self, alert: AlertSchema) -> AlertSchema:
         """Store alert in the database."""
+
         return store_alert_in_db(alert)
 
     def process_alert(self, alert: dict) -> Alert:

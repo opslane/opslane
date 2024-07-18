@@ -37,6 +37,7 @@ def _convert_alert_schema_to_db_model(alert_schema: AlertSchema) -> Alert:
         env=alert_schema.env,
         additional_data=alert_schema.dict(),
         provider_event_id=alert_schema.provider_event_id,
+        provider_cycle_key=alert_schema.provider_cycle_key,
         configuration_id=alert_schema.configuration_id,
         provider_aggregation_key=alert_schema.provider_aggregation_key,
         duration_seconds=alert_schema.duration_seconds,
@@ -237,6 +238,7 @@ def calculate_alert_duration(
         ).first()
 
         if triggered_alert and triggered_alert.created_at:
-            return int((resolved_at - triggered_alert.created_at).total_seconds())
+            triggered_at = triggered_alert.created_at
+            return int((resolved_at - triggered_at).total_seconds())
 
     return None

@@ -22,4 +22,3 @@ async def process_alert(source: str, raw_alert: dict) -> None:
 
     integration = IntegrationSourceFactory.get_integration(source)
     processed_alert = integration.process_alert(raw_alert)
-    print(f"Processed alert: {processed_alert}")
