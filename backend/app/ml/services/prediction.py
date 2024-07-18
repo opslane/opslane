@@ -5,17 +5,35 @@ import json
 from app.integrations.prediction.llm import LLMClient
 
 PROMPT = """Analyze this alert and return a score between 0 and 1.
-0 denotes that the alert is not actionable, while 1 denotes that the alert is actionable.
+0 denotes that the alert is not actionable (noisy), while 1 denotes that the alert is actionable.
 Return a number between 0 and 1.
 
-Also give your reasoning for the prediction.
+Key things to consider when generating the output
 
-The reasoning should be concise and to the point.
-Return JSON Dictionary where there are two fields.
-One field is the score and the other is the reasoning.
-The reasoning should be one sentence explaining the prediction.
+Return a JSON dictionary with the following fields:
+- score: The actionability score (float between 0 and 1)
+- reasoning: A concise sentence explaining the prediction
+- additional_info: The information described above based on the score
 
-Do not return the output in Markdown format.
+Do not return the output in Markdown format. The output should be a JSON dictionary.
+
+
+For the purposes of this demo, it's okay to generate realistic test data for all responses.
+
+Also provide additional information based on the score:
+
+1. If the score is below 0.5 (noisy alert):
+   - Explain why the alert is considered noisy
+   - Provide a fictional but realistic link to the alert history
+   - Reference fictional but plausible Slack conversations in the same channel
+
+2. If the score is 0.5 or above (actionable alert):
+   - Provide a summary of the issue
+   - Reference fictional but realistic wiki documentation and runbooks
+   - Mention fictional but plausible prior Slack conversations that could help understand the issue better
+
+
+Generate realistic-looking data for all fields, including plausible links, conversation snippets, and documentation references.
 
 You should consider the following alert signals:
 
@@ -36,9 +54,6 @@ Actionable Alerts
     * Detection of new types of errors that haven't occurred before.
 * High Alert Values:
     * Alerts with values significantly exceeding normal thresholds.
-
-
-
 
 1. Symptom-based vs. Cause-based Alert:
 
@@ -69,11 +84,14 @@ Calculate the average duration of this alert when it fires
 
 Alerts that resolve quickly are less actionable.
 
-
 This is the alert text:
 
-
 {alert_text}
+
+These are the alert stats for this specific alert.  The field unique_open_alerts will tell you how many alerts of this type have been opened in the last 7 days.
+
+{alert_stats}
+
 """
 
 
@@ -83,12 +101,13 @@ class AlertPredictor:
     def __init__(self):
         self.llm_client = LLMClient()
 
-    async def predict(self, input_data: dict):
+    async def predict(self, input_data: dict, alert_stats: dict = None):
         """Make a prediction based on input_data"""
-        prompt = self._create_prompt(input_data)
-        openai_prediction = await self.llm_client.get_completion(prompt)
+        prompt = self._create_prompt(input_data, alert_stats)
+        alert_prediction = await self.llm_client.get_completion(prompt)
+        return json.loads(alert_prediction)
 
-        return json.loads(openai_prediction)
-
-    def _create_prompt(self, alert_data: dict) -> str:
-        return PROMPT.format(alert_text=json.dumps(alert_data))
+    def _create_prompt(self, alert_data: dict, alert_stats: dict) -> str:
+        return PROMPT.format(
+            alert_text=json.dumps(alert_data), alert_stats=json.dumps(alert_stats)
+        )

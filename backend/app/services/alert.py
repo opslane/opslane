@@ -245,6 +245,7 @@ def calculate_alert_duration(
 
 
 def get_alert_configuration_stats(monitor_id: int) -> Dict[str, Any]:
+    """Get statistics for an alert configuration"""
     with Session(engine) as session:
         # Get the alert configuration
         alert_config = session.exec(
@@ -256,22 +257,17 @@ def get_alert_configuration_stats(monitor_id: int) -> Dict[str, Any]:
         if not alert_config:
             return {"error": "Alert configuration not found"}
 
-        # Get stats for this configuration
-        # stats = session.exec(
-        #     select(
-        #         func.count(Alert.id).label("total_alerts"),
-        #         func.count(Alert.provider_cycle_key.distinct()).label("unique_alerts"),
-        #         func.avg(Alert.duration_seconds).label("avg_duration"),
-        #         func.min(Alert.created_at).label("first_occurrence"),
-        #         func.max(Alert.created_at).label("last_occurrence")
-        #     ).where(Alert.configuration_id == alert_config.id)
-        # ).first()
+        # Get count of unique open alerts for this configuration
+        unique_open_alerts = session.exec(
+            select(func.count(Alert.id.distinct())).where(
+                Alert.configuration_id == str(alert_config.provider_id),
+                Alert.status == AlertStatus.OPEN,
+            )
+        ).one()
 
         return {
             "configuration_id": alert_config.id,
             "provider_id": alert_config.provider_id,
             "name": alert_config.name,
-            "total_alerts": 10,
-            "unique_alerts": 5,
-            "avg_duration": 600,
+            "unique_open_alerts": unique_open_alerts,
         }

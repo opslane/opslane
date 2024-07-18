@@ -1,6 +1,7 @@
 """Slack Bolt app for handling Slack events and actions."""
 
 import asyncio
+import json
 
 from datetime import datetime, timedelta
 from typing import List
@@ -206,13 +207,15 @@ class SlackBot:
             We use this callback to send the alert reasoning to the user.
             """
             if "bot_id" in event and event["bot_id"] in self.allowed_bot_ids:
-                import json
-
-                print(json.dumps(event))
                 monitor_id = event["metadata"]["event_payload"]["monitor_id"]
                 alert_stats = get_alert_configuration_stats(monitor_id)
-                print(alert_stats)
-                prediction = await self.predictor.predict(event)
+                prediction = await self.predictor.predict(event, alert_stats)
+
+                alert_classification = (
+                    "actionable"
+                    if prediction["score"] > settings.PREDICTION_CONFIDENCE_THRESHOLD
+                    else "noisy"
+                )
 
                 channel_id = event["channel"]
                 thread_ts = event["ts"]
@@ -223,8 +226,21 @@ class SlackBot:
                             "type": "section",
                             "text": {
                                 "type": "mrkdwn",
+                                "text": f"Alert Classification: {alert_classification}",
+                            },
+                        },
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
                                 "text": prediction["reasoning"],
-                                # "text": "This is my reasoning for the alert",
+                            },
+                        },
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": json.dumps(prediction["additional_info"]),
                             },
                         },
                         {

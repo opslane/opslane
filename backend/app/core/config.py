@@ -3,6 +3,7 @@
 import secrets
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from typing import Optional
 
 
 class Settings(BaseSettings):
@@ -22,8 +23,9 @@ class Settings(BaseSettings):
     DATADOG_BOT_SLACK_ID: str
 
     PREDICTION_CONFIDENCE_THRESHOLD: float = 0.5
-    LLM_PROVIDER: str = "openai"
-    LLM_API_KEY: str
+    LLM_PROVIDER: str = "ollama"
+    LLM_API_KEY: Optional[str] = None
+    LLM_API_BASE: Optional[str] = None
 
 
 settings = Settings()  # type: ignore
