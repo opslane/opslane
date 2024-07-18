@@ -10,8 +10,9 @@ from slack_bolt.adapter.fastapi.async_handler import AsyncSlackRequestHandler
 from slack_sdk.errors import SlackApiError
 
 from app.core.config import settings
-from app.services.alert import get_alert_report_data
 from app.ml.services.prediction import AlertPredictor
+from app.services.alert import get_alert_report_data
+from app.services.alert import get_alert_configuration_stats
 
 
 class SlackBot:
@@ -205,8 +206,13 @@ class SlackBot:
             We use this callback to send the alert reasoning to the user.
             """
             if "bot_id" in event and event["bot_id"] in self.allowed_bot_ids:
-                # alerts = get_alert_configuration_stats()
-                # prediction = await self.predictor.predict(str(alerts[0]))
+                import json
+
+                print(json.dumps(event))
+                monitor_id = event["metadata"]["event_payload"]["monitor_id"]
+                alert_stats = get_alert_configuration_stats(monitor_id)
+                print(alert_stats)
+                prediction = await self.predictor.predict(event)
 
                 channel_id = event["channel"]
                 thread_ts = event["ts"]
@@ -217,8 +223,8 @@ class SlackBot:
                             "type": "section",
                             "text": {
                                 "type": "mrkdwn",
-                                # "text": prediction["reasoning"],
-                                "text": "This is my reasoning for the alert",
+                                "text": prediction["reasoning"],
+                                # "text": "This is my reasoning for the alert",
                             },
                         },
                         {

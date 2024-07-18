@@ -1,7 +1,7 @@
 """Alert related services methods"""
 
 from datetime import datetime, timedelta
-from typing import Tuple, Optional
+from typing import Any, Dict, Tuple, Optional
 
 from sqlmodel import select, func, Session
 
@@ -242,3 +242,36 @@ def calculate_alert_duration(
             return int((resolved_at - triggered_at).total_seconds())
 
     return None
+
+
+def get_alert_configuration_stats(monitor_id: int) -> Dict[str, Any]:
+    with Session(engine) as session:
+        # Get the alert configuration
+        alert_config = session.exec(
+            select(AlertConfiguration).where(
+                AlertConfiguration.provider_id == str(monitor_id)
+            )
+        ).first()
+
+        if not alert_config:
+            return {"error": "Alert configuration not found"}
+
+        # Get stats for this configuration
+        # stats = session.exec(
+        #     select(
+        #         func.count(Alert.id).label("total_alerts"),
+        #         func.count(Alert.provider_cycle_key.distinct()).label("unique_alerts"),
+        #         func.avg(Alert.duration_seconds).label("avg_duration"),
+        #         func.min(Alert.created_at).label("first_occurrence"),
+        #         func.max(Alert.created_at).label("last_occurrence")
+        #     ).where(Alert.configuration_id == alert_config.id)
+        # ).first()
+
+        return {
+            "configuration_id": alert_config.id,
+            "provider_id": alert_config.provider_id,
+            "name": alert_config.name,
+            "total_alerts": 10,
+            "unique_alerts": 5,
+            "avg_duration": 600,
+        }

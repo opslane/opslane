@@ -2,7 +2,7 @@
 
 import enum
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Union
 
 from pydantic import BaseModel, ConfigDict
 
@@ -65,7 +65,17 @@ class AlertSchema(BaseModel):
     provider_cycle_key: Optional[str] = None
     configuration_id: Optional[str] = None
     host: Optional[str] = None
-    created_at: Optional[str] = None
+    created_at: Optional[Union[str, datetime]] = None
     duration_seconds: Optional[int] = None
 
     model_config = ConfigDict(from_attributes=True)
+
+    @classmethod
+    def model_validate(cls, obj, *args, **kwargs):
+        if (
+            isinstance(obj, dict)
+            and "created_at" in obj
+            and isinstance(obj["created_at"], datetime)
+        ):
+            obj["created_at"] = obj["created_at"].isoformat()
+        return super().model_validate(obj, *args, **kwargs)
