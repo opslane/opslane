@@ -2,8 +2,8 @@
 
 import secrets
 
-from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import Optional
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -15,7 +15,7 @@ class Settings(BaseSettings):
 
     API_V1_STR: str = "/api/v1"
     SECRET_KEY: str = secrets.token_urlsafe(32)
-    DATABASE_URL: str
+    DATABASE_URL_NEW: str
     SLACK_BOT_TOKEN: str
     SLACK_SIGNING_SECRET: str
     DATADOG_API_KEY: str
@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     LLM_PROVIDER: str = "ollama"
     LLM_API_KEY: Optional[str] = None
     LLM_API_BASE: Optional[str] = None
+    OPENAI_API_KEY: Optional[str] = None
 
 
 settings = Settings()  # type: ignore

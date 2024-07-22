@@ -3,6 +3,7 @@
 from datetime import datetime
 from typing import List, Optional
 from sqlmodel import Field, SQLModel, Column, Enum, JSON, Relationship, String
+from sqlalchemy.dialects.postgresql import ARRAY, FLOAT
 
 from app.schemas.alert import AlertSource, AlertStatus, SeverityLevel
 
@@ -47,6 +48,7 @@ class Alert(SQLModel, table=True):
     duration_seconds: Optional[int] = Field(
         default=None, description="The duration of the alert in seconds"
     )
+    embedding: Optional[List[float]] = Field(sa_column=Column(ARRAY(FLOAT)))
 
     configuration_id: str = Field(
         default=None, foreign_key="alertconfiguration.provider_id"

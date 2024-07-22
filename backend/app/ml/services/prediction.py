@@ -2,7 +2,11 @@
 
 import json
 
+from langchain.schema import HumanMessage, SystemMessage
+
 from app.integrations.prediction.llm import LLMClient
+from app.ml.vector_store import VectorStore
+
 
 PROMPT = """Analyze this alert and return a score between 0 and 1.
 0 denotes that the alert is not actionable (noisy), while 1 denotes that the alert is actionable.
@@ -99,15 +103,69 @@ class AlertPredictor:
     """Alert prediction service."""
 
     def __init__(self):
+        """
+        Initialize the AlertPredictor with LLMClient and VectorStore instances.
+        """
         self.llm_client = LLMClient()
+        self.vector_store = VectorStore()
 
     async def predict(self, input_data: dict, alert_stats: dict = None):
-        """Make a prediction based on input_data"""
+        """
+        Predict the alert based on input data and alert statistics.
+
+        Args:
+            input_data (dict): The input data for the alert.
+            alert_stats (dict, optional): Statistics related to the alert. Defaults to None.
+
+        Returns:
+            dict: The prediction result as a JSON object.
+        """
         prompt = self._create_prompt(input_data, alert_stats)
-        alert_prediction = await self.llm_client.get_completion(prompt)
-        return json.loads(alert_prediction)
+        relevant_docs = self.vector_store.similarity_search(prompt)
+        context = "\n\n".join(doc.page_content for doc in relevant_docs)
+
+        messages = [
+            SystemMessage(content=f"Context: {context}"),
+            HumanMessage(content=prompt),
+        ]
+
+        alert_prediction = await self.llm_client.get_completion(messages)
+
+        try:
+            return json.loads(alert_prediction)
+        except json.JSONDecodeError:
+            # Handle the case where the output is not valid JSON
+            return {
+                "error": "Failed to parse LLM output as JSON",
+                "raw_output": alert_prediction,
+            }
 
     def _create_prompt(self, alert_data: dict, alert_stats: dict) -> str:
+        """
+        Create a prompt string from alert data and statistics.
+
+        Args:
+            alert_data (dict): The alert data.
+            alert_stats (dict): The alert statistics.
+
+        Returns:
+            str: The formatted prompt string.
+        """
         return PROMPT.format(
             alert_text=json.dumps(alert_data), alert_stats=json.dumps(alert_stats)
+        )
+
+    def add_to_vector_store(self, alert_data: dict):
+        """
+        Add alert data to the vector store.
+
+        Args:
+            alert_data (dict): The alert data to be added.
+        """
+
+        text = f"{alert_data['title']} {alert_data['description']}"
+        embedding = self.llm_client.get_embedding(text)
+
+        self.vector_store.add_embeddings(
+            [text], [embedding], [{"alert_id": alert_data["id"]}]
         )

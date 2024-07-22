@@ -31,6 +31,10 @@ aiohttp = "^3.9.5"
 matplotlib = "^3.9.0"
 ipdb = "^0.13.13"
 litellm = "^1.41.23"
+langchain = "^0.2.10"
+langchain-community = "^0.2.9"
+pgvector = "^0.3.2"
+psycopg2-binary = "^2.9.9"
 
 
 [build-system]
