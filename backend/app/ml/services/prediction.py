@@ -96,6 +96,25 @@ These are the alert stats for this specific alert.  The field unique_open_alerts
 
 {alert_stats}
 
+
+Historical Data:
+{historical_data}
+
+Consider the following about the historical data:
+1. How many similar alerts were there in the past?
+2. What percentage of these similar alerts were actionable?
+3. For actionable alerts, what was the average thread length?
+4. Are there any common patterns in the responses to actionable alerts?
+5. What kind of actions or resolutions were typically taken for similar alerts?
+
+Analyze the thread conversations in the historical data to understand:
+- Common troubleshooting steps
+- Typical resolution times
+- Key personnel involved in resolving similar issues
+
+Use this historical information to inform your decision about whether the current alert is likely to be actionable or noisy, and to suggest potential next steps or resolutions.
+
+
 """
 
 
@@ -120,7 +139,8 @@ class AlertPredictor:
         Returns:
             dict: The prediction result as a JSON object.
         """
-        prompt = self._create_prompt(input_data, alert_stats)
+        historical_data = await self.fetch_historical_data(input_data)
+        prompt = self._create_prompt(input_data, alert_stats, historical_data)
         relevant_docs = self.vector_store.similarity_search(prompt)
         context = "\n\n".join(doc.page_content for doc in relevant_docs)
 
@@ -140,19 +160,25 @@ class AlertPredictor:
                 "raw_output": alert_prediction,
             }
 
-    def _create_prompt(self, alert_data: dict, alert_stats: dict) -> str:
+    def _create_prompt(
+        self, alert_data: dict, alert_stats: dict, historical_data: list
+    ) -> str:
         """
-        Create a prompt string from alert data and statistics.
+        Create a prompt string from alert data, statistics, and historical data.
 
         Args:
             alert_data (dict): The alert data.
             alert_stats (dict): The alert statistics.
+            historical_data (list): Historical data for similar alerts.
 
         Returns:
             str: The formatted prompt string.
         """
+        historical_data_str = json.dumps(historical_data, indent=2)
         return PROMPT.format(
-            alert_text=json.dumps(alert_data), alert_stats=json.dumps(alert_stats)
+            alert_text=json.dumps(alert_data),
+            alert_stats=json.dumps(alert_stats),
+            historical_data=historical_data_str,
         )
 
     def add_to_vector_store(self, alert_data: dict):
@@ -169,3 +195,27 @@ class AlertPredictor:
         self.vector_store.add_embeddings(
             [text], [embedding], [{"alert_id": alert_data["id"]}]
         )
+
+    async def fetch_historical_data(self, alert_data: dict) -> list:
+        """
+        Fetch historical data for similar alerts.
+
+        Args:
+            alert_data (dict): The current alert data.
+
+        Returns:
+            list: A list of similar historical alerts with their metadata.
+        """
+        query = f"{alert_data.get('title', '')} {alert_data.get('description', '')}"
+        similar_alerts = self.vector_store.search_similar_alerts(query, k=5)
+
+        historical_data = []
+        for doc, score in similar_alerts:
+            historical_alert = {
+                "text": doc.page_content,
+                "metadata": doc.metadata,
+                "similarity": score,  # This is now the similarity score
+            }
+            historical_data.append(historical_alert)
+
+        return historical_data

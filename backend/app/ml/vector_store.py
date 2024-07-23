@@ -2,7 +2,7 @@
 Vector Store Module
 """
 
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple
 
 from langchain.embeddings import OpenAIEmbeddings
 from langchain.schema import Document
@@ -48,3 +48,22 @@ class VectorStore:
             List[Document]: A list of the k most similar entries to the query.
         """
         return self.store.similarity_search(query, k=k)
+
+    def add_alert_with_thread(self, full_text: str, metadata: dict):
+        """Add an alert and its thread to the vector store."""
+        self.store.add_texts([full_text], metadatas=[metadata])
+
+    def search_similar_alerts(
+        self, query: str, k: int = 5
+    ) -> List[Tuple[Document, float]]:
+        """Search for similar alerts in the vector store."""
+        results = self.store.similarity_search_with_score(query, k=k)
+        return [
+            (Document(page_content=doc.page_content, metadata=doc.metadata), score)
+            for doc, score in results
+        ]
+
+    def message_exists(self, message_id: str) -> bool:
+        """Check if a message already exists in the vector store."""
+        results = self.store.similarity_search(f"message_id:{message_id}", k=1)
+        return len(results) > 0
