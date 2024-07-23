@@ -6,6 +6,7 @@ from langchain.schema import HumanMessage, SystemMessage
 
 from app.integrations.prediction.llm import LLMClient
 from app.ml.vector_store import VectorStore
+from app.knowledge_base.confluence import ConfluenceIntegrator
 
 
 PROMPT = """Analyze this alert and return a score between 0 and 1.
@@ -127,6 +128,7 @@ class AlertPredictor:
         """
         self.llm_client = LLMClient()
         self.vector_store = VectorStore()
+        self.confluence_integrator = ConfluenceIntegrator()
 
     async def predict(self, input_data: dict, alert_stats: dict = None):
         """
@@ -208,9 +210,12 @@ class AlertPredictor:
         """
         query = f"{alert_data.get('title', '')} {alert_data.get('description', '')}"
         similar_alerts = self.vector_store.search_similar_alerts(query, k=5)
+        confluence_content = self.confluence_integrator.search_knowledge_base(
+            query, k=2
+        )
 
         historical_data = []
-        for doc, score in similar_alerts:
+        for doc, score in similar_alerts + confluence_content:
             historical_alert = {
                 "text": doc.page_content,
                 "metadata": doc.metadata,

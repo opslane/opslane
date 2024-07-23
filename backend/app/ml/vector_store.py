@@ -54,10 +54,10 @@ class VectorStore:
         self.store.add_texts([full_text], metadatas=[metadata])
 
     def search_similar_alerts(
-        self, query: str, k: int = 5
+        self, query: str, k: int = 5, filter: Dict[str, Any] = None
     ) -> List[Tuple[Document, float]]:
         """Search for similar alerts in the vector store."""
-        results = self.store.similarity_search_with_score(query, k=k)
+        results = self.store.similarity_search_with_score(query, k=k, filter=filter)
         return [
             (Document(page_content=doc.page_content, metadata=doc.metadata), score)
             for doc, score in results

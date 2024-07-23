@@ -35,6 +35,7 @@ langchain = "^0.2.10"
 langchain-community = "^0.2.9"
 pgvector = "^0.3.2"
 psycopg2-binary = "^2.9.9"
+atlassian-python-api = "^3.41.14"
 
 
 [build-system]
