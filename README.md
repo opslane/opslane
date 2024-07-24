@@ -1,10 +1,9 @@
-<div align="center">
- <img alt="opslane" height="200px" src="https://path-to-your-logo.png">
-</div>
+
+![opslane](backend/docs/opslane-transparent.png)
 
 # Opslane
 
-[![Discord](https://dcbadge.vercel.app/api/server/opslane?style=flat&compact=true)](https://discord.gg/opslane)
+[![lack](https://dcbadge.vercel.app/api/server/opslane?style=flat&compact=true)](https://discord.gg/opslane)
 
 Opslane is a tool that helps on-call engineers reduce alert fatigue by classifying alerts as actionable or noisy, grouping related alerts, and providing contextual information for handling alerts.
 
