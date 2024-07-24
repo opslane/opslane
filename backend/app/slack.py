@@ -2,8 +2,10 @@
 
 import asyncio
 import json
+import re
 
 from datetime import datetime, timedelta
+from hashlib import md5
 from typing import List
 
 from slack_bolt.async_app import AsyncApp
@@ -461,6 +463,33 @@ class SlackBot:
             },
         ]
 
+        for alert in report_data["top_alerts"]:
+            alert_id = (
+                getattr(alert, "id", None) or md5(alert.title.encode()).hexdigest()
+            )
+            blocks.extend(
+                [
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": f"*{alert.title}* ({alert.count} times)",
+                        },
+                        "accessory": {
+                            "type": "button",
+                            "text": {
+                                "type": "plain_text",
+                                "text": "Silence",
+                                "emoji": True,
+                            },
+                            "value": f"silence_alert_{alert_id}",
+                            "action_id": f"silence_alert_{alert_id}",
+                        },
+                    },
+                    {"type": "divider"},
+                ]
+            )
+
         await say(blocks=blocks)
 
     def _register_command_handlers(self):
@@ -513,6 +542,36 @@ class SlackBot:
                 user=user_id,
                 text=f"Thanks for the feedback, <@{user_id}>!",
             )
+
+        @self.slack_app.action(re.compile("silence_alert_.*"))
+        async def handle_silence_alert(ack, body, say):
+            await ack()
+            alert_id = body["actions"][0]["value"].split("_")[-1]
+            user_id = body["user"]["id"]
+            channel_id = body["container"]["channel_id"]
+
+            # Implement the logic to silence the alert
+            success = await self.silence_alert(alert_id)
+
+            if success:
+                await self.slack_app.client.chat_postEphemeral(
+                    channel=channel_id,
+                    user=user_id,
+                    text=f"Alert with ID {alert_id} has been silenced.",
+                )
+            else:
+                await self.slack_app.client.chat_postEphemeral(
+                    channel=channel_id,
+                    user=user_id,
+                    text=f"Failed to silence alert with ID {alert_id}. Please try again or contact support.",
+                )
+
+    async def silence_alert(self, alert_id: str) -> bool:
+        """Silence the alert with the given ID."""
+        # Implement the logic to silence the alert
+        # This might involve calling the Sentry API or updating your database
+        # Return True if successful, False otherwise
+        pass
 
     async def ingest_historical_data(self, channel_id: str, days_back: int = 30):
         end_time = datetime.now()
