@@ -215,7 +215,17 @@ def get_alert_report_data(days: int = 7):
             )
         ).one()
 
+        noisy_alerts = session.exec(
+            select(AlertConfiguration)
+            .where(AlertConfiguration.is_noisy == True)
+            .order_by(AlertConfiguration.name)
+        ).all()
+
     open_alerts = [AlertSchema.model_validate(alert) for alert in open_alerts]
+    noisy_alerts = [
+        AlertConfigurationSchema.model_validate(alert.model_dump())
+        for alert in noisy_alerts
+    ]
 
     return {
         "open_alerts": open_alerts,
@@ -227,6 +237,7 @@ def get_alert_report_data(days: int = 7):
         "start_date": start_date,
         "end_date": end_date,
         "noisy_alerts_count": noisy_alerts_count,
+        "noisy_alerts": noisy_alerts,
     }
 
 

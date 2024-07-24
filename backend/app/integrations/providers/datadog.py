@@ -9,6 +9,7 @@ from datadog_api_client.v1.api.events_api import EventsApi
 from datadog_api_client.v1.api.monitors_api import MonitorsApi
 from datadog_api_client.v1.model.event import Event
 from datadog_api_client.v1.model.monitor import Monitor
+from datadog_api_client.v1.model.monitor_update_request import MonitorUpdateRequest
 from datadog_api_client.v2.api.events_api import EventsApi as EventsApiV2
 from datadog_api_client.v2.model.events_list_request import EventsListRequest
 from datadog_api_client.v2.model.events_query_filter import EventsQueryFilter
@@ -322,3 +323,19 @@ class DatadogIntegration(BaseIntegration):
     def enrich_alert(self, alert: Alert) -> Alert:
         """Enrich alert with additional data."""
         return alert
+
+    async def silence_alert(self, alert_id: str) -> bool:
+        try:
+            with ApiClient(self.configuration) as api_client:
+                api_instance = MonitorsApi(api_client)
+                body = MonitorUpdateRequest(
+                    options={
+                        "silenced": {"*": None}
+                    }  # Mute for all scopes indefinitely
+                )
+                api_instance.update_monitor(monitor_id=int(alert_id), body=body)
+            print(f"Successfully silenced Datadog alert with ID: {alert_id}")
+            return True
+        except Exception as e:
+            print(f"Error silencing Datadog alert: {e}")
+            return False

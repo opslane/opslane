@@ -13,10 +13,12 @@ from slack_bolt.adapter.fastapi.async_handler import AsyncSlackRequestHandler
 from slack_sdk.errors import SlackApiError
 
 from app.core.config import settings
+from app.integrations.providers.factory import IntegrationSourceFactory
 from app.ml.services.prediction import AlertPredictor
 from app.ml.vector_store import VectorStore
 from app.services.alert import (
     get_alert_report_data,
+    get_alert_configuration,
     get_alert_configuration_stats,
     mark_alert_configuration_as_noisy,
 )
@@ -124,116 +126,116 @@ class SlackBot:
                     self._save_alert_channels()
                     await self.ingest_historical_data(channel_id)
 
-                report_data = get_alert_report_data()
-                blocks = [
-                    {
-                        "type": "header",
-                        "text": {
-                            "type": "plain_text",
-                            "text": "Weekly Alert Insights Report",
-                            "emoji": True,
-                        },
-                    },
-                    {
-                        "type": "context",
-                        "elements": [
-                            {
-                                "type": "plain_text",
-                                "text": f"{report_data['start_date'].strftime('%B %d, %Y')} - {report_data['end_date'].strftime('%B %d, %Y')}",
-                                "emoji": True,
-                            }
-                        ],
-                    },
-                    {"type": "divider"},
-                    {
-                        "type": "section",
-                        "text": {
-                            "type": "mrkdwn",
-                            "text": "📈 *Top 5 most frequent alerts*",
-                        },
-                    },
-                    {
-                        "type": "rich_text",
-                        "elements": [
-                            {
-                                "type": "rich_text_list",
-                                "style": "ordered",
-                                "elements": [
-                                    {
-                                        "type": "rich_text_section",
-                                        "elements": [
-                                            {
-                                                "type": "text",
-                                                "text": f"{alert.title} ({alert.count} times)",
-                                            }
-                                        ],
-                                    }
-                                    for alert in report_data["top_alerts"]
-                                ],
-                            }
-                        ],
-                    },
-                    {"type": "divider"},
-                    {
-                        "type": "section",
-                        "text": {
-                            "type": "mrkdwn",
-                            "text": "🔥 *Noisiest Services*",
-                        },
-                    },
-                    {
-                        "type": "rich_text",
-                        "elements": [
-                            {
-                                "type": "rich_text_list",
-                                "style": "ordered",
-                                "elements": [
-                                    {
-                                        "type": "rich_text_section",
-                                        "elements": [
-                                            {
-                                                "type": "text",
-                                                "text": f"{service} ({count} noisy alerts)",
-                                            }
-                                        ],
-                                    }
-                                    for service, count in report_data["noisy_services"]
-                                ],
-                            }
-                        ],
-                    },
-                    {"type": "divider"},
-                    {
-                        "type": "section",
-                        "text": {
-                            "type": "mrkdwn",
-                            "text": "📆 *Daily Alert Volume*",
-                        },
-                    },
-                    {
-                        "type": "rich_text",
-                        "elements": [
-                            {
-                                "type": "rich_text_list",
-                                "style": "bullet",
-                                "elements": [
-                                    {
-                                        "type": "rich_text_section",
-                                        "elements": [
-                                            {
-                                                "type": "text",
-                                                "text": f"{date}: {count} alerts",
-                                            }
-                                        ],
-                                    }
-                                    for date, count in report_data["daily_volume"]
-                                ],
-                            }
-                        ],
-                    },
-                ]
+                # report_data = get_alert_report_data()
+                # blocks = [
+                #     {
+                #         "type": "header",
+                #         "text": {
+                #             "type": "plain_text",
+                #             "text": "Weekly Alert Insights Report",
+                #             "emoji": True,
+                #         },
+                #     },
+                #     {
+                #         "type": "context",
+                #         "elements": [
+                #             {
+                #                 "type": "plain_text",
+                #                 "text": f"{report_data['start_date'].strftime('%B %d, %Y')} - {report_data['end_date'].strftime('%B %d, %Y')}",
+                #                 "emoji": True,
+                #             }
+                #         ],
+                #     },
+                #     {"type": "divider"},
+                #     {
+                #         "type": "section",
+                #         "text": {
+                #             "type": "mrkdwn",
+                #             "text": "📈 *Top 5 most frequent alerts*",
+                #         },
+                #     },
+                #     {
+                #         "type": "rich_text",
+                #         "elements": [
+                #             {
+                #                 "type": "rich_text_list",
+                #                 "style": "ordered",
+                #                 "elements": [
+                #                     {
+                #                         "type": "rich_text_section",
+                #                         "elements": [
+                #                             {
+                #                                 "type": "text",
+                #                                 "text": f"{alert.title} ({alert.count} times)",
+                #                             }
+                #                         ],
+                #                     }
+                #                     for alert in report_data["top_alerts"]
+                #                 ],
+                #             }
+                #         ],
+                #     },
+                #     {"type": "divider"},
+                #     {
+                #         "type": "section",
+                #         "text": {
+                #             "type": "mrkdwn",
+                #             "text": "🔥 *Noisiest Services*",
+                #         },
+                #     },
+                #     {
+                #         "type": "rich_text",
+                #         "elements": [
+                #             {
+                #                 "type": "rich_text_list",
+                #                 "style": "ordered",
+                #                 "elements": [
+                #                     {
+                #                         "type": "rich_text_section",
+                #                         "elements": [
+                #                             {
+                #                                 "type": "text",
+                #                                 "text": f"{service} ({count} noisy alerts)",
+                #                             }
+                #                         ],
+                #                     }
+                #                     for service, count in report_data["noisy_services"]
+                #                 ],
+                #             }
+                #         ],
+                #     },
+                #     {"type": "divider"},
+                #     {
+                #         "type": "section",
+                #         "text": {
+                #             "type": "mrkdwn",
+                #             "text": "📆 *Daily Alert Volume*",
+                #         },
+                #     },
+                #     {
+                #         "type": "rich_text",
+                #         "elements": [
+                #             {
+                #                 "type": "rich_text_list",
+                #                 "style": "bullet",
+                #                 "elements": [
+                #                     {
+                #                         "type": "rich_text_section",
+                #                         "elements": [
+                #                             {
+                #                                 "type": "text",
+                #                                 "text": f"{date}: {count} alerts",
+                #                             }
+                #                         ],
+                #                     }
+                #                     for date, count in report_data["daily_volume"]
+                #                 ],
+                #             }
+                #         ],
+                #     },
+                # ]
 
-                await say(blocks=blocks)
+                # await say(blocks=blocks)
 
         @self.slack_app.event("message")
         async def handle_message_events(event, say):
@@ -437,42 +439,6 @@ class SlackBot:
             },
             {
                 "type": "section",
-                "text": {"type": "mrkdwn", "text": "🔥 *Noisiest Services*"},
-            },
-            {
-                "type": "rich_text",
-                "elements": [
-                    {
-                        "type": "rich_text_list",
-                        "style": "ordered",
-                        "indent": 0,
-                        "border": 0,
-                        "elements": [
-                            {
-                                "type": "rich_text_section",
-                                "elements": [
-                                    {
-                                        "type": "text",
-                                        "text": f"{service} ({count} noisy alerts)",
-                                    }
-                                ],
-                            }
-                            for service, count in report_data["noisy_services"]
-                        ],
-                    }
-                ],
-            },
-            {
-                "type": "context",
-                "elements": [{"type": "plain_text", "text": " ", "emoji": True}],
-            },
-            {"type": "divider"},
-            {
-                "type": "context",
-                "elements": [{"type": "plain_text", "text": " ", "emoji": True}],
-            },
-            {
-                "type": "section",
                 "text": {"type": "mrkdwn", "text": "📆 *Daily Alert Volume*"},
             },
             {
@@ -497,17 +463,29 @@ class SlackBot:
             },
         ]
 
-        for alert in report_data["top_alerts"]:
-            alert_id = (
-                getattr(alert, "id", None) or md5(alert.title.encode()).hexdigest()
-            )
+        blocks.extend(
+            [
+                {
+                    "type": "header",
+                    "text": {
+                        "type": "plain_text",
+                        "text": "Noisiest Alerts",
+                        "emoji": True,
+                    },
+                },
+                {"type": "divider"},
+            ]
+        )
+
+        for alert in report_data["noisy_alerts"]:
+            alert_id = alert.provider_id
             blocks.extend(
                 [
                     {
                         "type": "section",
                         "text": {
                             "type": "mrkdwn",
-                            "text": f"*{alert.title}* ({alert.count} times)",
+                            "text": alert.name,
                         },
                         "accessory": {
                             "type": "button",
@@ -658,10 +636,12 @@ class SlackBot:
 
     async def silence_alert(self, alert_id: str) -> bool:
         """Silence the alert with the given ID."""
-        # Implement the logic to silence the alert
-        # This might involve calling the Sentry API or updating your database
-        # Return True if successful, False otherwise
-        pass
+        alert_config = get_alert_configuration(alert_id)
+
+        integration = IntegrationSourceFactory.get_integration(alert_config.provider)
+        success = await integration.silence_alert(alert_id)
+
+        return success
 
     async def ingest_historical_data(self, channel_id: str, days_back: int = 30):
         end_time = datetime.now()
