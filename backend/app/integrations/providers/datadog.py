@@ -29,8 +29,6 @@ from app.schemas.providers.datadog import DatadogAlert
 from app.services.alert import calculate_alert_duration
 from app.integrations.providers.base import BaseIntegration
 
-from app.db.models.alert import Alert
-
 
 class DatadogIntegration(BaseIntegration):
     """Integration for Datadog."""
@@ -79,22 +77,35 @@ class DatadogIntegration(BaseIntegration):
     ALERTS_HISTORY_WINDOW = timedelta(days=14)
 
     def __init__(self):
+        """Initialize the Datadog integration with API configuration."""
         self.configuration = Configuration()
         self.configuration.api_key["apiKeyAuth"] = settings.DATADOG_API_KEY
         self.configuration.api_key["appKeyAuth"] = settings.DATADOG_APP_KEY
 
     def _should_ignore_alert(self, alert: Event) -> bool:
-        """Check if alert should be ignored."""
+        """
+        Check if an alert should be ignored.
+
+        Args:
+            alert (Event): The Datadog event to check.
+
+        Returns:
+            bool: True if the alert should be ignored, False otherwise.
+        """
         return "[TEST]" in alert.title
 
     def _parse_title(self, title: str) -> Tuple[Optional[str], str, str]:
-        """Parse the Datadog alert to extract severity, status, and title.
+        """
+        Parse the Datadog alert to extract severity, status, and title.
 
         Args:
             title (str): The Datadog alert title.
 
         Returns:
             Tuple[Optional[str], str, str]: A tuple containing severity (or None), status, and title.
+
+        Raises:
+            ValueError: If the title format is not recognized.
         """
         pattern = r"^\[(P\d+)\] \[(\w+)\] (.+)$|^\[(\w+)\] (.+)$"
         match = re.match(pattern, title)
@@ -118,7 +129,8 @@ class DatadogIntegration(BaseIntegration):
     def _normalize_alert(
         self, alert: Event, aggregation_key: str, duration_nanoseconds: int
     ) -> AlertSchema:
-        """Normalize Datadog alert to AlertSchema format.
+        """
+        Normalize Datadog alert to AlertSchema format.
 
         Args:
             alert (Event): Raw Datadog event object.
@@ -165,7 +177,15 @@ class DatadogIntegration(BaseIntegration):
     def _normalize_alert_configuration(
         self, monitor: Monitor
     ) -> AlertConfigurationSchema:
-        """Format alert configuration to be stored in the database."""
+        """
+        Format alert configuration to be stored in the database.
+
+        Args:
+            monitor (Monitor): Datadog monitor object.
+
+        Returns:
+            AlertConfigurationSchema: Normalized alert configuration.
+        """
         alert_configuration = AlertConfigurationSchema(
             name=monitor.name,
             description=monitor.message,
@@ -269,7 +289,15 @@ class DatadogIntegration(BaseIntegration):
         return normalized_alerts, normalized_configurations
 
     def normalize_alert(self, alert: dict) -> AlertSchema:
-        """Format alert to be sent to notifiers."""
+        """
+        Format alert to be sent to notifiers.
+
+        Args:
+            alert (dict): Raw alert data from Datadog webhook.
+
+        Returns:
+            AlertSchema: Normalized alert object.
+        """
 
         datadog_alert = DatadogAlert(**alert)
 
@@ -320,11 +348,16 @@ class DatadogIntegration(BaseIntegration):
 
         return normalized_alert
 
-    def enrich_alert(self, alert: Alert) -> Alert:
-        """Enrich alert with additional data."""
-        return alert
-
     async def silence_alert(self, alert_id: str) -> bool:
+        """
+        Silence a Datadog alert.
+
+        Args:
+            alert_id (str): The ID of the alert to silence.
+
+        Returns:
+            bool: True if the alert was successfully silenced, False otherwise.
+        """
         try:
             with ApiClient(self.configuration) as api_client:
                 api_instance = MonitorsApi(api_client)

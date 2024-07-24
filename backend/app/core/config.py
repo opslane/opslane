@@ -28,10 +28,5 @@ class Settings(BaseSettings):
     LLM_API_BASE: Optional[str] = None
     OPENAI_API_KEY: Optional[str] = None
 
-    CONFLUENCE_URL: Optional[str] = None
-    CONFLUENCE_USERNAME: Optional[str] = None
-    CONFLUENCE_PASSWORD: Optional[str] = None
-    CONFLUENCE_SPACE_KEY: Optional[str] = None
-
 
 settings = Settings()  # type: ignore
