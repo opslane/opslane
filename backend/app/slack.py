@@ -234,68 +234,106 @@ class SlackBot:
 
         @self.slack_app.event("message")
         async def handle_message_events(event, say):
-            """Callback for message events.
-
-            We use this callback to send the alert reasoning to the user.
-            """
+            """Callback for message events to send alert reasoning to the user."""
             if "bot_id" in event and event["bot_id"] in self.allowed_bot_ids:
                 monitor_id = event["metadata"]["event_payload"]["monitor_id"]
                 alert_stats = get_alert_configuration_stats(monitor_id)
                 prediction = await self.predictor.predict(event, alert_stats)
 
                 alert_classification = (
-                    "actionable"
+                    "Actionable"
                     if prediction["score"] > settings.PREDICTION_CONFIDENCE_THRESHOLD
-                    else "noisy"
+                    else "Potentially Noisy"
                 )
 
                 channel_id = event["channel"]
                 thread_ts = event["ts"]
 
-                await say(
-                    blocks=[
-                        {
-                            "type": "section",
-                            "text": {
-                                "type": "mrkdwn",
-                                "text": f"Alert Classification: {alert_classification}",
-                            },
+                # Format additional info for better readability
+                additional_info = []
+                for k, v in prediction["additional_info"].items():
+                    if k == "slack_conversations":
+                        conversation_links = []
+                        for conv in v:
+                            user = conv.get("user", "Unknown")
+                            timestamp = conv.get("timestamp", "")
+                            message = conv.get("message", "")
+                            link = f"<slack://channel?team=T027FNUU9V2&id=C079ZECA30U&message={timestamp}|{user}: {message[:50]}...>"
+                            conversation_links.append(link)
+                        additional_info.append(
+                            f"• *{k}:*\n  " + "\n  ".join(conversation_links)
+                        )
+                    else:
+                        additional_info.append(f"• *{k}:* {v}")
+
+                additional_info_text = "\n".join(additional_info)
+
+                blocks = [
+                    {
+                        "type": "header",
+                        "text": {
+                            "type": "plain_text",
+                            "text": f"Alert Classification: {alert_classification}",
+                            "emoji": True,
                         },
-                        {
-                            "type": "section",
-                            "text": {
-                                "type": "mrkdwn",
-                                "text": prediction["reasoning"],
-                            },
+                    },
+                    {
+                        "type": "section",
+                        "text": {"type": "mrkdwn", "text": prediction["reasoning"]},
+                    },
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": f"*Additional Information:*\n{additional_info_text}",
                         },
-                        {
-                            "type": "section",
-                            "text": {
-                                "type": "mrkdwn",
-                                "text": json.dumps(prediction["additional_info"]),
-                            },
+                    },
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": f"*Confidence Score:* {prediction['score']:.2f}",
                         },
-                        {
-                            "type": "actions",
-                            "elements": [
-                                {
-                                    "type": "button",
-                                    "text": {"type": "plain_text", "text": "👍"},
-                                    "value": "thumbs_up",
-                                    "action_id": "thumbs_up",
+                    },
+                    {
+                        "type": "actions",
+                        "elements": [
+                            {
+                                "type": "button",
+                                "text": {
+                                    "type": "plain_text",
+                                    "text": "👍 Correct",
+                                    "emoji": True,
                                 },
-                                {
-                                    "type": "button",
-                                    "text": {"type": "plain_text", "text": "👎"},
-                                    "value": "thumbs_down",
-                                    "action_id": "thumbs_down",
+                                "value": "thumbs_up",
+                                "action_id": "thumbs_up",
+                                "style": "primary",
+                            },
+                            {
+                                "type": "button",
+                                "text": {
+                                    "type": "plain_text",
+                                    "text": "👎 Incorrect",
+                                    "emoji": True,
                                 },
-                            ],
-                        },
-                    ],
-                    channel=channel_id,
-                    thread_ts=thread_ts,
-                )
+                                "value": "thumbs_down",
+                                "action_id": "thumbs_down",
+                                "style": "danger",
+                            },
+                        ],
+                    },
+                    {
+                        "type": "context",
+                        "elements": [
+                            {
+                                "type": "mrkdwn",
+                                "text": "Please provide feedback on the classification to help improve future predictions.",
+                            }
+                        ],
+                    },
+                ]
+
+                await say(blocks=blocks, channel=channel_id, thread_ts=thread_ts)
 
     async def send_insight_report(self, say):
         """Send the weekly alert insights report to the user."""
