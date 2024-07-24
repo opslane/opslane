@@ -1,5 +1,5 @@
 
-![opslane](backend/docs/opslane-transparent.png)
+![opslane](backend/docs/opslane-logo-large.png)
 
 # Opslane
 
