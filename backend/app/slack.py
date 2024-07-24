@@ -292,13 +292,6 @@ class SlackBot:
                         },
                     },
                     {
-                        "type": "section",
-                        "text": {
-                            "type": "mrkdwn",
-                            "text": f"*Confidence Score:* {prediction['score']:.2f}",
-                        },
-                    },
-                    {
                         "type": "actions",
                         "elements": [
                             {
@@ -621,7 +614,7 @@ class SlackBot:
             await self.update_alert_metadata(
                 config_id,
                 is_noisy,
-                f"User feedback: {'not noisy' if is_positive else 'noisy'}",
+                f"User feedback: {'noisy' if is_noisy else 'not noisy'}",
             )
 
             feedback_type = "positive" if is_positive else "negative"

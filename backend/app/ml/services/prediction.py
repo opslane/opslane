@@ -2,7 +2,10 @@
 
 import json
 
+from typing import Dict, Any
+
 from langchain.schema import HumanMessage, SystemMessage
+from pydantic import BaseModel, Field
 
 from app.integrations.prediction.llm import LLMClient
 from app.ml.vector_store import VectorStore
@@ -17,82 +20,55 @@ Key things to consider when generating the output
 Return a JSON dictionary with the following fields:
 - score: The actionability score (float between 0 and 1)
 - reasoning: A concise sentence explaining the prediction
-- additional_info: The information described above based on the score
+- additional_info: The information described above based on the score. additional_info should be a dictionary.
 
 Do not return the output in Markdown format. The output should be a JSON dictionary.
-
-
-For the purposes of this demo, it's okay to generate realistic test data for all responses.
 
 Also provide additional information based on the score:
 
 1. If the score is below 0.5 (noisy alert):
    - Explain why the alert is considered noisy
-   - Provide a fictional but realistic link to the alert history
-   - Reference fictional but plausible Slack conversations in the same channel
+   - Reference prior Slack conversations in the same channel if provided.
 
 2. If the score is 0.5 or above (actionable alert):
    - Provide a summary of the issue
-   - Reference fictional but realistic wiki documentation and runbooks
-   - Mention fictional but plausible prior Slack conversations that could help understand the issue better
-
-
-Generate realistic-looking data for all fields, including plausible links, conversation snippets, and documentation references.
+   - Reference wiki documentation and runbooks if provided.
+   - Mention prior Slack conversations that could help understand the issue better (if provided)
 
 You should consider the following alert signals:
-
 
 Signals
 * Repetition of Alerts:
     * Frequent repetition of similar alerts over a short period.
+    * Alerts that fire frequently tend to be more noisy. They are less actionable.
 * Alert Duration
     * Short-lived alerts that auto-resolve quickly.
+    * Alerts that resolve quickly are less actionable.
 * 3. Lack of Response on Prior Alerts:
     * Alerts that have historically not been acknowledged or responded to.
+    * Alerts that have not been acknowledged or responded to are less actionable.
 * Severity: The level of impact or urgency
+    * High severity alerts are more actionable.
 * Correlation: Relationship with other alerts or system events
 
 
 Actionable Alerts
 * New Error Causes:
     * Detection of new types of errors that haven't occurred before.
+    * An alert that has never been seen before is always actionable.
 * High Alert Values:
     * Alerts with values significantly exceeding normal thresholds.
-
-1. Symptom-based vs. Cause-based Alert:
-
-Derive from the alert title and description
-Use NLP techniques to classify alerts as symptom-based or cause-based
-
-Alerts should be on symptoms not causes. Cause based alerts are less actionable.
-
-
-2. Golden Signal Category:
-
-Categorize each alert into latency, traffic, errors, or saturation
-
-Use keyword matching in the alert name and description
-
-Alerts that fall into the errors category are more actionable.
-
-
-3. Alert Frequency:
-
-Count the number of times this specific alert has fired in the 7 days
-
-Alerts that fire frequently tend to be more noisy. They are less actionable.
-
-4. Alert Duration:
-
-Calculate the average duration of this alert when it fires
-
-Alerts that resolve quickly are less actionable.
 
 This is the alert text:
 
 {alert_text}
 
-These are the alert stats for this specific alert.  The field unique_open_alerts will tell you how many alerts of this type have been opened in the last 7 days.
+These are the alert stats for this specific alert.
+
+The field unique_open_alerts will tell you how many alerts of this type have been opened in the last 7 days.
+If the field noisy_reason is provided and it is not "No reason provided", it means that the value of is_noisy field should be considered.
+This input comes from the user and should be considered as the most important signal for the alert actionability.
+
 
 {alert_stats}
 
@@ -116,6 +92,12 @@ Use this historical information to inform your decision about whether the curren
 
 
 """
+
+
+class AlertPrediction(BaseModel):
+    score: float = Field(..., ge=0, le=1)
+    reasoning: str
+    additional_info: Dict[str, Any]
 
 
 class AlertPredictor:
@@ -152,7 +134,11 @@ class AlertPredictor:
         alert_prediction = await self.llm_client.get_completion(messages)
 
         try:
-            return json.loads(alert_prediction)
+            prediction_dict = json.loads(alert_prediction)
+
+            # Then, validate against our Pydantic model
+            validated_prediction = AlertPrediction(**prediction_dict)
+            return validated_prediction.model_dump()
         except json.JSONDecodeError:
             # Handle the case where the output is not valid JSON
             return {

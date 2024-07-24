@@ -272,6 +272,8 @@ def get_alert_configuration_stats(monitor_id: int) -> Dict[str, Any]:
 
         return {
             "configuration_id": alert_config.id,
+            "is_noisy": alert_config.is_noisy,
+            "noisy_reason": alert_config.noisy_reason or "No reason provided",
             "provider_id": alert_config.provider_id,
             "name": alert_config.name,
             "unique_open_alerts": unique_open_alerts,
