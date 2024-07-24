@@ -276,3 +276,36 @@ def get_alert_configuration_stats(monitor_id: int) -> Dict[str, Any]:
             "name": alert_config.name,
             "unique_open_alerts": unique_open_alerts,
         }
+
+
+def mark_alert_configuration_as_noisy(
+    provider_id: str, is_noisy: bool, reason: Optional[str] = None
+) -> Optional[AlertConfiguration]:
+    """
+    Mark an AlertConfiguration as noisy or not noisy and provide a reason.
+
+    Args:
+        provider_id (str): The provider_id of the AlertConfiguration.
+        is_noisy (bool): Whether to mark the configuration as noisy or not.
+        reason (Optional[str]): The reason for marking the configuration as noisy or not.
+
+    Returns:
+        Optional[AlertConfiguration]: The updated AlertConfiguration if found, None otherwise.
+    """
+    with Session(engine) as session:
+        statement = select(AlertConfiguration).where(
+            AlertConfiguration.provider_id == provider_id
+        )
+        result = session.exec(statement)
+        alert_config = result.first()
+
+        if alert_config:
+            alert_config.is_noisy = is_noisy
+            alert_config.noisy_reason = reason if is_noisy else None
+            session.add(alert_config)
+            session.commit()
+            session.refresh(alert_config)
+            return alert_config
+        else:
+            print(f"Warning: No configuration found for provider_id {provider_id}")
+            return None

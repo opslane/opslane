@@ -20,6 +20,7 @@ class AlertConfiguration(SQLModel, table=True):
         unique=True, index=True, description="The ID in the provider's system"
     )
     is_noisy: bool = Field(default=False)
+    noisy_reason: Optional[str] = Field(default=None)
 
     events: List["Alert"] = Relationship(back_populates="configuration")
 

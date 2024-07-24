@@ -15,8 +15,11 @@ from slack_sdk.errors import SlackApiError
 from app.core.config import settings
 from app.ml.services.prediction import AlertPredictor
 from app.ml.vector_store import VectorStore
-from app.services.alert import get_alert_report_data
-from app.services.alert import get_alert_configuration_stats
+from app.services.alert import (
+    get_alert_report_data,
+    get_alert_configuration_stats,
+    mark_alert_configuration_as_noisy,
+)
 
 
 class SlackBot:
@@ -302,10 +305,10 @@ class SlackBot:
                                 "type": "button",
                                 "text": {
                                     "type": "plain_text",
-                                    "text": "👍 Correct",
+                                    "text": "👍",
                                     "emoji": True,
                                 },
-                                "value": "thumbs_up",
+                                "value": alert_classification,
                                 "action_id": "thumbs_up",
                                 "style": "primary",
                             },
@@ -313,10 +316,10 @@ class SlackBot:
                                 "type": "button",
                                 "text": {
                                     "type": "plain_text",
-                                    "text": "👎 Incorrect",
+                                    "text": "👎",
                                     "emoji": True,
                                 },
-                                "value": "thumbs_down",
+                                "value": alert_classification,
                                 "action_id": "thumbs_down",
                                 "style": "danger",
                             },
@@ -553,32 +556,19 @@ class SlackBot:
     def _register_action_handlers(self):
         @self.slack_app.action("thumbs_up")
         async def handle_thumbs_up(ack, body, say):
-            """Handle the thumbs_up action.
-
-            We use this action to update the alert metadata in the database.
-            """
             await ack()
-            user_id = body["user"]["id"]
-            channel_id = body["container"]["channel_id"]
-            await self.slack_app.client.chat_postEphemeral(
-                channel=channel_id,
-                user=user_id,
-                text=f"Thanks for the feedback, <@{user_id}>!",
+            classification = body["actions"][0]["value"]
+
+            await self.handle_feedback(
+                body, say, is_positive=True, classification=classification
             )
 
         @self.slack_app.action("thumbs_down")
         async def handle_thumbs_down(ack, body, say):
-            """Handle the thumbs_down action.
-
-            We use this action to update the alert metadata in the database.
-            """
             await ack()
-            user_id = body["user"]["id"]
-            channel_id = body["container"]["channel_id"]
-            await self.slack_app.client.chat_postEphemeral(
-                channel=channel_id,
-                user=user_id,
-                text=f"Thanks for the feedback, <@{user_id}>!",
+            classification = body["actions"][0]["value"]
+            await self.handle_feedback(
+                body, say, is_positive=False, classification=classification
             )
 
         @self.slack_app.action(re.compile("silence_alert_.*"))
@@ -603,6 +593,75 @@ class SlackBot:
                     user=user_id,
                     text=f"Failed to silence alert with ID {alert_id}. Please try again or contact support.",
                 )
+
+    async def handle_feedback(self, body, say, is_positive, classification):
+        user_id = body["user"]["id"]
+        channel_id = body["container"]["channel_id"]
+        message_ts = body["container"]["message_ts"]
+
+        try:
+            result = await self.slack_app.client.conversations_history(
+                channel=channel_id, latest=message_ts, limit=1, inclusive=True
+            )
+            parent_message = result["messages"][0]
+
+            # Extract alert title, configuration ID, and prediction
+            alert_title = parent_message["attachments"][0]["title"]
+            title_link = parent_message["attachments"][0]["title_link"]
+
+            # Parse out the alert configuration ID
+            config_id = title_link.split("/monitors/")[1].split("?")[0]
+
+            # Determine if the alert is noisy based on prediction and feedback
+            is_noisy = (classification == "Actionable" and not is_positive) or (
+                classification == "Potentially Noisy" and is_positive
+            )
+
+            # Update the database with the feedback
+            await self.update_alert_metadata(
+                config_id,
+                is_noisy,
+                f"User feedback: {'not noisy' if is_positive else 'noisy'}",
+            )
+
+            feedback_type = "positive" if is_positive else "negative"
+            await self.slack_app.client.chat_postEphemeral(
+                channel=channel_id,
+                user=user_id,
+                text=f"Thanks for the {feedback_type} feedback on the alert: '{alert_title}' (ID: {config_id}). The alert has been marked as {'noisy' if is_noisy else 'not noisy'}.",
+            )
+
+            # Update the original message to reflect the feedback
+            updated_attachments = parent_message.get("attachments", [])
+            updated_attachments.append(
+                {
+                    "color": "good" if is_positive else "danger",
+                    "text": f"Feedback received: {'👍' if is_positive else '👎'} from <@{user_id}>. Alert marked as {'noisy' if is_noisy else 'not noisy'}.",
+                }
+            )
+
+            await self.slack_app.client.chat_update(
+                channel=channel_id, ts=message_ts, attachments=updated_attachments
+            )
+
+        except Exception as e:
+            print(f"Error handling feedback: {e}")
+            await self.slack_app.client.chat_postEphemeral(
+                channel=channel_id,
+                user=user_id,
+                text=f"Sorry, there was an error processing your feedback. Please try again later.",
+            )
+
+    async def update_alert_metadata(self, config_id: str, is_noisy: bool, reason: str):
+        """Mark an AlertConfiguration as noisy or not noisy and provide a reason."""
+        try:
+            updated_config = mark_alert_configuration_as_noisy(
+                provider_id=config_id, is_noisy=is_noisy, reason=reason
+            )
+            print(f"Successfully updated metadata for alert configuration {config_id}")
+        except Exception as e:
+            print(f"Error updating alert metadata: {e}")
+            # You might want to add more robust error handling here
 
     async def silence_alert(self, alert_id: str) -> bool:
         """Silence the alert with the given ID."""

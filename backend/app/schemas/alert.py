@@ -43,6 +43,7 @@ class AlertConfigurationSchema(BaseModel):
     provider: AlertSource
     provider_id: str
     is_noisy: bool = False
+    noisy_reason: Optional[str] = None
 
 
 class AlertSchema(BaseModel):
