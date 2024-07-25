@@ -28,7 +28,7 @@ target_metadata = SQLModel.metadata
 
 def get_db_url():
     """Get the database URL from the environment variables."""
-    return os.getenv("DATABASE_URL_NEW", "")
+    return os.getenv("DATABASE_URL", "")
 
 
 def run_migrations_offline():

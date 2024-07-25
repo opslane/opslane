@@ -21,7 +21,7 @@ class VectorStore:
         The PGVector is configured with the database engine and a collection name for alert embeddings.
         """
         self.store = PGVector(
-            connection_string=str(settings.DATABASE_URL_NEW),
+            connection_string=str(settings.DATABASE_URL),
             embedding_function=OpenAIEmbeddings(openai_api_key=settings.LLM_API_KEY),
             collection_name="alert_embeddings",
         )

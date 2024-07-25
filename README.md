@@ -1,12 +1,10 @@
 
-![opslane](backend/docs/opslane-logo-large.png)
-
 <p align="center">
   <img alt="logo" src="./assets/opslane-logo-large.png">
 </p>
 
 <p align="center">
-  <a href="">Demo</a> - <a href="">Slack</a>
+  <a href="">Demo</a> - <a href="https://opslanecommunity.slack.com">Slack</a>
 </p>
 
 # Opslane
@@ -21,17 +19,13 @@ Opslane is a tool that helps on-call engineers reduce alert fatigue by classifyi
 - **Open Source**: Opslane is open source and welcomes contributions from the community.
 
 
-## System Architecture
-
-[Insert a diagram of your system architecture here]
-
 ## Installation
 
 ### Prerequisites
 
 - Docker
 - Slack workspace
-- Datadog and/or Sentry account
+- Datadog account
 
 ### Setup
 
@@ -45,7 +39,7 @@ Opslane is a tool that helps on-call engineers reduce alert fatigue by classifyi
 ```bash
 bash
 cp .env.example .env
-# Edit .env with your Slack, Datadog, and Sentry API keys
+# Edit .env with your Slack, Datadog, and OpenAI API keys
 ```
 
 
@@ -53,15 +47,14 @@ cp .env.example .env
 
 ```bash
 
-   docker build -t opslane .
-   docker run -d -p 8080:8080 --env-file .env opslane
+   docker-compose up --build
 
 ```
 
 ## Usage
 
 1. Add the Opslane bot to your Slack workspace
-2. Configure Datadog and Sentry to send alerts to Opslane's webhook endpoint
+2. Configure Datadog to send alerts to Opslane's webhook endpoint
 3. Opslane will automatically analyze incoming alerts and post insights in your Slack channel
 
 ## Contributing
