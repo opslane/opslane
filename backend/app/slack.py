@@ -14,6 +14,7 @@ from slack_sdk.errors import SlackApiError
 
 from app.core.config import settings
 from app.integrations.providers.factory import IntegrationSourceFactory
+from app.ml.chat import answer_question
 from app.ml.services.prediction import AlertPredictor
 from app.ml.vector_store import VectorStore
 from app.services.alert import (
@@ -240,97 +241,109 @@ class SlackBot:
         @self.slack_app.event("message")
         async def handle_message_events(event, say):
             """Callback for message events to send alert reasoning to the user."""
-            if "bot_id" in event and event["bot_id"] in self.allowed_bot_ids:
-                monitor_id = event["metadata"]["event_payload"]["monitor_id"]
-                alert_stats = get_alert_configuration_stats(monitor_id)
-                prediction = await self.predictor.predict(event, alert_stats)
 
-                alert_classification = (
-                    "Actionable"
-                    if prediction["score"] > settings.PREDICTION_CONFIDENCE_THRESHOLD
-                    else "Potentially Noisy"
-                )
+            channel_id = event["channel"]
+            thread_ts = event["ts"]
 
-                channel_id = event["channel"]
-                thread_ts = event["ts"]
+            if "bot_id" in event:
+                if event["bot_id"] == self.bot_user_id:
+                    return
 
-                # Format additional info for better readability
-                additional_info = []
-                for k, v in prediction["additional_info"].items():
-                    if k == "slack_conversations":
-                        conversation_links = []
-                        for conv in v:
-                            user = conv.get("user", "Unknown")
-                            timestamp = conv.get("timestamp", "")
-                            message = conv.get("message", "")
-                            link = f"<slack://channel?team=T027FNUU9V2&id=C079ZECA30U&message={timestamp}|{user}: {message[:50]}...>"
-                            conversation_links.append(link)
-                        additional_info.append(
-                            f"• *{k}:*\n  " + "\n  ".join(conversation_links)
-                        )
-                    else:
-                        additional_info.append(f"• *{k}:* {v}")
+                if event["bot_id"] in self.allowed_bot_ids:
+                    monitor_id = event["metadata"]["event_payload"]["monitor_id"]
+                    alert_stats = get_alert_configuration_stats(monitor_id)
+                    prediction = await self.predictor.predict(event, alert_stats)
 
-                additional_info_text = "\n".join(additional_info)
+                    alert_classification = (
+                        "Actionable"
+                        if prediction["score"]
+                        > settings.PREDICTION_CONFIDENCE_THRESHOLD
+                        else "Potentially Noisy"
+                    )
 
-                blocks = [
-                    {
-                        "type": "header",
-                        "text": {
-                            "type": "plain_text",
-                            "text": f"Alert Classification: {alert_classification}",
-                            "emoji": True,
-                        },
-                    },
-                    {
-                        "type": "section",
-                        "text": {"type": "mrkdwn", "text": prediction["reasoning"]},
-                    },
-                    {
-                        "type": "section",
-                        "text": {
-                            "type": "mrkdwn",
-                            "text": f"*Additional Information:*\n{additional_info_text}",
-                        },
-                    },
-                    {
-                        "type": "actions",
-                        "elements": [
-                            {
-                                "type": "button",
-                                "text": {
-                                    "type": "plain_text",
-                                    "text": "👍",
-                                    "emoji": True,
-                                },
-                                "value": alert_classification,
-                                "action_id": "thumbs_up",
-                                "style": "primary",
+                    # Format additional info for better readability
+                    additional_info = []
+                    for k, v in prediction["additional_info"].items():
+                        if k == "slack_conversations":
+                            conversation_links = []
+                            for conv in v:
+                                user = conv.get("user", "Unknown")
+                                timestamp = conv.get("timestamp", "")
+                                message = conv.get("message", "")
+                                link = f"<slack://channel?team=T027FNUU9V2&id=C079ZECA30U&message={timestamp}|{user}: {message[:50]}...>"
+                                conversation_links.append(link)
+                            additional_info.append(
+                                f"• *{k}:*\n  " + "\n  ".join(conversation_links)
+                            )
+                        else:
+                            additional_info.append(f"• *{k}:* {v}")
+
+                    additional_info_text = "\n".join(additional_info)
+
+                    blocks = [
+                        {
+                            "type": "header",
+                            "text": {
+                                "type": "plain_text",
+                                "text": f"Alert Classification: {alert_classification}",
+                                "emoji": True,
                             },
-                            {
-                                "type": "button",
-                                "text": {
-                                    "type": "plain_text",
-                                    "text": "👎",
-                                    "emoji": True,
-                                },
-                                "value": alert_classification,
-                                "action_id": "thumbs_down",
-                                "style": "danger",
-                            },
-                        ],
-                    },
-                    {
-                        "type": "context",
-                        "elements": [
-                            {
+                        },
+                        {
+                            "type": "section",
+                            "text": {"type": "mrkdwn", "text": prediction["reasoning"]},
+                        },
+                        {
+                            "type": "section",
+                            "text": {
                                 "type": "mrkdwn",
-                                "text": "Please provide feedback on the classification to help improve future predictions.",
-                            }
-                        ],
-                    },
-                ]
+                                "text": f"*Additional Information:*\n{additional_info_text}",
+                            },
+                        },
+                        {
+                            "type": "actions",
+                            "elements": [
+                                {
+                                    "type": "button",
+                                    "text": {
+                                        "type": "plain_text",
+                                        "text": "👍",
+                                        "emoji": True,
+                                    },
+                                    "value": alert_classification,
+                                    "action_id": "thumbs_up",
+                                    "style": "primary",
+                                },
+                                {
+                                    "type": "button",
+                                    "text": {
+                                        "type": "plain_text",
+                                        "text": "👎",
+                                        "emoji": True,
+                                    },
+                                    "value": alert_classification,
+                                    "action_id": "thumbs_down",
+                                    "style": "danger",
+                                },
+                            ],
+                        },
+                        {
+                            "type": "context",
+                            "elements": [
+                                {
+                                    "type": "mrkdwn",
+                                    "text": "Please provide feedback on the classification to help improve future predictions.",
+                                }
+                            ],
+                        },
+                    ]
 
+                    await say(blocks=blocks, channel=channel_id, thread_ts=thread_ts)
+            else:
+                result = await answer_question(event["text"])
+                blocks = [
+                    {"type": "section", "text": {"type": "mrkdwn", "text": result}}
+                ]
                 await say(blocks=blocks, channel=channel_id, thread_ts=thread_ts)
 
     async def send_insight_report(self, say):

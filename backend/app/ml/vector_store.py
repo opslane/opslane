@@ -4,6 +4,7 @@ Vector Store Module
 
 from typing import List, Dict, Any, Tuple
 
+from langchain.docstore.document import Document
 from langchain.embeddings import OpenAIEmbeddings
 from langchain.schema import Document
 from langchain.vectorstores import PGVector
@@ -67,3 +68,13 @@ class VectorStore:
         """Check if a message already exists in the vector store."""
         results = self.store.similarity_search(f"message_id:{message_id}", k=1)
         return len(results) > 0
+
+    def add_document(self, text: str, metadata: Dict[str, Any], source: str):
+        document = Document(page_content=text, metadata={**metadata, "source": source})
+        self.store.add_documents([document])
+
+    def similarity_search_with_score(
+        self, query: str, k: int = 5, filter: Dict[str, Any] = None
+    ) -> List[Tuple[Document, float]]:
+        """Search for similar documents and return with relevance scores."""
+        return self.store.similarity_search_with_score(query, k=k, filter=filter)

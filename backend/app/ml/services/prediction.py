@@ -1,5 +1,6 @@
 """Alert prediction service."""
 
+import asyncio
 import json
 
 from typing import Dict, Any
@@ -37,7 +38,8 @@ Also provide additional information based on the score:
 
 You should consider the following alert signals:
 
-Signals
+The signals are based on the order of priority. The higher the signal, the more important it is.
+
 * Repetition of Alerts:
     * Frequent repetition of similar alerts over a short period.
     * Alerts that fire frequently tend to be more noisy. They are less actionable.
@@ -123,11 +125,9 @@ class AlertPredictor:
         """
         historical_data = await self.fetch_historical_data(input_data)
         prompt = self._create_prompt(input_data, alert_stats, historical_data)
-        relevant_docs = self.vector_store.similarity_search(prompt)
-        context = "\n\n".join(doc.page_content for doc in relevant_docs)
+        asyncio.create_task(self._log_prompt(prompt))
 
         messages = [
-            SystemMessage(content=f"Context: {context}"),
             HumanMessage(content=prompt),
         ]
 
@@ -145,6 +145,10 @@ class AlertPredictor:
                 "error": "Failed to parse LLM output as JSON",
                 "raw_output": alert_prediction,
             }
+
+    async def _log_prompt(self, prompt: str):
+        # Replace this with your preferred logging method
+        print(f"Prompt: {prompt}")
 
     def _create_prompt(
         self, alert_data: dict, alert_stats: dict, historical_data: list
