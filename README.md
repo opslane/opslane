@@ -4,12 +4,18 @@
 </p>
 
 <p align="center">
-  <a href="">Demo</a> - <a href="https://opslanecommunity.slack.com">Slack</a>
+  <a href="https://youtu.be/m_K9Dq1kZDw">Demo</a> - <a href="https://opslanecommunity.slack.com">Slack</a>
 </p>
 
 # Opslane
 
 Opslane is a tool that helps on-call engineers reduce alert fatigue by classifying alerts as actionable or noisy, grouping related alerts, and providing contextual information for handling alerts.
+
+## Demo
+
+
+[![Demo CountPages alpha](./assets/opslane-demo.gif)](https://youtu.be/m_K9Dq1kZDw)
+
 
 ## Key Features
 
@@ -53,12 +59,8 @@ cp .env.example .env
 
 ## Usage
 
-1. Add the Opslane bot to your Slack workspace
+1. Add the Opslane bot to the Slack channel where you receive alerts
 2. Configure Datadog to send alerts to Opslane's webhook endpoint
 3. Opslane will automatically analyze incoming alerts and post insights in your Slack channel
-
-## Contributing
-
-We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) for more details.
 
 
