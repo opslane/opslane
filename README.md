@@ -9,7 +9,9 @@
 
 # Opslane
 
-Opslane is a tool that helps on-call engineers reduce alert fatigue by classifying alerts as actionable or noisy, grouping related alerts, and providing contextual information for handling alerts.
+Opslane is a tool that helps the on-call experience less stressful.
+
+It reduces alert fatigue by classifying alerts as actionable or noisy and providing contextual information for handling alerts.
 
 ## Demo
 
