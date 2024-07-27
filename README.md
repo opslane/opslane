@@ -27,6 +27,23 @@ It reduces alert fatigue by classifying alerts as actionable or noisy and provid
 - **Open Source**: Opslane is open source and welcomes contributions from the community.
 
 
+## Architecture
+
+Opslane uses a modular architecture designed for efficient alert processing and seamless integration with existing tools:
+
+1. **Alert Ingestion**: Datadog sends alerts via webhooks to our FastAPI server.
+3. **FastAPI Server**: The core of our system, processing incoming alerts, interacting with Slack, and managing data flow.
+4. **Slack Integration**: Provides a user interface for alert management and interaction.
+5. **Database**: Utilizes Postgres with pgvector for storing alert data and embeddings.
+
+Here's a high-level overview of the Opslane architecture:
+
+![Opslane Architecture Diagram](./assets/opslane-arch.png)
+
+### Integrations
+
+We use a flexible data model so that we can support multiple integrations. Currently, Opslane supports Datadog.
+
 ## Installation
 
 ### Prerequisites
