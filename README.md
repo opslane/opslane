@@ -4,7 +4,7 @@
 </p>
 
 <p align="center">
-  <a href="https://youtu.be/m_K9Dq1kZDw">Demo</a> - <a href="https://opslanecommunity.slack.com">Slack</a>
+  <a href="https://youtu.be/m_K9Dq1kZDw">Demo</a> - <a href="https://join.slack.com/t/opslanecommunity/shared_invite/zt-2ncr7a1tx-8YAdUoVHJX0qgCF31PATuA">Slack</a>
 </p>
 
 # Opslane
