@@ -56,13 +56,13 @@ We use a flexible data model so that we can support multiple integrations. Curre
 
 1. Clone the repository:
 ```bash
-   git clone https://github.com/yourusername/opslane.git
+git clone https://github.com/yourusername/opslane.git
+cd opslane
 ```
 
 2. Configure environment variables:
 
 ```bash
-bash
 cp .env.example .env
 # Edit .env with your Slack, Datadog, and OpenAI API keys
 ```
@@ -71,9 +71,7 @@ cp .env.example .env
 3. Build and run the Docker container:
 
 ```bash
-
-   docker-compose up --build
-
+docker-compose up --build
 ```
 
 ## Usage
