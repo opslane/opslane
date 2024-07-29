@@ -83,3 +83,15 @@ cp .env.example .env
 3. Opslane will automatically analyze incoming alerts and post insights in your Slack channel
 
 
+## Telemetry
+
+We capture anonymized telemetry to understand usage patterns.
+
+This helps us:
+
+- Improve Opslane based on usage patterns
+- Track usage for internal metrics
+
+We collect minimal, non-sensitive data and do not share it with third parties.
+
+If you prefer to opt out of telemetry, set `ANONYMIZED_TELEMETRY=False` in the .env file.

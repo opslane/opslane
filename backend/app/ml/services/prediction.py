@@ -5,11 +5,13 @@ import json
 
 from typing import Dict, Any
 
-from langchain.schema import HumanMessage, SystemMessage
+from langchain.schema import HumanMessage
 from pydantic import BaseModel, Field
 
 from app.integrations.prediction.llm import LLMClient
 from app.ml.vector_store import VectorStore
+from app.telemetry.events import ApplicationEvents
+from app.telemetry.posthog import posthog_client
 
 
 PROMPT = """Analyze this alert and return a score between 0 and 1.
@@ -125,13 +127,13 @@ class AlertPredictor:
         """
         historical_data = await self.fetch_historical_data(input_data)
         prompt = self._create_prompt(input_data, alert_stats, historical_data)
-        asyncio.create_task(self._log_prompt(prompt))
 
         messages = [
             HumanMessage(content=prompt),
         ]
 
         alert_prediction = await self.llm_client.get_completion(messages)
+        posthog_client.capture(ApplicationEvents.ALERT_PREDICTION)
 
         try:
             prediction_dict = json.loads(alert_prediction)
@@ -145,10 +147,6 @@ class AlertPredictor:
                 "error": "Failed to parse LLM output as JSON",
                 "raw_output": alert_prediction,
             }
-
-    async def _log_prompt(self, prompt: str):
-        # Replace this with your preferred logging method
-        print(f"Prompt: {prompt}")
 
     def _create_prompt(
         self, alert_data: dict, alert_stats: dict, historical_data: list

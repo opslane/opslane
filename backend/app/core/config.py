@@ -27,5 +27,7 @@ class Settings(BaseSettings):
     LLM_API_BASE: Optional[str] = None
     OPENAI_API_KEY: Optional[str] = None
 
+    ANONYMIZED_TELEMETRY: bool = True
+
 
 settings = Settings()  # type: ignore
