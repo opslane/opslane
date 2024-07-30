@@ -37,6 +37,8 @@ pgvector = "^0.3.2"
 psycopg2-binary = "^2.9.9"
 atlassian-python-api = "^3.41.14"
 posthog = "^3.5.0"
+pytest = "^8.3.2"
+pytest-asyncio = "^0.23.8"
 
 
 [build-system]
