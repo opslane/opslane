@@ -4,7 +4,7 @@ from fastapi import FastAPI, Request
 
 from app.api.main import api_router
 from app.core.config import settings
-from app.slack import slack_handler
+from app.slack.bot import slack_handler
 
 
 def create_app() -> FastAPI:
