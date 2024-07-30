@@ -20,7 +20,7 @@ We welcome contributions to Opslane! This document outlines the process for cont
 
 ## Reporting Bugs
 
-Report bugs by [opening a new issue](https://github.com/yourusername/opslane/issues/new).
+Report bugs by [opening a new issue](https://github.com/opslane/opslane/issues/new).
 
 ### Bug Report Guidelines
 
