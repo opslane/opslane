@@ -7,10 +7,9 @@ from sqlmodel import select, func, Session
 
 from app.db import engine
 from app.db.models.alert import Alert, AlertConfiguration, AlertSource, AlertStatus
-from app.ml.services.prediction import AlertPredictor
-from app.schemas.alert import AlertConfigurationSchema, AlertSchema
 
-predictor = AlertPredictor()
+# from app.ml.services.prediction import AlertPredictor
+from app.schemas.alert import AlertConfigurationSchema, AlertSchema
 
 
 def _convert_alert_configuration_schema_to_db_model(
@@ -94,9 +93,12 @@ def get_alert_configuration(provider_id: str) -> Optional[AlertConfiguration]:
 def store_alert_in_db(alert: AlertSchema) -> Alert:
     """Store alert in the database."""
     with Session(engine) as session:
+
+        # predictor = AlertPredictor()
+
         alert_db = _convert_alert_schema_to_db_model(alert)
         alert_text = f"Title: {alert.title}\nDescription: {alert.description}\nSeverity: {alert.severity}\nSource: {alert.alert_source}"
-        alert_db.embedding = predictor.llm_client.get_embedding(alert_text)
+        # alert_db.embedding = predictor.llm_client.get_embedding(alert_text)
 
         # Get the corresponding AlertConfiguration
         config = get_alert_configuration(alert.configuration_id)

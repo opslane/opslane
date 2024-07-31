@@ -1,18 +1,11 @@
-"""Alert prediction service."""
-
-import asyncio
 import json
+from langchain import hub
+from langchain.agents import AgentExecutor, create_react_agent
+from langchain_openai import ChatOpenAI
+from langchain_core.tools import tool
 
-from typing import Dict, Any
-
-from langchain.schema import HumanMessage
-from pydantic import BaseModel, Field
-
-from app.integrations.prediction.llm import LLMClient
 from app.ml.vector_store import VectorStore
-from app.telemetry.events import ApplicationEvents
-from app.telemetry.posthog import posthog_client
-
+from app.services.alert import get_alert_configuration_stats
 
 PROMPT = """Analyze this alert and return a score between 0 and 1.
 0 denotes that the alert is not actionable (noisy), while 1 denotes that the alert is actionable.
@@ -25,7 +18,9 @@ Return a JSON dictionary with the following fields:
 - reasoning: A concise sentence explaining the prediction
 - additional_info: The information described above based on the score. additional_info should be a dictionary.
 
-Do not return the output in Markdown format. The output should be a JSON dictionary.
+Do not return the output in Markdown format.
+
+The output should be a JSON dictionary.
 
 Also provide additional information based on the score:
 
@@ -37,48 +32,6 @@ Also provide additional information based on the score:
    - Provide a summary of the issue
    - Reference wiki documentation and runbooks if provided.
    - Mention prior Slack conversations that could help understand the issue better (if provided)
-
-You should consider the following alert signals:
-
-The signals are based on the order of priority. The higher the signal, the more important it is.
-
-* Repetition of Alerts:
-    * Frequent repetition of similar alerts over a short period.
-    * Alerts that fire frequently tend to be more noisy. They are less actionable.
-* Alert Duration
-    * Short-lived alerts that auto-resolve quickly.
-    * Alerts that resolve quickly are less actionable.
-* 3. Lack of Response on Prior Alerts:
-    * Alerts that have historically not been acknowledged or responded to.
-    * Alerts that have not been acknowledged or responded to are less actionable.
-* Severity: The level of impact or urgency
-    * High severity alerts are more actionable.
-* Correlation: Relationship with other alerts or system events
-
-
-Actionable Alerts
-* New Error Causes:
-    * Detection of new types of errors that haven't occurred before.
-    * An alert that has never been seen before is always actionable.
-* High Alert Values:
-    * Alerts with values significantly exceeding normal thresholds.
-
-This is the alert text:
-
-{alert_text}
-
-These are the alert stats for this specific alert.
-
-The field unique_open_alerts will tell you how many alerts of this type have been opened in the last 7 days.
-If the field noisy_reason is provided and it is not "No reason provided", it means that the value of is_noisy field should be considered.
-This input comes from the user and should be considered as the most important signal for the alert actionability.
-
-
-{alert_stats}
-
-
-Historical Data:
-{historical_data}
 
 Consider the following about the historical data:
 1. How many similar alerts were there in the past?
@@ -94,14 +47,38 @@ Analyze the thread conversations in the historical data to understand:
 
 Use this historical information to inform your decision about whether the current alert is likely to be actionable or noisy, and to suggest potential next steps or resolutions.
 
+Alert Title: {alert_title}
+Alert Description: {alert_description}
+
+This is the alert id:
+{alert_id}
 
 """
 
 
-class AlertPrediction(BaseModel):
-    score: float = Field(..., ge=0, le=1)
-    reasoning: str
-    additional_info: Dict[str, Any]
+@tool
+def fetch_historical_data(alert_title: str) -> str:
+    """Get historical data for similar alerts from the vector store."""
+    vector_store = VectorStore()
+    query = f"{alert_title}"
+    similar_alerts = vector_store.search_similar_alerts(query, k=5)
+
+    historical_data = []
+    for doc, score in similar_alerts:
+        historical_alert = {
+            "text": doc.page_content,
+            "metadata": doc.metadata,
+            "similarity": score,
+        }
+        historical_data.append(historical_alert)
+
+    return historical_data
+
+
+@tool
+def fetch_alert_stats(alert_id: str) -> dict:
+    """Get statistics for the current alert."""
+    return get_alert_configuration_stats(alert_id)
 
 
 class AlertPredictor:
@@ -111,99 +88,47 @@ class AlertPredictor:
         """
         Initialize the AlertPredictor with LLMClient and VectorStore instances.
         """
-        self.llm_client = LLMClient()
-        self.vector_store = VectorStore()
+        llm = ChatOpenAI(model_name="gpt-4o", verbose=True, temperature=0)
+        tools = [
+            fetch_historical_data,
+            fetch_alert_stats,
+        ]
+        prompt = hub.pull("hwchase17/react")
+        agent = create_react_agent(
+            llm,
+            tools,
+            prompt,
+        )
+        self.agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True)
 
-    async def predict(self, input_data: dict, alert_stats: dict = None):
+    async def predict(self, input_data: dict, alert_id: str = None):
         """
         Predict the alert based on input data and alert statistics.
 
         Args:
-            input_data (dict): The input data for the alert.
-            alert_stats (dict, optional): Statistics related to the alert. Defaults to None.
+            input_data (dict): The input data for the alert. This data can be used to find historical data.
+            alert_id (str): The alert ID.
 
         Returns:
             dict: The prediction result as a JSON object.
         """
-        historical_data = await self.fetch_historical_data(input_data)
-        prompt = self._create_prompt(input_data, alert_stats, historical_data)
+        query = self._create_prompt(alert_data=input_data, alert_id=alert_id)
+        result = self.agent_executor.invoke({"input": query})
+        return json.loads(result["output"])
 
-        messages = [
-            HumanMessage(content=prompt),
-        ]
-
-        alert_prediction = await self.llm_client.get_completion(messages)
-        posthog_client.capture(ApplicationEvents.ALERT_PREDICTION)
-
-        try:
-            prediction_dict = json.loads(alert_prediction)
-
-            # Then, validate against our Pydantic model
-            validated_prediction = AlertPrediction(**prediction_dict)
-            return validated_prediction.model_dump()
-        except json.JSONDecodeError:
-            # Handle the case where the output is not valid JSON
-            return {
-                "error": "Failed to parse LLM output as JSON",
-                "raw_output": alert_prediction,
-            }
-
-    def _create_prompt(
-        self, alert_data: dict, alert_stats: dict, historical_data: list
-    ) -> str:
+    def _create_prompt(self, alert_data: dict, alert_id: str) -> str:
         """
-        Create a prompt string from alert data, statistics, and historical data.
+        Create a prompt string from alert data and alert ID.
 
         Args:
             alert_data (dict): The alert data.
-            alert_stats (dict): The alert statistics.
-            historical_data (list): Historical data for similar alerts.
+            alert_id (str): The alert ID.
 
         Returns:
             str: The formatted prompt string.
         """
-        historical_data_str = json.dumps(historical_data, indent=2)
         return PROMPT.format(
-            alert_text=json.dumps(alert_data),
-            alert_stats=json.dumps(alert_stats),
-            historical_data=historical_data_str,
+            alert_title=alert_data.get("title", ""),
+            alert_description=alert_data.get("description", ""),
+            alert_id=alert_id,
         )
-
-    def add_to_vector_store(self, alert_data: dict):
-        """
-        Add alert data to the vector store.
-
-        Args:
-            alert_data (dict): The alert data to be added.
-        """
-
-        text = f"{alert_data['title']} {alert_data['description']}"
-        embedding = self.llm_client.get_embedding(text)
-
-        self.vector_store.add_embeddings(
-            [text], [embedding], [{"alert_id": alert_data["id"]}]
-        )
-
-    async def fetch_historical_data(self, alert_data: dict) -> list:
-        """
-        Fetch historical data for similar alerts.
-
-        Args:
-            alert_data (dict): The current alert data.
-
-        Returns:
-            list: A list of similar historical alerts with their metadata.
-        """
-        query = f"{alert_data.get('title', '')} {alert_data.get('description', '')}"
-        similar_alerts = self.vector_store.search_similar_alerts(query, k=5)
-
-        historical_data = []
-        for doc, score in similar_alerts:
-            historical_alert = {
-                "text": doc.page_content,
-                "metadata": doc.metadata,
-                "similarity": score,  # This is now the similarity score
-            }
-            historical_data.append(historical_alert)
-
-        return historical_data

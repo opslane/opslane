@@ -28,8 +28,7 @@ def register_event_handlers(bot):
 
             if event["bot_id"] in bot.allowed_bot_ids:
                 monitor_id = event["metadata"]["event_payload"]["monitor_id"]
-                alert_stats = get_alert_configuration_stats(monitor_id)
-                prediction = await bot.predictor.predict(event, alert_stats)
+                prediction = await bot.predictor.predict(event, monitor_id)
 
                 blocks = format_prediction_blocks(
                     prediction, settings.PREDICTION_CONFIDENCE_THRESHOLD
