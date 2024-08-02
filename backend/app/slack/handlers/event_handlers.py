@@ -27,9 +27,13 @@ def register_event_handlers(bot):
                 return
 
             if event["bot_id"] in bot.allowed_bot_ids:
-                monitor_id = event["metadata"]["event_payload"]["monitor_id"]
-                prediction = await bot.predictor.predict(event, monitor_id)
-
+                alert_id = event["metadata"]["event_payload"]["monitor_id"]
+                query = {
+                    "alert_id": alert_id,
+                    "alert_title": event["attachments"][0].get("title", ""),
+                    "alert_description": event["attachments"][0].get("text", ""),
+                }
+                prediction = bot.classifier_agent.run(query=query)
                 blocks = format_prediction_blocks(
                     prediction, settings.PREDICTION_CONFIDENCE_THRESHOLD
                 )

@@ -211,7 +211,7 @@ def format_prediction_blocks(
     """
     alert_classification = (
         "Actionable"
-        if prediction["score"] > confidence_threshold
+        if float(prediction["score"]) > confidence_threshold
         else "Potentially Noisy"
     )
 

@@ -1,11 +1,13 @@
 """Main SlackBot class for handling Slack events and actions."""
 
 import asyncio
+
 from typing import Set
 from slack_bolt.async_app import AsyncApp
 from slack_bolt.adapter.fastapi.async_handler import AsyncSlackRequestHandler
+
+from app.agents.alert_classifier import AlertClassifierAgent
 from app.core.config import settings
-from app.ml.services.prediction import AlertPredictor
 from app.ml.vector_store import VectorStore
 from app.slack.handlers.event_handlers import register_event_handlers
 from app.slack.handlers.command_handlers import register_command_handlers
@@ -32,7 +34,7 @@ class SlackBot:
         self.slack_handler: AsyncSlackRequestHandler = AsyncSlackRequestHandler(
             self.slack_app
         )
-        self.predictor: AlertPredictor = AlertPredictor()
+        self.classifier_agent = AlertClassifierAgent()
         self.vector_store: VectorStore = VectorStore()
         self.bot_user_id: str | None = None
         self.allowed_bot_ids: list[str] = []
