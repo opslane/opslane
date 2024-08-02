@@ -33,7 +33,14 @@ def register_event_handlers(bot):
                     "alert_title": event["attachments"][0].get("title", ""),
                     "alert_description": event["attachments"][0].get("text", ""),
                 }
+                # Get alert classification
                 prediction = bot.classifier_agent.run(query=query)
+
+                # Get alert root cause
+                debug_query = {**query, "classification": prediction}
+                root_cause = bot.debug_agent.run(query=debug_query)
+                print(root_cause)
+
                 blocks = format_prediction_blocks(
                     prediction, settings.PREDICTION_CONFIDENCE_THRESHOLD
                 )
