@@ -42,7 +42,7 @@ def register_event_handlers(bot):
                 print(root_cause)
 
                 blocks = format_prediction_blocks(
-                    prediction, settings.PREDICTION_CONFIDENCE_THRESHOLD
+                    prediction, settings.PREDICTION_CONFIDENCE_THRESHOLD, root_cause
                 )
                 await say(blocks=blocks, channel=channel_id, thread_ts=thread_ts)
         else:

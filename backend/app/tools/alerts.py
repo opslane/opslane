@@ -11,5 +11,7 @@ def fetch_alert_stats(alert_id: str) -> dict:
 def debug_noisy_alert(alert_id: str) -> dict:
     """Debug a noisy alert."""
     return {
-        "owner": "John Doe",
+        "owner": "Abhishek Ray",
+        "created": "2021-10-01",
+        "reason": "Noisy alert due to volatile metric",
     }

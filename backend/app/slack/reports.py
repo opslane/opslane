@@ -197,17 +197,18 @@ def format_insight_report_blocks(report_data: Dict[str, Any]) -> List[Dict[str, 
 
 
 def format_prediction_blocks(
-    prediction: Dict[str, Any], confidence_threshold: float
+    prediction: Dict[str, Any], confidence_threshold: float, root_cause: Dict[str, Any]
 ) -> List[Dict[str, Any]]:
     """
-    Format the prediction data into Slack blocks.
+    Format the prediction data into Slack blocks, including root cause analysis.
 
     Args:
         prediction (Dict[str, Any]): The prediction data containing alert classification information.
         confidence_threshold (float): The threshold for determining if an alert is actionable.
+        root_cause (Dict[str, Any]): The root cause analysis data.
 
     Returns:
-        List[Dict[str, Any]]: A list of Slack blocks representing the formatted prediction.
+        List[Dict[str, Any]]: A list of Slack blocks representing the formatted prediction and root cause analysis.
     """
     alert_classification = (
         "Actionable"
@@ -251,6 +252,42 @@ def format_prediction_blocks(
                 "text": f"*Additional Information:*\n{additional_info_text}",
             },
         },
+        {"type": "divider"},
+        {
+            "type": "header",
+            "text": {
+                "type": "plain_text",
+                "text": "Root Cause Analysis",
+                "emoji": True,
+            },
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*Debug Steps:*\n"
+                + "\n".join(f"• {step}" for step in root_cause["debug_steps"]),
+            },
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*Possible Causes:*\n"
+                + "\n".join(f"• {cause}" for cause in root_cause["possible_causes"]),
+            },
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*Recommended Actions:*\n"
+                + "\n".join(
+                    f"• {action}" for action in root_cause["recommended_actions"]
+                ),
+            },
+        },
+        {"type": "divider"},
         {
             "type": "actions",
             "elements": [
@@ -276,15 +313,6 @@ def format_prediction_blocks(
                     "action_id": "thumbs_down",
                     "style": "danger",
                 },
-            ],
-        },
-        {
-            "type": "context",
-            "elements": [
-                {
-                    "type": "mrkdwn",
-                    "text": "Please provide feedback on the classification to help improve future predictions.",
-                }
             ],
         },
     ]
