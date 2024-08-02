@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import List, Optional
 from sqlmodel import Field, SQLModel, Column, Enum, JSON, Relationship, String
 from sqlalchemy.dialects.postgresql import ARRAY, FLOAT
+from pydantic_settings import SettingsConfigDict
 
 from app.schemas.alert import AlertSource, AlertStatus, SeverityLevel
 
@@ -57,5 +58,9 @@ class Alert(SQLModel, table=True):
 
     configuration: Optional[AlertConfiguration] = Relationship(back_populates="events")
 
-    class Config:
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_ignore_empty=True,
+        extra="ignore",
         arbitrary_types_allowed = True
+    )
