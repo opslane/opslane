@@ -5,9 +5,9 @@ Vector Store Module
 from typing import List, Dict, Any, Tuple
 
 from langchain.docstore.document import Document
-from langchain.embeddings import OpenAIEmbeddings
 from langchain.schema import Document
-from langchain.vectorstores import PGVector
+from langchain_community.embeddings import OpenAIEmbeddings
+from langchain_community.vectorstores import PGVector
 
 from app.core.config import settings
 
