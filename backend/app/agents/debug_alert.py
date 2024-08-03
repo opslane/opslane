@@ -1,14 +1,14 @@
 import json
 from typing import List, Dict, Any
 
-from langchain.agents import Tool, AgentExecutor, LLMSingleActionAgent
+from langchain.agents import Tool, AgentExecutor
 from langchain.prompts import PromptTemplate
 from langchain.output_parsers import PydanticOutputParser
-from langchain.memory import ConversationBufferMemory
 from pydantic import BaseModel, Field
 
 from app.agents.base import BaseAgent
 from app.tools.alerts import debug_noisy_alert
+from app.tools.datadog import fetch_datadog_logs
 from app.tools.github import get_git_changes
 
 
@@ -36,6 +36,16 @@ class DebugAlertAgent(BaseAgent):
                 name="debug_noisy_alert",
                 func=debug_noisy_alert,
                 description="Debug root cause of noisy alerts",
+            ),
+            Tool(
+                name="get_git_changes",
+                func=get_git_changes,
+                description="Gather recent GitHub changes for potential root causes. This tool doesn't require any input.",
+            ),
+            Tool(
+                name="fetch_datadog_logs",
+                func=fetch_datadog_logs,
+                description="Fetch logs from Datadog for debugging",
             ),
         ]
 
@@ -67,11 +77,18 @@ class DebugAlertAgent(BaseAgent):
 
             {agent_scratchpad}
 
-            When analyzing the alert, consider the recent code changes. For each relevant commit:
-            1. Review the commit message and changed files.
-            2. Examine the actual changes (patches) in each file.
-            3. Determine if these changes could be related to the alert.
-            4. If a change seems relevant, explain why and how it might have caused or contributed to the alert.
+
+            Available tools:
+            1. debug_noisy_alert: Use this to get information about potentially noisy alerts.
+            2. get_git_changes: Use this to fetch recent code changes that might be related to the alert.
+            3. fetch_datadog_logs: Use this to fetch relevant logs from Datadog. Provide a query and optional time range.
+
+            Instructions:
+            1. Use each tool only once unless you receive new information that warrants using it again.
+            2. After using a tool, analyze the information received and decide on the next step.
+            3. If you have gathered sufficient information, proceed to formulate your final answer.
+            4. Your final answer should include debug steps, possible causes, and recommended actions.
+            5. If you find yourself repeating actions, stop and provide your best analysis based on the information gathered so far.
 
             Provide your final answer in the specified format, including:
             1. A list of debug steps to investigate the alert
@@ -80,7 +97,7 @@ class DebugAlertAgent(BaseAgent):
             4. An analysis of how recent code changes might be related to the alert (if applicable)
 
             IMPORTANT: Ensure that the output is valid JSON. Use "true" and "false" for boolean values.
-            Focus on the most recent and relevant changes. If there are too many changes, prioritize those that seem most likely to be related to the alert.
+            If you have sufficient information to answer, provide your final response instead of using more tools.
             """,
         )
 
