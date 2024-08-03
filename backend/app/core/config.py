@@ -26,6 +26,8 @@ class Settings(BaseSettings):
     LLM_API_KEY: Optional[str] = None
     LLM_API_BASE: Optional[str] = None
     OPENAI_API_KEY: Optional[str] = None
+    GITHUB_TOKEN: Optional[str] = None
+    GITHUB_REPO: Optional[str] = None
 
     ANONYMIZED_TELEMETRY: bool = True
 

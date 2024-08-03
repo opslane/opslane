@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 
 from app.agents.base import BaseAgent
 from app.tools.alerts import debug_noisy_alert
+from app.tools.github import get_git_changes
 
 
 class DebugAlertOutput(BaseModel):
@@ -66,12 +67,20 @@ class DebugAlertAgent(BaseAgent):
 
             {agent_scratchpad}
 
+            When analyzing the alert, consider the recent code changes. For each relevant commit:
+            1. Review the commit message and changed files.
+            2. Examine the actual changes (patches) in each file.
+            3. Determine if these changes could be related to the alert.
+            4. If a change seems relevant, explain why and how it might have caused or contributed to the alert.
+
             Provide your final answer in the specified format, including:
             1. A list of debug steps to investigate the alert
-            2. A list of possible causes for the alert
+            2. A list of possible causes for the alert, including any relevant recent code changes
             3. A list of recommended actions to resolve the alert
+            4. An analysis of how recent code changes might be related to the alert (if applicable)
 
             IMPORTANT: Ensure that the output is valid JSON. Use "true" and "false" for boolean values.
+            Focus on the most recent and relevant changes. If there are too many changes, prioritize those that seem most likely to be related to the alert.
             """,
         )
 
