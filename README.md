@@ -1,46 +1,74 @@
 
 <p align="center">
-  <img alt="logo" src="./assets/opslane-logo-large.png">
+  <img alt="logo" src="./assets/opslane-logo-large.png" width="300">
 </p>
 
 <p align="center">
-  <a href="https://youtu.be/m_K9Dq1kZDw">Demo</a> - <a href="https://join.slack.com/t/opslanecommunity/shared_invite/zt-2ncr7a1tx-8YAdUoVHJX0qgCF31PATuA">Slack</a>
+  <a href="https://oposlane.com">Website</a> &bull;
+  <a href="https://docs.opslane.com">Docs</a> &bull;
+  <a href="https://youtu.be/m_K9Dq1kZDw">Demo</a> &bull;
+  <a href="https://cal.com/team/opslane/demo">Book a call</a> &bull;
+  <a href="https://join.slack.com/t/opslanecommunity/shared_invite/zt-2ncr7a1tx-8YAdUoVHJX0qgCF31PATuA">Join Community</a>
 </p>
 
-# Opslane
+### Opslane is an AI On-Call Co-Pilot
 
-Opslane is a tool that helps make the on-call experience less stressful.
+[![Docs](https://img.shields.io/badge/docs-docs.opslane.com-3F16E4)](https://docs.opslane.com) [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-purple.svg)](https://github.com/opslane/opslane/blob/main/LICENSE.md) [![Slack](https://img.shields.io/badge/slack-opslane-red.svg)](https://join.slack.com/t/opslanecommunity/shared_invite/zt-2ncr7a1tx-8YAdUoVHJX0qgCF31PATuA)
 
-It reduces alert fatigue by classifying alerts as actionable or noisy and providing contextual information for handling alerts.
+Opslane is an open-source tool designed to make the on-call experience less stressful.
 
-## Demo
-
+It leverages AI to reduce alert fatigue, provide contextual information, and automate routine tasks.
 
 [![Demo CountPages alpha](./assets/opslane-demo.gif)](https://youtu.be/m_K9Dq1kZDw)
 
+## Why did we build Opslane?
 
-## Key Features
+Most engineers don't enjoy being on-call.
 
-- **Alert Classification**: Opslane can classify alerts as actionable or noisy using LLMs. We analyze alert history and Slack conversations to determine if an alert is actionable.
-- **Slack Integration**: Opslane operates in a Slack channel where a team receives alerts. We provide insights and additional resources for debugging actionable alerts.
-- **Analytics**: Opslane provides weekly reporting data for the quality of alerts in a Slack channel. We analyze the pattern of alerts and provide an option to silence noisy alerts directly from Slack.
-- **Open Source**: Opslane is open source and welcomes contributions from the community.
+These are some of the main reasons why:
+- **Alert fatigue**: Engineers receive too many alerts, many of which are noisy.
+- **Lack of context**: It's challenging to understand the root cause of an incident.
+- **Manual incident resolution**: It's time-consuming to look through runbooks and logs to resolve incidents.
+- **Monitoring tool overload**: Engineers use multiple monitoring tools, each with its own set of alerts.
+- **Burnout**: The stress of being on-call can lead to burnout and decreased productivity.
+
+Opslane addresses these challenges by building an AI-powered on-call co-pilot that makes on-call duties more manageable.
+
+## Status
+
+Opslane is currently in beta. We are actively working on improving the product and adding new features.
+
+### Roadmap
+
+- [ ] **Intelligent Alert Management**
+  - [X] Classify alerts as actionable or noisy using AI
+  - [ ] Group related alerts for easier management
+  - [ ] Provide historical context and runbooks for alerts
+
+- [ ] **Analytics and Reporting**
+  - [X] Weekly alert quality reports
+  - [ ] Identify patterns in alert frequency and timing
+  - [X] One-click option to silence noisy alerts
+
+- [ ] **Root Cause Analysis**
+  - [ ] Correlate issues across multiple systems
+  - [ ] Automate initial debugging steps
+  - [ ] Suggest potential root causes
+
+- [ ] **Runbook Automation**
+  - [ ] Automate common incident resolution steps using runbooks
+
+- [ ] **Gruntwork Automation**
+  - [ ] Generate on-call handoff documents
+  - [ ] Integrate with PagerDuty/OpsGenie for scheduling overrides
+  - [ ] Automatically update Slack with current on-call engineer
+
+- [ ] **Slack Integration**
+  - [X] Operate directly in your alert Slack channels
+  - [X] Provide insights and debugging resources in-context
 
 
-## Architecture
-
-Opslane uses a modular architecture designed for efficient alert processing and seamless integration with existing tools:
-
-1. **Alert Ingestion**: Datadog sends alerts via webhooks to our FastAPI server.
-3. **FastAPI Server**: The core of our system, processing incoming alerts, interacting with Slack, and managing data flow.
-4. **Slack Integration**: Provides a user interface for alert management and interaction.
-5. **Database**: Utilizes Postgres with pgvector for storing alert data and embeddings.
-
-Here's a high-level overview of the Opslane architecture:
-
-![Opslane Architecture Diagram](./assets/opslane-arch.png)
-
-### Integrations
+## Integrations
 
 We use a flexible data model so that we can support multiple integrations. Currently, Opslane supports Datadog.
 
@@ -82,6 +110,11 @@ cp .env.example .env
 2. Configure Datadog to send alerts to Opslane's webhook endpoint
 3. Opslane will automatically analyze incoming alerts and post insights in your Slack channel
 
+## Community
+
+The Opslane community can be found on [GitHub Discussions](https://github.com/opslane/opslane/discussions), and our [Slack community](https://join.slack.com/t/opslanecommunity/shared_invite/zt-2ncr7a1tx-8YAdUoVHJX0qgCF31PATuA).
+
+Ask questions, report bugs, join discussions, voice ideas, make feature requests, or share your projects.
 
 ## Telemetry
 
