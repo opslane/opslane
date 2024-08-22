@@ -3,8 +3,9 @@
 import secrets
 
 from enum import Enum
-from typing import Optional
+from typing import List, Optional
 
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.core.auth.config import AuthSettings
@@ -12,6 +13,12 @@ from app.core.auth.config import AuthSettings
 
 class AuthType(str, Enum):
     DISABLED = "disabled"
+
+
+def parse_comma_separated_list(v: Optional[str]) -> Optional[List[str]]:
+    if v is None:
+        return None
+    return [item.strip() for item in v.split(",") if item.strip()]
 
 
 class Settings(BaseSettings):
@@ -30,8 +37,15 @@ class Settings(BaseSettings):
     auth: AuthSettings = AuthSettings()
 
     # External Services
+
+    ## SLACK
     SLACK_BOT_TOKEN: str
     SLACK_SIGNING_SECRET: str
+    SLACK_WORKSPACE: str
+    SLACK_CHANNELS: Optional[list[str]] = None
+    SLACK_CHANNEL_REGEX_ENABLED: bool = False
+
+    ## DATADOG
     DATADOG_API_KEY: str
     DATADOG_APP_KEY: str
 
@@ -47,6 +61,11 @@ class Settings(BaseSettings):
 
     # Miscellaneous
     ANONYMIZED_TELEMETRY: bool = True
+
+    @field_validator("SLACK_CHANNELS", mode="before")
+    @classmethod
+    def parse_slack_channels(cls, v):
+        return parse_comma_separated_list(v)
 
 
 settings = Settings()  # type: ignore
