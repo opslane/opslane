@@ -9,7 +9,6 @@ from typing import Optional
 
 class AuthType(str, Enum):
     DISABLED = "disabled"
-    BASIC = "basic"
 
 
 class Settings(BaseSettings):
