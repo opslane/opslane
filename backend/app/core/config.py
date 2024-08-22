@@ -3,8 +3,11 @@
 import secrets
 
 from enum import Enum
-from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import Optional
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from app.core.auth.config import AuthSettings
 
 
 class AuthType(str, Enum):
@@ -24,7 +27,7 @@ class Settings(BaseSettings):
     DATABASE_URL: str
 
     # Authentication
-    AUTH_TYPE: AuthType = AuthType.DISABLED
+    auth: AuthSettings = AuthSettings()
 
     # External Services
     SLACK_BOT_TOKEN: str
