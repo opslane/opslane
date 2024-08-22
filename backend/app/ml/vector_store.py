@@ -7,9 +7,11 @@ from typing import List, Dict, Any, Tuple
 from langchain.docstore.document import Document
 from langchain.schema import Document
 from langchain_community.embeddings import OpenAIEmbeddings
-from langchain_community.vectorstores import PGVector
+from langchain_postgres import PGVector
+from sqlmodel import Session
 
 from app.core.config import settings
+from app.db import engine
 
 
 class VectorStore:
@@ -22,8 +24,8 @@ class VectorStore:
         The PGVector is configured with the database engine and a collection name for alert embeddings.
         """
         self.store = PGVector(
-            connection_string=str(settings.DATABASE_URL),
-            embedding_function=OpenAIEmbeddings(openai_api_key=settings.LLM_API_KEY),
+            connection=str(settings.DATABASE_URL),
+            embeddings=OpenAIEmbeddings(openai_api_key=settings.LLM_API_KEY),
             collection_name="alert_embeddings",
         )
 

@@ -33,7 +33,7 @@ ipdb = "^0.13.13"
 litellm = "^1.41.23"
 langchain = "^0.2.10"
 langchain-community = "^0.2.9"
-pgvector = "^0.3.2"
+pgvector = "0.2.5"
 psycopg2-binary = "^2.9.9"
 atlassian-python-api = "^3.41.14"
 posthog = "^3.5.0"
@@ -43,6 +43,7 @@ ipykernel = "^6.29.5"
 langchain-openai = "^0.1.19"
 langchainhub = "^0.1.20"
 pygithub = "^2.3.0"
+langchain-postgres = "^0.0.9"
 
 
 [build-system]
