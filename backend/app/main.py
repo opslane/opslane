@@ -3,6 +3,7 @@
 from fastapi import FastAPI, Request
 
 from app.api.main import api_router
+from app.api.auth_check import enforce_authentication
 from app.core.config import settings
 from app.slack.bot import slack_handler
 
@@ -18,5 +19,8 @@ def create_app() -> FastAPI:
     @app.post("/slack/events")
     async def slack_events(request: Request):
         return await slack_handler.handle(request)
+
+    # Enforce authentication on routes
+    enforce_authentication(app)
 
     return app
