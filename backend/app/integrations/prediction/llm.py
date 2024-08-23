@@ -1,7 +1,6 @@
 """LLM Client for Prediction using LangChain"""
 
-from langchain_openai import ChatOpenAI
-from langchain.embeddings import OpenAIEmbeddings
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 
 from app.core.config import settings
 

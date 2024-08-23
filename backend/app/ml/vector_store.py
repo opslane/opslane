@@ -6,7 +6,7 @@ from typing import List, Dict, Any, Tuple
 
 from langchain.docstore.document import Document
 from langchain.schema import Document
-from langchain_community.embeddings import OpenAIEmbeddings
+from langchain_openai import OpenAIEmbeddings
 from langchain_postgres import PGVector
 from sqlmodel import Session
 

@@ -4,16 +4,17 @@ It includes utilities for fetching channels, messages, and threads from Slack,
 as well as processing and storing this data.
 """
 
-import re
 from datetime import datetime, timezone
-from typing import Any, Dict, Generator, Optional
+from typing import Any, Dict, Generator, List, Optional
 
+
+from langchain.schema import Document as LangChainDocument
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
 from app.core.config import settings
-from app.db.models.document import Document, DocumentSource
-from app.vector_store.pgvector import PGVectorStore
+from app.core.vector_store import MilvusBase
+
 
 ChannelType = dict[str, Any]
 MessageType = dict[str, Any]
@@ -117,19 +118,24 @@ def thread_to_doc(workspace: str, channel: ChannelType, thread: ThreadType) -> d
     """
     channel_id = channel["id"]
     initial_sender = thread[0].get("user", "Unknown")
-    first_message = thread[0].get("text", "")
-    snippet = (first_message[:50] + "...") if len(first_message) > 50 else first_message
+    thread_ts = thread[0].get("ts", "")
+
+    # Combine the initial message with all replies
+    full_conversation = "\n".join(
+        [f"[{msg.get('user', 'Unknown')}]: {msg.get('text', '')}" for msg in thread]
+    )
 
     return {
-        "id": f"{channel_id}__{thread[0]['ts']}",
-        "text": "\n".join([msg.get("text", "") for msg in thread]),
+        "id": f"{channel_id}__{thread_ts}",
+        "text": full_conversation,
         "metadata": {
             "source": "slack",
             "workspace": workspace,
             "channel": channel["name"],
-            "sender": initial_sender,
+            "initial_sender": initial_sender,
             "timestamp": get_latest_message_time(thread).isoformat(),
-            "url": f"https://{workspace}.slack.com/archives/{channel_id}/p{thread[0]['ts'].replace('.', '')}",
+            "url": f"https://{workspace}.slack.com/archives/{channel_id}/p{thread_ts.replace('.', '')}",
+            "message_count": len(thread),
         },
     }
 
@@ -168,7 +174,7 @@ def filter_channels(
     ]
 
 
-class SlackIndexer:
+class SlackIndexer(MilvusBase):
     """
     A class for indexing Slack content into a vector store.
     """
@@ -187,58 +193,43 @@ class SlackIndexer:
             channels (Optional[list[str]]): List of channels to index.
             channel_regex_enabled (bool): Whether to use regex for channel matching.
         """
+        super().__init__("slack_messages")
         self.workspace = workspace
         self.channels = channels
         self.channel_regex_enabled = channel_regex_enabled
         self.client = WebClient(token=settings.SLACK_BOT_TOKEN)
-        self.vector_store = PGVectorStore()
 
-    def message_to_document(self, message: Dict[str, Any]) -> Document:
+    def message_to_document(self, message: Dict[str, Any]) -> LangChainDocument:
         """
-        Convert a Slack message to a Document object.
+        Convert a Slack message to a LangChain Document object.
 
         Args:
             message (Dict[str, Any]): The Slack message data.
-            vector_store (PGVectorStore): The vector store for generating embeddings.
 
         Returns:
-            Document: A Document object representing the Slack message.
+            LangChainDocument: A LangChain Document object representing the Slack message.
         """
-        channel_id, _ = message["id"].split("__")
-
-        # Generate embedding
-        embedding = self.vector_store.store.embeddings.embed_query(message["text"])
-
-        # Create metadata
-        metadata = {
-            "channel_id": channel_id,
-            "channel_name": message["metadata"]["channel"],
-            "user_id": message["metadata"]["sender"],
-            "user_name": "",  # This information is not provided in the current schema
-            "timestamp": message["metadata"]["timestamp"],
-            "thread_ts": None,  # This information is not provided in the current schema
-            "is_thread_parent": False,  # This information is not provided in the current schema
-            "is_in_thread": False,  # This information is not provided in the current schema
-            "reactions": [],  # This information is not provided in the current schema
-            "attachments": None,  # This information is not provided in the current schema
-            "workspace": message["metadata"]["workspace"],
-            "url": message["metadata"]["url"],
-        }
-
-        # Parse the timestamp
-        created_at = datetime.fromisoformat(message["metadata"]["timestamp"])
-
-        # Create Document object
-        return Document(
-            external_id=message["id"],
-            source=DocumentSource.SLACK,
-            title=f"Slack message in {metadata['channel_name']}",
-            content=message["text"],
-            doc_metadata=metadata,
-            embedding=embedding,
-            created_at=created_at,
-            updated_at=created_at,
+        return LangChainDocument(
+            page_content=message["text"], metadata=message["metadata"]
         )
+
+    def get_thread_messages(self, channel_id: str, thread_ts: str) -> List[MessageType]:
+        """
+        Fetch all messages in a thread.
+
+        Args:
+            channel_id (str): The ID of the channel containing the thread.
+            thread_ts (str): The timestamp of the thread's parent message.
+
+        Returns:
+            List[MessageType]: A list of all messages in the thread.
+        """
+        try:
+            result = self.client.conversations_replies(channel=channel_id, ts=thread_ts)
+            return result["messages"]
+        except SlackApiError as e:
+            print(f"Error fetching thread {thread_ts}: {e}")
+            return []
 
     def index_slack_content(
         self, oldest: Optional[str] = None, latest: Optional[str] = None
@@ -263,11 +254,8 @@ class SlackIndexer:
 
             for message_batch in channel_message_batches:
                 for message in message_batch:
-                    thread_ts = message.get("thread_ts")
-                    if thread_ts:
-                        thread = get_thread(self.client, channel["id"], thread_ts)
-                    else:
-                        thread = [message]
+                    thread_ts = message.get("thread_ts") or message.get("ts")
+                    thread = self.get_thread_messages(channel["id"], thread_ts)
 
                     doc = thread_to_doc(self.workspace, channel, thread)
                     documents.append(self.message_to_document(doc))
