@@ -18,6 +18,7 @@ def register_event_handlers(bot):
 
     @bot.slack_app.event("message")
     async def handle_message_events(event, say):
+
         channel_id = event["channel"]
         thread_ts = event["ts"]
 

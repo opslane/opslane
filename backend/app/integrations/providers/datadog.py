@@ -74,7 +74,7 @@ class DatadogIntegration(BaseIntegration):
         "Muted": AlertStatus.SUPPRESSED,
     }
 
-    ALERTS_HISTORY_WINDOW = timedelta(days=14)
+    ALERTS_HISTORY_WINDOW = timedelta(days=30)
 
     def __init__(self):
         """Initialize the Datadog integration with API configuration."""
