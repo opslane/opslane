@@ -4,7 +4,7 @@
 </p>
 
 <p align="center">
-  <a href="https://oposlane.com">Website</a> &bull;
+  <a href="https://opslane.com">Website</a> &bull;
   <a href="https://docs.opslane.com">Docs</a> &bull;
   <a href="https://youtu.be/m_K9Dq1kZDw">Demo</a> &bull;
   <a href="https://cal.com/team/opslane/demo">Book a call</a> &bull;
