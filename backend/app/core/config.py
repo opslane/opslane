@@ -46,6 +46,7 @@ class Settings(BaseSettings):
     SLACK_WORKSPACE: str
     SLACK_CHANNELS: Optional[list[str]] = None
     SLACK_CHANNEL_REGEX_ENABLED: bool = False
+    ALLOWED_BOT_APPS: Optional[List[str]] = ["Datadog"]
 
     ## DATADOG
     DATADOG_API_KEY: str

@@ -196,9 +196,7 @@ def format_insight_report_blocks(report_data: Dict[str, Any]) -> List[Dict[str, 
     return blocks
 
 
-def format_prediction_blocks(
-    prediction: Dict[str, Any], confidence_threshold: float, root_cause: Dict[str, Any]
-) -> List[Dict[str, Any]]:
+def format_prediction_blocks(prediction: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
     Format the prediction data into Slack blocks, including root cause analysis.
 
@@ -210,82 +208,10 @@ def format_prediction_blocks(
     Returns:
         List[Dict[str, Any]]: A list of Slack blocks representing the formatted prediction and root cause analysis.
     """
-    alert_classification = (
-        "Actionable"
-        if float(prediction["score"]) > confidence_threshold
-        else "Potentially Noisy"
-    )
-
-    additional_info = []
-    for k, v in prediction["additional_info"].items():
-        if k == "slack_conversations":
-            conversation_links = []
-            for conv in v:
-                user = conv.get("user", "Unknown")
-                timestamp = conv.get("timestamp", "")
-                message = conv.get("message", "")
-                link = f"<slack://channel?team=T027FNUU9V2&id=C079ZECA30U&message={timestamp}|{user}: {message[:50]}...>"
-                conversation_links.append(link)
-            additional_info.append(f"• *{k}:*\n  " + "\n  ".join(conversation_links))
-        else:
-            additional_info.append(f"• *{k}:* {v}")
-
-    additional_info_text = "\n".join(additional_info)
-
     blocks = [
         {
-            "type": "header",
-            "text": {
-                "type": "plain_text",
-                "text": f"Alert Classification: {alert_classification}",
-                "emoji": True,
-            },
-        },
-        {
             "type": "section",
-            "text": {"type": "mrkdwn", "text": prediction["reasoning"]},
-        },
-        {
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": f"*Additional Information:*\n{additional_info_text}",
-            },
-        },
-        {"type": "divider"},
-        {
-            "type": "header",
-            "text": {
-                "type": "plain_text",
-                "text": "Root Cause Analysis",
-                "emoji": True,
-            },
-        },
-        {
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": f"*Debug Steps:*\n"
-                + "\n".join(f"• {step}" for step in root_cause["debug_steps"]),
-            },
-        },
-        {
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": f"*Possible Causes:*\n"
-                + "\n".join(f"• {cause}" for cause in root_cause["possible_causes"]),
-            },
-        },
-        {
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": f"*Recommended Actions:*\n"
-                + "\n".join(
-                    f"• {action}" for action in root_cause["recommended_actions"]
-                ),
-            },
+            "text": {"type": "mrkdwn", "text": prediction},
         },
         {"type": "divider"},
         {
@@ -298,7 +224,7 @@ def format_prediction_blocks(
                         "text": "👍",
                         "emoji": True,
                     },
-                    "value": alert_classification,
+                    "value": "yes",
                     "action_id": "thumbs_up",
                     "style": "primary",
                 },
@@ -309,7 +235,7 @@ def format_prediction_blocks(
                         "text": "👎",
                         "emoji": True,
                     },
-                    "value": alert_classification,
+                    "value": "no",
                     "action_id": "thumbs_down",
                     "style": "danger",
                 },

@@ -1,26 +1,29 @@
 """Utility functions for Slack bot operations."""
 
-import json
-from typing import List, Set
+from typing import List
 from slack_sdk.errors import SlackApiError
 
-
-def load_alert_channels() -> Set[str]:
-    try:
-        with open("alert_channels.json", "r") as f:
-            return set(json.load(f))
-    except FileNotFoundError:
-        return set()
-
-
-def save_alert_channels(alert_channels: Set[str]):
-    with open("alert_channels.json", "w") as f:
-        json.dump(list(alert_channels), f)
+from app.core.config import settings
 
 
 async def get_allowed_bot_ids(slack_app) -> List[str]:
+    """
+    Retrieve the bot IDs of allowed Slack apps.
+
+    This function iterates through the Slack workspace's user list and identifies
+    bot users whose names match the allowed app names specified in the settings.
+
+    Args:
+        slack_app: The Slack app instance used to make API calls.
+
+    Returns:
+        List[str]: A list of bot IDs for the allowed Slack apps.
+
+    Raises:
+        SlackApiError: If there's an error while fetching the user list from Slack API.
+    """
     allowed_bot_ids = []
-    allowed_app_names = ["Datadog", "Sentry"]
+    allowed_app_names = settings.ALLOWED_BOT_APPS
     cursor = None
 
     try:
@@ -44,12 +47,3 @@ async def get_allowed_bot_ids(slack_app) -> List[str]:
         print(f"Error fetching user list: {e}")
 
     return allowed_bot_ids
-
-
-def is_alert_message(message: dict, allowed_bot_ids: List[str]) -> bool:
-    return message.get("bot_id") in allowed_bot_ids
-
-
-async def process_historical_alert(bot, alert_message: dict, channel_id: str):
-    # Implementation of process_historical_alert
-    pass

@@ -6,17 +6,12 @@ from typing import Set
 from slack_bolt.async_app import AsyncApp
 from slack_bolt.adapter.fastapi.async_handler import AsyncSlackRequestHandler
 
-from app.agents.alert_classifier import AlertClassifierAgent
 from app.agents.debug_alert import DebugAlertAgent
 from app.core.config import settings
 from app.slack.handlers.event_handlers import register_event_handlers
 from app.slack.handlers.command_handlers import register_command_handlers
 from app.slack.handlers.action_handlers import register_action_handlers
-from app.slack.utils import (
-    load_alert_channels,
-    save_alert_channels,
-    get_allowed_bot_ids,
-)
+from app.slack.utils import get_allowed_bot_ids
 
 
 class SlackBot:
@@ -34,11 +29,9 @@ class SlackBot:
         self.slack_handler: AsyncSlackRequestHandler = AsyncSlackRequestHandler(
             self.slack_app
         )
-        self.classifier_agent = AlertClassifierAgent()
         self.debug_agent = DebugAlertAgent()
         self.bot_user_id: str | None = None
         self.allowed_bot_ids: list[str] = []
-        self.alert_channels: Set[str] = load_alert_channels()
 
         asyncio.create_task(self._initialize())
         self._register_handlers()
@@ -73,20 +66,6 @@ class SlackBot:
         register_event_handlers(self)
         register_command_handlers(self)
         register_action_handlers(self)
-
-    async def update_alert_channels(self) -> None:
-        """
-        Update the set of alert channels by fetching the latest information from Slack API.
-        """
-        try:
-            response = await self.slack_app.client.users_conversations(
-                user=self.bot_user_id, types="public_channel,private_channel"
-            )
-            for channel in response["channels"]:
-                self.alert_channels.add(channel["id"])
-            save_alert_channels(self.alert_channels)
-        except Exception as e:
-            print(f"Error updating alert channels: {e}")
 
 
 slack_bot: SlackBot = SlackBot()

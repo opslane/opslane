@@ -1,9 +1,9 @@
 """Event handlers for Slack events."""
 
-from app.services.alert import get_alert_configuration_stats
 from app.core.config import settings
-from app.slack.utils import is_alert_message, process_historical_alert
 from app.slack.reports import format_prediction_blocks
+from app.ml.alert_classifier import alert_classifier
+from app.agents.alert_classifier import alert_classifier_rag
 
 
 def register_event_handlers(bot):
@@ -33,26 +33,14 @@ def register_event_handlers(bot):
                     "alert_title": event["attachments"][0].get("title", ""),
                     "alert_description": event["attachments"][0].get("text", ""),
                 }
+
                 # Get alert classification
-                prediction = bot.classifier_agent.run(query=query)
+                result = alert_classifier.classify(query)
+                prediction = alert_classifier_rag.run(query=result)
 
-                # Get alert root cause
-                debug_query = {**query, "classification": prediction}
-                root_cause = bot.debug_agent.run(query=debug_query)
-                print(root_cause)
-
-                blocks = format_prediction_blocks(
-                    prediction, settings.PREDICTION_CONFIDENCE_THRESHOLD, root_cause
-                )
+                blocks = format_prediction_blocks(prediction)
                 await say(blocks=blocks, channel=channel_id, thread_ts=thread_ts)
         else:
             result = "Test"
             blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": result}}]
             await say(blocks=blocks, channel=channel_id, thread_ts=thread_ts)
-
-    bot.ingest_historical_data = ingest_historical_data
-
-
-async def ingest_historical_data(bot, channel_id: str, days_back: int = 30):
-    # Implementation of ingest_historical_data
-    pass

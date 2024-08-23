@@ -277,6 +277,21 @@ def get_alert_configuration_stats(monitor_id: int) -> Dict[str, Any]:
             )
         ).one()
 
+        # Get the average alert duration
+        avg_duration = session.exec(
+            select(func.avg(Alert.duration_seconds)).where(
+                Alert.configuration_id == str(alert_config.provider_id),
+                Alert.duration_seconds.isnot(None),
+            )
+        ).one()
+
+        severity = session.exec(
+            select(Alert.severity, func.count(Alert.id).label("count"))
+            .where(Alert.configuration_id == str(alert_config.provider_id))
+            .group_by(Alert.severity)
+            .order_by(func.count(Alert.id).desc())
+        ).first()
+
         return {
             "configuration_id": alert_config.id,
             "is_noisy": alert_config.is_noisy,
@@ -284,6 +299,8 @@ def get_alert_configuration_stats(monitor_id: int) -> Dict[str, Any]:
             "provider_id": alert_config.provider_id,
             "name": alert_config.name,
             "unique_open_alerts": unique_open_alerts,
+            "average_duration_seconds": avg_duration or 0,
+            "severity": severity.severity,
         }
 
 
