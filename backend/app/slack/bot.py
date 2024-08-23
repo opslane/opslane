@@ -9,7 +9,6 @@ from slack_bolt.adapter.fastapi.async_handler import AsyncSlackRequestHandler
 from app.agents.alert_classifier import AlertClassifierAgent
 from app.agents.debug_alert import DebugAlertAgent
 from app.core.config import settings
-from app.ml.vector_store import VectorStore
 from app.slack.handlers.event_handlers import register_event_handlers
 from app.slack.handlers.command_handlers import register_command_handlers
 from app.slack.handlers.action_handlers import register_action_handlers
@@ -37,7 +36,6 @@ class SlackBot:
         )
         self.classifier_agent = AlertClassifierAgent()
         self.debug_agent = DebugAlertAgent()
-        self.vector_store: VectorStore = VectorStore()
         self.bot_user_id: str | None = None
         self.allowed_bot_ids: list[str] = []
         self.alert_channels: Set[str] = load_alert_channels()

@@ -1,6 +1,5 @@
 """Event handlers for Slack events."""
 
-from app.ml.chat import answer_question
 from app.services.alert import get_alert_configuration_stats
 from app.core.config import settings
 from app.slack.utils import is_alert_message, process_historical_alert
@@ -46,7 +45,7 @@ def register_event_handlers(bot):
                 )
                 await say(blocks=blocks, channel=channel_id, thread_ts=thread_ts)
         else:
-            result = await answer_question(event["text"])
+            result = "Test"
             blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": result}}]
             await say(blocks=blocks, channel=channel_id, thread_ts=thread_ts)
 
