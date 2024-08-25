@@ -214,33 +214,33 @@ def format_prediction_blocks(prediction: Dict[str, Any]) -> List[Dict[str, Any]]
             "text": {"type": "mrkdwn", "text": prediction["summary"]},
         },
         {"type": "divider"},
-        {
-            "type": "actions",
-            "elements": [
-                {
-                    "type": "button",
-                    "text": {
-                        "type": "plain_text",
-                        "text": "👍",
-                        "emoji": True,
-                    },
-                    "value": prediction["is_actionable"],
-                    "action_id": "thumbs_up",
-                    "style": "primary",
-                },
-                {
-                    "type": "button",
-                    "text": {
-                        "type": "plain_text",
-                        "text": "👎",
-                        "emoji": True,
-                    },
-                    "value": prediction["is_actionable"],
-                    "action_id": "thumbs_down",
-                    "style": "danger",
-                },
-            ],
-        },
+        # {
+        #     "type": "actions",
+        #     "elements": [
+        #         {
+        #             "type": "button",
+        #             "text": {
+        #                 "type": "plain_text",
+        #                 "text": "👍",
+        #                 "emoji": True,
+        #             },
+        #             "value": prediction["is_actionable"],
+        #             "action_id": "thumbs_up",
+        #             "style": "primary",
+        #         },
+        #         {
+        #             "type": "button",
+        #             "text": {
+        #                 "type": "plain_text",
+        #                 "text": "👎",
+        #                 "emoji": True,
+        #             },
+        #             "value": prediction["is_actionable"],
+        #             "action_id": "thumbs_down",
+        #             "style": "danger",
+        #         },
+        #     ],
+        # },
     ]
 
     return blocks

@@ -292,6 +292,14 @@ def get_alert_configuration_stats(monitor_id: int) -> Dict[str, Any]:
             .order_by(func.count(Alert.id).desc())
         ).first()
 
+        # Get count of alerts marked as noisy for this configuration
+        noisy_alerts_count = session.exec(
+            select(func.count(Alert.id)).where(
+                Alert.configuration_id == str(alert_config.provider_id),
+                Alert.is_noisy == True,
+            )
+        ).one()
+
         return {
             "configuration_id": alert_config.id,
             "is_noisy": alert_config.is_noisy,
@@ -301,6 +309,7 @@ def get_alert_configuration_stats(monitor_id: int) -> Dict[str, Any]:
             "unique_open_alerts": unique_open_alerts,
             "average_duration_seconds": avg_duration or 0,
             "severity": severity.severity,
+            "noisy_alerts_count": noisy_alerts_count,
         }
 
 
