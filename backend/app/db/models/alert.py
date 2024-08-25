@@ -50,7 +50,6 @@ class Alert(SQLModel, table=True):
     duration_seconds: Optional[int] = Field(
         default=None, description="The duration of the alert in seconds"
     )
-    embedding: Optional[List[float]] = Field(sa_column=Column(ARRAY(FLOAT)))
 
     configuration_id: str = Field(
         default=None, foreign_key="alertconfiguration.provider_id"
@@ -62,5 +61,5 @@ class Alert(SQLModel, table=True):
         env_file=".env",
         env_ignore_empty=True,
         extra="ignore",
-        arbitrary_types_allowed = True
+        arbitrary_types_allowed=True,
     )
