@@ -23,7 +23,11 @@ class AlertClassifierRAG:
             [
                 (
                     "system",
-                    "Analyze this alert classification result and create a concise human-readable sentence explaining the classifier output.",
+                    """
+                    Analyze this alert classification result and create a concise human-readable sentence explaining the classifier output.
+
+                    The alert classification schema includes the field "is_actionable" which is a boolean, the "confidence_score" along with the features.
+                    """,
                 ),
                 (
                     "human",

@@ -47,6 +47,7 @@ class Settings(BaseSettings):
     SLACK_CHANNELS: Optional[list[str]] = None
     SLACK_CHANNEL_REGEX_ENABLED: bool = False
     ALLOWED_BOT_APPS: Optional[List[str]] = ["Datadog"]
+    SLACK_COLLECTION_NAME: str = "slack_messages"
 
     ## DATADOG
     DATADOG_API_KEY: str

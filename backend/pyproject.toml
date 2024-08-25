@@ -45,6 +45,8 @@ langchainhub = "^0.1.20"
 pygithub = "^2.3.0"
 langchain-postgres = "^0.0.9"
 langchain-milvus = "^0.1.4"
+click = "^8.1.7"
+joblib = "^1.4.2"
 
 
 [build-system]

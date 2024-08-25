@@ -1,91 +1,89 @@
+"""Module for classifying alerts using a trained machine learning model."""
+
+import os
+from typing import Dict, Any, Optional
+
+import joblib
+
 from app.services.alert import get_alert_configuration_stats
 from app.core.config import settings
-from app.schemas.alert import SeverityLevel
-from typing import Dict, Any
-import math
+from app.ml.utils import engineer_features
 
 
 class AlertClassifier:
     def __init__(self):
-        self.rules = [
-            {
-                "name": "severity",
-                "condition": lambda alert: alert["severity"],
-                "score": lambda severity: {
-                    SeverityLevel.CRITICAL: 0.9,
-                    SeverityLevel.HIGH: 0.7,
-                    SeverityLevel.MEDIUM: 0.5,
-                    SeverityLevel.LOW: 0.3,
-                }.get(severity, 0),
-                "weight": 0.3,
-            },
-            {
-                "name": "unique_open_alerts",
-                "condition": lambda alert: alert["unique_open_alerts"],
-                "score": lambda count: 1 if count == 0 else 1 / (1 + math.log(count)),
-                "weight": 0.2,
-            },
-            {
-                "name": "average_resolution_time",
-                "condition": lambda alert: alert["average_duration_seconds"],
-                "score": lambda time: 1 / (1 + math.exp(-0.0001 * (time - 3600))),
-                "weight": 0.15,
-            },
-            {
-                "name": "is_noisy",
-                "condition": lambda alert: alert["is_noisy"],
-                "score": lambda is_noisy: 0.2 if is_noisy else 0.8,
-                "weight": 0.25,
-            },
-            {
-                "name": "occurrence_frequency",
-                "condition": lambda alert: alert.get("unique_open_alerts", 0),
-                "score": lambda freq: 1 / (1 + math.log(freq + 1)),
-                "weight": 0.1,
-            },
-        ]
+        """Initialize the AlertClassifier with a trained model and confidence threshold."""
+        self.model: Optional[Any] = None
         self.threshold = settings.PREDICTION_CONFIDENCE_THRESHOLD
+        self.model_path = "alert_classifier_model.joblib"
+        self.last_loaded_time = 0
+        self._load_model()
+
+    def _load_model(self):
+        """Attempt to load the trained model if it exists or has been updated."""
+        if os.path.exists(self.model_path):
+            current_mtime = os.path.getmtime(self.model_path)
+            if current_mtime > self.last_loaded_time:
+                try:
+                    self.model = joblib.load(self.model_path)
+                    self.last_loaded_time = current_mtime
+                    print(f"Model loaded successfully from {self.model_path}")
+                except Exception as e:
+                    print(f"Error loading model: {e}")
+                    self.model = None
+            else:
+                print("Model is up to date")
+        else:
+            print(f"Model file not found: {self.model_path}")
+            self.model = None
 
     def classify(self, alert: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Classify an alert as actionable or not.
+
+        Args:
+            alert (Dict[str, Any]): The alert data to classify.
+
+        Returns:
+            Dict[str, Any]: Classification result including actionability, confidence, and contributing factors.
+        """
+        self._load_model()  # Check and load the model if necessary
+
+        if self.model is None:
+            return {
+                "error": "Model not available",
+                "is_actionable": "unknown",
+                "confidence": 0.0,
+                "factors": {},
+            }
+
         alert_stats = get_alert_configuration_stats(alert["alert_id"])
-        alert_data = {**alert, **alert_stats}
+        features = engineer_features(alert, alert_stats)
 
-        total_score = 0
-        total_weight = 0
-
-        for rule in self.rules:
-            condition_value = rule["condition"](alert_data)
-            if condition_value is not None:
-                score = rule["score"](condition_value)
-                weight = rule["weight"]
-                total_score += score * weight
-                total_weight += weight
-
-        if total_weight == 0:
-            confidence = 0
-        else:
-            confidence = total_score / total_weight
-
+        # Use the model to predict
+        prediction = self.model.predict_proba([list(features.values())])[0]
+        confidence = prediction[1]  # Probability of being actionable
         is_actionable = confidence > self.threshold
 
         return {
-            "is_actionable": is_actionable,
+            "is_actionable": str(is_actionable),
             "confidence": confidence,
-            "factors": self._get_contributing_factors(alert_data),
+            "factors": self._get_contributing_factors(features),
         }
 
-    def _get_contributing_factors(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
-        factors = {}
-        for rule in self.rules:
-            condition_value = rule["condition"](alert_data)
-            if condition_value is not None:
-                score = rule["score"](condition_value)
-                factors[rule["name"]] = {
-                    "value": condition_value,
-                    "score": score,
-                    "weight": rule["weight"],
-                }
-        return factors
+    def _get_contributing_factors(self, features: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Determine the contributing factors for the classification.
+
+        Args:
+            features (Dict[str, Any]): The engineered features used for classification.
+
+        Returns:
+            Dict[str, Any]: The contributing factors (currently just returns the features).
+        """
+        # You can implement logic here to determine contributing factors
+        # For now, we'll just return the features
+        return features
 
 
 # Create a single instance of the classifier to be used throughout the application

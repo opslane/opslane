@@ -4,6 +4,7 @@ It includes utilities for fetching channels, messages, and threads from Slack,
 as well as processing and storing this data.
 """
 
+import re
 from datetime import datetime, timezone
 from typing import Any, Dict, Generator, List, Optional
 
@@ -13,7 +14,7 @@ from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
 from app.core.config import settings
-from app.core.vector_store import MilvusBase
+from app.core.vector_store import VectorStore
 
 
 ChannelType = dict[str, Any]
@@ -174,7 +175,7 @@ def filter_channels(
     ]
 
 
-class SlackIndexer(MilvusBase):
+class SlackIndexer(VectorStore):
     """
     A class for indexing Slack content into a vector store.
     """

@@ -7,7 +7,7 @@ from pymilvus import connections
 from app.core.config import settings
 
 
-class MilvusBase:
+class VectorStore:
     def __init__(self, collection_name: str):
         self.collection_name = collection_name
         self._connect_to_milvus()
