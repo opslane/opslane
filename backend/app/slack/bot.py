@@ -6,7 +6,6 @@ from typing import Set
 from slack_bolt.async_app import AsyncApp
 from slack_bolt.adapter.fastapi.async_handler import AsyncSlackRequestHandler
 
-from app.agents.debug_alert import DebugAlertAgent
 from app.core.config import settings
 from app.slack.handlers.event_handlers import register_event_handlers
 from app.slack.handlers.command_handlers import register_command_handlers
@@ -29,7 +28,6 @@ class SlackBot:
         self.slack_handler: AsyncSlackRequestHandler = AsyncSlackRequestHandler(
             self.slack_app
         )
-        self.debug_agent = DebugAlertAgent()
         self.bot_user_id: str | None = None
         self.allowed_bot_ids: list[str] = []
 
