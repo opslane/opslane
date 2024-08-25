@@ -21,5 +21,11 @@ RUN poetry config virtualenvs.create false \
 # Copy project
 COPY . /app
 
-# Run the application
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Print directory structure for debugging
+RUN echo "Directory structure:" && ls -R
+
+# Print content of main.py for debugging
+RUN echo "Content of main.py:" && cat app/main.py
+
+# Run the application with verbose output
+CMD ["uvicorn", "app.main:create_app", "--host", "0.0.0.0", "--port", "8000", "--log-level", "debug"]

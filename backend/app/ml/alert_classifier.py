@@ -61,13 +61,24 @@ class AlertClassifier:
         features = engineer_features(alert, alert_stats)
 
         # Use the model to predict
-        prediction = self.model.predict_proba([list(features.values())])[0]
+        feature_values = [features[feature] for feature in self.model.feature_names_in_]
+        prediction = self.model.predict_proba([feature_values])[0]
+
+        if len(prediction) < 2:
+            print(f"Unexpected prediction format: {prediction}")
+            return {
+                "error": "Unexpected prediction format",
+                "is_actionable": "unknown",
+                "confidence": 0.0,
+                "factors": {},
+            }
+
         confidence = prediction[1]  # Probability of being actionable
         is_actionable = confidence > self.threshold
 
         return {
             "is_actionable": str(is_actionable),
-            "confidence": confidence,
+            "confidence": float(confidence),
             "factors": self._get_contributing_factors(features),
         }
 

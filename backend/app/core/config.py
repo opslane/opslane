@@ -59,10 +59,6 @@ class Settings(BaseSettings):
     LLM_API_KEY: Optional[str] = None
     LLM_API_BASE: Optional[str] = None
 
-    # Codebase
-    GITHUB_TOKEN: Optional[str] = None
-    GITHUB_REPO: Optional[str] = None
-
     # Miscellaneous
     ANONYMIZED_TELEMETRY: bool = True
 

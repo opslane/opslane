@@ -194,7 +194,7 @@ class SlackIndexer(VectorStore):
             channels (Optional[list[str]]): List of channels to index.
             channel_regex_enabled (bool): Whether to use regex for channel matching.
         """
-        super().__init__("slack_messages")
+        super().__init__(settings.SLACK_COLLECTION_NAME)
         self.workspace = workspace
         self.channels = channels
         self.channel_regex_enabled = channel_regex_enabled
