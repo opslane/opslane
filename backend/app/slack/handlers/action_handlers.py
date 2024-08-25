@@ -1,6 +1,8 @@
 """Action handlers for Slack interactive components."""
 
+import json
 import re
+
 from app.services.alert import (
     get_alert_configuration,
     update_alert_feedback,
@@ -27,10 +29,8 @@ def register_action_handlers(bot):
             say: Function to send a message to the channel.
         """
         await ack()
-        classification = body["actions"][0]["value"]
-        await handle_feedback(
-            bot, body, say, is_positive=True, classification=classification
-        )
+        value = body["actions"][0]["value"]
+        await handle_feedback(bot, body, say, is_positive=True, value=value)
 
     @bot.slack_app.action("thumbs_down")
     async def handle_thumbs_down(ack, body, say):
@@ -43,10 +43,8 @@ def register_action_handlers(bot):
             say: Function to send a message to the channel.
         """
         await ack()
-        classification = body["actions"][0]["value"]
-        await handle_feedback(
-            bot, body, say, is_positive=False, classification=classification
-        )
+        value = body["actions"][0]["value"]
+        await handle_feedback(bot, body, say, is_positive=False, value=value)
 
     @bot.slack_app.action(re.compile("silence_alert_.*"))
     async def handle_silence_alert(ack, body, say):
@@ -79,7 +77,7 @@ def register_action_handlers(bot):
             )
 
 
-async def handle_feedback(bot, body, say, is_positive, classification):
+async def handle_feedback(bot, body, say, is_positive, value):
     """
     Handle user feedback on alert classification.
 
@@ -90,7 +88,11 @@ async def handle_feedback(bot, body, say, is_positive, classification):
         is_positive: Boolean indicating if the feedback is positive.
         classification: The original classification of the alert.
     """
-    alert_id = body["message"]["metadata"]["alert_id"]
+    value_dict = json.loads(value)
+
+    classification = value_dict["is_actionable"]
+    alert_id = value_dict["alert_id"]
+    alert_configuration_id = value_dict["alert_configuration_id"]
 
     is_noisy = (
         (classification is False and is_positive)
@@ -99,13 +101,20 @@ async def handle_feedback(bot, body, say, is_positive, classification):
     )
 
     # Update the alert in the database
-    update_alert_feedback(alert_id, is_noisy)
+    update_alert_feedback(
+        alert_id=alert_id,
+        alert_configuration_id=alert_configuration_id,
+        is_noisy=is_noisy,
+    )
 
     # Respond to the user
     response_text = (
         "Thank you for your feedback! We'll use this to improve our predictions."
     )
-    await say(text=response_text)
+
+    await bot.slack_app.client.chat_postEphemeral(
+        channel=body["channel"]["id"], user=body["user"]["id"], text=response_text
+    )
 
 
 async def silence_alert(alert_id: str) -> bool:

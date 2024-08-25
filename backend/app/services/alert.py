@@ -346,9 +346,12 @@ def mark_alert_configuration_as_noisy(
             return None
 
 
-def update_alert_feedback(alert_id: int, is_noisy: bool):
+def update_alert_feedback(alert_id: str, alert_configuration_id: int, is_noisy: bool):
     with Session(engine) as session:
-        statement = select(Alert).where(Alert.id == alert_id)
+        statement = select(Alert).where(
+            Alert.provider_event_id == str(alert_id),
+            Alert.configuration_id == str(alert_configuration_id),
+        )
         results = session.exec(statement)
         alert = results.first()
         if alert:
@@ -356,4 +359,6 @@ def update_alert_feedback(alert_id: int, is_noisy: bool):
             session.add(alert)
             session.commit()
         else:
-            print(f"Alert with id {alert_id} not found")
+            print(
+                f"Alert with provider_event_id {alert_id} and configuration_id {alert_configuration_id} not found"
+            )

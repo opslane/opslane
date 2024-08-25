@@ -1,6 +1,8 @@
 """Functions for generating and formatting Slack reports."""
 
+import json
 from typing import Dict, List, Any
+
 from app.services.alert import get_alert_report_data
 
 
@@ -196,7 +198,9 @@ def format_insight_report_blocks(report_data: Dict[str, Any]) -> List[Dict[str, 
     return blocks
 
 
-def format_prediction_blocks(prediction: Dict[str, Any]) -> List[Dict[str, Any]]:
+def format_prediction_blocks(
+    prediction: Dict[str, Any], alert_data: Dict[str, Any]
+) -> List[Dict[str, Any]]:
     """
     Format the prediction data into Slack blocks, including root cause analysis.
 
@@ -208,39 +212,46 @@ def format_prediction_blocks(prediction: Dict[str, Any]) -> List[Dict[str, Any]]
     Returns:
         List[Dict[str, Any]]: A list of Slack blocks representing the formatted prediction and root cause analysis.
     """
+    value_dict = {
+        "is_actionable": prediction["is_actionable"],
+        "alert_id": alert_data["alert_id"],
+        "alert_configuration_id": alert_data["alert_configuration_id"],
+    }
+    value = json.dumps(value_dict)
+
     blocks = [
         {
             "type": "section",
             "text": {"type": "mrkdwn", "text": prediction["summary"]},
         },
         {"type": "divider"},
-        # {
-        #     "type": "actions",
-        #     "elements": [
-        #         {
-        #             "type": "button",
-        #             "text": {
-        #                 "type": "plain_text",
-        #                 "text": "👍",
-        #                 "emoji": True,
-        #             },
-        #             "value": prediction["is_actionable"],
-        #             "action_id": "thumbs_up",
-        #             "style": "primary",
-        #         },
-        #         {
-        #             "type": "button",
-        #             "text": {
-        #                 "type": "plain_text",
-        #                 "text": "👎",
-        #                 "emoji": True,
-        #             },
-        #             "value": prediction["is_actionable"],
-        #             "action_id": "thumbs_down",
-        #             "style": "danger",
-        #         },
-        #     ],
-        # },
+        {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {
+                        "type": "plain_text",
+                        "text": "👍",
+                        "emoji": True,
+                    },
+                    "value": value,
+                    "action_id": "thumbs_up",
+                    "style": "primary",
+                },
+                {
+                    "type": "button",
+                    "text": {
+                        "type": "plain_text",
+                        "text": "👎",
+                        "emoji": True,
+                    },
+                    "value": value,
+                    "action_id": "thumbs_down",
+                    "style": "danger",
+                },
+            ],
+        },
     ]
 
     return blocks

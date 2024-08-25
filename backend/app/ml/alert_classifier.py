@@ -57,7 +57,7 @@ class AlertClassifier:
                 "factors": {},
             }
 
-        alert_stats = get_alert_configuration_stats(alert["alert_id"])
+        alert_stats = get_alert_configuration_stats(alert["alert_configuration_id"])
         features = engineer_features(alert, alert_stats)
 
         # Use the model to predict

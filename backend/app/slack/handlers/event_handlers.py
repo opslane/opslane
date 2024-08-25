@@ -51,13 +51,17 @@ def register_event_handlers(bot) -> None:
                 return
 
             if event["bot_id"] in bot.allowed_bot_ids:
-                alert_id = event["metadata"]["event_payload"]["monitor_id"]
+                alert_id = event["metadata"]["event_payload"]["event_id"]
+                alert_configuration_id = event["metadata"]["event_payload"][
+                    "monitor_id"
+                ]
                 alert_title = event["attachments"][0].get("title", "")
                 alert_description = event["attachments"][0].get("text", "")
 
                 # Prepare the alert data for classification
                 alert_data = {
                     "alert_id": alert_id,
+                    "alert_configuration_id": alert_configuration_id,
                     "title": alert_title,
                     "description": alert_description,
                     "severity": SeverityLevel.MEDIUM,  # You might want to extract this from the event
@@ -73,5 +77,5 @@ def register_event_handlers(bot) -> None:
                     "is_actionable": classification_result["is_actionable"],
                 }
 
-                blocks = format_prediction_blocks(alert_summary)
+                blocks = format_prediction_blocks(alert_summary, alert_data)
                 await say(blocks=blocks, channel=channel_id, thread_ts=thread_ts)
