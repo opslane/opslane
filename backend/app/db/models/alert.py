@@ -50,6 +50,9 @@ class Alert(SQLModel, table=True):
     duration_seconds: Optional[int] = Field(
         default=None, description="The duration of the alert in seconds"
     )
+    is_noisy: Optional[bool] = Field(
+        default=None, description="User feedback on alert actionability"
+    )
 
     configuration_id: str = Field(
         default=None, foreign_key="alertconfiguration.provider_id"

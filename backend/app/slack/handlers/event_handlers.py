@@ -68,11 +68,10 @@ def register_event_handlers(bot) -> None:
                 classification_result = alert_classifier.classify(alert_data)
 
                 # Use the classification result in the RAG model
-                alert_summary = alert_classifier_rag.run(query=classification_result)
+                alert_summary = {
+                    "summary": alert_classifier_rag.run(query=classification_result),
+                    "is_actionable": classification_result["is_actionable"],
+                }
 
                 blocks = format_prediction_blocks(alert_summary)
                 await say(blocks=blocks, channel=channel_id, thread_ts=thread_ts)
-        # else:
-        #     result = "Test"
-        #     blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": result}}]
-        #     await say(blocks=blocks, channel=channel_id, thread_ts=thread_ts)

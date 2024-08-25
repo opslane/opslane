@@ -2,11 +2,13 @@
 
 import click
 import pandas as pd
+import joblib
+from typing import List, Dict, Any
+
+from sqlmodel import select, Session, update
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
-import joblib
-from typing import List, Dict, Any
 
 from app.services.alert import (
     pull_and_store_alerts_from_source,
@@ -15,8 +17,6 @@ from app.services.alert import (
 from app.schemas.alert import AlertSource
 from app.db.models.alert import Alert
 from app.db import engine
-from sqlmodel import select, Session
-
 from app.ml.utils import engineer_features
 
 
@@ -49,17 +49,27 @@ def train_model_cli(num_alerts: int):
     alerts = get_recent_alerts()[:num_alerts]
     labeled_data = []
 
-    for alert in alerts:
-        click.echo(f"\nAlert: {alert['title']}")
-        click.echo(f"Severity: {alert['severity']}")
-        click.echo(f"Description: {alert['description']}")
+    with Session(engine) as session:
+        for alert in alerts:
+            click.echo(f"\nAlert: {alert['title']}")
+            click.echo(f"Severity: {alert['severity']}")
+            click.echo(f"Description: {alert['description']}")
 
-        is_actionable = click.confirm("Is this alert actionable?", default=True)
+            is_actionable = click.confirm("Is this alert actionable?", default=True)
+            is_noisy = not is_actionable
 
-        alert_stats = get_alert_configuration_stats(alert["configuration_id"])
-        features = engineer_features(alert, alert_stats)
-        features["is_actionable"] = int(is_actionable)
-        labeled_data.append(features)
+            # Update the alert in the database
+            stmt = (
+                update(Alert).where(Alert.id == alert["id"]).values(is_noisy=is_noisy)
+            )
+            session.exec(stmt)
+
+            alert_stats = get_alert_configuration_stats(alert["configuration_id"])
+            features = engineer_features(alert, alert_stats)
+            features["is_actionable"] = int(is_actionable)
+            labeled_data.append(features)
+
+        session.commit()
 
     df = pd.DataFrame(labeled_data)
     X = df.drop("is_actionable", axis=1)

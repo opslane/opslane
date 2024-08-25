@@ -211,7 +211,7 @@ def format_prediction_blocks(prediction: Dict[str, Any]) -> List[Dict[str, Any]]
     blocks = [
         {
             "type": "section",
-            "text": {"type": "mrkdwn", "text": prediction},
+            "text": {"type": "mrkdwn", "text": prediction["summary"]},
         },
         {"type": "divider"},
         {
@@ -224,7 +224,7 @@ def format_prediction_blocks(prediction: Dict[str, Any]) -> List[Dict[str, Any]]
                         "text": "👍",
                         "emoji": True,
                     },
-                    "value": "yes",
+                    "value": prediction["is_actionable"],
                     "action_id": "thumbs_up",
                     "style": "primary",
                 },
@@ -235,7 +235,7 @@ def format_prediction_blocks(prediction: Dict[str, Any]) -> List[Dict[str, Any]]
                         "text": "👎",
                         "emoji": True,
                     },
-                    "value": "no",
+                    "value": prediction["is_actionable"],
                     "action_id": "thumbs_down",
                     "style": "danger",
                 },

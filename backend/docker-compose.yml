@@ -17,11 +17,6 @@ services:
       - opslane-db
       - milvus-standalone
       - setup
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
 
   opslane-db:
     image: postgres:13

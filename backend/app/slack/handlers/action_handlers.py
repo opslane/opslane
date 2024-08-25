@@ -2,15 +2,30 @@
 
 import re
 from app.services.alert import (
-    mark_alert_configuration_as_noisy,
     get_alert_configuration,
+    update_alert_feedback,
 )
 from app.integrations.providers.factory import IntegrationSourceFactory
 
 
 def register_action_handlers(bot):
+    """
+    Register action handlers for Slack interactive components.
+
+    Args:
+        bot: The bot instance to register handlers for.
+    """
+
     @bot.slack_app.action("thumbs_up")
     async def handle_thumbs_up(ack, body, say):
+        """
+        Handle the thumbs up action.
+
+        Args:
+            ack: Function to acknowledge the action.
+            body: The request body from Slack.
+            say: Function to send a message to the channel.
+        """
         await ack()
         classification = body["actions"][0]["value"]
         await handle_feedback(
@@ -19,6 +34,14 @@ def register_action_handlers(bot):
 
     @bot.slack_app.action("thumbs_down")
     async def handle_thumbs_down(ack, body, say):
+        """
+        Handle the thumbs down action.
+
+        Args:
+            ack: Function to acknowledge the action.
+            body: The request body from Slack.
+            say: Function to send a message to the channel.
+        """
         await ack()
         classification = body["actions"][0]["value"]
         await handle_feedback(
@@ -27,6 +50,14 @@ def register_action_handlers(bot):
 
     @bot.slack_app.action(re.compile("silence_alert_.*"))
     async def handle_silence_alert(ack, body, say):
+        """
+        Handle the silence alert action.
+
+        Args:
+            ack: Function to acknowledge the action.
+            body: The request body from Slack.
+            say: Function to send a message to the channel.
+        """
         await ack()
         alert_id = body["actions"][0]["value"].split("_")[-1]
         user_id = body["user"]["id"]
@@ -49,11 +80,44 @@ def register_action_handlers(bot):
 
 
 async def handle_feedback(bot, body, say, is_positive, classification):
-    # Implementation of handle_feedback
-    pass
+    """
+    Handle user feedback on alert classification.
+
+    Args:
+        bot: The bot instance.
+        body: The request body from Slack.
+        say: Function to send a message to the channel.
+        is_positive: Boolean indicating if the feedback is positive.
+        classification: The original classification of the alert.
+    """
+    alert_id = body["message"]["metadata"]["alert_id"]
+
+    is_noisy = (
+        (classification is False and is_positive)
+        or (classification is True and not is_positive)
+        or False
+    )
+
+    # Update the alert in the database
+    update_alert_feedback(alert_id, is_noisy)
+
+    # Respond to the user
+    response_text = (
+        "Thank you for your feedback! We'll use this to improve our predictions."
+    )
+    await say(text=response_text)
 
 
 async def silence_alert(alert_id: str) -> bool:
+    """
+    Silence an alert using the appropriate integration.
+
+    Args:
+        alert_id: The ID of the alert to silence.
+
+    Returns:
+        bool: True if the alert was successfully silenced, False otherwise.
+    """
     alert_config = get_alert_configuration(alert_id)
     integration = IntegrationSourceFactory.get_integration(alert_config.provider)
     return await integration.silence_alert(alert_id)

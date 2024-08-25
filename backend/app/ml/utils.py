@@ -60,7 +60,7 @@ def engineer_features(
         "severity_score": map_severity(alert["severity"]),
         "unique_open_alerts": alert_stats["unique_open_alerts"],
         "avg_resolution_time": alert_stats["average_duration_seconds"],
-        "is_noisy": int(alert_stats["is_noisy"]),
+        "is_noisy": alert["is_noisy"],
         "occurrence_frequency": alert_stats["unique_open_alerts"],
         "time_of_day": alert["created_at"].hour if alert["created_at"] else 0,
         "day_of_week": alert["created_at"].weekday() if alert["created_at"] else 0,

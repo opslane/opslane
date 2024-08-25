@@ -335,3 +335,16 @@ def mark_alert_configuration_as_noisy(
         else:
             print(f"Warning: No configuration found for provider_id {provider_id}")
             return None
+
+
+def update_alert_feedback(alert_id: int, is_noisy: bool):
+    with Session(engine) as session:
+        statement = select(Alert).where(Alert.id == alert_id)
+        results = session.exec(statement)
+        alert = results.first()
+        if alert:
+            alert.is_noisy = is_noisy
+            session.add(alert)
+            session.commit()
+        else:
+            print(f"Alert with id {alert_id} not found")
