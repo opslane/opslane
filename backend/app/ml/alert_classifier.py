@@ -62,19 +62,27 @@ class AlertClassifier:
 
         # Use the model to predict
         feature_values = [features[feature] for feature in self.model.feature_names_in_]
-        prediction = self.model.predict_proba([feature_values])[0]
+        try:
+            prediction = self.model.predict_proba([feature_values])[0]
 
-        if len(prediction) < 2:
-            print(f"Unexpected prediction format: {prediction}")
+            if len(prediction) == 1:
+                # If only one class is predicted, assume it's the positive class
+                confidence = prediction[0]
+                is_actionable = confidence > self.threshold
+            elif len(prediction) == 2:
+                confidence = prediction[1]  # Probability of being actionable
+                is_actionable = confidence > self.threshold
+            else:
+                raise ValueError(f"Unexpected prediction format: {prediction}")
+
+        except Exception as e:
+            print(f"Error during prediction: {e}")
             return {
-                "error": "Unexpected prediction format",
+                "error": "Prediction error",
                 "is_actionable": "unknown",
                 "confidence": 0.0,
                 "factors": {},
             }
-
-        confidence = prediction[1]  # Probability of being actionable
-        is_actionable = confidence > self.threshold
 
         return {
             "is_actionable": str(is_actionable),

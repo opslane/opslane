@@ -99,4 +99,4 @@ def train_model_cli(num_alerts: int):
 
 
 if __name__ == "__main__":
-    train_model_cli(num_alerts=20)
+    train_model_cli()
