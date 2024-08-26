@@ -93,7 +93,6 @@ services:
     command: >
       sh -c "
         python -m alembic upgrade head &&
-        python -m app.scripts.seed_data &&
         echo 'Setup completed successfully'
       "
 
