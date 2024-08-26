@@ -72,27 +72,40 @@ def train_model_cli(num_alerts: int):
         session.commit()
 
     df = pd.DataFrame(labeled_data)
+
+    if len(df) < 2:
+        click.echo("Not enough data to train the model. Please label more alerts.")
+        return
+
     X = df.drop("is_actionable", axis=1)
     y = df["is_actionable"]
 
+    # Adjust test_size based on the number of samples
+    test_size = min(0.2, 1 / len(df))
+
     X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42
+        X, y, test_size=test_size, random_state=42
     )
 
     model = RandomForestClassifier(n_estimators=100, random_state=42)
     model.fit(X_train, y_train)
 
-    y_pred = model.predict(X_test)
-    accuracy = accuracy_score(y_test, y_pred)
-    precision = precision_score(y_test, y_pred)
-    recall = recall_score(y_test, y_pred)
-    f1 = f1_score(y_test, y_pred)
+    if len(X_test) > 0:
+        y_pred = model.predict(X_test)
+        accuracy = accuracy_score(y_test, y_pred)
+        precision = precision_score(y_test, y_pred, zero_division=0)
+        recall = recall_score(y_test, y_pred, zero_division=0)
+        f1 = f1_score(y_test, y_pred, zero_division=0)
 
-    click.echo("\nModel Performance:")
-    click.echo(f"Accuracy: {accuracy}")
-    click.echo(f"Precision: {precision}")
-    click.echo(f"Recall: {recall}")
-    click.echo(f"F1 Score: {f1}")
+        click.echo("\nModel Performance:")
+        click.echo(f"Accuracy: {accuracy}")
+        click.echo(f"Precision: {precision}")
+        click.echo(f"Recall: {recall}")
+        click.echo(f"F1 Score: {f1}")
+    else:
+        click.echo(
+            "\nNot enough data for a test set. Model trained on all available data."
+        )
 
     joblib.dump(model, "alert_classifier_model.joblib")
     click.echo("\nModel saved as 'alert_classifier_model.joblib'")
