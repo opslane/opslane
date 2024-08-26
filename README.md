@@ -74,33 +74,7 @@ We use a flexible data model so that we can support multiple integrations. Curre
 
 ## Installation
 
-### Prerequisites
-
-- Docker
-- Slack workspace
-- Datadog account
-
-### Setup
-
-1. Clone the repository:
-```bash
-git clone https://github.com/yourusername/opslane.git
-cd opslane
-```
-
-2. Configure environment variables:
-
-```bash
-cp .env.example .env
-# Edit .env with your Slack, Datadog, and OpenAI API keys
-```
-
-
-3. Build and run the Docker container:
-
-```bash
-docker-compose up --build
-```
+Check out the Quickstart instructions [here](https://docs.opslane.com/quickstart).
 
 ## Usage
 
