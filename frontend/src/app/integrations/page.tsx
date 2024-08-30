@@ -3,6 +3,9 @@
 import { useState } from 'react';
 import axios from 'axios';
 import { API_BASE_URL } from '@/config/api';
+import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
+import { Card, CardHeader, CardTitle, CardContent, CardFooter } from "@/components/ui/card"
 
 export default function IntegrationsPage() {
   const [datadogApiKey, setDatadogApiKey] = useState('');
@@ -38,56 +41,56 @@ export default function IntegrationsPage() {
     <div className="container mx-auto px-4 py-8">
       <h1 className="text-2xl font-bold mb-4">Integrations</h1>
 
-      <div className="mb-8">
-        <h2 className="text-xl font-semibold mb-2">Datadog</h2>
-        <form onSubmit={handleDatadogSubmit} className="space-y-4">
-          <div>
-            <label htmlFor="datadogApiKey" className="block mb-1">API Key</label>
-            <input
+      <Card className="mb-8">
+        <CardHeader>
+          <CardTitle>Datadog</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <form onSubmit={handleDatadogSubmit} className="space-y-4">
+            <Input
+              placeholder="API Key"
               type="text"
-              id="datadogApiKey"
               value={datadogApiKey}
               onChange={(e) => setDatadogApiKey(e.target.value)}
-              className="w-full px-3 py-2 border rounded"
               required
             />
-          </div>
-          <div>
-            <label htmlFor="datadogAppKey" className="block mb-1">App Key</label>
-            <input
+            <Input
+              placeholder="App Key"
               type="text"
-              id="datadogAppKey"
               value={datadogAppKey}
               onChange={(e) => setDatadogAppKey(e.target.value)}
-              className="w-full px-3 py-2 border rounded"
               required
             />
-          </div>
-          <button type="submit" className="bg-blue-500 text-white px-4 py-2 rounded">
+          </form>
+        </CardContent>
+        <CardFooter>
+          <Button onClick={handleDatadogSubmit}>
             Integrate Datadog
-          </button>
-        </form>
-      </div>
+          </Button>
+        </CardFooter>
+      </Card>
 
-      <div>
-        <h2 className="text-xl font-semibold mb-2">PagerDuty</h2>
-        <form onSubmit={handlePagerdutySubmit} className="space-y-4">
-          <div>
-            <label htmlFor="pagerdutyApiKey" className="block mb-1">API Key</label>
-            <input
+      <Card>
+        <CardHeader>
+          <CardTitle>PagerDuty</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <form onSubmit={handlePagerdutySubmit} className="space-y-4">
+            <Input
+              placeholder="API Key"
               type="text"
-              id="pagerdutyApiKey"
               value={pagerdutyApiKey}
               onChange={(e) => setPagerdutyApiKey(e.target.value)}
-              className="w-full px-3 py-2 border rounded"
               required
             />
-          </div>
-          <button type="submit" className="bg-green-500 text-white px-4 py-2 rounded">
+          </form>
+        </CardContent>
+        <CardFooter>
+          <Button onClick={handlePagerdutySubmit}>
             Integrate PagerDuty
-          </button>
-        </form>
-      </div>
+          </Button>
+        </CardFooter>
+      </Card>
     </div>
   );
 }
