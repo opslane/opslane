@@ -3,7 +3,7 @@
 from enum import Enum
 from typing import Optional, Dict, Any
 
-from sqlalchemy import JSON, Column, ForeignKey
+from sqlalchemy import JSON, Column, ForeignKey, UniqueConstraint
 from sqlmodel import Field, SQLModel
 
 from app.db.models.base import Base
@@ -13,7 +13,6 @@ class IntegrationType(str, Enum):
     DATADOG = "datadog"
     SENTRY = "sentry"
     PAGERDUTY = "pagerduty"
-    # Add more integration types as needed
 
 
 class Integration(Base, table=True):
@@ -25,6 +24,10 @@ class Integration(Base, table=True):
     is_active: bool = Field(default=True)
     credential_id: Optional[int] = Field(
         default=None, foreign_key="integrationcredential.id"
+    )
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "type", name="uq_tenant_integration_type"),
     )
 
 

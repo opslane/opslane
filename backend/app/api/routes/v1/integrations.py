@@ -23,8 +23,10 @@ def create_integration(
     tenant_id: str = Depends(get_current_tenant_id),
 ):
     """Create a new integration for the current tenant."""
-    i = integration_service.create_integration(db, integration, tenant_id)
-    return i
+    try:
+        return integration_service.create_integration(db, integration, tenant_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.get("/{integration_id}", response_model=IntegrationResponse)

@@ -1,5 +1,6 @@
 """Service module for managing integrations and their credentials."""
 
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session
 
 from app.db.models.integration import Integration, IntegrationCredential
@@ -25,34 +26,40 @@ def create_integration(
     Returns:
         Integration: The created integration object.
     """
-    # Create the Integration object first
-    db_integration = Integration(
-        **integration.dict(exclude={"credential_schema"}), tenant_id=tenant_id
-    )
-    db.add(db_integration)
-    db.commit()
-    db.refresh(db_integration)
+    try:
+        # Create the Integration object first
+        db_integration = Integration(
+            **integration.dict(exclude={"credential_schema"}), tenant_id=tenant_id
+        )
+        db.add(db_integration)
+        db.commit()
+        db.refresh(db_integration)
 
-    # Encrypt the credentials
-    encrypted_credentials = encrypt_credentials(integration.credential_schema)
+        # Encrypt the credentials
+        encrypted_credentials = encrypt_credentials(integration.credential_schema)
 
-    # Create the IntegrationCredential object with the integration_id
-    db_credential = IntegrationCredential(
-        tenant_id=tenant_id,
-        integration_id=db_integration.id,
-        encrypted_credentials=encrypted_credentials,
-    )
-    db.add(db_credential)
-    db.commit()
-    db.refresh(db_credential)
+        # Create the IntegrationCredential object with the integration_id
+        db_credential = IntegrationCredential(
+            tenant_id=tenant_id,
+            integration_id=db_integration.id,
+            encrypted_credentials=encrypted_credentials,
+        )
+        db.add(db_credential)
+        db.commit()
+        db.refresh(db_credential)
 
-    # Update the Integration object with the credential_id
-    db_integration.credential_id = db_credential.id
-    db.add(db_integration)
-    db.commit()
-    db.refresh(db_integration)
+        # Update the Integration object with the credential_id
+        db_integration.credential_id = db_credential.id
+        db.add(db_integration)
+        db.commit()
+        db.refresh(db_integration)
 
-    return db_integration
+        return db_integration
+    except IntegrityError as exc:
+        db.rollback()
+        raise ValueError(
+            f"An integration of type {integration.type} already exists for this tenant."
+        ) from exc
 
 
 def get_integration(db: Session, integration_id: int) -> Integration:
