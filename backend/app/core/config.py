@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     ENCRYPTION_KEY: str = Fernet.generate_key()
     MILVUS_HOST: str = "localhost"
     MILVUS_PORT: int = 19530
+    TENANT_NAME: str = "Opslane"
 
     # Authentication
     auth: AuthSettings = AuthSettings()
