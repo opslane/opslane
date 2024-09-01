@@ -116,6 +116,8 @@ class DatadogIntegration(BaseIntegration):
         if match.group(1):
             # Format: [P2] [Warn] CPU load is very high
             severity = match.group(1)
+            if severity not in self.SEVERITY_MAP.keys():
+                print(f"The priority in title '{title}' is invalid, default priority will be used.")
             status = match.group(2)
             alert_title = match.group(3)
         else:

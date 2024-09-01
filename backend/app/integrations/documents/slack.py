@@ -46,21 +46,21 @@ def get_channels(client: WebClient, exclude_archived: bool = True) -> list[Chann
 
 def get_channel_messages(
     client: WebClient,
-    channel: dict[str, Any],
+    channel: ChannelType,
     oldest: Optional[str] = None,
     latest: Optional[str] = None,
-) -> Generator[list[MessageType], None, None]:
+) -> Generator[ThreadType, None, None]:
     """
     Fetch messages from a Slack channel.
 
     Args:
         client (WebClient): The Slack WebClient instance.
-        channel (dict[str, Any]): The channel to fetch messages from.
+        channel (ChannelType): The channel to fetch messages from.
         oldest (Optional[str]): The oldest message timestamp to include.
         latest (Optional[str]): The latest message timestamp to include.
 
     Yields:
-        list[MessageType]: A list of message dictionaries.
+        ThreadType: A list of message dictionaries.
     """
     try:
         result = client.conversations_history(
@@ -142,20 +142,20 @@ def thread_to_doc(workspace: str, channel: ChannelType, thread: ThreadType) -> d
 
 
 def filter_channels(
-    all_channels: list[dict[str, Any]],
+    all_channels: list[ChannelType],
     channels_to_connect: Optional[list[str]],
     regex_enabled: bool,
-) -> list[dict[str, Any]]:
+) -> list[ChannelType]:
     """
     Filter channels based on a list of channel names or regex patterns.
 
     Args:
-        all_channels (list[dict[str, Any]]): All available channels.
+        all_channels (list[ChannelType]): All available channels.
         channels_to_connect (Optional[list[str]]): Channel names or regex patterns to filter by.
         regex_enabled (bool): Whether to use regex matching.
 
     Returns:
-        list[dict[str, Any]]: Filtered list of channels.
+        list[ChannelType]: Filtered list of channels.
     """
     if not channels_to_connect:
         return all_channels
@@ -200,12 +200,12 @@ class SlackIndexer(VectorStore):
         self.channel_regex_enabled = channel_regex_enabled
         self.client = WebClient(token=settings.SLACK_BOT_TOKEN)
 
-    def message_to_document(self, message: Dict[str, Any]) -> LangChainDocument:
+    def message_to_document(self, message: MessageType) -> LangChainDocument:
         """
         Convert a Slack message to a LangChain Document object.
 
         Args:
-            message (Dict[str, Any]): The Slack message data.
+            message (MessageType): The Slack message data.
 
         Returns:
             LangChainDocument: A LangChain Document object representing the Slack message.
