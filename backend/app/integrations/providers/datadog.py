@@ -302,7 +302,7 @@ class DatadogIntegration(BaseIntegration):
         datadog_alert = DatadogAlert(**alert)
 
         severity = self.SEVERITY_MAP.get(
-            datadog_alert.alert_priority.lower(), SeverityLevel.LOW
+            datadog_alert.alert_priority, SeverityLevel.LOW
         )
 
         status = self.STATUS_MAP.get(datadog_alert.alert_transition, AlertStatus.OPEN)
