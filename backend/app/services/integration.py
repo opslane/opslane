@@ -10,6 +10,7 @@ from app.schemas.integration import (
     IntegrationCredentialCreate,
 )
 from app.core.security import encrypt_credentials, decrypt_credentials
+from app.integrations.providers.factory import IntegrationSourceFactory
 
 
 def create_integration(
@@ -27,6 +28,9 @@ def create_integration(
         Integration: The created integration object.
     """
     try:
+        integration_type = IntegrationSourceFactory.get_integration(integration.type)
+        integration_type.validate_credentials(integration.credential_schema)
+
         # Create the Integration object first
         db_integration = Integration(
             **integration.dict(exclude={"credential_schema"}), tenant_id=tenant_id
@@ -55,6 +59,9 @@ def create_integration(
         db.refresh(db_integration)
 
         return db_integration
+    except ValueError as e:
+        db.rollback()
+        raise ValueError(f"Invalid integration configuration: {str(e)}")
     except IntegrityError as exc:
         db.rollback()
         raise ValueError(

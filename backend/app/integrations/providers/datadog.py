@@ -2,7 +2,7 @@
 
 import re
 from datetime import datetime, timedelta
-from typing import Tuple, Optional
+from typing import Dict, Tuple, Optional
 
 from datadog_api_client import ApiClient, Configuration
 from datadog_api_client.v1.api.events_api import EventsApi
@@ -16,6 +16,7 @@ from datadog_api_client.v2.model.events_query_filter import EventsQueryFilter
 from datadog_api_client.v2.model.events_query_options import EventsQueryOptions
 from datadog_api_client.v2.model.events_request_page import EventsRequestPage
 from datadog_api_client.v2.model.events_sort import EventsSort
+from pydantic import Field, ValidationError
 
 from app.core.config import settings
 from app.schemas.alert import (
@@ -27,7 +28,12 @@ from app.schemas.alert import (
 )
 from app.schemas.providers.datadog import DatadogAlert
 from app.services.alert import calculate_alert_duration
-from app.integrations.providers.base import BaseIntegration
+from app.integrations.providers.base import BaseIntegration, CredentialSchema
+
+
+class DatadogCredentialSchema(CredentialSchema):
+    api_key: str = Field(..., min_length=1)
+    app_key: str = Field(..., min_length=1)
 
 
 class DatadogIntegration(BaseIntegration):
@@ -81,6 +87,16 @@ class DatadogIntegration(BaseIntegration):
         self.configuration = Configuration()
         self.configuration.api_key["apiKeyAuth"] = settings.DATADOG_API_KEY
         self.configuration.api_key["appKeyAuth"] = settings.DATADOG_APP_KEY
+
+    @property
+    def credential_schema(self):
+        return DatadogCredentialSchema.schema()
+
+    def validate_credentials(self, credentials: Dict[str, str]) -> None:
+        try:
+            DatadogCredentialSchema(**credentials)
+        except ValidationError as e:
+            raise ValueError("Invalid Datadog credentials")
 
     def _should_ignore_alert(self, alert: Event) -> bool:
         """
