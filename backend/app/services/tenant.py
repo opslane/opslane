@@ -93,3 +93,17 @@ def delete_tenant(db: Session, tenant_id: str) -> bool:
         db.commit()
         return True
     return False
+
+
+def get_tenant_by_name(db: Session, name: str) -> Optional[Tenant]:
+    """
+    Retrieve a tenant by name.
+
+    Args:
+        db (Session): The database session.
+        name (str): The name of the tenant to retrieve.
+
+    Returns:
+        Optional[Tenant]: The retrieved tenant, or None if not found.
+    """
+    return db.query(Tenant).filter(Tenant.name == name).first()
