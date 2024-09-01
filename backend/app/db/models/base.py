@@ -1,5 +1,6 @@
 """Base model and utility functions for database operations."""
 
+import uuid
 from datetime import datetime
 from typing import Optional, Any
 
@@ -13,14 +14,14 @@ class Base(SQLModel):
     def __tablename__(self):
         return self.__name__.lower()
 
-    id: Optional[int] = Field(default=None, primary_key=True)
+    id: int = Field(default=None, primary_key=True)
     created_at: datetime = Field(default_factory=datetime.utcnow, nullable=False)
     updated_at: datetime = Field(
         default_factory=datetime.utcnow,
         nullable=False,
         sa_column_kwargs={"onupdate": datetime.utcnow},
     )
-    tenant_id: str = Field(index=True, foreign_key="tenant.id")
+    tenant_id: uuid.UUID = Field(index=True, foreign_key="tenant.id")
 
     @classmethod
     def create(cls, db: Session, **kwargs: Any) -> Any:

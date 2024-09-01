@@ -6,7 +6,9 @@ It uses SQLModel to define the database schema and Pydantic for data validation.
 
 from enum import Enum
 from typing import Optional
+
 from sqlmodel import Field, SQLModel
+
 from app.db.models.base import Base
 
 

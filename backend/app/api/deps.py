@@ -5,9 +5,27 @@ It includes functions to get mock users, current users, and admin users,
 which can be used as dependencies in FastAPI route handlers.
 """
 
+from typing import Generator
+
 from fastapi import Depends, HTTPException, status
+
 from app.core.auth.config import auth_settings, AuthType
+from app.db.base import get_session
 from app.schemas.user import User, UserRole
+
+
+def get_db() -> Generator:
+    try:
+        db = get_session()
+        yield next(db)
+    finally:
+        db.close()
+
+
+async def get_current_tenant_id() -> str:
+    # This is a placeholder. You should implement your own logic to get the current tenant ID.
+    # For example, you might get it from a JWT token or a request header.
+    return "default_tenant_id"
 
 
 def get_mock_user() -> User:

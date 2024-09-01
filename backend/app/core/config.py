@@ -1,11 +1,11 @@
 """ Settings for the application. """
 
 import secrets
-
 from enum import Enum
 from typing import List, Optional
 
-from pydantic import Field, field_validator
+from cryptography.fernet import Fernet
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.core.auth.config import AuthSettings
@@ -32,6 +32,7 @@ class Settings(BaseSettings):
     API_V1_STR: str = "/api/v1"
     SECRET_KEY: str = secrets.token_urlsafe(32)
     DATABASE_URL: str
+    ENCRYPTION_KEY: str = Fernet.generate_key()
     MILVUS_HOST: str = "localhost"
     MILVUS_PORT: int = 19530
 

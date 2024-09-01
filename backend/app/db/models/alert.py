@@ -3,16 +3,16 @@
 from datetime import datetime
 from typing import List, Optional
 from sqlmodel import Field, SQLModel, Column, Enum, JSON, Relationship, String
-from sqlalchemy.dialects.postgresql import ARRAY, FLOAT
+from sqlalchemy.dialects.postgresql import FLOAT
 from pydantic_settings import SettingsConfigDict
 
+from app.db.models.base import Base
 from app.schemas.alert import AlertSource, AlertStatus, SeverityLevel
 
 
-class AlertConfiguration(SQLModel, table=True):
+class AlertConfiguration(Base, table=True):
     """A model to store alert configurations (analogous to Datadog's Monitor)."""
 
-    id: Optional[int] = Field(default=None, primary_key=True)
     name: str = Field(index=True)
     description: Optional[str] = Field(default=None)
     query: str = Field(description="The condition that triggers the alert")
@@ -26,10 +26,9 @@ class AlertConfiguration(SQLModel, table=True):
     events: List["Alert"] = Relationship(back_populates="configuration")
 
 
-class Alert(SQLModel, table=True):
+class Alert(Base, table=True):
     """A model to store normalized alert data from various monitoring systems."""
 
-    id: Optional[int] = Field(default=None, primary_key=True)
     title: str = Field(index=True, description="A brief title of the alert")
     description: str = Field(description="Detailed description of the alert")
     severity: SeverityLevel = Field(sa_column=Column(Enum(SeverityLevel)))
