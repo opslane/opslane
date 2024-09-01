@@ -15,13 +15,26 @@ export default function IntegrationsPage() {
   const handleDatadogSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      await axios.post(`${API_BASE_URL}/api/integrations/datadog`, {
-        api_key: datadogApiKey,
-        app_key: datadogAppKey,
+      await axios.post(`${API_BASE_URL}/api/v1/integrations/`, {
+        name: "Datadog Integration",
+        description: "Integration with Datadog for monitoring",
+        type: "datadog",
+        configuration: {
+          api_url: "https://api.datadoghq.com"
+        },
+        credential_schema: {
+          api_key: datadogApiKey,
+          app_key: datadogAppKey // Note: Add this to the credential_schema if required
+        },
+        is_active: true
       });
       alert('Datadog integration successful!');
+      setDatadogApiKey('');
+      setDatadogAppKey('');
+    //   fetchIntegrations(); // Refresh the list of integrations
     } catch (error) {
       alert('Failed to integrate Datadog');
+      console.error('Error:', error);
     }
   };
 
