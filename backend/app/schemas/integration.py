@@ -44,3 +44,11 @@ class IntegrationResponse(BaseModel):
 
 class IntegrationCredentialCreate(BaseModel):
     credentials: Dict[str, str]
+
+
+class IntegrationAvailableResponse(BaseModel):
+    type: IntegrationType
+    name: str
+    description: str
+    credential_schema: Dict[str, str]
+    is_enabled: bool

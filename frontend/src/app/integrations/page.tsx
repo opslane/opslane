@@ -1,109 +1,108 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import axios from 'axios';
 import { API_BASE_URL } from '@/config/api';
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Card, CardHeader, CardTitle, CardContent, CardFooter } from "@/components/ui/card"
 
-export default function IntegrationsPage() {
-  const [datadogApiKey, setDatadogApiKey] = useState('');
-  const [datadogAppKey, setDatadogAppKey] = useState('');
-  const [pagerdutyApiKey, setPagerdutyApiKey] = useState('');
+interface IntegrationSchema {
+  type: string;
+  name: string;
+  description: string;
+  configuration_schema: Record<string, string>;
+  credential_schema: Record<string, string>;
+  is_enabled: boolean;
+}
 
-  const handleDatadogSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+export default function IntegrationsPage() {
+  const [integrations, setIntegrations] = useState<IntegrationSchema[]>([]);
+  const [formData, setFormData] = useState<Record<string, Record<string, string>>>({});
+
+  useEffect(() => {
+    fetchAvailableIntegrations();
+  }, []);
+
+  const fetchAvailableIntegrations = async () => {
     try {
-      await axios.post(`${API_BASE_URL}/api/v1/integrations/`, {
-        name: "Datadog Integration",
-        description: "Integration with Datadog for monitoring",
-        type: "datadog",
-        configuration: {
-          api_url: "https://api.datadoghq.com"
-        },
-        credential_schema: {
-          api_key: datadogApiKey,
-          app_key: datadogAppKey // Note: Add this to the credential_schema if required
-        },
-        is_active: true
-      });
-      alert('Datadog integration successful!');
-      setDatadogApiKey('');
-      setDatadogAppKey('');
-    //   fetchIntegrations(); // Refresh the list of integrations
+      const response = await axios.get(`${API_BASE_URL}/api/v1/integrations/available/`);
+      setIntegrations(response.data);
+      initializeFormData(response.data);
     } catch (error) {
-      alert('Failed to integrate Datadog');
-      console.error('Error:', error);
+      console.error('Failed to fetch available integrations:', error);
     }
   };
 
-  const handlePagerdutySubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const initializeFormData = (integrations: IntegrationSchema[]) => {
+    const initialFormData: Record<string, Record<string, string>> = {};
+    integrations.forEach(integration => {
+      initialFormData[integration.type] = Object.keys(integration.credential_schema).reduce((acc, key) => {
+        acc[key] = '';
+        return acc;
+      }, {} as Record<string, string>);
+    });
+    setFormData(initialFormData);
+  };
+
+  const handleInputChange = (integrationType: string, field: string, value: string) => {
+    setFormData(prevData => ({
+      ...prevData,
+      [integrationType]: {
+        ...prevData[integrationType],
+        [field]: value
+      }
+    }));
+  };
+
+  const handleSubmit = async (integration: IntegrationSchema) => {
     try {
-      await axios.post(`${API_BASE_URL}/api/integrations/pagerduty`, {
-        api_key: pagerdutyApiKey,
+      await axios.post(`${API_BASE_URL}/api/v1/integrations/`, {
+        name: integration.name,
+        description: integration.description,
+        type: integration.type,
+        configuration: integration.configuration_schema,
+        credential_schema: formData[integration.type],
+        is_active: true
       });
-      alert('PagerDuty integration successful!');
+      alert(`${integration.name} integration successful!`);
+      fetchAvailableIntegrations();
     } catch (error) {
-      alert('Failed to integrate PagerDuty');
+      alert(`Failed to integrate ${integration.name}`);
+      console.error('Error:', error);
     }
   };
 
   return (
     <div className="container mx-auto px-4 py-8">
       <h1 className="text-2xl font-bold mb-4">Integrations</h1>
-
-      <Card className="mb-8">
-        <CardHeader>
-          <CardTitle>Datadog</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <form onSubmit={handleDatadogSubmit} className="space-y-4">
-            <Input
-              placeholder="API Key"
-              type="text"
-              value={datadogApiKey}
-              onChange={(e) => setDatadogApiKey(e.target.value)}
-              required
-            />
-            <Input
-              placeholder="App Key"
-              type="text"
-              value={datadogAppKey}
-              onChange={(e) => setDatadogAppKey(e.target.value)}
-              required
-            />
-          </form>
-        </CardContent>
-        <CardFooter>
-          <Button onClick={handleDatadogSubmit}>
-            Integrate Datadog
-          </Button>
-        </CardFooter>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>PagerDuty</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <form onSubmit={handlePagerdutySubmit} className="space-y-4">
-            <Input
-              placeholder="API Key"
-              type="text"
-              value={pagerdutyApiKey}
-              onChange={(e) => setPagerdutyApiKey(e.target.value)}
-              required
-            />
-          </form>
-        </CardContent>
-        <CardFooter>
-          <Button onClick={handlePagerdutySubmit}>
-            Integrate PagerDuty
-          </Button>
-        </CardFooter>
-      </Card>
+      {integrations.map(integration => (
+        <Card key={integration.type} className="mb-8">
+          <CardHeader>
+            <CardTitle>{integration.name}</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <p>{integration.description}</p>
+            <form className="space-y-4 mt-4">
+              {Object.entries(integration.credential_schema).map(([key, type]) => (
+                <Input
+                  key={key}
+                  placeholder={key}
+                  type={type === 'string' ? 'text' : type}
+                  value={formData[integration.type]?.[key] || ''}
+                  onChange={(e) => handleInputChange(integration.type, key, e.target.value)}
+                  required
+                />
+              ))}
+            </form>
+          </CardContent>
+          <CardFooter>
+            <Button onClick={() => handleSubmit(integration)} disabled={integration.is_enabled}>
+              {integration.is_enabled ? 'Integrated' : `Integrate ${integration.name}`}
+            </Button>
+          </CardFooter>
+        </Card>
+      ))}
     </div>
   );
 }

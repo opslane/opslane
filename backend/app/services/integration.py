@@ -1,5 +1,7 @@
 """Service module for managing integrations and their credentials."""
 
+from typing import List
+
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session
 
@@ -8,6 +10,8 @@ from app.schemas.integration import (
     IntegrationCreate,
     IntegrationUpdate,
     IntegrationCredentialCreate,
+    IntegrationAvailableResponse,
+    IntegrationType,
 )
 from app.core.security import encrypt_credentials, decrypt_credentials
 from app.integrations.providers.factory import IntegrationSourceFactory
@@ -187,3 +191,39 @@ def get_integration_credential(db: Session, integration_id: int) -> dict:
     if credential:
         return decrypt_credentials(credential.encrypted_credentials)
     return None
+
+
+def get_available_integrations(db: Session) -> List[IntegrationAvailableResponse]:
+    available_integrations = [
+        {
+            "type": IntegrationType.DATADOG,
+            "name": "Datadog",
+            "description": "Integration with Datadog for monitoring",
+            "configuration_schema": {"api_url": "string"},
+            "credential_schema": {"api_key": "string", "app_key": "string"},
+            "is_enabled": False,
+        },
+        {
+            "type": IntegrationType.PAGERDUTY,
+            "name": "PagerDuty",
+            "description": "Integration with PagerDuty for incident management",
+            "configuration_schema": {},
+            "credential_schema": {"api_key": "string"},
+            "is_enabled": False,
+        },
+    ]
+
+    # Check if integrations are enabled
+    for integration in available_integrations:
+        db_integration = (
+            db.query(Integration)
+            .filter(Integration.type == integration["type"])
+            .first()
+        )
+        if db_integration:
+            integration["is_enabled"] = db_integration.is_active
+
+    return [
+        IntegrationAvailableResponse(**integration)
+        for integration in available_integrations
+    ]

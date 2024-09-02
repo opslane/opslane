@@ -1,8 +1,9 @@
 """API routes for managing integrations and their credentials."""
 
+from typing import List
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session
-from typing import List
 
 from app.api.deps import get_db, get_current_tenant_id
 from app.schemas.integration import (
@@ -10,6 +11,7 @@ from app.schemas.integration import (
     IntegrationUpdate,
     IntegrationResponse,
     IntegrationCredentialCreate,
+    IntegrationAvailableResponse,
 )
 from app.services import integration as integration_service
 
@@ -65,3 +67,9 @@ def delete_integration(integration_id: int, db: Session = Depends(get_db)):
     if not result:
         raise HTTPException(status_code=404, detail="Integration not found")
     return result
+
+
+@router.get("/available/", response_model=List[IntegrationAvailableResponse])
+def get_available_integrations(db: Session = Depends(get_db)):
+    """Retrieve a list of available integrations and their schemas."""
+    return integration_service.get_available_integrations(db)
