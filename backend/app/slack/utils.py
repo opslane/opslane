@@ -28,6 +28,7 @@ async def get_allowed_bot_ids(slack_app) -> List[str]:
 
     try:
         while True:
+            # TODO: fix users limit
             response = await slack_app.client.users_list(limit=200, cursor=cursor)
             if response["ok"]:
                 for member in response["members"]:

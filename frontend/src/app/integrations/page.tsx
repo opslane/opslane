@@ -6,6 +6,7 @@ import { API_BASE_URL } from '@/config/api';
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Card, CardHeader, CardTitle, CardContent, CardFooter } from "@/components/ui/card"
+import { useAuth } from '@clerk/nextjs'
 
 interface IntegrationSchema {
   type: string;
@@ -23,6 +24,7 @@ export default function IntegrationsPage() {
   useEffect(() => {
     fetchAvailableIntegrations();
   }, []);
+
 
   const fetchAvailableIntegrations = async () => {
     try {

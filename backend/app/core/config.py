@@ -48,18 +48,28 @@ class Settings(BaseSettings):
     SLACK_WORKSPACE: str
     SLACK_CHANNELS: Optional[list[str]] = None
     SLACK_CHANNEL_REGEX_ENABLED: bool = False
-    ALLOWED_BOT_APPS: Optional[List[str]] = ["Datadog"]
+    ALLOWED_BOT_APPS: Optional[List[str]] = ["PagerDuty"]
     SLACK_COLLECTION_NAME: str = "slack_messages"
 
     ## DATADOG
     DATADOG_API_KEY: str
     DATADOG_APP_KEY: str
 
-    # AI and Machine Learning
+    # PAGERDUTY
+    PAGERDUTY_API_TOKEN: str
+
+    # GITHUB
+    GITHUB_REPO: str = "abhishekray07/stock-trader"
+    GITHUB_TOKEN: str
+
+    # LLM
     PREDICTION_CONFIDENCE_THRESHOLD: float = 0.5
-    LLM_PROVIDER: str = "ollama"
-    LLM_API_KEY: Optional[str] = None
-    LLM_API_BASE: Optional[str] = None
+    ANTHROPIC_API_KEY: Optional[str] = None
+    OPENAI_API_KEY: Optional[str] = None
+    IS_LANGFUSE_ENABLED: bool = False
+    LANGFUSE_PUBLIC_KEY: Optional[str] = None
+    LANGFUSE_SECRET_KEY: Optional[str] = None
+    LANGFUSE_HOST: Optional[str] = "https://us.cloud.langfuse.com"
 
     # Miscellaneous
     ANONYMIZED_TELEMETRY: bool = True

@@ -3,6 +3,8 @@
 import json
 from typing import Dict, List, Any
 
+from app.agents.rca import RCAOutput, CodeChange
+from app.agents.confluence import ConfluenceKBOutput
 from app.services.alert import get_alert_report_data
 
 
@@ -255,3 +257,102 @@ def format_prediction_blocks(
     ]
 
     return blocks
+
+
+def create_rca_blocks(rca_result: RCAOutput) -> List[Dict]:
+    blocks = [
+        {
+            "type": "header",
+            "text": {
+                "type": "plain_text",
+                "text": "Root Cause Analysis Results",
+                "emoji": True,
+            },
+        },
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": f"*Summary:*\n{rca_result.summary}"},
+        },
+        {"type": "divider"},
+    ]
+
+    if rca_result.issues:
+        issues_text = "\n".join(
+            [f"• <{issue.log_link}|{issue.summary}>" for issue in rca_result.issues]
+        )
+        blocks.extend(
+            [
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f"*Potential Issues:*\n{issues_text}",
+                    },
+                },
+                {"type": "divider"},
+            ]
+        )
+
+    if rca_result.code_changes:
+        code_changes_text = "\n".join(
+            [
+                f"• Commit: `{change.commit_hash}`(<{change.link}|link>) \n  Author: {change.author}\n  Title: {change.title}"
+                for change in rca_result.code_changes
+            ]
+        )
+        blocks.extend(
+            [
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f"*Suspicious Code Changes:*\n{code_changes_text}",
+                    },
+                },
+                {"type": "divider"},
+            ]
+        )
+
+    if rca_result.remediation:
+        remediation_text = "\n".join([f"• {step}" for step in rca_result.remediation])
+        blocks.extend(
+            [
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f"*Recommended Remediation Steps:*\n{remediation_text}",
+                    },
+                },
+                {"type": "divider"},
+            ]
+        )
+
+    return blocks
+
+
+def create_confluence_blocks(document: dict) -> List[Dict]:
+    """
+    Create Slack blocks for Confluence KB results.
+
+    Args:
+        confluence_result (ConfluenceKBOutput): The Confluence KB output containing relevant documents.
+
+    Returns:
+        List[Dict]: A list of Slack blocks representing the Confluence results.
+    """
+    if not document:
+        return []
+
+    confluence_text = f"• <{document['source']}|{document['title']}>"
+
+    return [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*Relevant Confluence Documents:*\n{confluence_text}",
+            },
+        },
+        {"type": "divider"},
+    ]

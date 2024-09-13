@@ -19,6 +19,8 @@ async def process_alert(source: str, raw_alert: dict) -> None:
     Returns:
         None
     """
-
-    integration = IntegrationSourceFactory.get_integration(source)
-    processed_alert = integration.process_alert(raw_alert)
+    try:
+        integration = IntegrationSourceFactory.get_integration(source)
+        processed_alert = integration.process_alert(raw_alert)
+    except ValueError as exc:
+        raise ValueError(f"Invalid alert source: {source}") from exc

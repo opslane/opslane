@@ -47,6 +47,16 @@ langchain-postgres = "^0.0.9"
 langchain-milvus = "^0.1.4"
 click = "^8.1.7"
 joblib = "^1.4.2"
+lxml = "^5.3.0"
+tree-sitter = "^0.23.0"
+pdpyras = "^5.2.0"
+tiktoken = "^0.7.0"
+rank-bm25 = "^0.2.2"
+langchain-anthropic = "^0.1.23"
+fuzzywuzzy = "^0.18.0"
+python-levenshtein = "^0.25.1"
+gitpython = "^3.1.43"
+langfuse = "^2.48.0"
 
 
 [build-system]
