@@ -33,8 +33,6 @@ class Settings(BaseSettings):
     SECRET_KEY: str = secrets.token_urlsafe(32)
     DATABASE_URL: str
     ENCRYPTION_KEY: str = Fernet.generate_key()
-    MILVUS_HOST: str = "localhost"
-    MILVUS_PORT: int = 19530
     TENANT_NAME: str = "Opslane"
 
     # Authentication
@@ -55,17 +53,28 @@ class Settings(BaseSettings):
     DATADOG_API_KEY: str
     DATADOG_APP_KEY: str
 
+    # RENDER
+    RENDER_API_KEY: Optional[str] = None
+
     # PAGERDUTY
     PAGERDUTY_API_TOKEN: str
 
     # GITHUB
-    GITHUB_REPO: str = "abhishekray07/stock-trader"
+    GITHUB_REPO: str
     GITHUB_TOKEN: str
+
+    # CONFLUENCE
+    CONFLUENCE_URL: Optional[str] = None
+    CONFLUENCE_USERNAME: Optional[str] = None
+    CONFLUENCE_API_KEY: Optional[str] = None
+    CONFLUENCE_SPACE_KEY: Optional[str] = None
 
     # LLM
     PREDICTION_CONFIDENCE_THRESHOLD: float = 0.5
     ANTHROPIC_API_KEY: Optional[str] = None
     OPENAI_API_KEY: Optional[str] = None
+
+    # Langfuse
     IS_LANGFUSE_ENABLED: bool = False
     LANGFUSE_PUBLIC_KEY: Optional[str] = None
     LANGFUSE_SECRET_KEY: Optional[str] = None

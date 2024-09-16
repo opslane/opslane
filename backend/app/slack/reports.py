@@ -313,6 +313,20 @@ def create_rca_blocks(rca_result: RCAOutput) -> List[Dict]:
             ]
         )
 
+    if rca_result.runbook_step_results:
+        blocks.extend(
+            [
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f"*Suspicious Runbook Investigation:*\n{rca_result.runbook_step_results}",
+                    },
+                },
+                {"type": "divider"},
+            ]
+        )
+
     if rca_result.remediation:
         remediation_text = "\n".join([f"• {step}" for step in rca_result.remediation])
         blocks.extend(

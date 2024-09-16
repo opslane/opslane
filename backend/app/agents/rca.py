@@ -1,6 +1,6 @@
 """Module for performing Root Cause Analysis on incidents."""
 
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 from langchain.memory import ConversationBufferMemory
 from langchain_core.pydantic_v1 import BaseModel, Field
@@ -35,6 +35,9 @@ class RCAOutput(BaseModel):
     code_changes: List[CodeChange] = Field(
         description="Suspicious code changes based on the alert description and errors in the logs"
     )
+    runbook_step_results: Optional[str] = Field(
+        description="Suspicious activity based on the runbook automation step results"
+    )
     remediation: List[str] = Field(
         description="Recommended remediation steps based on the RCA analysis"
     )
@@ -57,7 +60,10 @@ class RCAAgent(BaseAgent):
                 1. A summary of the incident
                 2. Potential issues found in the log lines. Choose 1-2 log lines that indicate an issue and provide a link to the specific log line in Datadog.
                 3. Any suspicious code changes based on the alert description and errors in the logs. Look at the patches in the code as well.
-                4. Recommended remediation steps based on the RCA analysis if any.
+                4. Suspicious activity based on the runbook automation step results (if any).
+                5. Recommended remediation steps based on the RCA analysis if any.
+
+                If any event or log line occurs around the same time as the alert, the likelihood of being suspicious is high.
 
                 If you can't find anything suspicious, you can leave the fields empty. In the remediation steps, say you couldn't find the root cause.
 
@@ -75,14 +81,18 @@ class RCAAgent(BaseAgent):
                 ),
                 (
                     "human",
-                    "Alert Description: {alert_description}\n\nLog Lines:\n{log_lines}\n\nRecent Code Changes:\n{code_changes}",
+                    "Alert Description: {alert_description}\n\nLog Lines:\n{log_lines}\n\nRecent Code Changes:\n{code_changes}\n\n Runbook step results: {runbook_results}",
                 ),
             ]
         )
         super().__init__(RCAOutput, prompt)
 
     def run(
-        self, alert_description: str, log_lines: str, code_changes: str
+        self,
+        alert_description: str,
+        log_lines: str,
+        code_changes: str,
+        runbook_results: str,
     ) -> Dict[str, Any]:
         """
         Perform Root Cause Analysis based on the provided information.
@@ -100,16 +110,10 @@ class RCAAgent(BaseAgent):
             "alert_description": alert_description,
             "log_lines": log_lines,
             "code_changes": code_changes,
+            "runbook_results": runbook_results,
         }
 
         return self.run_chain(input_data)
-
-        # Save context and output to memory
-        self.memory.save_context(
-            {"input": f"Alert: {alert_description}"}, {"output": str(result["parsed"])}
-        )
-
-        return result["parsed"]
 
 
 rca_agent = RCAAgent()

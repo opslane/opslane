@@ -12,7 +12,7 @@ SIMILARITY_THRESHOLD = 0.25
 
 
 @tool
-def fetch_relevant_documents(alert_description: str) -> str:
+def fetch_relevant_documents(alert_description: str) -> dict:
     """Fetch relevant documents from PGVector store based on the alert description.
 
     Args:
@@ -32,7 +32,6 @@ def fetch_relevant_documents(alert_description: str) -> str:
     # docs_and_scores = vectorstore.similarity_search_with_score(
     #     alert_description, k=NUM_DOCS_TO_RETURN
     # )
-
     docs = vectorstore.max_marginal_relevance_search(
         alert_description, k=NUM_DOCS_TO_RETURN
     )
@@ -40,4 +39,5 @@ def fetch_relevant_documents(alert_description: str) -> str:
     return {
         "title": docs[0].metadata["title"],
         "source": docs[0].metadata["source"],
+        "content": docs[0].page_content,
     }

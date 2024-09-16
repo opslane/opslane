@@ -33,6 +33,7 @@ class BaseAgent:
             api_key=settings.ANTHROPIC_API_KEY,
             model="claude-3-5-sonnet-20240620",
             default_headers={"anthropic-beta": "tools-2024-04-04"},
+            verbose=True,
         )
 
         if len(tools) > 0:
@@ -66,8 +67,8 @@ class BaseAgent:
         Raises:
             ValueError: If there's a parsing error or the tool wasn't invoked.
         """
+
         if tool_output["parsing_error"]:
-            print("Parsing error!")
             raw_output = str(tool_output["raw"].content)
             error = tool_output["parsing_error"]
             raise ValueError(

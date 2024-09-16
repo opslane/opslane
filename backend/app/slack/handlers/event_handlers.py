@@ -1,5 +1,6 @@
 """Event handlers for Slack events."""
 
+import json
 from typing import Any, Dict
 
 # from app.agents.alert_classifier import alert_classifier_rag
@@ -8,9 +9,18 @@ from typing import Any, Dict
 
 from app.agents.rca import rca_agent
 from app.agents.pagerduty import pagerduty_agent
+from app.agents.runbook_automation import (
+    runbook_automation_agent,
+    runbook_analyzer_agent,
+)
+from app.core.config import settings
+from app.tools.api_spec import get_api_spec
+from app.tools.code_execution import execute_generated_code
 from app.tools.confluence import fetch_relevant_documents
 from app.tools.datadog import fetch_datadog_logs
 from app.tools.github import get_latest_git_changes
+from app.vendors import get_api_key
+
 
 # from app.schemas.alert import SeverityLevel
 from app.slack.reports import (
@@ -27,6 +37,14 @@ def register_event_handlers(bot) -> None:
     Args:
         bot (SlackBot): The Slack bot instance.
     """
+
+    async def _update_message(bot, channel_id, message_ts, blocks=None, text=None):
+        await bot.slack_app.client.chat_update(
+            channel=channel_id,
+            ts=message_ts,
+            blocks=blocks,
+            text=text or "Updated results",
+        )
 
     @bot.slack_app.event("member_joined_channel")
     async def handle_member_joined(event: Dict[str, Any], say: Any) -> None:
@@ -84,33 +102,84 @@ def register_event_handlers(bot) -> None:
                         channel=channel_id,
                         thread_ts=thread_ts,
                     )
+                    message_ts = initial_message["ts"]
 
                     # Process the alert
                     pd_result = pagerduty_agent.run(incident_id=incident_id)
 
+                    await _update_message(
+                        bot,
+                        channel_id,
+                        message_ts,
+                        text="Processed the alert. Now fetching runbooks...",
+                    )
+
                     # fetch confluence kb articles
                     document = fetch_relevant_documents(pd_result.alert_summary)
-                    confluence_blocks = create_confluence_blocks(document)
-                    await say(
-                        blocks=confluence_blocks,
-                        text="Confluence",  # Fallback text for notifications
-                        channel=channel_id,
-                        thread_ts=thread_ts,
+                    runbook_steps_results = None
+
+                    if document:
+                        confluence_blocks = create_confluence_blocks(document)
+                        await say(
+                            blocks=confluence_blocks,
+                            text="Confluence",  # Fallback text for notifications
+                            channel=channel_id,
+                            thread_ts=thread_ts,
+                        )
+
+                        await _update_message(
+                            bot,
+                            channel_id,
+                            message_ts,
+                            text="Fetched the runbooks. Now automating the runbook steps...",
+                        )
+
+                        runbook_analyzer_output = runbook_analyzer_agent.run(
+                            runbook_content=document["content"]
+                        )
+
+                        if runbook_analyzer_output.external_service_name:
+                            external_service_name = (
+                                runbook_analyzer_output.external_service_name
+                            )
+                            api_spec = get_api_spec(external_service_name)
+                            api_key = get_api_key(external_service_name)
+
+                            runbook_automation = runbook_automation_agent.run(
+                                document["content"], api_spec
+                            )
+
+                            runbook_steps_results = execute_generated_code(
+                                code=runbook_automation.generated_code,
+                                api_key=api_key,
+                            )
+
+                            if runbook_automation.status_page_summary:
+                                await say(
+                                    text=f"External Vendor Status Page: {runbook_automation.status_page_summary}",
+                                    channel=channel_id,
+                                    thread_ts=thread_ts,
+                                )
+
+                    await _update_message(
+                        bot,
+                        channel_id,
+                        message_ts,
+                        text="Analyzing root cause using logs and git changes...",
                     )
 
                     # fetch the logs from datadog
                     logs = fetch_datadog_logs(pd_result.query)
 
                     # fetch the git changes
-                    git_changes = get_latest_git_changes(
-                        repo_name="abhishekray07/stock-trader"
-                    )
+                    git_changes = get_latest_git_changes(repo_name=settings.GITHUB_REPO)
 
                     # Run the RCA agent
                     rca_result = rca_agent.run(
                         alert_description=pd_result.alert_summary,
                         log_lines=logs,
                         code_changes=git_changes,
+                        runbook_results=runbook_steps_results,
                     )
 
                     blocks = create_rca_blocks(rca_result)
@@ -121,6 +190,13 @@ def register_event_handlers(bot) -> None:
                         text="Root Cause Analysis Results",  # Fallback text for notifications
                         channel=channel_id,
                         thread_ts=thread_ts,
+                    )
+
+                    await _update_message(
+                        bot,
+                        channel_id,
+                        message_ts,
+                        text="Root cause analysis data updated.",
                     )
 
         #         alert_id = event["metadata"]["event_payload"]["event_id"]
