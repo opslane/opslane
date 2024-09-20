@@ -17,9 +17,9 @@
 
 Opslane is an open-source tool designed to make the on-call experience less stressful.
 
-It leverages AI to reduce alert fatigue, provide contextual information, and automate routine tasks.
+It leverages AI to reduce alert fatigue, provide contextual information, and automate root cause analysis.
 
-[![Demo CountPages alpha](./assets/opslane-demo.gif)](https://youtu.be/m_K9Dq1kZDw)
+[![Demo CountPages alpha](./assets/opslane-demo-rca.gif)](https://youtu.be/F1qaIgV_-kg)
 
 ## Why did we build Opslane?
 
@@ -50,27 +50,29 @@ Opslane is currently in beta. We are actively working on improving the product a
   - [ ] Identify patterns in alert frequency and timing
   - [X] One-click option to silence noisy alerts
 
-- [ ] **Root Cause Analysis**
-  - [ ] Correlate issues across multiple systems
-  - [ ] Automate initial debugging steps
-  - [ ] Suggest potential root causes
+- [X] **Root Cause Analysis**
+  - [X] Correlate issues across multiple systems
+  - [X] Automate initial debugging steps
+  - [X] Suggest potential root causes
 
-- [ ] **Runbook Automation**
-  - [ ] Automate common incident resolution steps using runbooks
+- [X] **Runbook Automation**
+  - [X] Automate common incident resolution steps using runbooks
 
 - [ ] **Gruntwork Automation**
   - [ ] Generate on-call handoff documents
   - [ ] Integrate with PagerDuty/OpsGenie for scheduling overrides
   - [ ] Automatically update Slack with current on-call engineer
 
-- [ ] **Slack Integration**
+- [X] **Slack Integration**
   - [X] Operate directly in your alert Slack channels
   - [X] Provide insights and debugging resources in-context
 
 
 ## Integrations
 
-We use a flexible data model so that we can support multiple integrations. Currently, Opslane supports Datadog.
+We use a flexible data model so that we can support multiple integrations. Currently, Opslane supports Datadog and PagerDuty.
+
+We are actively working on adding integrations to the Grafana stack.
 
 ## Installation
 

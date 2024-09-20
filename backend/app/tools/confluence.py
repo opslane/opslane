@@ -28,10 +28,6 @@ def fetch_relevant_documents(alert_description: str) -> dict:
         use_jsonb=True,
     )
 
-    # Perform similarity search with scores
-    # docs_and_scores = vectorstore.similarity_search_with_score(
-    #     alert_description, k=NUM_DOCS_TO_RETURN
-    # )
     docs = vectorstore.max_marginal_relevance_search(
         alert_description, k=NUM_DOCS_TO_RETURN
     )
