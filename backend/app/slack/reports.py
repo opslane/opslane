@@ -370,3 +370,47 @@ def create_confluence_blocks(document: dict) -> List[Dict]:
         },
         {"type": "divider"},
     ]
+
+def build_explanation_blocks(alert: Dict[str, Any], result: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Build Slack blocks for alert classification explanation."""
+    explanation = result.get("explanation", {})
+    feature_importance = explanation.get("feature_importance", {})
+    
+    # Format top contributing factors
+    # here
+    factors_text = ""
+    for feature, importance in list(feature_importance.items())[:3]:
+        readable_feature = feature.replace("_", " ").title()
+        importance_pct = f"{abs(importance)*100:.1f}%"
+        factors_text += f"• {readable_feature}: {importance_pct}\n"
+
+    blocks = [
+        {
+            "type": "header",
+            "text": {
+                "type": "plain_text",
+                "text": "🔍 Alert Classification Explanation"
+            }
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*Alert:* {alert.get('title', 'N/A')}\n"
+                       f"*Classification:* {'Actionable' if result.get('is_actionable') == 'True' else 'Non-actionable'}\n"
+                       f"*Confidence:* {result.get('confidence', 0)*100:.1f}%"
+            }
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*Top Contributing Factors:*\n{factors_text}"
+            }
+        },
+        {
+            "type": "divider"
+        }
+    ]
+    
+    return blocks

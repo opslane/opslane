@@ -4,6 +4,8 @@ import os
 from typing import Dict, Any, Optional
 
 import joblib
+from shap import TreeExplainer
+import numpy as np
 
 from app.services.alert import get_alert_configuration_stats
 from app.core.config import settings
@@ -18,6 +20,7 @@ class AlertClassifier:
         self.model_path = "alert_classifier_model.joblib"
         self.last_loaded_time = 0
         self._load_model()
+        self.explainer: Optional[TreeExplainer] = None
 
     def _load_model(self):
         """Attempt to load the trained model if it exists or has been updated."""
@@ -37,15 +40,20 @@ class AlertClassifier:
             print(f"Model file not found: {self.model_path}")
             self.model = None
 
+    def _initialize_explainer(self) -> None:
+        """Initialize SHAP explainer if model is loaded and explainer doesn't exist."""
+        if self.model and not self.explainer:
+            self.explainer = TreeExplainer(self.model)
+
     def classify(self, alert: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Classify an alert as actionable or not.
+        Classify an alert as actionable or not and provide SHAP explanations.
 
         Args:
             alert (Dict[str, Any]): The alert data to classify.
 
         Returns:
-            Dict[str, Any]: Classification result including actionability, confidence, and contributing factors.
+            Dict[str, Any]: Classification result including actionability, confidence, contributing factors, and SHAP explanations.
         """
         self._load_model()  # Check and load the model if necessary
 
@@ -84,11 +92,18 @@ class AlertClassifier:
                 "factors": {},
             }
 
-        return {
+        original_result = {
             "is_actionable": str(is_actionable),
             "confidence": float(confidence),
             "factors": self._get_contributing_factors(features),
         }
+
+        # Add SHAP explanations if classification was successful
+        if original_result.get("error") is None:
+            explanation = self._explain_prediction(features)
+            original_result["explanation"] = explanation
+
+        return original_result
 
     def _get_contributing_factors(self, features: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -103,6 +118,36 @@ class AlertClassifier:
         # You can implement logic here to determine contributing factors
         # For now, we'll just return the features
         return features
+
+    def _explain_prediction(self, features: Dict[str, Any]) -> Dict[str, Any]:
+        """Generate SHAP explanation for the prediction."""
+        self._initialize_explainer()
+        
+        if not self.explainer:
+            return {}
+
+        feature_values = [features[feature] for feature in self.model.feature_names_in_]
+        shap_values = self.explainer.shap_values(feature_values)
+
+        if isinstance(shap_values, list):
+            shap_values = shap_values[1]
+
+        feature_importance = {}
+        for idx, feature_name in enumerate(self.model.feature_names_in_):
+            feature_importance[feature_name] = float(abs(shap_values[idx]))
+
+        sorted_features = dict(sorted(
+            feature_importance.items(), 
+            key=lambda x: abs(x[1]), 
+            reverse=True
+        ))
+
+        return {
+            "feature_importance": sorted_features,
+            "base_value": float(self.explainer.expected_value if isinstance(self.explainer.expected_value, float) 
+                              else self.explainer.expected_value[1]),
+            "top_contributors": list(sorted_features.keys())[:3]
+        }
 
 
 # Create a single instance of the classifier to be used throughout the application

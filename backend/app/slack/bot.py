@@ -11,6 +11,9 @@ from app.slack.handlers.event_handlers import register_event_handlers
 from app.slack.handlers.command_handlers import register_command_handlers
 from app.slack.handlers.action_handlers import register_action_handlers
 from app.slack.utils import get_allowed_bot_ids
+from app.ml.alert_classifier import AlertClassifier
+from app.ml.utils import get_alert_by_id
+from app.slack.reports import build_explanation_blocks
 
 
 class SlackBot:
@@ -64,6 +67,42 @@ class SlackBot:
         register_event_handlers(self)
         register_command_handlers(self)
         register_action_handlers(self)
+        self.slack_app.action("explain_alert")(self.handle_alert_explanation_request)
+
+    async def handle_alert_explanation_request(
+        self,
+        client,
+        body,
+        alert_id: str,
+        classifier: AlertClassifier
+    ):
+        """Handle requests for alert classification explanations."""
+        try:
+            # Get alert details
+            alert = await get_alert_by_id(alert_id)
+            if not alert:
+                await client.chat_postMessage(
+                    channel=body["channel_id"],
+                    text="❌ Alert not found"
+                )
+                return
+
+            # Get classification with explanation
+            result = classifier.classify(alert)
+            
+            # Build explanation message
+            blocks = build_explanation_blocks(alert, result)
+            
+            await client.chat_postMessage(
+                channel=body["channel_id"],
+                blocks=blocks
+            )
+        except Exception as e:
+            logger.error(f"Error handling explanation request: {e}")
+            await client.chat_postMessage(
+                channel=body["channel_id"],
+                text="❌ Error generating explanation"
+            )
 
 
 slack_bot: SlackBot = SlackBot()
