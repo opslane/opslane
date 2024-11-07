@@ -377,6 +377,7 @@ def build_explanation_blocks(alert: Dict[str, Any], result: Dict[str, Any]) -> L
     feature_importance = explanation.get("feature_importance", {})
     
     # Format top contributing factors
+    # here
     factors_text = ""
     for feature, importance in list(feature_importance.items())[:3]:
         readable_feature = feature.replace("_", " ").title()
