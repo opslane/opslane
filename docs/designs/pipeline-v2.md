@@ -90,8 +90,8 @@ On the next run, the Setup Writer reads this and generates correct SQL without f
 
 | Item | Rationale |
 |------|-----------|
-| Cloud execution | Phase 2 — requires server infrastructure |
-| PR comment integration | Phase 2 — depends on cloud execution |
+| Cloud execution | Out of scope — server removed, local-only direction |
+| PR comment integration | Out of scope — depends on cloud execution |
 | Multi-ORM setup (Drizzle, TypeORM) | Ships after v2 (tracked in TODOS.md) |
 | Eval infrastructure for v2 stages | Ships after v2 (tracked in TODOS.md) |
 | Run comparison / --diff mode | Primarily eval-phase tool, JSON diff suffices |
@@ -103,8 +103,6 @@ On the next run, the Setup Writer reads this and generates correct SQL without f
 ## Dream State Delta
 
 ```
-12-MONTH IDEAL:  Push to GitHub → pipeline runs in cloud → PR comment with verdicts
-THIS PLAN:       Local CLI with TypeScript pipeline, learning loop, structured logging
-DELTA:           Cloud execution + PR integration remain. Architecture supports both.
-                 ~60% of the way to the ideal.
+CURRENT FOCUS:   Local CLI with TypeScript pipeline, learning loop, structured logging
+FUTURE:          CI mode with --ci flag + gh api for PR comments (no server needed)
 ```
