@@ -42,9 +42,10 @@ if (command === "init") {
   // Update .gitignore
   const gitignorePath = join(projectDir, ".gitignore");
   const patterns = [
-    ".verify/config.json", ".verify/evidence/", ".verify/prompts/",
-    ".verify/report.json", ".verify/report.html",
-    ".verify/progress.jsonl",
+    ".verify/config.json", ".verify/auth.json", ".verify/app.json",
+    ".verify/seed-data.txt", ".verify/runs/", ".verify/evidence/",
+    ".verify/prompts/", ".verify/report.json", ".verify/browse.json",
+    ".verify/report.html", ".verify/progress.jsonl",
   ];
   let gitignore = existsSync(gitignorePath) ? readFileSync(gitignorePath, "utf-8") : "";
   for (const p of patterns) {

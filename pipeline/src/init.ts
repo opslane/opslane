@@ -1,7 +1,7 @@
 // pipeline/src/init.ts — Preflight checks (run before any LLM call)
 import { existsSync } from "node:fs";
 
-interface CheckResult {
+export interface CheckResult {
   ok: boolean;
   error?: string;
 }
