@@ -6,25 +6,25 @@ Deferred work captured from plan reviews. Each item includes enough context to p
 
 ## ~~P2 — Demo PR auto-close~~ SUPERSEDED
 
-> Server being removed. No server-side PR handling.
+> Server being removed in a separate branch. No server-side PR handling.
 
 ---
 
 ## ~~P2 — /config command for ongoing config edits~~ SUPERSEDED
 
-> Server being removed. Config is now `.verify/config.json` written by the inline `/verify-setup` skill.
+> Server being removed in a separate branch. Config is now `.verify/config.json` written by the inline `/verify-setup` skill.
 
 ---
 
 ## ~~P3 — org_id-based ownership check on POST /auth/installed~~ SUPERSEDED
 
-> Server being removed.
+> Server being removed in a separate branch.
 
 ---
 
 ## ~~P3 — Rate limiting on /auth/status and POST /auth/installed~~ SUPERSEDED
 
-> Server being removed.
+> Server being removed in a separate branch.
 
 ---
 

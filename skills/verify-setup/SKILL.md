@@ -31,19 +31,12 @@ If `.gitignore` didn't exist, create it with `.verify/` as the first line.
 
 ### Step 2: Detect dev server port
 
-Read the project's `package.json` and look at the `scripts.dev`, `scripts.start`, and `scripts.serve` entries for port numbers. Check for:
+Find the dev server port. Check in this order:
+1. `package.json` scripts (`dev`, `start`, `serve`) — look for `-p`, `--port`, or `PORT=` flags
+2. `.env.local`, `.env.development`, `.env` — look for `PORT=XXXX`
+3. Framework configs (`vite.config.*`, `next.config.*`) — look for port settings
 
-- Flags like `-p 3000`, `--port 5173`, `--port=8080`
-- Inline env vars like `PORT=3000`
-
-If no port found in package.json, check these files in order:
-- `.env.local`, `.env.development`, `.env` — look for `PORT=XXXX`
-- `vite.config.ts`, `vite.config.js`, `vite.config.mjs` — look for `server.port` or `port:` in the config
-- `docker-compose.yml` — look for port mappings like `"3000:3000"`
-
-If the detected port is `0`, warn the user: "Port 0 means the OS picks a random port. Please tell me the actual port your dev server runs on."
-
-If no port is found in any file, default to `3000` and tell the user.
+If the detected port is `0`, warn the user and ask for the actual port. If no port found, default to `3000` and tell the user.
 
 ### Step 3: Ping the dev server
 
@@ -104,12 +97,7 @@ Find the e2e/integration test suite in this project. Look for:
 
 This may be a monorepo. Check under `packages/`, `apps/`, `tests/`, `e2e/`.
 
-For each test file, extract:
-- URLs from `page.goto()`, `cy.visit()`, or equivalent navigation calls
-- Selectors from `page.locator()`, `page.getByTestId()`, `page.getByRole()`, `cy.get()`, etc.
-- If tests use Page Object Models or helper files, follow the imports to resolve actual selectors
-
-Group selectors by the URL/page they're used on. Keep it compact, max 10 selectors per page. Prefer `data-testid` and role selectors.
+For each test file, extract the URLs navigated to and selectors used. Group selectors by URL/page. Keep it compact — max 10 selectors per page. Prefer `data-testid` and role selectors.
 
 Build a JSON object with this schema:
 ```json
@@ -124,17 +112,15 @@ Merge the routes and pages into a single JSON object and write it using the Writ
 
 ```json
 {
-  "indexed_at": "2026-04-11T12:00:00.000Z",
+  "indexed_at": "<current ISO timestamp>",
   "routes": { ... },
   "pages": { ... }
 }
 ```
 
-Use the current ISO timestamp for `indexed_at`.
-
 ### Step 8: Configure Playwright MCP
 
-Check if Playwright MCP is already configured by attempting to use any Playwright MCP tool (e.g., list resources from the playwright server).
+Check if Playwright MCP is already configured: use `ListMcpResourcesTool` with `server="playwright"`. If it returns results, Playwright is configured.
 
 If not configured, tell the user:
 
