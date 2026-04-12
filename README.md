@@ -6,21 +6,8 @@ A verification layer for Claude Code. Reads your spec, runs a browser agent agai
 
 ### Prerequisites
 
-- Node 22+
 - Claude Code with OAuth login (`claude login`)
 - Playwright MCP configured (see below)
-
-```bash
-npx @opslane/verify --version
-```
-
-**Manual (contributors):**
-```bash
-git clone https://github.com/opslane/verify.git
-cd verify/pipeline && npm install
-```
-
-> Manual clone gives you the pipeline CLI but not the `/verify` slash commands. See [CLAUDE.md](./CLAUDE.md) for contributor setup.
 
 ## Usage
 
@@ -34,17 +21,9 @@ cd verify/pipeline && npm install
 /verify
 ```
 
+`/verify-setup` auto-detects your dev server port, indexes routes and selectors from your codebase, and writes `.verify/config.json` + `.verify/app.json`. No npm install needed.
+
 `/verify` asks for your spec, reviews it for ambiguities, then verifies each acceptance criterion using Playwright MCP. Results appear inline with screenshots.
-
-### CLI (setup only)
-
-```bash
-# One-time setup (auto-detects dev server, indexes app)
-npx @opslane/verify init
-
-# Re-index the app after schema/route changes
-npx @opslane/verify index --project-dir .
-```
 
 ### Playwright MCP Setup
 
