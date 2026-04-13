@@ -1,17 +1,4 @@
-# Verify pipeline — secrets and artifacts (config.json is committed)
-.verify/auth.json
-.verify/evidence/
-.verify/prompts/
-.verify/report.json
-.verify/plan.json
-.verify/.spec_path
-.verify/chrome-profile/
-.verify/*.txt
-.verify/*.log
-.verify/config.json
-.verify/progress.jsonl
-.verify/report.html
-.verify/spec.md
+.verify/
 .playwright-mcp/
 docs/evals/
 .worktrees/
@@ -19,9 +6,6 @@ node_modules/
 .env
 .env.local
 .gstack/
-pipeline/dist/
-pipeline/spike-*-output*/
-pipeline/spikes/
 .claude/worktrees/
 .claude/projects/
 .tmp-merge-backup/

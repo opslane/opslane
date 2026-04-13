@@ -3,7 +3,7 @@ opslane/verify — automated acceptance criteria verification for Claude Code ch
 
 ## Architecture
 ```
-/verify-setup → init (port detection + 2 LLM agents → app.json)
+/verify-setup → Claude reads project files → .verify/config.json + app.json
 /verify → spec interpreter → AC extractor → Playwright MCP verification → report
 ```
 Config lives in `.verify/config.json`. App index lives in `.verify/app.json`. Env vars always override config.
@@ -13,8 +13,7 @@ Config lives in `.verify/config.json`. App index lives in `.verify/app.json`. En
 The skills in `skills/` are the source of truth. A `PostToolUse` hook (`.claude/hooks/sync-skill.sh`) automatically copies them to `~/.claude/skills/` after every Write or Edit. Never edit `~/.claude/skills/verify/SKILL.md` directly — edit the project copy instead.
 
 ## Module-specific instructions
-- For pipeline work, see `pipeline/CLAUDE.md`
+- For server work, see `server/CLAUDE.md`
 
 ## References
 - Design docs and implementation plans: `docs/plans/`
-- Prompt templates: `pipeline/src/prompts/`
