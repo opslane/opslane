@@ -166,10 +166,10 @@ Present the AC list to the user: "I've extracted N acceptance criteria. Here's t
 
 For each extracted AC, dispatch a variant-generator subagent. This is a generation-only step; variants are verified in Phase 2.
 
-**Invocation:** Use the `Agent` tool with:
+**Invocation:** Use the `Task` tool with:
 - `subagent_type`: `"general-purpose"`
 - `description`: `"Adversarial variant generation"`
-- Timeout: 60 seconds (enforced at skill level — if subagent takes longer, treat as failure per constraint #13)
+- On Task-tool default timeout, record `[]` for this AC and continue (constraint #13)
 
 **Prompt:**
 
@@ -298,24 +298,24 @@ Skip this step if:
 **Re-read variants for this AC** (skill is stateless across ACs):
 
 ```bash
-VARIANTS=$(jq --arg ac "$AC_ID" '.[$ac] // []' .verify/runs/$RUN_ID/variants.json)
+VARIANTS=$(jq --arg ac "{ac_id}" '.[$ac] // []' .verify/runs/$RUN_ID/variants.json)
 ```
 
 If `$VARIANTS` is `[]` or empty, skip to step 8.
 
 For each variant `v` in `$VARIANTS`:
 
-a. **Execute variant** using Playwright MCP primitives with a **6-command budget** (constraint #9). Stop and write best-guess verdict at command 6.
+a. **Execute variant** — read `steps` and `expected` from the variant object; execute `steps` in order using Playwright MCP primitives within a **6-command budget** (constraint #9). At command 6, write best-guess verdict and stop. Judge the final observed state against `expected`.
 
 b. **Judge result** using the same vocabulary: `pass`, `fail`, `blocked`, `unclear`, `error`, `timeout`, `skipped`. A variant's `error`/`timeout` verdict does not cascade (constraint #13).
 
 c. **Write variant result:**
 
    ```bash
-   mkdir -p .verify/runs/$RUN_ID/evidence/$AC_ID/adversarial/$VARIANT_ID
+   mkdir -p .verify/runs/$RUN_ID/evidence/{ac_id}/adversarial/{variant_id}
    ```
 
-   Use the Write tool to create `.verify/runs/$RUN_ID/evidence/$AC_ID/adversarial/$VARIANT_ID/result.json`:
+   Use the Write tool to create `.verify/runs/$RUN_ID/evidence/{ac_id}/adversarial/{variant_id}/result.json`:
 
    ```json
    {
@@ -398,7 +398,7 @@ These rules are battle-tested from 15+ real verification runs:
 
 8. **ALWAYS WRITE RESULT:** Before moving to the next AC, you MUST write the result JSON. A partial result is better than no result.
 
-9. **ADVERSARIAL BUDGET:** 6 Playwright commands per variant max. If 5 commands used and result unresolved, write best-guess verdict and move on.
+9. **ADVERSARIAL BUDGET:** 6 Playwright commands per variant max. At command 6, write best-guess verdict and stop.
 
 10. **ADVERSARIAL IS READ-ONLY (extends #6):** Variants must not submit forms or click Save/Submit/Delete/Create/Remove/Publish/Confirm buttons. The generator prompt enforces this.
 
