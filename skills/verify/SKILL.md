@@ -289,6 +289,53 @@ For EACH acceptance criterion, follow this sequence:
    }
    ```
 
+7b. **Verify adversarial variants (if `adversarial_enabled` and happy-path verdict == `pass`)**
+
+Skip this step if:
+- `adversarial_enabled` is false
+- Happy-path verdict for this AC is not `pass` (constraint #12)
+
+**Re-read variants for this AC** (skill is stateless across ACs):
+
+```bash
+VARIANTS=$(jq --arg ac "$AC_ID" '.[$ac] // []' .verify/runs/$RUN_ID/variants.json)
+```
+
+If `$VARIANTS` is `[]` or empty, skip to step 8.
+
+For each variant `v` in `$VARIANTS`:
+
+a. **Execute variant** using Playwright MCP primitives with a **6-command budget** (constraint #9). Stop and write best-guess verdict at command 6.
+
+b. **Judge result** using the same vocabulary: `pass`, `fail`, `blocked`, `unclear`, `error`, `timeout`, `skipped`. A variant's `error`/`timeout` verdict does not cascade (constraint #13).
+
+c. **Write variant result:**
+
+   ```bash
+   mkdir -p .verify/runs/$RUN_ID/evidence/$AC_ID/adversarial/$VARIANT_ID
+   ```
+
+   Use the Write tool to create `.verify/runs/$RUN_ID/evidence/$AC_ID/adversarial/$VARIANT_ID/result.json`:
+
+   ```json
+   {
+     "variant_id": "ac1_adv1",
+     "parent": "ac1",
+     "type": "adversarial",
+     "category": "input_boundary",
+     "verdict": "pass",
+     "confidence": "high",
+     "reasoning": "What you observed and why",
+     "observed": "Exact text/state on the page",
+     "steps_taken": ["..."],
+     "screenshots": ["screenshot-filename.png"]
+   }
+   ```
+
+   Constraint #8 (ALWAYS WRITE RESULT) applies — write before moving on.
+
+d. **Move to next variant.** Do NOT reset the browser.
+
 8. **Move to next AC.** Do NOT close or reset the browser between ACs.
 
 ### Phase 3: Report Results
