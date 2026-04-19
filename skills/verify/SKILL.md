@@ -340,27 +340,41 @@ d. **Move to next variant.** Do NOT reset the browser.
 
 ### Phase 3: Report Results
 
-After all ACs are verified:
+After all ACs and variants are verified:
 
-1. Read each `result.json` from the evidence subdirectories and show inline summary:
+1. **Read all result.json files** from `.verify/runs/$RUN_ID/evidence/` recursively. Classify each as `happy_path` (direct child of `evidence/{ac_id}/`) or `adversarial` (under `evidence/{ac_id}/adversarial/{variant_id}/`).
 
-   For each AC:
-   - `pass` → "✓ ac1: pass"
-   - anything else → "✗ ac2: fail — [first 100 chars of reasoning]"
+2. **Print two-bucket summary to the user:**
 
-2. Write combined `verdicts.json` using the Write tool to `.verify/runs/$RUN_ID/verdicts.json`:
+   ```
+   HAPPY PATH (gating)
+   ✓ ac1: pass
+   ✗ ac2: fail — [first 100 chars of reasoning]
+
+   ADVERSARIAL WARNINGS (informational, does not block push)
+   ⚠ ac1_adv2 (input_boundary): fail — [first 100 chars]
+   ⚠ ac1_adv3 (navigation_recovery): fail — [first 100 chars]
+
+   Summary: X/Y happy-path passed. Z adversarial warnings.
+   ```
+
+   If no adversarial variants ran (disabled or all empty), omit the ADVERSARIAL WARNINGS section entirely.
+
+3. **Write combined `verdicts.json`** to `.verify/runs/$RUN_ID/verdicts.json`:
 
    ```json
    {
      "run_id": "{RUN_ID}",
+     "adversarial_enabled": true,
      "verdicts": [
-       {"ac_id": "ac1", "verdict": "pass", "confidence": "high", "reasoning": "..."},
-       {"ac_id": "ac2", "verdict": "fail", "confidence": "high", "reasoning": "..."}
+       {"ac_id": "ac1", "type": "happy_path", "verdict": "pass", "reasoning": "..."},
+       {"ac_id": "ac1_adv1", "type": "adversarial", "parent": "ac1", "category": "input_boundary", "verdict": "pass", "reasoning": "..."},
+       {"ac_id": "ac2", "type": "happy_path", "verdict": "fail", "reasoning": "..."}
      ]
    }
    ```
 
-3. Show pass/fail summary counts.
+   Every verdict entry MUST have a `type` field. Adversarial entries MUST have `parent` and `category`.
 
 ---
 
@@ -406,6 +420,8 @@ These rules are battle-tested from 15+ real verification runs:
 | Auth redirect on all ACs | "Auth cookies expired. Re-run `/verify-setup` to import fresh cookies." |
 | Playwright command timeout | Write `timeout` for current AC, continue to next |
 | All ACs blocked | "Check dev server and auth. Run `/verify-setup` to reconfigure." |
+| Generator subagent failure | Log, set variants[ac_id] = [], continue (constraint #13) |
+| Variant timeout | Write timeout verdict, continue to next variant (constraint #13) |
 
 ---
 
@@ -417,4 +433,5 @@ These rules are battle-tested from 15+ real verification runs:
 /verify path/to/spec.md             # run with specific spec
 cat .verify/runs/*/verdicts.json    # check verdicts
 ls .verify/runs/*/evidence/         # browse evidence (each AC has a subdirectory)
+jq '.verdicts[] | select(.type=="adversarial" and .verdict=="fail")' .verify/runs/*/verdicts.json  # adversarial warnings only
 ```
