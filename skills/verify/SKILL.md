@@ -134,6 +134,16 @@ Read the spec content and any clarifications. Also read context files if they ex
 - `.verify/seed-data.txt` — actual database records, use for specific data references (limit: first 8000 chars)
 - `.verify/learnings.md` — corrections from past verification runs
 
+**Read adversarial flag** — parse `.verify/config.json` and set `adversarial_enabled`:
+
+Default: `true` (adversarial runs always-on unless explicitly disabled).
+
+```bash
+ADVERSARIAL=$(cat .verify/config.json 2>/dev/null | grep -o '"adversarial"[[:space:]]*:[[:space:]]*[a-z]*' | grep -oE '(true|false)' || echo "true")
+```
+
+If `$ADVERSARIAL` is `false`, skip Phase 1b and all adversarial steps in Phase 2 and 3. Happy-path flow is unchanged.
+
 Extract testable ACs. Each AC must be concrete enough for browser verification:
 
 **AC quality standard — this is critical:**
@@ -151,6 +161,64 @@ USE THE ROUTES. If app routes show `/t/personal_xyz/settings/document`, referenc
 - NEVER use template variables like {envId}, {orgId} — resolve to actual values from routes or seed data
 
 Present the AC list to the user: "I've extracted N acceptance criteria. Here's the plan: [list ACs]. Starting verification now."
+
+### Phase 1b: Generate Adversarial Variants (if `adversarial_enabled`)
+
+For each extracted AC, dispatch a variant-generator subagent. This is a generation-only step; variants are verified in Phase 2.
+
+**Invocation:** Use the `Agent` tool with:
+- `subagent_type`: `"general-purpose"`
+- `description`: `"Adversarial variant generation"`
+- Timeout: 60 seconds (enforced at skill level — if subagent takes longer, treat as failure per constraint #13)
+
+**Prompt:**
+
+> You are an adversarial test-case generator for a web app acceptance criterion. You generate test steps only — you do NOT execute them.
+>
+> Input:
+> - AC description: {ac_description}
+> - Current page snapshot (accessibility tree): {snapshot}
+> - Seed data (real DB records): {seed_data}
+> - Known app routes: {routes}
+>
+> Task: Generate exactly 3 **READ-ONLY** edge-case variants of this AC. Pick from these categories:
+> - `input_boundary`: empty, very long (10k chars), unicode, whitespace-only, special chars — ONLY on filter/search/read-side inputs (no submit that creates or modifies records).
+> - `navigation_recovery`: back-button out of a form or modal; rapid-click on non-mutating controls (sort, filter, pagination); deep-link to a page then navigate away and return.
+>
+> HARD RULES:
+> - Variants MUST NOT create, update, or delete any app data.
+> - Variants MUST NOT click "Save", "Submit", "Delete", "Create", "Remove", "Publish", or "Confirm" buttons.
+> - Variants MUST be executable with exactly these Playwright MCP primitives: `mcp__playwright__browser_navigate`, `browser_navigate_back`, `browser_snapshot`, `browser_click`, `browser_type`, `browser_hover`, `browser_press_key`, `browser_wait_for`, `browser_take_screenshot`. There is no refresh primitive.
+>
+> Output: a JSON array of exactly 3 objects. No prose before or after. Schema:
+> ```json
+> [
+>   {
+>     "variant_id": "ac1_adv1",
+>     "category": "input_boundary",
+>     "description": "Human-readable edge case description",
+>     "steps": ["navigate /path", "click ref_search", "type 10000 chars", "snapshot"],
+>     "expected": "Falsifiable observation"
+>   }
+> ]
+> ```
+
+**Handling generator output per AC:**
+- If response parses as a JSON array of length 3 → use it
+- If length > 3 → truncate to first 3
+- If length 0–2 → accept as-is
+- If malformed JSON, empty response, timeout, or error → store `[]` for this AC, continue (constraint #13)
+
+**Persist variants to disk** — the skill is stateless prose; Phase 2 must re-read per AC. After all ACs processed, write `.verify/runs/$RUN_ID/variants.json`:
+
+```json
+{
+  "ac1": [{"variant_id": "ac1_adv1", "category": "input_boundary", "description": "...", "steps": [...], "expected": "..."}],
+  "ac2": []
+}
+```
+
+Present variant count to user alongside the AC list: "Generated M adversarial variants across N ACs. Starting verification now."
 
 ### Phase 2: Verify Each AC with Playwright MCP
 
