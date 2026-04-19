@@ -269,6 +269,16 @@ These rules are battle-tested from 15+ real verification runs:
 
 8. **ALWAYS WRITE RESULT:** Before moving to the next AC, you MUST write the result JSON. A partial result is better than no result.
 
+9. **ADVERSARIAL BUDGET:** 6 Playwright commands per variant max. If 5 commands used and result unresolved, write best-guess verdict and move on.
+
+10. **ADVERSARIAL IS READ-ONLY (extends #6):** Variants must not submit forms or click Save/Submit/Delete/Create/Remove/Publish/Confirm buttons. The generator prompt enforces this.
+
+11. **ADVERSARIAL NEVER BLOCKS:** Adversarial failures are informational warnings. The summary must clearly mark them as informational. Never tell the user to "fix this before pushing" for an adversarial verdict.
+
+12. **SKIP ADVERSARIAL ON NON-PASS:** If a happy-path AC verdict is not `pass`, do not run its variants. Adversarial is only meaningful after the happy path succeeds.
+
+13. **ADVERSARIAL FAILURES ARE ISOLATED:** Generator subagent errors, timeouts, or malformed output set `variants[ac_id] = []` and continue. A variant's `error`, `timeout`, or `blocked` verdict never cascades to sibling variants or to the parent AC.
+
 ---
 
 ## Error Handling
