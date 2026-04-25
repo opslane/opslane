@@ -93,6 +93,17 @@ See [CHANGELOG.md](./CHANGELOG.md) for the full release history.
 - Inline `/verify-setup` skill (no CLI binary)
 - Playwright MCP-based `/verify` (one-command install)
 
+## FAQ
+
+**How is this different from Playwright alone?**
+Playwright is a browser library — you still write tests, run them, maintain them. Verify takes a PM ticket and executes intent-level checks via Claude + Playwright. No test code to write, no selectors to maintain, no CI to wire up.
+
+**What about auth?**
+`/verify-setup` initializes Playwright with `--storage-state .verify/auth.json --isolated`. On first `/verify` run, the skill walks you through logging in once and re-uses the session for every subsequent run.
+
+**What about flaky selectors?**
+The browser agent does intent-based navigation (clicks "the submit button"), not brittle CSS selectors. If something does break, `.verify/runs/<run_id>/evidence/<ac_id>/` has the video + trace so you can see exactly what happened.
+
 ## Dev setup
 
 See [CLAUDE.md](./CLAUDE.md) for dev commands, conventions, and test instructions.
