@@ -36,6 +36,29 @@ Auto-detects your dev server port, indexes routes and selectors from your codeba
 
 Paste the ticket. Verify reviews it for ambiguities, drives the browser through each requirement via Playwright MCP, and reports pass/fail with screenshots — all inline.
 
+## Example
+
+You paste a ticket like this:
+
+> **As a user, I want to save a draft of my document.**
+>
+> Acceptance criteria:
+> 1. The "Save Draft" button appears on the document edit page
+> 2. Clicking it persists the document state without publishing
+> 3. A confirmation toast appears with text "Draft saved"
+
+Verify drives the browser through each AC and produces a verdict for every one:
+
+```json
+{
+  "ac_1": { "verdict": "pass", "confidence": 0.95, "evidence": "save_draft_button.png" },
+  "ac_2": { "verdict": "pass", "confidence": 0.91, "evidence": "draft_persisted.png" },
+  "ac_3": { "verdict": "fail", "confidence": 0.88, "reasoning": "Toast text was 'Saved' not 'Draft saved'", "evidence": "toast_mismatch.png" }
+}
+```
+
+You see the failing AC inline with the screenshot — before you push.
+
 ## Debugging failures
 
 After a run, evidence lives in `.verify/runs/<run_id>/`:
