@@ -1,37 +1,40 @@
 # Verify
 
-A verification layer for Claude Code. Reads your spec, runs a browser agent against your local dev server for each acceptance criterion, and returns pass/fail with screenshots — before you push. No CI. No infrastructure.
+**Self-serve QA for your PR, before you push.**
 
-## Install
+Paste the ticket. Verify drives a browser against your local dev server and checks each requirement. Pass/fail + screenshots, inline in Claude Code. No CI. No tests to write. No infrastructure.
 
-### Prerequisites
+![Verify report screenshot](docs/report-screenshot.png)
 
-- Claude Code with OAuth login (`claude login`)
-- Playwright MCP configured (see below)
+## Install (90 seconds)
 
-## Usage
+**Prerequisites:** Claude Code with OAuth login (`claude login`).
 
-### Claude Code Skills
+Three commands, in order:
 
-```bash
-# One-time setup — auto-detects dev server, indexes app
-/verify-setup
-
-# Run verification against a spec
-/verify
-```
-
-`/verify-setup` auto-detects your dev server port, indexes routes and selectors from your codebase, and writes `.verify/config.json` + `.verify/app.json`. No npm install needed.
-
-`/verify` asks for your spec, reviews it for ambiguities, then verifies each acceptance criterion using Playwright MCP. Results appear inline with screenshots.
-
-### Playwright MCP Setup
+**1. Add Playwright MCP** (one-time per machine)
 
 ```bash
 claude mcp add playwright -- npx @playwright/mcp@latest --storage-state .verify/auth.json --isolated
 ```
 
-Restart Claude Code after adding the MCP server.
+Restart Claude Code after this command.
+
+**2. Set up the project** (one-time per project, run from your repo root)
+
+```bash
+/verify-setup
+```
+
+Auto-detects your dev server port, indexes routes and selectors from your codebase, and writes `.verify/config.json` + `.verify/app.json`.
+
+**3. Verify a PR** (run anytime)
+
+```bash
+/verify
+```
+
+Paste the ticket. Verify reviews it for ambiguities, drives the browser through each requirement via Playwright MCP, and reports pass/fail with screenshots — all inline.
 
 ## Debugging failures
 
