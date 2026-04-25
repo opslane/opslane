@@ -51,9 +51,9 @@ Verify drives the browser through each AC and produces a verdict for every one:
 
 ```json
 {
-  "ac_1": { "verdict": "pass", "confidence": 0.95, "evidence": "save_draft_button.png" },
-  "ac_2": { "verdict": "pass", "confidence": 0.91, "evidence": "draft_persisted.png" },
-  "ac_3": { "verdict": "fail", "confidence": 0.88, "reasoning": "Toast text was 'Saved' not 'Draft saved'", "evidence": "toast_mismatch.png" }
+  "ac_1": { "verdict": "pass", "confidence": "high", "reasoning": "Save Draft button visible on /docs/edit", "screenshots": ["save_draft_button.png"] },
+  "ac_2": { "verdict": "pass", "confidence": "high", "reasoning": "Draft persisted; reload shows the saved state", "screenshots": ["draft_persisted.png"] },
+  "ac_3": { "verdict": "fail", "confidence": "high", "reasoning": "Toast text was 'Saved' not 'Draft saved'", "screenshots": ["toast_mismatch.png"] }
 }
 ```
 

@@ -6,8 +6,8 @@
     "name": "opslane",
     "url": "https://github.com/opslane"
   },
-  "homepage": "https://github.com/opslane/opslane-v3",
-  "repository": "https://github.com/opslane/opslane-v3",
+  "homepage": "https://github.com/opslane/verify",
+  "repository": "https://github.com/opslane/verify",
   "license": "MIT",
   "mcp_servers": {
     "playwright": {
