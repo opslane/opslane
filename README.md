@@ -72,15 +72,27 @@ Each AC's evidence directory contains:
 - `result.json` — verdict, confidence, reasoning, steps taken
 - `*.png` — screenshots captured during execution
 
-## Architecture
+## How it works
 
-`/verify` runs as a Claude Code skill using Playwright MCP for browser interaction:
+`/verify` runs as a Claude Code skill using Playwright MCP for browser interaction. Three stages:
 
-1. **Spec Interpreter** — reviews acceptance criteria for ambiguities, asks clarifying questions
-2. **AC Extractor** — parses the spec into concrete, testable acceptance criteria using seed data and known routes
-3. **Browser Verification** — navigates the app via Playwright MCP, checks each AC, collects screenshots
-4. **Report** — writes per-AC `result.json` and a combined `verdicts.json`
+1. **Spec interpretation** — reads your ticket, extracts concrete acceptance criteria, asks clarifying questions when something is ambiguous
+2. **Browser verification** — drives the app via Playwright MCP, checks each AC, captures screenshots / video / trace
+3. **Report** — writes per-AC `result.json` and a combined `verdicts.json` to `.verify/runs/<run_id>/`
 
-### Dev setup
+## Why this exists
 
-See [CLAUDE.md](./CLAUDE.md) for full dev commands, conventions, and test instructions.
+Built this because I kept shipping PRs that passed my eyeball check but failed the PM's check. Verify is the sanity pass I always did manually, automated against a real browser — not a mock, not a unit test, the actual app.
+
+## Recently shipped
+
+See [CHANGELOG.md](./CHANGELOG.md) for the full release history.
+
+**Latest (v1.1.0 — 2026-04-23):**
+- Per-AC video + trace evidence on non-pass verdicts
+- Inline `/verify-setup` skill (no CLI binary)
+- Playwright MCP-based `/verify` (one-command install)
+
+## Dev setup
+
+See [CLAUDE.md](./CLAUDE.md) for dev commands, conventions, and test instructions.
