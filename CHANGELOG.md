@@ -25,5 +25,5 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Fixed
 - `/verify-setup` cookie import flow, `auth.json` export path, and browse-binary download fallback. (#9)
 
-[Unreleased]: https://github.com/opslane/opslane-v3/compare/v1.1.0...HEAD
-[1.1.0]: https://github.com/opslane/opslane-v3/releases/tag/v1.1.0
+[Unreleased]: https://github.com/opslane/verify/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/opslane/verify/releases/tag/v1.1.0
