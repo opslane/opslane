@@ -1,6 +1,6 @@
 {
   "name": "opslane-verify",
-  "description": "Browser-based acceptance criteria verification for frontend PRs using Claude + Playwright",
+  "description": "Self-serve QA for your PR — browser-based verification of ticket requirements before you push.",
   "version": "1.1.0",
   "author": {
     "name": "opslane",
