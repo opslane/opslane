@@ -165,6 +165,16 @@ Read the spec content and any clarifications. Also read context files if they ex
 - `.verify/seed-data.txt` — actual database records, use for specific data references (limit: first 8000 chars)
 - `.verify/learnings.md` — corrections from past verification runs
 
+**Read adversarial flag** — parse `.verify/config.json` and set `adversarial_enabled`:
+
+Default: `true` (adversarial runs always-on unless explicitly disabled).
+
+```bash
+ADVERSARIAL=$(cat .verify/config.json 2>/dev/null | grep -o '"adversarial"[[:space:]]*:[[:space:]]*[a-z]*' | grep -oE '(true|false)' || echo "true")
+```
+
+If `$ADVERSARIAL` is `false`, skip Phase 1b and all adversarial steps in Phase 2 and 3. Happy-path flow is unchanged.
+
 Extract testable ACs. Each AC must be concrete enough for browser verification:
 
 **AC quality standard — this is critical:**
@@ -182,6 +192,64 @@ USE THE ROUTES. If app routes show `/t/personal_xyz/settings/document`, referenc
 - NEVER use template variables like {envId}, {orgId} — resolve to actual values from routes or seed data
 
 Present the AC list to the user: "I've extracted N acceptance criteria. Here's the plan: [list ACs]. Starting verification now."
+
+### Phase 1b: Generate Adversarial Variants (if `adversarial_enabled`)
+
+For each extracted AC, dispatch a variant-generator subagent. This is a generation-only step; variants are verified in Phase 2.
+
+**Invocation:** Use the `Task` tool with:
+- `subagent_type`: `"general-purpose"`
+- `description`: `"Adversarial variant generation"`
+- On Task-tool default timeout, record `[]` for this AC and continue (constraint #14)
+
+**Prompt:**
+
+> You are an adversarial test-case generator for a web app acceptance criterion. You generate test steps only — you do NOT execute them.
+>
+> Input:
+> - AC description: {ac_description}
+> - Current page snapshot (accessibility tree): {snapshot}
+> - Seed data (real DB records): {seed_data}
+> - Known app routes: {routes}
+>
+> Task: Generate exactly 3 **READ-ONLY** edge-case variants of this AC. Pick from these categories:
+> - `input_boundary`: empty, very long (10k chars), unicode, whitespace-only, special chars — ONLY on filter/search/read-side inputs (no submit that creates or modifies records).
+> - `navigation_recovery`: back-button out of a form or modal; rapid-click on non-mutating controls (sort, filter, pagination); deep-link to a page then navigate away and return.
+>
+> HARD RULES:
+> - Variants MUST NOT create, update, or delete any app data.
+> - Variants MUST NOT click "Save", "Submit", "Delete", "Create", "Remove", "Publish", or "Confirm" buttons.
+> - Variants MUST be executable with exactly these Playwright MCP primitives: `mcp__playwright__browser_navigate`, `browser_navigate_back`, `browser_snapshot`, `browser_click`, `browser_type`, `browser_hover`, `browser_press_key`, `browser_wait_for`, `browser_take_screenshot`. There is no refresh primitive.
+>
+> Output: a JSON array of exactly 3 objects. No prose before or after. Schema:
+> ```json
+> [
+>   {
+>     "variant_id": "ac1_adv1",
+>     "category": "input_boundary",
+>     "description": "Human-readable edge case description",
+>     "steps": ["navigate /path", "click ref_search", "type 10000 chars", "snapshot"],
+>     "expected": "Falsifiable observation"
+>   }
+> ]
+> ```
+
+**Handling generator output per AC:**
+- If response parses as a JSON array of length 3 → use it
+- If length > 3 → truncate to first 3
+- If length 0–2 → accept as-is
+- If malformed JSON, empty response, timeout, or error → store `[]` for this AC, continue (constraint #14)
+
+**Persist variants to disk** — the skill is stateless prose; Phase 2 must re-read per AC. After all ACs processed, write `.verify/runs/$RUN_ID/variants.json`:
+
+```json
+{
+  "ac1": [{"variant_id": "ac1_adv1", "category": "input_boundary", "description": "...", "steps": [...], "expected": "..."}],
+  "ac2": []
+}
+```
+
+Present variant count to user alongside the AC list: "Generated M adversarial variants across N ACs. Starting verification now."
 
 ### Phase 2: Verify Each AC with Playwright MCP
 
@@ -300,15 +368,66 @@ For EACH acceptance criterion, follow this sequence:
    }
    ```
 
+7b. **Verify adversarial variants (if `adversarial_enabled` and happy-path verdict == `pass`)**
+
+Skip this step if:
+- `adversarial_enabled` is false
+- Happy-path verdict for this AC is not `pass` (constraint #13)
+
+**Re-read variants for this AC** (skill is stateless across ACs):
+
+```bash
+VARIANTS=$(jq --arg ac "{ac_id}" '.[$ac] // []' .verify/runs/$RUN_ID/variants.json)
+```
+
+If `$VARIANTS` is `[]` or empty, skip to step 8.
+
+For each variant `v` in `$VARIANTS`:
+
+a. **Execute variant** — read `steps` and `expected` from the variant object; execute `steps` in order using Playwright MCP primitives within a **6-command budget** (constraint #10). At command 6, write best-guess verdict and stop. Judge the final observed state against `expected`.
+
+b. **Judge result** using the same vocabulary: `pass`, `fail`, `blocked`, `unclear`, `error`, `timeout`, `skipped`. A variant's `error`/`timeout` verdict does not cascade (constraint #14).
+
+c. **Write variant result:**
+
+   ```bash
+   mkdir -p .verify/runs/$RUN_ID/evidence/{ac_id}/adversarial/{variant_id}
+   ```
+
+   Use the Write tool to create `.verify/runs/$RUN_ID/evidence/{ac_id}/adversarial/{variant_id}/result.json`:
+
+   ```json
+   {
+     "variant_id": "ac1_adv1",
+     "parent": "ac1",
+     "type": "adversarial",
+     "category": "input_boundary",
+     "verdict": "pass",
+     "confidence": "high",
+     "reasoning": "What you observed and why",
+     "observed": "Exact text/state on the page",
+     "steps_taken": ["..."],
+     "screenshots": ["screenshot-filename.png"]
+   }
+   ```
+
+   Constraint #8 (ALWAYS WRITE RESULT) applies — write before moving on.
+
+d. **Move to next variant.** Do NOT reset the browser.
+
 8. **Move to next AC.** Do NOT close or reset the browser between ACs.
 
 ### Phase 3: Report Results
 
-After all ACs are verified:
+After all ACs and variants are verified:
 
-1. Read each `result.json` from the evidence subdirectories and show inline summary:
+1. **Read all result.json files** from `.verify/runs/$RUN_ID/evidence/` recursively. Classify each as `happy_path` (direct child of `evidence/{ac_id}/`) or `adversarial` (under `evidence/{ac_id}/adversarial/{variant_id}/`).
 
-   For each AC:
+2. **Print two-bucket summary to the user.**
+
+   Happy-path bucket is gating; adversarial is informational.
+
+   For each happy-path AC:
    - `pass` → `✓ ac1: pass`
    - anything else → verdict line, then a `replay:` line for the trace zip and a `video:` line for the webm, printed only for artifacts that are non-null in result.json:
      ```
@@ -318,22 +437,43 @@ After all ACs are verified:
      ```
      Skip the line for any artifact whose field is `null` (e.g., if `stop_video` failed and only the trace was retained).
 
-2. Write combined `verdicts.json` using the Write tool to `.verify/runs/$RUN_ID/verdicts.json`. Include `target_url` (from `.verify/config.json`) and `spec` (the spec path or `inline`) so the report has context:
+   Example full output:
+   ```
+   HAPPY PATH (gating)
+   ✓ ac1: pass
+   ✗ ac2: fail — [first 100 chars of reasoning]
+       replay: npx playwright show-trace .verify/runs/{RUN_ID}/evidence/ac2/trace.zip
+       video:  .verify/runs/{RUN_ID}/evidence/ac2/{RUN_ID}-ac2.webm
+
+   ADVERSARIAL WARNINGS (informational, does not block push)
+   ⚠ ac1_adv2 (input_boundary): fail — [first 100 chars]
+   ⚠ ac1_adv3 (navigation_recovery): fail — [first 100 chars]
+
+   Summary: X/Y happy-path passed. Z adversarial warnings.
+   ```
+
+   If no adversarial variants ran (disabled or all empty), omit the ADVERSARIAL WARNINGS section entirely.
+
+3. Write combined `verdicts.json` using the Write tool to `.verify/runs/$RUN_ID/verdicts.json`. Include `target_url` (from `.verify/config.json`) and `spec` (the spec path or `inline`) so the report has context:
 
    ```json
    {
      "run_id": "{RUN_ID}",
      "target_url": "https://...",
      "spec": "docs/spec.md",
+     "adversarial_enabled": true,
      "verdicts": [
-       {"ac_id": "ac1", "verdict": "pass", "confidence": "high", "reasoning": "..."},
-       {"ac_id": "ac2", "verdict": "fail", "confidence": "high", "reasoning": "..."}
+       {"ac_id": "ac1", "type": "happy_path", "verdict": "pass", "confidence": "high", "reasoning": "..."},
+       {"ac_id": "ac1_adv1", "type": "adversarial", "parent": "ac1", "category": "input_boundary", "verdict": "pass", "confidence": "medium", "reasoning": "..."},
+       {"ac_id": "ac2", "type": "happy_path", "verdict": "fail", "confidence": "high", "reasoning": "..."}
      ],
-     "summary": {"total": 2, "pass": 1, "fail": 1}
+     "summary": {"total": 2, "pass": 1, "fail": 1, "adversarial_warnings": 0}
    }
    ```
 
-3. **Collect screenshots into the run dir.** Playwright MCP writes screenshots into the current working directory, not into `.verify/runs/$RUN_ID/`. Move them in so the report can reference them:
+   Every verdict entry MUST have a `type` field. Adversarial entries MUST have `parent` and `category`. `summary.total`/`pass`/`fail` count happy-path only; `summary.adversarial_warnings` counts non-pass adversarial entries.
+
+4. **Collect screenshots into the run dir.** Playwright MCP writes screenshots into the current working directory, not into `.verify/runs/$RUN_ID/`. Move them in so the report can reference them:
 
    ```bash
    for png in $(cat .verify/runs/$RUN_ID/evidence/*/result.json 2>/dev/null | grep -o '"[^"]*\.png"' | tr -d '"' | sort -u); do
@@ -341,7 +481,7 @@ After all ACs are verified:
    done
    ```
 
-4. **Generate `report.html`** — single-file HTML report that embeds verdict cards, reasoning, steps, and screenshots. Run this Python script via Bash (pass `RUN_ID` via env so the quoted heredoc stays safe):
+5. **Generate `report.html`** — single-file HTML report that embeds verdict cards, reasoning, steps, and screenshots. Run this Python script via Bash (pass `RUN_ID` via env so the quoted heredoc stays safe):
 
    ```bash
    RUN_ID=$RUN_ID python3 - <<'PYEOF'
@@ -462,7 +602,7 @@ After all ACs are verified:
    PYEOF
    ```
 
-5. Show pass/fail summary counts and the report path: "Report: `.verify/runs/$RUN_ID/report.html`".
+6. Show pass/fail summary counts and the report path: "Report: `.verify/runs/$RUN_ID/report.html`".
 
 ---
 
@@ -488,6 +628,16 @@ These rules are battle-tested from 15+ real verification runs:
 
 9. **RECORDING BOOKENDS ARE MANDATORY:** Every AC must call `browser_start_tracing` + `browser_start_video` (step 1a) right after navigate, and `browser_stop_video` + `browser_stop_tracing` (step 4a) right before writing result.json. Every verdict — including `blocked`, `error`, `timeout`, `auth_expired` — runs the full bookend. Without `stop_*`, Playwright never flushes the files to disk and you lose the evidence.
 
+10. **ADVERSARIAL BUDGET:** 6 Playwright commands per variant max. At command 6, write best-guess verdict and stop.
+
+11. **ADVERSARIAL IS READ-ONLY (extends #6):** Variants must not submit forms or click Save/Submit/Delete/Create/Remove/Publish/Confirm buttons. The generator prompt enforces this.
+
+12. **ADVERSARIAL NEVER BLOCKS:** Adversarial failures are informational warnings. The summary must clearly mark them as informational. Never tell the user to "fix this before pushing" for an adversarial verdict.
+
+13. **SKIP ADVERSARIAL ON NON-PASS:** If a happy-path AC verdict is not `pass`, do not run its variants. Adversarial is only meaningful after the happy path succeeds.
+
+14. **ADVERSARIAL FAILURES ARE ISOLATED:** Generator subagent errors, timeouts, or malformed output set `variants[ac_id] = []` and continue. A variant's `error`, `timeout`, or `blocked` verdict never cascades to sibling variants or to the parent AC.
+
 ---
 
 ## Error Handling
@@ -500,6 +650,8 @@ These rules are battle-tested from 15+ real verification runs:
 | Auth redirect on all ACs | "Auth cookies expired. Re-run `/verify-setup` to import fresh cookies." |
 | Playwright command timeout | Write `timeout` for current AC, continue to next |
 | All ACs blocked | "Check dev server and auth. Run `/verify-setup` to reconfigure." |
+| Generator subagent failure | Log, set variants[ac_id] = [], continue (constraint #14) |
+| Variant timeout | Write timeout verdict, continue to next variant (constraint #14) |
 
 ---
 
@@ -512,4 +664,5 @@ These rules are battle-tested from 15+ real verification runs:
 open .verify/runs/*/report.html     # open the HTML report in a browser
 cat .verify/runs/*/verdicts.json    # check verdicts as JSON
 ls .verify/runs/*/evidence/         # browse evidence (each AC has a subdirectory)
+jq '.verdicts[] | select(.type=="adversarial" and .verdict=="fail")' .verify/runs/*/verdicts.json  # adversarial warnings only
 ```
