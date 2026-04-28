@@ -11,7 +11,6 @@ This is the sanity pass you'd otherwise do manually with the PM ticket open in o
 ## Demo
 
 [Demo](https://youtu.be/Pq21t894udM)
-*30-second screencast coming soon.* For now, here's what a finished run looks like:
 
 ![Verify report screenshot](docs/report-screenshot.png)
 
