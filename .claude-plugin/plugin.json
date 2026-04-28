@@ -12,7 +12,7 @@
   "mcp_servers": {
     "playwright": {
       "command": "npx",
-      "args": ["@playwright/mcp@latest", "--storage-state", ".verify/auth.json", "--isolated"],
+      "args": ["@playwright/mcp@next", "--storage-state", ".verify/auth.json", "--isolated", "--caps=devtools", "--output-dir", ".verify/mcp-output"],
       "description": "Browser automation for verification"
     }
   },
