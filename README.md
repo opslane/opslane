@@ -1,6 +1,6 @@
-# Verify
+# Opslane
 
-Verify is self-serve QA for your PR. You paste the ticket; Verify drives a real browser against your local dev server, checks each acceptance criterion, and reports pass/fail with screenshots — inline in Claude Code, before you push.
+Opslane is self-serve QA for your PR. You paste the ticket; Verify drives a real browser against your local dev server, checks each acceptance criterion, and reports pass/fail with screenshots — inline in Claude Code, before you push.
 
 ## How it works
 
