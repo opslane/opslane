@@ -16,6 +16,5 @@
       "description": "Browser automation for verification"
     }
   },
-  "skills": ["verify", "verify-setup"],
   "keywords": ["verify", "playwright", "frontend", "acceptance-criteria", "qa"]
 }
