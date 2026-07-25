@@ -154,3 +154,39 @@ It was deliberately left alone by the issue-list polish plan, which is scoped da
 **Context:** server rejects at `handler/session.go` (project mismatch between API key and stored session); SDK side is the browser package's session-init path. Workaround: clear site storage / incognito window.
 
 **Depends on / blocked by:** nothing; SDK-side change.
+
+## Shorten the scrubber's 30-second eligibility grace
+
+**What:** Reduce the 30s grace in `ClaimUnscrubbedChunks` (`packages/ingestion/db/sessions.go:310`) now that no presigned upload policy exists.
+
+**Why:** The number was chosen to outlive `chunkUploadPolicyTTL` so a replayed presigned POST could not overwrite an already-redacted chunk with raw bytes. Issue #194's fix deletes presigned chunk uploads entirely — the browser now posts to ingestion, which writes to storage itself — so that race cannot happen. Until the grace shrinks, every chunk sits unredacted in storage for 30 seconds longer than it needs to.
+
+**Pros:** raw user input spends measurably less time unscrubbed in the bucket — a real privacy improvement, and the mechanism it guarded against no longer exists. **Cons:** privacy-sensitive timing; deserves its own change with its own verification rather than riding along in a delivery-path rewrite.
+
+**Context:** Surfaced during the 2026-07-24 /plan-eng-review of #194. The reasoning is restated in three places (`main.go:206-210`, `scrubber/scrubber.go:34`, `scrubber/interval_test.go:9`); the #194 PR corrects those comments to describe the real invariant but deliberately leaves the number alone. Start by confirming nothing else depends on the 30s value.
+
+**Depends on / blocked by:** #194 landing.
+
+## Decide the fate of ReplayInit and the legacy /api/v1/replays route
+
+**What:** Either exercise `ReplayInit`'s presigned PUT path against a real browser and R2, or delete it along with the legacy one-shot replay route.
+
+**Why:** `handler/replay.go:155` hands the browser a presigned PUT URL, and the current SDK never calls `/api/v1/replays` — grep of `packages/sdk/src` finds no reference. After #194 it is the last direct browser-to-storage upload in the product, and the only one whose browser CORS behaviour against R2 is unverified. `replay.go:231` already carries a comment conceding the browser often cannot PUT directly, with an inline fallback. This is the same shape as #194: a storage path that works everywhere it is tested and fails only in a real browser against real R2.
+
+**Pros:** removes the last untested storage path, or proves it works before a customer finds out. **Cons:** `test-e2e/replay-contract.test.ts:164` pins "keeps the legacy one-shot init route alive for older SDKs", so deleting it means deciding that contract is over.
+
+**Context:** Surfaced during the 2026-07-24 /plan-eng-review of #194. With no SDK builds deployed to real users, "older SDKs" may mean nobody at all — check before assuming the contract has consumers. R2 bucket CORS is also unconfigured as far as this repo can tell; if the path is kept, that is a prerequisite.
+
+**Depends on / blocked by:** nothing.
+
+## Give the ingestion HTTP server read/write/idle timeouts
+
+**What:** Replace the bare `http.ListenAndServe` at `packages/ingestion/main.go:237` with a configured `http.Server` carrying `ReadHeaderTimeout`, `ReadTimeout`, `WriteTimeout` and `IdleTimeout`.
+
+**Why:** Without timeouts a slow or stalled client holds a connection and its goroutine indefinitely, which is a cheap way to exhaust a replica. Standard hardening that protects every endpoint at once.
+
+**Pros:** small diff, no behaviour change for well-behaved clients, removes a whole class of resource exhaustion. **Cons:** timeouts sized too tightly break legitimate slow uploads — and #194 raises the largest accepted body to 5MB, so the write timeout must accommodate that over a bad mobile connection.
+
+**Context:** Raised by the Codex outside voice during the 2026-07-24 /plan-eng-review of #194. Pre-existing and unrelated to that bug, but #194 increases the largest body ingestion accepts, so pick the numbers after that lands. `ReadHeaderTimeout` is the safe one to set aggressively; `ReadTimeout` needs headroom for chunk uploads.
+
+**Depends on / blocked by:** size `ReadTimeout` after #194 lands.
