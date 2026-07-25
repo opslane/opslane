@@ -41,9 +41,7 @@ The agent callback requires `code`, `installation_id`, and UUID `state`; definit
 | POST | `/api/v1/replays/{replayID}/complete` | yes | Finish a replay upload |
 | POST | `/api/v1/replays/{replayID}/fail` | yes | Record a replay upload failure |
 | POST | `/api/v1/sessions/init` | yes | Register a tenant-owned session with optional payload `environment`; returns the recording kill switch |
-| POST | `/api/v1/sessions/{sessionID}/chunks/upload-url` | yes | Size-capped presigned POST policy for one chunk |
-| POST | `/api/v1/sessions/{sessionID}/chunks/{seq}/commit` | yes | Acknowledge an uploaded chunk exists |
-| POST | `/api/v1/sessions/{sessionID}/chunks/{seq}/inline` | yes | Keepalive tail flush on tab close (at most 64KB) |
+| POST | `/api/v1/sessions/{sessionID}/chunks/{seq}` | yes | Store and commit one gzipped replay chunk (max 5MiB) |
 | POST | `/api/v1/sourcemaps` | no (build-time upload) | Upload source maps |
 
 ## Session (dashboard/CLI)

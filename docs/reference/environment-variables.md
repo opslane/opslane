@@ -30,7 +30,7 @@ Every variable each service actually reads, from `os.Getenv` (ingestion) and `pr
 | `INTERNAL_READ_TOKEN` | for worker replay evidence | Shared secret guarding worker-to-ingestion chunk reads. Unset disables the internal endpoint. |
 | `SESSION_IDLE_CLOSE_MINUTES` | no (30) | Idle minutes before a recording session closes and its `session_analysis` job is enqueued (friction detection producer) |
 | `RETENTION_SWEEP_INTERVAL_SECONDS` | no (3600) | How often the retention sweeper runs (session close + expiry pass) |
-| `SCRUB_INTERVAL_SECONDS` | no (15) | How often the chunk scrubber looks for committed chunks to redact. Test lanes shorten it to cut e2e wall-clock. Separate from the fixed 30s eligibility grace, which outlives the replayable presigned upload policy and is deliberately not configurable. |
+| `SCRUB_INTERVAL_SECONDS` | no (15) | How often the chunk scrubber looks for committed chunks to redact. Test lanes shorten it to cut e2e wall-clock. Separate from the retained fixed 30s eligibility grace; chunk uploads are no longer presigned, so shortening that grace is now a separate privacy-timing decision. |
 | `ADMIN_EMAILS` | no | Comma-separated operator email allowlist for the cross-tenant admin dashboard. Empty disables the admin API. Docker Compose maps it from the host-side `OPSLANE_ADMIN_EMAILS`. |
 | `VERSION` | no | Reported by `/health` |
 

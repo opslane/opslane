@@ -51,9 +51,12 @@ displayed unless you mask it** — this has not changed, but it now applies to
 every session rather than only sessions that hit an error. If you have not
 reviewed your masking, do that before upgrading.
 
-For **chunked session recordings**, the browser uploads gzipped ~30s chunks
-directly to private object storage via a size-capped presigned POST policy. A
-server-side scrubber inflates each chunk under a hard ceiling, redacts it, and
+For **chunked session recordings**, the browser sends each gzipped ~30s chunk
+to ingestion in one API-key-authenticated request. Ingestion buffers at most
+5MiB, enforces that ceiling before writing anything, and stores the chunk with
+server-side object-storage credentials. Raw replay bytes therefore transit
+ingestion and may exist in its process memory before scrubbing. A server-side
+scrubber inflates each stored chunk under a hard ceiling, redacts it, and
 re-stores it. A chunk is **unreadable until that completes**: `scrubbed_at` is
 the only thing that makes it visible to any reader, and a chunk that cannot be
 scrubbed stays unreadable permanently rather than being served raw.
@@ -81,7 +84,7 @@ See [replay privacy and masking](../guides/replay-privacy.md) for what replay da
 
 These are known, tracked, and stated here so you can make an informed deployment decision:
 
-- **Replay and session retention.** Chunked session recordings are deleted on a per-project clock (default 30 days, `projects.session_retention_days`), removing both the database rows and the entire stored-object prefix. Sessions pinned as incident evidence survive the normal window but are hard-capped at 90 days. Deleted session ids are tombstoned and their prefixes are re-swept continuously, so an upload accepted just before policy expiry cannot permanently recreate the data.
+- **Replay and session retention.** Chunked session recordings are deleted on a per-project clock (default 30 days, `projects.session_retention_days`), removing both the database rows and the entire stored-object prefix. Sessions pinned as incident evidence survive the normal window but are hard-capped at 90 days. Deleted session ids are tombstoned and their prefixes are re-swept continuously, so an ingestion-owned storage write already in flight during deletion cannot permanently recreate the data.
 - **The older one-shot replay path still has no retention.** `session_replays` rows from the error-triggered path have no expiry or cleanup job and persist until you delete them. See [#29](https://github.com/opslane/opslane-oss/issues/29).
 - **`github_token_encrypted` is unused.** The schema has an encrypted-token column, but no code path writes or reads it; GitHub credentials come from the environment (PAT or App key). Envelope-encrypted at-rest token storage is not implemented yet.
 - **The bundled Compose file is a development deployment.** Development credentials, no backups, no upgrade/rollback procedure. A production operations guide is tracked separately and blocked on that work.

@@ -1,5 +1,7 @@
 # Origin Allowlist: Server-Side SDK Exemption — Implementation Plan
 
+> **Superseded for replay chunk routes:** the upload-url, commit, and inline endpoints were replaced by the single-call ingestion upload in `2026-07-24-replay-chunk-upload-r2.md`. This document remains a historical implementation record.
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** Stop the browser origin allowlist from silently dropping every backend SDK event, so one project can hold both browser and server-side errors — which is what our one-project-many-platforms model requires.
