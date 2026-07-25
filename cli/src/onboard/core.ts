@@ -4,7 +4,7 @@
  * import `ink`, read `process.stdin`, or call a model directly.
  */
 import type { writeEnvLocal } from '../envfile.js';
-import type { runApply, runDetect } from './engine.js';
+import type { ApplyReport, runApply, runDetect } from './engine.js';
 import { reduceTasks, type TaskLine } from './events.js';
 import type { ApprovalRequest } from './policy.js';
 import type { ensureLoggedIn, ensureProvisioned } from './provision.js';
@@ -80,6 +80,14 @@ function messageOf(error: unknown): string {
 
 type Record_ = (message: unknown) => void;
 
+/** The agent's own report and the engine's tracked edits must name the same files. */
+function sameFiles(left: string[] = [], right: string[] = []): boolean {
+  if (left.length !== right.length) return false;
+  const a = [...left].sort();
+  const b = [...right].sort();
+  return a.every((value, index) => value === b[index]);
+}
+
 /** Task 9 replaces this with a real cap; the call site never changes. */
 function boundTasks(tasks: TaskLine[]): TaskLine[] {
   return tasks;
@@ -137,6 +145,43 @@ async function runFlow(deps: CoreDeps, record: Record_): Promise<CoreResult> {
       ok: false,
       status: 'failed',
       message: detect.reason ?? 'the survey did not produce a plan',
+    };
+  }
+
+  emit({ stage: 'awaiting-approval', plan });
+
+  tasks = []; // detect's list must not carry over
+  emit({ stage: 'apply', tasks });
+  let report: ApplyReport | undefined;
+  const applied = await deps.runApply({
+    cwd: deps.cwd,
+    plan,
+    signal,
+    requestApproval: deps.requestApproval,
+    onReport: (value) => {
+      report = value;
+    },
+    onMessage: (message) => {
+      record(message);
+      tasks = boundTasks(reduceTasks(tasks, message));
+      emit({ stage: 'apply', tasks });
+    },
+  });
+
+  if (applied.aborted) return { ok: false, status: 'aborted' };
+  if (!applied.ok || report === undefined) {
+    return {
+      ok: false,
+      status: 'failed',
+      message:
+        applied.failures?.join('; ') ?? applied.reason ?? 'the wiring could not be verified',
+    };
+  }
+  if (!sameFiles(report.editedFiles, applied.editedFiles)) {
+    return {
+      ok: false,
+      status: 'failed',
+      message: 'the agent report does not match the files the engine tracked',
     };
   }
 

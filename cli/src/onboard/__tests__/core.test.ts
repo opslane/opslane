@@ -8,6 +8,7 @@ import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 
 import { runOnboardCore, type CoreDeps, type CoreEvent } from '../core.js';
 import type { ApplyReport } from '../engine.js';
+import type { TaskLine } from '../events.js';
 import type { DevServerHandle, ProcessCompletion } from '../process.js';
 import type { RunLog } from '../runlog.js';
 import { OPSLANE_SDK_VERSION, type OnboardingPlan } from '../tools.js';
@@ -311,5 +312,76 @@ describe('runOnboardCore detect stage', () => {
     });
     await runOnboardCore(d);
     expect(answer).toEqual(['admin']); // the ANSWER, not just that we asked
+  });
+});
+
+describe('runOnboardCore apply stage', () => {
+  it('writes no env and never polls when apply fails', async () => {
+    const writeEnv = vi.fn<CoreDeps['writeEnv']>(async () => '/unused/.env.local');
+    const waitForAppReporting = vi.fn<CoreDeps['waitForAppReporting']>();
+    const d = deps({
+      runApply: async () => ({
+        ok: false,
+        aborted: false,
+        reason: 'verification_failed',
+        failures: [
+          'manifest does not contain an identity-capable Opslane SDK version (>=1.2.0)',
+        ],
+      }),
+      writeEnv,
+      waitForAppReporting,
+    });
+    const result = await runOnboardCore(d);
+    expect(result).toMatchObject({ ok: false, status: 'failed' });
+    expect(result.message).toMatch(/identity-capable/);
+    expect(writeEnv).not.toHaveBeenCalled();
+    expect(waitForAppReporting).not.toHaveBeenCalled();
+  });
+
+  it('rejects a report whose editedFiles disagree with the engine', async () => {
+    const d = deps({
+      runApply: async (options) => {
+        options.onReport({
+          editedFiles: ['web/src/main.ts'],
+          summary: 'x',
+          installRequired: true,
+          installCwd: 'web',
+        });
+        return {
+          ok: true,
+          aborted: false,
+          editedFiles: ['web/src/main.ts', 'web/package.json'],
+        };
+      },
+    });
+    const result = await runOnboardCore(d);
+    expect(result).toMatchObject({ ok: false, status: 'failed' });
+    expect(result.message).toMatch(/report.*match|reconcil/i);
+  });
+
+  it('starts the apply task list empty rather than reusing detect tasks', async () => {
+    const seen: TaskLine[][] = [];
+    await runOnboardCore(
+      deps({
+        emit: (event) => {
+          if (event.stage === 'apply' && event.tasks) seen.push(event.tasks);
+        },
+        runDetect: async (options) => {
+          options.onMessage(toolUse('t1', 'Read'));
+          options.onMessage(toolUse('t2', 'Glob'));
+          options.onPlan(fixturePlan());
+          return { ok: true, aborted: false };
+        },
+      }),
+    );
+    expect(seen[0]).toHaveLength(0);
+  });
+
+  it('emits the plan for review before applying', async () => {
+    const events: CoreEvent[] = [];
+    await runOnboardCore(deps({ emit: (event) => events.push(event) }));
+    expect(events.find((event) => event.stage === 'awaiting-approval')?.plan?.app_dir).toBe(
+      'web',
+    );
   });
 });
