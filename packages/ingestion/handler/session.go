@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strconv"
 	"time"
@@ -21,9 +22,6 @@ import (
 const (
 	defaultChunkIntervalMs = 30_000
 	maxChunkBytes          = 5 << 20
-	maxInlineChunkBytes    = 64 << 10
-	// Scrubbing waits this out because POST policies are replayable until expiry.
-	chunkUploadPolicyTTL = 30 * time.Second
 )
 
 var sessionIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{8,128}$`)
@@ -220,164 +218,47 @@ func chunkObjectKey(projectID, sessionID string, seq int) string {
 	return fmt.Sprintf("sessions/%s/%s/chunk-%06d.json.gz", projectID, sessionID, seq)
 }
 
-type chunkUploadURLRequest struct {
-	Seq             int   `json:"seq"`
-	SizeBytes       int64 `json:"size_bytes"`
-	HasFullSnapshot bool  `json:"has_full_snapshot"`
-}
-
-type chunkUploadURLResponse struct {
-	UploadURL string            `json:"upload_url"`
-	FormData  map[string]string `json:"form_data"`
-	ObjectKey string            `json:"object_key"`
-}
-
-// ChunkUploadURL reserves a sequence and issues an exactly size-capped POST
-// policy. POST /api/v1/sessions/{sessionID}/chunks/upload-url
-func (d *Dependencies) ChunkUploadURL(w http.ResponseWriter, r *http.Request) {
-	projectID := ProjectIDFromCtx(r.Context())
-	if projectID == "" {
-		writeJSONError(w, http.StatusUnauthorized, "missing project context")
-		return
+// parseHasFullSnapshot reads the has_full_snapshot query parameter.
+//
+// Contract: "1" is true, "0" is false, absent is false, anything else is an
+// error. A repeated parameter is an error rather than a silent first-value
+// win: a proxy or SDK bug must not be able to quietly flip a chunk's
+// playability flag, because the read path uses it to choose a starting chunk.
+func parseHasFullSnapshot(query url.Values) (bool, error) {
+	values, present := query["has_full_snapshot"]
+	if !present {
+		return false, nil
 	}
-	if d.MinIO == nil {
-		writeJSONError(w, http.StatusServiceUnavailable, "object storage not configured")
-		return
+	if len(values) != 1 {
+		return false, fmt.Errorf("repeated has_full_snapshot")
 	}
-
-	sessionID := chi.URLParam(r, "sessionID")
-	if !validSessionID(sessionID) {
-		writeJSONError(w, http.StatusBadRequest, "invalid session_id")
-		return
+	switch values[0] {
+	case "1":
+		return true, nil
+	case "0":
+		return false, nil
+	default:
+		return false, fmt.Errorf("invalid has_full_snapshot %q", values[0])
 	}
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 4<<10))
-	if err != nil {
-		writeJSONError(w, http.StatusBadRequest, "failed to read body")
-		return
-	}
-	var req chunkUploadURLRequest
-	if err := json.Unmarshal(body, &req); err != nil {
-		writeJSONError(w, http.StatusBadRequest, "invalid JSON")
-		return
-	}
-	if req.Seq < 0 {
-		writeJSONError(w, http.StatusBadRequest, "seq must be non-negative")
-		return
-	}
-	if req.SizeBytes <= 0 {
-		writeJSONError(w, http.StatusBadRequest, "size_bytes must be positive")
-		return
-	}
-	if req.SizeBytes > maxChunkBytes {
-		writeJSONError(w, http.StatusRequestEntityTooLarge, "chunk exceeds maximum size")
-		return
-	}
-
-	enabled, err := d.Queries.ProjectRecordingEnabled(r.Context(), projectID)
-	if err != nil {
-		slog.Error("recording flag lookup failed", "error", err, "project_id", projectID)
-		writeJSONError(w, http.StatusInternalServerError, "failed to issue upload url")
-		return
-	}
-	if !enabled {
-		writeJSONError(w, http.StatusForbidden, "recording disabled for this project")
-		return
-	}
-	owned, err := d.Queries.SessionBelongsToProject(r.Context(), sessionID, projectID)
-	if err != nil {
-		slog.Error("session ownership check failed", "error", err, "session_id", sessionID)
-		writeJSONError(w, http.StatusInternalServerError, "failed to issue upload url")
-		return
-	}
-	if !owned {
-		writeJSONError(w, http.StatusNotFound, "session not found")
-		return
-	}
-	objectKey := chunkObjectKey(projectID, sessionID, req.Seq)
-	if err := d.Queries.ReserveChunkSeq(r.Context(), sessionID, projectID, req.Seq, objectKey, req.HasFullSnapshot); err != nil {
-		if errors.Is(err, db.ErrChunkSeqTaken) {
-			writeJSONError(w, http.StatusConflict, "chunk seq already used")
-			return
-		}
-		slog.Error("reserve chunk seq failed", "error", err, "session_id", sessionID, "seq", req.Seq)
-		writeJSONError(w, http.StatusInternalServerError, "failed to issue upload url")
-		return
-	}
-	if !chunkBytesBudget.allow(projectID, req.SizeBytes) {
-		_ = d.Queries.ReleaseChunkReservation(r.Context(), sessionID, projectID, req.Seq)
-		slog.Warn("chunk byte budget exceeded", "project_id", projectID, "size_bytes", req.SizeBytes)
-		writeJSONError(w, http.StatusTooManyRequests, "byte budget exceeded")
-		return
-	}
-
-	uploadURL, formData, err := d.MinIO.PresignedPostPolicy(
-		r.Context(), objectKey, "application/gzip", req.SizeBytes, chunkUploadPolicyTTL)
-	if err != nil {
-		slog.Error("presign chunk policy failed", "error", err, "object_key", objectKey)
-		_ = d.Queries.ReleaseChunkReservation(r.Context(), sessionID, projectID, req.Seq)
-		writeJSONError(w, http.StatusInternalServerError, "failed to issue upload url")
-		return
-	}
-	writeJSON(w, http.StatusOK, chunkUploadURLResponse{UploadURL: uploadURL, FormData: formData, ObjectKey: objectKey})
-}
-
-// ChunkCommit records a stored chunk using the size observed from storage.
-// POST /api/v1/sessions/{sessionID}/chunks/{seq}/commit
-func (d *Dependencies) ChunkCommit(w http.ResponseWriter, r *http.Request) {
-	projectID := ProjectIDFromCtx(r.Context())
-	if projectID == "" {
-		writeJSONError(w, http.StatusUnauthorized, "missing project context")
-		return
-	}
-	if d.MinIO == nil {
-		writeJSONError(w, http.StatusServiceUnavailable, "object storage not configured")
-		return
-	}
-	sessionID := chi.URLParam(r, "sessionID")
-	if !validSessionID(sessionID) {
-		writeJSONError(w, http.StatusBadRequest, "invalid session_id")
-		return
-	}
-	seq, err := strconv.Atoi(chi.URLParam(r, "seq"))
-	if err != nil || seq < 0 {
-		writeJSONError(w, http.StatusBadRequest, "invalid seq")
-		return
-	}
-	owned, err := d.Queries.SessionBelongsToProject(r.Context(), sessionID, projectID)
-	if err != nil {
-		slog.Error("session ownership check failed", "error", err, "session_id", sessionID)
-		writeJSONError(w, http.StatusInternalServerError, "failed to commit chunk")
-		return
-	}
-	if !owned {
-		writeJSONError(w, http.StatusNotFound, "session not found")
-		return
-	}
-
-	objectKey := chunkObjectKey(projectID, sessionID, seq)
-	size, err := d.MinIO.StatObject(r.Context(), objectKey)
-	if err != nil {
-		slog.Warn("commit for missing object", "object_key", objectKey, "error", err)
-		writeJSONError(w, http.StatusConflict, "chunk object not found in storage")
-		return
-	}
-	if err := d.Queries.CommitChunk(r.Context(), sessionID, projectID, seq, size); err != nil {
-		if errors.Is(err, db.ErrSessionNotFound) {
-			writeJSONError(w, http.StatusNotFound, "chunk reservation not found")
-			return
-		}
-		slog.Error("commit chunk failed", "error", err, "session_id", sessionID, "seq", seq)
-		writeJSONError(w, http.StatusInternalServerError, "failed to commit chunk")
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "committed"})
 }
 
 var gzipMagic = []byte{0x1f, 0x8b}
 
-// ChunkInline stores and commits a keepalive-sized final gzip chunk in one
-// request. POST /api/v1/sessions/{sessionID}/chunks/{seq}/inline
-func (d *Dependencies) ChunkInline(w http.ResponseWriter, r *http.Request) {
+// ChunkUpload stores and commits one gzipped rrweb chunk in a single request.
+// POST /api/v1/sessions/{sessionID}/chunks/{seq}
+//
+// The browser sends the bytes here rather than to object storage because
+// Cloudflare R2 does not implement the S3 POST Object API (#194).
+//
+// The #48 ceiling lives here as a result. It used to be a content-length-range
+// condition on a presigned POST policy, enforced by storage after the bytes had
+// already left the browser; a public SDK key ships in customer bundles and is
+// not secret, so without a ceiling it is a storage-flood primitive. Ingestion
+// now sees every chunk, so http.MaxBytesReader below refuses an oversized body
+// before a single byte reaches storage — a strictly stronger guarantee, and a
+// portable one: content-length-range is only expressible on a POST policy, so
+// the old form could never have worked on a backend without POST Object.
+func (d *Dependencies) ChunkUpload(w http.ResponseWriter, r *http.Request) {
 	projectID := ProjectIDFromCtx(r.Context())
 	if projectID == "" {
 		writeJSONError(w, http.StatusUnauthorized, "missing project context")
@@ -397,11 +278,17 @@ func (d *Dependencies) ChunkInline(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "invalid seq")
 		return
 	}
-
-	payload, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxInlineChunkBytes))
+	hasFullSnapshot, err := parseHasFullSnapshot(r.URL.Query())
 	if err != nil {
-		if err.Error() == "http: request body too large" {
-			writeJSONError(w, http.StatusRequestEntityTooLarge, "inline chunk too large")
+		writeJSONError(w, http.StatusBadRequest, "invalid has_full_snapshot")
+		return
+	}
+
+	payload, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxChunkBytes))
+	if err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			writeJSONError(w, http.StatusRequestEntityTooLarge, "chunk too large")
 			return
 		}
 		writeJSONError(w, http.StatusBadRequest, "failed to read body")
@@ -431,7 +318,7 @@ func (d *Dependencies) ChunkInline(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	objectKey := chunkObjectKey(projectID, sessionID, seq)
-	if err := d.Queries.ReserveChunkSeq(r.Context(), sessionID, projectID, seq, objectKey, false); err != nil {
+	if err := d.Queries.ReserveChunkSeq(r.Context(), sessionID, projectID, seq, objectKey, hasFullSnapshot); err != nil {
 		if errors.Is(err, db.ErrChunkSeqTaken) {
 			writeJSONError(w, http.StatusConflict, "chunk seq already used")
 			return
@@ -439,8 +326,43 @@ func (d *Dependencies) ChunkInline(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "failed to store chunk")
 		return
 	}
+	// Cleanup must outlive the request. r.Context() is already cancelled when
+	// the browser disconnects mid-upload, which is precisely when these paths
+	// run, so inheriting it makes every release and remove a silent no-op.
+	//
+	// Start each timeout when cleanup begins, not before the storage write:
+	// PutObject has its own 30s deadline and may legitimately outlive a cleanup
+	// timeout that was created eagerly.
+	cleanupBase := context.WithoutCancel(r.Context())
+	releaseReservation := func() error {
+		cleanupCtx, cancelCleanup := context.WithTimeout(cleanupBase, 5*time.Second)
+		defer cancelCleanup()
+		return d.Queries.ReleaseChunkReservation(cleanupCtx, sessionID, projectID, seq)
+	}
+	removeObjectAndRelease := func() {
+		// Preserve remove-then-release ordering so a retry cannot store the same
+		// deterministic key and then have this request delete the retry's object.
+		removeCtx, cancelRemove := context.WithTimeout(cleanupBase, 5*time.Second)
+		removeErr := d.MinIO.RemoveObject(removeCtx, objectKey)
+		cancelRemove()
+		if removeErr != nil {
+			// Retaining the reservation is fail-safe: the storage outcome is
+			// ambiguous, so allowing a retry could race the same object key.
+			slog.Error("chunk cleanup remove failed; reservation retained",
+				"error", removeErr, "object_key", objectKey)
+			return
+		}
+		if err := releaseReservation(); err != nil {
+			slog.Error("chunk cleanup release failed", "error", err,
+				"session_id", sessionID, "seq", seq)
+		}
+	}
+
 	if !chunkBytesBudget.allow(projectID, int64(len(payload))) {
-		_ = d.Queries.ReleaseChunkReservation(r.Context(), sessionID, projectID, seq)
+		if err := releaseReservation(); err != nil {
+			slog.Error("chunk budget cleanup release failed", "error", err,
+				"session_id", sessionID, "seq", seq)
+		}
 		writeJSONError(w, http.StatusTooManyRequests, "byte budget exceeded")
 		return
 	}
@@ -448,15 +370,17 @@ func (d *Dependencies) ChunkInline(w http.ResponseWriter, r *http.Request) {
 	putErr := d.MinIO.PutObject(putCtx, objectKey, payload, "application/gzip")
 	cancelPut()
 	if putErr != nil {
-		slog.Error("inline chunk put failed", "error", putErr, "object_key", objectKey)
-		_ = d.Queries.ReleaseChunkReservation(r.Context(), sessionID, projectID, seq)
+		slog.Error("chunk put failed", "error", putErr, "object_key", objectKey)
+		// A failed PUT is ambiguous: storage may have accepted the object before
+		// the response or request context was lost. Remove before releasing so a
+		// retry cannot race an orphan at the deterministic key.
+		removeObjectAndRelease()
 		writeJSONError(w, http.StatusInternalServerError, "failed to store chunk")
 		return
 	}
 	if err := d.Queries.CommitChunk(r.Context(), sessionID, projectID, seq, int64(len(payload))); err != nil {
-		slog.Error("inline chunk commit failed", "error", err, "session_id", sessionID, "seq", seq)
-		_ = d.MinIO.RemoveObject(r.Context(), objectKey)
-		_ = d.Queries.ReleaseChunkReservation(r.Context(), sessionID, projectID, seq)
+		slog.Error("chunk commit failed", "error", err, "session_id", sessionID, "seq", seq)
+		removeObjectAndRelease()
 		writeJSONError(w, http.StatusInternalServerError, "failed to store chunk")
 		return
 	}

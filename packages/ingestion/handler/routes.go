@@ -88,9 +88,7 @@ func NewRouterWithPool(deps *Dependencies, pool *pgxpool.Pool) *chi.Mux {
 		r.With(deps.AuthenticateSDK, deps.EnforceOrigin, rateLimitByProject(replaysLimiter)).Post("/replays/{replayID}/complete", deps.ReplayComplete)
 		r.With(deps.AuthenticateSDK, deps.EnforceOrigin, rateLimitByProject(replaysLimiter)).Post("/replays/{replayID}/fail", deps.ReplayFail)
 		r.With(deps.AuthenticateSDK, deps.EnforceOrigin, rateLimitByProject(chunksLimiter)).Post("/sessions/init", deps.SessionInit)
-		r.With(deps.AuthenticateSDK, deps.EnforceOrigin, rateLimitByProject(chunksLimiter)).Post("/sessions/{sessionID}/chunks/upload-url", deps.ChunkUploadURL)
-		r.With(deps.AuthenticateSDK, deps.EnforceOrigin, rateLimitByProject(chunksLimiter)).Post("/sessions/{sessionID}/chunks/{seq}/commit", deps.ChunkCommit)
-		r.With(deps.AuthenticateSDK, deps.EnforceOrigin, rateLimitByProject(chunksLimiter)).Post("/sessions/{sessionID}/chunks/{seq}/inline", deps.ChunkInline)
+		r.With(deps.AuthenticateSDK, deps.EnforceOrigin, rateLimitByProject(chunksLimiter)).Post("/sessions/{sessionID}/chunks/{seq}", deps.ChunkUpload)
 		r.With(deps.AuthenticateSDK, rateLimitByProject(sourcemapsLimiter)).Post("/sourcemaps", deps.UploadSourceMap)
 
 		// Session-authenticated endpoints (dashboard + CLI)

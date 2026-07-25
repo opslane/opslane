@@ -16,10 +16,10 @@ var (
 	sourcemapsLimiter = newRateLimiter(20)
 
 	// Always-on recording: every session uploads a chunk every ~30s, and each
-	// chunk costs 2 ingestion requests (upload-url + commit). The 120/min
-	// replays budget is a whole-project budget and would cap a project at ~30
-	// concurrent sessions. 6000/min supports ~1500 concurrent sessions per
-	// replica; the byte budget below is the real ceiling.
+	// chunk now costs 1 ingestion request (#194 collapsed the upload-url +
+	// storage POST + commit handshake into a single call). 6000/min therefore
+	// supports ~3000 concurrent sessions per replica; the byte budget below is
+	// the real ceiling.
 	chunksLimiter = newRateLimiter(6000)
 
 	// 512 MB/min/project of compressed chunks. A 30s chunk gzips to roughly
