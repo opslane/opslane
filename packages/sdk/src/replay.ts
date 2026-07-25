@@ -279,7 +279,7 @@ function beginSessionRotation(newSessionID: string, previous: SessionProgress): 
   pendingMeta = null;
 
   if (pending.length > 0 && pendingSeq >= 0 && oldSessionID) {
-    void uploadChunk(oldSessionID, pendingSeq, pending, true);
+    void shipChunk(oldSessionID, pendingSeq, pending);
   }
 
   void (async () => {
@@ -308,11 +308,15 @@ function onVisibilityChange(): void {
   buffer = [];
   bufferBytes = 0;
   currentSeq = -1;
-  void flushInline(tailSessionID, tailSeq, tail).then((landed) => {
-    // A backgrounded page may survive. If keepalive could not carry the tail
-    // (most commonly because gzip exceeded 64KB), fall back to the normal
-    // storage-policy flow. A closing page will simply run out of time.
-    if (!landed) void shipChunk(tailSessionID, tailSeq, tail);
+  void flushInline(tailSessionID, tailSeq, tail).then((result) => {
+    // All three states are load-bearing: 'stop' means recording was disabled
+    // or the session disappeared, false means keepalive could not carry the
+    // tail, and true means the chunk landed.
+    if (result === 'stop') {
+      stopReplayCapture();
+      return;
+    }
+    if (!result) void shipChunk(tailSessionID, tailSeq, tail);
   });
   // If the page survives backgrounding, resume from a new full snapshot. This
   // also prevents the regular uploader from reusing the inline tail's seq.
