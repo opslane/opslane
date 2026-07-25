@@ -9,7 +9,6 @@ import { containedRepoRelative, hasSecretSegment } from './paths.js';
 const FILE_TOOLS = new Set(['Read', 'Glob', 'Edit', 'Write', 'MultiEdit']);
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit']);
 const MUTATING_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'Bash']);
-const ALLOWED_BASH = /^(npm|pnpm|yarn|bun) run (build|typecheck|lint)$/;
 const PATH_KEYS = new Set(['path', 'file_path', 'pattern']);
 
 function deny(reason: string) {
@@ -81,10 +80,10 @@ export function onboardPreToolUseHook({
     }
 
     if (toolName === 'Bash') {
-      const command = toolInput.command;
-      if (typeof command !== 'string' || !ALLOWED_BASH.test(command)) {
-        return deny('Only exact package build, typecheck, or lint scripts are allowed');
-      }
+      // The agent has no shell. Both stages also list Bash in disallowedTools
+      // and runApply passes a Bash-free allow-set, so this is defence in depth.
+      // docs/decisions/agent-runs-commands.md records why a shell was rejected.
+      return deny('The onboarding agent is not allowed to run shell commands');
     }
 
     return {};
@@ -94,6 +93,7 @@ export function onboardPreToolUseHook({
 export type ApprovalRequest = (
   toolName: string,
   input: Record<string, unknown>,
+  options?: { signal?: AbortSignal; [key: string]: unknown },
 ) => Promise<boolean>;
 
 export function createOnboardApproval({
@@ -103,7 +103,6 @@ export function createOnboardApproval({
     'Edit',
     'Write',
     'MultiEdit',
-    'Bash',
     'mcp__onboard__finish_apply',
     'mcp__onboard__ask_user',
   ],
@@ -112,13 +111,27 @@ export function createOnboardApproval({
   allowedTools?: Iterable<string>;
 }): CanUseTool {
   const allowed = new Set(allowedTools);
-  return async (toolName, input) => {
+  return async (toolName, input, options) => {
     if (!allowed.has(toolName)) {
       return { behavior: 'deny', message: `Onboarding does not allow tool ${toolName}` };
     }
     if (!MUTATING_TOOLS.has(toolName)) return { behavior: 'allow', updatedInput: input };
-    return (await requestApproval(toolName, input))
-      ? { behavior: 'allow', updatedInput: input }
-      : { behavior: 'deny', message: 'declined' };
+
+    const signal = options?.signal;
+    if (signal?.aborted === true) return { behavior: 'deny', message: 'declined' };
+
+    let onAbort: (() => void) | undefined;
+    try {
+      const approved = await new Promise<boolean>((resolve) => {
+        onAbort = () => resolve(false);
+        signal?.addEventListener('abort', onAbort, { once: true });
+        void requestApproval(toolName, input, options).then(resolve, () => resolve(false));
+      });
+      return approved
+        ? { behavior: 'allow', updatedInput: input }
+        : { behavior: 'deny', message: 'declined' };
+    } finally {
+      if (onAbort !== undefined) signal?.removeEventListener('abort', onAbort);
+    }
   };
 }

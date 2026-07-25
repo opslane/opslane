@@ -12,6 +12,15 @@ const pollId = '123e4567-e89b-42d3-a456-426614174000';
 
 interface RunResult { code: number; stdout: string; stderr: string }
 
+/**
+ * Every case here spawns a real compiled CLI. Under `pnpm test` the whole
+ * workspace runs vitest in parallel, so these children compete for CPU with
+ * ~38 other CLI test files plus five other packages. Without a bound, a starved
+ * child stalls the suite and reports as an opaque multi-minute timeout rather
+ * than a diagnosable failure. Kill the process group and say what happened.
+ */
+const CLI_RUN_TIMEOUT_MS = 45_000;
+
 function runCli(args: string[], home: string, cwd: string): Promise<RunResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [cliEntry, ...args], {
@@ -21,12 +30,36 @@ function runCli(args: string[], home: string, cwd: string): Promise<RunResult> {
     });
     let stdout = '';
     let stderr = '';
+    let settled = false;
+    const finish = (fn: () => void): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      fn();
+    };
+    const timer = setTimeout(() => {
+      finish(() => {
+        child.kill('SIGKILL');
+        reject(new Error(
+          `opslane ${args.join(' ')} did not exit within ${CLI_RUN_TIMEOUT_MS}ms. `
+          + `stdout so far: ${JSON.stringify(stdout.slice(0, 300))}`,
+        ));
+      });
+    }, CLI_RUN_TIMEOUT_MS);
+    timer.unref?.();
     child.stdout.setEncoding('utf8').on('data', (chunk: string) => { stdout += chunk; });
     child.stderr.setEncoding('utf8').on('data', (chunk: string) => { stderr += chunk; });
-    child.on('error', reject);
-    child.on('close', (code) => resolve({ code: code ?? 1, stdout, stderr }));
+    child.on('error', (error) => finish(() => reject(error)));
+    child.on('close', (code) => finish(() => resolve({ code: code ?? 1, stdout, stderr })));
   });
 }
+
+/**
+ * A per-test budget that survives a loaded machine. Vitest's 5s default is for
+ * unit tests; these compile-and-spawn cases need room, and `runCli` above is
+ * what actually catches a genuine hang.
+ */
+const SUBPROCESS_TEST_TIMEOUT_MS = 60_000;
 
 async function listen(server: Server): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -100,7 +133,7 @@ describe('compiled CLI agent contract', () => {
     expect(result.poll.code).toBe(0);
     expect(JSON.parse(result.poll.stdout)).toMatchObject({ status: 'completed', api_key: 'key' });
     expect(result.pollTokenSeen).toBe('subprocess-secret');
-  });
+  }, SUBPROCESS_TEST_TIMEOUT_MS);
 
   it.each([
     [{ status: 'completed', project_id: 'project' }, 200, 'key_unavailable'],
@@ -111,7 +144,7 @@ describe('compiled CLI agent contract', () => {
     const result = await startThenPoll(body, httpStatus);
     expect(result.poll.code).toBe(1);
     expect(JSON.parse(result.poll.stdout)).toMatchObject({ status: expectedStatus });
-  });
+  }, SUBPROCESS_TEST_TIMEOUT_MS);
 
   it('reports conflicting setup modes as one usage_error JSON document', async () => {
     const home = await temp();
@@ -119,7 +152,14 @@ describe('compiled CLI agent contract', () => {
     const result = await runCli(['setup', '--start', '--poll', pollId, '--repo', 'acme/app'], home, cwd);
     expect(result.code).toBe(1);
     expect(JSON.parse(result.stdout)).toMatchObject({ status: 'usage_error' });
-  });
+  }, SUBPROCESS_TEST_TIMEOUT_MS);
+
+  it('onboard emits one tty_required JSON document when not a TTY', async () => {
+    const result = await runCli(['onboard'], await temp(), await temp());
+    expect(result.code).toBe(1);
+    expect(JSON.parse(result.stdout)).toMatchObject({ status: 'tty_required' });
+    expect(result.stdout).not.toMatch(/\x1b\[/);
+  }, SUBPROCESS_TEST_TIMEOUT_MS);
 
   it.each([
     ['setup', '--start', '--repo', 'acme/app'],
@@ -134,5 +174,5 @@ describe('compiled CLI agent contract', () => {
     expect(result.code).toBe(1);
     expect(JSON.parse(result.stdout)).toMatchObject({ status: 'usage_error' });
     expect(result.stderr).toBe('');
-  });
+  }, SUBPROCESS_TEST_TIMEOUT_MS);
 });

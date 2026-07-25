@@ -1,10 +1,10 @@
 # CLI agent contract
 
-This deterministic reference is sourced from `cli/src/contract.ts` and the setup protocol in `cli/src/setup.ts`. It covers the agent-facing `setup`, `snippet`, `verify`, and `status` commands.
+This deterministic reference is sourced from `cli/src/contract.ts` and the setup protocol in `cli/src/setup.ts`. It covers the agent-facing `setup`, `snippet`, `verify`, and `status` commands, and `onboard` when invoked non-interactively.
 
 ## Output and persistence invariants
 
-- Each covered command writes exactly one JSON document to stdout per invocation. It never mixes prose, progress, or a second JSON document into stdout.
+- Each covered command writes exactly one JSON document to stdout per invocation. It never mixes prose, progress, or a second JSON document into stdout. `onboard` is covered only on its non-TTY path, which emits `tty_required` and exits 1; under a TTY it is an interactive human command and, like `login` and `init`, is exempt.
 - Diagnostics go to stderr. Blocking `setup` writes the interim `auth_required` document, including the human authorization URL, to stderr and reserves stdout for its one terminal document. `setup --start` instead returns `auth_required` as its terminal stdout document.
 - `auth_required`, `pending`, an informational `already_configured`, `completed`, `relinked`, `ok`, and `configured` exit 0. Failures and usage errors exit 1. A refused `setup --force` is the documented exception where `already_configured` exits 1 because relinking is required.
 - `login` and `init` are interactive human commands and are exempt from this JSON/stream contract.
@@ -38,6 +38,7 @@ The rows between the markers are machine parsed. Do not edit them without changi
 | `setup` | `repo_not_detected` | 1 | `stdout` | No GitHub owner/repo could be resolved from the arguments or git remote. |
 | `setup --relink` | `project_not_in_active_org` | 1 | `stdout` | The repo project is not visible in the authenticated active organization. |
 | `setup --relink` | `login_required` | 1 | `stdout` | A current origin-scoped interactive login is required before relinking. |
+| `onboard` | `tty_required` | 1 | `stdout` | The command needs an interactive terminal; run it without piping stdin or stdout. |
 | `snippet, verify, status, errors` | `no_credentials` | 1 | `stdout` | No credential matches the current API origin and repository. |
 | `snippet` | `internal_error` | 1 | `stdout` | Framework detection or patch generation failed before a snippet could be emitted. |
 | `verify` | `ok` | 0 | `stdout` | The API is reachable; has_events says whether the first event arrived. |

@@ -38,6 +38,8 @@ describe('detect-stage agent specification', () => {
     expect(spec).toMatch(/anchor[\s\S]{0,100}init block|init block[\s\S]{0,100}anchor/i);
     expect(spec).toMatch(/import_line[\s\S]{0,100}module top level/i);
     expect(spec).toContain('manifest_file');
+    expect(spec).toContain('dev_script');
+    expect(spec).toMatch(/exact key[\s\S]{0,120}package\.json "scripts"/i);
     expect(spec).toMatch(/host pins the SDK version/i);
     expect(spec).not.toMatch(/\bedit or write\b/i);
   });
@@ -48,6 +50,7 @@ describe('apply-stage agent specification', () => {
     app_dir: 'web',
     framework: 'vue-vite',
     package_manager: 'pnpm',
+    dev_script: 'dev',
     env_prefix: 'VITE_',
     dependency: { name: '@opslane/sdk', version: '^1.2.0' },
     env_vars: {

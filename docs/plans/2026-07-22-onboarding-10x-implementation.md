@@ -1046,210 +1046,256 @@ refactored seams — = Phase 2 complete.
 
 ---
 
-## Phase 3 — TUI, command registration, live smoke (the payoff)
+## Phase 3 — TUI, command registration, live smoke
 
-The two run-and-observe files (`tui.tsx`, `app.tsx`) wrap a live model + a TTY — the same
-deliberate TDD exception the prototype documented, confined to this phase.
+> **Restructured 2026-07-24 by `/plan-eng-review`.** Phase 3 was one milestone with
+> ~11 files and 5 new modules. It is now M1–M5, ordered so the SDK release gates only
+> the last one. 8 review issues and 11 outside-voice (Codex) findings are folded in
+> below. The 2026-07-24 D5b amendment is no longer a pasted addendum — it is built
+> into M2 and M4.
 
-**Deliverable:** `opslane onboard` works end-to-end on a clean Vite repo: survey → ask →
-wire → app runs → TUI confirms `app_reporting` for this run's session.
+**Deliverable (reworded).** M1–M5 prove the **orchestration** end to end: login,
+provisioning, both agent stages, approvals, env write, consented install, a TUI-owned
+dev server, and polling to `app_reporting`.
 
-> **Amendment (2026-07-24 eng review, D5b) — in-TUI consented execution.** The
-> print-and-wait hand-off ("now run `<pm> install`, then `<pm> run dev`") is replaced by
-> the TUI running those commands itself, each behind an Enter-to-confirm prompt, so the
-> user never leaves the terminal:
-> - New tested seam `runConsentedCommand` (injected `spawn`): command text is
->   **lockfile-derived** (R4 — never model text), streamed output, exit-code surfaced.
->   Skip path on every prompt prints the copy-paste command (old behavior preserved).
-> - The dev server is spawned and **owned by the TUI**: its stdout is parsed for the
->   real localhost URL (no port guessing), rendered as a clickable link — "Open your
->   app: http://localhost:5173". On quit, the TUI stops the dev server and prints the
->   restart command.
-> - `waitForAppReporting` runs alongside; the ✓ flip happens live when the user clicks
->   the link and the SDK phones home.
-> - Security posture unchanged: deterministic command text (R4) + per-command human
->   consent (R2). The *agent's* Bash allowlist still denies installs — this is the
->   TUI's own child process, not a model tool call.
-> - **Playwright/headless auto-open: rejected** — it manufactures `app_reporting`
->   without the user seeing their app (fakes the aha), adds a heavyweight dependency,
->   and breaks on auth-walled apps.
+They explicitly do **not** prove the agent beats a codemod. `cli/src/codemods/react-vite.ts`
+and `vue-vite.ts` already handle a clean Vite repo deterministically, and the design doc
+says so in its own words (`2026-07-22-onboarding-10x-design.md:14`): *"If it only handles
+a single clean Vite app, a codemod would have done, and there is no point."* The design's
+acceptance bar is **Milestone B**, the hard repo. Phase 3 is the machinery B runs on.
 
-### Task 3.1: Ink view (port; run-and-observe)
+### Blockers to resolve BEFORE M2 starts
 
-**Files:**
-- Create: `cli/src/onboard/tui.tsx` — port the prototype's `tui.tsx`, importing `TaskLine`
-  from `events.ts`. Per `docs/decisions/tui-renderer.md`: the TTY decision lives **outside**
-  the component tree, and Ink is only imported after that check (dynamic `import()` in the
-  controller), so piped callers never load the renderer.
+Four items make the milestone unwritable as previously specified. Each is a decision,
+not a task.
 
-**Verify:** `pnpm --filter @opslane/cli build` green (JSX config: add `"jsx": "react-jsx"`
-to `cli/tsconfig.json` if not present). **Commit.**
+1. **`devScript` has no source of truth.** The plan references it 7 times (Task 3.3
+   steps 4 and 6, and the finish-tool sketch at lines ~378–424). It exists nowhere in
+   the code. `OnboardingPlan` (`cli/src/onboard/tools.ts:47`) is
+   `{app_dir, framework, package_manager, env_prefix, dependency, env_vars, edit}` —
+   singular, and with no dev-script field. M2 has nothing to run until either the plan
+   schema gains a validated `dev_script`, or the CLI derives it by reading
+   `<app_dir>/package.json` `scripts` itself. **Deriving it CLI-side is preferred**: it
+   keeps the command text out of model output entirely, which is what R4 is for.
+2. **No `--repo` fallback.** `detectRepoFromGit` (`cli/src/setup.ts:58`) returns `null`
+   unless `git remote get-url origin` yields a github.com URL. A freshly scaffolded
+   local Vite app has no remote, so onboarding fails before the agent starts. `setup`
+   already exposes `--repo`; `onboard` must too, plus a clear error naming the fix.
+3. **The approval seam drops what the prompt needs.** `createOnboardApproval`
+   (`cli/src/onboard/policy.ts:99`) is `async (toolName, input) => ...` — two params.
+   The Agent SDK's `CanUseTool` passes a third carrying display metadata and an abort
+   signal. Task 3.3 promises an Ink prompt rendered from the SDK's `title`/`displayName`;
+   that data is currently discarded. The seam must forward the third argument, and must
+   settle any parked approval Promise on cancellation.
+4. **`waitForAppReporting` cannot be cancelled.** `WaitOptions`
+   (`cli/src/onboard/wait.ts:3`) has no `signal`. The teardown contract below depends on
+   aborting during the poll, so `wait.ts` gains a caller `signal` that also interrupts
+   its sleeps. Login has the same gap.
 
-### Task 3.2: `tty_required` joins the CLI status contract (TDD)
+---
 
-The canonical contract (`cli/src/contract.ts`) currently permits exits 0 and 1 and a fixed
-status list; a new machine-readable status must be added there first, not improvised.
+### M1 — Contract and toolchain
 
-**Files:**
-- Modify: `cli/src/contract.ts` — add `tty_required` (exit 1) to the status vocabulary.
-- Modify: the synced contract docs the drift test checks.
-- Test: extend `cli/src/__tests__/contract-drift.test.ts` expectations.
+No UI, no agent. Nothing here depends on the SDK release.
 
-**Steps:** failing drift test → contract + docs updated → green → commit.
+**Files**
+- Modify `cli/src/contract.ts` — add `tty_required` (exit 1) to `AGENT_STATUSES`.
+- Modify `docs/reference/cli-agent-contract.md` — the synced table.
+- Modify `cli/src/__tests__/contract-drift.test.ts` — TDD: failing first.
+- Modify `cli/package.json` — **the plan previously never said to add these.** Exact
+  pins, per `docs/decisions/tui-renderer.md` ("All package versions were exact, not
+  ranges"): `ink@7.1.1`, `@inkjs/ui@2.0.0`, `react@19.2.8`, plus `@types/react` and dev
+  dependency `ink-testing-library@4.0.0`.
+- Modify `cli/tsconfig.json` — `"jsx": "react-jsx"`.
 
-### Task 3.3: Controller — a **tested** core plus a thin Ink shell
+**Gate:** `pnpm --filter @opslane/cli build` and `test` green; the drift test enforces
+the new status.
 
-The controller coordinates approvals, cleanup, reconciliation, secret writes, polling, and
-exit status. That is too safety-critical to leave as run-and-observe, so it splits: a pure
-`runOnboardCore(deps)` with every effect injected (unit-tested, no TTY, no model), and a
-thin `app.tsx` shell that wires the real Ink UI, resolver, and `requestApproval` into it.
-Only the shell is run-and-observe.
+---
 
-**Files:**
-- Create: `cli/src/onboard/core.ts` — `runOnboardCore(deps)` where `deps` injects
-  `{ ensureLoggedIn, ensureProvisioned, runAgent, requestApproval, writeEnv,
-  waitForAppReporting, pending, out }`.
-- Create: `cli/src/onboard/app.tsx` — the Ink shell: real `requestApproval` (renders an Ink
-  prompt using the SDK's `title`/`displayName`), real ask resolver, then calls
-  `runOnboardCore`.
-- Test: `cli/src/onboard/__tests__/core.test.ts`.
+### M2 — `runConsentedCommand`
 
-**Core logic (each step is a tested branch):**
+Pure, injected `spawn`, still no UI. This is the D5b amendment's risky half, isolated
+and tested before anything renders.
 
-1. **TTY gate first** (in the shell, `process.stdin.isTTY && process.stdout.isTTY`), before
-   any Ink import. Non-TTY: `out.json({status:'tty_required', message:'…run it in a terminal'})`
-   and exit 1 (contract from Task 3.2). **No headless auto-answer.**
-2. **Login, then provision.** `ensureLoggedIn(...)`; then `detectRepoFromGit(cwd)` and
-   `ensureProvisioned({ apiUrl, repo, token, ... })` — account-based, no GitHub App.
-3. **Run the agent with the composed policy.** Build `createOnboardPolicy({ root: cwd,
-   requestApproval })` (Task 1.5) and pass it as `canUseTool` into `runAgent`. This is the
-   one seam: the policy validates and mutates finish-state, and calls the injected
-   `requestApproval` for Edit/Write/Bash; in the shell that renders an Ink prompt, in tests
-   it's a spy. Feed `reduceTasks` and `runlog.record` from each stage's `onMessage` (edit
-   reconciliation is internal to `runApply` via `EditTracker` — there is no `collectEdit`).
-   In a `finally`: reset the resolver/report slots so a failed run never leaks
-   state into a same-process retry.
-4. **Validate the outcome — a `result` message is not success.** Require ALL of: SDK result
-   reports success; a report was captured; the report's `editedFiles` set **equals** the
-   `collectEdit` set (both already canonical repo-relative from Task 1.3, so a normal run
-   matches); each `app.devScript` exists in `<dir>/package.json` `scripts`. Otherwise render
-   the specific failure, exit 1, **no env writes, no poll**.
-5. **Write env, symlink-safe.** The validated `OnboardingPlan` names one app: resolve
-   `join(cwd, plan.app_dir)` through `realpath`, reject if outside `cwd`, then
-   `writeEnvLocal(dir, { [plan.env_vars.api_key]: apiKey, [plan.env_vars.endpoint]:
-   endpoint })` (Task 2.3 also revalidates the var-name regex).
-6. **Hand-off from verified facts only.** Derive the package manager **from the repo's
-   lockfile** (`pnpm-lock.yaml`/`package-lock.json`/`yarn.lock`/`bun.lockb`), not from the
-   report's `packageManager` field — the enum stops injection but not a wrong value (finding
-   #9). Print "In `<dir>`: run `<pm> install`, then `<pm> run <devScript>`" using the derived
-   pm and the script-existence-checked `devScript`.
-7. `waitForAppReporting({ ..., sessionId, pollToken })`; on resolve flip to success, clear
-   the pending record, exit 0. On reject: show the poll error with the session id (pending
-   record kept so a re-run resumes), exit 1.
+**Files:** create `cli/src/onboard/consented-command.ts` and its `__tests__`.
 
-**Controller tests (DI, no TTY, no model) — the six the review requires:**
+**Behaviour**
+- Package manager derived from the repo's lockfile (`pnpm-lock.yaml`,
+  `package-lock.json`, `yarn.lock`, `bun.lockb`), never from model output.
+- Dev script derived per blocker 1, never from model output.
+- `spawn(executable, argv, { shell: false })`. Never a shell string.
+- Streamed output, exit code surfaced, skip path prints the copy-paste command.
+- Dev-server mode: long-running child, stdout scanned for the real localhost URL.
+- **Output rendering is throttled.** Chunks accumulate in a plain array holding only
+  the last ~8 lines and flush to React state on a ~100ms timer. A loud `npm install`
+  must not cause one Ink frame rebuild per line.
+- **Child output is ANSI-stripped before rendering.** The CLI is now executing package
+  lifecycle scripts and the repo's arbitrary dev script; without stripping, a hostile
+  script can emit terminal control sequences that spoof an Ink consent prompt.
+
+**Teardown contract (all paths, not just quit)**
+```
+spawn(..., { detached: true })            // child leads its own process group
+stop() => process.kill(-child.pid, 'SIGTERM')
+
+  normal quit          -> stop() + print restart command
+  SIGINT / SIGTERM     -> stop(), exit 130
+  uncaught throw       -> stop(), rethrow
+  abort during polling -> stop()          (needs blocker 4)
+```
+Vite spawns its own children (esbuild), so killing the direct child is not enough —
+kill the group. Precedent in this repo: `withFileLock` released only in a `finally`,
+which a signal skips, and a Ctrl-C stranded a lock file that wedged every later token
+write (found in the 2026-07-24 pre-landing review).
+
+**Tests (fake spawn, no real processes)**
+- package-manager detection: pnpm | npm | yarn | bun | none (5 cases)
+- run: exit 0 | non-zero | skip
+- dev server: URL parsed | non-default port (5174 when 5173 is taken) | URL never
+  appears | timeout
+- teardown: SIGINT during install | SIGINT during poll | throw | quit | abort
+- throttling: 500 synthetic lines produce ≤ ceil(duration/100ms) flushes; tail holds
+  only the last 8
+- ANSI stripping: a chunk containing `\x1b[2J\x1b[H` plus fake prompt text renders inert
+
+---
+
+### M3 — `runOnboardCore`
+
+Tested controller, still no UI. Every effect injected.
+
+**Files:** create `cli/src/onboard/core.ts` and `__tests__/core.test.ts`.
+
+**Corrected dependency contract.** The previous list named `runAgent` and
+`createOnboardPolicy`; neither exists.
+
+```
+deps = {
+  ensureLoggedIn, ensureProvisioned,
+  runDetect,   // {cwd, onMessage, onPlan, signal, askUser, queryFn}
+  runApply,    // {cwd, plan, onMessage, onReport, requestApproval, signal, queryFn}
+  requestApproval,          // passed INTO runApply, not used to build a policy
+  runConsentedCommand,      // from M2
+  writeEnv, waitForAppReporting, pending,
+}
+```
+
+**The caller does not build the tool policy.** `runApply` already constructs both
+`onboardPreToolUseHook` and `createOnboardApproval` internally
+(`cli/src/onboard/engine.ts:629-647`) and just wants `requestApproval` passed in.
+
+**Preflight runs before anything mutates state.** Today the model API key is only
+checked when `runAgentCore` starts (`engine.ts:235`), i.e. after login and provisioning
+have already changed server and local state. Check the model credential and the required
+package-manager executable first.
+
+**Edit reconciliation.** Reconcile the report's `editedFiles` against `EditTracker`.
+There is no `collectEdit`; the previous Task 3.3 contradicted itself by requiring one in
+step 4 while step 3 said it did not exist.
+
+**Tests**
+- login → provision
+- `runDetect` → plan | unsupported | failure
+- human rejection denies the tool and records no edit
+- an invalid or unreconciled report writes no env file and never polls
+- `editedFiles` vs `EditTracker`
+- `writeEnv` targets are realpath-contained
+- `waitForAppReporting` success | failure | timeout
+- the `finally` always resets resolver and report slots, even on throw
+- `abort()` cancels the SDK via the injected `AbortController`
+
+---
+
+### M4 — Ink shell and command registration
+
+First live run. **Not** blocked by the SDK release: `verify.ts:987-997` range-checks the
+`package.json` **text**, so Detect and Apply both pass without the SDK being published.
+
+**Files:** create `cli/src/onboard/tui.tsx`, `app.tsx`, `command.ts`; modify
+`cli/src/index.ts`.
+
+**The Ink boundary is a module boundary, not an import boundary.** With
+`"jsx": "react-jsx"`, every `.tsx` compiles with `import { jsx } from "react/jsx-runtime"`
+hoisted above all user code. So `await import('ink')` *inside* `app.tsx` does not satisfy
+`docs/decisions/tui-renderer.md` — loading `app.tsx` has already pulled React in. The
+dynamic boundary sits around the whole `.tsx` module:
+
 ```ts
-// with a requestApproval spy and injected deps:
-it('human rejection denies the tool and no edit is recorded', ...);
-it('abort() cancels the SDK via the injected AbortController', ...);
-it('an invalid/unreconciled report writes no env file and never polls', ...);
-it('the finally always resets resolver + report slots, even on throw', ...);
-it('success writes exactly the reported apps, each realpath-contained', ...);
-it('non-TTY output is exactly one JSON line, zero ANSI bytes', ...);
+// command.ts — plain .ts, no JSX, no react import
+if (!process.stdin.isTTY || !process.stdout.isTTY) {
+  exitWithStatus('tty_required', { message: '...run it in a terminal' }, 1)
+}
+const { runOnboardApp } = await import('./app.js')   // first touch of any .tsx
 ```
 
-**Verify (observe, the shell only):** build green; piped run emits the single JSON line, no
-ANSI: `node cli/dist/index.js onboard < /dev/null | cat`. **Commit.**
+Use the typed `exitWithStatus` from `cli/src/output.ts`, not a new `out.json`. Its first
+parameter is `AgentStatus`, so a typo is a compile error rather than a silent contract break.
 
-### Task 3.4: Register the command + live smoke
+**Bound the task list.** `reduceTasks` (`cli/src/onboard/events.ts:187`) appends per tool
+call with no cap and re-clones the array on every message — O(n²) allocations and an
+unbounded wall of text on a multi-app repo. Keep a rolling window of in-flight lines,
+collapse settled ones into a counter, and stop cloning per message.
 
-**Files:**
-- Modify: `cli/src/index.ts` — register after the `setup` command, and switch the program to
-  `await program.parseAsync()` (the action is async; bare `parse()` drops rejections):
+**Tests**
+- `contract.subprocess.test.ts`: piped run emits **exactly one JSON document** (matching
+  `docs/reference/cli-agent-contract.md:7` and how every other command already behaves —
+  *not* "one line", which nothing consumes), zero ANSI bytes, exit 1.
+- `ink-testing-library`: the question renders and a keystroke resolves it; each terminal
+  failure state renders something actionable rather than a spinner (unsupported repo,
+  apply failed and rolled back, poll timed out).
+- `reduceTasks`: 200 synthetic tool calls keep the array bounded and the counter correct.
 
-```ts
-program
-  .command('onboard')
-  .description('Agent-guided SDK onboarding for the repo in the current directory')
-  .argument('[dir]', 'target repo', process.cwd())
-  .option('--api-url <url>', 'Opslane API URL')
-  .action(async (dir, opts) => {
-    const { runOnboardCommand } = await import('./onboard/command.js');
-    await runOnboardCommand(dir, opts);
-  });
-```
-- Create: `cli/src/onboard/command.ts` — resolves options and calls `runOnboard`; repeat
-  provisioning follows the same `201 provisioned` path as the first run.
+Only real-terminal behaviour (colour, resize, spinner animation) stays run-and-observe.
 
-**Step 1:** `pnpm --filter @opslane/cli build && pnpm --filter @opslane/cli test` — green.
+---
 
-**Step 2: Packed-CLI reality check.** The published CLI now carries the Agent SDK as a
-regular npm dependency (npm fetches it separately; we do not bundle it). Run the repo's
-packed-package check and fix anything it flags; confirm the license checker outcome from
-Task 1.1 Step 2 holds for the packed artifact too:
+### M5 — Live smoke to `app_reporting`
 
-```bash
-node scripts/check-packed-packages.mjs
-```
+**Blocked on the SDK release** (#45 / #46). The agent writes `"@opslane/sdk": "^1.2.0"`
+(`cli/src/onboard/tools.ts:19`, derived from `OPSLANE_IDENTITY_MIN_VERSION` at
+`verify.ts:43`) and npm's latest is `1.0.0`, so `npm install` fails with ETARGET before
+the tarball-overlay line is ever reached. Once published, the smoke needs no tarball
+overlay at all.
 
-**Step 3: Live smoke (run-and-observe, the Phase 3 acceptance).** Order matters: pack the
-tarball from THIS worktree before leaving it.
+**The smoke must isolate pending state first.** `ensureProvisioned` resumes sessions
+already at `app_reporting` or `completed` (`cli/src/onboard/provision.ts:131`). A crash
+before the pending file is deleted makes the next run's poll succeed instantly without
+the newly edited app ever connecting. Clear `~/.opslane/pending` before the run and
+assert a fresh `provisioned → app_reporting` transition, not merely a terminal status.
 
-```bash
-# in the worktree:
-cd /Users/abhishekray/orca/workspaces/opslane-oss/onboarding-10x-2
-PACK_DIR=$(mktemp -d)
-pnpm --filter @opslane/sdk pack --pack-destination "$PACK_DIR"
-export ANTHROPIC_API_KEY=$(grep '^ANTHROPIC_API_KEY=' /Users/abhishekray/Projects/opslane/opslane-oss/.env | cut -d= -f2-)
+Keep: `node scripts/check-packed-packages.mjs`, and confirm server-side by **this run's**
+session id.
 
-# in the smoke repo — TRULY clean: no @opslane/sdk installed or in package.json yet,
-# so the agent has to add the dependency itself (that's the path Phase 3 verifies).
-cd ~/Projects/opslane/opslane-smoke
-grep -q '@opslane/sdk' package.json && echo "NOT CLEAN — reset the smoke repo first" && exit 1
-node /Users/abhishekray/orca/workspaces/opslane-oss/onboarding-10x-2/cli/dist/index.js onboard --api-url http://localhost:8082
-# TUI prints the session id — note it as $SID.
-# Complete login, then watch survey → answer the ask → agent edits + reports.
+**Preconditions, recorded 2026-07-25 at the end of Phase 3b.** The controller, the Ink
+shell, and `opslane onboard` are all in place; only the live smoke is outstanding.
 
-# Verify the agent actually added the registry dependency (not a file: path, not skipped):
-grep '"@opslane/sdk"' package.json    # expect a normal semver range in dependencies
+1. **Blocked on `@opslane/sdk >= 1.2.0` reaching npm** (#45 / #46). Until then `npm install`
+   fails ETARGET — verified, not assumed.
+2. **Clear `~/.opslane/pending` before the run.** `ensureProvisioned` resumes sessions
+   already at `app_reporting` or `completed` (`cli/src/onboard/provision.ts:131`) and
+   `waitForAppReporting` accepts those statuses immediately (`cli/src/onboard/wait.ts:90`),
+   so a stale record makes the poll succeed without the edited app ever connecting. **This
+   is a false-success path in the product, not only in the smoke.** If it recurs in real
+   use, the fix is a server-side transition marker — a session must prove it moved to
+   `app_reporting` during *this* run — not a workaround in the smoke script.
+3. **Assert a fresh `provisioned → app_reporting` transition for this run's session id.**
+   A terminal status alone does not distinguish a resumed session from a new one.
+4. **Re-run `node scripts/check-packed-packages.mjs`** once the SDK release lands.
 
-# The human install step the TUI instructs, then overlay the UNRELEASED identity fix only
-# (--no-save so package.json keeps the registry dep the agent wrote):
-npm install
-npm install --no-save "$PACK_DIR"/opslane-sdk-*.tgz   # drop when milestone 0's release ships
-npm run dev     # open the page
-# The TUI's poll should flip to app_reporting and exit 0.
-```
+---
 
-Confirm server-side **by this run's session id** (a project-wide query can pass on a stale
-session):
-```bash
-docker compose -p opslane-oss exec -T postgres psql -U opslane -d opslane -c \
-  "select id, status from agent_sessions where id='<SID>';"
-```
-Expected: `app_reporting`.
+### Folded plan items (outside voice, 2026-07-24)
 
-Note on what this proves: `app_reporting` means the wired SDK's `/sessions/init` reached
-the server with identity — "your app connected." It is not proof an error event landed.
-Optionally extend the smoke: trigger a test error in the page and confirm a row lands in
-the events/errors table for the project.
-
-**Step 4: Commit** — `feat(cli): opslane onboard — agent-guided TUI onboarding to app_reporting`
-
-**Phase 3 validation checkpoint (engineering acceptance):**
-- Live smoke reaches `app_reporting` for this run's session id (TUI exit 0 + DB row).
-- Piped invocation emits exactly one byte-clean JSON object with `status: "tty_required"`.
-- `node scripts/check-packed-packages.mjs` green.
-- `pnpm --filter @opslane/cli build && pnpm --filter @opslane/cli test` green.
-- Whole-repo gate before the PR (per AGENTS.md): `pnpm -r build && pnpm test` +
-  `(cd packages/ingestion && go build ./... && go test ./...)` +
-  `docker compose config --quiet`.
-
-**Phase 3 done means:** a user in a clean Vite repo runs `opslane onboard`, answers one
-question, runs their app, and watches the TUI confirm the app connected — with every unit
-seam (`tools`, `events`, `spec`, `engine`, `agent-protocol`, `provision`, `envfile`,
-`wait`, contract) covered by Vitest. The design's 10/10 bar (the hard repo) is Milestone
-B, immediately next.
+- **`envfile.ts` symlink exposure.** Resolving `app_dir` through realpath does not protect
+  the files written inside it. `cli/src/envfile.ts:25` reads and writes `.env.local` and
+  writes `.gitignore` directly, following symlinks. A symlinked `.gitignore` writes outside
+  the repo, and a failed `.gitignore` write leaves an un-ignored secret behind. Realpath
+  both targets and fail closed.
+- **Security posture is not unchanged.** The D5b line claiming otherwise is wrong: the CLI
+  now executes package lifecycle scripts and the repo's arbitrary dev script. Lockfile-derived
+  *names* do not shrink that code-execution boundary. Covered by M2's `shell:false` and ANSI
+  stripping; the plan text should state the trust boundary plainly rather than deny it.
 
 ---
 
@@ -1311,26 +1357,24 @@ not "if abuse appears."
 
 | Review | Trigger | Why | Runs | Status | Findings |
 |--------|---------|-----|------|--------|----------|
-| Codex Review | `/codex review` | Independent 2nd opinion | 2 | issues_found → addressed | Round 1: 24; Round 2: 23; engine-license finding overruled by founder decision |
-| Plan review | manual (founder) | Architecture + contract audit | 1 | issues_found → addressed | 9 findings (3 blocking, 4 high, 2 medium); all addressed 2026-07-22 |
-| Eng Review | `/plan-eng-review` | Architecture & tests (required) | 1 | CLEAR (PLAN) | Phase 2: 16 issues (9 review + 7 outside voice), all folded 2026-07-24 |
-| Outside Voice | Claude subagent (Codex timed out) | Independent plan challenge | 1 | issues_found → addressed | 7 findings; 2 reversed same-day decisions (poll-first resume, login.ts seam) |
+| CEO Review | `/plan-ceo-review` | Scope & strategy | 0 | — | — |
+| Codex Review | `/codex review` | Independent 2nd opinion | 2 | issues_found → addressed | Round 1: 24; Round 2: 23 (2026-07-22 vintage) |
+| Eng Review | `/plan-eng-review` | Architecture & tests (required) | 2 | issues_open (PLAN) | Phase 2: 16, all folded. **Phase 3: 19 (8 review + 11 outside voice), 2 critical gaps** |
+| Design Review | `/plan-design-review` | UI/UX gaps | 0 | — | — |
+| DX Review | `/plan-devex-review` | Developer experience gaps | 0 | — | — |
 
-**PLAN REVIEW (2026-07-22) — the corrections that mattered:**
-- **Blocking:** added **Phase 0.5** (authenticated account-provisioning endpoint with a full API/DB/test contract) and made Task 2.2 provisioning **synchronous** (no second `auth_url`); **rebuilt the permission architecture** so nothing security-relevant sits in `allowedTools` (Read/Grep were auto-run, so the dotenv and one-finish guards were dead code) — now one composed `createOnboardPolicy` handler with per-run state, an injected approval seam, and secret-aware custom survey tools replacing built-in Read/Grep; added a **by-repo pending lookup** (`findPendingByRepo`) since `pending.ts` only loaded by poll-id UUID.
-- **High:** fixed report/observed-edit **reconciliation** to one canonical repo-relative form with `realpath` symlink containment (normal runs were guaranteed to fail before); resolved the **install contradiction** (agent Bash is checks-only, installs stay the human's job); **run log is metadata-by-default**, full transcript opt-in with redaction/retention/warning; **smoke runs on a truly clean repo** and overlays the tarball `--no-save`.
-- **Medium:** the safety-critical controller is now a **tested core** (`runOnboardCore` with DI) plus a thin Ink shell, with the six required tests; **package manager is derived from the lockfile**, not the model's report field.
+**ENG REVIEW (2026-07-24, Phase 3 scope) — Phase 3 restructured into M1–M5:**
 
-**ENG REVIEW (2026-07-24, Phase 2 scope) — decisions folded into the section above:**
-- **Architecture:** admin gate on `/onboard/provision` **kept** with a typed `NotAuthorizedError` for 403 ("ask an org admin", never re-login); poll seam speaks the **server vocabulary verbatim** (contract.ts stays the setup-command contract); stale pre-split names refreshed (`OnboardingPlan`, `EditTracker`, single-app shape).
-- **Outside voice (all 7 accepted):** new **Task 2.0** — server-side duplicate-project guard (setup-flow projects invisible to the onboard idempotency token) + window-closed copy fix; **resume reversed to poll-first** (the poll re-delivers the key while the session lives — one poll proves liveness, recovers lost keys, catches cross-machine rotation); `login.ts` amended to throw typed errors with an injectable token path; **refresh grant wired** into `ensureLoggedIn`; pending sessions gain a `kind` discriminator; both server wire dialects (`{"status"}` / `{"error"}`) parsed; run log keyed by local run id.
-- **Tests:** 9 gap tests added across the five tasks (403 branch, LoginFailedError, poll-first resume fallback, server-vocab passthrough, atomic write + perm tightening, provisioned-as-waiting, failed-as-terminal, Retry-After header vs body, origin/kind pending mismatches).
-- **Phase 3 amendment (D5b):** in-TUI consented execution — lockfile-derived commands behind Enter-to-confirm, TUI-owned dev server, clickable localhost URL parsed from its stdout; Playwright rejected.
+- **The unlock:** `verify.ts:987-997` range-checks the `package.json` **text**, not `node_modules`. So the SDK release gates only M5 — M1–M4 build and verify now, while #45 sits.
+- **Architecture (4):** the live smoke cannot run (agent writes `^1.2.0`, npm latest is `1.0.0` → ETARGET) → M5 gated on the real release; Task 3.3 named `createOnboardPolicy`/`runAgent`, neither of which exists → dep contract rewritten against `runDetect`/`runApply`, and `runApply` already builds the policy internally; the plan never added `ink`/`react`/`@inkjs/ui` → folded into M1 as exact pins per `docs/decisions/tui-renderer.md`; no teardown contract for the spawned dev server → process-group kill on quit / SIGINT / throw / abort, tested in M2.
+- **Code quality (2):** `reduceTasks` (`events.ts:187`) grew unbounded and re-cloned per message → rolling window plus a done counter; the plan invented an untyped `out.json` → use the typed `exitWithStatus`, so a bad status is a compile error.
+- **Tests (1):** `tui.tsx`/`app.tsx` were declared run-and-observe → covered with `ink-testing-library@4.0.0`; only real-terminal behaviour stays unobserved. The plan named 6 tests for ~36 new branches.
+- **Performance (1):** streaming child stdout into Ink state renders per line → bounded tail flushed on a ~100ms timer.
 
-**CODEX:** Codex CLI timed out (5m); the outside voice ran as a Claude subagent — findings verified against source before acceptance.
+**CODEX:** ran (gpt-5.6-sol, high effort). 11 findings, none a repeat of the review. Four are hard blockers that make the milestone unwritable: `devScript` is referenced 7× in the plan and exists nowhere in `OnboardingPlan` (`tools.ts:47`); `detectRepoFromGit` returns null without a GitHub remote and `onboard` exposes no `--repo`; `createOnboardApproval` discards the SDK's third argument (display metadata + signal); `wait.ts` has no caller `signal`, so the agreed teardown has nothing to hook. All 11 verified against source before acceptance and folded above.
 
-**CROSS-MODEL:** outside voice overturned two same-day review decisions (D6→poll-first resume, D8→login.ts amendment) with code-verified evidence; both reversals accepted by the founder.
+**CROSS-MODEL:** two tensions. (1) Codex flagged that `exitWithStatus` pretty-prints, contradicting the plan's "one JSON line" — resolved **against the plan**: `docs/reference/cli-agent-contract.md:7` says "one JSON **document**" and `contract.subprocess.test.ts` parses whole stdout, so the plan's wording was the outlier. (2) Codex challenged the acceptance target as proving nothing the `react-vite`/`vue-vite` codemods already do — the design doc agrees in its own words (`onboarding-10x-design.md:14`); resolved by keeping the clean-repo target and **renaming what it proves** (the orchestration, not the agent's reasoning advantage). Milestone B remains the design's acceptance bar.
 
-**VERDICT:** ENG CLEARED (Phase 2) — the section is implementation-ready as rewritten; prior plan-review corrections stand. The 2026-07-22 unresolved items are closed: milestone 0.5 was built and landed (#182), and the corrected plan has now been independently re-reviewed (this pass + outside voice).
+**VERDICT:** ENG CLEARED — the M1–M5 structure is sound, all 19 findings are folded, and the one open decision was settled on 2026-07-24: `dev_script` joins the `OnboardingPlan` schema, model-reported and cross-checked against the app's `package.json` scripts, mirroring how `package_manager` is already handled at `tools.ts:234-237`. (The review had recorded "derive CLI-side" as preferred; that was reversed — pure derivation has to guess between `dev`, `dev:staging`, and `start`, and choosing correctly is the judgment the agent exists to provide.) Executable plan for the blockers plus M1–M2: `docs/plans/2026-07-24-phase-3a-execution-seam.md`.
 
 NO UNRESOLVED DECISIONS

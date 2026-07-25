@@ -1,4 +1,12 @@
-import { chmod, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  stat,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -54,6 +62,35 @@ describe('writeEnvLocal', () => {
       .split('\n')
       .filter((line) => line === '.env.local');
     expect(lines).toHaveLength(1);
+  });
+
+  it('refuses to write through a symlinked .gitignore', async () => {
+    const d = await dir();
+    const outside = join(await mkdtemp(join(tmpdir(), 'opslane-out-')), 'victim');
+    await writeFile(outside, 'original\n');
+    await symlink(outside, join(d, '.gitignore'));
+
+    await expect(writeEnvLocal(d, { VITE_OPSLANE_API_KEY: 'opk_x' })).rejects.toThrow();
+    expect(await readFile(outside, 'utf8')).toBe('original\n');
+  });
+
+  it('refuses to write through a symlinked .env.local', async () => {
+    const d = await dir();
+    const outside = join(await mkdtemp(join(tmpdir(), 'opslane-out-')), 'victim');
+    await writeFile(outside, 'original\n');
+    await symlink(outside, join(d, '.env.local'));
+
+    await expect(writeEnvLocal(d, { VITE_OPSLANE_API_KEY: 'opk_x' })).rejects.toThrow();
+    expect(await readFile(outside, 'utf8')).toBe('original\n');
+  });
+
+  it('does not leave the key on disk when the gitignore write fails', async () => {
+    const d = await dir();
+    await mkdir(join(d, '.gitignore'));
+
+    await expect(writeEnvLocal(d, { VITE_OPSLANE_API_KEY: 'opk_x' })).rejects.toThrow();
+    await expect(readFile(join(d, '.env.local'), 'utf8'))
+      .rejects.toMatchObject({ code: 'ENOENT' });
   });
 
   it('rejects var names failing the regex', async () => {

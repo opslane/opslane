@@ -134,6 +134,81 @@ describe('waitForAppReporting', () => {
     expect(fetchFn).toHaveBeenCalledTimes(3);
   });
 
+  it('rejects immediately when the signal is already aborted', async () => {
+    const fetchFn = vi.fn();
+
+    await expect(
+      waitForAppReporting({ ...OPTS, fetchFn, signal: AbortSignal.abort() }),
+    ).rejects.toThrow(/aborted/i);
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+
+  it('stops on abort without sleeping through the backoff', async () => {
+    const controller = new AbortController();
+    const sleepFn = vi.fn(async () => undefined);
+    const fetchFn = vi.fn(async () => {
+      controller.abort();
+      throw Object.assign(new Error('aborted'), { name: 'AbortError' });
+    });
+
+    await expect(
+      waitForAppReporting({
+        ...OPTS,
+        fetchFn,
+        sleepFn,
+        signal: controller.signal,
+      }),
+    ).rejects.toThrow(/aborted/i);
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    expect(sleepFn).not.toHaveBeenCalled();
+  });
+
+  it('interrupts an active default pause and clears its timer', async () => {
+    vi.useFakeTimers();
+    try {
+      const controller = new AbortController();
+      const fetchFn = seq({ status: 200, body: { status: 'pending' } });
+      const pending = waitForAppReporting({
+        ...OPTS,
+        fetchFn,
+        sleepFn: undefined,
+        pollIntervalMs: 30_000,
+        signal: controller.signal,
+      });
+      await vi.waitFor(() => expect(fetchFn).toHaveBeenCalledTimes(1));
+
+      controller.abort();
+
+      await expect(pending).rejects.toThrow(/aborted/i);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not accumulate abort listeners across poll turns', async () => {
+    const controller = new AbortController();
+    const add = vi.spyOn(controller.signal, 'addEventListener');
+    const remove = vi.spyOn(controller.signal, 'removeEventListener');
+    let polls = 0;
+    const fetchFn = vi.fn(async () => {
+      polls += 1;
+      if (polls > 30) {
+        return new Response(JSON.stringify({ status: 'app_reporting' }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ status: 'pending' }), { status: 200 });
+    });
+
+    await waitForAppReporting({
+      ...OPTS,
+      fetchFn,
+      sleepFn: async () => undefined,
+      signal: controller.signal,
+    });
+
+    expect(add.mock.calls.length).toBe(remove.mock.calls.length);
+  });
+
   it('times out with the session id in its message', async () => {
     const nowFn = vi.fn()
       .mockReturnValueOnce(0)

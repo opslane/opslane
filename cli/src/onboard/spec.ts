@@ -13,7 +13,8 @@ Read the repository and use the secret-aware search tool to determine:
 - whether the repository is unsupported because it has no web app;
 - the selected app's framework and real entry point;
 - the environment-variable naming convention and prefix this app actually uses;
-- the package manager, based on the repository lock file; and
+- the package manager, based on the repository lock file;
+- the script in the selected app's package.json that starts its dev server; and
 - any existing error or monitoring SDK, including Sentry, PostHog, @defender-dev/sdk,
   or @opslane/sdk.
 
@@ -34,6 +35,9 @@ Call report_plan exactly once and make no further tool calls afterward.
   equal the complete non-whitespace content of one line, including its semicolon.
 - Provide manifest_file for the selected app's package.json. Do not provide a dependency
   version or compute any hash; the host pins the SDK version and records both file hashes.
+- Provide dev_script: the exact key from the selected app's package.json "scripts" that
+  starts its dev server. It must be one of that file's declared scripts. In a repo with
+  several (dev, dev:staging, start), choose the one for the app you selected.
 - Keep Opslane initialization able to coexist with any existing monitoring SDK, and set
   existing_sdk.action to exactly one of:
   - "none" when the repository has no error or monitoring SDK at all (name: null);

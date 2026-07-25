@@ -87,6 +87,16 @@ program
   });
 
 program
+  .command('onboard')
+  .description('Agent-guided SDK onboarding for the repo in the current directory')
+  .option('--api-url <url>', 'Opslane API URL')
+  .option('--repo <owner/repo>', 'Override auto-detected repository')
+  .action(async (opts: { apiUrl?: string; repo?: string }) => {
+    const { runOnboardCommand } = await import('./onboard/command.js');
+    await runOnboardCommand(opts);
+  });
+
+program
   .command('snippet')
   .description('Get framework-specific SDK init code')
   .option('--framework <name>', 'Override auto-detected framework')

@@ -56,6 +56,7 @@ describe('deterministic apply verification', () => {
       app_dir: '.',
       framework: 'vue-vite',
       package_manager: 'pnpm',
+      dev_script: 'dev',
       env_prefix: 'VITE_',
       dependency: { name: '@opslane/sdk', version: '^1.2.0' },
       env_vars: {

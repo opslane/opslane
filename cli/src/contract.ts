@@ -54,6 +54,7 @@ export const AGENT_STATUSES = [
   agentStatus("setup", "repo_not_detected", 1, "stdout", "No GitHub owner/repo could be resolved from the arguments or git remote."),
   agentStatus("setup --relink", "project_not_in_active_org", 1, "stdout", "The repo project is not visible in the authenticated active organization."),
   agentStatus("setup --relink", "login_required", 1, "stdout", "A current origin-scoped interactive login is required before relinking."),
+  agentStatus("onboard", "tty_required", 1, "stdout", "The command needs an interactive terminal; run it without piping stdin or stdout."),
   agentStatus("snippet, verify, status, errors", "no_credentials", 1, "stdout", "No credential matches the current API origin and repository."),
   agentStatus("snippet", "internal_error", 1, "stdout", "Framework detection or patch generation failed before a snippet could be emitted."),
   agentStatus("verify", "ok", 0, "stdout", "The API is reachable; has_events says whether the first event arrived."),

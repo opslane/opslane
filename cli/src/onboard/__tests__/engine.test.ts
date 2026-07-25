@@ -38,13 +38,15 @@ function fixture(): { root: string; report: ReportPlanInput; plan: OnboardingPla
   const root = mkdtempSync(join(tmpdir(), 'opslane-engine-'));
   mkdirSync(join(root, 'src'));
   const contents = "createApp(App).mount('#app');\n";
-  const manifest = '{\n  "name": "fixture",\n  "dependencies": {}\n}\n';
+  const manifest =
+    '{\n  "name": "fixture",\n  "scripts": { "dev": "vite" },\n  "dependencies": {}\n}\n';
   writeFileSync(join(root, 'src', 'main.ts'), contents);
   writeFileSync(join(root, 'package.json'), manifest);
   const plan: OnboardingPlan = {
     app_dir: '.',
     framework: 'vue-vite',
     package_manager: 'pnpm',
+    dev_script: 'dev',
     env_prefix: 'VITE_',
     dependency: { name: '@opslane/sdk', version: OPSLANE_SDK_VERSION },
     env_vars: {
@@ -131,7 +133,7 @@ function reportQuery(
 function appliedContents(plan: OnboardingPlan): { entry: string; manifest: string } {
   return {
     entry: `${plan.edit.import_line}\n${plan.edit.init_block}\n${plan.edit.anchor}\n`,
-    manifest: `{\n  "name": "fixture",\n  "dependencies": {\n    "@opslane/sdk": "${plan.dependency.version}"\n  }\n}\n`,
+    manifest: `{\n  "name": "fixture",\n  "scripts": { "dev": "vite" },\n  "dependencies": {\n    "@opslane/sdk": "${plan.dependency.version}"\n  }\n}\n`,
   };
 }
 
@@ -506,6 +508,27 @@ describe('detect-stage engine', () => {
       reason: 'unsupported',
     });
     expect(plans).toBe(0);
+  });
+
+  it('returns the agent explanation when the repo is unsupported', async () => {
+    const { root } = fixture();
+
+    const result = await runDetect({
+      cwd: root,
+      signal: new AbortController().signal,
+      onMessage: () => undefined,
+      onPlan: () => undefined,
+      queryFn: reportQuery({
+        status: 'unsupported',
+        reason: 'this repository has no web application',
+      }),
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      reason: 'unsupported',
+      unsupportedReason: 'this repository has no web application',
+    });
   });
 
   it.each([
