@@ -503,3 +503,48 @@ describe('runOnboardCore dev server', () => {
     expect(server.stop).toHaveBeenCalled();
   });
 });
+
+describe('runOnboardCore task-list bounding', () => {
+  it('bounds retained task state and counts what it dropped', async () => {
+    let last: TaskLine[] = [];
+    await runOnboardCore(
+      deps({
+        // Only the detect stage; the apply stage re-emits an empty list.
+        emit: (event) => {
+          if (event.stage === 'detect' && event.tasks) last = event.tasks;
+        },
+        runDetect: async (options) => {
+          for (let index = 0; index < 200; index += 1) {
+            options.onMessage(toolUse(`t${index}`, 'Read'));
+            options.onMessage(toolResult(`t${index}`));
+          }
+          options.onPlan(fixturePlan());
+          return { ok: true, aborted: false };
+        },
+      }),
+    );
+    expect(last.length).toBeLessThanOrEqual(8);
+    expect(last.filter((task) => task.state === 'run')).toHaveLength(0);
+  });
+
+  it('counts dropped failures separately from dropped successes', async () => {
+    let event: CoreEvent | undefined;
+    await runOnboardCore(
+      deps({
+        emit: (value) => {
+          if (value.stage === 'detect' && value.tasks) event = value;
+        },
+        runDetect: async (options) => {
+          for (let index = 0; index < 30; index += 1) {
+            options.onMessage(toolUse(`t${index}`, 'Read'));
+            options.onMessage(toolResult(`t${index}`, { isError: index % 10 === 0 })); // 3 failures
+          }
+          options.onPlan(fixturePlan());
+          return { ok: true, aborted: false };
+        },
+      }),
+    );
+    expect(event!.droppedFailed).toBe(3);
+    expect(event!.droppedDone).toBe(30 - 3 - event!.tasks!.length);
+  });
+});

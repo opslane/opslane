@@ -40,6 +40,9 @@ export type Stage =
 export interface CoreEvent {
   stage: Stage;
   tasks?: TaskLine[];
+  /** Settled lines the controller stopped retaining, so the view can total them. */
+  droppedDone?: number;
+  droppedFailed?: number;
   question?: { question: string; options: string[]; multi: boolean };
   plan?: OnboardingPlan;
   url?: string;
@@ -97,9 +100,37 @@ function sameFiles(left: string[] = [], right: string[] = []): boolean {
   return a.every((value, index) => value === b[index]);
 }
 
-/** Task 9 replaces this with a real cap; the call site never changes. */
-function boundTasks(tasks: TaskLine[]): TaskLine[] {
-  return tasks;
+const MAX_TASKS = 8;
+
+export interface BoundedTasks {
+  tasks: TaskLine[];
+  droppedDone: number;
+  droppedFailed: number;
+}
+
+const NO_TASKS: BoundedTasks = { tasks: [], droppedDone: 0, droppedFailed: 0 };
+
+/**
+ * Keep every still-running line (a `tool_result` must still find its `tool_use`),
+ * plus the most recent settled ones. Failures are NEVER dropped silently — they
+ * are counted separately so the view cannot report a failure as "done".
+ *
+ * `running` is never truncated: dropping a running line would orphan its
+ * `tool_result` and the entry would never settle. When more than MAX_TASKS tools
+ * are in flight the list exceeds the cap, which is correct and transient.
+ */
+function boundTasks(tasks: TaskLine[], prev: BoundedTasks): BoundedTasks {
+  const running = tasks.filter((task) => task.state === 'run');
+  const settled = tasks.filter((task) => task.state !== 'run');
+  const room = Math.max(0, MAX_TASKS - running.length);
+  // slice(-0) is slice(0) and returns EVERYTHING — guard room === 0 explicitly.
+  const keep = room === 0 ? [] : settled.slice(-room);
+  const dropped = settled.slice(0, settled.length - keep.length);
+  return {
+    tasks: [...keep, ...running],
+    droppedDone: prev.droppedDone + dropped.filter((task) => task.state === 'done').length,
+    droppedFailed: prev.droppedFailed + dropped.filter((task) => task.state === 'fail').length,
+  };
 }
 
 async function runFlow(deps: CoreDeps, record: Record_): Promise<CoreResult> {
@@ -124,9 +155,17 @@ async function runFlow(deps: CoreDeps, record: Record_): Promise<CoreResult> {
   deps.runLog.addSecret(provision.pollToken);
   await deps.runLog.setSessionId(provision.sessionId);
 
-  emit({ stage: 'detect', tasks: [] });
+  let bounded = NO_TASKS;
+  const emitTasks = (stage: Stage): void =>
+    emit({
+      stage,
+      tasks: bounded.tasks,
+      droppedDone: bounded.droppedDone,
+      droppedFailed: bounded.droppedFailed,
+    });
+
+  emitTasks('detect');
   let plan: OnboardingPlan | undefined;
-  let tasks: TaskLine[] = [];
   const detect = await deps.runDetect({
     cwd: deps.cwd,
     signal,
@@ -136,8 +175,8 @@ async function runFlow(deps: CoreDeps, record: Record_): Promise<CoreResult> {
     },
     onMessage: (message) => {
       record(message);
-      tasks = boundTasks(reduceTasks(tasks, message));
-      emit({ stage: 'detect', tasks });
+      bounded = boundTasks(reduceTasks(bounded.tasks, message), bounded);
+      emitTasks('detect');
     },
   });
 
@@ -159,8 +198,8 @@ async function runFlow(deps: CoreDeps, record: Record_): Promise<CoreResult> {
 
   emit({ stage: 'awaiting-approval', plan });
 
-  tasks = []; // detect's list must not carry over
-  emit({ stage: 'apply', tasks });
+  bounded = NO_TASKS; // detect's list must not carry over
+  emitTasks('apply');
   let report: ApplyReport | undefined;
   const applied = await deps.runApply({
     cwd: deps.cwd,
@@ -172,8 +211,8 @@ async function runFlow(deps: CoreDeps, record: Record_): Promise<CoreResult> {
     },
     onMessage: (message) => {
       record(message);
-      tasks = boundTasks(reduceTasks(tasks, message));
-      emit({ stage: 'apply', tasks });
+      bounded = boundTasks(reduceTasks(bounded.tasks, message), bounded);
+      emitTasks('apply');
     },
   });
 
