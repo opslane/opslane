@@ -11,6 +11,7 @@ export interface WaitOptions {
   maxUnreachable?: number;
   requestTimeoutMs?: number;
   nowFn?: () => number;
+  signal?: AbortSignal;
 }
 
 const WAITING = new Set(['pending', 'provisioned', 'key_ok']);
@@ -22,24 +23,54 @@ const REQUEST_TIMEOUT_MS = 30_000;
 
 export async function waitForAppReporting(options: WaitOptions): Promise<PollResult> {
   const fetchFn = options.fetchFn ?? fetch;
-  const sleepFn = options.sleepFn
-    ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const sleepFn = options.sleepFn;
   const now = options.nowFn ?? Date.now;
   const interval = options.pollIntervalMs ?? 3_000;
   const deadline = now() + (options.timeoutMs ?? 15 * 60_000);
   const maxUnreachable = options.maxUnreachable ?? 20;
   const requestTimeout = options.requestTimeoutMs ?? REQUEST_TIMEOUT_MS;
+  const callerSignal = options.signal;
+  const abortError = (): Error =>
+    new Error(`waiting for session ${options.sessionId} was aborted`);
+  const throwIfAborted = (): void => {
+    if (callerSignal?.aborted === true) throw abortError();
+  };
   let unreachable = 0;
 
   async function pause(ms: number): Promise<void> {
     const remaining = deadline - now();
-    if (remaining > 0) await sleepFn(Math.min(ms, remaining));
+    if (remaining <= 0) return;
+    throwIfAborted();
+
+    let onAbort: (() => void) | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await new Promise<void>((resolve, reject) => {
+        onAbort = () => reject(abortError());
+        callerSignal?.addEventListener('abort', onAbort, { once: true });
+        const delay = Math.min(ms, remaining);
+        const sleeping = sleepFn === undefined
+          ? new Promise<void>((resolveSleep) => {
+              timer = setTimeout(resolveSleep, delay);
+              if (typeof timer.unref === 'function') timer.unref();
+            })
+          : sleepFn(delay);
+        void sleeping.then(resolve, reject);
+      });
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+      if (onAbort !== undefined) callerSignal?.removeEventListener('abort', onAbort);
+    }
   }
 
+  throwIfAborted();
   while (now() < deadline) {
     const remaining = deadline - now();
     if (remaining <= 0) break;
+    throwIfAborted();
     const controller = new AbortController();
+    const onCallerAbort = (): void => controller.abort();
+    callerSignal?.addEventListener('abort', onCallerAbort, { once: true });
     const timeout = setTimeout(
       () => controller.abort(),
       Math.min(remaining, requestTimeout),
@@ -50,7 +81,11 @@ export async function waitForAppReporting(options: WaitOptions): Promise<PollRes
       pollToken: options.pollToken,
       fetchFn,
       signal: controller.signal,
-    }).finally(() => clearTimeout(timeout));
+    }).finally(() => {
+      clearTimeout(timeout);
+      callerSignal?.removeEventListener('abort', onCallerAbort);
+    });
+    throwIfAborted();
 
     if (result.status === 'app_reporting' || result.status === 'completed') return result;
     if (result.status === 'failed') {

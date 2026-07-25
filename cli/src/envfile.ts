@@ -3,11 +3,29 @@
  * agent's validated OnboardingPlan (tools.ts validatePlan); values come from
  * provisioning. Atomic write (fsutil), 0600 always.
  */
-import { chmod, readFile, writeFile } from 'node:fs/promises';
+import { constants, open, type FileHandle } from 'node:fs/promises';
 import { join } from 'node:path';
 import { writeFileAtomic } from './fsutil.js';
 
 const ENV_VAR_NAME = /^[A-Z][A-Z0-9_]*$/;
+
+/** Read a file, refusing to traverse a final-component symlink. Missing is ''. */
+async function readNoFollow(filePath: string): Promise<string> {
+  let handle: FileHandle;
+  try {
+    handle = await open(filePath, constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT') return '';
+    // ELOOP (Linux) / EMLINK (some BSDs) mean the final component is a symlink.
+    throw new Error(`refusing to read ${filePath}: ${code}`);
+  }
+  try {
+    return await handle.readFile('utf8');
+  } finally {
+    await handle.close();
+  }
+}
 
 export async function writeEnvLocal(
   dir: string,
@@ -23,13 +41,18 @@ export async function writeEnvLocal(
   }
 
   const envPath = join(dir, '.env.local');
-  let current = '';
-  try {
-    current = await readFile(envPath, 'utf8');
-  } catch {
-    // Create the file below.
+  const gitignorePath = join(dir, '.gitignore');
+
+  // Ignore the secret first, so a gitignore failure cannot leave it exposed.
+  const gitignore = await readNoFollow(gitignorePath);
+  if (!gitignore.split(/\r?\n/).includes('.env.local')) {
+    await writeFileAtomic(
+      gitignorePath,
+      `${gitignore}${gitignore && !gitignore.endsWith('\n') ? '\n' : ''}.env.local\n`,
+    );
   }
 
+  const current = await readNoFollow(envPath);
   let next = current;
   for (const [name, value] of Object.entries(vars)) {
     const line = `${name}=${value}`;
@@ -40,19 +63,6 @@ export async function writeEnvLocal(
   }
 
   await writeFileAtomic(envPath, next);
-  await chmod(envPath, 0o600);
-
-  const gitignorePath = join(dir, '.gitignore');
-  let gitignore = '';
-  try {
-    gitignore = await readFile(gitignorePath, 'utf8');
-  } catch {
-    // Create the file below.
-  }
-  if (!gitignore.split(/\r?\n/).includes('.env.local')) {
-    gitignore += `${gitignore && !gitignore.endsWith('\n') ? '\n' : ''}.env.local\n`;
-    await writeFile(gitignorePath, gitignore, 'utf8');
-  }
 
   return envPath;
 }

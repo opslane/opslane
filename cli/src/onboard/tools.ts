@@ -48,6 +48,8 @@ export interface OnboardingPlan {
   app_dir: string;
   framework: string;
   package_manager: (typeof PACKAGE_MANAGERS)[number];
+  /** A key of `scripts` in the app's package.json. Verified against disk. */
+  dev_script: string;
   env_prefix: string;
   dependency: {
     name: '@opslane/sdk';
@@ -286,6 +288,7 @@ function validatePlan(root: string, value: unknown): OnboardingPlan {
   }
   const manifestAbsolute = path.join(root, manifestFile);
   let manifestContents: Buffer;
+  let manifestJson: unknown;
   try {
     const metadata = statSync(manifestAbsolute);
     if (
@@ -297,11 +300,23 @@ function validatePlan(root: string, value: unknown): OnboardingPlan {
       throw new Error('not a regular file');
     }
     manifestContents = readFileSync(manifestAbsolute);
-    assertRecord(JSON.parse(manifestContents.toString('utf8')), 'edit.manifest_file');
+    manifestJson = JSON.parse(manifestContents.toString('utf8'));
+    assertRecord(manifestJson, 'edit.manifest_file');
   } catch {
     throw new Error('edit.manifest_file must be a valid regular JSON file');
   }
   const manifestHash = createHash('sha256').update(manifestContents).digest('hex');
+  const devScript = nonEmptyString(value.dev_script, 'dev_script');
+  const scripts = (manifestJson as Record<string, unknown>).scripts;
+  const availableScripts =
+    typeof scripts === 'object' && scripts !== null && !Array.isArray(scripts)
+      ? Object.keys(scripts)
+      : [];
+  if (!availableScripts.includes(devScript)) {
+    throw new Error(
+      `dev_script must be one of: ${availableScripts.join(', ') || '(none declared)'}`,
+    );
+  }
 
   const importLine = nonEmptyString(value.edit.import_line, 'edit.import_line');
   const initBlock = nonEmptyString(value.edit.init_block, 'edit.init_block');
@@ -352,6 +367,7 @@ function validatePlan(root: string, value: unknown): OnboardingPlan {
     app_dir: appDir,
     framework,
     package_manager: packageManager,
+    dev_script: devScript,
     env_prefix: envPrefix,
     dependency: { name: '@opslane/sdk', version: OPSLANE_SDK_VERSION },
     env_vars: { api_key: apiKey, endpoint },
@@ -402,6 +418,7 @@ export function createReportPlanTool(
     app_dir: z.string(),
     framework: z.string(),
     package_manager: z.enum(PACKAGE_MANAGERS),
+    dev_script: z.string(),
     env_prefix: z.string(),
     dependency: z.object({
       name: z.literal('@opslane/sdk'),

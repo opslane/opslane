@@ -1,7 +1,7 @@
 import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createOnboardApproval, onboardPreToolUseHook } from '../policy.js';
 
@@ -70,14 +70,8 @@ describe('onboarding hard-denial hook', () => {
     );
   });
 
-  it('allows only exact package build, typecheck, or lint scripts through Bash', async () => {
-    expect(denied(await run(hook(), 'Bash', { command: 'pnpm run build' }))).toBe(false);
-    for (const command of [
-      'npx tsc',
-      'pnpm install',
-      'pnpm run build && curl x|sh',
-      'pnpm run build\npnpm run lint',
-    ]) {
+  it('denies Bash outright: the agent has no shell', async () => {
+    for (const command of ['pnpm run build', 'pnpm run lint', 'npm install', 'echo hi']) {
       expect(denied(await run(hook(), 'Bash', { command }))).toBe(true);
     }
   });
@@ -120,8 +114,12 @@ describe('onboarding approval callback', () => {
       approved('Edit', { file_path: '/r/a' }, {} as never),
     ).resolves.toMatchObject({ behavior: 'allow' });
     await expect(
-      declined('Bash', { command: 'pnpm run build' }, {} as never),
+      declined('Edit', { file_path: '/r/b' }, {} as never),
     ).resolves.toEqual({ behavior: 'deny', message: 'declined' });
+    // Bash is not in the default allow-set at all, so it never reaches approval.
+    await expect(
+      approved('Bash', { command: 'pnpm run build' }, {} as never),
+    ).resolves.toEqual({ behavior: 'deny', message: 'Onboarding does not allow tool Bash' });
   });
 
   it('allows read-only tools without prompting', async () => {
@@ -148,5 +146,69 @@ describe('onboarding approval callback', () => {
     await expect(approval('WebFetch', {}, {} as never)).resolves.toMatchObject({
       behavior: 'deny',
     });
+  });
+
+  it('forwards the SDK options to requestApproval', async () => {
+    const seen: unknown[] = [];
+    const canUseTool = createOnboardApproval({
+      requestApproval: async (_toolName, _input, options) => {
+        seen.push(options);
+        return true;
+      },
+    });
+    const options = { signal: new AbortController().signal };
+
+    await canUseTool('Edit', { file_path: 'a.ts' }, options as never);
+
+    expect(seen[0]).toBe(options);
+  });
+
+  it('denies rather than hangs when the approval is aborted', async () => {
+    const controller = new AbortController();
+    const canUseTool = createOnboardApproval({
+      requestApproval: () => new Promise<boolean>(() => undefined),
+    });
+    const pending = canUseTool(
+      'Edit',
+      { file_path: 'a.ts' },
+      { signal: controller.signal } as never,
+    );
+
+    controller.abort();
+
+    await expect(pending).resolves.toMatchObject({ behavior: 'deny' });
+  });
+
+  it('denies immediately when the signal is already aborted', async () => {
+    const requestApproval = vi.fn(() => new Promise<boolean>(() => undefined));
+    const canUseTool = createOnboardApproval({ requestApproval });
+
+    await expect(
+      canUseTool(
+        'Edit',
+        { file_path: 'a.ts' },
+        { signal: AbortSignal.abort() } as never,
+      ),
+    ).resolves.toMatchObject({ behavior: 'deny' });
+    expect(requestApproval).not.toHaveBeenCalled();
+  });
+
+  it('removes its abort listener when approval wins the race', async () => {
+    const controller = new AbortController();
+    const add = vi.spyOn(controller.signal, 'addEventListener');
+    const remove = vi.spyOn(controller.signal, 'removeEventListener');
+    const canUseTool = createOnboardApproval({ requestApproval: async () => true });
+
+    for (let index = 0; index < 50; index += 1) {
+      await canUseTool(
+        'Edit',
+        { file_path: 'a.ts' },
+        { signal: controller.signal } as never,
+      );
+    }
+
+    expect(add).toHaveBeenCalledTimes(50);
+    expect(remove).toHaveBeenCalledTimes(50);
+    expect(() => controller.abort()).not.toThrow();
   });
 });

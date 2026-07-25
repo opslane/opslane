@@ -50,13 +50,14 @@ describe('report_plan', () => {
     mkdirSync(join(root, 'web', 'src'), { recursive: true });
     entryFile = join(root, 'web', 'src', 'main.ts');
     entryContents = "import App from './App.vue';\ncreateApp(App).mount('#app');\n";
-    manifestContents = '{\n  "name": "web",\n  "dependencies": {}\n}\n';
+    manifestContents = '{\n  "name": "web",\n  "scripts": { "dev": "vite" },\n  "dependencies": {}\n}\n';
     writeFileSync(entryFile, entryContents);
     writeFileSync(join(root, 'web', 'package.json'), manifestContents);
     plan = {
       app_dir: 'web',
       framework: 'vue-vite',
       package_manager: 'pnpm',
+      dev_script: 'dev',
       env_prefix: 'VITE_',
       dependency: { name: '@opslane/sdk' },
       env_vars: {
@@ -110,6 +111,32 @@ describe('report_plan', () => {
       dependency: { name: '@opslane/sdk', version: OPSLANE_SDK_VERSION },
     });
     await expect(call(tool, { status: 'ok', plan })).rejects.toThrow(/already/i);
+  });
+
+  it('keeps dev_script through the schema and reports it', async () => {
+    let captured: OnboardingPlan | undefined;
+    const tool = createReportPlanTool(root, (value) => {
+      captured = value;
+    });
+
+    await call(tool, { status: 'ok', plan });
+
+    expect(captured?.dev_script).toBe('dev');
+  });
+
+  it('rejects a dev_script that the app manifest does not declare', async () => {
+    const tool = createReportPlanTool(root, () => undefined);
+
+    await expect(
+      call(tool, { status: 'ok', plan: { ...plan, dev_script: 'serve' } }),
+    ).rejects.toThrow(/dev_script must be one of: dev/);
+  });
+
+  it('rejects a plan with no dev_script at all', async () => {
+    const tool = createReportPlanTool(root, () => undefined);
+    const { dev_script: _omitted, ...withoutDevScript } = plan;
+
+    await expect(call(tool, { status: 'ok', plan: withoutDevScript })).rejects.toThrow();
   });
 
   it.each([

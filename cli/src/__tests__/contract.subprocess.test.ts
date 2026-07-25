@@ -121,6 +121,13 @@ describe('compiled CLI agent contract', () => {
     expect(JSON.parse(result.stdout)).toMatchObject({ status: 'usage_error' });
   });
 
+  it('onboard emits one tty_required JSON document when not a TTY', async () => {
+    const result = await runCli(['onboard'], await temp(), await temp());
+    expect(result.code).toBe(1);
+    expect(JSON.parse(result.stdout)).toMatchObject({ status: 'tty_required' });
+    expect(result.stdout).not.toMatch(/\x1b\[/);
+  });
+
   it.each([
     ['setup', '--start', '--repo', 'acme/app'],
     ['snippet', '--api-key', 'test-key'],
