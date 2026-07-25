@@ -4,6 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 
+import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
+
 import { runOnboardCore, type CoreDeps, type CoreEvent } from '../core.js';
 import type { ApplyReport } from '../engine.js';
 import type { DevServerHandle, ProcessCompletion } from '../process.js';
@@ -52,6 +54,18 @@ function fixturePlan(): OnboardingPlan {
     rationale: 'Initialize before mount.',
   };
 }
+
+const toolUse = (id: string, name: string): SDKMessage =>
+  ({
+    type: 'assistant',
+    message: { content: [{ type: 'tool_use', id, name, input: {} }] },
+  }) as unknown as SDKMessage;
+
+const toolResult = (id: string, { isError = false } = {}): SDKMessage =>
+  ({
+    type: 'user',
+    message: { content: [{ type: 'tool_result', tool_use_id: id, is_error: isError }] },
+  }) as unknown as SDKMessage;
 
 const EDITED = ['web/src/main.ts', 'web/package.json'];
 
@@ -222,5 +236,80 @@ describe('runOnboardCore lifecycle', () => {
       }),
     );
     expect(result.message).not.toMatch(/\bat \w+ \(/);
+  });
+
+  it('drains queued run-log records before finishing', async () => {
+    const order: string[] = [];
+    const runLog: RunLog = {
+      ...fakeRunLog(),
+      record: async () => {
+        await delay(5);
+        order.push('record');
+      },
+      finish: async () => {
+        order.push('finish');
+      },
+    };
+    await runOnboardCore(
+      deps({
+        runLog,
+        runDetect: async (options) => {
+          options.onMessage(toolUse('t1', 'Read'));
+          options.onPlan(fixturePlan());
+          return { ok: true, aborted: false };
+        },
+      }),
+    );
+    expect(order.at(-1)).toBe('finish');
+    expect(order.filter((entry) => entry === 'record').length).toBeGreaterThan(0);
+  });
+});
+
+describe('runOnboardCore detect stage', () => {
+  it('stops with the agent explanation when the repo is unsupported', async () => {
+    const d = deps({
+      runDetect: async () => ({
+        ok: false,
+        aborted: false,
+        reason: 'unsupported',
+        unsupportedReason: 'this repository has no web application',
+      }),
+    });
+    await expect(runOnboardCore(d)).resolves.toMatchObject({
+      ok: false,
+      status: 'unsupported',
+      message: 'this repository has no web application',
+    });
+  });
+
+  it('never writes env or polls when detect fails', async () => {
+    const writeEnv = vi.fn<CoreDeps['writeEnv']>(async () => '/unused/.env.local');
+    const waitForAppReporting = vi.fn<CoreDeps['waitForAppReporting']>();
+    const d = deps({
+      runDetect: async () => ({ ok: false, aborted: false, reason: 'no_plan' }),
+      writeEnv,
+      waitForAppReporting,
+    });
+    await expect(runOnboardCore(d)).resolves.toMatchObject({ ok: false, status: 'failed' });
+    expect(writeEnv).not.toHaveBeenCalled();
+    expect(waitForAppReporting).not.toHaveBeenCalled();
+  });
+
+  it('forwards the human answer back to the agent', async () => {
+    let answer: string[] | undefined;
+    const d = deps({
+      askUser: async ({ options }) => [options[1]!],
+      runDetect: async (options) => {
+        answer = await options.askUser!({
+          question: 'Which app?',
+          options: ['web', 'admin'],
+          multi: false,
+        });
+        options.onPlan(fixturePlan());
+        return { ok: true, aborted: false };
+      },
+    });
+    await runOnboardCore(d);
+    expect(answer).toEqual(['admin']); // the ANSWER, not just that we asked
   });
 });

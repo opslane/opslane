@@ -5,7 +5,7 @@
  */
 import type { writeEnvLocal } from '../envfile.js';
 import type { runApply, runDetect } from './engine.js';
-import type { TaskLine } from './events.js';
+import { reduceTasks, type TaskLine } from './events.js';
 import type { ApprovalRequest } from './policy.js';
 import type { ensureLoggedIn, ensureProvisioned } from './provision.js';
 import type { runCommand, startDevServer } from './process.js';
@@ -80,8 +80,13 @@ function messageOf(error: unknown): string {
 
 type Record_ = (message: unknown) => void;
 
-async function runFlow(deps: CoreDeps, _record: Record_): Promise<CoreResult> {
-  const { emit } = deps;
+/** Task 9 replaces this with a real cap; the call site never changes. */
+function boundTasks(tasks: TaskLine[]): TaskLine[] {
+  return tasks;
+}
+
+async function runFlow(deps: CoreDeps, record: Record_): Promise<CoreResult> {
+  const { emit, signal } = deps;
 
   emit({ stage: 'login' });
   const tokens = await deps.ensureLoggedIn({
@@ -101,6 +106,39 @@ async function runFlow(deps: CoreDeps, _record: Record_): Promise<CoreResult> {
   deps.runLog.addSecret(provision.apiKey);
   deps.runLog.addSecret(provision.pollToken);
   await deps.runLog.setSessionId(provision.sessionId);
+
+  emit({ stage: 'detect', tasks: [] });
+  let plan: OnboardingPlan | undefined;
+  let tasks: TaskLine[] = [];
+  const detect = await deps.runDetect({
+    cwd: deps.cwd,
+    signal,
+    askUser: deps.askUser,
+    onPlan: (value) => {
+      plan = value;
+    },
+    onMessage: (message) => {
+      record(message);
+      tasks = boundTasks(reduceTasks(tasks, message));
+      emit({ stage: 'detect', tasks });
+    },
+  });
+
+  if (detect.aborted) return { ok: false, status: 'aborted' };
+  if (detect.reason === 'unsupported') {
+    return {
+      ok: false,
+      status: 'unsupported',
+      message: detect.unsupportedReason ?? 'this repository is not supported',
+    };
+  }
+  if (!detect.ok || plan === undefined) {
+    return {
+      ok: false,
+      status: 'failed',
+      message: detect.reason ?? 'the survey did not produce a plan',
+    };
+  }
 
   return { ok: true, status: 'completed' };
 }
