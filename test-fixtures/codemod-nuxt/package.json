@@ -8,7 +8,7 @@
   },
   "dependencies": {
     "@opslane/sdk": "workspace:*",
-    "nuxt": "3.21.7"
+    "nuxt": "4.5.0"
   },
   "devDependencies": {
     "@nuxt/cli": "3.37.0",
