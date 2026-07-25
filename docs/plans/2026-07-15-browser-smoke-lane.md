@@ -1,5 +1,7 @@
 # Deterministic Browser-Smoke CI Lane Implementation Plan
 
+> **Superseded for replay chunks:** the presigned POST and commit flow was replaced by the single-call ingestion upload in `2026-07-24-replay-chunk-upload-r2.md`. This document remains a historical implementation record.
+
 > **Execution:** Work task-by-task in order; each task ends in a verified state and a commit. Any agent or human can execute this — no tool-specific workflow assumed. Commit messages are intent-first sentences matching this repo's log style (e.g. "Keep deterministic reliability checks portable across CI").
 
 **Goal:** A CI lane where a real Chromium browser drives Vue and React fixture apps with the real SDK pointed at the real (keyless) ingestion stack, deterministically asserting that a browser error becomes a `needs_human` incident and that browser rage-clicks become a `rage_click` friction signal.

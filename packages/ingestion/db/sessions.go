@@ -178,8 +178,8 @@ func (q *Queries) SessionIsTombstoned(ctx context.Context, sessionID string) (bo
 	return exists, nil
 }
 
-// ReserveChunkSeq claims (session, seq) before a presigned URL is issued.
-// The row is a reservation until CommitChunk records its observed size.
+// ReserveChunkSeq claims (session, seq) before ingestion writes the object.
+// The row is a reservation until CommitChunk records the buffered byte length.
 func (q *Queries) ReserveChunkSeq(ctx context.Context, sessionID, projectID string, seq int, objectKey string, hasFullSnapshot bool) error {
 	tag, err := q.pool.Exec(ctx,
 		`INSERT INTO session_chunks (session_id, seq, project_id, object_key, has_full_snapshot)

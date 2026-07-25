@@ -4,17 +4,6 @@ import { loadConfig, resetConfig } from '../config';
 
 const ENDPOINT = 'https://ingest.example.com';
 
-function policyResponse() {
-  return {
-    ok: true,
-    status: 200,
-    json: async () => ({
-      upload_url: 'https://storage.example.com/opslane-replays',
-      form_data: { key: 'sessions/p/s/chunk-000000.json.gz', policy: 'abc', 'x-amz-signature': 'sig' },
-    }),
-  };
-}
-
 describe('uploadChunk', () => {
   let fetchMock: ReturnType<typeof vi.fn>;
 
@@ -22,49 +11,28 @@ describe('uploadChunk', () => {
     resetConfig();
     _resetChunkUploadState();
     loadConfig({ apiKey: 'test-key', endpoint: ENDPOINT });
-    fetchMock = vi.fn();
+    fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
     globalThis.fetch = fetchMock as unknown as typeof fetch;
   });
 
-  it('runs upload-url -> storage POST -> commit in order', async () => {
-    fetchMock
-      .mockResolvedValueOnce(policyResponse())
-      .mockResolvedValueOnce({ ok: true, status: 204 })
-      .mockResolvedValueOnce({ ok: true, status: 200 });
+  it('sends exactly one request carrying the gzip body', async () => {
     expect(await uploadChunk('sess_abc', 0, [{ type: 2, timestamp: 1 }] as never, true)).toBe(true);
-    expect(fetchMock.mock.calls.map((call) => call[0])).toEqual([
-      `${ENDPOINT}/api/v1/sessions/sess_abc/chunks/upload-url`,
-      'https://storage.example.com/opslane-replays',
-      `${ENDPOINT}/api/v1/sessions/sess_abc/chunks/0/commit`,
-    ]);
-    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toMatchObject({ seq: 0, has_full_snapshot: true });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, options] = fetchMock.mock.calls[0];
+    expect(url).toBe(`${ENDPOINT}/api/v1/sessions/sess_abc/chunks/0?has_full_snapshot=1`);
+    expect(options).toMatchObject({
+      method: 'POST',
+      headers: { 'Content-Type': 'application/gzip', 'X-API-Key': 'test-key' },
+      keepalive: false,
+    });
+    expect((options.body as Uint8Array).byteLength).toBeGreaterThan(0);
   });
 
-  it('declares the exact compressed byte length and appends file last', async () => {
-    let declared = -1;
-    let sent = -1;
-    let order: string[] = [];
-    fetchMock
-      .mockImplementationOnce(async (_url, options) => {
-        declared = JSON.parse(options.body).size_bytes;
-        return policyResponse();
-      })
-      .mockImplementationOnce(async (_url, options) => {
-        const form = options.body as FormData;
-        sent = (form.get('file') as Blob).size;
-        order = Array.from(form.keys());
-        return { ok: true, status: 204 };
-      })
-      .mockResolvedValueOnce({ ok: true, status: 200 });
-    await uploadChunk('sess_abc', 0, [{ type: 2, timestamp: 1 }] as never, true);
-    expect(declared).toBe(sent);
-    expect(order.at(-1)).toBe('file');
-  });
-
-  it('does not commit when storage fails', async () => {
-    fetchMock.mockResolvedValueOnce(policyResponse()).mockResolvedValueOnce({ ok: false, status: 400 });
-    expect(await uploadChunk('sess_abc', 0, [{ type: 2, timestamp: 1 }] as never, true)).toBe(false);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+  it('sends an explicit false query flag when there is no full snapshot', async () => {
+    await uploadChunk('sess_abc', 1, [{ type: 3, timestamp: 1 }] as never, false);
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      `${ENDPOINT}/api/v1/sessions/sess_abc/chunks/1?has_full_snapshot=0`,
+    );
   });
 
   it('reports stop on 403 and 410', async () => {
@@ -77,7 +45,9 @@ describe('uploadChunk', () => {
 
   it('never throws and skips empty chunks', async () => {
     fetchMock.mockRejectedValue(new Error('network down'));
-    await expect(uploadChunk('sess_abc', 0, [{ type: 2, timestamp: 1 }] as never, true)).resolves.toBe(false);
+    await expect(
+      uploadChunk('sess_abc', 0, [{ type: 2, timestamp: 1 }] as never, true),
+    ).resolves.toBe(false);
     fetchMock.mockClear();
     expect(await uploadChunk('sess_abc', 0, [] as never, true)).toBe(false);
     expect(fetchMock).not.toHaveBeenCalled();
@@ -95,20 +65,35 @@ describe('flushInline', () => {
     globalThis.fetch = fetchMock as unknown as typeof fetch;
   });
 
-  it('sends one keepalive request with gzip inline', async () => {
+  it('sends one keepalive request to the same route', async () => {
     expect(await flushInline('sess_abc', 3, [{ type: 2, timestamp: 1 }] as never)).toBe(true);
     const [url, options] = fetchMock.mock.calls[0];
-    expect(url).toBe(`${ENDPOINT}/api/v1/sessions/sess_abc/chunks/3/inline`);
-    expect(options).toMatchObject({ keepalive: true, headers: { 'Content-Type': 'application/gzip' } });
+    expect(url).toBe(`${ENDPOINT}/api/v1/sessions/sess_abc/chunks/3?has_full_snapshot=0`);
+    expect(options).toMatchObject({
+      keepalive: true,
+      headers: { 'Content-Type': 'application/gzip', 'X-API-Key': 'test-key' },
+    });
   });
 
+  // Browsers cap keepalive request bodies at 64KiB. Over that the send would be
+  // refused by the browser itself, so the caller must fall back to a normal
+  // request. This is the only reason the 64KiB number exists.
   it('drops an over-budget tail and never throws', async () => {
     const huge = Array.from({ length: 20_000 }, (_, i) => ({
-      type: 3, timestamp: i, data: { text: `unique-${Math.random()}-${i}` },
+      type: 3,
+      timestamp: i,
+      data: { text: `unique-${i}-${'x'.repeat(20)}` },
     }));
     expect(await flushInline('sess_abc', 4, huge as never)).toBe(false);
     expect(fetchMock).not.toHaveBeenCalled();
     fetchMock.mockRejectedValue(new Error('page gone'));
-    await expect(flushInline('sess_abc', 5, [{ type: 2, timestamp: 1 }] as never)).resolves.toBe(false);
+    await expect(
+      flushInline('sess_abc', 5, [{ type: 2, timestamp: 1 }] as never),
+    ).resolves.toBe(false);
+  });
+
+  it('propagates stop from the tail path', async () => {
+    fetchMock.mockResolvedValueOnce({ ok: false, status: 403 });
+    expect(await flushInline('sess_abc', 6, [{ type: 2, timestamp: 1 }] as never)).toBe('stop');
   });
 });

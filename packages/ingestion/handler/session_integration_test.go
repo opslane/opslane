@@ -4,13 +4,14 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
-	"encoding/json"
+	cryptorand "crypto/rand"
 	"fmt"
-	"mime/multipart"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -20,7 +21,7 @@ import (
 	minioPkg "github.com/opslane/opslane/packages/ingestion/minio"
 )
 
-const maxInlineChunkBytesForTest = 64 << 10
+const maxChunkBytesForTest = 5 << 20
 
 func storageEnv(primary, legacy string) string {
 	if value := os.Getenv(primary); value != "" {
@@ -81,20 +82,6 @@ func initSession(t *testing.T, router http.Handler, apiKey, sessionID string) {
 	}
 }
 
-func requestUploadURL(t *testing.T, router http.Handler, apiKey, sessionID string, seq int, size int64) (int, map[string]any) {
-	t.Helper()
-	body := fmt.Sprintf(`{"seq":%d,"size_bytes":%d,"has_full_snapshot":true}`, seq, size)
-	req := httptest.NewRequest("POST",
-		fmt.Sprintf("/api/v1/sessions/%s/chunks/upload-url", sessionID), strings.NewReader(body))
-	req.Header.Set("X-API-Key", apiKey)
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	router.ServeHTTP(w, req)
-	var out map[string]any
-	_ = json.Unmarshal(w.Body.Bytes(), &out)
-	return w.Code, out
-}
-
 func gzipBytes(t *testing.T, raw []byte) []byte {
 	t.Helper()
 	var buf bytes.Buffer
@@ -108,65 +95,13 @@ func gzipBytes(t *testing.T, raw []byte) []byte {
 	return buf.Bytes()
 }
 
-func postForm(t *testing.T, uploadURL string, fields map[string]string, payload []byte) int {
-	t.Helper()
-	var body bytes.Buffer
-	w := multipart.NewWriter(&body)
-	for key, value := range fields {
-		if err := w.WriteField(key, value); err != nil {
-			t.Fatalf("write form field: %v", err)
-		}
-	}
-	part, err := w.CreateFormFile("file", "chunk.json.gz")
-	if err != nil {
-		t.Fatalf("create file field: %v", err)
-	}
-	if _, err := part.Write(payload); err != nil {
-		t.Fatalf("write file field: %v", err)
-	}
-	if err := w.Close(); err != nil {
-		t.Fatalf("close multipart: %v", err)
-	}
-	req, err := http.NewRequest(http.MethodPost, uploadURL, &body)
-	if err != nil {
-		t.Fatalf("new storage request: %v", err)
-	}
-	req.Header.Set("Content-Type", w.FormDataContentType())
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("storage request: %v", err)
-	}
-	defer resp.Body.Close()
-	return resp.StatusCode
-}
-
-func uploadToPolicy(t *testing.T, out map[string]any, payload []byte) {
-	t.Helper()
-	uploadURL, _ := out["upload_url"].(string)
-	rawForm, _ := out["form_data"].(map[string]any)
-	form := make(map[string]string, len(rawForm))
-	for key, value := range rawForm {
-		form[key], _ = value.(string)
-	}
-	if code := postForm(t, uploadURL, form, payload); code >= 400 {
-		t.Fatalf("storage upload returned %d", code)
-	}
-}
-
-func commitChunk(t *testing.T, router http.Handler, apiKey, sessionID string, seq int) int {
+// postChunk posts a gzip body to the single-call chunk upload route. query is
+// appended verbatim (for example, "?has_full_snapshot=1") so tests can exercise
+// the query contract, including malformed values.
+func postChunk(t *testing.T, router http.Handler, apiKey, sessionID string, seq int, payload []byte, query string) int {
 	t.Helper()
 	req := httptest.NewRequest("POST",
-		fmt.Sprintf("/api/v1/sessions/%s/chunks/%d/commit", sessionID, seq), strings.NewReader(`{}`))
-	req.Header.Set("X-API-Key", apiKey)
-	w := httptest.NewRecorder()
-	router.ServeHTTP(w, req)
-	return w.Code
-}
-
-func postInlineChunk(t *testing.T, router http.Handler, apiKey, sessionID string, seq int, payload []byte) int {
-	t.Helper()
-	req := httptest.NewRequest("POST",
-		fmt.Sprintf("/api/v1/sessions/%s/chunks/%d/inline", sessionID, seq), bytes.NewReader(payload))
+		fmt.Sprintf("/api/v1/sessions/%s/chunks/%d%s", sessionID, seq, query), bytes.NewReader(payload))
 	req.Header.Set("X-API-Key", apiKey)
 	req.Header.Set("Content-Type", "application/gzip")
 	w := httptest.NewRecorder()
@@ -174,111 +109,122 @@ func postInlineChunk(t *testing.T, router http.Handler, apiKey, sessionID string
 	return w.Code
 }
 
-func TestChunkUploadURL_DuplicateSeqReturns409(t *testing.T) {
+// Mirrors handler.chunkObjectKey, which is unexported.
+func chunkObjectKeyForTest(projectID, sessionID string, seq int) string {
+	return fmt.Sprintf("sessions/%s/%s/chunk-%06d.json.gz", projectID, sessionID, seq)
+}
+
+func TestChunkUpload_DuplicateSeqReturns409(t *testing.T) {
 	deps, pool := testDepsWithStorage(t)
 	_, _, apiKey := seedTenantWithKey(t, pool)
 	router := newTestRouter(t, deps, pool)
 	sid := fmt.Sprintf("sess_%d", time.Now().UnixNano())
 	initSession(t, router, apiKey, sid)
-	if code, _ := requestUploadURL(t, router, apiKey, sid, 0, 1024); code != http.StatusOK {
-		t.Fatalf("first upload-url returned %d, want 200", code)
+	payload := gzipBytes(t, []byte(`{"events":[]}`))
+	if code := postChunk(t, router, apiKey, sid, 0, payload, ""); code != http.StatusOK {
+		t.Fatalf("first upload returned %d, want 200", code)
 	}
-	if code, _ := requestUploadURL(t, router, apiKey, sid, 0, 1024); code != http.StatusConflict {
+	if code := postChunk(t, router, apiKey, sid, 0, payload, ""); code != http.StatusConflict {
 		t.Fatalf("duplicate seq returned %d, want 409", code)
 	}
 }
 
-func TestChunkUploadURL_RejectsOversizeDeclaration(t *testing.T) {
+// The #48 ceiling: a public SDK key must not be usable as a storage-flood
+// primitive. Storage used to enforce this via a content-length-range policy
+// condition; ingestion enforces it now, so this proves both halves — the
+// request is refused and nothing is persisted.
+func TestChunkUpload_RejectsOversizeBodyAndStoresNothing(t *testing.T) {
 	deps, pool := testDepsWithStorage(t)
-	_, _, apiKey := seedTenantWithKey(t, pool)
+	projectID, _, apiKey := seedTenantWithKey(t, pool)
 	router := newTestRouter(t, deps, pool)
 	sid := fmt.Sprintf("sess_%d", time.Now().UnixNano())
 	initSession(t, router, apiKey, sid)
-	code, _ := requestUploadURL(t, router, apiKey, sid, 0, 50<<20)
-	if code != http.StatusRequestEntityTooLarge && code != http.StatusBadRequest {
-		t.Fatalf("50MiB declaration returned %d, want 413/400", code)
+
+	oversize := make([]byte, maxChunkBytesForTest+1)
+	oversize[0], oversize[1] = 0x1f, 0x8b
+	if code := postChunk(t, router, apiKey, sid, 0, oversize, ""); code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversize body returned %d, want 413", code)
+	}
+
+	var rows int
+	if err := pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM session_chunks WHERE session_id=$1 AND seq=0`, sid).Scan(&rows); err != nil {
+		t.Fatalf("count reservations: %v", err)
+	}
+	if rows != 0 {
+		t.Fatalf("oversize upload left %d reservation rows, want 0", rows)
+	}
+	if _, err := deps.MinIO.StatObject(context.Background(), chunkObjectKeyForTest(projectID, sid, 0)); err == nil {
+		t.Fatal("oversize upload wrote an object to storage, want none")
 	}
 }
 
-func TestChunkUploadURL_UnknownSessionReturns404(t *testing.T) {
+func TestChunkUpload_UnknownSessionReturns404(t *testing.T) {
 	deps, pool := testDepsWithStorage(t)
 	_, _, apiKey := seedTenantWithKey(t, pool)
 	router := newTestRouter(t, deps, pool)
-	code, _ := requestUploadURL(t, router, apiKey, "sess_neverregistered", 0, 1024)
+	payload := gzipBytes(t, []byte(`{"events":[]}`))
+	code := postChunk(t, router, apiKey, "sess_neverregistered", 0, payload, "")
 	if code != http.StatusNotFound {
 		t.Fatalf("unknown session returned %d, want 404", code)
 	}
 }
 
-func TestChunkUploadURL_CrossTenantReturns404(t *testing.T) {
+func TestChunkUpload_CrossTenantReturns404(t *testing.T) {
 	deps, pool := testDepsWithStorage(t)
 	_, _, apiKeyA := seedTenantWithKey(t, pool)
 	_, _, apiKeyB := seedTenantWithKey(t, pool)
 	router := newTestRouter(t, deps, pool)
 	sid := fmt.Sprintf("sess_%d", time.Now().UnixNano())
 	initSession(t, router, apiKeyA, sid)
-	code, _ := requestUploadURL(t, router, apiKeyB, sid, 0, 1024)
-	if code != http.StatusNotFound {
-		t.Fatalf("cross-tenant upload-url returned %d, want 404", code)
-	}
-}
-
-func TestChunkCommit_MissingObjectReturns409(t *testing.T) {
-	deps, pool := testDepsWithStorage(t)
-	_, _, apiKey := seedTenantWithKey(t, pool)
-	router := newTestRouter(t, deps, pool)
-	sid := fmt.Sprintf("sess_%d", time.Now().UnixNano())
-	initSession(t, router, apiKey, sid)
-	if code, _ := requestUploadURL(t, router, apiKey, sid, 0, 1024); code != http.StatusOK {
-		t.Fatal("upload-url failed")
-	}
-	if code := commitChunk(t, router, apiKey, sid, 0); code != http.StatusConflict {
-		t.Fatalf("commit of a never-uploaded chunk returned %d, want 409", code)
-	}
-}
-
-func TestChunkCommit_RecordsServerObservedSize(t *testing.T) {
-	deps, pool := testDepsWithStorage(t)
-	_, _, apiKey := seedTenantWithKey(t, pool)
-	router := newTestRouter(t, deps, pool)
-	sid := fmt.Sprintf("sess_%d", time.Now().UnixNano())
-	initSession(t, router, apiKey, sid)
 	payload := gzipBytes(t, []byte(`{"events":[]}`))
-	code, out := requestUploadURL(t, router, apiKey, sid, 0, int64(len(payload)))
-	if code != http.StatusOK {
-		t.Fatalf("upload-url returned %d", code)
+	code := postChunk(t, router, apiKeyB, sid, 0, payload, "")
+	if code != http.StatusNotFound {
+		t.Fatalf("cross-tenant upload returned %d, want 404", code)
 	}
-	uploadToPolicy(t, out, payload)
-	if code := commitChunk(t, router, apiKey, sid, 0); code != http.StatusOK {
-		t.Fatalf("commit returned %d, want 200", code)
+}
+
+func TestChunkUpload_StoresAndCommitsInOneCall(t *testing.T) {
+	deps, pool := testDepsWithStorage(t)
+	_, _, apiKey := seedTenantWithKey(t, pool)
+	router := newTestRouter(t, deps, pool)
+	sid := fmt.Sprintf("sess_%d", time.Now().UnixNano())
+	initSession(t, router, apiKey, sid)
+	payload := gzipBytes(t, []byte(`{"events":[{"type":2}]}`))
+	if code := postChunk(t, router, apiKey, sid, 0, payload, "?has_full_snapshot=1"); code != http.StatusOK {
+		t.Fatalf("upload returned %d, want 200", code)
 	}
 
 	var size int64
-	var scrubbedAt *time.Time
+	var uploadedAt, scrubbedAt *time.Time
+	var hasFullSnapshot bool
 	if err := pool.QueryRow(context.Background(),
-		`SELECT size_bytes, scrubbed_at FROM session_chunks WHERE session_id=$1 AND seq=0`, sid,
-	).Scan(&size, &scrubbedAt); err != nil {
+		`SELECT size_bytes, uploaded_at, scrubbed_at, has_full_snapshot
+		   FROM session_chunks WHERE session_id=$1 AND seq=0`, sid,
+	).Scan(&size, &uploadedAt, &scrubbedAt, &hasFullSnapshot); err != nil {
 		t.Fatalf("read chunk: %v", err)
 	}
-	if size != int64(len(payload)) {
-		t.Fatalf("recorded size %d, want %d", size, len(payload))
-	}
-	if scrubbedAt != nil {
-		t.Fatal("commit set scrubbed_at")
+	if size != int64(len(payload)) || uploadedAt == nil || scrubbedAt != nil || !hasFullSnapshot {
+		t.Fatalf("chunk = size %d, uploaded %v, scrubbed %v, full snapshot %v",
+			size, uploadedAt, scrubbedAt, hasFullSnapshot)
 	}
 }
 
-func TestChunkCommit_IsIdempotent(t *testing.T) {
+func TestChunkUpload_IsIdempotentOnRetry(t *testing.T) {
 	deps, pool := testDepsWithStorage(t)
 	_, _, apiKey := seedTenantWithKey(t, pool)
 	router := newTestRouter(t, deps, pool)
 	sid := fmt.Sprintf("sess_%d", time.Now().UnixNano())
 	initSession(t, router, apiKey, sid)
 	payload := gzipBytes(t, []byte(`{"events":[]}`))
-	_, out := requestUploadURL(t, router, apiKey, sid, 0, int64(len(payload)))
-	uploadToPolicy(t, out, payload)
-	commitChunk(t, router, apiKey, sid, 0)
-	commitChunk(t, router, apiKey, sid, 0)
+	if code := postChunk(t, router, apiKey, sid, 0, payload, ""); code != http.StatusOK {
+		t.Fatalf("first upload returned %d, want 200", code)
+	}
+	// A retry is rejected because the sequence is already committed, but it
+	// must not duplicate the session rollup.
+	if code := postChunk(t, router, apiKey, sid, 0, payload, ""); code != http.StatusConflict {
+		t.Fatalf("retry returned %d, want 409", code)
+	}
 
 	var chunkCount int
 	var bytesStored int64
@@ -292,48 +238,304 @@ func TestChunkCommit_IsIdempotent(t *testing.T) {
 	}
 }
 
-func TestChunkInline_StoresAndCommitsInOneCall(t *testing.T) {
+func TestChunkUpload_AcceptsBodyLargerThanTheOldInlineCap(t *testing.T) {
 	deps, pool := testDepsWithStorage(t)
+	_, _, apiKey := seedTenantWithKey(t, pool)
+	router := newTestRouter(t, deps, pool)
+	sid := fmt.Sprintf("sess_%d", time.Now().UnixNano())
+	initSession(t, router, apiKey, sid)
+
+	raw := make([]byte, 512<<10)
+	if _, err := cryptorand.Read(raw); err != nil {
+		t.Fatalf("random payload: %v", err)
+	}
+	payload := gzipBytes(t, raw)
+	if len(payload) <= 64<<10 {
+		t.Fatalf("test payload gzipped to %d bytes, need > 64KiB to be meaningful", len(payload))
+	}
+	if code := postChunk(t, router, apiKey, sid, 0, payload, ""); code != http.StatusOK {
+		t.Fatalf("upload returned %d, want 200", code)
+	}
+
+	var size int64
+	var uploadedAt *time.Time
+	if err := pool.QueryRow(context.Background(),
+		`SELECT size_bytes, uploaded_at FROM session_chunks WHERE session_id=$1 AND seq=0`, sid,
+	).Scan(&size, &uploadedAt); err != nil {
+		t.Fatalf("read chunk: %v", err)
+	}
+	if size != int64(len(payload)) || uploadedAt == nil {
+		t.Fatalf("chunk = size %d (want %d), uploaded %v", size, len(payload), uploadedAt)
+	}
+}
+
+func TestChunkUpload_HasFullSnapshotQueryContract(t *testing.T) {
+	deps, pool := testDepsWithStorage(t)
+	_, _, apiKey := seedTenantWithKey(t, pool)
+	router := newTestRouter(t, deps, pool)
+
+	cases := []struct {
+		name     string
+		query    string
+		wantCode int
+		wantFlag bool
+	}{
+		{"explicit true", "?has_full_snapshot=1", http.StatusOK, true},
+		{"explicit false", "?has_full_snapshot=0", http.StatusOK, false},
+		{"absent defaults to false", "", http.StatusOK, false},
+		{"malformed is rejected", "?has_full_snapshot=yes", http.StatusBadRequest, false},
+		{"repeated is rejected", "?has_full_snapshot=1&has_full_snapshot=0", http.StatusBadRequest, false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sid := fmt.Sprintf("sess_%d", time.Now().UnixNano())
+			initSession(t, router, apiKey, sid)
+			payload := gzipBytes(t, []byte(`{"events":[{"type":2}]}`))
+			if code := postChunk(t, router, apiKey, sid, 0, payload, tc.query); code != tc.wantCode {
+				t.Fatalf("returned %d, want %d", code, tc.wantCode)
+			}
+			if tc.wantCode != http.StatusOK {
+				return
+			}
+			var got bool
+			if err := pool.QueryRow(context.Background(),
+				`SELECT has_full_snapshot FROM session_chunks WHERE session_id=$1 AND seq=0`, sid,
+			).Scan(&got); err != nil {
+				t.Fatalf("read flag: %v", err)
+			}
+			if got != tc.wantFlag {
+				t.Fatalf("has_full_snapshot = %v, want %v", got, tc.wantFlag)
+			}
+		})
+	}
+}
+
+// Cleanup runs after the client has gone away, so it must not inherit the
+// request context. The fake S3 endpoint blocks the PUT until this test cancels
+// the browser request, ensuring cancellation happens after the reservation is
+// created instead of being rejected earlier by authentication or a DB lookup.
+func TestChunkUpload_CleansUpAfterClientDisconnect(t *testing.T) {
+	deps, pool := testDeps(t)
+	putStarted := make(chan struct{}, 1)
+	deleteCalled := make(chan struct{}, 1)
+	releasePUT := make(chan struct{})
+	defer close(releasePUT)
+	fakeS3 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPut:
+			select {
+			case putStarted <- struct{}{}:
+			default:
+			}
+			<-releasePUT
+		case http.MethodDelete:
+			select {
+			case deleteCalled <- struct{}{}:
+			default:
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(fakeS3.Close)
+
+	var err error
+	deps.MinIO, err = minioPkg.New(fakeS3.URL, "", "test-key", "test-secret", "test-bucket", "us-east-1")
+	if err != nil {
+		t.Fatalf("fake storage client: %v", err)
+	}
+	_, _, apiKey := seedTenantWithKey(t, pool)
+	router := newTestRouter(t, deps, pool)
+	sid := fmt.Sprintf("sess_%d", time.Now().UnixNano())
+	initSession(t, router, apiKey, sid)
+
+	payload := gzipBytes(t, []byte(`{"events":[{"type":2}]}`))
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodPost,
+		fmt.Sprintf("/api/v1/sessions/%s/chunks/0", sid), bytes.NewReader(payload)).WithContext(ctx)
+	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("Content-Type", "application/gzip")
+	rec := httptest.NewRecorder()
+	requestDone := make(chan struct{})
+	go func() {
+		router.ServeHTTP(rec, req)
+		close(requestDone)
+	}()
+
+	select {
+	case <-putStarted:
+		cancel()
+	case <-time.After(5 * time.Second):
+		cancel()
+		t.Fatal("upload never reached storage")
+	}
+	select {
+	case <-requestDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancelled upload did not return")
+	}
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("cancelled upload returned %d, want 500", rec.Code)
+	}
+	select {
+	case <-deleteCalled:
+	default:
+		t.Fatal("cancelled upload did not remove the ambiguous storage object")
+	}
+
+	var rows int
+	if err := pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM session_chunks WHERE session_id=$1 AND seq=0 AND size_bytes IS NULL`, sid,
+	).Scan(&rows); err != nil {
+		t.Fatalf("count orphans: %v", err)
+	}
+	if rows != 0 {
+		t.Fatalf("disconnect left %d orphaned reservations, want 0", rows)
+	}
+}
+
+func TestChunkUpload_RemovesAmbiguousPutBeforeReleasingReservation(t *testing.T) {
+	deps, pool := testDeps(t)
+	var objectPresent atomic.Bool
+	var deleteCalls atomic.Int32
+	fakeS3 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPut:
+			if _, err := io.Copy(io.Discard, r.Body); err != nil {
+				t.Errorf("read fake PUT: %v", err)
+			}
+			// Simulate storage accepting the bytes but losing the success
+			// response. PutObject reports an error even though an object exists.
+			objectPresent.Store(true)
+			w.WriteHeader(http.StatusInternalServerError)
+		case http.MethodDelete:
+			deleteCalls.Add(1)
+			objectPresent.Store(false)
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(fakeS3.Close)
+
+	var err error
+	deps.MinIO, err = minioPkg.New(fakeS3.URL, "", "test-key", "test-secret", "test-bucket", "us-east-1")
+	if err != nil {
+		t.Fatalf("fake storage client: %v", err)
+	}
 	_, _, apiKey := seedTenantWithKey(t, pool)
 	router := newTestRouter(t, deps, pool)
 	sid := fmt.Sprintf("sess_%d", time.Now().UnixNano())
 	initSession(t, router, apiKey, sid)
 	payload := gzipBytes(t, []byte(`{"events":[{"type":2}]}`))
-	if code := postInlineChunk(t, router, apiKey, sid, 0, payload); code != http.StatusOK {
-		t.Fatalf("inline flush returned %d, want 200", code)
-	}
 
-	var size int64
-	var uploadedAt, scrubbedAt *time.Time
+	if code := postChunk(t, router, apiKey, sid, 0, payload, ""); code != http.StatusInternalServerError {
+		t.Fatalf("ambiguous PUT returned %d, want 500", code)
+	}
+	if objectPresent.Load() {
+		t.Fatal("ambiguous PUT object survived cleanup")
+	}
+	if deleteCalls.Load() != 1 {
+		t.Fatalf("cleanup DELETE calls = %d, want 1", deleteCalls.Load())
+	}
+	var rows int
 	if err := pool.QueryRow(context.Background(),
-		`SELECT size_bytes, uploaded_at, scrubbed_at FROM session_chunks WHERE session_id=$1 AND seq=0`, sid,
-	).Scan(&size, &uploadedAt, &scrubbedAt); err != nil {
-		t.Fatalf("read chunk: %v", err)
+		`SELECT count(*) FROM session_chunks WHERE session_id=$1 AND seq=0`, sid,
+	).Scan(&rows); err != nil {
+		t.Fatalf("count reservations: %v", err)
 	}
-	if size != int64(len(payload)) || uploadedAt == nil || scrubbedAt != nil {
-		t.Fatalf("inline chunk = size %d, uploaded %v, scrubbed %v", size, uploadedAt, scrubbedAt)
+	if rows != 0 {
+		t.Fatalf("successful cleanup left %d reservation rows, want 0", rows)
 	}
 }
 
-func TestChunkInline_RejectsOversizeBody(t *testing.T) {
+func TestChunkUpload_RetainsReservationWhenAmbiguousPutCannotBeRemoved(t *testing.T) {
+	deps, pool := testDeps(t)
+	var deleteCalls atomic.Int32
+	fakeS3 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPut:
+			_, _ = io.Copy(io.Discard, r.Body)
+			w.WriteHeader(http.StatusInternalServerError)
+		case http.MethodDelete:
+			deleteCalls.Add(1)
+			w.WriteHeader(http.StatusInternalServerError)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(fakeS3.Close)
+
+	var err error
+	deps.MinIO, err = minioPkg.New(fakeS3.URL, "", "test-key", "test-secret", "test-bucket", "us-east-1")
+	if err != nil {
+		t.Fatalf("fake storage client: %v", err)
+	}
+	_, _, apiKey := seedTenantWithKey(t, pool)
+	router := newTestRouter(t, deps, pool)
+	sid := fmt.Sprintf("sess_%d", time.Now().UnixNano())
+	initSession(t, router, apiKey, sid)
+	payload := gzipBytes(t, []byte(`{"events":[{"type":2}]}`))
+
+	if code := postChunk(t, router, apiKey, sid, 0, payload, ""); code != http.StatusInternalServerError {
+		t.Fatalf("uncleanable PUT returned %d, want 500", code)
+	}
+	if deleteCalls.Load() == 0 {
+		t.Fatal("cleanup DELETE was not attempted")
+	}
+	var pendingRows int
+	if err := pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM session_chunks
+		  WHERE session_id=$1 AND seq=0 AND size_bytes IS NULL`, sid,
+	).Scan(&pendingRows); err != nil {
+		t.Fatalf("count retained reservation: %v", err)
+	}
+	if pendingRows != 1 {
+		t.Fatalf("uncleanable PUT left %d pending reservations, want 1", pendingRows)
+	}
+}
+
+func TestChunkUpload_RejectsNonGzipBody(t *testing.T) {
 	deps, pool := testDepsWithStorage(t)
 	_, _, apiKey := seedTenantWithKey(t, pool)
 	router := newTestRouter(t, deps, pool)
 	sid := fmt.Sprintf("sess_%d", time.Now().UnixNano())
 	initSession(t, router, apiKey, sid)
-	if code := postInlineChunk(t, router, apiKey, sid, 0, make([]byte, maxInlineChunkBytesForTest+1)); code != http.StatusRequestEntityTooLarge {
-		t.Fatalf("oversize inline body returned %d, want 413", code)
-	}
-}
-
-func TestChunkInline_RejectsNonGzipBody(t *testing.T) {
-	deps, pool := testDepsWithStorage(t)
-	_, _, apiKey := seedTenantWithKey(t, pool)
-	router := newTestRouter(t, deps, pool)
-	sid := fmt.Sprintf("sess_%d", time.Now().UnixNano())
-	initSession(t, router, apiKey, sid)
-	if code := postInlineChunk(t, router, apiKey, sid, 0, []byte("this is not gzip at all")); code != http.StatusBadRequest {
+	if code := postChunk(t, router, apiKey, sid, 0, []byte("this is not gzip at all"), ""); code != http.StatusBadRequest {
 		t.Fatalf("non-gzip body returned %d, want 400", code)
+	}
+}
+
+func TestChunkUpload_MissingAPIKeyReturns401(t *testing.T) {
+	deps, pool := testDepsWithStorage(t)
+	router := newTestRouter(t, deps, pool)
+	payload := gzipBytes(t, []byte(`{"events":[]}`))
+	if code := postChunk(t, router, "", "sess_neverregistered", 0, payload, ""); code != http.StatusUnauthorized {
+		t.Fatalf("missing API key returned %d, want 401", code)
+	}
+}
+
+func TestChunkUpload_OriginNotAllowlistedReturns403(t *testing.T) {
+	deps, pool := testDepsWithStorage(t)
+	projectID, _, apiKey := seedTenantWithKey(t, pool)
+	if _, err := pool.Exec(context.Background(),
+		`UPDATE projects SET allowed_origins = $2 WHERE id = $1`,
+		projectID, []string{"https://app.example.com"}); err != nil {
+		t.Fatalf("set allowlist: %v", err)
+	}
+	router := newTestRouter(t, deps, pool)
+	payload := gzipBytes(t, []byte(`{"events":[]}`))
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/sessions/sess_neverregistered/chunks/0", bytes.NewReader(payload))
+	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("Content-Type", "application/gzip")
+	req.Header.Set("Origin", "https://evil.example")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("foreign origin returned %d, want 403", w.Code)
 	}
 }
 
@@ -480,7 +682,7 @@ func TestSessionInit_TombstoneReturns410(t *testing.T) {
 	}
 }
 
-func TestChunkUploadURL_RecordingDisabledReturns403(t *testing.T) {
+func TestChunkUpload_RecordingDisabledReturns403(t *testing.T) {
 	deps, pool := testDepsWithStorage(t)
 	projectID, _, apiKey := seedTenantWithKey(t, pool)
 	router := newTestRouter(t, deps, pool)
@@ -490,7 +692,8 @@ func TestChunkUploadURL_RecordingDisabledReturns403(t *testing.T) {
 		`UPDATE projects SET recording_enabled = FALSE WHERE id = $1`, projectID); err != nil {
 		t.Fatalf("disable recording: %v", err)
 	}
-	if code, _ := requestUploadURL(t, router, apiKey, sid, 0, 1024); code != http.StatusForbidden {
-		t.Fatalf("upload-url while disabled returned %d, want 403", code)
+	payload := gzipBytes(t, []byte(`{"events":[]}`))
+	if code := postChunk(t, router, apiKey, sid, 0, payload, ""); code != http.StatusForbidden {
+		t.Fatalf("upload while disabled returned %d, want 403", code)
 	}
 }

@@ -115,54 +115,6 @@ func (c *Client) GetObject(ctx context.Context, objectKey string) ([]byte, error
 	return io.ReadAll(obj)
 }
 
-// PresignedPostPolicy generates a presigned POST form policy for uploading a
-// single object with a hard, storage-enforced byte ceiling.
-//
-// This exists because presigned PUT URLs carry no size condition: S3 signs the
-// URL, not a policy document, so a PUT holder can upload arbitrarily many bytes.
-// content-length-range is only expressible on a POST policy (#48). The caller
-// passes the exact declared size; storage rejects anything larger, so a public
-// SDK key cannot be turned into a storage-flood primitive.
-//
-// Returns the POST URL and the form fields the client must send *before* the
-// file field (which must be named "file" and sent last).
-func (c *Client) PresignedPostPolicy(ctx context.Context, objectKey, contentType string, maxBytes int64, expiry time.Duration) (string, map[string]string, error) {
-	if maxBytes <= 0 {
-		return "", nil, fmt.Errorf("maxBytes must be positive, got %d", maxBytes)
-	}
-
-	policy := minio.NewPostPolicy()
-	if err := policy.SetBucket(c.bucket); err != nil {
-		return "", nil, err
-	}
-	if err := policy.SetKey(objectKey); err != nil {
-		return "", nil, err
-	}
-	if err := policy.SetExpires(time.Now().UTC().Add(expiry)); err != nil {
-		return "", nil, err
-	}
-	if err := policy.SetContentType(contentType); err != nil {
-		return "", nil, err
-	}
-	// The ceiling. Storage — not application code — enforces this.
-	if err := policy.SetContentLengthRange(1, maxBytes); err != nil {
-		return "", nil, err
-	}
-
-	// Sign against the public host when configured, so the browser's Host header
-	// matches the signature (same reason as PresignedPutURL).
-	client := c.mc
-	if c.publicMC != nil {
-		client = c.publicMC
-	}
-
-	u, formData, err := client.PresignedPostPolicy(ctx, policy)
-	if err != nil {
-		return "", nil, err
-	}
-	return u.String(), formData, nil
-}
-
 // RemoveObject deletes the object at objectKey.
 //
 // Deleting a key that does not exist is not an error: retention sweeps are
@@ -172,7 +124,8 @@ func (c *Client) RemoveObject(ctx context.Context, objectKey string) error {
 }
 
 // RemovePrefix deletes every object below prefix. Retention uses this instead
-// of trusting database rows because an upload policy can outlive those rows.
+// of trusting database rows because an in-flight storage write can outlive the
+// row deletion, and tombstone sweeps must remain safe to retry.
 func (c *Client) RemovePrefix(ctx context.Context, prefix string) error {
 	objects := c.mc.ListObjects(ctx, c.bucket, minio.ListObjectsOptions{
 		Prefix:    prefix,

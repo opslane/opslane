@@ -260,9 +260,7 @@ func TestRouter_OriginExemptionIsScopedToEvents(t *testing.T) {
 		"/api/v1/replays/r1/complete",
 		"/api/v1/replays/r1/fail",
 		"/api/v1/sessions/init",
-		"/api/v1/sessions/s1/chunks/upload-url",
-		"/api/v1/sessions/s1/chunks/0/commit",
-		"/api/v1/sessions/s1/chunks/0/inline",
+		"/api/v1/sessions/s1/chunks/0",
 	}
 	for _, path := range browserOnly {
 		if code := post(path, `{}`); code != http.StatusForbidden {

@@ -592,7 +592,7 @@ export async function initSession(
   }
 }
 
-/** Uploads one gzipped chunk through the real policy → MinIO → commit path. */
+/** Uploads one gzipped chunk through ingestion's single-call storage path. */
 export async function uploadChunk(
   apiKey: string,
   sessionId: string,
@@ -603,57 +603,34 @@ export async function uploadChunk(
   const { gzipSync } = await import('node:zlib');
   const compressed = gzipSync(JSON.stringify(envelope));
 
-  const policy = await fetch(`${ingestionUrl}/api/v1/sessions/${sessionId}/chunks/upload-url`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey },
-    body: JSON.stringify({
-      seq,
-      size_bytes: compressed.byteLength,
-      has_full_snapshot: true,
-    }),
-  });
-  if (policy.status !== 200) {
-    throw new Error(`chunk policy failed: ${policy.status} ${await policy.text()}`);
-  }
-  const policyBody = (await policy.json()) as {
-    upload_url: string;
-    form_data: Record<string, string>;
-  };
-  const form = new FormData();
-  for (const [key, value] of Object.entries(policyBody.form_data)) form.append(key, value);
-  form.append('file', new Blob([compressed as unknown as BlobPart], { type: 'application/gzip' }));
-  const upload = await fetch(policyBody.upload_url, { method: 'POST', body: form });
+  const upload = await fetch(
+    `${ingestionUrl}/api/v1/sessions/${sessionId}/chunks/${seq}?has_full_snapshot=1`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/gzip', 'X-API-Key': apiKey },
+      body: compressed,
+    },
+  );
   if (!upload.ok) {
     throw new Error(`chunk upload failed: ${upload.status} ${await upload.text()}`);
-  }
-
-  const commit = await fetch(`${ingestionUrl}/api/v1/sessions/${sessionId}/chunks/${seq}/commit`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey },
-    body: '{}',
-  });
-  if (commit.status !== 200) {
-    throw new Error(`chunk commit failed: ${commit.status} ${await commit.text()}`);
   }
 }
 
 /**
  * Makes a test's own freshly-committed chunks eligible for the scrubber now.
  *
- * Production makes a chunk wait 30s (db/sessions.go ClaimUnscrubbedChunks)
- * because the presigned POST policy stays replayable for the whole of
- * handler.chunkUploadPolicyTTL. A replay inside that window could swap raw
- * bytes under a row the scrubber has already stamped, so the grace outlives the
- * policy on purpose. A test that owns the client and never replays has no such
- * exposure, so it fast-forwards its own fixtures rather than waiting out a
- * window that exists to defend against hostile callers.
+ * Production retains a 30s eligibility grace in ClaimUnscrubbedChunks. Chunk
+ * uploads are no longer presigned, so the grace is no longer load-bearing
+ * against a replayed upload replacing already-scrubbed bytes; shortening it is
+ * a separate privacy-timing decision. Tests fast-forward their own fixtures so
+ * they do not wait out that production interval.
  *
  * Scoped to one session id, so it can never touch a concurrently running
  * suite's rows. Shifts uploaded_at relatively, so ordering within a batch (the
  * claim query's ORDER BY uploaded_at) is preserved.
  *
  * Waits for the chunk to be committed first: callers that upload through a real
- * browser SDK (friction-smoke) have no synchronous commit to await.
+ * browser SDK (friction-smoke) have no synchronous upload to await.
  */
 export async function makeChunksScrubbable(
   sessionId: string,

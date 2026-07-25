@@ -432,6 +432,19 @@ describe('continuous chunked recording', () => {
     expect(chunkMocks.uploadChunk).toHaveBeenCalledWith(expect.any(String), 0, expect.any(Array), true);
   });
 
+  it('stops capture when the tail flush is told to stop', async () => {
+    await startEnabled();
+    chunkMocks.flushInline.mockResolvedValueOnce('stop');
+    emit(fullSnapshot(1_000), true);
+    emit(incremental(1_500));
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
+    document.dispatchEvent(new Event('visibilitychange'));
+    await drainMicrotasks();
+
+    expect(rrwebState.stop).toHaveBeenCalled();
+    expect(chunkMocks.uploadChunk).not.toHaveBeenCalled();
+  });
+
   it('registers a new session when identity changes', async () => {
     await startEnabled();
     emit(fullSnapshot(1_000), true);
@@ -443,6 +456,19 @@ describe('continuous chunked recording', () => {
     expect(initCalls).toHaveLength(2);
     expect(chunkMocks.uploadChunk).toHaveBeenCalledTimes(1);
     expect(rrwebState.takeFullSnapshot).toHaveBeenCalledWith(true);
+  });
+
+  it('stops capture when closing the old identity is told to stop', async () => {
+    await startEnabled();
+    emit(fullSnapshot(1_000), true);
+    emit(incremental(1_500));
+    chunkMocks.uploadChunk.mockResolvedValueOnce('stop');
+    fetchMock.mockResolvedValueOnce({ ok: true, json: async () => ({ recording: true }) });
+
+    setUser({ id: 'alice' });
+    await drainMicrotasks();
+
+    expect(rrwebState.stop).toHaveBeenCalled();
   });
 
   it('closes the old identity with its next seq without advancing the new session', async () => {

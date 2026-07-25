@@ -74,8 +74,8 @@ services:
       NOTIFY_UNSAFE_EXTRA_WEBHOOK_HOSTS: ${NOTIFY_UNSAFE_EXTRA_WEBHOOK_HOSTS:-}
       INTERNAL_READ_TOKEN: ${INTERNAL_READ_TOKEN:-dev-internal-token}
       ADMIN_EMAILS: ${OPSLANE_ADMIN_EMAILS:-}
-      # Test lanes shorten the scrub tick. The 30s eligibility grace is NOT
-      # tunable and is not shortened here; see handler.chunkUploadPolicyTTL.
+      # Test lanes shorten the scrub tick. The retained 30s eligibility grace
+      # is not tunable; shortening it is a separate privacy-timing decision.
       SCRUB_INTERVAL_SECONDS: ${SCRUB_INTERVAL_SECONDS:-}
     # Lets the e2e webhook sink on the host be reached from the container on
     # Linux; Docker Desktop resolves host.docker.internal natively.

@@ -1,5 +1,7 @@
 # Keyless Smoke CI Speed-Up Implementation Plan
 
+> **Superseded for replay chunks:** the presigned POST and commit flow was replaced by the single-call ingestion upload in `2026-07-24-replay-chunk-upload-r2.md`. This document remains a historical implementation record.
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** Cut the `Keyless smoke E2E` CI job from ~13 minutes to under 5, without losing a single test or weakening a security invariant.

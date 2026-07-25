@@ -29,9 +29,10 @@ interface ViteDevServer { listen(): Promise<unknown>; close(): Promise<unknown>;
 let mockServer: http.Server;
 let mockPort: number;
 let capturedChunk: { events: unknown[]; meta: Record<string, unknown> } | null;
+let capturedChunkQuery: string;
+let capturedChunkHeaders: http.IncomingHttpHeaders;
+let chunkUploadCount: number;
 let sessionInitBody: Record<string, unknown> | null;
-let chunkPolicyBody: Record<string, unknown> | null;
-let chunkCommitCount: number;
 let legacyReplayRequestCount: number;
 let viteServer: ViteDevServer;
 let vitePort: number;
@@ -40,28 +41,18 @@ let page: BrowserPage;
 
 const FIXTURE_APP_DIR = resolve(__dirname, '../../../../test-fixtures/vue-app');
 
-function extractMultipartFile(raw: Buffer, contentType: string): Buffer | null {
-  const match = /boundary=(?:"([^"]+)"|([^;]+))/.exec(contentType);
-  const boundary = match?.[1] ?? match?.[2];
-  if (!boundary) return null;
-  const headerEnd = raw.indexOf(Buffer.from('\r\n\r\n'));
-  if (headerEnd < 0) return null;
-  const fileStart = headerEnd + 4;
-  const fileEnd = raw.indexOf(Buffer.from(`\r\n--${boundary}`), fileStart);
-  return fileEnd < 0 ? null : raw.subarray(fileStart, fileEnd);
-}
-
 describe.skipIf(!playwrightAvailable)('rrweb replay capture (real browser)', () => {
   beforeAll(async () => {
     capturedChunk = null;
+    capturedChunkQuery = '';
+    capturedChunkHeaders = {};
+    chunkUploadCount = 0;
     sessionInitBody = null;
-    chunkPolicyBody = null;
-    chunkCommitCount = 0;
     legacyReplayRequestCount = 0;
 
     mockServer = http.createServer((req, res) => {
       res.setHeader('Access-Control-Allow-Origin', '*');
-      res.setHeader('Access-Control-Allow-Methods', 'POST, PUT, OPTIONS');
+      res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
       res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-API-Key');
       if (req.method === 'OPTIONS') { res.writeHead(204).end(); return; }
 
@@ -82,27 +73,22 @@ describe.skipIf(!playwrightAvailable)('rrweb replay capture (real browser)', () 
              .end(JSON.stringify({ recording: true, chunk_interval_ms: 30000, max_chunk_bytes: 5242880 }));
           return;
         }
-        if (/^\/api\/v1\/sessions\/[^/]+\/chunks\/upload-url$/.test(url)) {
-          try { chunkPolicyBody = JSON.parse(body); } catch { chunkPolicyBody = null; }
-          res.writeHead(200, { 'Content-Type': 'application/json' })
-             .end(JSON.stringify({ upload_url: `http://localhost:${mockPort}/chunk-upload`, form_data: {} }));
-          return;
-        }
-        if (url === '/chunk-upload' && req.method === 'POST') {
-          const compressed = extractMultipartFile(rawBody, req.headers['content-type'] ?? '');
+        // Single-call chunk upload (#194). The body is the gzip: no multipart
+        // and no presigned form. Requiring a second request here would recreate
+        // the browser-to-R2 bug.
+        const path = url.split('?')[0] ?? '';
+        const chunkMatch = /^\/api\/v1\/sessions\/([^/]+)\/chunks\/(\d+)$/.exec(path);
+        if (chunkMatch && req.method === 'POST') {
+          chunkUploadCount += 1;
+          capturedChunkQuery = url.includes('?') ? url.slice(url.indexOf('?')) : '';
+          capturedChunkHeaders = req.headers;
           try {
-            capturedChunk = compressed
-              ? JSON.parse(gunzipSync(compressed).toString('utf8')) as typeof capturedChunk
-              : null;
+            capturedChunk = JSON.parse(gunzipSync(rawBody).toString('utf8')) as typeof capturedChunk;
           } catch {
             capturedChunk = null;
           }
-          res.writeHead(200).end();
-          return;
-        }
-        if (/^\/api\/v1\/sessions\/[^/]+\/chunks\/\d+\/commit$/.test(url)) {
-          chunkCommitCount += 1;
-          res.writeHead(200).end('{}');
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+             .end(JSON.stringify({ status: 'committed' }));
           return;
         }
         if (url.startsWith('/api/v1/replays')) legacyReplayRequestCount += 1;
@@ -154,12 +140,12 @@ describe.skipIf(!playwrightAvailable)('rrweb replay capture (real browser)', () 
     await new Promise<void>(r => mockServer?.close(() => r()));
   });
 
-  it('flushes a self-contained normal chunk for an early error without a one-shot upload', async () => {
+  it('flushes a self-contained chunk for an early error in one request', async () => {
     await page.goto(`http://localhost:${vitePort}`);
     // Generate some DOM activity (rrweb incremental events) then trigger the bug.
     await page.click('[data-testid="nav-usercard"]');
     await page.click('[data-testid="edit-profile-btn"]');
-    // Wait for event flush + chunk policy→multipart upload→commit round trip.
+    // Wait for the event flush and direct gzip chunk upload.
     await page.waitForTimeout(2500);
 
     expect(sessionInitBody?.session_id).toEqual(expect.any(String));
@@ -176,8 +162,10 @@ describe.skipIf(!playwrightAvailable)('rrweb replay capture (real browser)', () 
     expect(types.slice(0, 2)).toEqual([4, 2]);
     const ts = (chunk.events as Array<{ timestamp: number }>).map((event) => event.timestamp);
     expect(ts).toEqual([...ts].sort((a, b) => a - b));
-    expect(chunkPolicyBody).toMatchObject({ seq: 0, has_full_snapshot: true });
-    expect(chunkCommitCount).toBe(1);
+    expect(capturedChunkQuery).toBe('?has_full_snapshot=1');
+    expect(capturedChunkHeaders['content-type']).toBe('application/gzip');
+    expect(capturedChunkHeaders['x-api-key']).toBe('sk-test-browser');
+    expect(chunkUploadCount).toBe(1);
     expect(legacyReplayRequestCount).toBe(0);
   }, 20_000);
 });

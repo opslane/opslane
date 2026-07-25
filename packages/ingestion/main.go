@@ -205,9 +205,11 @@ func main() {
 	if minioClient != nil {
 		s := &scrubber.Scrubber{Q: queries, MinIO: minioClient}
 		// Only the tick rate is tunable. The 30s eligibility grace in
-		// ClaimUnscrubbedChunks stays fixed: it outlives chunkUploadPolicyTTL,
-		// so shortening it would let a replayed upload swap raw bytes under an
-		// already-scrubbed row.
+		// ClaimUnscrubbedChunks is retained but no longer load-bearing: chunk
+		// uploads are no longer presigned (#194), so there is no replayable
+		// upload that could swap raw bytes under an already-scrubbed row. It
+		// now only bounds how long a raw chunk sits unredacted; shortening it
+		// is a separate privacy-timing decision.
 		scrubInterval := 15 * time.Second
 		if v := os.Getenv("SCRUB_INTERVAL_SECONDS"); v != "" {
 			if parsed, err := strconv.Atoi(v); err == nil && parsed > 0 {
