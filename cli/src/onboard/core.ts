@@ -12,6 +12,7 @@ import { containedRepoRelative } from './paths.js';
 import type { ApprovalRequest } from './policy.js';
 import type { ensureLoggedIn, ensureProvisioned } from './provision.js';
 import {
+  devCommand,
   formatCommand,
   installCommand,
   type runCommand,
@@ -224,7 +225,58 @@ async function runFlow(deps: CoreDeps, record: Record_): Promise<CoreResult> {
     }
   }
 
-  return { ok: true, status: 'completed' };
+  const dev = devCommand(deps.cwd, appDir, plan.dev_script);
+  if (!(await deps.confirm('Start the dev server?', formatCommand(dev)))) {
+    return {
+      ok: false,
+      status: 'failed',
+      message:
+        'The dev server was not started. Start it yourself with '
+        + `\`${formatCommand(dev)}\`, then re-run onboarding.`,
+    };
+  }
+
+  emit({ stage: 'starting-dev' });
+  const server = deps.startDevServer({
+    command: dev,
+    cwd: envDir,
+    signal,
+    onOutput: (output) => emit({ stage: 'starting-dev', output }),
+  });
+  // The poll must be cancellable independently: when the server dies, the
+  // losing side of the race would otherwise keep polling for 15 minutes.
+  const pollController = new AbortController();
+  const onOuterAbort = (): void => pollController.abort();
+  signal.addEventListener('abort', onOuterAbort, { once: true });
+  // Never let the losing branch surface as an unhandled rejection.
+  const serverDied = server.completed.then(
+    ({ exitCode }) => {
+      throw new Error(`the dev server stopped (${exitCode ?? 'signal'}) unexpectedly`);
+    },
+    (error: unknown) => {
+      throw error instanceof Error ? error : new Error(String(error));
+    },
+  );
+  void serverDied.catch(() => undefined);
+  try {
+    const url = await Promise.race([server.url, serverDied]);
+    emit({ stage: 'waiting', url });
+    await Promise.race([
+      deps.waitForAppReporting({
+        apiUrl: deps.apiUrl,
+        sessionId: provision.sessionId,
+        pollToken: provision.pollToken,
+        signal: pollController.signal,
+      }),
+      serverDied,
+    ]);
+    return { ok: true, status: 'completed', url };
+  } finally {
+    pollController.abort(); // stop the poll either way
+    signal.removeEventListener('abort', onOuterAbort);
+    server.stop();
+    await server.completed.catch(() => undefined); // teardown before the terminal event
+  }
 }
 
 export async function runOnboardCore(deps: CoreDeps): Promise<CoreResult> {

@@ -421,9 +421,11 @@ describe('runOnboardCore install', () => {
     expect(runCommand).not.toHaveBeenCalled();
   });
 
-  it('asks for consent and skips the install when declined', async () => {
+  it('asks for consent and skips the install when declined, then still starts the dev server', async () => {
+    const startDevServer = vi.fn<CoreDeps['startDevServer']>(() => fakeServer());
     let consentAsked = false;
     const d = deps({
+      startDevServer,
       // Decline ONLY the install. Task 8 adds a dev-server prompt through the
       // same `confirm`; a blanket false would decline that too.
       confirm: async (prompt) => !prompt.toLowerCase().includes('install'),
@@ -439,6 +441,7 @@ describe('runOnboardCore install', () => {
       status: 'completed',
     });
     expect(consentAsked).toBe(true);
+    expect(startDevServer).toHaveBeenCalledTimes(1);
   });
 
   it('stops on a failed install rather than continuing', async () => {
@@ -451,5 +454,52 @@ describe('runOnboardCore install', () => {
     expect(result).toMatchObject({ ok: false, status: 'failed' });
     expect(result.message).toMatch(/install/i);
     expect(startDevServer).not.toHaveBeenCalled();
+  });
+});
+
+describe('runOnboardCore dev server', () => {
+  it('asks before starting the dev server and stops if declined', async () => {
+    const startDevServer = vi.fn<CoreDeps['startDevServer']>();
+    const d = deps({
+      confirm: async (prompt) => !prompt.includes('dev server'),
+      startDevServer,
+    });
+    const result = await runOnboardCore(d);
+    expect(startDevServer).not.toHaveBeenCalled();
+    expect(result.message).toMatch(/dev server/i);
+  });
+
+  it('emits the URL it parsed', async () => {
+    const events: CoreEvent[] = [];
+    await runOnboardCore(deps({ emit: (event) => events.push(event) }));
+    expect(events.find((event) => event.url)?.url).toBe('http://localhost:5173/');
+  });
+
+  it('fails fast when the dev server dies instead of waiting out the poll', async () => {
+    const waitForAppReporting = vi.fn<CoreDeps['waitForAppReporting']>(
+      () => new Promise(() => undefined), // never settles
+    );
+    const d = deps({
+      startDevServer: () => ({
+        ...fakeServer(),
+        completed: Promise.resolve({ exitCode: 1, signal: null }),
+      }),
+      waitForAppReporting,
+    });
+    const result = await runOnboardCore(d);
+    expect(result).toMatchObject({ ok: false, status: 'failed' });
+    expect(result.message).toMatch(/dev server (exited|stopped)/i);
+  });
+
+  it('stops the dev server when the wait fails', async () => {
+    const server = fakeServer();
+    const d = deps({
+      startDevServer: () => server,
+      waitForAppReporting: async () => {
+        throw new Error('timed out waiting for your app to report');
+      },
+    });
+    await expect(runOnboardCore(d)).resolves.toMatchObject({ ok: false, status: 'failed' });
+    expect(server.stop).toHaveBeenCalled();
   });
 });
