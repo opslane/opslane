@@ -3,9 +3,12 @@
  * tree is unit-testable with no TTY, no model, and no network. Nothing here may
  * import `ink`, read `process.stdin`, or call a model directly.
  */
+import { join } from 'node:path';
+
 import type { writeEnvLocal } from '../envfile.js';
 import type { ApplyReport, runApply, runDetect } from './engine.js';
 import { reduceTasks, type TaskLine } from './events.js';
+import { containedRepoRelative } from './paths.js';
 import type { ApprovalRequest } from './policy.js';
 import type { ensureLoggedIn, ensureProvisioned } from './provision.js';
 import type { runCommand, startDevServer } from './process.js';
@@ -184,6 +187,14 @@ async function runFlow(deps: CoreDeps, record: Record_): Promise<CoreResult> {
       message: 'the agent report does not match the files the engine tracked',
     };
   }
+
+  emit({ stage: 'writing-env' });
+  const appDir = containedRepoRelative(deps.cwd, plan.app_dir); // throws if it escapes
+  const envDir = join(deps.cwd, appDir);
+  await deps.writeEnv(envDir, {
+    [plan.env_vars.api_key]: provision.apiKey,
+    [plan.env_vars.endpoint]: provision.endpoint,
+  });
 
   return { ok: true, status: 'completed' };
 }

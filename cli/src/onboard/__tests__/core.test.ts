@@ -385,3 +385,31 @@ describe('runOnboardCore apply stage', () => {
     );
   });
 });
+
+describe('runOnboardCore env write', () => {
+  it('writes both env vars into the plan app dir', async () => {
+    const writes: Array<[string, Record<string, string>]> = [];
+    await runOnboardCore(
+      deps({
+        writeEnv: async (dir, vars) => {
+          writes.push([dir, vars]);
+          return join(dir, '.env.local');
+        },
+      }),
+    );
+    expect(writes[0]).toEqual([
+      join(root, 'web'),
+      {
+        VITE_OPSLANE_API_KEY: 'opk_test',
+        VITE_OPSLANE_ENDPOINT: 'http://localhost:8082',
+      },
+    ]);
+  });
+
+  it('refuses an app_dir that escapes the repo', async () => {
+    const writeEnv = vi.fn<CoreDeps['writeEnv']>(async () => '/unused/.env.local');
+    const d = deps({ plan: { ...fixturePlan(), app_dir: '../outside' }, writeEnv });
+    await expect(runOnboardCore(d)).resolves.toMatchObject({ ok: false, status: 'failed' });
+    expect(writeEnv).not.toHaveBeenCalled();
+  });
+});
