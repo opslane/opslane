@@ -87,29 +87,16 @@ describe('session replay pointer contract', () => {
     });
     const compressed = gzipSync(recording);
 
-    // Mirror the SDK's normal early-error flush: reserve, multipart upload, commit.
-    const policy = await fetch(
-      `${ingestionUrl}/api/v1/sessions/${sessionId}/chunks/upload-url`,
+    // Mirror the SDK's normal early-error flush: one raw-gzip request.
+    const upload = await fetch(
+      `${ingestionUrl}/api/v1/sessions/${sessionId}/chunks/0?has_full_snapshot=1`,
       {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-API-Key': tenant.apiKey },
-        body: JSON.stringify({ seq: 0, size_bytes: compressed.byteLength, has_full_snapshot: true }),
+        headers: { 'Content-Type': 'application/gzip', 'X-API-Key': tenant.apiKey },
+        body: compressed,
       },
     );
-    expect(policy.status).toBe(200);
-    const policyBody = await policy.json() as { upload_url: string; form_data: Record<string, string> };
-    const form = new FormData();
-    for (const [key, value] of Object.entries(policyBody.form_data)) form.append(key, value);
-    form.append('file', new Blob([compressed], { type: 'application/gzip' }));
-    const upload = await fetch(policyBody.upload_url, { method: 'POST', body: form });
-    expect(upload.ok).toBe(true);
-
-    const commit = await fetch(`${ingestionUrl}/api/v1/sessions/${sessionId}/chunks/0/commit`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-API-Key': tenant.apiKey },
-      body: '{}',
-    });
-    expect(commit.status).toBe(200);
+    expect(upload.status).toBe(200);
 
     const db = getPool();
     const committed = await db.query<{
