@@ -117,9 +117,10 @@ func sessionPrefix(session db.SessionRef) string {
 	return fmt.Sprintf("sessions/%s/%s/", session.ProjectID, session.ID)
 }
 
-// A POST accepted before policy expiry can finish after the initial purge.
-// Tombstones are permanent, so rotate through their prefixes on every pass and
-// make any such late object temporary rather than permanently orphaned.
+// An ingestion-owned storage write already in flight during deletion can
+// finish after the initial purge. Tombstones are permanent, so rotate through
+// their prefixes on every pass and make any such late object temporary rather
+// than permanently orphaned.
 func (s *Sweeper) sweepDeletedPrefixes(ctx context.Context) error {
 	tombstones, err := s.Q.ClaimTombstonesForStorageSweep(ctx, tombstoneBatch)
 	if err != nil {

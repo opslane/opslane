@@ -171,7 +171,7 @@ func TestSweep_RemovesObjectThatArrivesAfterSessionDeletion(t *testing.T) {
 	s, q, mc, pool := setup(t)
 	session := seedSession(t, q, pool, mc, 40, 30, nil)
 	runThroughGrace(t, s, pool, session)
-	if err := mc.PutObject(context.Background(), session.key, []byte("late-policy-upload"), "application/gzip"); err != nil {
+	if err := mc.PutObject(context.Background(), session.key, []byte("late-inflight-upload"), "application/gzip"); err != nil {
 		t.Fatalf("simulate late upload: %v", err)
 	}
 	if _, err := pool.Exec(context.Background(),

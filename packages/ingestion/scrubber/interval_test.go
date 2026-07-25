@@ -6,9 +6,9 @@ import (
 )
 
 // The tick interval is the caller's to choose. It is deliberately NOT bounded
-// by the 30s eligibility grace in ClaimUnscrubbedChunks: that grace outlives
-// the replayable presigned POST policy (handler.chunkUploadPolicyTTL) and is a
-// floor on when a chunk becomes claimable, not a floor on how often we look.
+// by the retained 30s eligibility grace in ClaimUnscrubbedChunks: that grace is
+// a floor on when a chunk becomes claimable, not on how often we look, and is
+// no longer load-bearing now that chunk uploads are not presigned (#194).
 func TestResolveInterval(t *testing.T) {
 	tests := []struct {
 		name string

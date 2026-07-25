@@ -50,8 +50,8 @@ CREATE TABLE IF NOT EXISTS session_chunks (
   seq               INTEGER NOT NULL,
   project_id        UUID NOT NULL REFERENCES projects(id),
   object_key        TEXT NOT NULL,
-  -- NULL until the commit call Stats the object. The server never trusts a
-  -- client-declared size (design v4-1).
+  -- NULL until the upload handler stores the buffered object and commits its
+  -- server-observed byte length (design v4-1).
   size_bytes        BIGINT,
   has_full_snapshot BOOLEAN NOT NULL DEFAULT FALSE,
   uploaded_at       TIMESTAMPTZ,
@@ -63,9 +63,9 @@ CREATE TABLE IF NOT EXISTS session_chunks (
   PRIMARY KEY (session_id, seq)
 );
 
--- A deleted session id (design v4-16). Presigned URLs outlive the rows they
--- were issued for, so without this a URL held past a retention sweep could
--- recreate orphaned raw data that no retention pass would ever find again.
+-- A deleted session id (design v4-16). An ingestion-owned storage write may
+-- already be in flight when retention deletes the session row; recurring
+-- prefix sweeps ensure that late write cannot become permanent orphaned data.
 -- Deliberately not FK'd to sessions -- the whole point is that the row is gone.
 CREATE TABLE IF NOT EXISTS session_tombstones (
   session_id TEXT PRIMARY KEY,
@@ -140,14 +140,14 @@ CREATE INDEX IF NOT EXISTS idx_sessions_purge
   ON sessions(deletion_started_at)
   WHERE status = 'deleting';
 
--- Revisit deleted-session prefixes forever. A storage POST accepted just
--- before policy expiry may finish after the first retention pass.
+-- Revisit deleted-session prefixes forever. An ingestion-owned storage write
+-- already in flight may finish after the first retention pass.
 CREATE INDEX IF NOT EXISTS idx_session_tombstones_storage_sweep_order
   ON session_tombstones((COALESCE(storage_swept_at, deleted_at)), storage_sweep_claimed_at);
 
 -- Per-project recording controls.
 -- recording_enabled is the runtime kill switch: /sessions/init returns
--- {"recording": false} when it is off, and the chunk upload-url endpoint 403s,
+-- {"recording": false} when it is off, and the chunk upload endpoint 403s,
 -- which stops sessions already in flight (see Correction 8).
 ALTER TABLE projects
   ADD COLUMN IF NOT EXISTS recording_enabled BOOLEAN NOT NULL DEFAULT TRUE;

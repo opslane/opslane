@@ -31,10 +31,10 @@ type Scrubber struct {
 }
 
 // resolveInterval picks the tick interval for Start. Only a non-positive
-// interval is overridden. The 30s eligibility grace in ClaimUnscrubbedChunks is
-// a separate and deliberately non-configurable floor: it outlives the
-// replayable presigned POST policy (handler.chunkUploadPolicyTTL), so it must
-// not be bound to, or shortened alongside, the tick rate.
+// interval is overridden. The retained 30s eligibility grace in
+// ClaimUnscrubbedChunks is a separate privacy-timing decision: chunk uploads
+// are no longer presigned (#194), so the grace is no longer load-bearing
+// against replayed writes and must not be coupled to the tick rate.
 func resolveInterval(interval time.Duration) time.Duration {
 	if interval <= 0 {
 		return defaultInterval
