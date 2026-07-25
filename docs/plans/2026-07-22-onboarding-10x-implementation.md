@@ -1267,6 +1267,22 @@ assert a fresh `provisioned → app_reporting` transition, not merely a terminal
 Keep: `node scripts/check-packed-packages.mjs`, and confirm server-side by **this run's**
 session id.
 
+**Preconditions, recorded 2026-07-25 at the end of Phase 3b.** The controller, the Ink
+shell, and `opslane onboard` are all in place; only the live smoke is outstanding.
+
+1. **Blocked on `@opslane/sdk >= 1.2.0` reaching npm** (#45 / #46). Until then `npm install`
+   fails ETARGET — verified, not assumed.
+2. **Clear `~/.opslane/pending` before the run.** `ensureProvisioned` resumes sessions
+   already at `app_reporting` or `completed` (`cli/src/onboard/provision.ts:131`) and
+   `waitForAppReporting` accepts those statuses immediately (`cli/src/onboard/wait.ts:90`),
+   so a stale record makes the poll succeed without the edited app ever connecting. **This
+   is a false-success path in the product, not only in the smoke.** If it recurs in real
+   use, the fix is a server-side transition marker — a session must prove it moved to
+   `app_reporting` during *this* run — not a workaround in the smoke script.
+3. **Assert a fresh `provisioned → app_reporting` transition for this run's session id.**
+   A terminal status alone does not distinguish a resumed session from a new one.
+4. **Re-run `node scripts/check-packed-packages.mjs`** once the SDK release lands.
+
 ---
 
 ### Folded plan items (outside voice, 2026-07-24)
