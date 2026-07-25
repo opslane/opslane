@@ -62,6 +62,8 @@ export interface EngineResult {
   aborted: boolean;
   subtype?: string;
   reason?: string;
+  /** The agent's own explanation, when `reason === 'unsupported'`. */
+  unsupportedReason?: string;
 }
 
 export interface ApplyReport extends FinishApplyReport {
@@ -362,7 +364,7 @@ export async function runDetect({
     return { ...core, ok: false, reason: 'multiple_plans' };
   }
   if (unsupportedReason !== undefined) {
-    return { ...core, ok: false, reason: 'unsupported' };
+    return { ...core, ok: false, reason: 'unsupported', unsupportedReason };
   }
   if (reportCaptures === 0 || planCaptures === 0) {
     return { ...core, ok: false, reason: 'no_plan' };
