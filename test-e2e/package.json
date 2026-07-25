@@ -11,7 +11,7 @@
     "pg": "^8.22.0"
   },
   "devDependencies": {
-    "@playwright/test": "^1.61.1",
+    "@playwright/test": "^1.62.0",
     "@types/pg": "^8.20.0",
     "@vitejs/plugin-react": "^4.3.0",
     "@vitejs/plugin-vue": "^6.0.8",
