@@ -11,7 +11,12 @@ import { reduceTasks, type TaskLine } from './events.js';
 import { containedRepoRelative } from './paths.js';
 import type { ApprovalRequest } from './policy.js';
 import type { ensureLoggedIn, ensureProvisioned } from './provision.js';
-import type { runCommand, startDevServer } from './process.js';
+import {
+  formatCommand,
+  installCommand,
+  type runCommand,
+  type startDevServer,
+} from './process.js';
 import type { RunLog } from './runlog.js';
 import type { AskUserResolver, OnboardingPlan } from './tools.js';
 import type { waitForAppReporting } from './wait.js';
@@ -195,6 +200,29 @@ async function runFlow(deps: CoreDeps, record: Record_): Promise<CoreResult> {
     [plan.env_vars.api_key]: provision.apiKey,
     [plan.env_vars.endpoint]: provision.endpoint,
   });
+
+  if (report.installRequired) {
+    emit({ stage: 'installing' });
+    const installRelative = containedRepoRelative(deps.cwd, report.installCwd);
+    const installDir = join(deps.cwd, installRelative);
+    const install = installCommand(deps.cwd, installRelative);
+    const installed = await deps.runCommand({
+      command: install,
+      cwd: installDir,
+      signal,
+      consent: () => deps.confirm('Install dependencies?', formatCommand(install)),
+      onOutput: (output) => emit({ stage: 'installing', output }),
+    });
+    if (installed.ran && !installed.ok) {
+      return {
+        ok: false,
+        status: 'failed',
+        message:
+          `${formatCommand(install)} failed (exit ${installed.exitCode ?? installed.signal}). `
+          + 'Fix the install and re-run onboarding. Do not change the @opslane/sdk version.',
+      };
+    }
+  }
 
   return { ok: true, status: 'completed' };
 }

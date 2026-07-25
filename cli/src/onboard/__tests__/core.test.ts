@@ -413,3 +413,43 @@ describe('runOnboardCore env write', () => {
     expect(writeEnv).not.toHaveBeenCalled();
   });
 });
+
+describe('runOnboardCore install', () => {
+  it('skips the install when the report says it is not required', async () => {
+    const runCommand = vi.fn<CoreDeps['runCommand']>();
+    await runOnboardCore(deps({ installRequired: false, runCommand }));
+    expect(runCommand).not.toHaveBeenCalled();
+  });
+
+  it('asks for consent and skips the install when declined', async () => {
+    let consentAsked = false;
+    const d = deps({
+      // Decline ONLY the install. Task 8 adds a dev-server prompt through the
+      // same `confirm`; a blanket false would decline that too.
+      confirm: async (prompt) => !prompt.toLowerCase().includes('install'),
+      runCommand: async (options) => {
+        consentAsked = true;
+        return (await options.consent!())
+          ? { ran: true, ok: true, exitCode: 0, signal: null }
+          : { ran: false, copyPaste: 'pnpm install' };
+      },
+    });
+    await expect(runOnboardCore(d)).resolves.toMatchObject({
+      ok: true,
+      status: 'completed',
+    });
+    expect(consentAsked).toBe(true);
+  });
+
+  it('stops on a failed install rather than continuing', async () => {
+    const startDevServer = vi.fn<CoreDeps['startDevServer']>();
+    const d = deps({
+      runCommand: async () => ({ ran: true, ok: false, exitCode: 1, signal: null }),
+      startDevServer,
+    });
+    const result = await runOnboardCore(d);
+    expect(result).toMatchObject({ ok: false, status: 'failed' });
+    expect(result.message).toMatch(/install/i);
+    expect(startDevServer).not.toHaveBeenCalled();
+  });
+});
