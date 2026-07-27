@@ -325,7 +325,7 @@ describe('runOnboardCore apply stage', () => {
         aborted: false,
         reason: 'verification_failed',
         failures: [
-          'manifest does not contain an identity-capable Opslane SDK version (>=1.2.0)',
+          'manifest does not contain an identity-capable Opslane SDK version (>=2.0.0)',
         ],
       }),
       writeEnv,

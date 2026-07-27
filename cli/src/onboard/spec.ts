@@ -43,8 +43,8 @@ Call report_plan exactly once and make no further tool calls afterward.
   - "none" when the repository has no error or monitoring SDK at all (name: null);
   - "keep" when another SDK is present and Opslane should run alongside it (name: that SDK);
   - "migrate" when the named SDK should be replaced, including an outdated
-    @opslane/sdk version below 1.2.0 that cannot report SDK identity;
-  - "no_op" only when an identity-capable @opslane/sdk version (at least 1.2.0) is
+    @opslane/sdk version below 2.0.0 that cannot report SDK identity;
+  - "no_op" only when an identity-capable @opslane/sdk version (at least 2.0.0) is
     already imported, initialized, and nothing should change.
 - Never report secret values. Report environment-variable names only.
 `;

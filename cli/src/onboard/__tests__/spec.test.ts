@@ -52,7 +52,7 @@ describe('apply-stage agent specification', () => {
     package_manager: 'pnpm',
     dev_script: 'dev',
     env_prefix: 'VITE_',
-    dependency: { name: '@opslane/sdk', version: '^1.2.0' },
+    dependency: { name: '@opslane/sdk', version: '^2.0.0' },
     env_vars: {
       api_key: 'VITE_OPSLANE_API_KEY',
       endpoint: 'VITE_OPSLANE_ENDPOINT',
