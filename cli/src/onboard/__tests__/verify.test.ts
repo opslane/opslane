@@ -11,9 +11,10 @@ import { join } from 'node:path';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import {
+  OPSLANE_IDENTITY_MIN_VERSION,
+  type VerifiableOnboardingPlan,
   verifyAlreadyOnboarded,
   verifyApplied,
-  type VerifiableOnboardingPlan,
 } from '../verify.js';
 
 const hash = (value: Buffer | string) =>
@@ -58,7 +59,7 @@ describe('deterministic apply verification', () => {
       package_manager: 'pnpm',
       dev_script: 'dev',
       env_prefix: 'VITE_',
-      dependency: { name: '@opslane/sdk', version: '^1.2.0' },
+      dependency: { name: '@opslane/sdk', version: '^2.0.0' },
       env_vars: {
         api_key: 'VITE_OPSLANE_API_KEY',
         endpoint: 'VITE_OPSLANE_ENDPOINT',
@@ -169,7 +170,7 @@ describe('deterministic apply verification', () => {
         .toString('utf8')
         .replace(
           '    "vue": "^3.5.0"',
-          '    "vue": "^3.5.0",\n    "@opslane/sdk": "^1.2.0"',
+          '    "vue": "^3.5.0",\n    "@opslane/sdk": "^2.0.0"',
         ),
     );
 
@@ -196,7 +197,7 @@ describe('deterministic apply verification', () => {
     writeFileSync(join(root, 'src', 'main.ts'), entry);
     writeFileSync(
       join(root, 'package.json'),
-      '{\n  "name": "fixture",\n  "dependencies": {\n    "@opslane/sdk": "^1.2.0"\n  }\n}\n',
+      '{\n  "name": "fixture",\n  "dependencies": {\n    "@opslane/sdk": "^2.0.0"\n  }\n}\n',
     );
     expect(verify()).toEqual({ ok: true, failures: [] });
 
@@ -209,7 +210,7 @@ describe('deterministic apply verification', () => {
     };
     writeFileSync(
       join(root, 'package.json'),
-      originalManifest.toString('utf8').replace('^1.0.0', '^1.2.0'),
+      originalManifest.toString('utf8').replace('^1.0.0', '^2.0.0'),
     );
     expect(verify()).toEqual({ ok: true, failures: [] });
   });
@@ -281,7 +282,7 @@ describe('deterministic apply verification', () => {
         .toString('utf8')
         .replace(
           '    "vue": "^3.5.0"',
-          '    "vue": "^3.5.0",\n    "@opslane/sdk": "^1.2.0"',
+          '    "vue": "^3.5.0",\n    "@opslane/sdk": "^2.0.0"',
         ),
     );
 
@@ -306,7 +307,7 @@ describe('deterministic apply verification', () => {
         .toString('utf8')
         .replace(
           '    "vue": "^3.5.0"',
-          '    "vue": "^3.5.0",\n    "@opslane/sdk": "^1.2.0"',
+          '    "vue": "^3.5.0",\n    "@opslane/sdk": "^2.0.0"',
         ),
     );
 
@@ -456,16 +457,17 @@ describe('deterministic apply verification', () => {
   it('rejects no-op for an identity-broken SDK version or a nonexistent default export', () => {
     applyFixture();
     const manifest = join(root, 'package.json');
-    writeFileSync(manifest, read(manifest).replace('^1.2.0', '^1.0.0'));
+    writeFileSync(manifest, read(manifest).replace('^2.0.0', '^1.0.0'));
 
     const oldVersion = verifyAlreadyOnboarded({ root, plan });
     expect(oldVersion.ok).toBe(false);
-    expect(oldVersion.failures[0]).toMatch(/identity-capable.*>=1\.2\.0/i);
+    expect(oldVersion.failures[0])
+      .toContain(`identity-capable Opslane SDK version (>=${OPSLANE_IDENTITY_MIN_VERSION})`);
 
-    writeFileSync(manifest, read(manifest).replace('^1.0.0', '1.2.0-beta.1'));
+    writeFileSync(manifest, read(manifest).replace('^1.0.0', '2.0.0-beta.1'));
     expect(verifyAlreadyOnboarded({ root, plan }).ok).toBe(false);
 
-    writeFileSync(manifest, read(manifest).replace('1.2.0-beta.1', '^1.2.0'));
+    writeFileSync(manifest, read(manifest).replace('2.0.0-beta.1', '^2.0.0'));
     writeFileSync(
       join(root, 'src', 'main.ts'),
       [

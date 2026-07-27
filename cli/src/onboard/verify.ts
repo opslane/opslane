@@ -40,7 +40,7 @@ const TRIVIAL_DOTENV_VALUES = new Set([
   'production',
   'test',
 ]);
-export const OPSLANE_IDENTITY_MIN_VERSION = '1.2.0';
+export const OPSLANE_IDENTITY_MIN_VERSION = '2.0.0';
 
 export type VerifiableOnboardingPlan = OnboardingPlan & {
   edit: OnboardingPlan['edit'] & {
