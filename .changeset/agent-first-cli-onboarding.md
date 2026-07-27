@@ -1,5 +1,4 @@
 ---
-'@opslane/cli': minor
 '@opslane/sdk': patch
 ---
 
