@@ -1,6 +1,7 @@
 {
   "name": "@opslane/cli",
   "version": "0.0.1",
+  "private": true,
   "description": "CLI for installing and configuring the Opslane SDK",
   "license": "AGPL-3.0-only",
   "repository": {
