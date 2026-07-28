@@ -1,0 +1,30 @@
+{
+  "timestamp": "2026-07-16T00:00:00.000Z",
+  "error": {
+    "type": "TypeError",
+    "message": "Cannot read properties of null (reading 'name')",
+    "stack": "TypeError: Cannot read properties of null (reading 'name')\n    at UserCard (https://app.example.com/assets/index.js:8:20)"
+  },
+  "breadcrumbs": [
+    {
+      "type": "navigation",
+      "timestamp": "2026-07-16T00:00:00.000Z",
+      "category": "navigation",
+      "message": "https://app.example.com/dashboard"
+    }
+  ],
+  "context": {
+    "url": "https://app.example.com/dashboard",
+    "user_agent": "Mozilla/5.0",
+    "user": {
+      "id": "user-123",
+      "email": "jane@example.com",
+      "account_id": "acct-42",
+      "account_name": "Example Inc"
+    }
+  },
+  "sdk_version": "2.0.1",
+  "release": "web@2026.07.16",
+  "session_id": "sess-abc",
+  "environment": "staging"
+}
