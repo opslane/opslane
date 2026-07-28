@@ -119,6 +119,42 @@ const pm = arg('pm', existsSync(join(repo, 'pnpm-lock.yaml'))
     ? 'yarn'
     : 'npm');
 
+// ── fast path: ask Vite directly, no build ─────────────────────────────────
+//
+// Building is the strongest evidence, but it needs the repo to build, and real
+// repos often do not on a fresh clone: hoppscotch fails in vite-plugin-pages
+// before our code runs, and umami's build wants a database. --via-config asks
+// Vite itself instead. resolveConfig applies the app's real vite config, so
+// envDir and envPrefix are the values the app would actually use, and loadEnv
+// returns exactly the variables Vite would expose to the browser. That covers
+// both failures seen in the corpus — wrong directory and wrong prefix — without
+// compiling anything.
+
+if (process.argv.includes('--via-config')) {
+  const appDir = arg('build-cwd', '.');
+  const { resolveConfig, loadEnv } = await import(
+    join(repo, 'node_modules', 'vite', 'dist', 'node', 'index.js')
+  ).catch(async () => import(join(repo, appDir, 'node_modules', 'vite', 'dist', 'node', 'index.js')));
+
+  const config = await resolveConfig({ root: join(repo, appDir) }, 'build');
+  // An unset envPrefix means Vite's default, not "no prefix". Printing the raw
+  // undefined told the reader the app exposes nothing, which is the opposite.
+  const prefix = config.envPrefix ?? 'VITE_';
+  const exposed = loadEnv('production', config.envDir, prefix);
+  const value = exposed[varName];
+
+  console.log(`  vite envDir    ${config.envDir}`);
+  console.log(`  vite envPrefix ${JSON.stringify(prefix)}${config.envPrefix === undefined ? ' (Vite default)' : ''}`);
+  console.log(
+    value === SENTINEL
+      ? `\nREACHABLE    ${varName} is exposed to the browser by this app's Vite config`
+      : `\nNOT REACHABLE  ${varName} is not exposed to the browser.\n`
+        + `             Vite reads .env from ${config.envDir} and only exposes names\n`
+        + `             starting with ${JSON.stringify(prefix)}.`,
+  );
+  process.exit(value === SENTINEL ? 0 : 1);
+}
+
 // ── build ──────────────────────────────────────────────────────────────────
 
 try {
@@ -126,8 +162,12 @@ try {
     console.log(`  installing with ${pm} ...`);
     run(pm, ['install'], repo);
   }
-  console.log(`  building (${pm} run ${buildScript}) ...`);
-  run(pm, ['run', buildScript], repo);
+  // Install belongs at the workspace root, but the build script often lives in
+  // the app package and has no root-level equivalent — hoppscotch has no root
+  // "build" at all. --build-cwd says where to run it.
+  const buildCwd = join(repo, arg('build-cwd', '.'));
+  console.log(`  building (${pm} run ${buildScript} in ${arg('build-cwd', '.')}) ...`);
+  run(pm, ['run', buildScript], buildCwd);
 } catch (error) {
   console.error(`\nBUILD FAILED — cannot judge reachability.\n${error.stdout ?? ''}${error.stderr ?? ''}`);
   process.exit(2);
