@@ -51,6 +51,13 @@ export interface OnboardingPlan {
   /** A key of `scripts` in the app's package.json. Verified against disk. */
   dev_script: string;
   env_prefix: string;
+  /**
+   * Repo-relative directory the bundler loads env files from. NOT always
+   * `app_dir`: Vite's `envDir` option moves it, and both monorepos in the eval
+   * corpus point it at the repository root while the app lives in a package.
+   * The host always writes `.env.local` inside this directory.
+   */
+  env_dir: string;
   dependency: {
     name: '@opslane/sdk';
     version: string;
@@ -238,6 +245,10 @@ function validatePlan(root: string, value: unknown): OnboardingPlan {
     throw new Error(`package manager must match ${detectedPackageManager} lockfile`);
   }
   const envPrefix = nonEmptyString(value.env_prefix, 'env_prefix');
+  const envDir = canonicalRepoPath(root, value.env_dir, 'env_dir');
+  if (!existsSync(path.resolve(root, envDir)) || !statSync(path.resolve(root, envDir)).isDirectory()) {
+    throw new Error('env_dir must be an existing directory');
+  }
   const rationale = nonEmptyString(value.rationale, 'rationale');
 
   assertRecord(value.dependency, 'dependency');
@@ -369,6 +380,7 @@ function validatePlan(root: string, value: unknown): OnboardingPlan {
     package_manager: packageManager,
     dev_script: devScript,
     env_prefix: envPrefix,
+    env_dir: envDir,
     dependency: { name: '@opslane/sdk', version: OPSLANE_SDK_VERSION },
     env_vars: { api_key: apiKey, endpoint },
     edit: {
@@ -420,6 +432,7 @@ export function createReportPlanTool(
     package_manager: z.enum(PACKAGE_MANAGERS),
     dev_script: z.string(),
     env_prefix: z.string(),
+    env_dir: z.string(),
     dependency: z.object({
       name: z.literal('@opslane/sdk'),
     }),

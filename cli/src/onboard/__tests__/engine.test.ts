@@ -48,6 +48,7 @@ function fixture(): { root: string; report: ReportPlanInput; plan: OnboardingPla
     package_manager: 'pnpm',
     dev_script: 'dev',
     env_prefix: 'VITE_',
+    env_dir: '.',
     dependency: { name: '@opslane/sdk', version: OPSLANE_SDK_VERSION },
     env_vars: {
       api_key: 'VITE_OPSLANE_API_KEY',

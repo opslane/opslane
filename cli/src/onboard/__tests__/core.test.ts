@@ -38,6 +38,7 @@ function fixturePlan(): OnboardingPlan {
     package_manager: 'pnpm',
     dev_script: 'dev',
     env_prefix: 'VITE_',
+    env_dir: 'web',
     dependency: { name: '@opslane/sdk', version: OPSLANE_SDK_VERSION },
     env_vars: { api_key: 'VITE_OPSLANE_API_KEY', endpoint: 'VITE_OPSLANE_ENDPOINT' },
     edit: {

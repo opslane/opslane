@@ -235,7 +235,11 @@ async function runFlow(deps: CoreDeps, record: Record_): Promise<CoreResult> {
 
   emit({ stage: 'writing-env' });
   const appDir = containedRepoRelative(deps.cwd, plan.app_dir); // throws if it escapes
-  const envDir = join(deps.cwd, appDir);
+  // NOT app_dir. Vite's `envDir` moves where .env files are read from, and both
+  // monorepos in the eval corpus point it at the repository root. Writing into
+  // the app directory there produces an app that installs, starts, and never
+  // reports, because the bundler never reads the file.
+  const envDir = join(deps.cwd, containedRepoRelative(deps.cwd, plan.env_dir));
   await deps.writeEnv(envDir, {
     [plan.env_vars.api_key]: provision.apiKey,
     [plan.env_vars.endpoint]: provision.endpoint,
