@@ -5,7 +5,12 @@ import { cleanup, render } from 'ink-testing-library';
 import React from 'react';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { createOnboardShell, OnboardApp, runOnboardApp } from '../app.js';
+import {
+  approvalTitle,
+  createOnboardShell,
+  OnboardApp,
+  runOnboardApp,
+} from '../app.js';
 import type { CoreDeps, CoreResult } from '../core.js';
 
 const delay = (ms: number): Promise<void> =>
@@ -44,8 +49,10 @@ afterEach(() => {
   cleanup();
 });
 
+const shellRoot = mkdtempSync(join(tmpdir(), 'opslane-app-shell-'));
+
 function shellFor(signal = new AbortController().signal): ReturnType<typeof createOnboardShell> {
-  return createOnboardShell({ signal });
+  return createOnboardShell({ root: shellRoot, signal });
 }
 
 describe('onboarding Ink shell', () => {
@@ -59,6 +66,36 @@ describe('onboarding Ink shell', () => {
     await waitFor(() => /src\/main\.ts/.test(lastFrame() ?? ''), 'the approval prompt');
     await pressEnter(stdin, () => resolved !== undefined, 'the approval');
     expect(resolved).toBe(true);
+  });
+
+  it('parks the informed plan gate as an approval, distinct from confirmations', async () => {
+    const shell = shellFor();
+    const { lastFrame, stdin } = render(<OnboardApp shell={shell} />);
+    let resolved: boolean | undefined;
+    void shell.ui.approvePlan({} as never).then((value) => {
+      resolved = value;
+    });
+
+    await waitFor(() => (lastFrame() ?? '').includes('Apply this?'), 'the plan approval');
+    expect(shell.getPrompt()?.kind).toBe('approval');
+    await pressEnter(stdin, () => resolved !== undefined, 'the plan approval');
+    expect(resolved).toBe(true);
+  });
+
+  it('uses repo-relative paths in tool prompts and retains outside absolute paths', () => {
+    const inside = join(shellRoot, 'src', 'main.ts');
+    const outside = join(tmpdir(), 'outside-opslane.ts');
+
+    expect(approvalTitle(shellRoot, 'Edit', { file_path: inside }))
+      .toBe('Allow Edit src/main.ts?');
+    expect(approvalTitle(shellRoot, 'Edit', { file_path: 'src/main.ts' }))
+      .toBe('Allow Edit src/main.ts?');
+    expect(approvalTitle(shellRoot, 'Edit', { file_path: outside }))
+      .toBe(`Allow Edit ${outside}?`);
+    expect(approvalTitle(shellRoot, 'Edit', { file_path: '../outside-opslane.ts' }))
+      .toBe(`Allow Edit ${outside}?`);
+    expect(approvalTitle(shellRoot, 'Edit', { file_path: inside }, { title: 'SDK title' }))
+      .toBe('SDK title');
   });
 
   it('prefers the SDK-supplied title over a reconstructed sentence', async () => {
@@ -136,12 +173,13 @@ describe('onboarding Ink shell', () => {
           typeof d.loginFn,
           typeof d.runLog.record,
           typeof d.writeEnv,
+          typeof d.approvePlan,
           d.tokenPath ? 'tokenPath' : 'none',
         );
         return { ok: true, status: 'completed' };
       },
     });
     expect(result).toMatchObject({ ok: true, status: 'completed' });
-    expect(calls).toEqual(['function', 'function', 'function', 'tokenPath']);
+    expect(calls).toEqual(['function', 'function', 'function', 'function', 'tokenPath']);
   });
 });

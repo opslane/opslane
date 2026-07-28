@@ -1,6 +1,6 @@
 /**
  * The Ink shell: the only file that wires real terminal I/O into the pure
- * controller. It owns the three interactive callbacks and the production
+ * controller. It owns the interactive callbacks and the production
  * dependency factory.
  *
  * The prompt state lives OUTSIDE React on purpose. Login prints the
@@ -10,7 +10,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join, resolve as resolvePath } from 'node:path';
 
 import { render, type Instance } from 'ink';
 import React, { useEffect, useReducer } from 'react';
@@ -25,7 +25,9 @@ import {
   type CoreResult,
 } from './core.js';
 import { runApply, runDetect } from './engine.js';
+import { containedRepoRelative } from './paths.js';
 import type { ApprovalRequest } from './policy.js';
+import type { ActionPreview } from './preview.js';
 import { runCommand, startDevServer } from './process.js';
 import { ensureLoggedIn, ensureProvisioned } from './provision.js';
 import { createRunLog } from './runlog.js';
@@ -38,6 +40,7 @@ const NO = 'No';
 
 export interface ShellUi {
   requestApproval: ApprovalRequest;
+  approvePlan: (preview: ActionPreview) => Promise<boolean>;
   askUser: AskUserResolver;
   confirm: (prompt: string, command: string) => Promise<boolean>;
   emit: (event: CoreEvent) => void;
@@ -50,7 +53,8 @@ export interface ShellUi {
  * own settle type: `false` for approvals and confirmations, `[]` for questions.
  */
 type Pending =
-  | { id: number; kind: 'boolean'; title: string; resolve: (value: boolean) => void }
+  | { id: number; kind: 'approval'; title: string; resolve: (value: boolean) => void }
+  | { id: number; kind: 'confirm'; title: string; resolve: (value: boolean) => void }
   | {
       id: number;
       kind: 'question';
@@ -69,7 +73,8 @@ export interface OnboardShell {
   settleAll: () => void;
 }
 
-function approvalTitle(
+export function approvalTitle(
+  root: string,
   toolName: string,
   input: Record<string, unknown>,
   options?: { [key: string]: unknown },
@@ -77,15 +82,41 @@ function approvalTitle(
   const supplied = options?.['title'];
   if (typeof supplied === 'string' && supplied !== '') return supplied;
   const filePath = input['file_path'];
-  return typeof filePath === 'string'
-    ? `Allow ${toolName} ${filePath}?`
-    : `Allow ${toolName}?`;
+  if (typeof filePath !== 'string') return `Allow ${toolName}?`;
+  let displayPath = filePath;
+  try {
+    displayPath = containedRepoRelative(root, filePath);
+  } catch {
+    // An outside-repository path is the case where the absolute path matters.
+    displayPath = isAbsolute(filePath) ? filePath : resolvePath(root, filePath);
+  }
+  return `Allow ${toolName} ${displayPath}?`;
+}
+
+/**
+ * Ask about what will actually happen. On an already-wired repository nothing
+ * is edited and the only remaining action is starting the dev server, so
+ * "Apply this?" asks the user to approve changes the screen just told them are
+ * not needed.
+ */
+function approvalQuestion(preview: ActionPreview): string {
+  // Fail safe: if any field is missing we cannot prove nothing will change, so
+  // ask the question that assumes it will. The opposite error would tell the
+  // user their code is untouched moments before we edit it.
+  const writesNothing =
+    preview?.envKeysAdded?.length === 0 &&
+    preview?.envKeysReplaced?.length === 0 &&
+    preview.gitignoreWillChange === false &&
+    preview.editsCode === false;
+  return writesNothing ? 'Everything is already set up. Start your dev server?' : 'Apply this?';
 }
 
 export function createOnboardShell({
+  root,
   signal,
   loginFn = async () => undefined,
 }: {
+  root: string;
   signal: AbortSignal;
   loginFn?: () => Promise<void>;
 }): OnboardShell {
@@ -134,13 +165,26 @@ export function createOnboardShell({
         }
         const entry: Pending = {
           id: (nextId += 1),
-          kind: 'boolean',
-          title: approvalTitle(toolName, input, options),
+          kind: 'confirm',
+          title: approvalTitle(root, toolName, input, options),
           resolve,
         };
         enqueue(entry);
         // The SDK cancels individual approvals; that must not settle the rest.
         options?.signal?.addEventListener('abort', () => drop(entry), { once: true });
+      }),
+    approvePlan: (preview) =>
+      new Promise<boolean>((resolve) => {
+        if (signal.aborted) {
+          resolve(false);
+          return;
+        }
+        enqueue({
+          id: (nextId += 1),
+          kind: 'approval',
+          title: approvalQuestion(preview),
+          resolve,
+        });
       }),
     confirm: (prompt, command) =>
       new Promise<boolean>((resolve) => {
@@ -150,7 +194,7 @@ export function createOnboardShell({
         }
         enqueue({
           id: (nextId += 1),
-          kind: 'boolean',
+          kind: 'confirm',
           title: `${prompt}  ${command}`,
           resolve,
         });
@@ -170,7 +214,18 @@ export function createOnboardShell({
         });
       }),
     emit: (next) => {
-      event = next;
+      // `next` is a whole new event, so any field it omits is cleared. That is
+      // right for per-moment fields, and wrong for the three that describe the
+      // whole run: they are computed once, before Apply, and every later event
+      // omits them — including the terminal one, which needs them to say what
+      // happened. `tasks` is deliberately NOT sticky; core.ts resets it between
+      // stages on purpose and carrying it would bleed Apply's list forward.
+      event = {
+        ...next,
+        plan: next.plan ?? event.plan,
+        preview: next.preview ?? event.preview,
+        dirty: next.dirty ?? event.dirty,
+      };
       notify();
     },
     loginFn,
@@ -219,6 +274,7 @@ export function OnboardApp({ shell }: { shell: OnboardShell }): React.JSX.Elemen
       {...event}
       tasks={event.tasks ?? []}
       question={question}
+      approving={prompt?.kind === 'approval'}
       onAnswer={(value) => shell.answer(value)}
     />
   );
@@ -263,6 +319,7 @@ async function productionDeps(
     startDevServer,
     waitForAppReporting,
     requestApproval: ui.requestApproval,
+    approvePlan: ui.approvePlan,
     askUser: ui.askUser,
     confirm: ui.confirm,
     runLog: await createRunLog({
@@ -279,6 +336,7 @@ export async function runOnboardApp(options: RunOnboardAppOptions): Promise<Core
   let instance: Instance | undefined;
 
   const shell: OnboardShell = createOnboardShell({
+    root: options.cwd,
     signal: options.signal,
     // Login prints the authorization URL, so give stdout back for its duration.
     // The run and its prompt queue live outside React, so remounting the view

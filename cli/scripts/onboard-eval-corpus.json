@@ -1,13 +1,13 @@
 {
-  "$comment": "Real open-source repos for the onboarding Detect eval. Cloned on demand by onboard-eval-corpus.mjs, never vendored. `exercises` says what the repo is meant to stress so a failure is legible. `expect` is the recorded human answer and IS SCORED: the runner passes it to detect-eval.mjs --expect, and a mismatch fails the run. Only fields with one defensible answer belong in `expect`; `framework_pattern` is a case-insensitive regex because the model writes that field as free text.",
+  "$comment": "Real open-source repos for the onboarding Detect eval. Cloned on demand by onboard-eval-corpus.mjs, never vendored. `exercises` says what the repo is meant to stress so a failure is legible. `rev` pins the exact commit the answers below were recorded against, so a ground-truth mismatch means Detect changed its mind rather than upstream restructuring itself; bumping a rev is the deliberate act that revalidates `expect`. `expect` is the recorded human answer and IS SCORED: the runner passes it to detect-eval.mjs --expect, and a mismatch fails the run. Only fields with one defensible answer belong in `expect`; `_pattern` fields are anchored case-insensitive regexes because the model writes those values as free text, so anchor anything added there or it will pass on a near-miss. NOT scored: `framework`. Measured 2026-07-28, Detect answers it with a bundler slug ('vite' for both a React app and a Vue one, 'Next.js' for umami), so any pattern strict enough to tell a Vue app from a React one fails on wording rather than on being wrong. app_dir, edit_file and env_prefix already pin the app choice far more precisely. detect-eval still supports framework_pattern if the field ever becomes a constrained value.",
   "repos": [
     {
       "name": "umami",
       "url": "https://github.com/umami-software/umami.git",
-      "exercises": "Next.js App Router. The entry is not an index.html \u2014 the SDK has to go in the 'use client' root (src/app/Providers.tsx), NOT layout.tsx which is a server component. Also forces the NEXT_PUBLIC_ prefix.",
+      "rev": "af1b6c6efcadd65136a9ec3db6b8ec20962a8a69",
+      "exercises": "Next.js App Router. The entry is not an index.html — the SDK has to go in the 'use client' root (src/app/Providers.tsx), NOT layout.tsx which is a server component. Also forces the NEXT_PUBLIC_ prefix.",
       "expect": {
         "app_dir": ".",
-        "framework_pattern": "next",
         "package_manager": "pnpm",
         "dev_script": "dev",
         "env_prefix": "NEXT_PUBLIC_",
@@ -19,25 +19,26 @@
     {
       "name": "excalidraw",
       "url": "https://github.com/excalidraw/excalidraw.git",
-      "exercises": "The closest public analogue to the design's acceptance repo. Yarn workspaces monorepo (12 packages) where the app must be picked out from libraries and examples; a CUSTOM VITE_APP_ env prefix that a codemod would get wrong; a dev script called 'start' rather than 'dev'; and an existing Sentry install that must be kept, not migrated.",
+      "rev": "7c0b3295760d3492a980f2f6416a36c9ef592103",
+      "exercises": "The closest public analogue to the design's acceptance repo. Yarn workspaces monorepo (12 packages) where the app must be picked out from libraries and examples; a CUSTOM VITE_APP_ env prefix that a codemod would get wrong; a dev script called 'start' rather than 'dev'; and an existing Sentry install (@sentry/browser) that must be kept, not migrated.",
       "expect": {
         "app_dir": "excalidraw-app",
-        "framework_pattern": "vite|react",
         "package_manager": "yarn",
         "dev_script": "start",
         "env_prefix": "VITE_APP_",
         "edit_file": "excalidraw-app/index.tsx",
         "existing_sdk_action": "keep",
+        "existing_sdk_name_pattern": "\\bsentry\\b",
         "env_dir": "."
       }
     },
     {
       "name": "hoppscotch",
       "url": "https://github.com/hoppscotch/hoppscotch.git",
+      "rev": "a4395b3e7c41541de1d769e8701ea110ba8f96c2",
       "exercises": "pnpm monorepo with several plausible web apps (selfhost-web, sh-admin, common, desktop, agent). Tests whether the primary user-facing app is chosen over an admin console and a shared library. Also has PostHog present in a NestJS backend package, which must NOT be treated as this app's monitoring SDK.",
       "expect": {
         "app_dir": "packages/hoppscotch-selfhost-web",
-        "framework_pattern": "vue|vite",
         "package_manager": "pnpm",
         "dev_script": "dev",
         "env_prefix": "VITE_",

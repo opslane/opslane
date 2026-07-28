@@ -142,6 +142,23 @@ describe('report_plan', () => {
     await expect(call(tool, { status: 'ok', plan })).rejects.toThrow(/already/i);
   });
 
+  it('truncates an overlong rationale on a word boundary instead of rejecting it', async () => {
+    let captured: OnboardingPlan | undefined;
+    await report({
+      status: 'ok',
+      plan: {
+        ...plan,
+        rationale: `${'repository evidence '.repeat(40)}tail`,
+      },
+    }, (accepted) => {
+      captured = accepted;
+    });
+
+    expect(captured!.rationale.length).toBeLessThanOrEqual(600);
+    expect(captured!.rationale).toMatch(/…$/);
+    expect(captured!.rationale).not.toMatch(/ evid…$/);
+  });
+
   it('keeps dev_script through the schema and reports it', async () => {
     let captured: OnboardingPlan | undefined;
     const tool = createReportPlanTool(root, (value) => {

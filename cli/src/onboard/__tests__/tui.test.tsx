@@ -3,11 +3,62 @@ import React from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { Stage } from '../core.js';
+import type { ActionPreview } from '../preview.js';
 import { Tui } from '../tui.js';
+import type { OnboardingPlan } from '../tools.js';
 
 afterEach(() => {
   cleanup();
 });
+
+const plan: OnboardingPlan = {
+  app_dir: 'web',
+  framework: 'vue-vite',
+  package_manager: 'pnpm',
+  dev_script: 'dev',
+  env_prefix: 'VITE_',
+  env_dir: '.',
+  dependency: { name: '@opslane/sdk', version: '^2.0.0' },
+  env_vars: {
+    api_key: 'VITE_OPSLANE_API_KEY',
+    endpoint: 'VITE_OPSLANE_ENDPOINT',
+  },
+  edit: {
+    file: 'web/src/main.ts',
+    entry_hash: 'entry',
+    manifest_file: 'web/package.json',
+    manifest_hash: 'manifest',
+    import_line: "import { init } from '@opslane/sdk';",
+    init_block: 'init({ apiKey: import.meta.env.VITE_OPSLANE_API_KEY });',
+    anchor: "createApp(App).mount('#app');",
+    position: 'before',
+    occurrence: 0,
+  },
+  existing_sdk: { action: 'none', name: null },
+  rationale: 'This is the only user-facing app; it uses VITE_ and keeps Sentry.',
+};
+
+const preview: ActionPreview = {
+  entryFile: 'web/src/main.ts',
+  manifestFile: 'web/package.json',
+  addedDependency: '@opslane/sdk@^2.0.0',
+  envFile: '.env.local',
+  envKeysAdded: ['VITE_OPSLANE_ENDPOINT'],
+  envKeysReplaced: ['VITE_OPSLANE_API_KEY'],
+  gitignoreWillChange: true,
+  editsCode: true,
+  installCommand: 'pnpm install',
+  devCommand: 'pnpm run dev',
+  devCwd: 'web',
+  insert: {
+    anchor: "createApp(App).mount('#app');",
+    position: 'before',
+    lines: [
+      "import { init } from '@opslane/sdk';",
+      'init({ apiKey: import.meta.env.VITE_OPSLANE_API_KEY });',
+    ],
+  },
+};
 
 describe('onboarding TUI', () => {
   it('renders the question and resolves on Enter', async () => {
@@ -60,5 +111,75 @@ describe('onboarding TUI', () => {
     expect(frame).toMatch(/\b37 done\b/); // 33 dropped + 4 shown
     expect(frame).toMatch(/\b3 failed\b/); // failures must never be counted as done
     expect(frame.split('\n').length).toBeLessThan(15);
+  });
+
+  it('renders the checked consent preview without secret values', () => {
+    const frame = render(
+      <Tui
+        stage="awaiting-approval"
+        tasks={[]}
+        plan={plan}
+        preview={preview}
+        dirty={['README.md', 'src/App.vue', 'one-more.ts']}
+        approving
+        question={{ question: 'Apply this?', options: ['Yes', 'No'], multi: false }}
+      />,
+    ).lastFrame() ?? '';
+
+    for (const expected of [
+      'What I found',
+      plan.rationale,
+      '3 files',
+      'README.md, src/App.vue, and 1 more',
+      'What I will change',
+      'web/src/main.ts',
+      'web/package.json',
+      '@opslane/sdk ^2.0.0',
+      '.env.local',
+      '1 new key',
+      '1 updated key',
+      '.gitignore',
+      'pnpm install',
+      'pnpm run dev',
+      'Apply this?',
+    ]) {
+      expect(frame).toContain(expected);
+    }
+    expect(frame).not.toContain('opk_secret');
+    expect(frame.indexOf(`+ ${preview.insert.lines[0]}`))
+      .toBeLessThan(frame.indexOf(preview.insert.anchor));
+  });
+
+  it('shows only real no-op actions and keeps ordinary confirmations compact', () => {
+    const noOpFrame = render(
+      <Tui
+        stage="awaiting-approval"
+        tasks={[]}
+        plan={{ ...plan, existing_sdk: { action: 'no_op', name: '@opslane/sdk' } }}
+        preview={{ ...preview, gitignoreWillChange: false, installCommand: null, editsCode: false }}
+        dirty={[]}
+        approving
+        question={{ question: 'Apply this?', options: ['Yes', 'No'], multi: false }}
+      />,
+    ).lastFrame() ?? '';
+    expect(noOpFrame).toContain('.env.local');
+    expect(noOpFrame).toContain('pnpm run dev');
+    expect(noOpFrame).not.toContain('web/src/main.ts');
+    expect(noOpFrame).not.toContain('web/package.json');
+    expect(noOpFrame).not.toContain('.gitignore');
+    expect(noOpFrame).not.toContain('pnpm install');
+
+    cleanup();
+    const confirmFrame = render(
+      <Tui
+        stage="apply"
+        tasks={[]}
+        plan={plan}
+        preview={preview}
+        question={{ question: 'Allow Edit src/main.ts?', options: ['Yes', 'No'], multi: false }}
+      />,
+    ).lastFrame() ?? '';
+    expect(confirmFrame).toContain('Allow Edit src/main.ts?');
+    expect(confirmFrame).not.toContain('What I will change');
   });
 });

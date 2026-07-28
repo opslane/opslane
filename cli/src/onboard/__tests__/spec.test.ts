@@ -39,6 +39,9 @@ describe('detect-stage agent specification', () => {
     expect(spec).toMatch(/import_line[\s\S]{0,100}module top level/i);
     expect(spec).toContain('manifest_file');
     expect(spec).toContain('dev_script');
+    expect(spec).toContain('rationale');
+    expect(spec).toMatch(/read by a person deciding/i);
+    expect(spec).toMatch(/600 characters/i);
     expect(spec).toMatch(/exact key[\s\S]{0,120}package\.json "scripts"/i);
     expect(spec).toMatch(/host pins the SDK version/i);
     expect(spec).not.toMatch(/\bedit or write\b/i);

@@ -18,9 +18,11 @@ import {
   type runCommand,
   type startDevServer,
 } from './process.js';
+import { buildActionPreview, type ActionPreview } from './preview.js';
 import type { RunLog } from './runlog.js';
 import type { AskUserResolver, OnboardingPlan } from './tools.js';
 import type { waitForAppReporting } from './wait.js';
+import { uncommittedFiles } from './worktree.js';
 
 export type Stage =
   | 'login'
@@ -45,6 +47,8 @@ export interface CoreEvent {
   droppedFailed?: number;
   question?: { question: string; options: string[]; multi: boolean };
   plan?: OnboardingPlan;
+  preview?: ActionPreview;
+  dirty?: string[] | null;
   url?: string;
   output?: string;
   message?: string;
@@ -62,6 +66,7 @@ export interface CoreDeps {
   runDetect: typeof runDetect;
   runApply: typeof runApply;
   requestApproval: ApprovalRequest;
+  approvePlan: (preview: ActionPreview) => Promise<boolean>;
   askUser: AskUserResolver;
   confirm: (prompt: string, command: string) => Promise<boolean>;
   writeEnv: typeof writeEnvLocal;
@@ -196,7 +201,30 @@ async function runFlow(deps: CoreDeps, record: Record_): Promise<CoreResult> {
     };
   }
 
-  emit({ stage: 'awaiting-approval', plan });
+  if (plan.existing_sdk.action === 'migrate') {
+    return {
+      ok: false,
+      status: 'failed',
+      message:
+        `Migration from ${plan.existing_sdk.name ?? 'the existing monitoring SDK'} `
+        + 'is not supported yet.',
+    };
+  }
+
+  const envValues = {
+    [plan.env_vars.api_key]: provision.apiKey,
+    [plan.env_vars.endpoint]: provision.endpoint,
+  };
+  const preview = buildActionPreview({ cwd: deps.cwd, plan, envValues });
+  const dirty = uncommittedFiles(deps.cwd);
+  emit({ stage: 'awaiting-approval', plan, preview, dirty });
+  if (!(await deps.approvePlan(preview))) {
+    return {
+      ok: false,
+      status: 'aborted',
+      message: 'You did not approve the changes.',
+    };
+  }
 
   bounded = NO_TASKS; // detect's list must not carry over
   emitTasks('apply');
@@ -205,7 +233,9 @@ async function runFlow(deps: CoreDeps, record: Record_): Promise<CoreResult> {
     cwd: deps.cwd,
     plan,
     signal,
-    requestApproval: deps.requestApproval,
+    // The user approved the finite write set shown in `preview`. The Apply hook
+    // hard-denies every other path before this callback can be consulted.
+    requestApproval: async () => true,
     onReport: (value) => {
       report = value;
     },
@@ -240,10 +270,7 @@ async function runFlow(deps: CoreDeps, record: Record_): Promise<CoreResult> {
   // the app directory there produces an app that installs, starts, and never
   // reports, because the bundler never reads the file.
   const envDir = join(deps.cwd, containedRepoRelative(deps.cwd, plan.env_dir));
-  await deps.writeEnv(envDir, {
-    [plan.env_vars.api_key]: provision.apiKey,
-    [plan.env_vars.endpoint]: provision.endpoint,
-  });
+  await deps.writeEnv(envDir, envValues);
 
   if (report.installRequired) {
     emit({ stage: 'installing' });
@@ -254,7 +281,8 @@ async function runFlow(deps: CoreDeps, record: Record_): Promise<CoreResult> {
       command: install,
       cwd: installDir,
       signal,
-      consent: () => deps.confirm('Install dependencies?', formatCommand(install)),
+      // Dependency installation was named in and covered by approvePlan.
+      consent: async () => true,
       onOutput: (output) => emit({ stage: 'installing', output }),
     });
     if (installed.ran && !installed.ok) {
@@ -269,20 +297,12 @@ async function runFlow(deps: CoreDeps, record: Record_): Promise<CoreResult> {
   }
 
   const dev = devCommand(deps.cwd, appDir, plan.dev_script, plan.package_manager);
-  if (!(await deps.confirm('Start the dev server?', formatCommand(dev)))) {
-    return {
-      ok: false,
-      status: 'failed',
-      message:
-        'The dev server was not started. Start it yourself with '
-        + `\`${formatCommand(dev)}\`, then re-run onboarding.`,
-    };
-  }
-
   emit({ stage: 'starting-dev' });
   const server = deps.startDevServer({
     command: dev,
-    cwd: envDir,
+    // Starting the server was named in and covered by approvePlan. `env_dir`
+    // only controls where the bundler reads env files; commands run in app_dir.
+    cwd: join(deps.cwd, appDir),
     signal,
     onOutput: (output) => emit({ stage: 'starting-dev', output }),
   });

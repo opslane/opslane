@@ -52,6 +52,23 @@ Call report_plan exactly once and make no further tool calls afterward.
 - Provide dev_script: the exact key from the selected app's package.json "scripts" that
   starts its dev server. It must be one of that file's declared scripts. In a repo with
   several (dev, dev:staging, start), choose the one for the app you selected.
+- Provide a rationale. This is read by a person deciding whether to let you edit their
+  code, on a terminal screen, in a few seconds. Write it for them, not for a reviewer.
+  - Two sentences. Aim for 220 characters; the host truncates at 600 characters.
+  - Plain language. No file extensions, config keys, package names, or version numbers
+    unless naming one IS the point. Do not list your evidence; state your conclusion.
+  - Say which app you chose and what makes it the user-facing one, and name anything
+    surprising you are leaving alone.
+  - Do not restate fields shown elsewhere on the screen: the files, the env variables,
+    the package manager, and the dev script are all displayed already.
+
+  Good: "excalidraw-app is the only app people actually use here — the other 11
+  workspaces are libraries and examples. It already uses a custom VITE_APP_ prefix, so
+  I matched it, and I left your Sentry setup alone."
+
+  Bad: "Single Vite+React app (vite.config.ts, @vitejs/plugin-react, index.html/
+  src/main.tsx). No envDir is set, so Vite loads .env from the app root ('.').
+  package-lock.json => npm; dev script is 'vite'."
 - Keep Opslane initialization able to coexist with any existing monitoring SDK, and set
   existing_sdk.action to exactly one of:
   - "none" when the repository has no error or monitoring SDK at all (name: null);
