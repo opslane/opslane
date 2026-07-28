@@ -59,6 +59,7 @@ describe('deterministic apply verification', () => {
       package_manager: 'pnpm',
       dev_script: 'dev',
       env_prefix: 'VITE_',
+      env_dir: 'web',
       dependency: { name: '@opslane/sdk', version: '^2.0.0' },
       env_vars: {
         api_key: 'VITE_OPSLANE_API_KEY',

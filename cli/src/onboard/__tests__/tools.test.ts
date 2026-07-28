@@ -59,6 +59,7 @@ describe('report_plan', () => {
       package_manager: 'pnpm',
       dev_script: 'dev',
       env_prefix: 'VITE_',
+      env_dir: 'web',
       dependency: { name: '@opslane/sdk' },
       env_vars: {
         api_key: 'VITE_OPSLANE_API_KEY',
@@ -81,6 +82,34 @@ describe('report_plan', () => {
 
   const report = (value: unknown, onPlan: (accepted: OnboardingPlan) => void = () => undefined) =>
     call(createReportPlanTool(root, onPlan), value);
+
+  // Every real monorepo in the eval corpus loads env vars from somewhere other
+  // than the app directory. excalidraw sets `envDir: "../"` and hoppscotch sets
+  // `envDir: path.resolve(__dirname, "../../")`, and both keep their .env files
+  // at the repo root. Writing .env.local into app_dir produced an app that
+  // installs, runs, and never reports, because the bundler never reads it.
+  describe('env_dir', () => {
+    it('accepts an env dir outside the app dir', async () => {
+      let captured: OnboardingPlan | undefined;
+      await report({ status: 'ok', plan: { ...plan, env_dir: '.' } }, (accepted) => {
+        captured = accepted;
+      });
+      expect(captured?.env_dir).toBe('.');
+      expect(captured?.app_dir).toBe('web');
+    });
+
+    it('rejects an env dir that escapes the repository', async () => {
+      await expect(
+        report({ status: 'ok', plan: { ...plan, env_dir: '../elsewhere' } }),
+      ).rejects.toThrow();
+    });
+
+    it('rejects an env dir that is not a directory on disk', async () => {
+      await expect(
+        report({ status: 'ok', plan: { ...plan, env_dir: 'web/package.json' } }),
+      ).rejects.toThrow(/directory/i);
+    });
+  });
 
   it('accepts and canonicalizes a valid plan exactly once', async () => {
     let captured: OnboardingPlan | undefined;
@@ -111,6 +140,23 @@ describe('report_plan', () => {
       dependency: { name: '@opslane/sdk', version: OPSLANE_SDK_VERSION },
     });
     await expect(call(tool, { status: 'ok', plan })).rejects.toThrow(/already/i);
+  });
+
+  it('truncates an overlong rationale on a word boundary instead of rejecting it', async () => {
+    let captured: OnboardingPlan | undefined;
+    await report({
+      status: 'ok',
+      plan: {
+        ...plan,
+        rationale: `${'repository evidence '.repeat(40)}tail`,
+      },
+    }, (accepted) => {
+      captured = accepted;
+    });
+
+    expect(captured!.rationale.length).toBeLessThanOrEqual(600);
+    expect(captured!.rationale).toMatch(/…$/);
+    expect(captured!.rationale).not.toMatch(/ evid…$/);
   });
 
   it('keeps dev_script through the schema and reports it', async () => {

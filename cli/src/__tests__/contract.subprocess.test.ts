@@ -17,7 +17,12 @@ interface RunResult { code: number; stdout: string; stderr: string }
  * workspace runs vitest in parallel, so these children compete for CPU with
  * ~38 other CLI test files plus five other packages. Without a bound, a starved
  * child stalls the suite and reports as an opaque multi-minute timeout rather
- * than a diagnosable failure. Kill the process group and say what happened.
+ * than a diagnosable failure.
+ *
+ * This bound converts a hang into a named failure; it does not remove the
+ * contention that causes slowness. The child is not detached, so the SIGKILL
+ * below signals that process only — adequate here because the CLI commands
+ * under test spawn no grandchildren.
  */
 const CLI_RUN_TIMEOUT_MS = 45_000;
 

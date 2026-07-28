@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
@@ -38,6 +38,7 @@ function fixturePlan(): OnboardingPlan {
     package_manager: 'pnpm',
     dev_script: 'dev',
     env_prefix: 'VITE_',
+    env_dir: 'web',
     dependency: { name: '@opslane/sdk', version: OPSLANE_SDK_VERSION },
     env_vars: { api_key: 'VITE_OPSLANE_API_KEY', endpoint: 'VITE_OPSLANE_ENDPOINT' },
     edit: {
@@ -144,6 +145,7 @@ function deps(overrides: DepsOverrides = {}): CoreDeps {
       return { ok: true, aborted: false, editedFiles: [...EDITED] };
     },
     requestApproval: async () => true,
+    approvePlan: async () => true,
     askUser: async ({ options }) => [options[0] ?? ''],
     confirm: async () => true,
     writeEnv: async (dir) => join(dir, '.env.local'),
@@ -316,6 +318,40 @@ describe('runOnboardCore detect stage', () => {
 });
 
 describe('runOnboardCore apply stage', () => {
+  it('leaves the repository untouched and never applies when approval is declined', async () => {
+    const before = [
+      readFileSync(join(root, 'web', 'src', 'main.ts')),
+      readFileSync(join(root, 'web', 'package.json')),
+      readFileSync(join(root, 'web', 'pnpm-lock.yaml')),
+    ];
+    const runApply = vi.fn<CoreDeps['runApply']>();
+    const writeEnv = vi.fn<CoreDeps['writeEnv']>();
+    const runCommand = vi.fn<CoreDeps['runCommand']>();
+    const startDevServer = vi.fn<CoreDeps['startDevServer']>();
+
+    await expect(runOnboardCore(deps({
+      approvePlan: async () => false,
+      runApply,
+      writeEnv,
+      runCommand,
+      startDevServer,
+    }))).resolves.toMatchObject({
+      ok: false,
+      status: 'aborted',
+      message: 'You did not approve the changes.',
+    });
+
+    expect(runApply).not.toHaveBeenCalled();
+    expect(writeEnv).not.toHaveBeenCalled();
+    expect(runCommand).not.toHaveBeenCalled();
+    expect(startDevServer).not.toHaveBeenCalled();
+    expect([
+      readFileSync(join(root, 'web', 'src', 'main.ts')),
+      readFileSync(join(root, 'web', 'package.json')),
+      readFileSync(join(root, 'web', 'pnpm-lock.yaml')),
+    ]).toEqual(before);
+  });
+
   it('writes no env and never polls when apply fails', async () => {
     const writeEnv = vi.fn<CoreDeps['writeEnv']>(async () => '/unused/.env.local');
     const waitForAppReporting = vi.fn<CoreDeps['waitForAppReporting']>();
@@ -359,6 +395,24 @@ describe('runOnboardCore apply stage', () => {
     expect(result.message).toMatch(/report.*match|reconcil/i);
   });
 
+  it('auto-approves only the Apply calls that the plan gate already covered', async () => {
+    const requestApproval = vi.fn<CoreDeps['requestApproval']>(async () => false);
+    let applyApproval: boolean | undefined;
+    await runOnboardCore(deps({
+      requestApproval,
+      runApply: async (options) => {
+        applyApproval = await options.requestApproval('Edit', {
+          file_path: join(root, 'web', 'src', 'main.ts'),
+        });
+        options.onReport(fixtureReport());
+        return { ok: true, aborted: false, editedFiles: [...EDITED] };
+      },
+    }));
+
+    expect(applyApproval).toBe(true);
+    expect(requestApproval).not.toHaveBeenCalled();
+  });
+
   it('starts the apply task list empty rather than reusing detect tasks', async () => {
     const seen: TaskLine[][] = [];
     await runOnboardCore(
@@ -377,12 +431,65 @@ describe('runOnboardCore apply stage', () => {
     expect(seen[0]).toHaveLength(0);
   });
 
-  it('emits the plan for review before applying', async () => {
+  it('emits the plan, checked preview, and worktree state before applying', async () => {
     const events: CoreEvent[] = [];
     await runOnboardCore(deps({ emit: (event) => events.push(event) }));
-    expect(events.find((event) => event.stage === 'awaiting-approval')?.plan?.app_dir).toBe(
-      'web',
-    );
+    const approval = events.find((event) => event.stage === 'awaiting-approval');
+    expect(approval?.plan?.app_dir).toBe('web');
+    expect(approval?.preview).toMatchObject({
+      entryFile: 'web/src/main.ts',
+      manifestFile: 'web/package.json',
+      devCommand: 'pnpm run dev',
+      devCwd: 'web',
+    });
+    expect(approval).toHaveProperty('dirty');
+  });
+
+  it('does not ask or apply an unsupported migration plan', async () => {
+    const approvePlan = vi.fn<CoreDeps['approvePlan']>();
+    const runApply = vi.fn<CoreDeps['runApply']>();
+    const result = await runOnboardCore(deps({
+      plan: {
+        ...fixturePlan(),
+        existing_sdk: { action: 'migrate', name: '@sentry/vue' },
+      },
+      approvePlan,
+      runApply,
+    }));
+
+    expect(result).toMatchObject({ ok: false, status: 'failed' });
+    expect(result.message).toMatch(/migration.*not supported/i);
+    expect(approvePlan).not.toHaveBeenCalled();
+    expect(runApply).not.toHaveBeenCalled();
+  });
+
+  it('approves only env and dev actions for an already-wired repository', async () => {
+    const approvePlan = vi.fn<CoreDeps['approvePlan']>(async () => true);
+    const runCommand = vi.fn<CoreDeps['runCommand']>();
+    const runApply = vi.fn<CoreDeps['runApply']>(async (options) => {
+      options.onReport({
+        editedFiles: [],
+        summary: 'Already wired.',
+        installRequired: false,
+        installCwd: 'web',
+      });
+      return { ok: true, aborted: false, editedFiles: [] };
+    });
+
+    await expect(runOnboardCore(deps({
+      plan: {
+        ...fixturePlan(),
+        existing_sdk: { action: 'no_op', name: '@opslane/sdk' },
+      },
+      approvePlan,
+      runApply,
+      runCommand,
+    }))).resolves.toMatchObject({ ok: true, status: 'completed' });
+
+    expect(approvePlan).toHaveBeenCalledWith(expect.objectContaining({
+      installCommand: null,
+    }));
+    expect(runCommand).not.toHaveBeenCalled();
   });
 });
 
@@ -421,26 +528,24 @@ describe('runOnboardCore install', () => {
     expect(runCommand).not.toHaveBeenCalled();
   });
 
-  it('asks for consent and skips the install when declined, then still starts the dev server', async () => {
+  it('uses the plan approval as install consent without asking again', async () => {
     const startDevServer = vi.fn<CoreDeps['startDevServer']>(() => fakeServer());
-    let consentAsked = false;
+    const confirm = vi.fn(async () => false);
+    let installConsent = false;
     const d = deps({
       startDevServer,
-      // Decline ONLY the install. Task 8 adds a dev-server prompt through the
-      // same `confirm`; a blanket false would decline that too.
-      confirm: async (prompt) => !prompt.toLowerCase().includes('install'),
+      confirm,
       runCommand: async (options) => {
-        consentAsked = true;
-        return (await options.consent!())
-          ? { ran: true, ok: true, exitCode: 0, signal: null }
-          : { ran: false, copyPaste: 'pnpm install' };
+        installConsent = await options.consent!();
+        return { ran: true, ok: true, exitCode: 0, signal: null };
       },
     });
     await expect(runOnboardCore(d)).resolves.toMatchObject({
       ok: true,
       status: 'completed',
     });
-    expect(consentAsked).toBe(true);
+    expect(installConsent).toBe(true);
+    expect(confirm).not.toHaveBeenCalled();
     expect(startDevServer).toHaveBeenCalledTimes(1);
   });
 
@@ -458,15 +563,17 @@ describe('runOnboardCore install', () => {
 });
 
 describe('runOnboardCore dev server', () => {
-  it('asks before starting the dev server and stops if declined', async () => {
-    const startDevServer = vi.fn<CoreDeps['startDevServer']>();
-    const d = deps({
-      confirm: async (prompt) => !prompt.includes('dev server'),
-      startDevServer,
+  it('starts from the selected app directory without asking again', async () => {
+    const confirm = vi.fn(async () => false);
+    const startDevServer = vi.fn<CoreDeps['startDevServer']>(() => fakeServer());
+    await expect(runOnboardCore(deps({ confirm, startDevServer }))).resolves.toMatchObject({
+      ok: true,
+      status: 'completed',
     });
-    const result = await runOnboardCore(d);
-    expect(startDevServer).not.toHaveBeenCalled();
-    expect(result.message).toMatch(/dev server/i);
+    expect(confirm).not.toHaveBeenCalled();
+    expect(startDevServer).toHaveBeenCalledWith(expect.objectContaining({
+      cwd: join(root, 'web'),
+    }));
   });
 
   it('emits the URL it parsed', async () => {

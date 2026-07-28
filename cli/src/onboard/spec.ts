@@ -12,7 +12,17 @@ Read the repository and use the secret-aware search tool to determine:
 - the one web app to onboard; in a monorepo, select the primary user-facing web app;
 - whether the repository is unsupported because it has no web app;
 - the selected app's framework and real entry point;
-- the environment-variable naming convention and prefix this app actually uses;
+- the environment-variable naming convention and prefix this app actually uses, and
+  crucially whether that prefix is one the bundler exposes to the BROWSER. A variable
+  the browser cannot read makes the SDK receive undefined and never report anything.
+  Vite exposes only names starting with the configured prefix (VITE_ by default, see
+  "envPrefix"). Next.js exposes only NEXT_PUBLIC_ automatically; any other name has to
+  be listed in next.config "env", which you may NOT edit, so prefer NEXT_PUBLIC_ there
+  even when the repo uses another prefix for its own server-side variables;
+- which directory the bundler loads .env files from. This is often NOT the app
+  directory. Vite's "envDir" option moves it, and monorepos commonly point it at the
+  repository root; check the app's vite config and note where existing .env files
+  actually live;
 - the package manager, based on the repository lock file;
 - the script in the selected app's package.json that starts its dev server; and
 - any existing error or monitoring SDK, including Sentry, PostHog, @defender-dev/sdk,
@@ -33,11 +43,32 @@ Call report_plan exactly once and make no further tool calls afterward.
   existing imports. Separately, provide exact init_block code plus an exact anchor,
   position, and zero-based occurrence that locate the init block only. The anchor must
   equal the complete non-whitespace content of one line, including its semicolon.
+- Provide env_dir: the repo-relative directory the bundler reads .env files from. The
+  host writes .env.local there. Use "." for the repository root. Do not assume this
+  equals app_dir; confirm it from the bundler config and from where existing .env files
+  are kept.
 - Provide manifest_file for the selected app's package.json. Do not provide a dependency
   version or compute any hash; the host pins the SDK version and records both file hashes.
 - Provide dev_script: the exact key from the selected app's package.json "scripts" that
   starts its dev server. It must be one of that file's declared scripts. In a repo with
   several (dev, dev:staging, start), choose the one for the app you selected.
+- Provide a rationale. This is read by a person deciding whether to let you edit their
+  code, on a terminal screen, in a few seconds. Write it for them, not for a reviewer.
+  - Two sentences. Aim for 220 characters; the host truncates at 600 characters.
+  - Plain language. No file extensions, config keys, package names, or version numbers
+    unless naming one IS the point. Do not list your evidence; state your conclusion.
+  - Say which app you chose and what makes it the user-facing one, and name anything
+    surprising you are leaving alone.
+  - Do not restate fields shown elsewhere on the screen: the files, the env variables,
+    the package manager, and the dev script are all displayed already.
+
+  Good: "excalidraw-app is the only app people actually use here — the other 11
+  workspaces are libraries and examples. It already uses a custom VITE_APP_ prefix, so
+  I matched it, and I left your Sentry setup alone."
+
+  Bad: "Single Vite+React app (vite.config.ts, @vitejs/plugin-react, index.html/
+  src/main.tsx). No envDir is set, so Vite loads .env from the app root ('.').
+  package-lock.json => npm; dev script is 'vite'."
 - Keep Opslane initialization able to coexist with any existing monitoring SDK, and set
   existing_sdk.action to exactly one of:
   - "none" when the repository has no error or monitoring SDK at all (name: null);
