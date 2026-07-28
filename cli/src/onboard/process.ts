@@ -1,7 +1,9 @@
 import { spawn as nodeSpawn, type ChildProcess } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
 
-import { packageManagerForRepo } from './tools.js';
+import { packageManagerForRepo, type OnboardingPlan } from './tools.js';
+
+type PackageManager = OnboardingPlan['package_manager'];
 
 export interface Command {
   executable: string;
@@ -42,21 +44,34 @@ export interface ProcessHandle {
   stop: () => void;
 }
 
-function manager(root: string, appDir: string): string {
-  const detected = packageManagerForRepo(root, appDir);
-  if (detected === null) {
-    throw new Error(`No lockfile in ${appDir} identifies a package manager`);
-  }
-  return detected;
+/**
+ * A lockfile is the stronger signal, but its absence is not an error: a freshly
+ * scaffolded app has no lockfile until the first install, which is precisely
+ * when onboarding runs. `planned` comes from the plan Apply already validated —
+ * `runApply` rejects a lockfile that DISAGREES with it and otherwise trusts it,
+ * so treating "no lockfile" as fatal here rejected what Apply had accepted,
+ * after the entry file, manifest, and .env.local were all written.
+ */
+function manager(root: string, appDir: string, planned: PackageManager): string {
+  return packageManagerForRepo(root, appDir) ?? planned;
 }
 
-export function installCommand(root: string, appDir: string): Command {
-  return { executable: manager(root, appDir), args: ['install'] };
+export function installCommand(
+  root: string,
+  appDir: string,
+  planned: PackageManager,
+): Command {
+  return { executable: manager(root, appDir, planned), args: ['install'] };
 }
 
 /** `devScript` was already verified against the selected app manifest. */
-export function devCommand(root: string, appDir: string, devScript: string): Command {
-  return { executable: manager(root, appDir), args: ['run', devScript] };
+export function devCommand(
+  root: string,
+  appDir: string,
+  devScript: string,
+  planned: PackageManager,
+): Command {
+  return { executable: manager(root, appDir, planned), args: ['run', devScript] };
 }
 
 const SAFE_ARGUMENT = /^[A-Za-z0-9_@%+=:,./-]+$/;

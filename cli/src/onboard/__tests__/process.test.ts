@@ -46,19 +46,34 @@ describe('command derivation', () => {
     ['bun.lockb', 'bun'],
   ])('derives %s -> %s', (lockfile, manager) => {
     const root = repoWith({ [lockfile]: '', 'package.json': '{}' });
-    expect(installCommand(root, '.')).toEqual({ executable: manager, args: ['install'] });
+    expect(installCommand(root, '.', 'bun')).toEqual({ executable: manager, args: ['install'] });
   });
 
   it('builds the dev command from the verified plan script', () => {
     const root = repoWith({ 'package-lock.json': '', 'package.json': '{}' });
-    expect(devCommand(root, '.', 'dev:staging')).toEqual({
+    expect(devCommand(root, '.', 'dev:staging', 'npm')).toEqual({
       executable: 'npm',
       args: ['run', 'dev:staging'],
     });
   });
 
-  it('throws when no lockfile identifies a package manager', () => {
-    expect(() => installCommand(repoWith({ 'package.json': '{}' }), '.')).toThrow(/lockfile/i);
+  // A repo with no lockfile is ordinary: a fresh `npm create vite` scaffold has
+  // none until the first install, which is exactly when onboarding runs. Apply
+  // already tolerates this — engine.ts only rejects a DISAGREEMENT between the
+  // lockfile and the plan, not a missing lockfile — so throwing here rejected
+  // what Apply had just accepted, after the edits and .env.local were written.
+  it('falls back to the plan package manager when no lockfile identifies one', () => {
+    const root = repoWith({ 'package.json': '{}' });
+    expect(installCommand(root, '.', 'yarn')).toEqual({ executable: 'yarn', args: ['install'] });
+    expect(devCommand(root, '.', 'dev', 'yarn')).toEqual({
+      executable: 'yarn',
+      args: ['run', 'dev'],
+    });
+  });
+
+  it('prefers the lockfile over the plan when both are present', () => {
+    const root = repoWith({ 'pnpm-lock.yaml': '', 'package.json': '{}' });
+    expect(installCommand(root, '.', 'npm')).toEqual({ executable: 'pnpm', args: ['install'] });
   });
 });
 

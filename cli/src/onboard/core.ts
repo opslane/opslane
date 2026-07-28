@@ -245,7 +245,7 @@ async function runFlow(deps: CoreDeps, record: Record_): Promise<CoreResult> {
     emit({ stage: 'installing' });
     const installRelative = containedRepoRelative(deps.cwd, report.installCwd);
     const installDir = join(deps.cwd, installRelative);
-    const install = installCommand(deps.cwd, installRelative);
+    const install = installCommand(deps.cwd, installRelative, plan.package_manager);
     const installed = await deps.runCommand({
       command: install,
       cwd: installDir,
@@ -264,7 +264,7 @@ async function runFlow(deps: CoreDeps, record: Record_): Promise<CoreResult> {
     }
   }
 
-  const dev = devCommand(deps.cwd, appDir, plan.dev_script);
+  const dev = devCommand(deps.cwd, appDir, plan.dev_script, plan.package_manager);
   if (!(await deps.confirm('Start the dev server?', formatCommand(dev)))) {
     return {
       ok: false,
