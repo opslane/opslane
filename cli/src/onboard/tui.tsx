@@ -188,6 +188,32 @@ function Done({ preview }: Pick<TuiProps, 'preview'>): React.JSX.Element {
   );
 }
 
+/**
+ * Waiting for the app's first report.
+ *
+ * The SDK only reports from a running browser, so this stage cannot end until a
+ * human opens the page. Nothing said so: the screen showed "Waiting for your app
+ * to report" over a bare URL, which reads as progress rather than as a request.
+ * A user who did not guess would watch a spinner until the 15-minute timeout.
+ */
+function Waiting({ url }: Pick<TuiProps, 'url'>): React.JSX.Element {
+  return (
+    <Box flexDirection="column">
+      <Text color="green">{'✓ Your dev server is running.'}</Text>
+      <Box marginTop={1} flexDirection="column">
+        <Text bold>{'Open your app so it can report in:'}</Text>
+        <Text color="cyan">{`  ${url ?? 'your dev server URL'}`}</Text>
+      </Box>
+      <Box marginTop={1}>
+        <Text dimColor>
+          {'Nothing has reached Opslane yet. I am watching for the first report,\n'
+            + 'and will finish as soon as it arrives.'}
+        </Text>
+      </Box>
+    </Box>
+  );
+}
+
 function Consent({
   plan,
   preview,
@@ -263,7 +289,7 @@ function Consent({
         is noise to anyone who is not us.
       */}
       <Box flexDirection="column" marginTop={1}>
-        <Text bold>Then</Text>
+        <Text bold>Then, to check it actually works</Text>
         {preview.installCommand !== null
           ? <Text>{`  ${preview.installCommand}`}</Text>
           : null}
@@ -307,6 +333,7 @@ export function Tui({
   }
 
   if (stage === 'done') return <Done preview={preview} />;
+  if (stage === 'waiting') return <Waiting url={url} />;
 
   const terminal = TERMINAL_STAGES.has(stage);
   return (

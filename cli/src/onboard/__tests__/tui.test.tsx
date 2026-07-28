@@ -150,6 +150,35 @@ describe('onboarding TUI', () => {
       .toBeLessThan(frame.indexOf(preview.insert.anchor));
   });
 
+  // The SDK only reports from a running browser, so this stage cannot end until
+  // a human opens the page. Before this the screen showed the URL with no
+  // instruction, which reads as progress rather than as a request, and a user
+  // who did not guess would wait for the 15-minute timeout.
+  it('asks the user to open the app while waiting for its first report', () => {
+    const frame = render(
+      <Tui stage="waiting" tasks={[]} url="http://localhost:5173/" />,
+    ).lastFrame() ?? '';
+    expect(frame).toMatch(/open/i);
+    expect(frame).toContain('http://localhost:5173/');
+    expect(frame).toMatch(/nothing has reached opslane yet/i);
+  });
+
+  it('says why the follow-up commands run, not just what they are', () => {
+    const frame = render(
+      <Tui
+        stage="apply"
+        tasks={[]}
+        plan={plan}
+        preview={preview}
+        approving
+        question={{ question: 'Apply this?', options: ['Yes', 'No'], multi: false }}
+      />,
+    ).lastFrame() ?? '';
+    // "Then / npm install / npm run dev" read as chores onboarding tacked on.
+    // They are how the wiring gets proved, and the heading has to say so.
+    expect(frame).toMatch(/to check it actually works/i);
+  });
+
   it('shows only real no-op actions and keeps ordinary confirmations compact', () => {
     const noOpFrame = render(
       <Tui
