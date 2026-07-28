@@ -84,13 +84,19 @@ function run(command, args, cwd) {
 
 // ── set up ─────────────────────────────────────────────────────────────────
 
-if (existsSync(envFile)) {
-  console.error(`refusing to overwrite ${envFile}`);
-  process.exit(2);
-}
+// A real repo usually already has a .env.local, so append rather than replace,
+// and put the original back on exit. Replacing it would delete whatever the
+// developer had there, and refusing outright would make the check unrunnable on
+// exactly the repos worth checking.
 mkdirSync(join(repo, envDir), { recursive: true });
-writeFileSync(envFile, `${varName}=${SENTINEL}\n`);
-restore.push(() => rmSync(envFile, { force: true }));
+if (existsSync(envFile)) {
+  const original = readFileSync(envFile);
+  restore.push(() => writeFileSync(envFile, original));
+  writeFileSync(envFile, `${original.toString('utf8').replace(/\n?$/, '\n')}${varName}=${SENTINEL}\n`);
+} else {
+  restore.push(() => rmSync(envFile, { force: true }));
+  writeFileSync(envFile, `${varName}=${SENTINEL}\n`);
+}
 
 // The bundler only inlines a variable that the source actually reads. After a
 // real Apply the init block does that; --inject reproduces it for a repo that
@@ -129,7 +135,13 @@ try {
 
 // ── look for the sentinel in the built output ──────────────────────────────
 
-const OUTPUT_DIRS = ['dist', 'build', '.next', 'out'];
+// A monorepo writes its bundle inside the app package, not at the repo root, so
+// the caller can name it. Guessing wrong would search an empty tree and report
+// "not reachable" for a build that was actually fine.
+const explicitOut = arg('out');
+const OUTPUT_DIRS = explicitOut === undefined
+  ? ['dist', 'build', '.next', 'out']
+  : [explicitOut];
 let searched = 0;
 let found = false;
 
