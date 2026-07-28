@@ -1,5 +1,11 @@
 # @opslane/sdk changelog
 
+## 2.0.1
+
+### Patch Changes
+
+- 18b877b: Accept Vite 8 as a peer. The range was `^6 || ^7`, so installing the SDK into a Vite 8 project failed with `ERESOLVE` before anything else could run.
+
 ## 2.0.0
 
 ### Major Changes
