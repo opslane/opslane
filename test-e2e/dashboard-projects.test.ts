@@ -148,12 +148,16 @@ describe('first-class projects dashboard', () => {
       });
       await payloadEnvironmentToggle.waitFor();
       expect(await payloadEnvironmentToggle.isEnabled()).toBe(true);
-      expect(await payloadEnvironmentToggle.isChecked()).toBe(false);
+      // New projects allow the SDK environment label by default. Migration 028
+      // flipped this on, so environment is a label the SDK sends rather than
+      // something an admin has to enable first. The toggle therefore starts on,
+      // and turning it OFF is what exercises the PATCH.
+      expect(await payloadEnvironmentToggle.isChecked()).toBe(true);
       const [toggleResponse] = await Promise.all([
         page.waitForResponse((response) =>
           response.request().method() === 'PATCH' &&
           response.url().endsWith(`/api/v1/projects/${second.project.id}`)),
-        payloadEnvironmentToggle.check({ force: true }),
+        payloadEnvironmentToggle.uncheck({ force: true }),
       ]);
       expect(toggleResponse.status()).toBe(200);
       await expect.poll(async () => {
@@ -162,7 +166,7 @@ describe('first-class projects dashboard', () => {
           [second.project.id],
         );
         return result.rows[0]?.allow_payload_environment;
-      }).toBe(true);
+      }).toBe(false);
 
       await page.getByRole('button', { name: 'New project' }).click();
       await page.locator('input[name="new-project-name"]').fill('Browser-created project');
