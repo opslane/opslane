@@ -67,6 +67,29 @@ program
     await doctor(opts);
   });
 
+const sourcemapsCommand = program
+  .command('sourcemaps')
+  .description('Configure and verify production source maps');
+
+sourcemapsCommand
+  .command('install-plugin')
+  .description('Safely add and verify the Opslane Vite plugin')
+  .option('--config <path>', 'Vite config path')
+  .option('--app-dir <path>', 'Application directory', '.')
+  .option('--yes', 'Apply without an interactive prompt')
+  .option('--json', 'Print the proposed change as JSON without prompting')
+  .option('--check', 'Verify registration without writing')
+  .action(async (opts: {
+    config?: string;
+    appDir?: string;
+    yes?: boolean;
+    json?: boolean;
+    check?: boolean;
+  }) => {
+    const { runSourcemapsCommand } = await import('./sourcemaps.js');
+    await runSourcemapsCommand(opts);
+  });
+
 // Agent-first onboarding commands
 program
   .command('setup')

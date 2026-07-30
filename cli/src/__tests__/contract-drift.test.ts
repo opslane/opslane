@@ -3,6 +3,8 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { AGENT_STATUSES, type AgentStatusContract } from '../contract.js';
+import { OPSLANE_VITE_PLUGIN } from '../codemods/vite-contract.js';
+import ts from 'typescript';
 
 const START = '<!-- BEGIN AGENT_STATUS_CONTRACT -->';
 const END = '<!-- END AGENT_STATUS_CONTRACT -->';
@@ -70,5 +72,47 @@ describe('CLI agent contract documentation', () => {
 
     const documentedStatuses = new Set<string>(AGENT_STATUSES.map((entry) => entry.status));
     expect([...usedStatuses].filter((status) => !documentedStatuses.has(status)).sort()).toEqual([]);
+  });
+});
+
+function sdkSourceFile(): ts.SourceFile {
+  const url = new URL('../../../packages/sdk/vite-plugin/index.ts', import.meta.url);
+  const source = readFileSync(url, 'utf8');
+  return ts.createSourceFile(url.pathname, source, ts.ScriptTarget.Latest, true);
+}
+
+function sdkExportsZeroArgFactory(sourceFile: ts.SourceFile, name: string): boolean {
+  return sourceFile.statements.some((statement) => {
+    const exported = ts.canHaveModifiers(statement)
+      && ts.getModifiers(statement)?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword);
+    if (!exported) return false;
+    if (ts.isFunctionDeclaration(statement)) {
+      return Boolean(statement.body)
+        && statement.name?.text === name
+        && statement.parameters.length === 0;
+    }
+    if (!ts.isVariableStatement(statement)) return false;
+    return statement.declarationList.declarations.some((declaration) =>
+      ts.isIdentifier(declaration.name)
+      && declaration.name.text === name
+      && declaration.initializer
+      && (ts.isArrowFunction(declaration.initializer) || ts.isFunctionExpression(declaration.initializer))
+      && declaration.initializer.parameters.length === 0,
+    );
+  });
+}
+
+describe('Vite plugin contract', () => {
+  it('loads and parses the SDK plugin source', () => {
+    expect(() => sdkSourceFile()).not.toThrow();
+    const diagnostics = (sdkSourceFile() as unknown as { parseDiagnostics: readonly unknown[] })
+      .parseDiagnostics;
+    expect(diagnostics).toEqual([]);
+  });
+
+  // EXPECTED TO FAIL until #224 ships opslane(). When #224 lands this flips to
+  // a hard failure and someone must set OPSLANE_VITE_PLUGIN_MIN_VERSION.
+  it.fails('SDK exports the zero-argument plugin factory this CLI inserts', () => {
+    expect(sdkExportsZeroArgFactory(sdkSourceFile(), OPSLANE_VITE_PLUGIN.exportName)).toBe(true);
   });
 });
