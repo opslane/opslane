@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { extractStackTraceFiles, hasNoAppFrames, scrubDevPaths } from '../harness/stack-trace-utils.js';
+import { extractStackTraceFiles, hasNoAppFrames, resolveTrackedFiles, scrubDevPaths } from '../harness/stack-trace-utils.js';
 
 describe('extractStackTraceFiles', () => {
   it('extracts files from V8-style stack traces', () => {
@@ -117,5 +117,46 @@ describe('scrubDevPaths', () => {
     expect(scrubDevPaths('at boot (/Users/abhi/project/vite.config.ts:5:1)')).toBe(
       'at boot (vite.config.ts:5:1)',
     );
+  });
+});
+
+describe('resolveTrackedFiles', () => {
+  // A real production stack from a minified Vite bundle. None of these paths
+  // exist in the customer's repository.
+  const MINIFIED_STACK = [
+    "TypeError: Cannot read properties of null (reading 'name')",
+    '    at t.render (https://app.example.com/assets/index-Dk3f8xBq.js:17:8237)',
+    '    at Tn (https://app.example.com/assets/vendor-B7kR2wjN.js:1:89012)',
+  ].join('\n');
+
+  const RESOLVED_STACK = [
+    "TypeError: Cannot read properties of null (reading 'name')",
+    '    at Proxy.render (src/components/UserCard.vue:10:30)',
+  ].join('\n');
+
+  const TRACKED = new Set(['src/components/UserCard.vue', 'src/main.ts', 'package.json']);
+
+  it('drops bundle paths that do not exist in the repository', () => {
+    const extracted = extractStackTraceFiles(MINIFIED_STACK);
+    // The extractor does find the bundle paths; that part is working.
+    expect(extracted.length).toBeGreaterThan(0);
+
+    // Nothing survives the tracked-file filter. This is what stops the scope
+    // guard from telling the agent its correct edit is out of scope, and stops
+    // the diff judge being told the error "references" a nonexistent file.
+    expect(resolveTrackedFiles(extracted, TRACKED)).toEqual([]);
+  });
+
+  it('keeps real source paths untouched', () => {
+    const extracted = extractStackTraceFiles(RESOLVED_STACK);
+    expect(resolveTrackedFiles(extracted, TRACKED)).toEqual(['src/components/UserCard.vue']);
+  });
+
+  it('matches a tracked file through a longer absolute prefix', () => {
+    expect(resolveTrackedFiles(['/home/user/repo/src/main.ts'], TRACKED)).toEqual(['src/main.ts']);
+  });
+
+  it('deduplicates repeated frames', () => {
+    expect(resolveTrackedFiles(['src/main.ts', 'src/main.ts'], TRACKED)).toEqual(['src/main.ts']);
   });
 });

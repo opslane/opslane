@@ -94,6 +94,43 @@ export function extractStackTraceFiles(
  * Minified app-bundle frames (e.g. assets/index-abc123.js) DO count as app
  * frames — they may be source-mappable, so let the normal flow try and give up.
  */
+/**
+ * Keep only the frames that name a file the repository actually contains.
+ *
+ * A minified production stack names bundle artifacts (`assets/index-Dk3f8xBq.js`)
+ * that exist nowhere in the customer's source. Passing those downstream is worse
+ * than passing nothing: the scope-review middleware tells the agent that its
+ * correct edit is "not referenced in the stack trace" and invites it to revert,
+ * and the diff judge is told the error references a file the repo does not have.
+ *
+ * Mirrors the tracked-file resolution the Python path has always done via
+ * `resolveFrames`, so both platforms narrow to real source before any consumer
+ * reads the list. An empty result is the correct answer for an unsymbolicated
+ * stack, and every consumer already treats empty as "no stack file information".
+ */
+export function resolveTrackedFiles(paths: string[], trackedFiles: Set<string>): string[] {
+  const resolved: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of paths) {
+    const match = matchTrackedPath(raw, trackedFiles);
+    if (match === null || seen.has(match)) continue;
+    seen.add(match);
+    resolved.push(match);
+  }
+  return resolved;
+}
+
+/** Exact hit, else the longest suffix of the path that is tracked. */
+function matchTrackedPath(path: string, trackedFiles: Set<string>): string | null {
+  if (trackedFiles.has(path)) return path;
+  const segments = path.split('/').filter(Boolean);
+  for (let i = 1; i < segments.length; i++) {
+    const candidate = segments.slice(i).join('/');
+    if (trackedFiles.has(candidate)) return candidate;
+  }
+  return null;
+}
+
 export function hasNoAppFrames(
   stackTrace: string,
   platform: Platform = 'javascript',
