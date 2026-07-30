@@ -18,11 +18,14 @@ Call `init` once, as early as possible in your browser entry point:
 import { init } from '@opslane/sdk';
 
 init({
-  apiKey: 'your-opslane-ingest-key',
+  apiKey: import.meta.env.VITE_OPSLANE_API_KEY,
   endpoint: 'https://your-opslane-instance.example.com', // omit for hosted Opslane
   release: import.meta.env.VITE_OPSLANE_RELEASE,          // e.g. your git SHA
 });
 ```
+
+`VITE_OPSLANE_API_KEY` is the project-scoped public ingest key created by onboarding and
+must start with `opslane_pk_`. Never put an `opslane_sk_` source-map key in browser code.
 
 `init` installs global `error`/`unhandledrejection` handlers and instruments `console`, `fetch`, and `XMLHttpRequest` for breadcrumbs. Calling it twice is a no-op. `destroy()` reverses everything.
 
@@ -38,7 +41,7 @@ The Vue plugin hooks `app.config.errorHandler` (preserving any existing handler)
 import { createApp } from 'vue';
 import { init, opslaneVuePlugin } from '@opslane/sdk';
 
-init({ apiKey: '...' });
+init({ apiKey: import.meta.env.VITE_OPSLANE_API_KEY });
 createApp(App).use(opslaneVuePlugin).mount('#app');
 ```
 
@@ -50,7 +53,7 @@ An error boundary that reports render errors, from the `/react` entry:
 import { init } from '@opslane/sdk';
 import { OpslaneErrorBoundary } from '@opslane/sdk/react';
 
-init({ apiKey: '...' });
+init({ apiKey: import.meta.env.VITE_OPSLANE_API_KEY });
 
 <OpslaneErrorBoundary fallback={<p>Something went wrong</p>}>
   <App />
@@ -61,22 +64,10 @@ React and Vue are optional peer dependencies — installing the SDK pulls in nei
 
 ### Vite source maps
 
-Upload source maps at build time so investigations see your original code instead of minified bundles:
+> Source-map upload is unavailable in this release. Remove `opslaneSourceMapPlugin()` from your Vite configuration until batch upload ships in [#218](https://github.com/opslane/opslane-oss/issues/218); leaving it enabled now fails the build deliberately.
 
-```ts
-// vite.config.ts
-import { opslaneSourceMapPlugin } from '@opslane/sdk/vite-plugin';
-
-export default {
-  plugins: [
-    opslaneSourceMapPlugin({
-      endpoint: 'https://your-opslane-instance.example.com',
-      apiKey: process.env.OPSLANE_API_KEY!,
-      release: process.env.GIT_SHA, // must match init()'s release
-    }),
-  ],
-};
-```
+Keep the plugin out of your Vite configuration for now. It does not remove or upload map
+assets while the replacement batch API is unavailable.
 
 ## Configuration
 

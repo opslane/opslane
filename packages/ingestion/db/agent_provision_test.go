@@ -189,7 +189,7 @@ func TestProvisionAgentSession_NewOrgUserProjectKey(t *testing.T) {
 	if after == nil || after.Status != "provisioned" || after.APIKeySealed == nil {
 		t.Fatalf("session not provisioned with sealed key: %+v", after)
 	}
-	if !strings.HasPrefix(*after.APIKeySealed, "sealed:def_") {
+	if !strings.HasPrefix(*after.APIKeySealed, "sealed:opslane_pk_") {
 		t.Errorf("sealed API key = %q, want sealed raw Opslane key", *after.APIKeySealed)
 	}
 	if after.OrgID == nil || *after.OrgID != result.OrgID || after.ProjectID == nil || *after.ProjectID != result.ProjectID {
@@ -225,9 +225,9 @@ func TestProvisionAgentSession_NewOrgUserProjectKey(t *testing.T) {
 
 	var environmentCount, keyCount int
 	err = pool.QueryRow(ctx,
-		`SELECT count(DISTINCT e.id), count(k.id)
+		`SELECT count(DISTINCT e.id), count(DISTINCT k.id)
 		 FROM environments e
-		 LEFT JOIN environment_api_keys k ON k.environment_id = e.id
+		 LEFT JOIN project_api_keys k ON k.project_id = e.project_id
 		 WHERE e.project_id = $1`, result.ProjectID).Scan(&environmentCount, &keyCount)
 	if err != nil {
 		t.Fatalf("count environment and key: %v", err)
@@ -235,16 +235,12 @@ func TestProvisionAgentSession_NewOrgUserProjectKey(t *testing.T) {
 	if environmentCount != 2 || keyCount != 1 {
 		t.Errorf("environments/keys = %d/%d, want 2/1", environmentCount, keyCount)
 	}
-	lookup, err := q.LookupAPIKey(ctx, strings.TrimPrefix(*after.APIKeySealed, "sealed:"))
+	lookup, err := q.LookupProjectKey(ctx, strings.TrimPrefix(*after.APIKeySealed, "sealed:"))
 	if err != nil {
 		t.Fatalf("lookup sealed development key: %v", err)
 	}
-	var sealedEnvironmentName string
-	if err := pool.QueryRow(ctx, `SELECT name FROM environments WHERE id = $1`, lookup.EnvironmentID).Scan(&sealedEnvironmentName); err != nil {
-		t.Fatalf("read sealed key environment: %v", err)
-	}
-	if sealedEnvironmentName != "development" {
-		t.Errorf("sealed key environment = %q, want development", sealedEnvironmentName)
+	if lookup.ProjectID != result.ProjectID {
+		t.Errorf("sealed key project = %q, want %q", lookup.ProjectID, result.ProjectID)
 	}
 
 	var installationOrg string

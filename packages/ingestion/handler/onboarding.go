@@ -5,11 +5,12 @@ import (
 	"log/slog"
 	"net/http"
 	"time"
+
+	"github.com/opslane/opslane/packages/ingestion/db"
 )
 
 // Rate limiters for onboarding and resource creation endpoints.
-var onboardingLimiter = newRateLimiter(5)  // 5/min — one-time flow
-var apiKeyLimiter = newRateLimiter(10)     // 10/min per IP
+var onboardingLimiter = newRateLimiter(5) // 5/min — one-time flow
 
 // OnboardingSetup atomically creates a project + production environment + API key
 // in a single database transaction. If any step fails, the entire operation is
@@ -74,7 +75,9 @@ func (d *Dependencies) OnboardingSetup(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 3. Create API key
-	apiKey, err := d.Queries.CreateAPIKeyTx(r.Context(), tx, env.ID)
+	apiKey, err := d.Queries.CreateProjectKeyTx(
+		r.Context(), tx, project.ID, db.ScopeIngest, "onboarding", nil,
+	)
 	if err != nil {
 		slog.Error("onboarding: create api key", "error", err)
 		writeJSONError(w, http.StatusInternalServerError, "failed to create API key")
@@ -93,9 +96,8 @@ func (d *Dependencies) OnboardingSetup(w http.ResponseWriter, r *http.Request) {
 		"project":     toProjectJSON(*project),
 		"environment": environmentJSON{ID: env.ID, ProjectID: env.ProjectID, Name: env.Name, CreatedAt: env.CreatedAt.Format(time.RFC3339)},
 		"api_key": map[string]any{
-			"id":         apiKey.ID,
-			"raw_key":    apiKey.RawKey,
-			"key_prefix": apiKey.KeyPrefix,
+			"id":      apiKey.ID,
+			"raw_key": apiKey.Raw,
 		},
 	})
 }
@@ -106,14 +108,4 @@ type environmentJSON struct {
 	ProjectID string `json:"project_id"`
 	Name      string `json:"name"`
 	CreatedAt string `json:"created_at"`
-}
-
-// apiKeyInfoJSON is the read-only JSON representation of an API key.
-type apiKeyInfoJSON struct {
-	ID              string  `json:"id"`
-	EnvironmentID   string  `json:"environment_id"`
-	EnvironmentName string  `json:"environment_name"`
-	KeyPrefix       string  `json:"key_prefix"`
-	RevokedAt       *string `json:"revoked_at,omitempty"`
-	CreatedAt       string  `json:"created_at"`
 }

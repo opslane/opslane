@@ -91,7 +91,7 @@ describe('needs_human contract (read API)', () => {
   });
 
   it('every needs_human incident has complete reason fields', async () => {
-    const incidents = await listIncidents(tenant.apiKey, tenant.projectId);
+    const incidents = await listIncidents(tenant.sessionToken, tenant.projectId);
 
     // All seeded groups should appear
     expect(incidents.length).toBeGreaterThanOrEqual(REASON_CODES.length);
@@ -110,7 +110,7 @@ describe('needs_human contract (read API)', () => {
     async (code) => {
       const groupId = groupIds.get(code)!;
       const incident = await getIncident(
-        tenant.apiKey,
+        tenant.sessionToken,
         tenant.projectId,
         groupId
       );
@@ -156,7 +156,7 @@ describe('needs_human contract (read API)', () => {
     });
 
     const incident = await getIncident(
-      tenant.apiKey,
+      tenant.sessionToken,
       tenant.projectId,
       groupId
     );
@@ -178,7 +178,7 @@ describe('needs_human contract (read API)', () => {
     });
 
     const incident = await getIncident(
-      tenant.apiKey,
+      tenant.sessionToken,
       tenant.projectId,
       groupId
     );
@@ -247,7 +247,7 @@ describe.skipIf(hasLLMKey || !keylessWorkerRunning)(
         const deadline = Date.now() + 60_000;
         let incident: Incident | undefined;
         while (Date.now() < deadline && !incident) {
-          const incidents = await listIncidents(tenant.apiKey, tenant.projectId);
+          const incidents = await listIncidents(tenant.sessionToken, tenant.projectId);
           incident = incidents.find((i) => i.title.includes(marker));
           if (!incident) await new Promise((r) => setTimeout(r, 2_000));
         }
@@ -258,7 +258,7 @@ describe.skipIf(hasLLMKey || !keylessWorkerRunning)(
         }
 
         const terminal = await pollUntilTerminal(
-          tenant.apiKey,
+          tenant.sessionToken,
           tenant.projectId,
           incident.id,
           ['needs_human'],
@@ -317,7 +317,7 @@ describe('incident list ordering', () => {
   });
 
   it('returns incidents ordered by last_seen descending', async () => {
-    const incidents = await listIncidents(tenant.apiKey, tenant.projectId);
+    const incidents = await listIncidents(tenant.sessionToken, tenant.projectId);
 
     expect(incidents.length).toBe(2);
 
@@ -329,7 +329,7 @@ describe('incident list ordering', () => {
 
   it('returns at most 100 incidents', async () => {
     // We only have 2, but verify the API doesn't error
-    const incidents = await listIncidents(tenant.apiKey, tenant.projectId);
+    const incidents = await listIncidents(tenant.sessionToken, tenant.projectId);
     expect(incidents.length).toBeLessThanOrEqual(100);
   });
 });

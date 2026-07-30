@@ -2,14 +2,12 @@ package db
 
 import (
 	"context"
-	"crypto/sha256"
 	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/opslane/opslane/packages/ingestion/auth"
@@ -99,24 +97,10 @@ type Environment struct {
 	CreatedAt time.Time
 }
 
-type APIKeyResult struct {
-	ID        string
-	RawKey    string // only available at creation time
-	KeyPrefix string
-}
-
 type ProjectProvisioning struct {
 	Project     Project
 	Environment Environment
-	APIKey      APIKeyResult
-}
-
-type APIKeyLookup struct {
-	EnvironmentID           string
-	ProjectID               string
-	OrgID                   string
-	AllowedOrigins          []string
-	AllowPayloadEnvironment bool
+	APIKey      MintedProjectKey
 }
 
 // OrgExists checks whether an org with the given ID exists.
@@ -158,8 +142,8 @@ func (q *Queries) CreateProject(ctx context.Context, orgID, name string, githubR
 }
 
 // ProvisionProject atomically creates the first-class project bundle. Reusing
-// an idempotency token preserves the original project/environment, revokes the
-// prior one-time provisioning key, and returns a freshly minted replacement.
+// an idempotency token preserves the original project/environment and returns
+// a freshly minted replacement without revoking previously deployed keys.
 func (q *Queries) ProvisionProject(
 	ctx context.Context,
 	orgID, name string,
@@ -239,24 +223,9 @@ func (q *Queries) provisionProjectTx(
 		return nil, fmt.Errorf("provision project: upsert production environment: %w", err)
 	}
 
-	if _, err := tx.Exec(ctx, `
-		UPDATE environment_api_keys ak
-		SET revoked_at = now()
-		FROM environments e
-		WHERE ak.id = (
-		  SELECT provisioning_key_id
-		  FROM projects
-		  WHERE id = $1 AND org_id = $2 AND idempotency_token = $3
-		)
-		  AND ak.environment_id = e.id
-		  AND e.project_id = $1
-		  AND ak.revoked_at IS NULL`,
-		result.Project.ID, orgID, idempotencyToken,
-	); err != nil {
-		return nil, fmt.Errorf("provision project: revoke prior key: %w", err)
-	}
-
-	apiKey, err := q.CreateAPIKeyTx(ctx, tx, result.Environment.ID)
+	apiKey, err := q.CreateProjectKeyTx(
+		ctx, tx, result.Project.ID, ScopeIngest, "onboarding", nil,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("provision project: %w", err)
 	}
@@ -307,55 +276,6 @@ func (q *Queries) FindEnvironmentIDByName(ctx context.Context, projectID, name s
 		return "", fmt.Errorf("resolve environment name: %w", err)
 	}
 	return id, nil
-}
-
-// CreateAPIKey generates a new API key for an environment.
-// The raw key is returned once; only a hash is stored.
-func (q *Queries) CreateAPIKey(ctx context.Context, environmentID string) (*APIKeyResult, error) {
-	rawKey := fmt.Sprintf("def_%s", uuid.New().String())
-	keyHash := hashKey(rawKey)
-	keyPrefix := rawKey[:12]
-
-	var result APIKeyResult
-	err := q.pool.QueryRow(ctx,
-		`INSERT INTO environment_api_keys (environment_id, key_hash, key_prefix)
-		 VALUES ($1, $2, $3)
-		 RETURNING id`,
-		environmentID, keyHash, keyPrefix,
-	).Scan(&result.ID)
-	if err != nil {
-		return nil, fmt.Errorf("create api key: %w", err)
-	}
-
-	result.RawKey = rawKey
-	result.KeyPrefix = keyPrefix
-	return &result, nil
-}
-
-// LookupAPIKey resolves a raw API key to the full tenant chain.
-// Returns error if key is not found or has been revoked.
-func (q *Queries) LookupAPIKey(ctx context.Context, rawKey string) (*APIKeyLookup, error) {
-	keyHash := hashKey(rawKey)
-
-	var lookup APIKeyLookup
-	err := q.pool.QueryRow(ctx,
-		`SELECT e.id, p.id, o.id, p.allowed_origins, p.allow_payload_environment
-		 FROM environment_api_keys ak
-		 JOIN environments e ON ak.environment_id = e.id
-		 JOIN projects p ON e.project_id = p.id
-		 JOIN orgs o ON p.org_id = o.id
-		 WHERE ak.key_hash = $1 AND ak.revoked_at IS NULL`,
-		keyHash,
-	).Scan(&lookup.EnvironmentID, &lookup.ProjectID, &lookup.OrgID, &lookup.AllowedOrigins, &lookup.AllowPayloadEnvironment)
-	if err != nil {
-		return nil, fmt.Errorf("lookup api key: %w", err)
-	}
-	return &lookup, nil
-}
-
-func hashKey(raw string) string {
-	h := sha256.Sum256([]byte(raw))
-	return fmt.Sprintf("%x", h)
 }
 
 // nonRetriableReasonCodes lists needs_human reason codes that represent permanent
@@ -3092,42 +3012,6 @@ func (q *Queries) ListEnvironments(ctx context.Context, projectID string) ([]Env
 	return envs, rows.Err()
 }
 
-// APIKeyInfo is the read-only view of an API key (no raw key or hash).
-type APIKeyInfo struct {
-	ID              string
-	EnvironmentID   string
-	EnvironmentName string
-	KeyPrefix       string
-	RevokedAt       *time.Time
-	CreatedAt       time.Time
-}
-
-// ListAPIKeys returns API keys for all environments in a project. Tenant-scoped.
-func (q *Queries) ListAPIKeys(ctx context.Context, projectID string) ([]APIKeyInfo, error) {
-	rows, err := q.pool.Query(ctx,
-		`SELECT eak.id, eak.environment_id, e.name, eak.key_prefix, eak.revoked_at, eak.created_at
-		 FROM environment_api_keys eak
-		 JOIN environments e ON e.id = eak.environment_id
-		 WHERE e.project_id = $1
-		 ORDER BY eak.created_at DESC`,
-		projectID,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("list api keys: %w", err)
-	}
-	defer rows.Close()
-
-	var keys []APIKeyInfo
-	for rows.Next() {
-		var k APIKeyInfo
-		if err := rows.Scan(&k.ID, &k.EnvironmentID, &k.EnvironmentName, &k.KeyPrefix, &k.RevokedAt, &k.CreatedAt); err != nil {
-			return nil, fmt.Errorf("scan api key: %w", err)
-		}
-		keys = append(keys, k)
-	}
-	return keys, rows.Err()
-}
-
 // HasEvents checks if a project has any error events. Uses EXISTS for performance.
 func (q *Queries) HasEvents(ctx context.Context, projectID string) (bool, error) {
 	var exists bool
@@ -3243,28 +3127,6 @@ func (q *Queries) GetProjectGitHubConfig(ctx context.Context, orgID, projectID s
 		return nil, fmt.Errorf("get project github config: %w", err)
 	}
 	return githubRepo, nil
-}
-
-// CreateAPIKeyTx generates a new API key within an existing transaction.
-func (q *Queries) CreateAPIKeyTx(ctx context.Context, tx pgx.Tx, environmentID string) (*APIKeyResult, error) {
-	rawKey := fmt.Sprintf("def_%s", uuid.New().String())
-	keyHash := hashKey(rawKey)
-	keyPrefix := rawKey[:12]
-
-	var result APIKeyResult
-	err := tx.QueryRow(ctx,
-		`INSERT INTO environment_api_keys (environment_id, key_hash, key_prefix)
-		 VALUES ($1, $2, $3)
-		 RETURNING id`,
-		environmentID, keyHash, keyPrefix,
-	).Scan(&result.ID)
-	if err != nil {
-		return nil, fmt.Errorf("create api key tx: %w", err)
-	}
-
-	result.RawKey = rawKey
-	result.KeyPrefix = keyPrefix
-	return &result, nil
 }
 
 // === Agent sessions ===

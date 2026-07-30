@@ -10,6 +10,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/opslane/opslane/packages/ingestion/db"
 )
 
 func NewRouter(deps *Dependencies) *chi.Mux {
@@ -78,18 +79,19 @@ func NewRouterWithPool(deps *Dependencies, pool *pgxpool.Pool) *chi.Mux {
 		})
 
 	r.Route("/api/v1", func(r chi.Router) {
-		// SDK endpoints (authenticated by API key, rate-limited per project).
+		// SDK endpoints (authenticated by ingest-scoped project key).
 		// Browser endpoints (replays, sessions, chunks) are origin-gated
 		// strictly. /events also accepts server-side SDKs, which send no
-		// Origin or Referer (#104). Sourcemaps are uploaded at build time from
-		// Node (no Origin header), so no origin middleware is applied there.
-		r.With(deps.AuthenticateSDK, deps.EnforceOriginAllowingServerSDK, rateLimitByProject(eventsLimiter)).Post("/events", deps.IngestEvent)
-		r.With(deps.AuthenticateSDK, deps.EnforceOrigin, rateLimitByProject(replaysLimiter)).Post("/replays/init", deps.ReplayInit)
-		r.With(deps.AuthenticateSDK, deps.EnforceOrigin, rateLimitByProject(replaysLimiter)).Post("/replays/{replayID}/complete", deps.ReplayComplete)
-		r.With(deps.AuthenticateSDK, deps.EnforceOrigin, rateLimitByProject(replaysLimiter)).Post("/replays/{replayID}/fail", deps.ReplayFail)
-		r.With(deps.AuthenticateSDK, deps.EnforceOrigin, rateLimitByProject(chunksLimiter)).Post("/sessions/init", deps.SessionInit)
-		r.With(deps.AuthenticateSDK, deps.EnforceOrigin, rateLimitByProject(chunksLimiter)).Post("/sessions/{sessionID}/chunks/{seq}", deps.ChunkUpload)
-		r.With(deps.AuthenticateSDK, rateLimitByProject(sourcemapsLimiter)).Post("/sourcemaps", deps.UploadSourceMap)
+		// Origin or Referer (#104).
+		ingestKey := deps.ProjectKey(db.ScopeIngest)
+		r.With(ingestKey, deps.EnforceOriginAllowingServerSDK, rateLimitByProject(eventsLimiter)).Post("/events", deps.IngestEvent)
+		r.With(ingestKey, deps.EnforceOrigin, rateLimitByProject(replaysLimiter)).Post("/replays/init", deps.ReplayInit)
+		r.With(ingestKey, deps.EnforceOrigin, rateLimitByProject(replaysLimiter)).Post("/replays/{replayID}/complete", deps.ReplayComplete)
+		r.With(ingestKey, deps.EnforceOrigin, rateLimitByProject(replaysLimiter)).Post("/replays/{replayID}/fail", deps.ReplayFail)
+		r.With(ingestKey, deps.EnforceOrigin, rateLimitByProject(chunksLimiter)).Post("/sessions/init", deps.SessionInit)
+		r.With(ingestKey, deps.EnforceOrigin, rateLimitByProject(chunksLimiter)).Post("/sessions/{sessionID}/chunks/{seq}", deps.ChunkUpload)
+		r.With(ingestKey, rateLimitByProject(eventsLimiter)).Post("/ingest/ping",
+			func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
 
 		// Session-authenticated endpoints (dashboard + CLI)
 		r.With(deps.AuthenticateUserSession).Get("/auth/me", deps.AuthMe)
@@ -120,19 +122,15 @@ func NewRouterWithPool(deps *Dependencies, pool *pgxpool.Pool) *chi.Mux {
 		r.With(deps.AuthenticateUserSession).Get("/projects/{projectID}/environments", deps.ListEnvironmentsEndpoint)
 		r.With(deps.AuthenticateUserSession, deps.RequireRoleIfCloud("admin")).Post("/projects/{projectID}/environments", deps.CreateEnvironmentEndpoint)
 
-		// API Key CRUD
-		r.With(deps.AuthenticateUserSession, deps.RequireRoleIfCloud("admin")).Post("/environments/{envID}/api-keys", deps.CreateAPIKeyEndpoint)
-		r.With(deps.AuthenticateUserSession).Get("/projects/{projectID}/api-keys", deps.ListAPIKeysEndpoint)
-
-		// Stats (session or SDK auth — CLI uses API key, dashboard uses JWT)
-		r.With(deps.AuthenticateSessionOrSDK).Get("/projects/{projectID}/event-count", deps.GetEventCountEndpoint)
+		// Stats are user-session reads.
+		r.With(deps.AuthenticateUserSession).Get("/projects/{projectID}/event-count", deps.GetEventCountEndpoint)
 		// Fix-stats is dashboard-only (session auth): it backs the autonomy
 		// settings receipts, which no SDK/CLI caller consumes.
 		r.With(deps.AuthenticateUserSession).Get("/projects/{projectID}/fix-stats", deps.GetFixStatsEndpoint)
 
-		// Incidents (session or SDK auth — CLI uses API key, dashboard uses JWT)
-		r.With(deps.AuthenticateSessionOrSDK).Get("/projects/{projectID}/incidents", deps.ListIncidents)
-		r.With(deps.AuthenticateSessionOrSDK).Get("/projects/{projectID}/incidents/{incidentID}", deps.GetIncident)
+		// Incidents are user-session reads.
+		r.With(deps.AuthenticateUserSession).Get("/projects/{projectID}/incidents", deps.ListIncidents)
+		r.With(deps.AuthenticateUserSession).Get("/projects/{projectID}/incidents/{incidentID}", deps.GetIncident)
 		r.With(deps.AuthenticateUserSession).Get("/projects/{projectID}/incidents/{incidentID}/sample-event", deps.GetSampleEvent)
 		// === Project D: replay retrieval (project-scoped, dashboard JWT auth) ===
 		r.With(deps.AuthenticateUserSession).Get("/projects/{projectID}/replays/{replayID}", deps.GetReplay)
@@ -250,10 +248,14 @@ func corsMiddleware() func(http.Handler) http.Handler {
 	}
 }
 
-// isSDKEndpoint returns true for paths that should use the permissive CORS policy (Origin: *).
+// isSDKEndpoint reports paths receiving permissive browser CORS. Boundary
+// checks keep similarly prefixed non-SDK routes out; ingest/ping is omitted so
+// arbitrary pages cannot read a credential probe.
 func isSDKEndpoint(path string) bool {
-	return strings.HasPrefix(path, "/api/v1/events") ||
-		strings.HasPrefix(path, "/api/v1/replays") ||
-		strings.HasPrefix(path, "/api/v1/sessions") ||
-		strings.HasPrefix(path, "/api/v1/sourcemaps")
+	for _, prefix := range []string{"/api/v1/events", "/api/v1/replays", "/api/v1/sessions"} {
+		if path == prefix || strings.HasPrefix(path, prefix+"/") {
+			return true
+		}
+	}
+	return false
 }

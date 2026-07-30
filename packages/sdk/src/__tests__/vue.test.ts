@@ -3,6 +3,7 @@ import { opslaneVuePlugin } from '../vue';
 import { resetConfig, loadConfig } from '../config';
 import { clearBreadcrumbs } from '../breadcrumbs';
 import * as transport from '../transport';
+import { TEST_PK } from './test-keys';
 
 vi.mock('../transport', () => ({
   enqueueEvent: vi.fn(),
@@ -29,7 +30,7 @@ describe('Vue 3 Plugin', () => {
     clearBreadcrumbs();
     loadConfig({
       endpoint: 'https://ingest.example.com',
-      apiKey: 'key-vue',
+      apiKey: TEST_PK,
     });
   });
 

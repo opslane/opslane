@@ -132,10 +132,10 @@ async function driveRageSession(
   apiKey: string,
   projectId: string,
   userId: string,
-  opts: { selector?: string } = {}
+  opts: { selector?: string; environment?: string } = {}
 ): Promise<string> {
   const sessionId = `e2e_fr_${RUN_ID}_${crypto.randomUUID().slice(0, 8)}`;
-  await initSession(apiKey, sessionId, { id: userId }, PAGE);
+  await initSession(apiKey, sessionId, { id: userId }, PAGE, opts.environment);
   await uploadChunk(apiKey, sessionId, 0, rageChunk(Date.now() - 5_000, opts.selector));
   await makeChunksScrubbable(sessionId);
   await waitForScrubbedChunks(sessionId, 1);
@@ -256,7 +256,7 @@ describeLive('friction incidents — synthetic live-service gate', () => {
       const { ingestionUrl } = getConfig();
       const listRes = await fetch(
         `${ingestionUrl}/api/v1/projects/${tenant.projectId}/incidents`,
-        { headers: { 'X-API-Key': tenant.apiKey } }
+        { headers: { Authorization: `Bearer ${tenant.sessionToken}` } }
       );
       expect(listRes.status).toBe(200);
       const incidents = (await listRes.json()) as Array<{ id: string; kind: string }>;
@@ -278,7 +278,9 @@ describeLive('friction incidents — synthetic live-service gate', () => {
 
       // Two staging users: same fingerprint, no promotion, production untouched.
       for (let i = 1; i <= 2; i++) {
-        await driveRageSession(staging.apiKey, tenant.projectId, `batch4-staging-${i}`);
+        await driveRageSession(staging.apiKey, tenant.projectId, `batch4-staging-${i}`, {
+          environment: 'staging',
+        });
       }
       const between = await db.query<{ id: string; affected_users_count: number }>(
         `SELECT id, affected_users_count FROM error_groups
@@ -301,13 +303,15 @@ describeLive('friction incidents — synthetic live-service gate', () => {
       const { ingestionUrl } = getConfig();
       const detail = await fetch(
         `${ingestionUrl}/api/v1/projects/${tenant.projectId}/incidents/${stagingCandidate.rows[0]!.id}`,
-        { headers: { 'X-API-Key': tenant.apiKey } }
+        { headers: { Authorization: `Bearer ${tenant.sessionToken}` } }
       );
       expect(detail.status).toBe(404);
 
       // Three more staging users promote a second, environment-distinct incident.
       for (let i = 3; i <= 5; i++) {
-        await driveRageSession(staging.apiKey, tenant.projectId, `batch4-staging-${i}`);
+        await driveRageSession(staging.apiKey, tenant.projectId, `batch4-staging-${i}`, {
+          environment: 'staging',
+        });
       }
       const finalRows = await db.query<{ environment_id: string; affected_users_count: number }>(
         `SELECT environment_id, affected_users_count FROM error_groups

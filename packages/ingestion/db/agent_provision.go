@@ -250,18 +250,19 @@ func (q *Queries) ProvisionAgentSession(ctx context.Context, in AgentProvisionIn
 	if _, err := q.CreateEnvironmentTx(ctx, tx, project.ID, "production"); err != nil {
 		return nil, err
 	}
-	development, err := q.CreateEnvironmentTx(ctx, tx, project.ID, "development")
-	if err != nil {
+	if _, err := q.CreateEnvironmentTx(ctx, tx, project.ID, "development"); err != nil {
 		return nil, err
 	}
-	developmentKey, err := q.CreateAPIKeyTx(ctx, tx, development.ID)
+	developmentKey, err := q.CreateProjectKeyTx(
+		ctx, tx, project.ID, ScopeIngest, "agent setup", nil,
+	)
 	if err != nil {
 		return nil, err
 	}
 	if in.SealKey == nil {
 		return nil, fmt.Errorf("seal api key: no seal function")
 	}
-	sealed, err := in.SealKey(developmentKey.RawKey)
+	sealed, err := in.SealKey(developmentKey.Raw)
 	if err != nil {
 		return nil, fmt.Errorf("seal api key: %w", err)
 	}

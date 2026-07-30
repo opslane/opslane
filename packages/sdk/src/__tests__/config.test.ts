@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { loadConfig, getConfig, resetConfig } from '../config';
+import { TEST_PK } from './test-keys';
 
 describe('SDK Config', () => {
   beforeEach(() => {
@@ -14,13 +15,13 @@ describe('SDK Config', () => {
   it('should load config from provided options', () => {
     loadConfig({
       endpoint: 'https://ingest.example.com',
-      apiKey: 'key-abc',
+      apiKey: TEST_PK,
     });
 
     const config = getConfig();
     expect(config).toEqual({
       endpoint: 'https://ingest.example.com',
-      apiKey: 'key-abc',
+      apiKey: TEST_PK,
       release: '',
       environment: '',
       maxBreadcrumbs: 50,
@@ -39,7 +40,7 @@ describe('SDK Config', () => {
   it('should default release to empty string', () => {
     loadConfig({
       endpoint: 'https://ingest.example.com',
-      apiKey: 'key-abc',
+      apiKey: TEST_PK,
     });
 
     expect(getConfig().release).toBe('');
@@ -48,7 +49,7 @@ describe('SDK Config', () => {
   it('should accept a release option', () => {
     loadConfig({
       endpoint: 'https://ingest.example.com',
-      apiKey: 'key-abc',
+      apiKey: TEST_PK,
       release: 'v1.2.3',
     });
 
@@ -56,18 +57,18 @@ describe('SDK Config', () => {
   });
 
   it('defaults environment to empty and accepts an explicit environment', () => {
-    loadConfig({ apiKey: 'key-abc' });
+    loadConfig({ apiKey: TEST_PK });
     expect(getConfig().environment).toBe('');
 
     resetConfig();
-    loadConfig({ apiKey: 'key-abc', environment: 'staging' });
+    loadConfig({ apiKey: TEST_PK, environment: 'staging' });
     expect(getConfig().environment).toBe('staging');
   });
 
   it('should allow partial overrides with defaults', () => {
     loadConfig({
       endpoint: 'https://ingest.example.com',
-      apiKey: 'key-def',
+      apiKey: TEST_PK,
       debug: true,
       maxBatchSize: 5,
     });
@@ -81,7 +82,7 @@ describe('SDK Config', () => {
   it('should load replay capture options', () => {
     loadConfig({
       endpoint: 'https://ingest.example.com',
-      apiKey: 'key-ghi',
+      apiKey: TEST_PK,
       replay: {
         enabled: true,
       },
@@ -93,34 +94,34 @@ describe('SDK Config', () => {
 
   describe('replay default (design v4-15)', () => {
     it('defaults replay to enabled when absent or empty', () => {
-      loadConfig({ apiKey: 'k' });
+      loadConfig({ apiKey: TEST_PK });
       expect(getConfig().replayEnabled).toBe(true);
       resetConfig();
-      loadConfig({ apiKey: 'k', replay: {} });
+      loadConfig({ apiKey: TEST_PK, replay: {} });
       expect(getConfig().replayEnabled).toBe(true);
     });
 
     it('honours explicit opt-out and opt-in', () => {
-      loadConfig({ apiKey: 'k', replay: { enabled: false } });
+      loadConfig({ apiKey: TEST_PK, replay: { enabled: false } });
       expect(getConfig().replayEnabled).toBe(false);
       resetConfig();
-      loadConfig({ apiKey: 'k', replay: { enabled: true } });
+      loadConfig({ apiKey: TEST_PK, replay: { enabled: true } });
       expect(getConfig().replayEnabled).toBe(true);
     });
   });
 
   describe('session reporting', () => {
     it('defaults to enabled when absent or empty', () => {
-      loadConfig({ apiKey: 'k' });
+      loadConfig({ apiKey: TEST_PK });
       expect(getConfig().reportingEnabled).toBe(true);
       resetConfig();
-      loadConfig({ apiKey: 'k', reporting: {} });
+      loadConfig({ apiKey: TEST_PK, reporting: {} });
       expect(getConfig().reportingEnabled).toBe(true);
     });
 
     it('honours an explicit opt-out independently of replay', () => {
       loadConfig({
-        apiKey: 'k',
+        apiKey: TEST_PK,
         reporting: { enabled: false },
         replay: { enabled: true },
       });
@@ -135,7 +136,7 @@ describe('SDK Config', () => {
 
   it('should throw if required fields are missing', () => {
     expect(() =>
-      loadConfig({ endpoint: '', apiKey: 'key' })
+      loadConfig({ endpoint: '', apiKey: TEST_PK })
     ).toThrow('endpoint is required');
 
     expect(() =>
@@ -144,21 +145,21 @@ describe('SDK Config', () => {
   });
 
   it('should throw on a malformed endpoint', () => {
-    expect(() => loadConfig({ endpoint: 'not-a-url', apiKey: 'key' }))
+    expect(() => loadConfig({ endpoint: 'not-a-url', apiKey: TEST_PK }))
       .toThrow('endpoint must be a valid http(s) URL');
-    expect(() => loadConfig({ endpoint: '   ', apiKey: 'key' }))
+    expect(() => loadConfig({ endpoint: '   ', apiKey: TEST_PK }))
       .toThrow('endpoint must be a valid http(s) URL');
     // host-less URL a permissive regex would wrongly accept
-    expect(() => loadConfig({ endpoint: 'https://?x', apiKey: 'key' }))
+    expect(() => loadConfig({ endpoint: 'https://?x', apiKey: TEST_PK }))
       .toThrow('endpoint must be a valid http(s) URL');
     // non-http(s) scheme
-    expect(() => loadConfig({ endpoint: 'ftp://example.com', apiKey: 'key' }))
+    expect(() => loadConfig({ endpoint: 'ftp://example.com', apiKey: TEST_PK }))
       .toThrow('endpoint must be a valid http(s) URL');
   });
 
   it('should accept the default endpoint and explicit http(s) endpoints', () => {
-    expect(() => loadConfig({ apiKey: 'key' })).not.toThrow();
-    expect(() => loadConfig({ endpoint: 'http://localhost:8080', apiKey: 'key' })).not.toThrow();
-    expect(() => loadConfig({ endpoint: 'https://x.com', apiKey: 'key' })).not.toThrow();
+    expect(() => loadConfig({ apiKey: TEST_PK })).not.toThrow();
+    expect(() => loadConfig({ endpoint: 'http://localhost:8080', apiKey: TEST_PK })).not.toThrow();
+    expect(() => loadConfig({ endpoint: 'https://x.com', apiKey: TEST_PK })).not.toThrow();
   });
 });

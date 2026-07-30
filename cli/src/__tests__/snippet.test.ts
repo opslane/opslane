@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { getSnippet } from '../snippet.js';
 import { saveAgentCredentials } from '../agent-credentials.js';
+import { TEST_PUBLIC_KEY } from './fixtures.js';
 
 vi.spyOn(console, 'log').mockImplementation(() => {});
 
@@ -29,16 +30,16 @@ describe('getSnippet', () => {
     );
     await writeFile(join(tmpDir, 'src', 'main.tsx'), 'import React from "react";');
 
-    const result = await getSnippet({ cwd: tmpDir, apiKey: 'def_test' });
+    const result = await getSnippet({ cwd: tmpDir, apiKey: TEST_PUBLIC_KEY });
     expect(result.framework).toBe('react-vite');
     expect(result.install).toContain('@opslane/sdk');
     expect(result.env).toEqual({
-      var: 'VITE_OPSLANE_API_KEY', value: 'def_test', file: '.env.local', gitignore: true,
+      var: 'VITE_OPSLANE_API_KEY', value: TEST_PUBLIC_KEY, file: '.env.local', gitignore: true,
     });
   });
 
   it('returns unknown framework when no package.json', async () => {
-    const result = await getSnippet({ cwd: tmpDir, apiKey: 'def_test' });
+    const result = await getSnippet({ cwd: tmpDir, apiKey: TEST_PUBLIC_KEY });
     expect(result.framework).toBe('unknown');
   });
 
@@ -48,7 +49,11 @@ describe('getSnippet', () => {
       JSON.stringify({ dependencies: {} }),
     );
 
-    const result = await getSnippet({ cwd: tmpDir, framework: 'vue-vite', apiKey: 'def_test' });
+    const result = await getSnippet({
+      cwd: tmpDir,
+      framework: 'vue-vite',
+      apiKey: TEST_PUBLIC_KEY,
+    });
     expect(result.framework).toBe('vue-vite');
   });
 

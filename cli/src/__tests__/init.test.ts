@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { detectFramework } from '../detect.js';
 import { applyPatches, init } from '../init.js';
 import type { FilePatch } from '../codemods/types.js';
+import { TEST_PUBLIC_KEY } from './fixtures.js';
 
 describe('detectFramework', () => {
   let tmpDir: string;
@@ -232,12 +233,11 @@ describe('init patch application', () => {
       "import React from 'react';\nexport {};\n",
     );
 
-    const secret = 'def_must-never-be-generated';
     await init({
       cwd: tmpDir,
       nonInteractive: true,
       projectId: 'project-1',
-      apiKey: secret,
+      apiKey: TEST_PUBLIC_KEY,
     });
 
     const source = await readFile(join(tmpDir, 'src/main.tsx'), 'utf-8');
@@ -245,10 +245,28 @@ describe('init patch application', () => {
     const env = await readFile(join(tmpDir, '.env.local'), 'utf-8');
     const gitignore = await readFile(join(tmpDir, '.gitignore'), 'utf-8');
     expect(source).toContain('import.meta.env.VITE_OPSLANE_API_KEY');
-    expect(source).not.toContain(secret);
-    expect(config).not.toContain(secret);
+    expect(source).not.toContain(TEST_PUBLIC_KEY);
+    expect(config).not.toContain(TEST_PUBLIC_KEY);
     expect(JSON.parse(config)).not.toHaveProperty('apiKey');
-    expect(env).toBe(`VITE_OPSLANE_API_KEY=${secret}\n`);
+    expect(env).toBe(`VITE_OPSLANE_API_KEY=${TEST_PUBLIC_KEY}\n`);
     expect(gitignore).toContain('.env.local');
+  });
+
+  it('refuses to write a legacy key into browser environment config', async () => {
+    await writeFile(
+      join(tmpDir, 'package.json'),
+      JSON.stringify({ dependencies: {} }),
+    );
+
+    await expect(init({
+      cwd: tmpDir,
+      nonInteractive: true,
+      projectId: 'project-1',
+      apiKey: 'def_must-never-be-written',
+    })).rejects.toThrow(/only opslane_pk_ keys belong in browser code/);
+
+    await expect(readFile(join(tmpDir, '.env.local'), 'utf-8')).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
   });
 });

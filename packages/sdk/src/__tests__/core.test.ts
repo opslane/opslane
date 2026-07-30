@@ -3,6 +3,7 @@ import { installGlobalHandlers, uninstallGlobalHandlers, buildPayload } from '..
 import { resetConfig, loadConfig } from '../config';
 import { addBreadcrumb, clearBreadcrumbs, getBreadcrumbs } from '../breadcrumbs';
 import * as transport from '../transport';
+import { TEST_PK } from './test-keys';
 
 vi.mock('../transport', () => ({
   enqueueEvent: vi.fn(),
@@ -14,7 +15,7 @@ describe('Core Error Capture', () => {
     clearBreadcrumbs();
     loadConfig({
       endpoint: 'https://ingest.example.com',
-      apiKey: 'key-abc',
+      apiKey: TEST_PK,
     });
   });
 
@@ -148,7 +149,7 @@ describe('Core Error Capture', () => {
 
   it('includes an explicitly configured environment in error payloads', () => {
     resetConfig();
-    loadConfig({ apiKey: 'key-abc', environment: 'staging' });
+    loadConfig({ apiKey: TEST_PK, environment: 'staging' });
 
     const payload = buildPayload('Error', 'boom', 'at app.js:1:1', {
       type: 'error',
@@ -234,7 +235,7 @@ describe('Core Error Capture', () => {
 
   it('stamps the configured release onto the event payload (C5)', () => {
     resetConfig();
-    loadConfig({ endpoint: 'https://i.com', apiKey: 'k', release: 'sha-abc123' });
+    loadConfig({ endpoint: 'https://i.com', apiKey: TEST_PK, release: 'sha-abc123' });
     const payload = buildPayload('Error', 'boom', 'at a.js:1:1', {
       type: 'error', timestamp: new Date().toISOString(), category: 'exception', message: 'x', level: 'error',
     });

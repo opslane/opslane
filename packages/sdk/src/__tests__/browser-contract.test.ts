@@ -2,6 +2,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import * as http from 'node:http';
 import { resolve } from 'node:path';
+import { TEST_PK } from './test-keys';
 
 // Check if Playwright browsers are available
 let playwrightAvailable = false;
@@ -104,7 +105,7 @@ describe.skipIf(!playwrightAvailable)('SDK browser contract', () => {
                 /init\(\{[\s\S]*?\}\);/,
                 `init({
                   endpoint: 'http://localhost:${mockPort}',
-                  apiKey: 'sk-test-browser',
+                  apiKey: '${TEST_PK}',
                   flushInterval: 200,
                   maxBatchSize: 1,
                   replay: { enabled: false },

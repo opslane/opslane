@@ -12,6 +12,7 @@ import { loadConfig, resetConfig, getConfig } from '../config';
 import { _resetThrottle } from '../throttle';
 import { setUser, clearUser } from '../core';
 import type { ErrorEventPayload } from '@opslane/shared';
+import { TEST_PK } from './test-keys';
 
 const replayMocks = vi.hoisted(() => ({
   flushReplayBufferForError: vi.fn(),
@@ -52,7 +53,7 @@ describe('Transport Layer', () => {
     resetConfig();
     loadConfig({
       endpoint: 'https://ingest.example.com',
-      apiKey: 'key-abc',
+      apiKey: TEST_PK,
       errorThrottleMs: 0, // disable throttle here; it has its own unit test
     });
     fetchMock = vi.fn().mockResolvedValue(new Response('ok', { status: 200 }));
@@ -82,7 +83,7 @@ describe('Transport Layer', () => {
     expect(url1).toBe('https://ingest.example.com/api/v1/events');
     expect(options1.method).toBe('POST');
     expect(options1.headers['Content-Type']).toBe('application/json');
-    expect(options1.headers['X-API-Key']).toBe('key-abc');
+    expect(options1.headers['X-API-Key']).toBe(TEST_PK);
 
     const body1 = JSON.parse(options1.body);
     expect(body1.error.type).toBe('Error');
@@ -133,7 +134,7 @@ describe('Transport Layer', () => {
 
   it('flushes the replay buffer after a replay-trigger error is accepted', async () => {
     resetConfig();
-    loadConfig({ endpoint: 'https://ingest.example.com', apiKey: 'k', replay: { enabled: true } });
+    loadConfig({ endpoint: 'https://ingest.example.com', apiKey: TEST_PK, replay: { enabled: true } });
     fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ event_id: 'evt-1', group_id: 'grp-1' }), {
       status: 202,
       headers: { 'Content-Type': 'application/json' },
@@ -147,7 +148,7 @@ describe('Transport Layer', () => {
 
   it('does not flush replay capture when error ingest is rejected', async () => {
     resetConfig();
-    loadConfig({ endpoint: 'https://ingest.example.com', apiKey: 'k', replay: { enabled: true } });
+    loadConfig({ endpoint: 'https://ingest.example.com', apiKey: TEST_PK, replay: { enabled: true } });
     fetchMock.mockResolvedValueOnce(new Response('nope', { status: 500 }));
 
     enqueueEvent(makeEvent(), 'uncaught_error');
@@ -177,7 +178,7 @@ describe('Transport Layer', () => {
 
   it('applies backoff after a failure: an immediate re-flush is gated', async () => {
     resetConfig();
-    loadConfig({ endpoint: 'https://ingest.example.com', apiKey: 'k' });
+    loadConfig({ endpoint: 'https://ingest.example.com', apiKey: TEST_PK });
     vi.spyOn(Math, 'random').mockReturnValue(0); // no jitter, deterministic
     fetchMock.mockRejectedValueOnce(new Error('down'));
     enqueueEvent(makeEvent());
@@ -196,7 +197,7 @@ describe('Transport Layer', () => {
 
   it('resets backoff after a successful flush', async () => {
     resetConfig();
-    loadConfig({ endpoint: 'https://ingest.example.com', apiKey: 'k' });
+    loadConfig({ endpoint: 'https://ingest.example.com', apiKey: TEST_PK });
     fetchMock.mockResolvedValue(new Response('ok', { status: 200 }));
     enqueueEvent(makeEvent());
     await flushEvents();                 // success
@@ -379,7 +380,7 @@ describe('Transport Layer', () => {
 
   it('drops the event when beforeSend returns null', async () => {
     resetConfig();
-    loadConfig({ endpoint: 'https://ingest.example.com', apiKey: 'k', beforeSend: () => null });
+    loadConfig({ endpoint: 'https://ingest.example.com', apiKey: TEST_PK, beforeSend: () => null });
     enqueueEvent(makeEvent());
     await flushEvents();
     expect(fetchMock).not.toHaveBeenCalled();
@@ -388,7 +389,7 @@ describe('Transport Layer', () => {
 
   it('scrubs the event before send (query string stripped from context.url)', async () => {
     resetConfig();
-    loadConfig({ endpoint: 'https://ingest.example.com', apiKey: 'k' });
+    loadConfig({ endpoint: 'https://ingest.example.com', apiKey: TEST_PK });
     enqueueEvent(makeEvent({ context: { url: 'https://app.com/p?token=abc', user_agent: 'ua' } }));
     await flushEvents();
     const body = JSON.parse(fetchMock.mock.calls[0][1].body);
@@ -398,7 +399,7 @@ describe('Transport Layer', () => {
   it('beforeSend can transform the event', async () => {
     resetConfig();
     loadConfig({
-      endpoint: 'https://ingest.example.com', apiKey: 'k',
+      endpoint: 'https://ingest.example.com', apiKey: TEST_PK,
       beforeSend: (e) => ({ ...e, error: { ...e.error, message: 'REDACTED' } }),
     });
     enqueueEvent(makeEvent());
@@ -409,7 +410,7 @@ describe('Transport Layer', () => {
 
   it('drops events when sampleRate excludes them', async () => {
     resetConfig();
-    loadConfig({ endpoint: 'https://ingest.example.com', apiKey: 'k', sampleRate: 0.5 });
+    loadConfig({ endpoint: 'https://ingest.example.com', apiKey: TEST_PK, sampleRate: 0.5 });
     const rnd = vi.spyOn(Math, 'random').mockReturnValue(0.9); // 0.9 >= 0.5 → drop
     enqueueEvent(makeEvent());
     await flushEvents();
@@ -422,7 +423,7 @@ describe('Transport Layer', () => {
 
   it('sampleRate defaults to 1 (keep everything)', () => {
     resetConfig();
-    loadConfig({ endpoint: 'https://ingest.example.com', apiKey: 'k' });
+    loadConfig({ endpoint: 'https://ingest.example.com', apiKey: TEST_PK });
     expect(getConfig().sampleRate).toBe(1);
   });
 });

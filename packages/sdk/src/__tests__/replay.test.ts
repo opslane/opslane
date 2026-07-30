@@ -12,6 +12,7 @@ import {
   startReplayCapture,
   stopReplayCapture,
 } from '../replay';
+import { TEST_PK, TEST_PK_ALT } from './test-keys';
 
 type RecordOptions = {
   emit?: (event: eventWithTime, isCheckout?: boolean) => void;
@@ -102,7 +103,7 @@ describe('continuous chunked recording', () => {
     resetSessionId();
     clearBreadcrumbs();
     resetConfig();
-    loadConfig({ apiKey: 'key-abc', endpoint: 'https://ingest.example.com', replay: { enabled: true } });
+    loadConfig({ apiKey: TEST_PK, endpoint: 'https://ingest.example.com', replay: { enabled: true } });
     fetchMock.mockReset();
     globalThis.fetch = fetchMock as unknown as typeof fetch;
     chunkMocks.uploadChunk.mockReset().mockResolvedValue(true);
@@ -152,7 +153,7 @@ describe('continuous chunked recording', () => {
     fetchMock.mockResolvedValue({ ok: true, json: async () => ({}) });
 
     init({
-      apiKey: 'k',
+      apiKey: TEST_PK,
       endpoint: 'https://ingest.example.com',
       release: 'abc123',
       environment: 'development',
@@ -177,7 +178,7 @@ describe('continuous chunked recording', () => {
     fetchMock.mockResolvedValue({ ok: true, json: async () => ({ recording: false }) });
 
     init({
-      apiKey: 'k',
+      apiKey: TEST_PK,
       endpoint: 'https://ingest.example.com',
       replay: { enabled: false },
     });
@@ -196,7 +197,7 @@ describe('continuous chunked recording', () => {
       .mockResolvedValue({ ok: true, json: async () => ({ recording: false }) });
 
     init({
-      apiKey: 'old-key',
+      apiKey: TEST_PK,
       endpoint: 'https://old.example.com',
       replay: { enabled: false },
     });
@@ -204,7 +205,7 @@ describe('continuous chunked recording', () => {
 
     destroy();
     init({
-      apiKey: 'new-key',
+      apiKey: TEST_PK_ALT,
       endpoint: 'https://new.example.com',
       replay: { enabled: false },
     });
@@ -219,7 +220,7 @@ describe('continuous chunked recording', () => {
     fetchMock.mockResolvedValue({ ok: true, json: async () => ({ recording: true }) });
 
     init({
-      apiKey: 'k',
+      apiKey: TEST_PK,
       endpoint: 'https://ingest.example.com',
       reporting: { enabled: false },
     });
@@ -233,7 +234,7 @@ describe('continuous chunked recording', () => {
   it('sends the configured environment when registering a replay session', async () => {
     resetConfig();
     loadConfig({
-      apiKey: 'key-abc',
+      apiKey: TEST_PK,
       endpoint: 'https://ingest.example.com',
       environment: 'staging',
       replay: { enabled: true },
@@ -272,12 +273,12 @@ describe('continuous chunked recording', () => {
 
   it('does not start rrweb when disabled, unsupported, or killed server-side', async () => {
     resetConfig();
-    loadConfig({ apiKey: 'k', endpoint: 'https://ingest.example.com', replay: { enabled: false } });
+    loadConfig({ apiKey: TEST_PK, endpoint: 'https://ingest.example.com', replay: { enabled: false } });
     await startReplayCapture();
     expect(rrwebState.record).not.toHaveBeenCalled();
 
     resetConfig();
-    loadConfig({ apiKey: 'k', endpoint: 'https://ingest.example.com', replay: { enabled: true } });
+    loadConfig({ apiKey: TEST_PK, endpoint: 'https://ingest.example.com', replay: { enabled: true } });
     vi.stubGlobal('CompressionStream', undefined);
     await startReplayCapture();
     expect(rrwebState.record).not.toHaveBeenCalled();

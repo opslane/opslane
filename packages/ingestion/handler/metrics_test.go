@@ -2,6 +2,7 @@ package handler
 
 import (
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -49,5 +50,21 @@ func TestNotificationDeliveriesAppearInMetrics(t *testing.T) {
 	}
 	if want := fmt.Sprintf(`opslane_notification_deliveries_total{type="slack",outcome="retry"} %d`, retryBefore+1); !strings.Contains(body, want) {
 		t.Fatalf("retry metric missing:\n%s", body)
+	}
+}
+
+func TestKeyAuthMetricRenders(t *testing.T) {
+	RecordKeyAuth("ok")
+	RecordKeyAuth("invalid_key")
+
+	rec := httptest.NewRecorder()
+	Metrics(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	for _, want := range []string{
+		`opslane_key_auth_total{outcome="ok"}`,
+		`opslane_key_auth_total{outcome="invalid_key"}`,
+	} {
+		if !strings.Contains(rec.Body.String(), want) {
+			t.Errorf("metrics output missing %q", want)
+		}
 	}
 }

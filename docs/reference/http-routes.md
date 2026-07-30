@@ -1,6 +1,6 @@
 # HTTP routes
 
-All routes registered by the ingestion API (`packages/ingestion/handler/routes.go`). Auth column legend: **none** (public), **poll token** (`X-Opslane-Poll-Token` for one agent session), **SDK** (`X-API-Key` per-environment key; rate-limited per project, and origin-gated — unconditionally on the browser-only endpoints, and on `/api/v1/events` only when the request presents `Origin` or `Referer`), **session** (dashboard JWT cookie or CLI token), **either** (session or SDK).
+All routes registered by the ingestion API (`packages/ingestion/handler/routes.go`). Auth column legend: **none** (public), **poll token** (`X-Opslane-Poll-Token` for one agent session), **SDK** (`X-API-Key` project-scoped public ingest key; rate-limited per project, and origin-gated — unconditionally on the browser-only endpoints, and on `/api/v1/events` only when the request presents `Origin` or `Referer`), and **session** (dashboard JWT cookie or CLI token).
 
 These are curated tables, not a stability contract — the API is early-stage and may change. The [drift check](../../scripts/check-docs-drift.mjs) fails the repository test gate (`pnpm test`, which CI runs) if this page and `routes.go` disagree.
 
@@ -36,13 +36,13 @@ The agent callback requires `code`, `installation_id`, and UUID `state`; definit
 
 | Method | Path | Origin-gated | Purpose |
 | --- | --- | --- | --- |
-| POST | `/api/v1/events` | browser callers only | Ingest an error event; optional payload `environment` is project-gated and falls back to the key environment |
+| POST | `/api/v1/events` | browser callers only | Ingest an error event; optional payload `environment` is project-gated and falls back to production |
 | POST | `/api/v1/replays/init` | yes | Begin a replay upload |
 | POST | `/api/v1/replays/{replayID}/complete` | yes | Finish a replay upload |
 | POST | `/api/v1/replays/{replayID}/fail` | yes | Record a replay upload failure |
 | POST | `/api/v1/sessions/init` | yes | Register a tenant-owned session with optional payload `environment`; returns the recording kill switch |
 | POST | `/api/v1/sessions/{sessionID}/chunks/{seq}` | yes | Store and commit one gzipped replay chunk (max 5MiB) |
-| POST | `/api/v1/sourcemaps` | no (build-time upload) | Upload source maps |
+| POST | `/api/v1/ingest/ping` | no | Verify that a public ingest key still authenticates; returns 204 without project data |
 
 ## Session (dashboard/CLI)
 
@@ -66,8 +66,9 @@ The agent callback requires `code`, `installation_id`, and UUID `state`; definit
 | GET | `/api/v1/projects/{projectID}/fix-stats` | Per-kind fix generation and PR outcome receipts |
 | GET | `/api/v1/projects/{projectID}/environments` | List environments |
 | POST | `/api/v1/projects/{projectID}/environments` | Create environment |
-| POST | `/api/v1/environments/{envID}/api-keys` | Create ingest key |
-| GET | `/api/v1/projects/{projectID}/api-keys` | List ingest keys |
+| GET | `/api/v1/projects/{projectID}/event-count` | Event count stats |
+| GET | `/api/v1/projects/{projectID}/incidents` | List incidents |
+| GET | `/api/v1/projects/{projectID}/incidents/{incidentID}` | Incident detail |
 | GET | `/api/v1/projects/{projectID}/notification-destinations` | List project notification destinations and recent delivery state |
 | POST | `/api/v1/projects/{projectID}/notification-destinations` | Create a Slack notification destination |
 | PATCH | `/api/v1/projects/{projectID}/notification-destinations/{destID}` | Update a notification destination |
@@ -94,14 +95,6 @@ The agent callback requires `code`, `installation_id`, and UUID `state`; definit
 | DELETE | `/api/v1/projects/{projectID}/github` | Remove project repo config |
 | POST | `/api/v1/projects/{projectID}/setup-pr` | Open SDK setup PR |
 | GET | `/api/v1/projects/{projectID}/setup-pr` | Setup PR status |
-
-## Session or SDK
-
-| Method | Path | Purpose |
-| --- | --- | --- |
-| GET | `/api/v1/projects/{projectID}/event-count` | Event count stats |
-| GET | `/api/v1/projects/{projectID}/incidents` | List incidents |
-| GET | `/api/v1/projects/{projectID}/incidents/{incidentID}` | Incident detail |
 
 ## Internal service reads
 

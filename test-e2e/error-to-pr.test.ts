@@ -53,7 +53,7 @@ describe('pr_created contract (read API)', () => {
 
   it('returns incident with pr_url and confidence via GET', async () => {
     const incident = await getIncident(
-      tenant.apiKey,
+      tenant.sessionToken,
       tenant.projectId,
       groupId
     );
@@ -79,7 +79,7 @@ describe('pr_created contract (read API)', () => {
   });
 
   it('appears in list incidents response', async () => {
-    const incidents = await listIncidents(tenant.apiKey, tenant.projectId);
+    const incidents = await listIncidents(tenant.sessionToken, tenant.projectId);
 
     expect(incidents.length).toBeGreaterThanOrEqual(1);
     const found = incidents.find((i) => i.id === groupId);
@@ -105,15 +105,15 @@ describe('pr_created contract (read API)', () => {
     // Create a second tenant
     const otherTenant = await seedTenant();
 
-    // Try to read our group using the other tenant's API key
+    // Try to read our group using the other tenant's session.
     const { ingestionUrl } = await import('./helpers.js').then((m) =>
       m.getConfig()
     );
     const res = await fetch(
       `${ingestionUrl}/api/v1/projects/${tenant.projectId}/incidents/${groupId}`,
-      { headers: { 'X-API-Key': otherTenant.apiKey } }
+      { headers: { Authorization: `Bearer ${otherTenant.sessionToken}` } }
     );
-    // Should be 403 (project mismatch) since the API key resolves to a different project
+    // The session is valid, but its organization cannot access this project.
     expect(res.status).toBe(403);
 
     await cleanupTenant(otherTenant.orgId);
@@ -171,7 +171,7 @@ describe.skipIf(!hasWorkerSecrets)(
 
       // Poll for terminal status (pr_created or needs_human)
       // The worker should process the job and reach a terminal state
-      const incidents = await listIncidents(tenant.apiKey, tenant.projectId);
+      const incidents = await listIncidents(tenant.sessionToken, tenant.projectId);
       if (incidents.length === 0) {
         // Ingest handler hasn't wired up event→group creation yet
         // Skip the poll — this is expected until the handler is complete
@@ -180,7 +180,7 @@ describe.skipIf(!hasWorkerSecrets)(
 
       const incident = incidents[0]!;
       const terminal = await pollUntilTerminal(
-        tenant.apiKey,
+        tenant.sessionToken,
         tenant.projectId,
         incident.id,
         ['pr_created', 'needs_human'],

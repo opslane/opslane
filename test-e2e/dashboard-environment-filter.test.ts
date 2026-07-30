@@ -45,7 +45,11 @@ describe.skipIf(!configured || !playwrightAvailable)('dashboard environment filt
   const productionPagePath = pageRowPath(productionPage);
   const stagingPagePath = pageRowPath(stagingPage);
 
-  async function ingest(apiKey: string, message: string): Promise<string> {
+  async function ingest(
+    apiKey: string,
+    message: string,
+    environment?: string,
+  ): Promise<string> {
     const response = await postEvent(apiKey, {
       timestamp: new Date().toISOString(),
       error: {
@@ -55,6 +59,7 @@ describe.skipIf(!configured || !playwrightAvailable)('dashboard environment filt
       },
       breadcrumbs: [],
       context: {},
+      ...(environment ? { environment } : {}),
     });
     expect(response.status).toBe(202);
     const body = await response.json() as { error_group_id: string };
@@ -75,9 +80,9 @@ describe.skipIf(!configured || !playwrightAvailable)('dashboard environment filt
 
     await ingest(tenant.apiKey, sharedTitle);
     await ingest(tenant.apiKey, sharedTitle);
-    await ingest(stagingAPIKey, sharedTitle);
+    await ingest(stagingAPIKey, sharedTitle, 'staging');
     await ingest(tenant.apiKey, productionOnlyTitle);
-    await ingest(stagingAPIKey, stagingOnlyTitle);
+    await ingest(stagingAPIKey, stagingOnlyTitle, 'staging');
 
     await initSession(
       tenant.apiKey,
@@ -90,6 +95,7 @@ describe.skipIf(!configured || !playwrightAvailable)('dashboard environment filt
       `sess_phase2_stage_${crypto.randomUUID().replaceAll('-', '').slice(0, 12)}`,
       undefined,
       stagingPage,
+      'staging',
     );
 
     const { chromium } = await import('@playwright/test');

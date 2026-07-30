@@ -1017,39 +1017,39 @@ func TestResolveArchiveUnarchiveLifecycle(t *testing.T) {
 	}
 }
 
-func TestLookupAPIKey_ResolvesTenantChainAndHonorsRevocation(t *testing.T) {
+func TestLookupProjectKeyResolvesTenantAndHonorsRevocation(t *testing.T) {
 	pool := testPool(t)
 	ctx := context.Background()
 	q := db.New(pool)
-	orgID, projID, envID, _ := seedGroup(t, pool, q, "api-key")
+	orgID, projID, _, _ := seedGroup(t, pool, q, "api-key")
 
-	key, err := q.CreateAPIKey(ctx, envID)
+	key, err := q.CreateProjectKey(ctx, projID, db.ScopeIngest, "test", nil)
 	if err != nil {
-		t.Fatalf("CreateAPIKey: %v", err)
+		t.Fatalf("CreateProjectKey: %v", err)
 	}
-	if !strings.HasPrefix(key.RawKey, "def_") {
-		t.Fatalf("raw key %q missing def_ prefix", key.RawKey)
+	if !strings.HasPrefix(key.Raw, "opslane_pk_") {
+		t.Fatalf("raw key %q missing opslane_pk_ prefix", key.Raw)
 	}
 
-	lookup, err := q.LookupAPIKey(ctx, key.RawKey)
+	lookup, err := q.LookupProjectKey(ctx, key.Raw)
 	if err != nil {
-		t.Fatalf("LookupAPIKey: %v", err)
+		t.Fatalf("LookupProjectKey: %v", err)
 	}
-	if lookup.OrgID != orgID || lookup.ProjectID != projID || lookup.EnvironmentID != envID {
-		t.Fatalf("lookup = %+v, want org=%s project=%s env=%s", lookup, orgID, projID, envID)
+	if lookup.OrgID != orgID || lookup.ProjectID != projID || lookup.Scope != db.ScopeIngest {
+		t.Fatalf("lookup = %+v, want org=%s project=%s scope=%s", lookup, orgID, projID, db.ScopeIngest)
 	}
 
 	// Unknown key is rejected.
-	if _, err := q.LookupAPIKey(ctx, "def_not-a-real-key"); err == nil {
+	if _, err := q.LookupProjectKey(ctx, "def_not-a-real-key"); !errors.Is(err, db.ErrProjectKeyInvalid) {
 		t.Fatal("expected unknown key lookup to fail")
 	}
 
 	// Revoked key is rejected.
 	if _, err := pool.Exec(ctx,
-		`UPDATE environment_api_keys SET revoked_at = now() WHERE id = $1`, key.ID); err != nil {
+		`UPDATE project_api_keys SET revoked_at = now() WHERE id = $1`, key.ID); err != nil {
 		t.Fatalf("revoke key: %v", err)
 	}
-	if _, err := q.LookupAPIKey(ctx, key.RawKey); err == nil {
+	if _, err := q.LookupProjectKey(ctx, key.Raw); !errors.Is(err, db.ErrProjectKeyInvalid) {
 		t.Fatal("expected revoked key lookup to fail")
 	}
 }

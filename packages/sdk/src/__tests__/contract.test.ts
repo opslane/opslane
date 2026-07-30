@@ -2,6 +2,7 @@
 import { describe, it, expect, beforeEach, afterAll, beforeAll } from 'vitest';
 import * as http from 'node:http';
 import type { ErrorEventPayload } from '@opslane/shared';
+import { TEST_PK } from './test-keys';
 
 let server: http.Server;
 let serverPort: number;
@@ -47,7 +48,7 @@ describe('SDK contract', () => {
 
     sdk.init({
       endpoint: `http://localhost:${serverPort}`,
-      apiKey: 'sk-test-contract',
+      apiKey: TEST_PK,
       flushInterval: 100,
       maxBatchSize: 1,
       debug: true,
@@ -83,7 +84,7 @@ describe('SDK contract', () => {
     if (!req) throw new Error('event request not received');
     expect(req.method).toBe('POST');
     expect(req.url).toBe('/api/v1/events');
-    expect(req.headers['x-api-key']).toBe('sk-test-contract');
+    expect(req.headers['x-api-key']).toBe(TEST_PK);
     expect(req.headers['content-type']).toBe('application/json');
 
     const payload = JSON.parse(req.body);

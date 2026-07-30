@@ -36,6 +36,8 @@ const VUE_FIXTURE = resolve(__dirname, '../test-fixtures/vue-app');
 const REACT_FIXTURE = resolve(__dirname, '../test-fixtures/react-app');
 const CODEMOD_REACT_FIXTURE = resolve(__dirname, '../test-fixtures/codemod-react');
 const SDK_SOURCE = resolve(__dirname, '../packages/sdk/src/index.ts');
+const CODEMOD_TEST_API_KEY =
+  'opslane_pk_mzxw6ytboi3damrrgi3tknzxgq_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopq';
 
 async function pollIncidentMatching(
   tenant: TestTenant,
@@ -44,7 +46,7 @@ async function pollIncidentMatching(
 ): Promise<Incident> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const incidents = await listIncidents(tenant.apiKey, tenant.projectId);
+    const incidents = await listIncidents(tenant.sessionToken, tenant.projectId);
     const hit = incidents.find(predicate);
     if (hit) return hit;
     await new Promise((resolve) => setTimeout(resolve, 2_000));
@@ -94,7 +96,7 @@ describe.skipIf(hasLLMKey || !keylessWorkerRunning || !playwrightAvailable)(
         expect(incident.status).toBeTruthy();
 
         const terminal = await pollUntilTerminal(
-          tenant.apiKey,
+          tenant.sessionToken,
           tenant.projectId,
           incident.id,
           ['needs_human'],
@@ -152,7 +154,7 @@ describe.skipIf(!playwrightAvailable)('browser smoke: patched codemod delivers a
     const snippet = await getSnippet({
       cwd: fixtureCopy,
       framework: 'react-vite',
-      apiKey: 'browser-smoke-key',
+      apiKey: CODEMOD_TEST_API_KEY,
       apiUrl: endpoint,
     });
     const patches: FilePatch[] = snippet.patches.map((patch) => ({
@@ -253,7 +255,7 @@ describe.skipIf(hasLLMKey || !keylessWorkerRunning || !playwrightAvailable)(
           }
         );
         const terminal = await pollUntilTerminal(
-          tenant.apiKey,
+          tenant.sessionToken,
           tenant.projectId,
           incident.id,
           ['needs_human'],

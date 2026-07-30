@@ -27,6 +27,7 @@ const (
 	ctxAllowedOrigins
 	ctxAllowPayloadEnvironment
 	ctxRole
+	ctxKeyScope
 )
 
 // ProjectIDFromCtx extracts the project_id set by auth middleware.
@@ -60,15 +61,15 @@ func RoleFromCtx(ctx context.Context) string {
 	return v
 }
 
-// AllowedOriginsFromCtx extracts the project's origin allowlist set by AuthenticateSDK.
+// AllowedOriginsFromCtx extracts the project's origin allowlist set by ProjectKey.
 // A nil/empty slice means no allowlist is configured (allow all).
 func AllowedOriginsFromCtx(ctx context.Context) []string {
 	v, _ := ctx.Value(ctxAllowedOrigins).([]string)
 	return v
 }
 
-// AllowPayloadEnvironmentFromCtx reports whether this project's SDK keys may
-// override their key-bound environment by sending a validated environment name.
+// AllowPayloadEnvironmentFromCtx reports whether this project's SDK payloads
+// may select a pre-created project environment by validated name.
 func AllowPayloadEnvironmentFromCtx(ctx context.Context) bool {
 	v, _ := ctx.Value(ctxAllowPayloadEnvironment).(bool)
 	return v
@@ -185,47 +186,6 @@ func (d *Dependencies) RequireAdmin(next http.Handler) http.Handler {
 	})
 }
 
-// AuthenticateSDK resolves environment API key -> environment -> project -> org.
-// Returns project_id and environment_id in context, or 401.
-func (d *Dependencies) AuthenticateSDK(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		apiKey := r.Header.Get("X-API-Key")
-		if apiKey == "" {
-			writeJSONError(w, http.StatusUnauthorized, "missing X-API-Key header")
-			return
-		}
-
-		lookup, err := d.Queries.LookupAPIKey(r.Context(), apiKey)
-		if err != nil {
-			writeJSONError(w, http.StatusUnauthorized, "invalid or revoked API key")
-			return
-		}
-
-		ctx := r.Context()
-		ctx = context.WithValue(ctx, ctxProjectID, lookup.ProjectID)
-		ctx = context.WithValue(ctx, ctxEnvironmentID, lookup.EnvironmentID)
-		ctx = context.WithValue(ctx, ctxOrgID, lookup.OrgID)
-		ctx = context.WithValue(ctx, ctxAllowedOrigins, lookup.AllowedOrigins)
-		ctx = context.WithValue(ctx, ctxAllowPayloadEnvironment, lookup.AllowPayloadEnvironment)
-		next.ServeHTTP(w, r.WithContext(ctx))
-	})
-}
-
-// AuthenticateSessionOrSDK accepts either JWT session auth (Authorization: Bearer)
-// or SDK API key auth (X-API-Key). Prefers SDK auth when X-API-Key is present.
-// Used for endpoints that both the dashboard (session) and CLI (API key) need.
-func (d *Dependencies) AuthenticateSessionOrSDK(next http.Handler) http.Handler {
-	sdkHandler := d.AuthenticateSDK(next)
-	sessionHandler := d.AuthenticateUserSession(next)
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("X-API-Key") != "" {
-			sdkHandler.ServeHTTP(w, r)
-			return
-		}
-		sessionHandler.ServeHTTP(w, r)
-	})
-}
-
 // AuthenticateUserSession authenticates a local session and, in cloud mode,
 // immediately re-checks active membership so removals and downgrades take effect.
 func (d *Dependencies) AuthenticateUserSession(next http.Handler) http.Handler {
@@ -247,6 +207,11 @@ func (d *Dependencies) AuthenticateSession(next http.Handler) http.Handler {
 			tokenStr = strings.TrimPrefix(header, "Bearer ")
 		}
 		if tokenStr == "" {
+			if r.Header.Get("X-API-Key") != "" {
+				writeJSONErrorCode(w, http.StatusUnauthorized,
+					"project API keys cannot access this route", "invalid_api_key")
+				return
+			}
 			writeJSONError(w, http.StatusUnauthorized, "missing or invalid credentials")
 			return
 		}
@@ -329,6 +294,13 @@ func writeJSONError(w http.ResponseWriter, status int, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(map[string]string{"error": message})
+}
+
+func writeJSONErrorCode(w http.ResponseWriter, status int, message, code string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": message, "code": code})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

@@ -10,6 +10,7 @@ import { buildPayload, clearUser, setUser } from '../core';
 import { resetSessionId } from '../session';
 import { _resetThrottle } from '../throttle';
 import { _resetQueue, enqueueEvent, flushEvents } from '../transport';
+import { TEST_PK } from './test-keys';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const packageMetadata = JSON.parse(readFileSync(join(here, '../../package.json'), 'utf8')) as { version: string };
@@ -71,7 +72,7 @@ describe('SDK emits the frozen wire shape', () => {
   it('minimal payload matches the frozen fixture', async () => {
     resetSessionId();
     loadConfig({
-      apiKey: 'sk-test',
+      apiKey: TEST_PK,
       endpoint: 'https://api.test',
       maxBreadcrumbs: 0,
       maxBatchSize: 100,
@@ -91,7 +92,7 @@ describe('SDK emits the frozen wire shape', () => {
 
   it('full payload matches the frozen fixture', async () => {
     loadConfig({
-      apiKey: 'sk-test',
+      apiKey: TEST_PK,
       endpoint: 'https://api.test',
       maxBatchSize: 100,
       errorThrottleMs: 0,

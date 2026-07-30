@@ -107,6 +107,11 @@ function apiKeyEnvironmentVariable(framework: Framework): string {
 }
 
 async function persistApiKeyEnvironment(cwd: string, framework: Framework, apiKey: string): Promise<void> {
+  if (!apiKey.startsWith('opslane_pk_')) {
+    throw new Error(
+      'refusing to write a non-public key to .env.local: only opslane_pk_ keys belong in browser code',
+    );
+  }
   await writeEnvLocal(cwd, { [apiKeyEnvironmentVariable(framework)]: apiKey });
 }
 

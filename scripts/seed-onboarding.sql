@@ -1,6 +1,7 @@
 -- Deterministic onboarding-reporting seed. Apply scripts/seed-e2e.sql first.
 --
--- Raw development API key: e2e-development-key-plaintext
+-- Raw development public ingest key:
+-- opslane_pk_onxw4z3fojrw63lqmfrwg33vnq_qrstuvwxyzABCDEFGHIJKLMNOPQRSTUV0123456789A
 -- Raw poll token: opt_9001e986d7d75a0051a2e832119dc17b3aec0390e8d1b986b0c2212fbc23cb5c
 --
 -- Matching pending file (~/.opslane/pending/00000000-0000-4000-8000-00000000a001.json):
@@ -10,14 +11,21 @@ INSERT INTO environments (id, project_id, name) VALUES
   ('00000000-0000-0000-0000-000000000101', '00000000-0000-0000-0000-000000000010', 'development')
 ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name;
 
--- key_hash is SHA256 of the raw key "e2e-development-key-plaintext".
-INSERT INTO environment_api_keys (id, environment_id, key_hash, key_prefix) VALUES
-  ('00000000-0000-0000-0000-000000001001', '00000000-0000-0000-0000-000000000101',
-   '508823bf8ff4d9f79476e49235816b554864b5fdc65f1c4a7e7abf58e24e397d', 'e2e-dev-')
+INSERT INTO project_api_keys
+  (id, key_id, project_id, scope, token_prefix, secret_hash, label)
+VALUES
+  ('00000000-0000-0000-0000-000000001001',
+   'onxw4z3fojrw63lqmfrwg33vnq',
+   '00000000-0000-0000-0000-000000000010',
+   'ingest',
+   'opslane_pk',
+   'e2add58b4892f2e3fde7989de34205c96a5b5dc1f195acb16c2bdbbfd73f304f',
+   'e2e agent setup')
 ON CONFLICT (id) DO UPDATE SET
-  environment_id = EXCLUDED.environment_id,
-  key_hash = EXCLUDED.key_hash,
-  revoked_at = NULL;
+  project_id = EXCLUDED.project_id,
+  secret_hash = EXCLUDED.secret_hash,
+  revoked_at = NULL,
+  revoked_by_user_id = NULL;
 
 INSERT INTO agent_sessions (
   id, repo_url, status, org_id, project_id, poll_token_hash, agent_key_pub,
@@ -30,7 +38,7 @@ INSERT INTO agent_sessions (
   '00000000-0000-0000-0000-000000000010',
   '1dd1432510c1f0541b2e3aeb3cc70e35766471c7e3859c8e370f47194da988e6',
   '9cjjJ7AOfdXVKfWwI3CsBHLxOf1YvmCOh+/V/KAG8Qk=',
-  'UhFCFG9oy9a5zir6ph2y/RW7VUxCr8+WAUOG3biuKHB/UTyXaKHDRzGr/DtR/tvbro6VXhW7lu1Gw9yGbUTsnHlHY5JLIh6JaNx5aRmwP2lgWgWXJ/wFORo=',
+  'gULXg04LcWTbbMRokirsvc3FdFuqTv/1YhRn/gfU9mdpEiPwRAbJeWi2S4plJp0n3vUmTDh5pt7RoqCsWtrHYsuD0lkK1+zTi0wW0mT3lf1ffiGC4VvftLh7Y+BAKzPJ56lg2iRUJpWfDjz467TaI9FxD+ZeaqaXGQxuOWAae5tS+LJcXaI8PEqo02Fl',
   now() + interval '24 hours',
   NULL,
   NULL,

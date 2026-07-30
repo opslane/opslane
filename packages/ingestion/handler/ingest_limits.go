@@ -11,9 +11,8 @@ import (
 // Public SDK keys ship in customer bundles and are not secret, so these cap burst
 // abuse per project. Generous defaults: real apps stay well under them.
 var (
-	eventsLimiter     = newRateLimiter(600) // ~10 errors/sec sustained
-	replaysLimiter    = newRateLimiter(120)
-	sourcemapsLimiter = newRateLimiter(20)
+	eventsLimiter  = newRateLimiter(600) // ~10 errors/sec sustained
+	replaysLimiter = newRateLimiter(120)
 
 	// Always-on recording: every session uploads a chunk every ~30s, and each
 	// chunk now costs 1 ingestion request (#194 collapsed the upload-url +
@@ -29,7 +28,7 @@ var (
 )
 
 // rateLimitByProject returns middleware that rate-limits by project_id set by
-// AuthenticateSDK. It must be chained after AuthenticateSDK.
+// ProjectKey. It must be chained after ProjectKey.
 func rateLimitByProject(limiter *rateLimiter) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

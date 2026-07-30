@@ -6,6 +6,7 @@ import { normalizeRepoURL, setup } from '../setup.js';
 import { loadPendingSession, savePendingSession } from '../pending.js';
 import { loadAgentCredentials, saveAgentCredentials } from '../agent-credentials.js';
 import { persistTokensTo } from '../auth.js';
+import { TEST_PUBLIC_KEY } from './fixtures.js';
 
 const pollId = '123e4567-e89b-42d3-a456-426614174000';
 const apiUrl = 'https://api.opslane.com';
@@ -173,6 +174,34 @@ describe('agent setup protocol', () => {
     expect(process.exit).toHaveBeenCalledWith(1);
     await expect(loadAgentCredentials({ filePath: credentialsPath, apiUrl, repo: 'acme/app' }))
       .resolves.toMatchObject({ api_key: 'old-key' });
+  });
+
+  it('validates an existing ingest key through the ingest ping', async () => {
+    await saveAgentCredentials({
+      org_id: 'org-1',
+      project_id: 'project-1',
+      api_key: TEST_PUBLIC_KEY,
+      repo: 'acme/app',
+      api_url: apiUrl,
+    }, credentialsPath);
+    const fetchFn = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      expect(init).toMatchObject({
+        method: 'POST',
+        headers: { 'X-API-Key': TEST_PUBLIC_KEY },
+      });
+      return new Response(null, { status: 204 });
+    });
+
+    await setup({ repo: 'acme/app', apiUrl, credentialsPath, pendingDir, fetchFn });
+
+    expect(fetchFn).toHaveBeenCalledWith(`${apiUrl}/api/v1/ingest/ping`, {
+      method: 'POST',
+      headers: { 'X-API-Key': TEST_PUBLIC_KEY },
+    });
+    expect(JSON.parse(String(log.mock.calls.at(-1)?.[0]))).toMatchObject({
+      status: 'already_configured',
+      project_id: 'project-1',
+    });
   });
 
   it.each([

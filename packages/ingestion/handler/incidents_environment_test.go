@@ -13,7 +13,7 @@ import (
 
 func TestListIncidentsValidatesAndScopesEnvironmentFilter(t *testing.T) {
 	deps, pool := testDeps(t)
-	orgID, projectID, productionID, rawKey := seedTenant(t, deps.Queries)
+	orgID, projectID, productionID, _ := seedTenant(t, deps.Queries)
 	t.Cleanup(func() { cleanupTenantHandler(t, pool, orgID) })
 	ctx := context.Background()
 
@@ -54,7 +54,7 @@ func TestListIncidentsValidatesAndScopesEnvironmentFilter(t *testing.T) {
 		t.Helper()
 		req := httptest.NewRequest(http.MethodGet,
 			"/api/v1/projects/"+projectID+"/incidents?environment_id="+environmentID, nil)
-		req.Header.Set("X-API-Key", rawKey)
+		req.Header.Set("Authorization", "Bearer "+dashboardToken(t, orgID))
 		response := httptest.NewRecorder()
 		router.ServeHTTP(response, req)
 		return response
@@ -83,7 +83,7 @@ func TestListIncidentsValidatesAndScopesEnvironmentFilter(t *testing.T) {
 
 	detailRequest := httptest.NewRequest(http.MethodGet,
 		"/api/v1/projects/"+projectID+"/incidents/"+productionGroupID, nil)
-	detailRequest.Header.Set("X-API-Key", rawKey)
+	detailRequest.Header.Set("Authorization", "Bearer "+dashboardToken(t, orgID))
 	detailResponse := httptest.NewRecorder()
 	router.ServeHTTP(detailResponse, detailRequest)
 	if detailResponse.Code != http.StatusOK {

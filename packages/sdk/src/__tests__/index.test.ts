@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { TEST_PK } from './test-keys';
 
 // We need to test the public API, so we mock the internals
 vi.mock('../core', () => ({
@@ -60,7 +61,7 @@ describe('SDK Public API', () => {
   it('should initialize all subsystems on init()', () => {
     init({
       endpoint: 'https://ingest.example.com',
-      apiKey: 'key-api',
+      apiKey: TEST_PK,
     });
 
     expect(core.installGlobalHandlers).toHaveBeenCalledTimes(1);
@@ -76,7 +77,7 @@ describe('SDK Public API', () => {
   it('should tear down all subsystems on destroy()', () => {
     init({
       endpoint: 'https://ingest.example.com',
-      apiKey: 'key-api',
+      apiKey: TEST_PK,
     });
 
     destroy();
@@ -94,12 +95,12 @@ describe('SDK Public API', () => {
   it('should not double-initialize', () => {
     init({
       endpoint: 'https://ingest.example.com',
-      apiKey: 'key-api',
+      apiKey: TEST_PK,
     });
 
     init({
       endpoint: 'https://ingest.example.com',
-      apiKey: 'key-api',
+      apiKey: TEST_PK,
     });
 
     expect(core.installGlobalHandlers).toHaveBeenCalledTimes(1);
@@ -120,7 +121,7 @@ describe('SDK Public API', () => {
     expect(() =>
       init({
         endpoint: 'https://ingest.example.com',
-        apiKey: 'key-api',
+        apiKey: TEST_PK,
       })
     ).not.toThrow();
   });

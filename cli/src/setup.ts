@@ -93,10 +93,10 @@ async function validateExistingCredential(
   fetchFn: typeof fetch,
 ): Promise<'valid' | 'invalid' | 'unreachable'> {
   try {
-    const response = await fetchFn(
-      `${creds.api_url}/api/v1/projects/${encodeURIComponent(creds.project_id)}/event-count`,
-      { headers: { 'X-API-Key': creds.api_key } },
-    );
+    const response = await fetchFn(`${creds.api_url}/api/v1/ingest/ping`, {
+      method: 'POST',
+      headers: { 'X-API-Key': creds.api_key },
+    });
     if (response.ok) return 'valid';
     return response.status === 401 || response.status === 403 ? 'invalid' : 'unreachable';
   } catch {

@@ -8,7 +8,6 @@ import Settings from './Settings.vue';
 import { getMe, listProjects, updateProject } from '../api';
 
 vi.mock('../api', () => ({
-  createAPIKey: vi.fn(),
   createEnvironment: vi.fn(),
   createInvitation: vi.fn(),
   createProject: vi.fn(),
@@ -20,7 +19,6 @@ vi.mock('../api', () => ({
   getGitHubAppStatus: vi.fn().mockResolvedValue({ installed: false }),
   getGitHubConfig: vi.fn().mockResolvedValue(null),
   getMe: vi.fn(),
-  listAPIKeys: vi.fn().mockResolvedValue([]),
   listEnvironments: vi.fn().mockResolvedValue({ environments: [], rollup_ready: true }),
   listInvitations: vi.fn().mockResolvedValue([]),
   listProjects: vi.fn(),

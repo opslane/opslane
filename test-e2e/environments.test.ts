@@ -90,21 +90,24 @@ describe.skipIf(!configured)('first-class environment ingestion', () => {
     await closePool();
   });
 
-  it('keeps one group across key environments with exact per-environment counts', async () => {
+  it('keeps one group across payload environments with exact per-environment counts', async () => {
     const marker = `environment-shared-${crypto.randomUUID()}`;
     const productionEvent = await ingest(tenant.apiKey, marker, { sharedFingerprint: true });
-    const stagingEvent = await ingest(staging.apiKey, marker, { sharedFingerprint: true });
+    const stagingEvent = await ingest(staging.apiKey, marker, {
+      environment: 'staging',
+      sharedFingerprint: true,
+    });
 
     expect(stagingEvent.groupId).toBe(productionEvent.groupId);
-    const all = await listIncidents(tenant.apiKey, tenant.projectId);
-    const production = await listIncidents(tenant.apiKey, tenant.projectId, tenant.environmentId);
-    const stagingOnly = await listIncidents(tenant.apiKey, tenant.projectId, staging.environmentId);
+    const all = await listIncidents(tenant.sessionToken, tenant.projectId);
+    const production = await listIncidents(tenant.sessionToken, tenant.projectId, tenant.environmentId);
+    const stagingOnly = await listIncidents(tenant.sessionToken, tenant.projectId, staging.environmentId);
     expect(all.find((incident) => incident.id === productionEvent.groupId)?.occurrence_count).toBe(2);
     expect(production.find((incident) => incident.id === productionEvent.groupId)?.occurrence_count).toBe(1);
     expect(stagingOnly.find((incident) => incident.id === productionEvent.groupId)?.occurrence_count).toBe(1);
   });
 
-  it('resolves opted-in names and accepts disabled, unknown, and invalid overrides into the key environment', async () => {
+  it('resolves opted-in names and falls back invalid overrides to production', async () => {
     const before = await scrapeMetrics();
     const beforeDisabled = metricValue(
       before,

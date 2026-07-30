@@ -21,7 +21,7 @@ const playwrightAvailable = await isPlaywrightAvailable();
 interface ProvisioningBundle {
   project: { id: string; name: string };
   environment: { id: string; name: string };
-  api_key: { id: string; raw_key: string; key_prefix: string };
+  api_key: { id: string; raw_key: string };
 }
 
 describe('first-class projects dashboard', () => {
@@ -178,8 +178,8 @@ describe('first-class projects dashboard', () => {
       ).toBe(201);
 
       await page.getByRole('heading', { name: 'Project created' }).waitFor();
-      const rawKey = (await page.getByText(/^def_/).textContent())?.trim() ?? '';
-      expect(rawKey).toMatch(/^def_/);
+      const rawKey = (await page.getByText(/^opslane_pk_/).textContent())?.trim() ?? '';
+      expect(rawKey).toMatch(/^opslane_pk_/);
       const done = page.getByRole('button', { name: 'Done' });
       expect(await done.isDisabled()).toBe(true);
       await page.getByText('I have copied and stored this key securely.').click();

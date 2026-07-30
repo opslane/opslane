@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { doctor, type CheckResult } from '../doctor.js';
 import { persistTokensTo } from '../auth.js';
 import { saveAgentCredentials } from '../agent-credentials.js';
+import { TEST_PUBLIC_KEY } from './fixtures.js';
 
 // Suppress console output during tests
 vi.spyOn(console, 'log').mockImplementation(() => {});
@@ -101,10 +102,10 @@ describe('doctor', () => {
     expect(authCheck?.message).toContain('login credentials');
   });
 
-  it('accepts repo-scoped agent credentials and validates their API key', async () => {
+  it('accepts repo-scoped agent credentials and validates their ingest key', async () => {
     const agentPath = join(credDir, 'agent-credentials.json');
     await saveAgentCredentials({
-      org_id: 'org', project_id: 'project', api_key: 'agent-key',
+      org_id: 'org', project_id: 'project', api_key: TEST_PUBLIC_KEY,
       repo: 'acme/app', api_url: 'https://api.opslane.com',
     }, agentPath);
     const results = await doctor({
@@ -115,15 +116,49 @@ describe('doctor', () => {
       fetchFn: (async (input: string | URL | Request, init?: RequestInit) => {
         const url = String(input);
         if (url.endsWith('/health')) return new Response(null, { status: 200 });
-        if (url.endsWith('/event-count')) {
-          expect(init?.headers).toEqual({ 'X-API-Key': 'agent-key' });
+        if (url.endsWith('/api/v1/ingest/ping')) {
+          expect(init?.method).toBe('POST');
+          expect(init?.headers).toEqual({ 'X-API-Key': TEST_PUBLIC_KEY });
           return new Response(JSON.stringify({ has_events: false }), { status: 200 });
         }
         return new Response(null, { status: 404 });
       }) as typeof fetch,
     });
     expect(results.find((result) => result.name === 'Authentication')?.passed).toBe(true);
-    expect(results.find((result) => result.name === 'API key')?.passed).toBe(true);
+    expect(results.find((result) => result.name === 'Ingest key')?.passed).toBe(true);
+  });
+
+  it('validates the user session separately from the ingest key', async () => {
+    await persistTokensTo(credFile, 'https://api.opslane.com', {
+      accessToken: 'valid-token',
+      refreshToken: 'valid-refresh',
+      expiresAt: Date.now() + 3600_000,
+    });
+    const fetchFn = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith('/health')) return new Response(null, { status: 200 });
+      if (url.endsWith('/api/v1/auth/verify')) {
+        expect(init?.headers).toEqual({ Authorization: 'Bearer valid-token' });
+        return new Response(null, { status: 200 });
+      }
+      return new Response(null, { status: 404 });
+    });
+
+    const results = await doctor({
+      cwd: tmpDir,
+      tokenPath: credFile,
+      credentialsPath: join(credDir, 'missing-agent.json'),
+      fetchFn,
+    });
+
+    expect(results.find((result) => result.name === 'Session')).toMatchObject({
+      passed: true,
+      message: 'Signed in',
+    });
+    expect(results.find((result) => result.name === 'Ingest key')).toMatchObject({
+      passed: false,
+      message: 'No stored key',
+    });
   });
 
   it('reports FAIL when credentials missing', async () => {
@@ -201,18 +236,19 @@ describe('doctor', () => {
     expect(callCount).toBeGreaterThan(0);
   });
 
-  it('runs all 4 checks', async () => {
+  it('runs all 5 checks', async () => {
     const results = await doctor({
       cwd: tmpDir,
       fetchFn: mockFetch('error', 'error'),
     });
 
-    expect(results).toHaveLength(4);
+    expect(results).toHaveLength(5);
     expect(results.map((r) => r.name)).toEqual([
       'Project config',
       'Authentication',
       'Ingestion service',
-      'API key',
+      'Session',
+      'Ingest key',
     ]);
   });
 

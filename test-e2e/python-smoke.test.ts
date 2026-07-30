@@ -117,14 +117,14 @@ interface IncidentRow {
 }
 
 async function listIncidentsRaw(
-  apiKey: string,
+  sessionToken: string,
   projectId: string,
   query = '',
 ): Promise<{ status: number; incidents: IncidentRow[] }> {
   const { ingestionUrl } = getConfig();
   const res = await fetch(
     `${ingestionUrl}/api/v1/projects/${projectId}/incidents${query}`,
-    { headers: { 'X-API-Key': apiKey } },
+    { headers: { Authorization: `Bearer ${sessionToken}` } },
   );
   if (!res.ok) return { status: res.status, incidents: [] };
   return { status: res.status, incidents: (await res.json()) as IncidentRow[] };
@@ -216,7 +216,7 @@ describe.runIf(HAS_FLASK)('python SDK live smoke (Flask fixture → ingestion)',
 
     // SDK transport is async — wait until both incidents landed and grouped.
     const incidents = await pollFor(
-      async () => (await listIncidentsRaw(tenant.apiKey, tenant.projectId)).incidents,
+      async () => (await listIncidentsRaw(tenant.sessionToken, tenant.projectId)).incidents,
       (rows) =>
         rows.length === 2 &&
         rows.some((r) => r.title.includes('seeded failure') && r.occurrence_count >= 2) &&
@@ -241,14 +241,14 @@ describe.runIf(HAS_FLASK)('python SDK live smoke (Flask fixture → ingestion)',
   });
 
   it('platform filter matches python, excludes javascript, rejects garbage', async () => {
-    const python = await listIncidentsRaw(tenant.apiKey, tenant.projectId, '?platform=python');
+    const python = await listIncidentsRaw(tenant.sessionToken, tenant.projectId, '?platform=python');
     expect(python.incidents.map((r) => r.platform)).toEqual(['python', 'python']);
 
-    const js = await listIncidentsRaw(tenant.apiKey, tenant.projectId, '?platform=javascript');
+    const js = await listIncidentsRaw(tenant.sessionToken, tenant.projectId, '?platform=javascript');
     expect(js.incidents).toHaveLength(0);
 
     const garbage = await listIncidentsRaw(
-      tenant.apiKey, tenant.projectId, '?platform=Not%20A%20Token',
+      tenant.sessionToken, tenant.projectId, '?platform=Not%20A%20Token',
     );
     expect(garbage.status).toBe(400);
   });
@@ -443,7 +443,7 @@ describe('python wire adversarial (hostile non-SDK client)', () => {
     expect(pyRes.status).toBe(202);
 
     const timeline = await listIncidentsRaw(
-      tenant.apiKey, tenant.projectId, `?end_user_id=${userId}`,
+      tenant.sessionToken, tenant.projectId, `?end_user_id=${userId}`,
     );
     expect(timeline.incidents).toHaveLength(2);
     expect(new Set(timeline.incidents.map((r) => r.platform))).toEqual(

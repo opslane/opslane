@@ -143,7 +143,7 @@ func (q *Queries) ProvisionOnboardSession(ctx context.Context, in OnboardProvisi
 		return nil, fmt.Errorf("provision onboard session: insert session: %w", err)
 	}
 
-	sealed, err := in.SealKey(sessionID, provisioning.APIKey.RawKey)
+	sealed, err := in.SealKey(sessionID, provisioning.APIKey.Raw)
 	if err != nil {
 		return nil, fmt.Errorf("provision onboard session: seal key: %w", err)
 	}
@@ -170,6 +170,6 @@ func (q *Queries) ProvisionOnboardSession(ctx context.Context, in OnboardProvisi
 		SessionID: sessionID,
 		OrgID:     in.OrgID,
 		ProjectID: provisioning.Project.ID,
-		RawKey:    provisioning.APIKey.RawKey,
+		RawKey:    provisioning.APIKey.Raw,
 	}, nil
 }

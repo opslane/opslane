@@ -638,9 +638,8 @@ func (d *Dependencies) CreateProjectEndpoint(w http.ResponseWriter, r *http.Requ
 			CreatedAt: provisioning.Environment.CreatedAt.Format(time.RFC3339),
 		},
 		"api_key": map[string]any{
-			"id":         provisioning.APIKey.ID,
-			"raw_key":    provisioning.APIKey.RawKey,
-			"key_prefix": provisioning.APIKey.KeyPrefix,
+			"id":      provisioning.APIKey.ID,
+			"raw_key": provisioning.APIKey.Raw,
 		},
 	})
 }
@@ -798,78 +797,6 @@ func (d *Dependencies) CreateEnvironmentEndpoint(w http.ResponseWriter, r *http.
 		Name:      env.Name,
 		CreatedAt: env.CreatedAt.Format(time.RFC3339),
 	})
-}
-
-// CreateAPIKeyEndpoint creates a new API key for an environment.
-// POST /api/v1/environments/{envID}/api-keys
-func (d *Dependencies) CreateAPIKeyEndpoint(w http.ResponseWriter, r *http.Request) {
-	ip := clientIP(r)
-	if !apiKeyLimiter.allow(ip) {
-		writeJSONError(w, http.StatusTooManyRequests, "too many requests, try again later")
-		return
-	}
-
-	orgID := OrgIDFromCtx(r.Context())
-	envID := chi.URLParam(r, "envID")
-
-	// Verify environment belongs to caller's org (tenant isolation)
-	projectID, err := d.Queries.VerifyEnvironmentAccess(r.Context(), orgID, envID)
-	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "internal error")
-		return
-	}
-	if projectID == "" {
-		writeJSONError(w, http.StatusNotFound, "environment not found")
-		return
-	}
-
-	key, err := d.Queries.CreateAPIKey(r.Context(), envID)
-	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "failed to create API key")
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(map[string]any{
-		"id":         key.ID,
-		"raw_key":    key.RawKey,
-		"key_prefix": key.KeyPrefix,
-	})
-}
-
-// ListAPIKeysEndpoint returns API keys for all environments in a project.
-// GET /api/v1/projects/{projectID}/api-keys
-func (d *Dependencies) ListAPIKeysEndpoint(w http.ResponseWriter, r *http.Request) {
-	projectID := chi.URLParam(r, "projectID")
-	if !d.verifyProjectAccess(w, r, projectID) {
-		return
-	}
-
-	keys, err := d.Queries.ListAPIKeys(r.Context(), projectID)
-	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "failed to list API keys")
-		return
-	}
-
-	result := make([]apiKeyInfoJSON, 0, len(keys))
-	for _, k := range keys {
-		info := apiKeyInfoJSON{
-			ID:              k.ID,
-			EnvironmentID:   k.EnvironmentID,
-			EnvironmentName: k.EnvironmentName,
-			KeyPrefix:       k.KeyPrefix,
-			CreatedAt:       k.CreatedAt.Format(time.RFC3339),
-		}
-		if k.RevokedAt != nil {
-			s := k.RevokedAt.Format(time.RFC3339)
-			info.RevokedAt = &s
-		}
-		result = append(result, info)
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(result)
 }
 
 // GetEventCountEndpoint returns whether a project has received any events.

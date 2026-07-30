@@ -4,7 +4,7 @@ All options accepted by `init()` from `@opslane/sdk`, mirrored from `SdkInitOpti
 
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
-| `apiKey` | `string` | *(required)* | Per-environment ingest key. `init` refuses to start without it. |
+| `apiKey` | `string` | *(required)* | Project-scoped public ingest key. It must start with `opslane_pk_`; `init` refuses to start without it. |
 | `endpoint` | `string` | `https://api.opslane.com` | Your Opslane instance; validated as an http(s) URL. |
 | `release` | `string` | `''` | Immutable build identifier (git SHA); must match uploaded source maps. |
 | `environment` | `string` | `''` | Optional deployment name sent with events and session initialization. The server uses it only when payload overrides are enabled for the project; existing session environment assignment takes precedence. |
@@ -19,4 +19,4 @@ All options accepted by `init()` from `@opslane/sdk`, mirrored from `SdkInitOpti
 | `errorThrottleMs` | `number` | `1000` | Minimum interval between reports of the same error. |
 | `beforeSend` | `(event) => event \| null` | `undefined` | Final hook: mutate the outgoing payload or return `null` to drop it. |
 
-Related exports: `captureException(err)`, `setUser({ id })`, `clearUser()`, `destroy()`, `opslaneVuePlugin`, and (from `@opslane/sdk/react`) `OpslaneErrorBoundary` / `captureReactError`. Build-time source-map upload lives in `@opslane/sdk/vite-plugin` — see the [SDK README](../../packages/sdk/README.md).
+Related exports: `captureException(err)`, `setUser({ id })`, `clearUser()`, `destroy()`, `opslaneVuePlugin`, and (from `@opslane/sdk/react`) `OpslaneErrorBoundary` / `captureReactError`. The `@opslane/sdk/vite-plugin` export is temporarily fail-loud while batch source-map upload is unavailable — see the [SDK README](../../packages/sdk/README.md).

@@ -41,15 +41,15 @@ func TestCreatesOrgProjectEnvironmentHierarchy(t *testing.T) {
 		t.Errorf("env.project_id = %q, want %q", env.ProjectID, project.ID)
 	}
 
-	// Create API key for environment
-	key, err := q.CreateAPIKey(ctx, env.ID)
+	// Create a project-scoped ingest key.
+	key, err := q.CreateProjectKey(ctx, project.ID, db.ScopeIngest, "test", nil)
 	if err != nil {
-		t.Fatalf("CreateAPIKey: %v", err)
+		t.Fatalf("CreateProjectKey: %v", err)
 	}
-	if key.RawKey == "" {
+	if key.Raw == "" {
 		t.Error("expected non-empty raw key")
 	}
-	if key.KeyPrefix == "" {
+	if key.TokenPrefix == "" {
 		t.Error("expected non-empty key prefix")
 	}
 
@@ -58,12 +58,9 @@ func TestCreatesOrgProjectEnvironmentHierarchy(t *testing.T) {
 	}
 
 	// Lookup API key resolves to correct tenant chain
-	lookup, err := q.LookupAPIKey(ctx, key.RawKey)
+	lookup, err := q.LookupProjectKey(ctx, key.Raw)
 	if err != nil {
-		t.Fatalf("LookupAPIKey: %v", err)
-	}
-	if lookup.EnvironmentID != env.ID {
-		t.Errorf("lookup.environment_id = %q, want %q", lookup.EnvironmentID, env.ID)
+		t.Fatalf("LookupProjectKey: %v", err)
 	}
 	if lookup.ProjectID != project.ID {
 		t.Errorf("lookup.project_id = %q, want %q", lookup.ProjectID, project.ID)

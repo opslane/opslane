@@ -39,15 +39,15 @@ func TestProjectFlagScansAndAPIKeyLookup(t *testing.T) {
 	if err != nil || got == nil || !got.AllowPayloadEnvironment {
 		t.Fatalf("get = %#v, err=%v", got, err)
 	}
-	environment, err := q.CreateEnvironment(ctx, project.ID, "production")
+	_, err = q.CreateEnvironment(ctx, project.ID, "production")
 	if err != nil {
 		t.Fatal(err)
 	}
-	key, err := q.CreateAPIKey(ctx, environment.ID)
+	key, err := q.CreateProjectKey(ctx, project.ID, db.ScopeIngest, "test", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	lookup, err := q.LookupAPIKey(ctx, key.RawKey)
+	lookup, err := q.LookupProjectKey(ctx, key.Raw)
 	if err != nil || !lookup.AllowPayloadEnvironment {
 		t.Fatalf("lookup = %#v, err=%v", lookup, err)
 	}

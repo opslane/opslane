@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { clearUser, getCurrentUser, onIdentityChange, setUser } from '../core';
 import { ensureSessionID, getSessionId, resetSessionId } from '../session';
 import { loadConfig, resetConfig } from '../config';
+import { TEST_PK } from './test-keys';
 
 describe('setUser session rotation', () => {
   beforeEach(() => {
@@ -10,7 +11,7 @@ describe('setUser session rotation', () => {
     resetConfig();
     onIdentityChange(null);
     clearUser();
-    loadConfig({ apiKey: 'k', endpoint: 'https://x.example.com' });
+    loadConfig({ apiKey: TEST_PK, endpoint: 'https://x.example.com' });
   });
 
   it('rotates the session id when identity changes', () => {

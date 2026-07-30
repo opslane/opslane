@@ -82,7 +82,10 @@ describe('project settings API', () => {
         name: 'production',
         created_at: '2026-07-19T00:00:00Z',
       },
-      api_key: { id: 'key-2', raw_key: 'def_secret', key_prefix: 'def_secret' },
+      api_key: {
+        id: 'key-2',
+        raw_key: 'opslane_pk_mzxw6ytboi3damrrgi3tknzxgq_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+      },
     };
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
