@@ -96,7 +96,7 @@ export async function verifyConnection(options: VerifyOptions = {}): Promise<Ver
         : `Session verification failed with status ${countResp.status}`,
     };
   }
-  const body = await countResp.json() as Record<string, unknown>;
+  const body = await countResp.json().catch(() => ({})) as Record<string, unknown>;
   const hasEvents = body['has_events'] === true;
 
   return {
