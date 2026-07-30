@@ -35,8 +35,19 @@ export async function writeEnvLocal(
     if (!ENV_VAR_NAME.test(name)) {
       throw new Error(`invalid environment variable name: ${JSON.stringify(name)}`);
     }
-    if (/[\r\n]/.test(vars[name] ?? '')) {
+    const value = vars[name] ?? '';
+    if (/[\r\n]/.test(value)) {
       throw new Error(`invalid environment variable value for ${name}: line breaks are not allowed`);
+    }
+    // .env.local feeds a browser bundle, so only the public ingest key may
+    // land here. This lives in the shared writer rather than in each caller
+    // because `opslane onboard` and `opslane setup` write through different
+    // paths, and only one of them used to check.
+    if (/^opslane_(sk|rk)_/.test(value)) {
+      throw new Error(
+        `refusing to write ${name}: only opslane_pk_ keys belong in browser code. `
+        + 'A key starting with opslane_sk_ is a secret and must never ship in a bundle.',
+      );
     }
   }
 
