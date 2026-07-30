@@ -78,7 +78,7 @@ export const AGENT_STATUSES = [
   agentStatus("sourcemaps install-plugin", "vite_config_resolve_timeout", 1, "stdout", "Post-edit Vite resolution timed out, the child stopped, and the original file was restored."),
   agentStatus("sourcemaps install-plugin", "config_changed_before_write", 1, "stdout", "The config changed after preview, so the command refused to overwrite it."),
   agentStatus("sourcemaps install-plugin", "repo_changed_during_verification", 1, "stdout", "Config execution changed another repository path; the command stopped and restored its edit."),
-  agentStatus("sourcemaps install-plugin", "write_failed", 1, "stdout", "The atomic config write failed and the original file was restored."),
+  agentStatus("sourcemaps install-plugin", "write_failed", 1, "stdout", "The atomic config write failed; the config was never replaced, so nothing needed restoring."),
   agentStatus("sourcemaps install-plugin", "restore_failed", 1, "stdout", "The original config could not be restored; recovery details and a backup path are reported."),
 ] as const satisfies readonly AgentStatusContract[];
 

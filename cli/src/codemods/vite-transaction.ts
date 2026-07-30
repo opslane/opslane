@@ -1,11 +1,15 @@
 import { execFileSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { readFileSync, realpathSync } from 'node:fs';
+import { mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
 import { writeFileAtomic } from '../fsutil.js';
 import { uncommittedFiles } from '../onboard/worktree.js';
-import { restoreSnapshot, snapshotRegularFile } from '../onboard/snapshot.js';
+import {
+  restoreSnapshot,
+  snapshotRegularFile,
+  type FileSnapshot,
+} from '../onboard/snapshot.js';
 import {
   DEFAULT_PLUGIN_CONTRACT,
   type PluginContractDeps,
@@ -181,6 +185,36 @@ function editTerminal(
   return { status: 'unsupported', file, reason: edit.reason };
 }
 
+/**
+ * The normal rollback keeps a copy when a restore fails, but it awaits the
+ * atomic write and a signal handler cannot await. Do the same job synchronously
+ * and report on stderr, which is the only channel still open on the way out.
+ */
+function writeInterruptRecovery(
+  repoRoot: string,
+  snapshot: FileSnapshot,
+  failure: string,
+): void {
+  try {
+    const directory = path.join(repoRoot, '.opslane-recovery');
+    mkdirSync(directory, { recursive: true });
+    const recoveryPath = path.join(
+      directory,
+      `${path.basename(snapshot.relative)}.${randomUUID()}.backup`,
+    );
+    writeFileSync(recoveryPath, snapshot.contents, { mode: snapshot.mode });
+    process.stderr.write(
+      `opslane: could not restore ${snapshot.relative} (${failure}). `
+      + `The original is saved at ${recoveryPath}\n`,
+    );
+  } catch {
+    process.stderr.write(
+      `opslane: could not restore ${snapshot.relative} (${failure}) and no backup `
+      + 'could be written. The config still holds the attempted edit.\n',
+    );
+  }
+}
+
 function assertParentContained(repoRoot: string, file: string): void {
   const rootReal = realpathSync(repoRoot);
   const parentReal = realpathSync(path.dirname(file));
@@ -211,6 +245,9 @@ export async function runViteTransaction(
     };
   }
 
+  // TypeScript drops the `discovery.ok` narrowing inside the nested helpers
+  // below, because it cannot prove when they run. Capture it once here.
+  const project = discovery;
   const originalText = discovery.snapshot.contents.toString('utf8');
   if (options.check) {
     const checked = await resolve({
@@ -311,7 +348,7 @@ export async function runViteTransaction(
     };
   }
 
-  let current;
+  let current: FileSnapshot;
   try {
     current = snapshotRegularFile(
       options.repoRoot,
@@ -385,40 +422,69 @@ export async function runViteTransaction(
     return failure;
   };
 
-  try {
-    assertParentContained(options.repoRoot, current.absolute);
-    await writeAtomic(current.absolute, edit.text, current.mode);
-  } catch (error) {
-    // The atomic write builds a temp file and renames it, so a failure here
-    // means the config was never replaced. Rolling back would truncate and
-    // rewrite a file that is already correct, which is the single operation
-    // most likely to lose it, and a failing write usually means a failing
-    // disk. Report and leave the file alone.
-    return {
-      status: 'write_failed',
-      file: current.relative,
-      reason: error instanceof Error ? error.message : String(error),
-    };
-  }
-
-  // The config now holds our edit and the only other copy of the original is
-  // in memory. An interrupt from here until the end of verification would take
-  // that copy with it, so put the file back before the process goes away.
+  const editedBytes = Buffer.from(edit.text, 'utf8');
+  // Installed before the write, not after it: the rename lands inside
+  // writeAtomic, so a signal delivered between that rename and the next line of
+  // JavaScript would otherwise leave the edit behind. The handler decides from
+  // the bytes on disk instead of from control flow, which makes it correct on
+  // both sides of the write, and makes it leave the file alone when neither the
+  // original nor our edit is there, because then somebody else owns it.
   const onInterrupt = (signal: NodeJS.Signals): void => {
-    try {
-      restore(current);
-    } catch {
-      // Nothing better is available on the way out; the failure is unreportable.
-    }
     process.removeListener('SIGINT', onInterrupt);
     process.removeListener('SIGTERM', onInterrupt);
+    try {
+      if (readFileSync(current.absolute).equals(editedBytes)) {
+        const failure = restore(current);
+        if (failure) writeInterruptRecovery(options.repoRoot, current, failure);
+      }
+    } catch (error) {
+      writeInterruptRecovery(
+        options.repoRoot,
+        current,
+        error instanceof Error ? error.message : String(error),
+      );
+    }
     process.kill(process.pid, signal);
   };
   process.on('SIGINT', onInterrupt);
   process.on('SIGTERM', onInterrupt);
 
   try {
-    const expected = Buffer.from(edit.text, 'utf8');
+    try {
+      assertParentContained(options.repoRoot, current.absolute);
+      await writeAtomic(current.absolute, edit.text, current.mode);
+    } catch (error) {
+      // The atomic write builds a temp file and renames it, so a failure here
+      // means the config was never replaced. Rolling back would rewrite a file
+      // that is already correct, and a failing write usually means a failing
+      // disk. Report and leave the file alone.
+      return {
+        status: 'write_failed',
+        file: current.relative,
+        reason: error instanceof Error ? error.message : String(error),
+      };
+    }
+
+    return await verifyAndFinish();
+  } finally {
+    process.removeListener('SIGINT', onInterrupt);
+    process.removeListener('SIGTERM', onInterrupt);
+  }
+
+  async function verifyAndFinish(): Promise<ViteTransactionResult> {
+    try {
+      return await verify();
+    } catch (error) {
+      return await rollback({
+        status: 'vite_config_broken_after_edit',
+        file: current.relative,
+        reason: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  async function verify(): Promise<ViteTransactionResult> {
+    const expected = editedBytes;
     const written = readFileSync(current.absolute);
     if (!written.equals(expected)) {
       return await rollback({
@@ -440,8 +506,8 @@ export async function runViteTransaction(
     }
 
     const verified = await resolve({
-      appDir: discovery.appDir,
-      configPath: discovery.configPath,
+      appDir: project.appDir,
+      configPath: project.configPath,
     });
     if (!verified.ok) {
       return await rollback({
@@ -478,22 +544,13 @@ export async function runViteTransaction(
         reason: 'A repository path other than the selected Vite config changed.',
       });
     }
-  } catch (error) {
-    return await rollback({
-      status: 'vite_config_broken_after_edit',
-      file: current.relative,
-      reason: error instanceof Error ? error.message : String(error),
-    });
-  } finally {
-    process.removeListener('SIGINT', onInterrupt);
-    process.removeListener('SIGTERM', onInterrupt);
-  }
 
-  return {
-    status: 'edited',
-    file: current.relative,
-    diff: proposal.diff,
-    disclosure: proposal.disclosure,
-    warnings,
-  };
+    return {
+      status: 'edited',
+      file: current.relative,
+      diff: proposal.diff,
+      disclosure: proposal.disclosure,
+      warnings,
+    };
+  }
 }

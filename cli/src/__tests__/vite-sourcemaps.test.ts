@@ -219,6 +219,8 @@ describe('addOpslanePlugin with the plugin name already bound', () => {
     ['import equals', `import opslane = require('other-pkg');\nexport default { plugins: [] };\n`],
     ['type alias', `type opslane = string;\nexport default { plugins: [] };\n`],
     ['interface', `interface opslane { a: string }\nexport default { plugins: [] };\n`],
+    ['var hoisted from a block', `if (process.env.X) { var opslane = 1; }\nexport default { plugins: [] };\n`],
+    ['var hoisted from a loop', `for (var opslane of [1]) {}\nexport default { plugins: [] };\n`],
   ];
 
   it.each(shadows)('refuses a config that already binds the name via %s', (_label, source) => {
@@ -233,8 +235,16 @@ describe('addOpslanePlugin with the plugin name already bound', () => {
       .toBe('edited');
   });
 
-  it('allows a binding that only exists in a nested scope', () => {
-    const source = `export default { plugins: [(() => { const opslane = 1; return null; })()] };\n`;
+  // `let` and `const` are block scoped, and a `var` inside a function belongs to
+  // that function, so none of these can collide with a top-level import.
+  const harmless: Array<[string, string]> = [
+    ['nested arrow', `export default { plugins: [(() => { const opslane = 1; return null; })()] };\n`],
+    ['let in a block', `if (process.env.X) { let opslane = 1; }\nexport default { plugins: [] };\n`],
+    ['const in a block', `if (process.env.X) { const opslane = 1; }\nexport default { plugins: [] };\n`],
+    ['var inside a function', `function f() { var opslane = 1; }\nexport default { plugins: [] };\n`],
+  ];
+
+  it.each(harmless)('still edits when the name is only bound by %s', (_label, source) => {
     expect(addOpslanePlugin(source, 'vite.config.ts').outcome).toBe('edited');
   });
 

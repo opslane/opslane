@@ -430,7 +430,30 @@ function topLevelBindingNames(sourceFile: ts.SourceFile): Set<string> {
       if (ts.isBindingElement(element)) addBinding(element.name);
     }
   };
+  // `var` is scoped to the module, not to the block it sits in, so a
+  // declaration buried in top-level control flow still collides with the
+  // import. Walk into those statements, but stop at anything that opens a new
+  // scope, because a binding in there cannot collide.
+  const addHoistedVars = (node: ts.Node): void => {
+    if (
+      ts.isFunctionDeclaration(node)
+      || ts.isFunctionExpression(node)
+      || ts.isArrowFunction(node)
+      || ts.isClassDeclaration(node)
+      || ts.isClassExpression(node)
+      || ts.isModuleDeclaration(node)
+    ) return;
+    if (
+      ts.isVariableDeclarationList(node)
+      && (node.flags & (ts.NodeFlags.Let | ts.NodeFlags.Const)) === 0
+    ) {
+      for (const declaration of node.declarations) addBinding(declaration.name);
+    }
+    node.forEachChild(addHoistedVars);
+  };
+
   for (const statement of sourceFile.statements) {
+    addHoistedVars(statement);
     if (ts.isImportDeclaration(statement)) {
       const clause = statement.importClause;
       if (!clause) continue;
