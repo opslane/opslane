@@ -36,6 +36,23 @@ describe('snapshotRegularFile and restoreSnapshot', () => {
     expect(readFileSync(file).equals(snapshot.contents)).toBe(true);
     expect(lstatSync(file).mode).toBe(snapshot.mode);
   });
+
+  // A truncate-then-write restore leaves the config empty if the write step
+  // fails, and at that moment the original bytes exist only in this process.
+  it('leaves the target intact when the write step fails', async () => {
+    const { root, file } = await fixture();
+    const snapshot = snapshotRegularFile(root, 'vite.config.ts', 1024);
+    writeFileSync(file, 'clobbered by the edit\n');
+    Object.defineProperty(snapshot, 'contents', {
+      get(): Buffer {
+        throw new Error('simulated write failure');
+      },
+    });
+
+    expect(restoreSnapshot(snapshot)).toMatch(/simulated write failure/);
+    expect(readFileSync(file, 'utf8')).toBe('clobbered by the edit\n');
+    expect(readdirSync(root)).toEqual(['vite.config.ts']);
+  });
 });
 
 describe('writeFileAtomic', () => {

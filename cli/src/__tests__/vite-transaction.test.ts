@@ -234,4 +234,46 @@ describe('runViteTransaction', () => {
     });
     expect(readFileSync(file).equals(before)).toBe(true);
   });
+
+  // The atomic write renames a temp file into place, so a failure means the
+  // config was never replaced. Restoring it anyway would rewrite a file that is
+  // already correct, on a disk that just proved it cannot be written to.
+  it('does not restore when the write never landed', async () => {
+    const root = await fixture();
+    const file = join(root, 'vite.config.ts');
+    const before = readFileSync(file);
+    const injected = deps([clean, wired]);
+    let restores = 0;
+    injected.writeAtomic = async () => {
+      throw new Error('ENOSPC: no space left on device');
+    };
+    injected.restore = () => {
+      restores += 1;
+      return undefined;
+    };
+
+    const result = await runViteTransaction({ repoRoot: root, apply: true }, injected);
+    expect(result).toMatchObject({ status: 'write_failed', file: 'vite.config.ts' });
+    expect(restores).toBe(0);
+    expect(readFileSync(file).equals(before)).toBe(true);
+  });
+
+  // The window between the write and the end of verification is the only time
+  // the original exists solely in memory.
+  it('holds interrupt handlers only while the config carries the edit', async () => {
+    const root = await fixture();
+    const baseline = process.listenerCount('SIGINT');
+    const injected = deps([clean, wired]);
+    let duringVerification = -1;
+    injected.resolve = async () => {
+      duringVerification = process.listenerCount('SIGINT');
+      return wired;
+    };
+
+    const result = await runViteTransaction({ repoRoot: root, apply: true }, injected);
+    expect(result.status).toBe('edited');
+    expect(duringVerification).toBe(baseline + 1);
+    expect(process.listenerCount('SIGINT')).toBe(baseline);
+    expect(process.listenerCount('SIGTERM')).toBe(baseline);
+  });
 });

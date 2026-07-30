@@ -389,12 +389,33 @@ export async function runViteTransaction(
     assertParentContained(options.repoRoot, current.absolute);
     await writeAtomic(current.absolute, edit.text, current.mode);
   } catch (error) {
-    return await rollback({
+    // The atomic write builds a temp file and renames it, so a failure here
+    // means the config was never replaced. Rolling back would truncate and
+    // rewrite a file that is already correct, which is the single operation
+    // most likely to lose it, and a failing write usually means a failing
+    // disk. Report and leave the file alone.
+    return {
       status: 'write_failed',
       file: current.relative,
       reason: error instanceof Error ? error.message : String(error),
-    });
+    };
   }
+
+  // The config now holds our edit and the only other copy of the original is
+  // in memory. An interrupt from here until the end of verification would take
+  // that copy with it, so put the file back before the process goes away.
+  const onInterrupt = (signal: NodeJS.Signals): void => {
+    try {
+      restore(current);
+    } catch {
+      // Nothing better is available on the way out; the failure is unreportable.
+    }
+    process.removeListener('SIGINT', onInterrupt);
+    process.removeListener('SIGTERM', onInterrupt);
+    process.kill(process.pid, signal);
+  };
+  process.on('SIGINT', onInterrupt);
+  process.on('SIGTERM', onInterrupt);
 
   try {
     const expected = Buffer.from(edit.text, 'utf8');
@@ -463,6 +484,9 @@ export async function runViteTransaction(
       file: current.relative,
       reason: error instanceof Error ? error.message : String(error),
     });
+  } finally {
+    process.removeListener('SIGINT', onInterrupt);
+    process.removeListener('SIGTERM', onInterrupt);
   }
 
   return {

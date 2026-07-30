@@ -1,14 +1,17 @@
+import { randomBytes } from 'node:crypto';
 import {
   closeSync,
   constants,
   existsSync,
   fchmodSync,
   fstatSync,
-  ftruncateSync,
+  fsyncSync,
   lstatSync,
   openSync,
   readFileSync,
   realpathSync,
+  renameSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import path from 'node:path';
@@ -52,6 +55,9 @@ export function snapshotRegularFile(
 }
 
 export function restoreSnapshot(snapshot: FileSnapshot): string | undefined {
+  const temporary = `${snapshot.absolute}.${process.pid}.${
+    randomBytes(8).toString('hex')
+  }.restore`;
   let descriptor: number | undefined;
   try {
     const parentReal = realpathSync(path.dirname(snapshot.absolute));
@@ -59,29 +65,39 @@ export function restoreSnapshot(snapshot: FileSnapshot): string | undefined {
     if (parentReal !== rootReal && !parentReal.startsWith(rootReal + path.sep)) {
       throw new Error('parent directory escaped the repository');
     }
-    const exists = existsSync(snapshot.absolute);
-    const flags = exists
-      ? constants.O_WRONLY | constants.O_NOFOLLOW
-      : constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL;
-    if (exists) {
+    if (existsSync(snapshot.absolute)) {
       const current = lstatSync(snapshot.absolute);
       if (current.isSymbolicLink()) throw new Error('path became a symbolic link');
       if (!current.isFile() || current.nlink > 1) {
         throw new Error('path is no longer a regular unlinked file');
       }
     }
-    descriptor = openSync(snapshot.absolute, flags, snapshot.mode);
-    const opened = fstatSync(descriptor);
-    if (!opened.isFile() || opened.nlink > 1) {
-      throw new Error('opened path is no longer a regular unlinked file');
-    }
-    ftruncateSync(descriptor, 0);
+    // Write to a sibling and rename over the target. Truncating the real file
+    // and then writing into it leaves the config empty if anything interrupts
+    // the write, and at that moment the original bytes exist only in memory.
+    // O_EXCL keeps this from following or reusing an attacker-planted path.
+    descriptor = openSync(
+      temporary,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL,
+      snapshot.mode,
+    );
     writeFileSync(descriptor, snapshot.contents);
+    // Creation mode is filtered by umask; restore the recorded mode exactly.
     fchmodSync(descriptor, snapshot.mode);
+    fsyncSync(descriptor);
+    closeSync(descriptor);
+    descriptor = undefined;
+    renameSync(temporary, snapshot.absolute);
     return undefined;
   } catch (error) {
     return `${snapshot.relative}: ${error instanceof Error ? error.message : String(error)}`;
   } finally {
     if (descriptor !== undefined) closeSync(descriptor);
+    // A successful rename consumed the temp file; anything left is debris.
+    try {
+      if (existsSync(temporary)) unlinkSync(temporary);
+    } catch {
+      // Leaving a stray temp file is strictly better than masking the real error.
+    }
   }
 }
