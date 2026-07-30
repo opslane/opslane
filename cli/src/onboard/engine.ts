@@ -1,15 +1,4 @@
 import { createHash } from 'node:crypto';
-import {
-  closeSync,
-  constants,
-  existsSync,
-  lstatSync,
-  openSync,
-  readFileSync,
-  realpathSync,
-  statSync,
-  writeFileSync,
-} from 'node:fs';
 import path from 'node:path';
 
 import {
@@ -26,8 +15,13 @@ import {
   onboardPreToolUseHook,
   type ApprovalRequest,
 } from './policy.js';
-import { containedRepoRelative, hasSecretSegment } from './paths.js';
+import { containedRepoRelative } from './paths.js';
 import { createSearchTool } from './search-tool.js';
+import {
+  restoreSnapshot,
+  snapshotRegularFile,
+  type FileSnapshot,
+} from './snapshot.js';
 import { renderApplySpec, renderDetectSpec } from './spec.js';
 import {
   createAskUserTool,
@@ -372,14 +366,6 @@ export async function runDetect({
   return core;
 }
 
-interface FileSnapshot {
-  root: string;
-  absolute: string;
-  relative: string;
-  contents: Buffer;
-  mode: number;
-}
-
 function hash(contents: Buffer): string {
   return createHash('sha256').update(contents).digest('hex');
 }
@@ -406,60 +392,6 @@ function anchorIsWholeLine(contents: string, anchor: string, occurrence: number)
     /^[\t ]*$/.test(contents.slice(lineStart, offset)) &&
     /^[\t ]*\r?$/.test(contents.slice(offset + anchor.length, lineEnd))
   );
-}
-
-function snapshotRegularFile(root: string, relative: string, maxBytes: number): FileSnapshot {
-  const canonical = containedRepoRelative(root, relative);
-  if (canonical !== relative || hasSecretSegment(canonical)) {
-    throw new Error(`unsafe plan path: ${relative}`);
-  }
-  const absolute = path.join(root, canonical);
-  const linkStat = lstatSync(absolute);
-  const metadata = statSync(absolute);
-  if (
-    linkStat.isSymbolicLink() ||
-    !metadata.isFile() ||
-    metadata.nlink > 1 || // hard link may alias an outside file
-    metadata.size > maxBytes
-  ) {
-    throw new Error(`plan path is not a regular file: ${relative}`);
-  }
-  return {
-    root,
-    absolute,
-    relative: canonical,
-    contents: readFileSync(absolute),
-    mode: linkStat.mode,
-  };
-}
-
-function restoreSnapshot(snapshot: FileSnapshot): string | undefined {
-  let descriptor: number | undefined;
-  try {
-    // O_NOFOLLOW only guards the final component. If a PARENT directory was
-    // swapped for a symlink after the snapshot, the write would land outside the
-    // repo. Re-verify the parent still resolves inside the repo before writing.
-    // (A perfectly-timed race between this check and the open is a local
-    // filesystem-racing attack, out of Phase 1b's threat model.)
-    const parentReal = realpathSync(path.dirname(snapshot.absolute));
-    const rootReal = realpathSync(snapshot.root);
-    if (parentReal !== rootReal && !parentReal.startsWith(rootReal + path.sep)) {
-      throw new Error('parent directory escaped the repository');
-    }
-    const flags = existsSync(snapshot.absolute)
-      ? constants.O_WRONLY | constants.O_TRUNC | constants.O_NOFOLLOW
-      : constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL;
-    if (existsSync(snapshot.absolute) && lstatSync(snapshot.absolute).isSymbolicLink()) {
-      throw new Error('path became a symbolic link');
-    }
-    descriptor = openSync(snapshot.absolute, flags, snapshot.mode);
-    writeFileSync(descriptor, snapshot.contents);
-    return undefined;
-  } catch (error) {
-    return `${snapshot.relative}: ${error instanceof Error ? error.message : String(error)}`;
-  } finally {
-    if (descriptor !== undefined) closeSync(descriptor);
-  }
 }
 
 function sameSet(left: Iterable<string>, right: Iterable<string>): boolean {

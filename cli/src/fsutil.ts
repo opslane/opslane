@@ -13,15 +13,23 @@ const LOCK_STALE_MS = 30_000;
 
 export async function writeFileAtomic(
   filePath: string,
-  contents: string,
+  contents: string | Buffer,
+  mode = 0o600,
 ): Promise<void> {
   await mkdir(dirname(filePath), { recursive: true });
   const suffix = randomBytes(8).toString('hex');
   const tempPath = `${filePath}.${process.pid}.${suffix}.tmp`;
-  const handle = await open(tempPath, 'wx', 0o600);
+  const handle = await open(tempPath, 'wx', mode);
   try {
     try {
-      await handle.writeFile(contents, 'utf8');
+      if (typeof contents === 'string') {
+        await handle.writeFile(contents, 'utf8');
+      } else {
+        await handle.writeFile(contents);
+      }
+      // Creation mode is filtered by umask. Restore the requested mode before
+      // the rename so replacing a customer-owned config preserves permissions.
+      await handle.chmod(mode);
       await handle.sync();
     } finally {
       await handle.close();
