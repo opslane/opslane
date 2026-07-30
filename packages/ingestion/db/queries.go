@@ -402,6 +402,8 @@ type IngestParams struct {
 	Breadcrumbs   string // JSON, defaults to "[]"
 	Context       string // JSON, defaults to "{}"
 	Release       string // source map lookup
+	DebugMeta     string // JSON, defaults to {"images":[]}
+	CommitSHA     string // optional lowercase Git object ID
 	SessionID     string // links error event to replay
 	Platform      string // javascript | python | future wire token; empty defaults to javascript
 	// EventTime is the validated client-side event time (issue #27). Zero
@@ -438,6 +440,9 @@ func (q *Queries) InsertErrorEventAndGroup(ctx context.Context, p IngestParams) 
 	if p.Context == "" {
 		p.Context = "{}"
 	}
+	if p.DebugMeta == "" {
+		p.DebugMeta = `{"images":[]}`
+	}
 	if p.Platform == "" {
 		p.Platform = "javascript"
 	}
@@ -473,10 +478,10 @@ func (q *Queries) InsertErrorEventAndGroup(ctx context.Context, p IngestParams) 
 	// 1. Insert error event
 	var eventID string
 	err = tx.QueryRow(ctx,
-		`INSERT INTO error_events (project_id, environment_id, timestamp, error_type, error_message, stack_trace_raw, breadcrumbs, context, release, session_id, platform)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9, $10, $11)
+		`INSERT INTO error_events (project_id, environment_id, timestamp, error_type, error_message, stack_trace_raw, breadcrumbs, context, release, session_id, platform, debug_meta, commit_sha)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9, $10, $11, $12::jsonb, $13)
 		 RETURNING id`,
-		p.ProjectID, p.EnvironmentID, eventTime, p.ErrorType, p.ErrorMessage, p.StackTraceRaw, p.Breadcrumbs, p.Context, nilIfEmpty(p.Release), nilIfEmpty(p.SessionID), p.Platform,
+		p.ProjectID, p.EnvironmentID, eventTime, p.ErrorType, p.ErrorMessage, p.StackTraceRaw, p.Breadcrumbs, p.Context, nilIfEmpty(p.Release), nilIfEmpty(p.SessionID), p.Platform, p.DebugMeta, nilIfEmpty(p.CommitSHA),
 	).Scan(&eventID)
 	if err != nil {
 		return nil, fmt.Errorf("insert error event: %w", err)
