@@ -655,7 +655,7 @@ PostgreSQL upgrades.
 ```http
 POST /api/v1/sourcemaps/batches
 X-API-Key: opslane_sk_...
-Idempotency-Key: 7f70766a-bda8-4ff7-bdc8-f8763aca3a82
+Idempotency-Key: <request-uuid>
 Content-Type: application/json
 
 {
