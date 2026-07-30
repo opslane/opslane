@@ -445,8 +445,19 @@ function topLevelBindingNames(sourceFile: ts.SourceFile): Set<string> {
         addBinding(declaration.name);
       }
     } else if (
-      (ts.isFunctionDeclaration(statement) || ts.isClassDeclaration(statement))
+      // Enums, namespaces and `import x = require()` all declare a runtime
+      // value. Type aliases and interfaces are erased, but a redeclaration
+      // still fails the customer's own type check, and refusing costs them
+      // only the documented manual path.
+      (ts.isFunctionDeclaration(statement)
+        || ts.isClassDeclaration(statement)
+        || ts.isEnumDeclaration(statement)
+        || ts.isModuleDeclaration(statement)
+        || ts.isImportEqualsDeclaration(statement)
+        || ts.isTypeAliasDeclaration(statement)
+        || ts.isInterfaceDeclaration(statement))
       && statement.name
+      && ts.isIdentifier(statement.name)
     ) {
       names.add(statement.name.text);
     }

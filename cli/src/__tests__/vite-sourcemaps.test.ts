@@ -211,6 +211,14 @@ describe('addOpslanePlugin with the plugin name already bound', () => {
     ['const', `const opslane = () => ({});\nexport default { plugins: [] };\n`],
     ['function', `function opslane() { return {}; }\nexport default { plugins: [] };\n`],
     ['destructured const', `const { opslane } = require('x');\nexport default { plugins: [] };\n`],
+    ['array destructure', `const [opslane] = [1];\nexport default { plugins: [] };\n`],
+    ['renamed import', `import { plugin as opslane } from 'other-pkg';\nexport default { plugins: [] };\n`],
+    ['class', `class opslane {}\nexport default { plugins: [] };\n`],
+    ['enum', `enum opslane { a }\nexport default { plugins: [] };\n`],
+    ['namespace', `namespace opslane {}\nexport default { plugins: [] };\n`],
+    ['import equals', `import opslane = require('other-pkg');\nexport default { plugins: [] };\n`],
+    ['type alias', `type opslane = string;\nexport default { plugins: [] };\n`],
+    ['interface', `interface opslane { a: string }\nexport default { plugins: [] };\n`],
   ];
 
   it.each(shadows)('refuses a config that already binds the name via %s', (_label, source) => {
@@ -223,6 +231,11 @@ describe('addOpslanePlugin with the plugin name already bound', () => {
   it('still edits a config that does not bind the name', () => {
     expect(addOpslanePlugin(`export default { plugins: [] };\n`, 'vite.config.ts').outcome)
       .toBe('edited');
+  });
+
+  it('allows a binding that only exists in a nested scope', () => {
+    const source = `export default { plugins: [(() => { const opslane = 1; return null; })()] };\n`;
+    expect(addOpslanePlugin(source, 'vite.config.ts').outcome).toBe('edited');
   });
 
   it('still reports our own registration as already wired', () => {
