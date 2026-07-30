@@ -51,4 +51,22 @@ regexes = [
   # plan). The database stores only its hash; the raw value is published on
   # purpose so the smoke can authenticate against the seeded session.
   '''opt_9001e986d7d75a0051a2e832119dc17b3aec0390e8d1b986b0c2212fbc23cb5c''',
+  # Project-key fixtures. Every documented and test example reuses the single
+  # placeholder key id from the frozen S0 contract, so allowlisting that id
+  # clears the fixtures without weakening detection: a real opslane_pk_ or
+  # opslane_sk_ carries 128 random bits here and still trips the scanner.
+  # Do NOT broaden this to the bare prefixes; the prefixes exist precisely so
+  # scanners can spot a leaked key.
+  '''opslane_(pk|sk)_mzxw6ytboi3damrrgi3tknzxgq_[A-Za-z0-9_-]+''',
+  # The browser fixture app's ingest key. Public by design: it ships inside a
+  # bundle, which is the whole point of a public key, and it points at a
+  # throwaway local project.
+  '''opslane_pk_mzxw6ytboi3damrrgi3tknzxgq_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopq''',
+  # Fake legacy key used to prove def_ credentials are rejected and redacted.
+  # The format was retired in S1 and this exact UUID authenticates nothing.
+  '''def_2f1c9a44-1b3e-4f4a-9c7a-4b2d8e6f0a11''',
+  # Parser vector whose secret deliberately contains underscores. base64url
+  # includes "_", so roughly half of all real keys contain one; this fixture
+  # proves the parser splits on the first three separators only.
+  '''a_b_c_deFGHIJKLMNOPQRSTUVWXYZ0123456789-_x''',
 ]
