@@ -1,5 +1,5 @@
 // @vitest-environment node
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -11,14 +11,18 @@ import { resetSessionId } from '../session';
 import { _resetThrottle } from '../throttle';
 import { _resetQueue, enqueueEvent, flushEvents } from '../transport';
 import { TEST_PK } from './test-keys';
+import {
+  COMMIT_SHA_GLOBAL,
+  REGISTRY_GLOBAL,
+} from '../build/registry-contract';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const packageMetadata = JSON.parse(readFileSync(join(here, '../../package.json'), 'utf8')) as { version: string };
 const fixtureDir = join(here, '../../../../test-fixtures/wire/events');
+const WIRE_FIXTURE_VERSION = '2.1.0';
 
 function loadFixture(kind: 'minimal' | 'full'): unknown {
   return JSON.parse(
-    readFileSync(join(fixtureDir, `v${packageMetadata.version}-${kind}.json`), 'utf8'),
+    readFileSync(join(fixtureDir, `v${WIRE_FIXTURE_VERSION}-${kind}.json`), 'utf8'),
   );
 }
 
@@ -67,6 +71,13 @@ describe('SDK emits the frozen wire shape', () => {
     _resetThrottle();
     clearBreadcrumbs();
     clearUser();
+    delete (globalThis as Record<string, unknown>)[REGISTRY_GLOBAL];
+    delete (globalThis as Record<string, unknown>)[COMMIT_SHA_GLOBAL];
+  });
+
+  afterEach(() => {
+    delete (globalThis as Record<string, unknown>)[REGISTRY_GLOBAL];
+    delete (globalThis as Record<string, unknown>)[COMMIT_SHA_GLOBAL];
   });
 
   it('minimal payload matches the frozen fixture', async () => {
@@ -91,6 +102,13 @@ describe('SDK emits the frozen wire shape', () => {
   });
 
   it('full payload matches the frozen fixture', async () => {
+    (globalThis as Record<string, unknown>)[REGISTRY_GLOBAL] = {
+      'https://app.example.com/assets/index.js': [
+        '01234567-89ab-cdef-0123-456789abcdef',
+      ],
+    };
+    (globalThis as Record<string, unknown>)[COMMIT_SHA_GLOBAL] =
+      'e60b4d1e113538d40f09e31717e949aaa08659f8';
     loadConfig({
       apiKey: TEST_PK,
       endpoint: 'https://api.test',
