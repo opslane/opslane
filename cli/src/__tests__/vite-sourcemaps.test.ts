@@ -196,3 +196,38 @@ export default defineConfig({
     ).outcome).toBe('unsupported');
   });
 });
+
+/**
+ * Inserting the plugin import next to an existing binding of the same name is a
+ * redeclaration. TypeScript accepts it as valid grammar, so the parse check and
+ * the post-write structural re-read both pass, and only the real Vite load
+ * fails. Any `opslane()` already in the plugin list also changes meaning.
+ */
+describe('addOpslanePlugin with the plugin name already bound', () => {
+  const shadows: Array<[string, string]> = [
+    ['default import', `import opslane from 'other-pkg';\nexport default { plugins: [opslane()] };\n`],
+    ['named import', `import { opslane } from 'other-pkg';\nexport default { plugins: [] };\n`],
+    ['namespace import', `import * as opslane from 'other-pkg';\nexport default { plugins: [] };\n`],
+    ['const', `const opslane = () => ({});\nexport default { plugins: [] };\n`],
+    ['function', `function opslane() { return {}; }\nexport default { plugins: [] };\n`],
+    ['destructured const', `const { opslane } = require('x');\nexport default { plugins: [] };\n`],
+  ];
+
+  it.each(shadows)('refuses a config that already binds the name via %s', (_label, source) => {
+    expect(addOpslanePlugin(source, 'vite.config.ts')).toMatchObject({
+      outcome: 'unsupported',
+      reason: 'plugin_name_taken',
+    });
+  });
+
+  it('still edits a config that does not bind the name', () => {
+    expect(addOpslanePlugin(`export default { plugins: [] };\n`, 'vite.config.ts').outcome)
+      .toBe('edited');
+  });
+
+  it('still reports our own registration as already wired', () => {
+    const source = `import { opslane } from '@opslane/sdk/vite-plugin';\n`
+      + `export default { plugins: [opslane()] };\n`;
+    expect(addOpslanePlugin(source, 'vite.config.ts').outcome).toBe('already_wired');
+  });
+});

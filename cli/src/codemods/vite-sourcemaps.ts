@@ -12,7 +12,8 @@ export type ViteUnsupportedReason =
   | 'plugins_shorthand'
   | 'duplicate_plugins_key'
   | 'plugins_would_be_overwritten'
-  | 'unsafe_suggestion';
+  | 'unsafe_suggestion'
+  | 'plugin_name_taken';
 
 export type PluginListLookup =
   | {
@@ -413,6 +414,46 @@ function pluginWouldBeOverwritten(lookup: Exclude<PluginListLookup, { found: 'no
   );
 }
 
+/**
+ * Every name the config already binds at the top level. Inserting our import
+ * next to a binding of the same name is a redeclaration, which the TypeScript
+ * parser accepts as valid grammar, so nothing downstream would notice.
+ */
+function topLevelBindingNames(sourceFile: ts.SourceFile): Set<string> {
+  const names = new Set<string>();
+  const addBinding = (name: ts.BindingName): void => {
+    if (ts.isIdentifier(name)) {
+      names.add(name.text);
+      return;
+    }
+    for (const element of name.elements) {
+      if (ts.isBindingElement(element)) addBinding(element.name);
+    }
+  };
+  for (const statement of sourceFile.statements) {
+    if (ts.isImportDeclaration(statement)) {
+      const clause = statement.importClause;
+      if (!clause) continue;
+      if (clause.name) names.add(clause.name.text);
+      const bindings = clause.namedBindings;
+      if (bindings && ts.isNamespaceImport(bindings)) names.add(bindings.name.text);
+      if (bindings && ts.isNamedImports(bindings)) {
+        for (const element of bindings.elements) names.add(element.name.text);
+      }
+    } else if (ts.isVariableStatement(statement)) {
+      for (const declaration of statement.declarationList.declarations) {
+        addBinding(declaration.name);
+      }
+    } else if (
+      (ts.isFunctionDeclaration(statement) || ts.isClassDeclaration(statement))
+      && statement.name
+    ) {
+      names.add(statement.name.text);
+    }
+  }
+  return names;
+}
+
 function policyTerminal(
   lookup: Exclude<PluginListLookup, { found: 'none' }>,
   policy: ViteEditPolicy,
@@ -432,6 +473,13 @@ function policyTerminal(
     && listCallsFactory(lookup.list, lookup.sourceFile, factoryLocal)
   ) {
     return { outcome: 'already_wired', text: lookup.sourceFile.text };
+  }
+  // Without an existing binding we insert `contract.importLine`, which declares
+  // `contract.exportName`. If the config already binds that name, the edit is a
+  // redeclaration that parses cleanly and then fails at runtime, and any call
+  // already in the plugin list silently changes meaning. Refuse instead.
+  if (!factoryLocal && topLevelBindingNames(lookup.sourceFile).has(contract.exportName)) {
+    return { outcome: 'unsupported', reason: 'plugin_name_taken' };
   }
   return undefined;
 }
