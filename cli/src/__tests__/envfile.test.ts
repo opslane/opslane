@@ -108,3 +108,32 @@ describe('writeEnvLocal', () => {
     })).rejects.toThrow(/line breaks/);
   });
 });
+
+describe('writeEnvLocal refuses secrets', () => {
+  it('writes a public ingest key', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'envfile-pk-'));
+    await writeEnvLocal(dir, {
+      VITE_OPSLANE_API_KEY:
+        'opslane_pk_mzxw6ytboi3damrrgi3tknzxgq_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789-_ab',
+    });
+    const body = await readFile(join(dir, '.env.local'), 'utf8');
+    expect(body).toContain('opslane_pk_');
+  });
+
+  it('refuses a source-map secret key', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'envfile-sk-'));
+    await expect(writeEnvLocal(dir, {
+      VITE_OPSLANE_API_KEY:
+        'opslane_sk_mzxw6ytboi3damrrgi3tknzxgq_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789-_ab',
+    })).rejects.toThrow(/only opslane_pk_ keys belong in browser code/);
+  });
+
+  it('leaves no .env.local behind when it refuses', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'envfile-none-'));
+    await expect(writeEnvLocal(dir, {
+      VITE_OPSLANE_API_KEY:
+        'opslane_sk_mzxw6ytboi3damrrgi3tknzxgq_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789-_ab',
+    })).rejects.toThrow();
+    await expect(readFile(join(dir, '.env.local'), 'utf8')).rejects.toThrow();
+  });
+});

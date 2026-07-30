@@ -1,5 +1,5 @@
 import type { SdkInitOptions } from './config';
-import { loadConfig, resetConfig } from './config';
+import { InvalidApiKeyError, loadConfig, resetConfig } from './config';
 import { captureException, installGlobalHandlers, onIdentityChange, uninstallGlobalHandlers, setUser, clearUser } from './core';
 import { patchConsole, unpatchConsole } from './console';
 import { patchFetch, unpatchFetch, patchXHR, unpatchXHR } from './network';
@@ -26,6 +26,12 @@ export function init(options: SdkInitOptions): void {
   try {
     loadConfig(options);
   } catch (e) {
+    if (e instanceof InvalidApiKeyError) {
+      // A wrong key type means the app can never report errors, or a secret
+      // may have been shipped in browser code. Surface it even without debug.
+      console.error(e.message);
+      return;
+    }
     if (options.debug) {
       console.error('[opslane] init failed:', e);
     }

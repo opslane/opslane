@@ -38,7 +38,7 @@ describe.skipIf(!configured || !playwrightAvailable)('SDK environment browser co
     const vue = (await import('@vitejs/plugin-vue')).default;
     fixture = await startFixture({
       fixtureDir: VUE_FIXTURE,
-      apiKey: tenant.apiKey,
+      apiKey: tenant.ingestKey,
       ingestionUrl: getConfig().ingestionUrl,
       environment: 'staging',
       entryPattern: /\/main\.ts$/,

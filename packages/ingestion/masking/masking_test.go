@@ -97,6 +97,25 @@ func TestRedactBody_APIKeyPrefixes(t *testing.T) {
 	}
 }
 
+func TestRedactsProjectKeys(t *testing.T) {
+	cases := map[string]string{
+		"public key": "opslane_pk_mzxw6ytboi3damrrgi3tknzxgq_aB-_cD3fGhIjKlMnOpQrStUvWxYz0123456789",
+		"secret key": "opslane_sk_mzxw6ytboi3damrrgi3tknzxgq_aB-_cD3fGhIjKlMnOpQrStUvWxYz0123456789",
+		"legacy key": "def_2f1c9a44-1b3e-4f4a-9c7a-4b2d8e6f0a11",
+	}
+	for name, key := range cases {
+		t.Run(name, func(t *testing.T) {
+			got := masking.RedactBody("token=" + key + " end")
+			if strings.Contains(got, key) {
+				t.Errorf("key survived redaction: %q", got)
+			}
+			if tail := key[len(key)-8:]; strings.Contains(got, tail) {
+				t.Errorf("key tail %q survived redaction: %q", tail, got)
+			}
+		})
+	}
+}
+
 func TestRedactBody_PasswordFields(t *testing.T) {
 	cases := []struct {
 		name  string

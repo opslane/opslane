@@ -175,10 +175,10 @@ export interface EnvironmentListResponse {
 }
 
 export interface APIKey {
-  id: string;
-  environment_id: string;
-  environment_name: string;
-  key_prefix: string;
+  key_id: string;
+  scope: 'ingest' | 'sourcemaps';
+  label: string;
+  status: 'active' | 'revoked';
   revoked_at: string | null;
   created_at: string;
 }
@@ -186,7 +186,6 @@ export interface APIKey {
 export interface APIKeyCreated {
   id: string;
   raw_key: string;
-  key_prefix: string;
   created_at?: string;
 }
 
@@ -455,14 +454,6 @@ export function listEnvironments(projectId: string): Promise<EnvironmentListResp
 
 export function createEnvironment(projectId: string, name: string): Promise<Environment> {
   return postJSON<Environment>(`/projects/${projectId}/environments`, { name });
-}
-
-export function createAPIKey(envId: string): Promise<APIKeyCreated> {
-  return postJSON<APIKeyCreated>(`/environments/${envId}/api-keys`, {});
-}
-
-export function listAPIKeys(projectId: string): Promise<APIKey[]> {
-  return fetchJSON<APIKey[]>(`/projects/${projectId}/api-keys`);
 }
 
 export function listNotificationDestinations(

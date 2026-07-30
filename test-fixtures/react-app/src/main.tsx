@@ -5,7 +5,7 @@ import { App } from './App';
 
 init({
   endpoint: 'http://localhost:8082',
-  apiKey: 'e2e-test-key-plaintext',
+  apiKey: 'opslane_pk_mzxw6ytboi3damrrgi3tknzxgq_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopq',
   release: 'e2e-react-fixture-v1',
   replay: { enabled: true },
 });

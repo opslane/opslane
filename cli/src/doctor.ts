@@ -122,48 +122,81 @@ function buildChecks(options: DoctorOptions): CheckFn[] {
       }
     },
 
-    // Check 4: API key valid
+    // Check 4: User session valid
     async (): Promise<CheckResult> => {
       try {
-        const agentCredentials = await resolveAgentCredentials();
-        const tokens = agentCredentials ? null : await resolveLoginTokens();
-        if (!agentCredentials && !tokens) {
+        const tokens = await resolveLoginTokens();
+        if (!tokens) {
           return {
-            name: 'API key',
+            name: 'Session',
             passed: false,
-            message: 'Cannot test API key without credentials',
-            remediation: 'Run `opslane login` first',
+            message: 'Not signed in',
+            remediation: 'Run `opslane login`',
           };
         }
-        const response = await fetchImpl(agentCredentials
-          ? `${agentCredentials.api_url}/api/v1/projects/${encodeURIComponent(agentCredentials.project_id)}/event-count`
-          : `${apiUrl}/api/v1/auth/verify`, {
-          headers: agentCredentials
-            ? { 'X-API-Key': agentCredentials.api_key }
-            : { Authorization: `Bearer ${tokens?.accessToken ?? ''}` },
+        const response = await fetchImpl(`${apiUrl}/api/v1/auth/verify`, {
+          headers: { Authorization: `Bearer ${tokens.accessToken}` },
           signal: AbortSignal.timeout(5000),
         });
         if (response.ok) {
           return {
-            name: 'API key',
+            name: 'Session',
             passed: true,
-            message: 'API key is valid',
+            message: 'Signed in',
           };
         }
         return {
-          name: 'API key',
+          name: 'Session',
           passed: false,
-          message: `Auth verification failed (status ${response.status})`,
-          remediation:
-            agentCredentials ? 'Run `opslane setup --force` or `opslane setup --relink`' : 'Run `opslane login` again',
+          message: `Not signed in (status ${response.status})`,
+          remediation: 'Run `opslane login`',
         };
       } catch {
         return {
-          name: 'API key',
+          name: 'Session',
           passed: false,
-          message: 'Could not verify API key',
-          remediation:
-            'Run `opslane setup --relink` or `opslane login` again',
+          message: 'Could not verify session',
+          remediation: 'Run `opslane login`',
+        };
+      }
+    },
+
+    // Check 5: Browser ingest key valid
+    async (): Promise<CheckResult> => {
+      try {
+        const agentCredentials = await resolveAgentCredentials();
+        if (!agentCredentials) {
+          return {
+            name: 'Ingest key',
+            passed: false,
+            message: 'No stored key',
+            remediation: 'Run `opslane onboard` in this repo',
+          };
+        }
+        const response = await fetchImpl(`${agentCredentials.api_url}/api/v1/ingest/ping`, {
+          method: 'POST',
+          headers: { 'X-API-Key': agentCredentials.api_key },
+          signal: AbortSignal.timeout(5000),
+        });
+        if (response.ok) {
+          return {
+            name: 'Ingest key',
+            passed: true,
+            message: 'Ingest key is valid',
+          };
+        }
+        return {
+          name: 'Ingest key',
+          passed: false,
+          message: `Ingest key rejected (status ${response.status})`,
+          remediation: 'Run `opslane onboard` to mint a replacement, then redeploy',
+        };
+      } catch {
+        return {
+          name: 'Ingest key',
+          passed: false,
+          message: 'Could not verify ingest key',
+          remediation: 'Run `opslane onboard` to mint a replacement, then redeploy',
         };
       }
     },

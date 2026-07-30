@@ -6,6 +6,7 @@ import { normalizeRepoURL, setup } from '../setup.js';
 import { loadPendingSession, savePendingSession } from '../pending.js';
 import { loadAgentCredentials, saveAgentCredentials } from '../agent-credentials.js';
 import { persistTokensTo } from '../auth.js';
+import { TEST_PUBLIC_KEY } from './fixtures.js';
 
 const pollId = '123e4567-e89b-42d3-a456-426614174000';
 const apiUrl = 'https://api.opslane.com';
@@ -175,6 +176,34 @@ describe('agent setup protocol', () => {
       .resolves.toMatchObject({ api_key: 'old-key' });
   });
 
+  it('validates an existing ingest key through the ingest ping', async () => {
+    await saveAgentCredentials({
+      org_id: 'org-1',
+      project_id: 'project-1',
+      api_key: TEST_PUBLIC_KEY,
+      repo: 'acme/app',
+      api_url: apiUrl,
+    }, credentialsPath);
+    const fetchFn = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      expect(init).toMatchObject({
+        method: 'POST',
+        headers: { 'X-API-Key': TEST_PUBLIC_KEY },
+      });
+      return new Response(null, { status: 204 });
+    });
+
+    await setup({ repo: 'acme/app', apiUrl, credentialsPath, pendingDir, fetchFn });
+
+    expect(fetchFn).toHaveBeenCalledWith(`${apiUrl}/api/v1/ingest/ping`, {
+      method: 'POST',
+      headers: { 'X-API-Key': TEST_PUBLIC_KEY },
+    });
+    expect(JSON.parse(String(log.mock.calls.at(-1)?.[0]))).toMatchObject({
+      status: 'already_configured',
+      project_id: 'project-1',
+    });
+  });
+
   it.each([
     [new Response(JSON.stringify({ status: 'rate_limited', retry_after: 7 }), { status: 429, headers: { 'Retry-After': '60' } }), 'rate_limited', { retry_after: 7 }],
     [new Response('not-json', { status: 500 }), 'internal_error', { message: 'unparseable server response' }],
@@ -205,34 +234,4 @@ describe('agent setup protocol', () => {
     expect(JSON.parse(String(log.mock.calls.at(-1)?.[0])).status).toBe('completed');
   });
 
-  it('--relink mints and saves a key only after authenticated success', async () => {
-    await persistTokensTo(tokenPath, apiUrl, {
-      accessToken: 'access', refreshToken: 'refresh', expiresAt: Date.now() + 60_000,
-    });
-    const fetchFn = vi.fn(async (input: string | URL | Request) => {
-      const url = String(input);
-      if (url.endsWith('/api/v1/projects')) return new Response(JSON.stringify([{ id: 'project-1', github_repo: 'Acme/App' }]));
-      if (url.endsWith('/environments')) return new Response(JSON.stringify([{ id: 'env-dev', name: 'development' }, { id: 'env-prod', name: 'production' }]));
-      expect(url).toContain('/environments/env-dev/api-keys');
-      return new Response(JSON.stringify({ raw_key: 'fresh-key' }), { status: 201 });
-    });
-    await setup({ relink: true, repo: 'acme/app', apiUrl, credentialsPath, tokenPath, fetchFn });
-    expect(JSON.parse(String(log.mock.calls.at(-1)?.[0]))).toMatchObject({ status: 'relinked', api_key: 'fresh-key' });
-    await expect(loadAgentCredentials({ filePath: credentialsPath, apiUrl, repo: 'acme/app' }))
-      .resolves.toMatchObject({ api_key: 'fresh-key', project_id: 'project-1' });
-  });
-
-  it('--relink reports the active-org mismatch without replacing an old key', async () => {
-    await saveAgentCredentials({ org_id: 'org', project_id: 'project', api_key: 'old-key', repo: 'acme/app', api_url: apiUrl }, credentialsPath);
-    await persistTokensTo(tokenPath, apiUrl, {
-      accessToken: 'access', refreshToken: 'refresh', expiresAt: Date.now() + 60_000,
-    });
-    await setup({
-      relink: true, repo: 'acme/app', apiUrl, credentialsPath, tokenPath,
-      fetchFn: async () => new Response(JSON.stringify([])),
-    });
-    expect(JSON.parse(String(log.mock.calls.at(-1)?.[0])).status).toBe('project_not_in_active_org');
-    await expect(loadAgentCredentials({ filePath: credentialsPath, apiUrl, repo: 'acme/app' }))
-      .resolves.toMatchObject({ api_key: 'old-key' });
-  });
 });

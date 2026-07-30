@@ -72,7 +72,7 @@ func cleanupCallbackTenant(t *testing.T, pool *pgxpool.Pool, sessionID string, i
 		`DELETE FROM error_group_affected_users WHERE error_group_id IN (SELECT id FROM error_groups WHERE project_id IN (SELECT id FROM projects WHERE org_id = $1))`,
 		`DELETE FROM error_groups WHERE project_id IN (SELECT id FROM projects WHERE org_id = $1)`,
 		`DELETE FROM end_users WHERE project_id IN (SELECT id FROM projects WHERE org_id = $1)`,
-		`DELETE FROM environment_api_keys WHERE environment_id IN (SELECT e.id FROM environments e JOIN projects p ON e.project_id = p.id WHERE p.org_id = $1)`,
+		`DELETE FROM project_api_keys WHERE project_id IN (SELECT id FROM projects WHERE org_id = $1)`,
 		`DELETE FROM environments WHERE project_id IN (SELECT id FROM projects WHERE org_id = $1)`,
 		`DELETE FROM projects WHERE org_id = $1`,
 		`DELETE FROM org_invitations WHERE org_id = $1 OR invited_by IN (SELECT id FROM users WHERE org_id = $1)`,
@@ -206,7 +206,7 @@ func TestWorkosAgentCallbackEndToEndAndFailureSemantics(t *testing.T) {
 			t.Fatalf("first poll code=%d body=%v", code, first)
 		}
 		key, _ := first["api_key"].(string)
-		if !strings.HasPrefix(key, "def_") {
+		if !strings.HasPrefix(key, "opslane_pk_") {
 			t.Fatalf("api_key=%q", key)
 		}
 		_, second := pollAgentSession(t, deps, session.ID, raw)

@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { buildPayload, setUser, clearUser } from '../core';
 import { loadConfig, resetConfig } from '../config';
 import { clearBreadcrumbs } from '../breadcrumbs';
+import { TEST_PK } from './test-keys';
 
 describe('setUser / clearUser', () => {
   beforeEach(() => {
@@ -10,7 +11,7 @@ describe('setUser / clearUser', () => {
     clearUser();
     loadConfig({
       endpoint: 'https://ingest.example.com',
-      apiKey: 'key-abc',
+      apiKey: TEST_PK,
     });
   });
 

@@ -246,14 +246,12 @@ func TestOnboardProvisionRealRouterAuthorizationAndLifecycle(t *testing.T) {
 	}
 	var activeKeys int
 	if err := pool.QueryRow(ctx, `
-		SELECT count(*)
-		FROM environment_api_keys k
-		JOIN environments e ON e.id = k.environment_id
-		WHERE e.project_id = $1 AND k.revoked_at IS NULL`, repeated.ProjectID,
+		SELECT count(*) FROM project_api_keys
+		WHERE project_id = $1 AND revoked_at IS NULL`, repeated.ProjectID,
 	).Scan(&activeKeys); err != nil {
 		t.Fatal(err)
 	}
-	if activeKeys != 1 {
-		t.Fatalf("active keys after repeat=%d, want 1", activeKeys)
+	if activeKeys != 2 {
+		t.Fatalf("active keys after repeat=%d, want 2", activeKeys)
 	}
 }

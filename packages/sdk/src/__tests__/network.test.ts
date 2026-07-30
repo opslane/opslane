@@ -8,6 +8,7 @@ import {
 } from '../network';
 import { clearBreadcrumbs, getBreadcrumbs } from '../breadcrumbs';
 import { loadConfig, resetConfig } from '../config';
+import { TEST_PK } from './test-keys';
 
 describe('Network Interceptor', () => {
   beforeEach(() => {
@@ -15,7 +16,7 @@ describe('Network Interceptor', () => {
     resetConfig();
     loadConfig({
       endpoint: 'https://ingest.example.com',
-      apiKey: 'key-net',
+      apiKey: TEST_PK,
     });
   });
 

@@ -103,7 +103,7 @@ describe.skipIf(!playwrightAvailable)('real Chromium always sends Origin to /eve
           });
           return response.status;
         },
-        [getConfig().ingestionUrl, tenant.apiKey, message] as const,
+        [getConfig().ingestionUrl, tenant.ingestKey, message] as const,
       );
     } finally {
       await tab.close();

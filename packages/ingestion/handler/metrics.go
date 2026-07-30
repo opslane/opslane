@@ -25,6 +25,8 @@ var (
 		mu     sync.Mutex
 		byType map[string]*atomic.Int64
 	}
+	keyAuthMu       sync.Mutex
+	keyAuthOutcomes = map[string]*atomic.Uint64{}
 
 	// Histogram for ingest duration (seconds)
 	ingestDuration struct {
@@ -74,6 +76,17 @@ func RecordEnvironmentOverrideFallback(reason string) {
 func RecordEnvironmentSessionDivergence() { ingestEnvironmentSessionDivergence.Add(1) }
 
 func RecordSessionCrossProjectConflict() { ingestSessionCrossProjectConflict.Add(1) }
+
+func RecordKeyAuth(outcome string) {
+	keyAuthMu.Lock()
+	counter, ok := keyAuthOutcomes[outcome]
+	if !ok {
+		counter = &atomic.Uint64{}
+		keyAuthOutcomes[outcome] = counter
+	}
+	keyAuthMu.Unlock()
+	counter.Add(1)
+}
 
 // RecordIngestError increments the error counter for the given error type.
 func RecordIngestError(errType string) {
@@ -135,6 +148,15 @@ func Metrics(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintln(w, "# HELP opslane_ingest_session_cross_project_conflict_total Total session registrations rejected because the id belongs to another project")
 	fmt.Fprintln(w, "# TYPE opslane_ingest_session_cross_project_conflict_total counter")
 	fmt.Fprintf(w, "opslane_ingest_session_cross_project_conflict_total %d\n\n", ingestSessionCrossProjectConflict.Load())
+
+	fmt.Fprintln(w, "# HELP opslane_key_auth_total Project API key authentication outcomes")
+	fmt.Fprintln(w, "# TYPE opslane_key_auth_total counter")
+	keyAuthMu.Lock()
+	for outcome, counter := range keyAuthOutcomes {
+		fmt.Fprintf(w, "opslane_key_auth_total{outcome=%q} %d\n", outcome, counter.Load())
+	}
+	keyAuthMu.Unlock()
+	fmt.Fprintln(w)
 
 	// opslane_ingest_errors_total
 	fmt.Fprintf(w, "# HELP opslane_ingest_errors_total Total ingest errors by type\n")

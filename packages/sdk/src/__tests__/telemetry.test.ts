@@ -7,6 +7,7 @@ import {
   uninstallInteractionTelemetry,
 } from '../telemetry';
 import { loadConfig, resetConfig } from '../config';
+import { TEST_PK } from './test-keys';
 
 describe('interaction telemetry', () => {
   let events: TelemetryEvent[];
@@ -14,7 +15,7 @@ describe('interaction telemetry', () => {
   beforeEach(() => {
     events = [];
     resetConfig();
-    loadConfig({ apiKey: 'k', endpoint: 'https://ingest.example.com' });
+    loadConfig({ apiKey: TEST_PK, endpoint: 'https://ingest.example.com' });
     setTelemetrySink((event) => events.push(event));
     document.body.innerHTML = '';
     uninstallInteractionTelemetry();

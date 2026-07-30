@@ -43,7 +43,7 @@ func testDeps(t *testing.T) (*handler.Dependencies, *pgxpool.Pool) {
 	t.Cleanup(func() { pool.Close() })
 
 	queries := db.New(pool)
-	deps := &handler.Dependencies{Queries: queries}
+	deps := &handler.Dependencies{Queries: queries, JWTSecret: sessionReadSecret}
 	return deps, pool
 }
 
@@ -67,12 +67,12 @@ func seedTenant(t *testing.T, q *db.Queries) (orgID, projectID, envID, rawKey st
 		t.Fatalf("create environment: %v", err)
 	}
 
-	key, err := q.CreateAPIKey(ctx, env.ID)
+	key, err := q.CreateProjectKey(ctx, proj.ID, db.ScopeIngest, "test", nil)
 	if err != nil {
 		t.Fatalf("create api key: %v", err)
 	}
 
-	return org.ID, proj.ID, env.ID, key.RawKey
+	return org.ID, proj.ID, env.ID, key.Raw
 }
 
 func testMinIO(t *testing.T) *minioPkg.Client {
@@ -320,13 +320,13 @@ func TestListErrorGroups_PlatformFilter(t *testing.T) {
 
 func TestListIncidents_PlatformQueryParam(t *testing.T) {
 	deps, _ := testDeps(t)
-	_, projectID, _, rawKey := seedTenant(t, deps.Queries)
+	orgID, projectID, _, rawKey := seedTenant(t, deps.Queries)
 	postErrorPayload(t, deps, rawKey, `{"timestamp":"2026-07-19T00:00:00Z","platform":"python","error":{"type":"ValueError","message":"python-http","stack":"Traceback (most recent call last):\nValueError: python-http"},"breadcrumbs":[],"context":{}}`)
 	postErrorPayload(t, deps, rawKey, `{"timestamp":"2026-07-19T00:00:01Z","platform":"javascript","error":{"type":"TypeError","message":"javascript-http","stack":"at fn (/src/http.js:1:1)"},"breadcrumbs":[],"context":{}}`)
 
 	req := httptest.NewRequest(http.MethodGet,
 		"/api/v1/projects/"+projectID+"/incidents?platform=python", nil)
-	req.Header.Set("X-API-Key", rawKey)
+	req.Header.Set("Authorization", "Bearer "+dashboardToken(t, orgID))
 	response := httptest.NewRecorder()
 	handler.NewRouter(deps).ServeHTTP(response, req)
 	if response.Code != http.StatusOK {
@@ -344,7 +344,7 @@ func TestListIncidents_PlatformQueryParam(t *testing.T) {
 
 	badReq := httptest.NewRequest(http.MethodGet,
 		"/api/v1/projects/"+projectID+"/incidents?platform=Not%20A%20Token", nil)
-	badReq.Header.Set("X-API-Key", rawKey)
+	badReq.Header.Set("Authorization", "Bearer "+dashboardToken(t, orgID))
 	badResponse := httptest.NewRecorder()
 	handler.NewRouter(deps).ServeHTTP(badResponse, badReq)
 	if badResponse.Code != http.StatusBadRequest {
@@ -552,7 +552,7 @@ func TestGetSampleEventEndpoint_SessionOnlyAndRedacted(t *testing.T) {
 
 func TestCrossStackEndUserTimeline(t *testing.T) {
 	deps, _ := testDeps(t)
-	_, projectID, _, rawKey := seedTenant(t, deps.Queries)
+	orgID, projectID, _, rawKey := seedTenant(t, deps.Queries)
 	postErrorPayload(t, deps, rawKey,
 		`{"timestamp":"2026-07-19T00:00:00Z","error":{"type":"TypeError","message":"cross-stack javascript","stack":"at jsFrame (/src/app.js:1:1)"},"breadcrumbs":[],"context":{"user":{"id":"cross-stack-user"}}}`)
 	postErrorPayload(t, deps, rawKey,
@@ -584,7 +584,7 @@ func TestCrossStackEndUserTimeline(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet,
 		"/api/v1/projects/"+projectID+"/incidents?end_user_id=cross-stack-user", nil)
-	req.Header.Set("X-API-Key", rawKey)
+	req.Header.Set("Authorization", "Bearer "+dashboardToken(t, orgID))
 	response := httptest.NewRecorder()
 	handler.NewRouter(deps).ServeHTTP(response, req)
 	if response.Code != http.StatusOK {
@@ -807,7 +807,11 @@ func TestEnvironmentScopedKeyAuth_RevokedKey(t *testing.T) {
 
 	// Revoke the key directly via SQL (no helper exists yet)
 	ctx := context.Background()
-	_, err := pool.Exec(ctx, `UPDATE environment_api_keys SET revoked_at = now() WHERE key_prefix = $1`, rawKey[:12])
+	parsed, err := db.ParseProjectKey(rawKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = pool.Exec(ctx, `UPDATE project_api_keys SET revoked_at = now() WHERE key_id = $1`, parsed.KeyID)
 	if err != nil {
 		t.Fatalf("revoke key: %v", err)
 	}
@@ -965,7 +969,7 @@ func TestReplayInit_DropsCrossTenantErrorEventID(t *testing.T) {
 
 func TestGetIncident_IncludesReplayID(t *testing.T) {
 	deps, pool := testDeps(t)
-	_, projectID, _, rawKey := seedTenant(t, deps.Queries)
+	orgID, projectID, _, rawKey := seedTenant(t, deps.Queries)
 
 	body := `{"timestamp":"2026-05-30T00:00:00Z","error":{"type":"TypeError","message":"boom","stack":"at a (src/a.ts:1:1)"},"breadcrumbs":[],"context":{},"session_id":"sess-X"}`
 	ew := httptest.NewRecorder()
@@ -993,7 +997,7 @@ func TestGetIncident_IncludesReplayID(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/api/v1/projects/"+projectID+"/incidents/"+groupID, nil)
-	req.Header.Set("X-API-Key", rawKey)
+	req.Header.Set("Authorization", "Bearer "+dashboardToken(t, orgID))
 	handler.NewRouter(deps).ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("get incident: %d (%s)", w.Code, w.Body.String())
@@ -1037,7 +1041,7 @@ func TestIncidentEvidence_IsDetailOnly(t *testing.T) {
 
 	list := httptest.NewRecorder()
 	listRequest := httptest.NewRequest("GET", "/api/v1/projects/"+projectID+"/incidents", nil)
-	listRequest.Header.Set("X-API-Key", rawKey)
+	listRequest.Header.Set("Authorization", "Bearer "+dashboardToken(t, orgID))
 	handler.NewRouter(deps).ServeHTTP(list, listRequest)
 	if list.Code != http.StatusOK {
 		t.Fatalf("list incidents: %d (%s)", list.Code, list.Body.String())
@@ -1065,7 +1069,7 @@ func TestIncidentEvidence_IsDetailOnly(t *testing.T) {
 
 	detail := httptest.NewRecorder()
 	detailRequest := httptest.NewRequest("GET", "/api/v1/projects/"+projectID+"/incidents/"+groupID, nil)
-	detailRequest.Header.Set("X-API-Key", rawKey)
+	detailRequest.Header.Set("Authorization", "Bearer "+dashboardToken(t, orgID))
 	handler.NewRouter(deps).ServeHTTP(detail, detailRequest)
 	if detail.Code != http.StatusOK {
 		t.Fatalf("get incident: %d (%s)", detail.Code, detail.Body.String())

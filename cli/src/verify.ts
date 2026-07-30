@@ -3,6 +3,7 @@ import { jsonOutput, exitWithStatus } from './output.js';
 import { defaultApiUrl } from './config.js';
 import { detectRepoFromGit } from './setup.js';
 import { canonicalOrigin } from './origin.js';
+import { authedFetch, type SessionTokenLoader } from './authed-fetch.js';
 
 export interface VerifyOptions {
   credentialsPath?: string;
@@ -10,6 +11,8 @@ export interface VerifyOptions {
   apiUrl?: string;
   repo?: string;
   cwd?: string;
+  tokenPath?: string;
+  loadToken?: SessionTokenLoader;
 }
 
 export interface VerifyResult {
@@ -60,20 +63,41 @@ export async function verifyConnection(options: VerifyOptions = {}): Promise<Ver
     };
   }
 
-  // Check if events have been received (server returns {has_events: bool})
-  let hasEvents = false;
+  // Check if events have been received (server returns {has_events: bool}).
+  // This is a session-authenticated read, so an auth failure means verify
+  // failed; it is not equivalent to a healthy project with zero events.
+  let countResp: Response;
   try {
-    const countResp = await fetchFn(
+    countResp = await authedFetch(
       `${creds.api_url}/api/v1/projects/${creds.project_id}/event-count`,
-      { headers: { 'X-API-Key': creds.api_key } },
+      {
+        apiUrl: creds.api_url,
+        fetchFn,
+        tokenPath: options.tokenPath,
+        loadToken: options.loadToken,
+      },
     );
-    if (countResp.ok) {
-      const body = await countResp.json() as Record<string, unknown>;
-      hasEvents = (body['has_events'] as boolean) ?? false;
-    }
-  } catch {
-    // Non-fatal — events may not have arrived yet
+  } catch (err) {
+    return {
+      status: 'error',
+      api_reachable: true,
+      has_events: false,
+      message: (err as Error).message,
+    };
   }
+  if (!countResp.ok) {
+    const body = await countResp.json().catch(() => ({})) as Record<string, unknown>;
+    return {
+      status: 'error',
+      api_reachable: true,
+      has_events: false,
+      message: typeof body['error'] === 'string'
+        ? body['error']
+        : `Session verification failed with status ${countResp.status}`,
+    };
+  }
+  const body = await countResp.json().catch(() => ({})) as Record<string, unknown>;
+  const hasEvents = body['has_events'] === true;
 
   return {
     status: 'ok',

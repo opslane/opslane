@@ -62,10 +62,8 @@ func countActiveProjectKeys(t *testing.T, pool *pgxpool.Pool, projectID string) 
 	t.Helper()
 	var count int
 	if err := pool.QueryRow(context.Background(), `
-		SELECT count(*)
-		FROM environment_api_keys k
-		JOIN environments e ON e.id = k.environment_id
-		WHERE e.project_id = $1 AND k.revoked_at IS NULL`,
+		SELECT count(*) FROM project_api_keys
+		WHERE project_id = $1 AND revoked_at IS NULL`,
 		projectID,
 	).Scan(&count); err != nil {
 		t.Fatalf("count active project keys: %v", err)
@@ -139,7 +137,7 @@ func TestProvisionOnboardSession(t *testing.T) {
 	if afterFailure == nil || afterFailure.Status != "provisioned" || afterFailure.APIKeySealed == nil {
 		t.Fatalf("failed replacement changed prior session: %+v", afterFailure)
 	}
-	if _, err := q.LookupAPIKey(ctx, first.RawKey); err != nil {
+	if _, err := q.LookupProjectKey(ctx, first.RawKey); err != nil {
 		t.Fatalf("failed replacement revoked the prior key: %v", err)
 	}
 
@@ -171,14 +169,14 @@ func TestProvisionOnboardSession(t *testing.T) {
 	if current == nil || current.Status != "provisioned" || current.APIKeySealed == nil {
 		t.Fatalf("current session = %+v, want provisioned with sealed key", current)
 	}
-	if _, err := q.LookupAPIKey(ctx, first.RawKey); err == nil {
-		t.Fatal("superseded session's key remains active")
+	if _, err := q.LookupProjectKey(ctx, first.RawKey); err != nil {
+		t.Fatalf("superseded session's deployed key stopped working: %v", err)
 	}
-	if _, err := q.LookupAPIKey(ctx, second.RawKey); err != nil {
+	if _, err := q.LookupProjectKey(ctx, second.RawKey); err != nil {
 		t.Fatalf("replacement session's key is inactive: %v", err)
 	}
-	if active := countActiveProjectKeys(t, pool, first.ProjectID); active != 1 {
-		t.Fatalf("active project keys after rotation = %d, want 1", active)
+	if active := countActiveProjectKeys(t, pool, first.ProjectID); active != 2 {
+		t.Fatalf("active project keys after reprovision = %d, want 2", active)
 	}
 
 	otherOrgID, otherUserID := seedOnboardOrgOwner(t, pool, "other")
@@ -397,8 +395,8 @@ func TestProvisionOnboardSessionConcurrent(t *testing.T) {
 	for id := range projectIDs {
 		projectID = id
 	}
-	if active := countActiveProjectKeys(t, pool, projectID); active != 1 {
-		t.Fatalf("active project keys after concurrent provision = %d, want 1", active)
+	if active := countActiveProjectKeys(t, pool, projectID); active != callers {
+		t.Fatalf("active project keys after concurrent provision = %d, want %d", active, callers)
 	}
 	var provisionedCount, expiredCount int
 	for sessionID, result := range resultsBySession {
@@ -412,7 +410,7 @@ func TestProvisionOnboardSessionConcurrent(t *testing.T) {
 			if session.APIKeySealed == nil {
 				t.Fatalf("current session %s has no sealed key", sessionID)
 			}
-			if _, err := q.LookupAPIKey(context.Background(), result.RawKey); err != nil {
+			if _, err := q.LookupProjectKey(context.Background(), result.RawKey); err != nil {
 				t.Fatalf("current session %s returned an inactive key: %v", sessionID, err)
 			}
 		case "expired":
@@ -420,8 +418,8 @@ func TestProvisionOnboardSessionConcurrent(t *testing.T) {
 			if session.APIKeySealed != nil {
 				t.Fatalf("expired session %s retained its sealed key", sessionID)
 			}
-			if _, err := q.LookupAPIKey(context.Background(), result.RawKey); err == nil {
-				t.Fatalf("expired session %s returned the active key", sessionID)
+			if _, err := q.LookupProjectKey(context.Background(), result.RawKey); err != nil {
+				t.Fatalf("expired session %s revoked its deployed key: %v", sessionID, err)
 			}
 		default:
 			t.Fatalf("concurrent session %s status = %q, want provisioned or expired", sessionID, session.Status)

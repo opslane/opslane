@@ -412,8 +412,8 @@ jobs:
             ^notifications contract
             ^python SDK live smoke \(Flask fixture → ingestion\) >
             ^python wire adversarial \(hostile non-SDK client\) >
-            ^first-class environment ingestion > keeps one group across key environments
-            ^first-class environment ingestion > resolves opted-in names and accepts disabled, unknown, and invalid
+            ^first-class environment ingestion > keeps one group across payload environments
+            ^first-class environment ingestion > resolves opted-in names and falls back invalid overrides
             ^first-class environment ingestion > supports out-of-order events, makes the existing same-project session
             ^dashboard environment filtering > gates readiness and filters incidents, detail chips, and sessions in real Chromium
             ^first-class projects dashboard > switches safely from a deep link and provisions a usable project key
@@ -430,6 +430,7 @@ jobs:
             ^friction incidents — synthetic live-service gate > a signal inside ±30s
             ^friction incidents — synthetic live-service gate > an error outside the ±30s window
             ^friction incidents — synthetic live-service gate > the stepper fixture produces no signal
+            ^credential boundary >
         run: node scripts/check-e2e-results.mjs "${{ runner.temp }}/e2e-results.json"
       - name: Token-leak scan over logs and public HTTP surfaces
         run: |

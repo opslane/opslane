@@ -8,6 +8,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import * as http from 'node:http';
 import { resolve } from 'node:path';
 import { gunzipSync } from 'node:zlib';
+import { TEST_PK } from './test-keys';
 
 let playwrightAvailable = false;
 try {
@@ -114,7 +115,7 @@ describe.skipIf(!playwrightAvailable)('rrweb replay capture (real browser)', () 
             if (id.endsWith('/main.ts')) {
               return code.replace(/init\(\{[\s\S]*?\}\);/, `init({
                 endpoint: 'http://localhost:${mockPort}',
-                apiKey: 'sk-test-browser',
+                apiKey: '${TEST_PK}',
                 flushInterval: 200,
                 maxBatchSize: 1,
                 replay: { enabled: true },
@@ -164,7 +165,7 @@ describe.skipIf(!playwrightAvailable)('rrweb replay capture (real browser)', () 
     expect(ts).toEqual([...ts].sort((a, b) => a - b));
     expect(capturedChunkQuery).toBe('?has_full_snapshot=1');
     expect(capturedChunkHeaders['content-type']).toBe('application/gzip');
-    expect(capturedChunkHeaders['x-api-key']).toBe('sk-test-browser');
+    expect(capturedChunkHeaders['x-api-key']).toBe(TEST_PK);
     expect(chunkUploadCount).toBe(1);
     expect(legacyReplayRequestCount).toBe(0);
   }, 20_000);

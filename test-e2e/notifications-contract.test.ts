@@ -163,7 +163,7 @@ describe('notifications contract (Slack webhook delivery)', () => {
   });
 
   it('delivers issue.created to the webhook as Block Kit', async () => {
-    const response = await postEvent(tenant.apiKey, eventPayload('NotifyContractError'));
+    const response = await postEvent(tenant.ingestKey, eventPayload('NotifyContractError'));
     expect(response.ok).toBe(true);
 
     const delivered = await pollDelivered();
@@ -180,7 +180,7 @@ describe('notifications contract (Slack webhook delivery)', () => {
   });
 
   it('does not deliver again for a repeat occurrence of the same group', async () => {
-    const response = await postEvent(tenant.apiKey, eventPayload('NotifyContractError'));
+    const response = await postEvent(tenant.ingestKey, eventPayload('NotifyContractError'));
     expect(response.ok).toBe(true);
     const { error_group_id } = (await response.json()) as { error_group_id: string };
 
@@ -214,7 +214,7 @@ describe('notifications contract (Slack webhook delivery)', () => {
     });
     expect(deleteResponse.ok).toBe(true);
 
-    const response = await postEvent(tenant.apiKey, eventPayload('PostDeleteError'));
+    const response = await postEvent(tenant.ingestKey, eventPayload('PostDeleteError'));
     expect(response.ok).toBe(true);
 
     // No enabled destination ⇒ publish writes no outbox rows for the new group,

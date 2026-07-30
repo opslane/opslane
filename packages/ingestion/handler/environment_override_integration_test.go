@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/opslane/opslane/packages/ingestion/db"
 	"github.com/opslane/opslane/packages/ingestion/handler"
 	minioPkg "github.com/opslane/opslane/packages/ingestion/minio"
 )
@@ -55,9 +56,9 @@ func TestPayloadEnvironmentAndSessionPrecedenceThroughHTTPAndPostgres(t *testing
 		cleanupTenantHandler(t, pool, org.ID)
 	})
 	project, _ := q.CreateProject(ctx, org.ID, "p1", nil)
-	production, _ := q.CreateEnvironment(ctx, project.ID, "production")
+	_, _ = q.CreateEnvironment(ctx, project.ID, "production")
 	staging, _ := q.CreateEnvironment(ctx, project.ID, "staging")
-	key, _ := q.CreateAPIKey(ctx, production.ID)
+	key, _ := q.CreateProjectKey(ctx, project.ID, db.ScopeIngest, "test", nil)
 	allow := true
 	if _, err := q.UpdateProject(ctx, org.ID, project.ID, nil, nil, nil, &allow); err != nil {
 		t.Fatal(err)
@@ -65,10 +66,10 @@ func TestPayloadEnvironmentAndSessionPrecedenceThroughHTTPAndPostgres(t *testing
 
 	other, _ := q.CreateProject(ctx, org.ID, "p2", nil)
 	otherEnvironment, _ := q.CreateEnvironment(ctx, other.ID, "production")
-	otherKey, _ := q.CreateAPIKey(ctx, otherEnvironment.ID)
+	otherKey, _ := q.CreateProjectKey(ctx, other.ID, db.ScopeIngest, "test", nil)
 	router := handler.NewRouter(deps)
 
-	overriddenEventID := postEnvironmentEvent(t, router, key.RawKey, "", "staging", "payload override "+uuid.NewString())
+	overriddenEventID := postEnvironmentEvent(t, router, key.Raw, "", "staging", "payload override "+uuid.NewString())
 	var storedEnvironmentID string
 	if err := pool.QueryRow(ctx, `SELECT environment_id FROM error_events WHERE id = $1`, overriddenEventID).Scan(&storedEnvironmentID); err != nil {
 		t.Fatal(err)
@@ -78,10 +79,10 @@ func TestPayloadEnvironmentAndSessionPrecedenceThroughHTTPAndPostgres(t *testing
 	}
 
 	sessionID := "sess_" + uuid.NewString()
-	if response := postEnvironmentSession(t, router, key.RawKey, sessionID, "staging"); response.Code != http.StatusOK {
+	if response := postEnvironmentSession(t, router, key.Raw, sessionID, "staging"); response.Code != http.StatusOK {
 		t.Fatalf("session init status = %d, body=%s", response.Code, response.Body.String())
 	}
-	sessionEventID := postEnvironmentEvent(t, router, key.RawKey, sessionID, "production", "session wins "+uuid.NewString())
+	sessionEventID := postEnvironmentEvent(t, router, key.Raw, sessionID, "production", "session wins "+uuid.NewString())
 	if err := pool.QueryRow(ctx, `SELECT environment_id FROM error_events WHERE id = $1`, sessionEventID).Scan(&storedEnvironmentID); err != nil {
 		t.Fatal(err)
 	}
@@ -89,10 +90,10 @@ func TestPayloadEnvironmentAndSessionPrecedenceThroughHTTPAndPostgres(t *testing
 		t.Fatalf("session event environment = %s, want %s", storedEnvironmentID, staging.ID)
 	}
 
-	if response := postEnvironmentSession(t, router, otherKey.RawKey, sessionID, "production"); response.Code != http.StatusConflict {
+	if response := postEnvironmentSession(t, router, otherKey.Raw, sessionID, "production"); response.Code != http.StatusConflict {
 		t.Fatalf("cross-project session status = %d, want 409; body=%s", response.Code, response.Body.String())
 	}
-	crossProjectEventID := postEnvironmentEvent(t, router, otherKey.RawKey, sessionID, "production", "cross-project event "+uuid.NewString())
+	crossProjectEventID := postEnvironmentEvent(t, router, otherKey.Raw, sessionID, "production", "cross-project event "+uuid.NewString())
 	if err := pool.QueryRow(ctx, `SELECT environment_id FROM error_events WHERE id = $1`, crossProjectEventID).Scan(&storedEnvironmentID); err != nil {
 		t.Fatal(err)
 	}
@@ -112,6 +113,10 @@ func TestPayloadEnvironmentFallbacksRemainAcceptedAndObservable(t *testing.T) {
 		t.Fatal(err)
 	}
 	router := handler.NewRouter(deps)
+	denyPayloadEnvironment := false
+	if _, err := q.UpdateProject(ctx, orgID, projectID, nil, nil, nil, &denyPayloadEnvironment); err != nil {
+		t.Fatal(err)
+	}
 
 	assertProduction := func(environment, message string) {
 		eventID := postEnvironmentEvent(t, router, rawKey, "", environment, message+uuid.NewString())
@@ -124,8 +129,8 @@ func TestPayloadEnvironmentFallbacksRemainAcceptedAndObservable(t *testing.T) {
 		}
 	}
 	assertProduction("staging", "disabled-")
-	allow := true
-	if _, err := q.UpdateProject(ctx, orgID, projectID, nil, nil, nil, &allow); err != nil {
+	allowPayloadEnvironment := true
+	if _, err := q.UpdateProject(ctx, orgID, projectID, nil, nil, nil, &allowPayloadEnvironment); err != nil {
 		t.Fatal(err)
 	}
 	assertProduction("missing", "unknown-")
@@ -156,18 +161,18 @@ func TestReplayInitRejectsSessionOwnedByAnotherProject(t *testing.T) {
 	})
 	p1, _ := q.CreateProject(ctx, org.ID, "p1", nil)
 	p2, _ := q.CreateProject(ctx, org.ID, "p2", nil)
-	e1, _ := q.CreateEnvironment(ctx, p1.ID, "production")
-	e2, _ := q.CreateEnvironment(ctx, p2.ID, "production")
-	k1, _ := q.CreateAPIKey(ctx, e1.ID)
-	k2, _ := q.CreateAPIKey(ctx, e2.ID)
+	_, _ = q.CreateEnvironment(ctx, p1.ID, "production")
+	_, _ = q.CreateEnvironment(ctx, p2.ID, "production")
+	k1, _ := q.CreateProjectKey(ctx, p1.ID, db.ScopeIngest, "test", nil)
+	k2, _ := q.CreateProjectKey(ctx, p2.ID, db.ScopeIngest, "test", nil)
 	router := handler.NewRouter(deps)
 	sessionID := "sess_" + uuid.NewString()
-	if response := postEnvironmentSession(t, router, k1.RawKey, sessionID, ""); response.Code != http.StatusOK {
+	if response := postEnvironmentSession(t, router, k1.Raw, sessionID, ""); response.Code != http.StatusOK {
 		t.Fatalf("session init status = %d, body=%s", response.Code, response.Body.String())
 	}
 	body := fmt.Sprintf(`{"session_id":%q,"trigger_type":"error"}`, sessionID)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/replays/init", strings.NewReader(body))
-	req.Header.Set("X-API-Key", k2.RawKey)
+	req.Header.Set("X-API-Key", k2.Raw)
 	recorder := httptest.NewRecorder()
 	router.ServeHTTP(recorder, req)
 	if recorder.Code != http.StatusNotFound {

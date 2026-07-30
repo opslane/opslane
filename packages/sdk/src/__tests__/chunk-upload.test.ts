@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { _resetChunkUploadState, flushInline, uploadChunk } from '../chunk-upload';
 import { loadConfig, resetConfig } from '../config';
+import { TEST_PK } from './test-keys';
 
 const ENDPOINT = 'https://ingest.example.com';
 
@@ -10,7 +11,7 @@ describe('uploadChunk', () => {
   beforeEach(() => {
     resetConfig();
     _resetChunkUploadState();
-    loadConfig({ apiKey: 'test-key', endpoint: ENDPOINT });
+    loadConfig({ apiKey: TEST_PK, endpoint: ENDPOINT });
     fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
     globalThis.fetch = fetchMock as unknown as typeof fetch;
   });
@@ -22,7 +23,7 @@ describe('uploadChunk', () => {
     expect(url).toBe(`${ENDPOINT}/api/v1/sessions/sess_abc/chunks/0?has_full_snapshot=1`);
     expect(options).toMatchObject({
       method: 'POST',
-      headers: { 'Content-Type': 'application/gzip', 'X-API-Key': 'test-key' },
+      headers: { 'Content-Type': 'application/gzip', 'X-API-Key': TEST_PK },
       keepalive: false,
     });
     expect((options.body as Uint8Array).byteLength).toBeGreaterThan(0);
@@ -60,7 +61,7 @@ describe('flushInline', () => {
   beforeEach(() => {
     resetConfig();
     _resetChunkUploadState();
-    loadConfig({ apiKey: 'test-key', endpoint: ENDPOINT });
+    loadConfig({ apiKey: TEST_PK, endpoint: ENDPOINT });
     fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
     globalThis.fetch = fetchMock as unknown as typeof fetch;
   });
@@ -71,7 +72,7 @@ describe('flushInline', () => {
     expect(url).toBe(`${ENDPOINT}/api/v1/sessions/sess_abc/chunks/3?has_full_snapshot=0`);
     expect(options).toMatchObject({
       keepalive: true,
-      headers: { 'Content-Type': 'application/gzip', 'X-API-Key': 'test-key' },
+      headers: { 'Content-Type': 'application/gzip', 'X-API-Key': TEST_PK },
     });
   });
 

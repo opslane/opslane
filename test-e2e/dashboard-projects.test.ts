@@ -11,6 +11,7 @@ import {
   postEvent,
   seedTenant,
   seedUserWithJWT,
+  type IngestKey,
   type TestTenant,
 } from './helpers.js';
 import { isPlaywrightAvailable } from './browser-helpers.js';
@@ -21,7 +22,10 @@ const playwrightAvailable = await isPlaywrightAvailable();
 interface ProvisioningBundle {
   project: { id: string; name: string };
   environment: { id: string; name: string };
-  api_key: { id: string; raw_key: string; key_prefix: string };
+  // Boundary: this key arrives over HTTP from the provisioning endpoint, but
+  // its role is known from the response shape — it's the project's ingest
+  // key — so this is where it becomes a branded IngestKey.
+  api_key: { id: string; raw_key: IngestKey };
 }
 
 describe('first-class projects dashboard', () => {
@@ -36,8 +40,8 @@ describe('first-class projects dashboard', () => {
   const createdTitle = `phase3 created ${crypto.randomUUID()}`;
   const clientIP = `198.51.100.${10 + Math.floor(Math.random() * 200)}`;
 
-  async function ingest(apiKey: string, title: string): Promise<string> {
-    const response = await postEvent(apiKey, {
+  async function ingest(ingestKey: IngestKey, title: string): Promise<string> {
+    const response = await postEvent(ingestKey, {
       timestamp: new Date().toISOString(),
       error: {
         type: 'TypeError',
@@ -73,7 +77,7 @@ describe('first-class projects dashboard', () => {
     expect(secondResponse.status).toBe(201);
     second = await secondResponse.json() as ProvisioningBundle;
 
-    firstIncidentId = await ingest(tenant.apiKey, firstTitle);
+    firstIncidentId = await ingest(tenant.ingestKey, firstTitle);
     await ingest(second.api_key.raw_key, secondTitle);
     const { chromium } = await import('@playwright/test');
     browser = await chromium.launch();
@@ -148,12 +152,16 @@ describe('first-class projects dashboard', () => {
       });
       await payloadEnvironmentToggle.waitFor();
       expect(await payloadEnvironmentToggle.isEnabled()).toBe(true);
-      expect(await payloadEnvironmentToggle.isChecked()).toBe(false);
+      // New projects allow the SDK environment label by default. Migration 028
+      // flipped this on, so environment is a label the SDK sends rather than
+      // something an admin has to enable first. The toggle therefore starts on,
+      // and turning it OFF is what exercises the PATCH.
+      expect(await payloadEnvironmentToggle.isChecked()).toBe(true);
       const [toggleResponse] = await Promise.all([
         page.waitForResponse((response) =>
           response.request().method() === 'PATCH' &&
           response.url().endsWith(`/api/v1/projects/${second.project.id}`)),
-        payloadEnvironmentToggle.check({ force: true }),
+        payloadEnvironmentToggle.uncheck({ force: true }),
       ]);
       expect(toggleResponse.status()).toBe(200);
       await expect.poll(async () => {
@@ -162,7 +170,7 @@ describe('first-class projects dashboard', () => {
           [second.project.id],
         );
         return result.rows[0]?.allow_payload_environment;
-      }).toBe(true);
+      }).toBe(false);
 
       await page.getByRole('button', { name: 'New project' }).click();
       await page.locator('input[name="new-project-name"]').fill('Browser-created project');
@@ -178,8 +186,12 @@ describe('first-class projects dashboard', () => {
       ).toBe(201);
 
       await page.getByRole('heading', { name: 'Project created' }).waitFor();
-      const rawKey = (await page.getByText(/^def_/).textContent())?.trim() ?? '';
-      expect(rawKey).toMatch(/^def_/);
+      const rawKeyText = (await page.getByText(/^opslane_pk_/).textContent())?.trim() ?? '';
+      expect(rawKeyText).toMatch(/^opslane_pk_/);
+      // Boundary: this key is scraped from the "copy your key" dialog, not
+      // from a typed API response. The assertion above is what confirms
+      // it's an ingest key before it becomes a branded IngestKey.
+      const rawKey = rawKeyText as IngestKey;
       const done = page.getByRole('button', { name: 'Done' });
       expect(await done.isDisabled()).toBe(true);
       await page.getByText('I have copied and stored this key securely.').click();

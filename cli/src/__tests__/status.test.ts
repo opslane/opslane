@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { getStatus } from '../status.js';
 import { saveAgentCredentials } from '../agent-credentials.js';
+import { TEST_PUBLIC_KEY } from './fixtures.js';
 
 vi.spyOn(console, 'log').mockImplementation(() => {});
 
@@ -29,7 +30,7 @@ describe('getStatus', () => {
     await saveAgentCredentials({
       org_id: 'org-1',
       project_id: 'proj-1',
-      api_key: 'def_test-key',
+      api_key: TEST_PUBLIC_KEY,
       repo: 'acme/app',
       api_url: 'http://localhost:8082',
     }, credFile);

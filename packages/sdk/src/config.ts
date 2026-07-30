@@ -45,6 +45,18 @@ export interface SdkInitOptions {
 }
 
 const DEFAULT_ENDPOINT = 'https://api.opslane.com';
+const PUBLIC_KEY_PREFIX = 'opslane_pk_';
+
+export class InvalidApiKeyError extends Error {
+  constructor(prefixSeen: string) {
+    super(
+      `[opslane] refusing to initialize: apiKey must start with "${PUBLIC_KEY_PREFIX}". ` +
+      `Got "${prefixSeen}". Only the public ingest key belongs in browser code. ` +
+      `A key starting with "opslane_sk_" is a secret and must never ship in a bundle.`,
+    );
+    this.name = 'InvalidApiKeyError';
+  }
+}
 
 const DEFAULTS: Omit<SdkConfig, 'endpoint' | 'apiKey' | 'release'> = {
   environment: '',
@@ -65,6 +77,9 @@ let currentConfig: SdkConfig | null = null;
 export function loadConfig(options: SdkInitOptions): void {
   if (!options.apiKey) {
     throw new Error('apiKey is required');
+  }
+  if (!options.apiKey.startsWith(PUBLIC_KEY_PREFIX)) {
+    throw new InvalidApiKeyError(options.apiKey.slice(0, 11));
   }
   if (options.endpoint === '') {
     throw new Error('endpoint is required');

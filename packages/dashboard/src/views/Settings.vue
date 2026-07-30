@@ -8,8 +8,6 @@ import {
   getFixStats,
   listEnvironments,
   createEnvironment,
-  listAPIKeys,
-  createAPIKey,
   getGitHubConfig,
   setGitHubConfig,
   deleteGitHubConfig,
@@ -17,8 +15,6 @@ import {
   getMe,
   type Project,
   type Environment,
-  type APIKey,
-  type APIKeyCreated,
   type FixStats,
   type ProjectProvisioningResponse,
 } from '../api';
@@ -129,10 +125,6 @@ const newEnvName = ref('');
 const creatingEnv = ref(false);
 const envError = ref('');
 
-// API Keys tab
-const apiKeys = ref<APIKey[]>([]);
-const loadingKeys = ref(false);
-
 // GitHub integration
 const githubConfig = ref<GitHubConfig | null>(null);
 const loadingGithub = ref(false);
@@ -141,13 +133,6 @@ const selectedRepo = ref('');
 const connectingGithub = ref(false);
 const disconnectingGithub = ref(false);
 const githubError = ref('');
-
-// New key modal
-const showNewKeyModal = ref(false);
-const newKeyEnvId = ref('');
-const newKeyResult = ref<APIKeyCreated | null>(null);
-const creatingKey = ref(false);
-const keyError = ref('');
 
 onMounted(async () => {
   getMe().then((user) => {
@@ -390,9 +375,6 @@ function switchTab(tab: SettingsTab): void {
   if (tab === 'environments' && environments.value.length === 0 && pid) {
     loadEnvironments(pid);
   }
-  if (tab === 'api-keys' && apiKeys.value.length === 0 && pid) {
-    loadAPIKeys(pid);
-  }
 }
 
 async function loadEnvironments(pid: string): Promise<void> {
@@ -420,27 +402,6 @@ async function handleCreateEnvironment(): Promise<void> {
   } finally {
     creatingEnv.value = false;
   }
-}
-
-async function loadAPIKeys(pid: string): Promise<void> {
-  loadingKeys.value = true;
-  try {
-    apiKeys.value = await listAPIKeys(pid);
-  } catch {
-    // Non-fatal
-  } finally {
-    loadingKeys.value = false;
-  }
-}
-
-function openNewKeyModal(): void {
-  newKeyResult.value = null;
-  keyError.value = '';
-  // Pre-select first environment if available
-  if (environments.value.length > 0) {
-    newKeyEnvId.value = environments.value[0].id;
-  }
-  showNewKeyModal.value = true;
 }
 
 async function loadGitHubConfig(pid: string): Promise<void> {
@@ -493,23 +454,6 @@ async function handleDisconnectGithub(): Promise<void> {
   }
 }
 
-async function handleCreateKey(): Promise<void> {
-  if (!newKeyEnvId.value) return;
-  creatingKey.value = true;
-  keyError.value = '';
-  try {
-    newKeyResult.value = await createAPIKey(newKeyEnvId.value);
-    // Refresh key list
-    const pid = selectedProjectId.value || localStorage.getItem('opslane_project_id') || '';
-    if (pid) {
-      apiKeys.value = await listAPIKeys(pid);
-    }
-  } catch (err: unknown) {
-    keyError.value = err instanceof Error ? err.message : 'Failed to create API key';
-  } finally {
-    creatingKey.value = false;
-  }
-}
 </script>
 
 <template>
@@ -804,48 +748,10 @@ async function handleCreateKey(): Promise<void> {
 
     <!-- API Keys tab -->
     <div v-if="activeTab === 'api-keys'" id="settings-api-keys-panel" role="tabpanel" aria-labelledby="settings-api-keys-tab" tabindex="0">
-      <div v-if="loadingKeys" class="text-sm text-muted">Loading API keys...</div>
-
-      <div v-else>
-        <div v-if="apiKeys.length > 0" class="border border-border rounded-lg overflow-hidden mb-6">
-          <table class="min-w-full text-sm">
-            <thead>
-              <tr class="border-b border-border bg-surface">
-                <th class="py-2.5 px-4 text-left text-xs font-medium text-muted uppercase tracking-wider">Prefix</th>
-                <th class="py-2.5 px-4 text-left text-xs font-medium text-muted uppercase tracking-wider">Environment</th>
-                <th class="py-2.5 px-4 text-left text-xs font-medium text-muted uppercase tracking-wider">Created</th>
-                <th class="py-2.5 px-4 text-left text-xs font-medium text-muted uppercase tracking-wider">Status</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr
-                v-for="key in apiKeys"
-                :key="key.id"
-                class="border-b border-border hover:bg-surface transition-colors"
-              >
-                <td class="py-2.5 px-4 font-mono text-xs" v-text="key.key_prefix"></td>
-                <td class="py-2.5 px-4" v-text="key.environment_name"></td>
-                <td class="py-2.5 px-4 whitespace-nowrap">{{ formatDate(key.created_at) }}</td>
-                <td class="py-2.5 px-4">
-                  <span
-                    class="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium"
-                    :class="key.revoked_at
-                      ? 'bg-danger/10 text-danger'
-                      : 'bg-success/10 text-success'"
-                  >
-                    {{ key.revoked_at ? 'Revoked' : 'Active' }}
-                  </span>
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-        <div v-else class="text-sm text-muted mb-6">No API keys yet.</div>
-
-        <Button variant="primary" @click="openNewKeyModal">
-          Generate new key
-        </Button>
-      </div>
+      <p class="text-sm text-muted">
+        API keys are created by <code>opslane onboard</code> in your repository.
+        Managing them here is coming with source-map settings.
+      </p>
     </div>
 
     <div v-if="activeTab === 'organization'" id="settings-organization-panel" role="tabpanel" aria-labelledby="settings-organization-tab" tabindex="0">
@@ -880,64 +786,5 @@ async function handleCreateKey(): Promise<void> {
       </template>
     </ModalSurface>
 
-    <!-- New key modal -->
-    <ModalSurface
-      v-model:open="showNewKeyModal"
-      :title="newKeyResult ? 'API key created' : 'Generate new API key'"
-      initial-focus="#key-env-select"
-    >
-        <!-- Key created view -->
-        <div v-if="newKeyResult">
-          <div class="rounded-lg bg-surface-subtle text-text p-4 font-mono text-sm break-all relative">
-            <span v-text="newKeyResult.raw_key"></span>
-            <div class="absolute top-2 right-2">
-              <CopyButton :text="newKeyResult.raw_key" />
-            </div>
-          </div>
-          <div class="mt-3 rounded-md bg-warning/10 border border-warning/20 p-3">
-            <p class="text-sm text-warning">
-              Save this key -- you won't see it again.
-            </p>
-          </div>
-          <Button variant="secondary" class="mt-4 w-full" @click="showNewKeyModal = false">
-            Done
-          </Button>
-        </div>
-
-        <!-- Environment selector -->
-        <div v-else>
-          <div v-if="environments.length === 0" class="text-sm text-muted mb-4">
-            Create an environment first in the Environments tab.
-          </div>
-          <div v-else class="space-y-4">
-            <div>
-              <label for="key-env-select" class="block text-sm font-medium text-muted">
-                Environment
-              </label>
-              <select
-                id="key-env-select"
-                v-model="newKeyEnvId"
-                class="mt-1 block w-full rounded-md pl-3 pr-9 py-2 text-sm"
-              >
-                <option
-                  v-for="env in environments"
-                  :key="env.id"
-                  :value="env.id"
-                  v-text="env.name"
-                ></option>
-              </select>
-            </div>
-            <div v-if="keyError" class="text-sm text-danger" v-text="keyError"></div>
-            <div class="flex gap-3">
-              <Button variant="primary" class="flex-1" @click="handleCreateKey" :disabled="creatingKey || !newKeyEnvId">
-                {{ creatingKey ? 'Generating...' : 'Generate key' }}
-              </Button>
-              <Button variant="secondary" @click="showNewKeyModal = false">
-                Cancel
-              </Button>
-            </div>
-          </div>
-        </div>
-    </ModalSurface>
   </div>
 </template>

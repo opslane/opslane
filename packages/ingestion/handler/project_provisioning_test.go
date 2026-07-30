@@ -50,9 +50,8 @@ func TestCreateProjectEndpointReturnsCompositeProvisioningBundle(t *testing.T) {
 			Name      string `json:"name"`
 		} `json:"environment"`
 		APIKey struct {
-			ID        string `json:"id"`
-			RawKey    string `json:"raw_key"`
-			KeyPrefix string `json:"key_prefix"`
+			ID     string `json:"id"`
+			RawKey string `json:"raw_key"`
 		} `json:"api_key"`
 	}
 	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
@@ -60,10 +59,10 @@ func TestCreateProjectEndpointReturnsCompositeProvisioningBundle(t *testing.T) {
 	}
 	if body.Project.ID == "" || body.Environment.ProjectID != body.Project.ID ||
 		body.Environment.Name != "production" || body.APIKey.ID == "" ||
-		body.APIKey.RawKey == "" || body.APIKey.KeyPrefix == "" {
+		body.APIKey.RawKey == "" {
 		t.Fatalf("incomplete provisioning response: %+v", body)
 	}
-	if lookup, err := deps.Queries.LookupAPIKey(ctx, body.APIKey.RawKey); err != nil || lookup.ProjectID != body.Project.ID {
+	if lookup, err := deps.Queries.LookupProjectKey(ctx, body.APIKey.RawKey); err != nil || lookup.ProjectID != body.Project.ID {
 		t.Fatalf("returned raw key lookup = (%+v, %v)", lookup, err)
 	}
 }
@@ -110,13 +109,17 @@ func TestRequireRoleIfCloudAndProvisioningRoutes(t *testing.T) {
 		{http.MethodPost, "/api/v1/projects"},
 		{http.MethodPatch, "/api/v1/projects/" + project.ID},
 		{http.MethodPost, "/api/v1/projects/" + project.ID + "/environments"},
-		{http.MethodPost, "/api/v1/environments/" + environment.ID + "/api-keys"},
 	} {
 		response := postJSONRequest(cloudRouter, route.method, route.path, token, `{}`)
 		if response.Code != http.StatusForbidden {
 			t.Errorf("cloud member %s %s = %d, want 403: %s",
 				route.method, route.path, response.Code, response.Body.String())
 		}
+	}
+	removedKeyRoute := postJSONRequest(cloudRouter, http.MethodPost,
+		"/api/v1/environments/"+environment.ID+"/api-keys", token, `{}`)
+	if removedKeyRoute.Code != http.StatusNotFound {
+		t.Fatalf("removed key-management route = %d, want 404", removedKeyRoute.Code)
 	}
 
 	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })

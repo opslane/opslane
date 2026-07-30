@@ -271,3 +271,56 @@ func TestDefaultBranchNullableMigrationPreservesExistingRows(t *testing.T) {
 		t.Fatalf("new default_branch = %q, want NULL", *created)
 	}
 }
+
+// TestMigrations_PreserveOperatorPayloadEnvironmentOptOut pins the one-shot
+// guard on 028's backfill. The migration runner has no ledger — it replays
+// every file on every boot — while allow_payload_environment stays
+// operator-settable via PATCH /api/v1/projects/{id} and the dashboard toggle.
+// An unguarded `UPDATE projects SET allow_payload_environment = true` would
+// therefore re-enable payload-environment overrides on every restart, silently
+// reversing a deliberate opt-out. Schema-snapshot idempotency cannot catch
+// this: the column definition is identical either way, only the row data moves.
+func TestMigrations_PreserveOperatorPayloadEnvironmentOptOut(t *testing.T) {
+	admin := testPool(t)
+	psql := findPsql(t)
+	pool, dsn := disposableDB(t, admin)
+	files := migrationFiles(t)
+
+	for _, file := range files {
+		if err := applyMigration(t, psql, dsn, file); err != nil {
+			t.Fatalf("migration %s failed on first apply: %v", file, err)
+		}
+	}
+
+	ctx := context.Background()
+	var orgID string
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO orgs (name) VALUES ('payload-env-optout') RETURNING id`,
+	).Scan(&orgID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO projects (org_id, name, allow_payload_environment)
+		 VALUES ($1, 'opted-out', false)`,
+		orgID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Every subsequent boot replays all migrations.
+	for _, file := range files {
+		if err := applyMigration(t, psql, dsn, file); err != nil {
+			t.Fatalf("migration %s failed on re-apply: %v", file, err)
+		}
+	}
+
+	var allowed bool
+	if err := pool.QueryRow(ctx,
+		`SELECT allow_payload_environment FROM projects WHERE name = 'opted-out'`,
+	).Scan(&allowed); err != nil {
+		t.Fatal(err)
+	}
+	if allowed {
+		t.Fatal("replaying migrations re-enabled allow_payload_environment on a " +
+			"project whose owner turned it off; 028's backfill must run at most once")
+	}
+}

@@ -4,8 +4,9 @@
 -- Usage:
 --   PGPASSWORD=opslane_dev psql -h localhost -p 5434 -U opslane -d opslane -f scripts/seed-e2e.sql
 --
--- Test API key (raw): e2e-test-key-plaintext
--- SHA256 hash: 9593bc5c8575550af4065fbb43886b3a5443273976ca27b78cfa991d6e777279
+-- Test public ingest key (raw):
+-- opslane_pk_mzxw6ytboi3damrrgi3tknzxgq_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopq
+-- SHA256(secret): 769e8d95aa246a02d94d48c42fb7183e531c85c41d5b3456ddb90011712d8bd7
 
 INSERT INTO orgs (id, name) VALUES
   ('00000000-0000-0000-0000-000000000001', 'E2E Test Org')
@@ -20,11 +21,21 @@ INSERT INTO environments (id, project_id, name) VALUES
   ('00000000-0000-0000-0000-000000000100', '00000000-0000-0000-0000-000000000010', 'production')
 ON CONFLICT (id) DO NOTHING;
 
--- key_hash is SHA256 of the raw key "e2e-test-key-plaintext"
-INSERT INTO environment_api_keys (id, environment_id, key_hash, key_prefix) VALUES
-  ('00000000-0000-0000-0000-000000001000', '00000000-0000-0000-0000-000000000100',
-   '9593bc5c8575550af4065fbb43886b3a5443273976ca27b78cfa991d6e777279', 'e2e-')
-ON CONFLICT (id) DO UPDATE SET key_hash = EXCLUDED.key_hash;
+INSERT INTO project_api_keys
+  (id, key_id, project_id, scope, token_prefix, secret_hash, label)
+VALUES
+  ('00000000-0000-0000-0000-000000001000',
+   'mzxw6ytboi3damrrgi3tknzxgq',
+   '00000000-0000-0000-0000-000000000010',
+   'ingest',
+   'opslane_pk',
+   '769e8d95aa246a02d94d48c42fb7183e531c85c41d5b3456ddb90011712d8bd7',
+   'e2e fixture')
+ON CONFLICT (id) DO UPDATE SET
+  project_id = EXCLUDED.project_id,
+  secret_hash = EXCLUDED.secret_hash,
+  revoked_at = NULL,
+  revoked_by_user_id = NULL;
 
 -- Test user for auth E2E (password: testpassword123, bcrypt cost 10)
 INSERT INTO users (id, org_id, email, password_hash, name) VALUES

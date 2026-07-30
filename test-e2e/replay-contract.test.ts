@@ -34,7 +34,7 @@ describe('session replay pointer contract', () => {
 
     const sessionInit = await fetch(`${ingestionUrl}/api/v1/sessions/init`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-API-Key': tenant.apiKey },
+      headers: { 'Content-Type': 'application/json', 'X-API-Key': tenant.ingestKey },
       body: JSON.stringify({
         session_id: sessionId,
         started_at: errorAt,
@@ -46,7 +46,7 @@ describe('session replay pointer contract', () => {
 
     const ingest = await fetch(`${ingestionUrl}/api/v1/events`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-API-Key': tenant.apiKey },
+      headers: { 'Content-Type': 'application/json', 'X-API-Key': tenant.ingestKey },
       body: JSON.stringify({
         timestamp: errorAt,
         error: { type: 'TypeError', message: 'session-pointer-contract', stack: 'at a (src/a.ts:1:1)' },
@@ -92,7 +92,7 @@ describe('session replay pointer contract', () => {
       `${ingestionUrl}/api/v1/sessions/${sessionId}/chunks/0?has_full_snapshot=1`,
       {
         method: 'POST',
-        headers: { 'Content-Type': 'application/gzip', 'X-API-Key': tenant.apiKey },
+        headers: { 'Content-Type': 'application/gzip', 'X-API-Key': tenant.ingestKey },
         body: compressed,
       },
     );
@@ -152,7 +152,7 @@ describe('session replay pointer contract', () => {
     const { ingestionUrl } = getConfig();
     const init = await fetch(`${ingestionUrl}/api/v1/replays/init`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-API-Key': tenant.apiKey },
+      headers: { 'Content-Type': 'application/json', 'X-API-Key': tenant.ingestKey },
       body: JSON.stringify({
         session_id: 'legacy_sdk_session',
         trigger_type: 'error',

@@ -3,6 +3,7 @@ import { jsonOutput, exitWithError, exitWithStatus } from './output.js';
 import { defaultApiUrl } from './config.js';
 import { detectRepoFromGit } from './setup.js';
 import { canonicalOrigin } from './origin.js';
+import { authedFetch, type SessionTokenLoader } from './authed-fetch.js';
 
 export interface ErrorsOptions {
   status?: string;
@@ -12,22 +13,37 @@ export interface ErrorsOptions {
   apiUrl?: string;
   repo?: string;
   cwd?: string;
+  tokenPath?: string;
+  loadToken?: SessionTokenLoader;
 }
 
-async function fetchAndOutput(fetchFn: typeof fetch, url: string, apiKey: string): Promise<void> {
+async function fetchAndOutput(
+  fetchFn: typeof fetch,
+  apiUrl: string,
+  url: string,
+  options: Pick<ErrorsOptions, 'tokenPath' | 'loadToken'>,
+): Promise<void> {
   try {
-    const resp = await fetchFn(url, {
-      headers: { 'X-API-Key': apiKey },
+    const resp = await authedFetch(url, {
+      apiUrl,
+      fetchFn,
+      tokenPath: options.tokenPath,
+      loadToken: options.loadToken,
     });
 
     if (!resp.ok) {
-      exitWithError(`API error: ${resp.status}`);
+      const body = await resp.json().catch(() => ({})) as Record<string, unknown>;
+      return exitWithStatus('error', {
+        status: resp.status,
+        code: body['code'] ?? null,
+        message: body['error'] ?? `API error: ${resp.status}`,
+      }, 1);
     }
 
     const body = await resp.json();
     jsonOutput(body as Record<string, unknown>);
   } catch (err) {
-    exitWithError(`Cannot reach API: ${(err as Error).message}`);
+    return exitWithError((err as Error).message);
   }
 }
 
@@ -55,7 +71,7 @@ export async function listErrors(options: ErrorsOptions = {}): Promise<void> {
   if (options.limit) params.set('limit', String(options.limit));
 
   const url = `${creds.api_url}/api/v1/projects/${creds.project_id}/incidents?${params}`;
-  await fetchAndOutput(fetchFn, url, creds.api_key);
+  await fetchAndOutput(fetchFn, creds.api_url, url, options);
 }
 
 export async function getError(errorId: string, options: ErrorsOptions = {}): Promise<void> {
@@ -78,5 +94,5 @@ export async function getError(errorId: string, options: ErrorsOptions = {}): Pr
   }
 
   const url = `${creds.api_url}/api/v1/projects/${creds.project_id}/incidents/${encodeURIComponent(errorId)}`;
-  await fetchAndOutput(fetchFn, url, creds.api_key);
+  await fetchAndOutput(fetchFn, creds.api_url, url, options);
 }

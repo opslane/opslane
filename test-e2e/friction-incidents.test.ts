@@ -27,6 +27,7 @@ import {
   makeChunksScrubbable,
   waitForScrubbedChunks,
   cleanupTenant,
+  type IngestKey,
   type TestTenant,
 } from './helpers.js';
 // Production worker pipeline, loaded from the built package inside beforeAll
@@ -132,10 +133,10 @@ async function driveRageSession(
   apiKey: string,
   projectId: string,
   userId: string,
-  opts: { selector?: string } = {}
+  opts: { selector?: string; environment?: string } = {}
 ): Promise<string> {
   const sessionId = `e2e_fr_${RUN_ID}_${crypto.randomUUID().slice(0, 8)}`;
-  await initSession(apiKey, sessionId, { id: userId }, PAGE);
+  await initSession(apiKey, sessionId, { id: userId }, PAGE, opts.environment);
   await uploadChunk(apiKey, sessionId, 0, rageChunk(Date.now() - 5_000, opts.selector));
   await makeChunksScrubbable(sessionId);
   await waitForScrubbedChunks(sessionId, 1);
@@ -149,7 +150,7 @@ const describeLive = process.env['DATABASE_URL'] && process.env['MINIO_ENDPOINT'
 
 describeLive('friction incidents — synthetic live-service gate', () => {
   let tenant: TestTenant;
-  let staging: { environmentId: string; apiKey: string };
+  let staging: { environmentId: string; ingestKey: IngestKey };
 
   beforeAll(async () => {
     await loadWorkerPipeline();
@@ -186,7 +187,7 @@ describeLive('friction incidents — synthetic live-service gate', () => {
     { timeout: 240_000 },
     async () => {
       for (let i = 1; i <= 4; i++) {
-        await driveRageSession(tenant.apiKey, tenant.projectId, `batch4-user-${i}`);
+        await driveRageSession(tenant.ingestKey, tenant.projectId, `batch4-user-${i}`);
       }
 
       // Positive-scope negative proof: no published friction incident.
@@ -208,7 +209,7 @@ describeLive('friction incidents — synthetic live-service gate', () => {
       expect(candidate.rows[0]!.affected_users_count).toBe(0);
 
       // Fifth user crosses the threshold.
-      await driveRageSession(tenant.apiKey, tenant.projectId, `batch4-user-5`);
+      await driveRageSession(tenant.ingestKey, tenant.projectId, `batch4-user-5`);
 
       const after = await db.query<{
         id: string;
@@ -256,7 +257,7 @@ describeLive('friction incidents — synthetic live-service gate', () => {
       const { ingestionUrl } = getConfig();
       const listRes = await fetch(
         `${ingestionUrl}/api/v1/projects/${tenant.projectId}/incidents`,
-        { headers: { 'X-API-Key': tenant.apiKey } }
+        { headers: { Authorization: `Bearer ${tenant.userSession}` } }
       );
       expect(listRes.status).toBe(200);
       const incidents = (await listRes.json()) as Array<{ id: string; kind: string }>;
@@ -278,7 +279,9 @@ describeLive('friction incidents — synthetic live-service gate', () => {
 
       // Two staging users: same fingerprint, no promotion, production untouched.
       for (let i = 1; i <= 2; i++) {
-        await driveRageSession(staging.apiKey, tenant.projectId, `batch4-staging-${i}`);
+        await driveRageSession(staging.ingestKey, tenant.projectId, `batch4-staging-${i}`, {
+          environment: 'staging',
+        });
       }
       const between = await db.query<{ id: string; affected_users_count: number }>(
         `SELECT id, affected_users_count FROM error_groups
@@ -301,13 +304,15 @@ describeLive('friction incidents — synthetic live-service gate', () => {
       const { ingestionUrl } = getConfig();
       const detail = await fetch(
         `${ingestionUrl}/api/v1/projects/${tenant.projectId}/incidents/${stagingCandidate.rows[0]!.id}`,
-        { headers: { 'X-API-Key': tenant.apiKey } }
+        { headers: { Authorization: `Bearer ${tenant.userSession}` } }
       );
       expect(detail.status).toBe(404);
 
       // Three more staging users promote a second, environment-distinct incident.
       for (let i = 3; i <= 5; i++) {
-        await driveRageSession(staging.apiKey, tenant.projectId, `batch4-staging-${i}`);
+        await driveRageSession(staging.ingestKey, tenant.projectId, `batch4-staging-${i}`, {
+          environment: 'staging',
+        });
       }
       const finalRows = await db.query<{ environment_id: string; affected_users_count: number }>(
         `SELECT environment_id, affected_users_count FROM error_groups
@@ -333,11 +338,11 @@ describeLive('friction incidents — synthetic live-service gate', () => {
       const sessionId = `e2e_fold_${RUN_ID}`;
       const t0 = Date.now() - 60_000;
 
-      await initSession(tenant.apiKey, sessionId, { id: 'batch4-fold-user' }, PAGE);
+      await initSession(tenant.ingestKey, sessionId, { id: 'batch4-fold-user' }, PAGE);
       // Error 10 seconds after the rage click, same session, client timestamp.
       const errorRes = await fetch(`${ingestionUrl}/api/v1/events`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-API-Key': tenant.apiKey },
+        headers: { 'Content-Type': 'application/json', 'X-API-Key': tenant.ingestKey },
         body: JSON.stringify({
           timestamp: new Date(t0 + 10_600).toISOString(),
           error: { type: 'TypeError', message: `fold-me-${RUN_ID}`, stack: 'at a (src/a.ts:1:1)' },
@@ -347,7 +352,7 @@ describeLive('friction incidents — synthetic live-service gate', () => {
       expect(errorRes.status).toBe(202);
       const errorBody = (await errorRes.json()) as { error_group_id: string };
 
-      await uploadChunk(tenant.apiKey, sessionId, 0, rageChunk(t0, selector));
+      await uploadChunk(tenant.ingestKey, sessionId, 0, rageChunk(t0, selector));
       await makeChunksScrubbable(sessionId);
       await waitForScrubbedChunks(sessionId, 1);
       await analyzeSessionInProcess(sessionId, tenant.projectId);
@@ -396,17 +401,17 @@ describeLive('friction incidents — synthetic live-service gate', () => {
       const sessionId = `e2e_nofold_${RUN_ID}`;
       const t0 = Date.now() - 120_000;
 
-      await initSession(tenant.apiKey, sessionId, { id: 'batch4-nofold-user' }, PAGE);
+      await initSession(tenant.ingestKey, sessionId, { id: 'batch4-nofold-user' }, PAGE);
       await fetch(`${ingestionUrl}/api/v1/events`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-API-Key': tenant.apiKey },
+        headers: { 'Content-Type': 'application/json', 'X-API-Key': tenant.ingestKey },
         body: JSON.stringify({
           timestamp: new Date(t0 + 45_000).toISOString(),
           error: { type: 'TypeError', message: `too-far-${RUN_ID}`, stack: 'at a (src/a.ts:1:1)' },
           session_id: sessionId,
         }),
       });
-      await uploadChunk(tenant.apiKey, sessionId, 0, rageChunk(t0, selector));
+      await uploadChunk(tenant.ingestKey, sessionId, 0, rageChunk(t0, selector));
       await makeChunksScrubbable(sessionId);
       await waitForScrubbedChunks(sessionId, 1);
       await analyzeSessionInProcess(sessionId, tenant.projectId);
@@ -426,8 +431,8 @@ describeLive('friction incidents — synthetic live-service gate', () => {
   it('the stepper fixture produces no signal and no incident', { timeout: 120_000 }, async () => {
     const db = getPool();
     const sessionId = `e2e_stepper_${RUN_ID}`;
-    await initSession(tenant.apiKey, sessionId, { id: 'batch4-stepper-user' }, PAGE);
-    await uploadChunk(tenant.apiKey, sessionId, 0, stepperChunk(Date.now() - 5_000));
+    await initSession(tenant.ingestKey, sessionId, { id: 'batch4-stepper-user' }, PAGE);
+    await uploadChunk(tenant.ingestKey, sessionId, 0, stepperChunk(Date.now() - 5_000));
     await makeChunksScrubbable(sessionId);
     await waitForScrubbedChunks(sessionId, 1);
     await analyzeSessionInProcess(sessionId, tenant.projectId);
