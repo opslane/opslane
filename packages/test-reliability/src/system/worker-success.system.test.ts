@@ -90,7 +90,7 @@ describe('event-to-pr reliability system tracer', () => {
     process.env['OPSLANE_RELIABILITY_HARNESS'] = '1';
 
     tenant = await helpers.seedTenant(githubRepo);
-    const postResponse = await helpers.postEvent(tenant.apiKey, {
+    const postResponse = await helpers.postEvent(tenant.ingestKey, {
       timestamp: new Date().toISOString(),
       error: {
         type: 'TypeError',
@@ -233,7 +233,7 @@ describe('event-to-pr reliability system tracer', () => {
     // ingest key is write-only now, so passing it here sends it as a bearer
     // token and the server rejects it as an expired session.
     const incident = await helpers.getIncident(
-      tenant.sessionToken,
+      tenant.userSession,
       tenant.projectId,
       accepted.group_id,
     );

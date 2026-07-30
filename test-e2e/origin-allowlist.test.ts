@@ -62,30 +62,30 @@ describe('origin allowlist with a server-side SDK', () => {
   });
 
   it('accepts a backend event that carries no Origin or Referer', async () => {
-    const res = await postEvent(tenant.apiKey, errorPayload('backend accepted'));
+    const res = await postEvent(tenant.ingestKey, errorPayload('backend accepted'));
     expect(res.status).toBe(202);
   });
 
   it('accepts a browser event from an allowlisted origin', async () => {
-    const res = await post('/api/v1/events', tenant.apiKey, errorPayload('browser ok'),
+    const res = await post('/api/v1/events', tenant.ingestKey, errorPayload('browser ok'),
       { Origin: ALLOWED_ORIGIN });
     expect(res.status).toBe(202);
   });
 
   it('rejects a browser event from an origin not on the list', async () => {
-    const res = await post('/api/v1/events', tenant.apiKey, errorPayload('browser blocked'),
+    const res = await post('/api/v1/events', tenant.ingestKey, errorPayload('browser blocked'),
       { Origin: 'https://evil.example' });
     expect(res.status).toBe(403);
   });
 
   it('rejects a referer-only event from an origin not on the list', async () => {
-    const res = await post('/api/v1/events', tenant.apiKey, errorPayload('referer blocked'),
+    const res = await post('/api/v1/events', tenant.ingestKey, errorPayload('referer blocked'),
       { Referer: 'https://evil.example/checkout' });
     expect(res.status).toBe(403);
   });
 
   it('keeps browser-only routes strict for header-less callers', async () => {
-    const res = await post('/api/v1/sessions/init', tenant.apiKey, {});
+    const res = await post('/api/v1/sessions/init', tenant.ingestKey, {});
     expect(res.status).toBe(403);
   });
 });

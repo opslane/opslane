@@ -13,6 +13,7 @@ import {
   seedEnvironment,
   seedTenant,
   seedUserWithJWT,
+  type IngestKey,
   type TestTenant,
 } from './helpers.js';
 import { isPlaywrightAvailable } from './browser-helpers.js';
@@ -23,7 +24,7 @@ const playwrightAvailable = await isPlaywrightAvailable();
 describe.skipIf(!configured || !playwrightAvailable)('dashboard environment filtering', () => {
   let tenant: TestTenant;
   let stagingEnvironmentId: string;
-  let stagingAPIKey: string;
+  let stagingAPIKey: IngestKey;
   let jwt: string;
   let browser: import('@playwright/test').Browser;
   let originalRollupStatus: string;
@@ -46,11 +47,11 @@ describe.skipIf(!configured || !playwrightAvailable)('dashboard environment filt
   const stagingPagePath = pageRowPath(stagingPage);
 
   async function ingest(
-    apiKey: string,
+    ingestKey: IngestKey,
     message: string,
     environment?: string,
   ): Promise<string> {
-    const response = await postEvent(apiKey, {
+    const response = await postEvent(ingestKey, {
       timestamp: new Date().toISOString(),
       error: {
         type: 'TypeError',
@@ -71,21 +72,21 @@ describe.skipIf(!configured || !playwrightAvailable)('dashboard environment filt
     const db = getPool();
     const staging = await seedEnvironment(tenant.projectId, 'staging');
     stagingEnvironmentId = staging.environmentId;
-    stagingAPIKey = staging.apiKey;
+    stagingAPIKey = staging.ingestKey;
     ({ jwt } = await seedUserWithJWT(tenant.orgId));
     const state = await db.query<{ status: string }>(
       `SELECT status FROM rollup_backfill_state WHERE id`,
     );
     originalRollupStatus = state.rows[0]!.status;
 
-    await ingest(tenant.apiKey, sharedTitle);
-    await ingest(tenant.apiKey, sharedTitle);
+    await ingest(tenant.ingestKey, sharedTitle);
+    await ingest(tenant.ingestKey, sharedTitle);
     await ingest(stagingAPIKey, sharedTitle, 'staging');
-    await ingest(tenant.apiKey, productionOnlyTitle);
+    await ingest(tenant.ingestKey, productionOnlyTitle);
     await ingest(stagingAPIKey, stagingOnlyTitle, 'staging');
 
     await initSession(
-      tenant.apiKey,
+      tenant.ingestKey,
       `sess_phase2_prod_${crypto.randomUUID().replaceAll('-', '').slice(0, 12)}`,
       undefined,
       productionPage,

@@ -46,7 +46,7 @@ describe.skipIf(hasLLMKey || !keylessWorkerRunning || !playwrightAvailable)(
       const vue = (await import('@vitejs/plugin-vue')).default;
       fixture = await startFixture({
         fixtureDir: VUE_FIXTURE,
-        apiKey: tenant.apiKey,
+        apiKey: tenant.ingestKey,
         ingestionUrl: getConfig().ingestionUrl,
         entryPattern: /\/main\.ts$/,
         plugins: [vue()],

@@ -14,7 +14,9 @@ import {
   seedEnvironment,
   seedTenant,
   seedUserWithJWT,
+  type IngestKey,
   type TestTenant,
+  type UserSession,
 } from './helpers.js';
 
 const configured = !!process.env['DATABASE_URL'] && !!process.env['INGESTION_URL'];
@@ -28,8 +30,8 @@ function metricValue(metrics: string, name: string, labels = ''): number {
 describe.skipIf(!configured)('first-class environment ingestion', () => {
   let tenant: TestTenant;
   let otherTenant: TestTenant;
-  let staging: { environmentId: string; apiKey: string };
-  let jwt: string;
+  let staging: { environmentId: string; ingestKey: IngestKey };
+  let jwt: UserSession;
 
   async function scrapeMetrics(): Promise<string> {
     const response = await fetch(`${getConfig().ingestionUrl}/metrics`);
@@ -45,12 +47,12 @@ describe.skipIf(!configured)('first-class environment ingestion', () => {
   }
 
   async function ingest(
-    apiKey: string,
+    ingestKey: IngestKey,
     marker: string,
     options: { environment?: string; sessionId?: string; sharedFingerprint?: boolean } = {},
   ): Promise<{ eventId: string; groupId: string; environmentId: string }> {
     const message = options.sharedFingerprint ? marker : `${marker}-${crypto.randomUUID()}`;
-    const response = await postEvent(apiKey, {
+    const response = await postEvent(ingestKey, {
       timestamp: new Date().toISOString(),
       error: {
         type: 'EnvironmentE2EError',
@@ -81,7 +83,10 @@ describe.skipIf(!configured)('first-class environment ingestion', () => {
     tenant = await seedTenant();
     staging = await seedEnvironment(tenant.projectId, 'staging');
     otherTenant = await seedTenant('other-org/other-repo');
-    ({ jwt } = await seedUserWithJWT(tenant.orgId));
+    // Boundary: seedUserWithJWT signs a plain JWT string; this test's use of
+    // it to read incidents/sessions is what makes it a session credential.
+    const { jwt: rawJwt } = await seedUserWithJWT(tenant.orgId);
+    jwt = rawJwt as UserSession;
   });
 
   afterAll(async () => {
@@ -92,16 +97,16 @@ describe.skipIf(!configured)('first-class environment ingestion', () => {
 
   it('keeps one group across payload environments with exact per-environment counts', async () => {
     const marker = `environment-shared-${crypto.randomUUID()}`;
-    const productionEvent = await ingest(tenant.apiKey, marker, { sharedFingerprint: true });
-    const stagingEvent = await ingest(staging.apiKey, marker, {
+    const productionEvent = await ingest(tenant.ingestKey, marker, { sharedFingerprint: true });
+    const stagingEvent = await ingest(staging.ingestKey, marker, {
       environment: 'staging',
       sharedFingerprint: true,
     });
 
     expect(stagingEvent.groupId).toBe(productionEvent.groupId);
-    const all = await listIncidents(tenant.sessionToken, tenant.projectId);
-    const production = await listIncidents(tenant.sessionToken, tenant.projectId, tenant.environmentId);
-    const stagingOnly = await listIncidents(tenant.sessionToken, tenant.projectId, staging.environmentId);
+    const all = await listIncidents(tenant.userSession, tenant.projectId);
+    const production = await listIncidents(tenant.userSession, tenant.projectId, tenant.environmentId);
+    const stagingOnly = await listIncidents(tenant.userSession, tenant.projectId, staging.environmentId);
     expect(all.find((incident) => incident.id === productionEvent.groupId)?.occurrence_count).toBe(2);
     expect(production.find((incident) => incident.id === productionEvent.groupId)?.occurrence_count).toBe(1);
     expect(stagingOnly.find((incident) => incident.id === productionEvent.groupId)?.occurrence_count).toBe(1);
@@ -126,17 +131,17 @@ describe.skipIf(!configured)('first-class environment ingestion', () => {
     );
 
     await setPayloadOverride(true);
-    expect((await ingest(tenant.apiKey, 'valid-override', { environment: 'staging' })).environmentId)
+    expect((await ingest(tenant.ingestKey, 'valid-override', { environment: 'staging' })).environmentId)
       .toBe(staging.environmentId);
 
     await setPayloadOverride(false);
-    expect((await ingest(tenant.apiKey, 'disabled-override', { environment: 'staging' })).environmentId)
+    expect((await ingest(tenant.ingestKey, 'disabled-override', { environment: 'staging' })).environmentId)
       .toBe(tenant.environmentId);
 
     await setPayloadOverride(true);
-    expect((await ingest(tenant.apiKey, 'unknown-override', { environment: 'does-not-exist' })).environmentId)
+    expect((await ingest(tenant.ingestKey, 'unknown-override', { environment: 'does-not-exist' })).environmentId)
       .toBe(tenant.environmentId);
-    expect((await ingest(tenant.apiKey, 'invalid-override', { environment: 'bad environment/name' })).environmentId)
+    expect((await ingest(tenant.ingestKey, 'invalid-override', { environment: 'bad environment/name' })).environmentId)
       .toBe(tenant.environmentId);
 
     const after = await scrapeMetrics();
@@ -155,7 +160,7 @@ describe.skipIf(!configured)('first-class environment ingestion', () => {
     const divergenceBefore = metricValue(before, 'opslane_ingest_env_session_divergence_total');
     const conflictBefore = metricValue(before, 'opslane_ingest_session_cross_project_conflict_total');
 
-    const beforeSession = await ingest(tenant.apiKey, 'before-session', {
+    const beforeSession = await ingest(tenant.ingestKey, 'before-session', {
       environment: 'staging',
       sessionId,
     });
@@ -163,7 +168,7 @@ describe.skipIf(!configured)('first-class environment ingestion', () => {
 
     const sessionInit = await fetch(`${getConfig().ingestionUrl}/api/v1/sessions/init`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-API-Key': tenant.apiKey },
+      headers: { 'Content-Type': 'application/json', 'X-API-Key': tenant.ingestKey },
       body: JSON.stringify({
         session_id: sessionId,
         started_at: new Date().toISOString(),
@@ -175,7 +180,7 @@ describe.skipIf(!configured)('first-class environment ingestion', () => {
       throw new Error(`session init failed: ${sessionInit.status} ${await sessionInit.text()}`);
     }
 
-    const afterSession = await ingest(tenant.apiKey, 'after-session', {
+    const afterSession = await ingest(tenant.ingestKey, 'after-session', {
       environment: 'staging',
       sessionId,
     });
@@ -195,7 +200,7 @@ describe.skipIf(!configured)('first-class environment ingestion', () => {
 
     const crossProjectInit = await fetch(`${getConfig().ingestionUrl}/api/v1/sessions/init`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-API-Key': otherTenant.apiKey },
+      headers: { 'Content-Type': 'application/json', 'X-API-Key': otherTenant.ingestKey },
       body: JSON.stringify({
         session_id: sessionId,
         started_at: new Date().toISOString(),
@@ -206,14 +211,14 @@ describe.skipIf(!configured)('first-class environment ingestion', () => {
 
     const ownerReplay = await fetch(`${getConfig().ingestionUrl}/api/v1/replays/init`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-API-Key': tenant.apiKey },
+      headers: { 'Content-Type': 'application/json', 'X-API-Key': tenant.ingestKey },
       body: JSON.stringify({ session_id: sessionId, trigger_type: 'error' }),
     });
     expect(ownerReplay.status).toBe(201);
 
     const crossProjectReplay = await fetch(`${getConfig().ingestionUrl}/api/v1/replays/init`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-API-Key': otherTenant.apiKey },
+      headers: { 'Content-Type': 'application/json', 'X-API-Key': otherTenant.ingestKey },
       body: JSON.stringify({ session_id: sessionId, trigger_type: 'error' }),
     });
     expect(crossProjectReplay.status).toBe(404);

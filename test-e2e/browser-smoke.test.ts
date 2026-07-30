@@ -46,7 +46,7 @@ async function pollIncidentMatching(
 ): Promise<Incident> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const incidents = await listIncidents(tenant.sessionToken, tenant.projectId);
+    const incidents = await listIncidents(tenant.userSession, tenant.projectId);
     const hit = incidents.find(predicate);
     if (hit) return hit;
     await new Promise((resolve) => setTimeout(resolve, 2_000));
@@ -66,7 +66,7 @@ describe.skipIf(hasLLMKey || !keylessWorkerRunning || !playwrightAvailable)(
       const vue = (await import('@vitejs/plugin-vue')).default;
       fixture = await startFixture({
         fixtureDir: VUE_FIXTURE,
-        apiKey: tenant.apiKey,
+        apiKey: tenant.ingestKey,
         ingestionUrl: getConfig().ingestionUrl,
         entryPattern: /\/main\.ts$/,
         plugins: [vue()],
@@ -96,7 +96,7 @@ describe.skipIf(hasLLMKey || !keylessWorkerRunning || !playwrightAvailable)(
         expect(incident.status).toBeTruthy();
 
         const terminal = await pollUntilTerminal(
-          tenant.sessionToken,
+          tenant.userSession,
           tenant.projectId,
           incident.id,
           ['needs_human'],
@@ -223,7 +223,7 @@ describe.skipIf(hasLLMKey || !keylessWorkerRunning || !playwrightAvailable)(
       const react = (await import('@vitejs/plugin-react')).default;
       fixture = await startFixture({
         fixtureDir: REACT_FIXTURE,
-        apiKey: tenant.apiKey,
+        apiKey: tenant.ingestKey,
         ingestionUrl: getConfig().ingestionUrl,
         entryPattern: /\/main\.tsx$/,
         plugins: [react()],
@@ -255,7 +255,7 @@ describe.skipIf(hasLLMKey || !keylessWorkerRunning || !playwrightAvailable)(
           }
         );
         const terminal = await pollUntilTerminal(
-          tenant.sessionToken,
+          tenant.userSession,
           tenant.projectId,
           incident.id,
           ['needs_human'],

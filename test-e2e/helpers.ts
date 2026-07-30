@@ -12,6 +12,17 @@ import crypto from 'node:crypto';
 const { Pool } = pg;
 
 // ---------------------------------------------------------------------------
+// Credential types
+// ---------------------------------------------------------------------------
+
+// Credentials are all strings on the wire, which is how an ingest key ended
+// up in an Authorization header on #243 without the compiler noticing.
+// Branding them costs nothing at runtime and makes that swap a type error.
+export type IngestKey = string & { readonly __credential: 'ingest' };
+export type SourceMapKey = string & { readonly __credential: 'sourcemap' };
+export type UserSession = string & { readonly __credential: 'session' };
+
+// ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
 
@@ -55,15 +66,30 @@ export interface TestTenant {
   orgId: string;
   projectId: string;
   environmentId: string;
-  apiKey: string; // raw key for X-API-Key header
-  sessionToken: string; // JWT for session-authenticated read endpoints
+  ingestKey: IngestKey; // raw key for X-API-Key header, scope 'ingest'
+  sourceMapKey: SourceMapKey; // raw key for X-API-Key header, scope 'sourcemaps'
+  revokedKey: IngestKey; // an ingest key whose revoked_at is already set
+  userSession: UserSession; // JWT for session-authenticated read endpoints
 }
 
-async function seedProjectIngestKey(
+type ProjectKeyScope = 'ingest' | 'sourcemaps';
+
+/**
+ * Inserts a project-scoped API key row and returns its raw wire form plus
+ * the key_id (needed by callers that revoke the key right after minting it).
+ *
+ * Generic over the credential brand so both seedProjectIngestKey and
+ * seedProjectSourceMapKey share one place where a freshly generated string
+ * legitimately becomes a branded credential, instead of each carrying its
+ * own cast.
+ */
+async function mintProjectKey<T extends string>(
   db: pg.Pool,
   projectId: string,
+  scope: ProjectKeyScope,
+  tokenPrefix: string,
   label: string,
-): Promise<string> {
+): Promise<{ keyId: string; key: T }> {
   const alphabet = 'abcdefghijklmnopqrstuvwxyz234567';
   const keyId = Array.from(
     crypto.randomBytes(26),
@@ -75,16 +101,50 @@ async function seedProjectIngestKey(
   await db.query(
     `INSERT INTO project_api_keys
        (key_id, project_id, scope, token_prefix, secret_hash, label)
-     VALUES ($1, $2, 'ingest', 'opslane_pk', $3, $4)`,
-    [keyId, projectId, secretHash, label],
+     VALUES ($1, $2, $3, $4, $5, $6)`,
+    [keyId, projectId, scope, tokenPrefix, secretHash, label],
   );
 
-  return `opslane_pk_${keyId}_${secret}`;
+  // Boundary: the key is random bytes we just inserted under `scope`, so its
+  // wire string is known by construction to be the credential T names. This
+  // is where an unbranded value legitimately becomes a branded credential.
+  const key = `${tokenPrefix}_${keyId}_${secret}` as T;
+  return { keyId, key };
+}
+
+async function seedProjectIngestKey(
+  db: pg.Pool,
+  projectId: string,
+  label: string,
+): Promise<IngestKey> {
+  const { key } = await mintProjectKey<IngestKey>(db, projectId, 'ingest', 'opslane_pk', label);
+  return key;
+}
+
+async function seedProjectSourceMapKey(
+  db: pg.Pool,
+  projectId: string,
+  label: string,
+): Promise<SourceMapKey> {
+  const { key } = await mintProjectKey<SourceMapKey>(db, projectId, 'sourcemaps', 'opslane_sk', label);
+  return key;
+}
+
+/** Mints an ingest key and revokes it immediately, for testing rejection of revoked credentials. */
+async function seedRevokedIngestKey(
+  db: pg.Pool,
+  projectId: string,
+  label: string,
+): Promise<IngestKey> {
+  const { keyId, key } = await mintProjectKey<IngestKey>(db, projectId, 'ingest', 'opslane_pk', label);
+  await db.query(`UPDATE project_api_keys SET revoked_at = now() WHERE key_id = $1`, [keyId]);
+  return key;
 }
 
 /**
- * Creates a full tenant hierarchy with an ingest key and session user.
- * Uses a unique suffix to avoid collisions between test runs.
+ * Creates a full tenant hierarchy with an ingest key, a source-map key, a
+ * revoked key, and a session user. Uses a unique suffix to avoid collisions
+ * between test runs.
  */
 export async function seedTenant(
   githubRepo = 'test-org/test-repo'
@@ -113,10 +173,18 @@ export async function seedTenant(
   );
   const environmentId = envResult.rows[0]!.id;
 
-  const apiKey = await seedProjectIngestKey(db, projectId, 'e2e tenant ingest');
-  const { jwt: sessionToken } = await seedUserWithJWT(orgId);
+  const ingestKey = await seedProjectIngestKey(db, projectId, 'e2e tenant ingest');
+  const sourceMapKey = await seedProjectSourceMapKey(db, projectId, 'e2e tenant sourcemap');
+  const revokedKey = await seedRevokedIngestKey(db, projectId, 'e2e tenant revoked');
+  // Boundary: seedUserWithJWT signs a plain JWT string; this tenant's use of
+  // it is what makes it a session credential, so this is where it becomes a
+  // branded UserSession. (seedUserWithJWT itself stays untyped: its `jwt` is
+  // also consumed directly, unbranded, by tests that only need a bearer
+  // token and never touch TestTenant.)
+  const { jwt } = await seedUserWithJWT(orgId);
+  const userSession = jwt as UserSession;
 
-  return { orgId, projectId, environmentId, apiKey, sessionToken };
+  return { orgId, projectId, environmentId, ingestKey, sourceMapKey, revokedKey, userSession };
 }
 
 // ---------------------------------------------------------------------------
@@ -221,7 +289,7 @@ export interface Incident {
  * POST an error event to the ingestion API.
  */
 export async function postEvent(
-  apiKey: string,
+  ingestKey: IngestKey,
   payload: Record<string, unknown>
 ): Promise<Response> {
   const { ingestionUrl } = getConfig();
@@ -229,7 +297,7 @@ export async function postEvent(
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'X-API-Key': apiKey,
+      'X-API-Key': ingestKey,
     },
     body: JSON.stringify(payload),
   });
@@ -239,7 +307,7 @@ export async function postEvent(
  * GET all incidents for a project.
  */
 export async function listIncidents(
-  sessionToken: string,
+  userSession: UserSession,
   projectId: string,
   environmentId?: string,
 ): Promise<Incident[]> {
@@ -249,7 +317,7 @@ export async function listIncidents(
     : '';
   const res = await fetch(
     `${ingestionUrl}/api/v1/projects/${projectId}/incidents${query}`,
-    { headers: { Authorization: `Bearer ${sessionToken}` } }
+    { headers: { Authorization: `Bearer ${userSession}` } }
   );
   if (!res.ok) {
     throw new Error(`listIncidents failed: ${res.status} ${await res.text()}`);
@@ -266,7 +334,7 @@ export interface SessionSummary {
 
 /** GET sessions for a project, optionally filtered by environment. */
 export async function listSessions(
-  sessionToken: string,
+  userSession: UserSession,
   projectId: string,
   environmentId?: string,
 ): Promise<SessionSummary[]> {
@@ -276,7 +344,7 @@ export async function listSessions(
     : '';
   const res = await fetch(
     `${ingestionUrl}/api/v1/projects/${projectId}/sessions${query}`,
-    { headers: { Authorization: `Bearer ${sessionToken}` } },
+    { headers: { Authorization: `Bearer ${userSession}` } },
   );
   if (!res.ok) {
     throw new Error(`listSessions failed: ${res.status} ${await res.text()}`);
@@ -289,14 +357,14 @@ export async function listSessions(
  * GET a single incident by ID.
  */
 export async function getIncident(
-  sessionToken: string,
+  userSession: UserSession,
   projectId: string,
   incidentId: string
 ): Promise<Incident> {
   const { ingestionUrl } = getConfig();
   const res = await fetch(
     `${ingestionUrl}/api/v1/projects/${projectId}/incidents/${incidentId}`,
-    { headers: { Authorization: `Bearer ${sessionToken}` } }
+    { headers: { Authorization: `Bearer ${userSession}` } }
   );
   if (!res.ok) {
     throw new Error(`getIncident failed: ${res.status} ${await res.text()}`);
@@ -313,7 +381,7 @@ export async function getIncident(
  * or the timeout expires.
  */
 export async function pollUntilTerminal(
-  sessionToken: string,
+  userSession: UserSession,
   projectId: string,
   incidentId: string,
   terminalStatuses: string[],
@@ -323,7 +391,7 @@ export async function pollUntilTerminal(
   const deadline = Date.now() + timeoutMs;
 
   while (Date.now() < deadline) {
-    const incident = await getIncident(sessionToken, projectId, incidentId);
+    const incident = await getIncident(userSession, projectId, incidentId);
     if (terminalStatuses.includes(incident.status)) {
       return incident;
     }
@@ -331,7 +399,7 @@ export async function pollUntilTerminal(
   }
 
   // One last try
-  const incident = await getIncident(sessionToken, projectId, incidentId);
+  const incident = await getIncident(userSession, projectId, incidentId);
   if (terminalStatuses.includes(incident.status)) {
     return incident;
   }
@@ -698,13 +766,13 @@ export async function waitForScrubbedChunks(
 export async function seedEnvironment(
   projectId: string,
   name: string
-): Promise<{ environmentId: string; apiKey: string }> {
+): Promise<{ environmentId: string; ingestKey: IngestKey }> {
   const db = getPool();
   const envResult = await db.query<{ id: string }>(
     `INSERT INTO environments (project_id, name) VALUES ($1, $2) RETURNING id`,
     [projectId, name]
   );
   const environmentId = envResult.rows[0]!.id;
-  const apiKey = await seedProjectIngestKey(db, projectId, `e2e ${name} ingest`);
-  return { environmentId, apiKey };
+  const ingestKey = await seedProjectIngestKey(db, projectId, `e2e ${name} ingest`);
+  return { environmentId, ingestKey };
 }
