@@ -88,16 +88,16 @@ Where each state comes from and what to do. (`rate_limited` comes from `setup --
 
 | Response | Emitted by | Meaning | What the agent should do |
 | --- | --- | --- | --- |
-| `status: "already_configured"` (exit 0) | `setup` / `setup --start` | Either valid local credentials exist for this repo, or the server already has a project for it. | If you have local credentials, run `verify`. If `verify` says `no_credentials`, recovery needs the human: `opslane login`, then `opslane setup --relink`. |
+| `status: "already_configured"` (exit 0) | `setup` / `setup --start` | Either valid local credentials exist for this repo, or the server already has a project for it. | If you have local credentials, run `verify`. If `verify` says `no_credentials`, recovery needs the human: run `opslane onboard` in this repo. |
 | `status: "expired"` | `setup --poll` | The ~15-minute session lapsed before authorization. | Run `setup --start` again and hand over the fresh link. |
 | `status: "not_found"` | `setup --poll` | Unknown `poll_id` or wrong poll token. | Run `setup --start` again. |
 | `status: "rate_limited"` | `setup --start` | Too many session starts. | Wait `retry_after` seconds, then retry. |
-| `status: "key_unavailable"` | `setup --poll` | Provisioning completed but the key-delivery window closed. | Recovery needs the human: `opslane login`, then `opslane setup --relink`. |
+| `status: "key_unavailable"` | `setup --poll` | Provisioning completed but the key-delivery window closed. | Recovery needs the human: run `opslane onboard` in this repo. |
 | `status: "failed", failure_reason: "identity_unverified"` | `setup --poll` | GitHub couldn't prove the authorizing human's identity (for example no verified email). | Human fixes their GitHub account state; then a fresh `setup --start`. |
 | `status: "failed", failure_reason: "installation_not_yours"` | `setup --poll` | The person who authorized doesn't own the App installation used. | The same human must both install and authorize; fresh `setup --start`. |
 | `status: "failed", failure_reason: "repo_not_granted"` | `setup --poll` | The installation doesn't include this repository. | Human grants the repo in the installation's repository access first; then a fresh `setup --start` (failed sessions cannot be reopened). |
 | `status: "failed", failure_reason: "org_exists_needs_invite"` | `setup --poll` | The org already exists in Opslane and the human isn't a member. | An existing org admin invites them in the dashboard; then a fresh `setup --start`. |
-| `status: "failed", failure_reason: "repo_already_configured"` | `setup --poll` | Another project already owns this repository. | Use the existing project: `opslane login` + `opslane setup --relink`. |
+| `status: "failed", failure_reason: "repo_already_configured"` | `setup --poll` | Another project already owns this repository. | Use the existing project: run `opslane onboard` in this repo. |
 
 ## Raw HTTP (no CLI)
 

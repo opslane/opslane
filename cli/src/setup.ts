@@ -33,7 +33,6 @@ export interface SetupOptions {
   poll?: string;
   timeout?: number | string;
   force?: boolean;
-  relink?: boolean;
   repo?: string;
   apiUrl?: string;
   repoUrl?: string;
@@ -154,7 +153,7 @@ async function pollLoop(
         await deletePendingSession(pending.poll_id, pendingDir);
         return exitWithStatus('key_unavailable', {
           project_id: result.projectId ?? undefined,
-          remediation: 'run "opslane login" then "opslane setup --relink"',
+          remediation: 'run "opslane onboard" in this repo to mint a replacement key, then redeploy',
         }, 1);
       }
       const orgId = result.orgId;
@@ -169,7 +168,7 @@ async function pollLoop(
           await deletePendingSession(pending.poll_id, pendingDir);
           return exitWithStatus('key_unavailable', {
             project_id: result.projectId ?? undefined,
-            remediation: 'run "opslane login" then "opslane setup --relink"',
+            remediation: 'run "opslane onboard" in this repo to mint a replacement key, then redeploy',
           }, 1);
         }
       }
@@ -263,95 +262,8 @@ async function resumePolling(options: SetupOptions): Promise<void> {
 interface ProjectResponse { id: string; github_repo?: string | null }
 interface EnvironmentResponse { id: string; name: string }
 
-async function relink(options: SetupOptions, repo: string, apiUrl: string): Promise<void> {
-  const fetchFn = options.fetchFn ?? fetch;
-  const token = await loadTokensFrom(options.tokenPath ?? defaultTokenPath(), apiUrl);
-  if (!token) {
-    return exitWithStatus('login_required', {
-      message: 'Run "opslane login" first (requires a browser).',
-    }, 1);
-  }
-  const authHeaders = { Authorization: `Bearer ${token.accessToken}` };
-
-  let projectsResponse: Response;
-  try {
-    projectsResponse = await fetchFn(`${apiUrl}/api/v1/projects`, { headers: authHeaders });
-  } catch {
-    return exitWithStatus('api_unreachable', { api_url: apiUrl }, 1);
-  }
-  if (projectsResponse.status === 401 || projectsResponse.status === 403) {
-    return exitWithStatus('login_required', { message: 'Run "opslane login" again.' }, 1);
-  }
-  let projects: unknown;
-  try { projects = await projectsResponse.json(); } catch { projects = null; }
-  if (!projectsResponse.ok || !Array.isArray(projects)) {
-    return exitWithStatus('internal_error', { message: 'could not list projects' }, 1);
-  }
-  const project = (projects as ProjectResponse[]).find((candidate) =>
-    typeof candidate.github_repo === 'string' && candidate.github_repo.toLowerCase() === repo.toLowerCase(),
-  );
-  if (!project) {
-    return exitWithStatus('project_not_in_active_org', {
-      repo,
-      remediation: 'switch to the owning org in the dashboard, or pass --org <id>',
-    }, 1);
-  }
-
-  const environmentsResponse = await fetchFn(
-    `${apiUrl}/api/v1/projects/${encodeURIComponent(project.id)}/environments`,
-    { headers: authHeaders },
-  ).catch(() => null);
-  if (!environmentsResponse?.ok) {
-    return exitWithStatus('internal_error', { message: 'could not list project environments' }, 1);
-  }
-  let environments: unknown;
-  try { environments = await environmentsResponse.json(); } catch { environments = null; }
-  if (!Array.isArray(environments) || environments.length === 0) {
-    return exitWithStatus('internal_error', { message: 'project has no environments' }, 1);
-  }
-  const candidates = environments as EnvironmentResponse[];
-  const environment = candidates.find((candidate) => candidate.name === 'development')
-    ?? candidates.find((candidate) => candidate.name === 'production')
-    ?? candidates[0];
-  if (!environment?.id) return exitWithStatus('internal_error', { message: 'invalid environment response' }, 1);
-
-  const keyResponse = await fetchFn(
-    `${apiUrl}/api/v1/environments/${encodeURIComponent(environment.id)}/api-keys`,
-    { method: 'POST', headers: authHeaders },
-  ).catch(() => null);
-  if (!keyResponse?.ok) {
-    return exitWithStatus('internal_error', { message: 'could not create API key' }, 1);
-  }
-  const keyBody = await responseJSON(keyResponse);
-  const apiKey = typeof keyBody?.['raw_key'] === 'string' ? keyBody['raw_key'] : null;
-  if (!apiKey) return exitWithStatus('internal_error', { message: 'key response omitted raw_key' }, 1);
-
-  const previous = await resolveCredentials({
-    apiUrl,
-    repo,
-    filePath: options.credentialsPath,
-  });
-  try {
-    await saveAgentCredentials({
-      org_id: previous?.org_id ?? '',
-      project_id: project.id,
-      api_key: apiKey,
-      repo,
-      api_url: apiUrl,
-    }, options.credentialsPath ?? defaultCredentialsPath());
-  } catch {
-    return exitWithStatus('internal_error', {
-      message: 'could not save the replacement credential; the previous credential was preserved',
-    }, 1);
-  }
-  jsonOutput({ status: 'relinked', project_id: project.id, api_key: apiKey, repo });
-}
-
 export async function setup(options: SetupOptions = {}): Promise<void> {
   if (options.start && options.poll) return usageError('--start and --poll cannot be used together');
-  if (options.relink && (options.start || options.poll || options.force)) {
-    return usageError('--relink cannot be combined with --start, --poll, or --force');
-  }
   if (options.poll) return resumePolling(options);
 
   const blockingTimeout = timeoutSeconds(options.timeout, BLOCKING_TIMEOUT_SECONDS);
@@ -368,7 +280,6 @@ export async function setup(options: SetupOptions = {}): Promise<void> {
       message: 'Could not detect repo from git remote. Use --repo owner/repo.',
     }, 1);
   }
-  if (options.relink) return relink(options, repo, apiUrl);
 
   const credentialsPath = options.credentialsPath ?? defaultCredentialsPath();
   const existing = await resolveCredentials({ apiUrl, repo, filePath: credentialsPath });
@@ -387,7 +298,7 @@ export async function setup(options: SetupOptions = {}): Promise<void> {
       return exitWithStatus('api_unreachable', { api_url: existing.api_url }, 1);
     }
     return exitWithStatus('credentials_invalid', {
-      remediation: 'run "opslane setup --force" for a new repo, or "opslane login" then "opslane setup --relink" for an existing project',
+      remediation: 'run "opslane setup --force" for a new repo, or "opslane onboard" for an existing project',
     }, 1);
   }
 
@@ -415,7 +326,7 @@ export async function setup(options: SetupOptions = {}): Promise<void> {
     if (options.force) {
       return exitWithStatus('already_configured', {
         repo,
-        remediation: 'run "opslane login" then "opslane setup --relink"',
+        remediation: 'run "opslane onboard" in this repo to mint a replacement key, then redeploy',
       }, 1);
     }
     jsonOutput(body);

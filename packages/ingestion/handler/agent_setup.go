@@ -83,7 +83,7 @@ func (d *Dependencies) AgentSetup(w http.ResponseWriter, r *http.Request) {
 		agentJSON(w, http.StatusOK, map[string]any{
 			"status":  "already_configured",
 			"repo":    req.RepoURL,
-			"message": "This repo already has an Opslane project. Run 'opslane login' then 'opslane setup --relink' to get a fresh key.",
+			"message": "This repo already has an Opslane project. Run 'opslane onboard' in this repo to get a fresh key.",
 		})
 		return
 	}
@@ -190,7 +190,7 @@ func (d *Dependencies) AgentPoll(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if session.APIKeySealed == nil || time.Now().After(session.ExpiresAt) {
-			resp["message"] = "key delivery window closed; run \"opslane login\" then \"opslane setup --relink\" for an existing project, or re-run provisioning"
+			resp["message"] = "key delivery window closed; run \"opslane onboard\" for an existing project, or re-run provisioning"
 		} else {
 			apiKey, openErr := auth.OpenAgentKey(pollToken, session.ID, *session.APIKeySealed)
 			if openErr != nil {
@@ -306,7 +306,7 @@ func agentFailureMessage(reason string) string {
 	case "org_exists_needs_invite":
 		return "This GitHub org already has an Opslane organization. Ask an Opslane admin of that org to invite you, then use the dashboard for a key."
 	case "repo_already_configured":
-		return "This repo already has an Opslane project. Run 'opslane login' then 'opslane setup --relink'."
+		return "This repo already has an Opslane project. Run 'opslane onboard' in this repo."
 	case "authorization_denied":
 		return "GitHub authorization was denied. Re-run setup when you are ready to approve access."
 	default:

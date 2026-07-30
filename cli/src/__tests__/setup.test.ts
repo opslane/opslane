@@ -234,34 +234,4 @@ describe('agent setup protocol', () => {
     expect(JSON.parse(String(log.mock.calls.at(-1)?.[0])).status).toBe('completed');
   });
 
-  it('--relink mints and saves a key only after authenticated success', async () => {
-    await persistTokensTo(tokenPath, apiUrl, {
-      accessToken: 'access', refreshToken: 'refresh', expiresAt: Date.now() + 60_000,
-    });
-    const fetchFn = vi.fn(async (input: string | URL | Request) => {
-      const url = String(input);
-      if (url.endsWith('/api/v1/projects')) return new Response(JSON.stringify([{ id: 'project-1', github_repo: 'Acme/App' }]));
-      if (url.endsWith('/environments')) return new Response(JSON.stringify([{ id: 'env-dev', name: 'development' }, { id: 'env-prod', name: 'production' }]));
-      expect(url).toContain('/environments/env-dev/api-keys');
-      return new Response(JSON.stringify({ raw_key: 'fresh-key' }), { status: 201 });
-    });
-    await setup({ relink: true, repo: 'acme/app', apiUrl, credentialsPath, tokenPath, fetchFn });
-    expect(JSON.parse(String(log.mock.calls.at(-1)?.[0]))).toMatchObject({ status: 'relinked', api_key: 'fresh-key' });
-    await expect(loadAgentCredentials({ filePath: credentialsPath, apiUrl, repo: 'acme/app' }))
-      .resolves.toMatchObject({ api_key: 'fresh-key', project_id: 'project-1' });
-  });
-
-  it('--relink reports the active-org mismatch without replacing an old key', async () => {
-    await saveAgentCredentials({ org_id: 'org', project_id: 'project', api_key: 'old-key', repo: 'acme/app', api_url: apiUrl }, credentialsPath);
-    await persistTokensTo(tokenPath, apiUrl, {
-      accessToken: 'access', refreshToken: 'refresh', expiresAt: Date.now() + 60_000,
-    });
-    await setup({
-      relink: true, repo: 'acme/app', apiUrl, credentialsPath, tokenPath,
-      fetchFn: async () => new Response(JSON.stringify([])),
-    });
-    expect(JSON.parse(String(log.mock.calls.at(-1)?.[0])).status).toBe('project_not_in_active_org');
-    await expect(loadAgentCredentials({ filePath: credentialsPath, apiUrl, repo: 'acme/app' }))
-      .resolves.toMatchObject({ api_key: 'old-key' });
-  });
 });

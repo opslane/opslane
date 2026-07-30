@@ -74,13 +74,12 @@ program
   .option('--poll <id>', 'Resume polling an existing setup session')
   .option('--timeout <seconds>', 'Polling timeout in seconds')
   .option('--force', 'Bypass local credential validation')
-  .option('--relink', 'Mint a replacement key using an authenticated login')
   .option('--api-url <url>', 'Opslane API URL')
   .option('--repo <owner/repo>', 'Override auto-detected repository')
   .option('--repo-url <url>', 'Override auto-detected repo URL')
   .option('--agent-name <name>', 'Agent identifier (e.g., "claude-code")')
   .action(async (opts: {
-    start?: boolean; poll?: string; timeout?: string; force?: boolean; relink?: boolean;
+    start?: boolean; poll?: string; timeout?: string; force?: boolean;
     apiUrl?: string; repo?: string; repoUrl?: string; agentName?: string;
   }) => {
     await setup(opts);
