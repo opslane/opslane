@@ -1,5 +1,7 @@
-import { access } from 'node:fs/promises';
-import { join } from 'node:path';
+import { access, readFile, readdir } from 'node:fs/promises';
+import { createRequire } from 'node:module';
+import { isAbsolute, join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import chalk from 'chalk';
 import { defaultTokenPath, loadTokensFrom } from './auth.js';
 import { defaultCredentialsPath, resolveCredentials } from './agent-credentials.js';
@@ -18,6 +20,8 @@ export interface DoctorOptions {
   repo?: string;
   credentialsPath?: string;
   tokenPath?: string;
+  /** Explicit build output directory for the debug-ID check. */
+  dist?: string;
 }
 
 export interface CheckResult {
@@ -200,7 +204,83 @@ function buildChecks(options: DoctorOptions): CheckFn[] {
         };
       }
     },
+
+    // Check 5: production chunks carry debug IDs.
+    async (): Promise<CheckResult> => {
+      const outDir = await resolveBuildOutput(cwd, options.dist);
+      let files: string[];
+      try {
+        files = await listFiles(outDir);
+      } catch {
+        return {
+          name: 'Debug IDs',
+          passed: true,
+          message: `Build output not found at ${outDir} (not built yet)`,
+        };
+      }
+      if (files.length === 0) {
+        return {
+          name: 'Debug IDs',
+          passed: true,
+          message: `Build output at ${outDir} is empty (not built yet)`,
+        };
+      }
+
+      const chunks = files.filter((file) => file.endsWith('.js'));
+      let stamped = 0;
+      for (const chunk of chunks) {
+        if ((await readFile(chunk, 'utf8')).includes('//# debugId=')) stamped++;
+      }
+      if (stamped > 0) {
+        return {
+          name: 'Debug IDs',
+          passed: true,
+          message: `${stamped}/${chunks.length} JavaScript chunks stamped in ${outDir}`,
+        };
+      }
+      return {
+        name: 'Debug IDs',
+        passed: false,
+        message: `No stamped JavaScript chunks found in ${outDir}`,
+        remediation:
+          'Add the Opslane Vite plugin, run a production build, then rerun `opslane doctor --dist <path>`',
+      };
+    },
   ];
+}
+
+async function resolveBuildOutput(cwd: string, explicit?: string): Promise<string> {
+  if (explicit) return isAbsolute(explicit) ? explicit : resolve(cwd, explicit);
+  try {
+    const requireFromProject = createRequire(join(cwd, 'package.json'));
+    const viteEntry = requireFromProject.resolve('vite');
+    const vite = (await import(pathToFileURL(viteEntry).href)) as {
+      resolveConfig?: (
+        config: { root: string },
+        command: 'build',
+      ) => Promise<{ root: string; build: { outDir: string } }>;
+    };
+    if (vite.resolveConfig) {
+      const config = await vite.resolveConfig({ root: cwd }, 'build');
+      return isAbsolute(config.build.outDir)
+        ? config.build.outDir
+        : resolve(config.root, config.build.outDir);
+    }
+  } catch {
+    // Vite is optional; fall back to its conventional output directory.
+  }
+  return join(cwd, 'dist');
+}
+
+async function listFiles(directory: string): Promise<string[]> {
+  const entries = await readdir(directory, { withFileTypes: true });
+  const nested = await Promise.all(
+    entries.map(async (entry) => {
+      const path = join(directory, entry.name);
+      return entry.isDirectory() ? listFiles(path) : [path];
+    }),
+  );
+  return nested.flat();
 }
 
 /**
