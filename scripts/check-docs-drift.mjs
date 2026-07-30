@@ -135,12 +135,29 @@ function workerEnvVars() {
   vars.delete('VITEST'); // test-runner detection, not configuration
   return vars;
 }
+function sdkBuildEnvVars() {
+  const vars = new Set();
+  const source = read('packages/sdk/vite-plugin/index.ts');
+  for (const m of source.matchAll(/env\?\.(\b[A-Z][A-Z0-9_]+\b)/g)) {
+    vars.add(m[1]);
+  }
+  const commitLadder = source.match(/const names = \[([\s\S]*?)\];/);
+  for (const m of (commitLadder?.[1] ?? '').matchAll(/['"]([A-Z][A-Z0-9_]+)['"]/g)) {
+    vars.add(m[1]);
+  }
+  return vars;
+}
 // Vars consumed indirectly: read by a dependency, not via a literal process.env
 // access this scanner can see. Each entry names its consumer.
 const INDIRECT_VARS = new Map([
   ['E2B_API_KEY', 'read internally by the e2b SDK when the worker creates sandboxes'],
 ]);
-const codeVars = new Set([...goEnvVars(), ...workerEnvVars(), ...INDIRECT_VARS.keys()]);
+const codeVars = new Set([
+  ...goEnvVars(),
+  ...workerEnvVars(),
+  ...sdkBuildEnvVars(),
+  ...INDIRECT_VARS.keys(),
+]);
 const envDoc = read('docs/reference/environment-variables.md');
 for (const v of codeVars) {
   if (!envDoc.includes(v)) problems.push(`env var ${v} is read by code but missing from docs/reference/environment-variables.md`);

@@ -2,6 +2,29 @@
 
 Every variable each service actually reads, from `os.Getenv` (ingestion) and `process.env` (worker). The [drift check](../../scripts/check-docs-drift.mjs) fails the repository test gate (`pnpm test`, which CI runs) if code and this page disagree.
 
+## Browser SDK build
+
+These variables are read only by the Vite build process; none is shipped as a
+secret to the browser.
+
+| Variable | Required | Purpose |
+| --- | --- | --- |
+| `VITE_OPSLANE_RELEASE` | for the published legacy plugin unless its `release` option is set | Release key used to upload source maps. It must match `init({ release })`. |
+| `OPSLANE_COMMIT_SHA` | no | First environment override used by debug-ID build provenance. |
+| `GITHUB_SHA` | no | GitHub Actions commit fallback. |
+| `VERCEL_GIT_COMMIT_SHA` | no | Vercel commit fallback. |
+| `CF_PAGES_COMMIT_SHA` | no | Cloudflare Pages commit fallback. |
+| `CI_COMMIT_SHA` | no | GitLab and compatible CI commit fallback. |
+| `RENDER_GIT_COMMIT` | no | Render commit fallback. |
+| `BITBUCKET_COMMIT` | no | Bitbucket commit fallback. |
+| `GIT_COMMIT` | no | Generic CI commit fallback. |
+| `BUILD_SOURCEVERSION` | no | Azure Pipelines commit fallback. |
+
+The precedence is the plugin's explicit `commitSha`, then the variables in the
+table order, then `.git/HEAD`. Only lowercase 40- or 64-character hexadecimal
+values are accepted. COMMIT_REF is intentionally unsupported because many CI
+systems use it for a branch name.
+
 ## Ingestion API
 
 | Variable | Required | Purpose |

@@ -69,6 +69,22 @@ React and Vue are optional peer dependencies — installing the SDK pulls in nei
 Keep the plugin out of your Vite configuration for now. It does not remove or upload map
 assets while the replacement batch API is unavailable.
 
+`opslaneSourceMapPlugin` is the setup supported by the currently published
+`@opslane/sdk@2.0.1`. This repository also contains the next debug-ID stamping
+plugin, but do not import its `opslaneVitePlugin` export from 2.0.1: that export
+has not been published yet. See the [source-map guide](../../docs/guides/source-maps.md)
+for the availability and migration matrix.
+
+When that export ships, its build options will be:
+
+| Option | Type | Default | Description |
+| --- | --- | --- | --- |
+| `commitSha` | `string` | CI environment or `.git/HEAD` | Lowercase 40- or 64-character build commit. |
+| `stamp` | `boolean` | `true` | Set `false` to leave chunks and maps unchanged. |
+| `logLevel` | `'silent' \| 'warn' \| 'debug'` | `'warn'` | Build diagnostics and summary verbosity. |
+| `sourcemaps` | `'remove' \| 'keep'` | `'remove'` | Whether emitted map assets remain in the build output. |
+| `maxMapBytes` | `number` | `33554432` | Maximum raw map size eligible for stamping. |
+
 ## Configuration
 
 All `init` options, from the SDK's `SdkInitOptions` type:

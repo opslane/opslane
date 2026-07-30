@@ -34,6 +34,12 @@ NEXT_PUBLIC_OPSLANE_RELEASE=<your git SHA>
 
 `release` should match the source maps you upload for that deploy. In CI, use the commit SHA or another immutable build identifier.
 
+For Vite production builds, configure the currently published
+`opslaneSourceMapPlugin` and verify the output/upload as described in the
+[source-map guide](guides/source-maps.md). Debug-ID stamping is present in this
+repository but its new plugin export is not part of the published 2.0.1
+package, so keep the legacy setup until a package release announces it.
+
 ## Manual Fallback
 
 If Opslane cannot open a setup PR for an unusual repository, install the SDK manually:

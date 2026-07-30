@@ -190,3 +190,43 @@ It was deliberately left alone by the issue-list polish plan, which is scoped da
 **Context:** Raised by the Codex outside voice during the 2026-07-24 /plan-eng-review of #194. Pre-existing and unrelated to that bug, but #194 increases the largest body ingestion accepts, so pick the numbers after that lands. `ReadHeaderTimeout` is the safe one to set aggressively; `ReadTimeout` needs headroom for chunk uploads.
 
 **Depends on / blocked by:** size `ReadTimeout` after #194 lands.
+
+---
+
+## Consume a pre-existing `//# debugId` stamped by another build plugin
+
+**What:** Teach the Opslane Vite plugin to detect a debug ID already stamped into a chunk and its map by `@sentry/vite-plugin` (or `sentry-cli sourcemaps inject`) and use that ID as the join key instead of stamping its own.
+
+**Why:** "Already running Sentry" is the most likely state of a qualified prospect. Today they must add a second build plugin, mint a second credential, and wire a second CI secret before Opslane resolves a single frame. Reading the ID they already have turns onboarding into "no build changes at all," which is a materially better story than editing `vite.config.ts` and minting a key.
+
+**Pros:**
+- Removes the entire build-configuration step for anyone already emitting debug IDs.
+- Costs roughly one branch in the plugin, not a new subsystem.
+- Makes Opslane composable with the incumbent rather than mutually exclusive with it.
+
+**Cons:**
+- Contract-incompatible as frozen. S0 §6 requires the claimed ID to equal the server's recomputed canonical hash, and Sentry's IDs are random UUIDs, so every upload would return `409 debug_id_mismatch`. Adopting this needs a deliberate contract change: a second, non-content-derived ID class with its own uniqueness and conflict rules.
+- Two ID classes means two code paths in the server's immutability logic, which is exactly where the design's `409` guarantees live.
+
+**Context:** Surfaced by the Claude CEO voice (finding F9) during `/autoplan` review of `docs/plans/2026-07-30-s2a-debug-ids-implementation.md` on 2026-07-30. The frozen algorithm is `docs/design/2026-07-29-keys-sourcemaps-s0-contracts.md` §6; the conflict rules are §6 and §8. Start by deciding whether a `debug_id_source` discriminator (`content_hash` vs `external`) is worth the branching in the conflict path — if it is, the plugin change is small.
+
+**Depends on / blocked by:** S2b (the upload and conflict path this would have to branch). Requires reopening the S0 §6 contract, so it cannot land inside S2a.
+
+---
+
+## Verify no SRI or integrity manifest disagrees with post-`generateBundle` bytes
+
+**What:** Confirm that nothing in the build pipeline — Vite's `build.manifest`, an SRI plugin, or a downstream consumer — computes a hash or byte length before `generateBundle` that the debug-ID prelude then invalidates.
+
+**Why:** Measured during the `/autoplan` review: Rollup does not recompute a chunk's content hash after `generateBundle` mutates `chunk.code` (verified on Vite 6.4.3, 7.3.6, 8.1.5). The filename stays honest because the prelude is a pure function of the chunk, but any *other* pre-computed integrity value would not. A wrong SRI hash is a hard load failure in the customer's browser, with no Opslane error to report it because the page never runs.
+
+**Pros:**
+- Rules out a failure mode that is invisible in our own fixtures and fatal in a customer's app.
+- Cheap: it is a check, not a build.
+
+**Cons:**
+- Cannot be proven exhaustively for every downstream consumer; the check bounds the risk rather than eliminating it.
+
+**Context:** Raised as a sub-point of Codex's blocking finding 1 during `/autoplan` on 2026-07-30, and folded into V0's exit criteria in `docs/plans/2026-07-30-s2a-debug-ids-implementation.md`. Related consequence worth recording: the map's root `file` member carries the content-hashed filename and participates in the debug-ID hash, so an unrelated filename change moves the debug ID even when `mappings` are byte-identical.
+
+**Depends on / blocked by:** Nothing; it is part of V0. Listed here so it survives if V0 is compressed.

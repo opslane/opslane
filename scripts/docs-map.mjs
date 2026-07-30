@@ -41,6 +41,7 @@ export const MANUAL_DOC_COVERS = Object.freeze({
   'docs/contracts/events.md': Object.freeze([
     'shared/src/types.ts',
     'packages/sdk/src/core.ts',
+    'packages/sdk/src/debug-images.ts',
     'packages/sdk/src/transport.ts',
     'packages/sdk/src/__tests__/wire-shape.test.ts',
     'packages/ingestion/handler/error_event*.go',
