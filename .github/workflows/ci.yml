@@ -430,6 +430,7 @@ jobs:
             ^friction incidents — synthetic live-service gate > a signal inside ±30s
             ^friction incidents — synthetic live-service gate > an error outside the ±30s window
             ^friction incidents — synthetic live-service gate > the stepper fixture produces no signal
+            ^credential boundary >
         run: node scripts/check-e2e-results.mjs "${{ runner.temp }}/e2e-results.json"
       - name: Token-leak scan over logs and public HTTP surfaces
         run: |
