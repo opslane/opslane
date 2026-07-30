@@ -4,6 +4,9 @@ import { addBreadcrumb, getBreadcrumbs } from './breadcrumbs';
 import { enqueueEvent } from './transport';
 import { getSessionId, getSessionProgress, setSessionUser, type SessionProgress } from './session.js';
 import { SDK_VERSION } from './version';
+import { COMMIT_SHA_GLOBAL } from './build/registry-contract.js';
+
+declare const __OPSLANE_COMMIT_SHA__: string;
 
 let installed = false;
 
@@ -89,9 +92,21 @@ export function buildPayload(
     context,
     sdk_version: SDK_VERSION,
     release: config.release || undefined,
+    commit_sha: readCommitSha(),
     session_id: getSessionId() || undefined,
     environment: config.environment || undefined,
   };
+}
+
+function readCommitSha(): string | undefined {
+  const injected =
+    typeof __OPSLANE_COMMIT_SHA__ !== 'undefined'
+      ? __OPSLANE_COMMIT_SHA__
+      : (globalThis as Record<string, unknown>)[COMMIT_SHA_GLOBAL];
+  return typeof injected === 'string' &&
+    /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(injected)
+    ? injected
+    : undefined;
 }
 
 function handleError(event: ErrorEvent): void {
@@ -126,9 +141,12 @@ function errorBreadcrumb(errorType: string, errorMessage: string): Breadcrumb {
 
 /** Check whether a stack string contains at least one user-code frame (at file:line:col). */
 function hasUserFrames(stack: string): boolean {
-  // Match V8-style "at <something>:<digits>:<digits>" patterns,
-  // skipping native/internal frames like "<anonymous>" or "native code".
-  return /at\s+.*\w+\.\w+:\d+:\d+/.test(stack);
+  // V8 uses "at fn (url:line:column)"; Firefox and WebKit use
+  // "fn@url:line:column". Keep the legacy relative-file form too.
+  return (
+    /at\s+.*\w+\.\w+:\d+:\d+/.test(stack) ||
+    /@(?:https?|blob|file):\/\/[^\s]+:\d+:\d+/.test(stack)
+  );
 }
 
 function normalizeError(input: unknown, fallbackMessage?: string, fallbackType = 'Error'): {

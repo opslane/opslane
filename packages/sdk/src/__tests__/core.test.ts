@@ -4,6 +4,7 @@ import { resetConfig, loadConfig } from '../config';
 import { addBreadcrumb, clearBreadcrumbs, getBreadcrumbs } from '../breadcrumbs';
 import * as transport from '../transport';
 import { TEST_PK } from './test-keys';
+import { COMMIT_SHA_GLOBAL } from '../build/registry-contract';
 
 vi.mock('../transport', () => ({
   enqueueEvent: vi.fn(),
@@ -24,6 +25,7 @@ describe('Core Error Capture', () => {
     resetConfig();
     clearBreadcrumbs();
     vi.restoreAllMocks();
+    delete (globalThis as Record<string, unknown>)[COMMIT_SHA_GLOBAL];
   });
 
   it('should capture errors from window.onerror', () => {
@@ -161,6 +163,27 @@ describe('Core Error Capture', () => {
     expect(payload.environment).toBe('staging');
   });
 
+  it('includes only a valid injected commit SHA', () => {
+    const commit = 'e60b4d1e113538d40f09e31717e949aaa08659f8';
+    (globalThis as Record<string, unknown>)[COMMIT_SHA_GLOBAL] = commit;
+    const breadcrumb = {
+      type: 'error' as const,
+      timestamp: new Date().toISOString(),
+      category: 'error',
+      message: 'boom',
+    };
+
+    expect(
+      buildPayload('Error', 'boom', 'at app.js:1:1', breadcrumb).commit_sha,
+    ).toBe(commit);
+
+    (globalThis as Record<string, unknown>)[COMMIT_SHA_GLOBAL] =
+      commit.toUpperCase();
+    expect(
+      buildPayload('Error', 'boom', 'at app.js:1:1', breadcrumb).commit_sha,
+    ).toBeUndefined();
+  });
+
   it('should restore original handlers on uninstall', () => {
     const originalOnError = window.onerror;
     const originalOnUnhandled = window.onunhandledrejection;
@@ -214,6 +237,25 @@ describe('Core Error Capture', () => {
     expect(transport.enqueueEvent).toHaveBeenCalledTimes(1);
     const payload = (transport.enqueueEvent as ReturnType<typeof vi.fn>).mock.calls[0][0];
     expect(payload.error.stack).not.toContain('--- synthetic caller stack ---');
+  });
+
+  it('does not append a synthetic stack to Firefox/WebKit URL frames', () => {
+    installGlobalHandlers();
+    const error = new Error('firefox boom');
+    error.stack =
+      'trigger@https://app.example.com/assets/index.js:10:20';
+
+    window.dispatchEvent(
+      new ErrorEvent('error', {
+        message: error.message,
+        error,
+      }),
+    );
+
+    const payload = (transport.enqueueEvent as ReturnType<typeof vi.fn>).mock
+      .calls[0][0];
+    expect(payload.error.stack).toBe(error.stack);
+    expect(payload.error.stack).not.toContain('synthetic caller stack');
   });
 
   it('should never throw even if internal processing fails', () => {
