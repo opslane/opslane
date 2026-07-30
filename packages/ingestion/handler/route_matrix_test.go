@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"runtime"
+	"sort"
 	"strings"
 	"testing"
 
@@ -225,6 +226,80 @@ func TestRouteMatrixCoversEveryProjectKeyRoute(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("project-key routes = %#v, want %#v", got, want)
+	}
+}
+
+// handlerAuthenticatedRoutes carry no authenticator middleware because they
+// authenticate inside the handler: the agent routes verify a poll token or a
+// one-time setup token, and the webhook verifies a GitHub HMAC signature.
+// Adding an entry here is a deliberate security decision, not a formality.
+var handlerAuthenticatedRoutes = map[string]bool{
+	"GET /api/v1/agent/poll/{sessionID}": true,
+	"POST /api/v1/agent/setup":           true,
+	"POST /api/v1/github/webhook":        true,
+}
+
+// TestEveryAPIRouteHasAnAuthenticator closes the gap the scope check cannot:
+// TestRouteMatrixCoversEveryProjectKeyRoute pins which routes take a project
+// key, but a new route registered with no middleware at all would satisfy it.
+// This asserts the complement — every /api/v1 route either attaches an
+// authenticator or is on the allowlist above.
+//
+// This reads chi internals (middleware are only exposed to chi.Walk from
+// v5.3.1 onward), so re-read it on any chi bump: if Walk stops passing
+// middleware, every route would look unauthenticated and this test would fail
+// loudly rather than pass silently.
+func TestEveryAPIRouteHasAnAuthenticator(t *testing.T) {
+	_, q, _ := authTestRouter(t)
+	deps := &handler.Dependencies{Queries: q, JWTSecret: sessionReadSecret}
+	router := handler.NewRouter(deps)
+
+	authenticators := []string{".ProjectKey.", "AuthenticateUserSession", "AuthenticateSession"}
+	var unauthenticated []string
+	walked := 0
+
+	if err := chi.Walk(router, func(
+		method, route string,
+		_ http.Handler,
+		middlewares ...func(http.Handler) http.Handler,
+	) error {
+		if !strings.HasPrefix(route, "/api/v1") {
+			return nil
+		}
+		walked++
+		key := method + " " + route
+		if handlerAuthenticatedRoutes[key] {
+			return nil
+		}
+		for _, middleware := range middlewares {
+			fn := runtime.FuncForPC(reflect.ValueOf(middleware).Pointer())
+			if fn == nil {
+				continue
+			}
+			for _, marker := range authenticators {
+				if strings.Contains(fn.Name(), marker) {
+					return nil
+				}
+			}
+		}
+		unauthenticated = append(unauthenticated, key)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Guard against chi.Walk silently returning nothing, which would make the
+	// assertion above vacuous.
+	if walked < len(handlerAuthenticatedRoutes) {
+		t.Fatalf("chi.Walk visited %d /api/v1 routes, expected at least %d",
+			walked, len(handlerAuthenticatedRoutes))
+	}
+	if len(unauthenticated) > 0 {
+		sort.Strings(unauthenticated)
+		t.Fatalf("these /api/v1 routes attach no authenticator: %v\n"+
+			"Attach ProjectKey or AuthenticateUserSession, or add the route to "+
+			"handlerAuthenticatedRoutes with the reason it authenticates in the handler.",
+			unauthenticated)
 	}
 }
 
