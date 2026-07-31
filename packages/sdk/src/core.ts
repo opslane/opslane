@@ -139,14 +139,30 @@ function errorBreadcrumb(errorType: string, errorMessage: string): Breadcrumb {
   };
 }
 
+/** Every real stack frame ends in `:line:column`, optionally closed by a paren. */
+const FRAME_TAIL = /:\d+:\d+\)?$/;
+/** A dotted filename, e.g. `index.js`. Fixed width, so it cannot backtrack. */
+const DOTTED_NAME = /\w\.\w/;
+
 /** Check whether a stack string contains at least one user-code frame (at file:line:col). */
 function hasUserFrames(stack: string): boolean {
-  // V8 uses "at fn (url:line:column)"; Firefox and WebKit use
-  // "fn@url:line:column". Keep the legacy relative-file form too.
-  return (
-    /at\s+.*\w+\.\w+:\d+:\d+/.test(stack) ||
-    /@(?:https?|blob|file):\/\/[^\s]+:\d+:\d+/.test(stack)
-  );
+  // Matched per line against an end-anchored pattern, which is what keeps this
+  // linear. Scanning the whole stack with a leading `.*` or `[^\s]+` in front
+  // of the position pair backtracks quadratically, and a stack carries the
+  // error message, which routinely holds text the page did not author. A
+  // regex that stalls here freezes the customer's main thread, which is worse
+  // than the exception we were called to report.
+  for (const raw of stack.split('\n')) {
+    const line = raw.trim();
+    if (!FRAME_TAIL.test(line)) continue;
+    // V8 writes "at fn (url:line:column)"; Firefox and WebKit write
+    // "fn@url:line:column". The dot keeps a V8 frame to ones naming a file,
+    // matching what this checked before; DOTTED_NAME is fixed-width and cannot
+    // backtrack, so it does not reintroduce the problem.
+    if (line.startsWith('at ') && DOTTED_NAME.test(line)) return true;
+    if (line.includes('@')) return true;
+  }
+  return false;
 }
 
 function normalizeError(input: unknown, fallbackMessage?: string, fallbackType = 'Error'): {

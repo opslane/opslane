@@ -105,8 +105,15 @@ describe('SDK emits the frozen wire shape', () => {
       readFileSync(join(here, '../../package.json'), 'utf8'),
     ) as { version: string };
 
+    const breadcrumb: Breadcrumb = {
+      type: 'error',
+      timestamp: new Date().toISOString(),
+      category: 'error',
+      message: 'boot',
+    };
+
     const wire = (await captureWire(
-      buildPayload('TypeError', FIXTURE_MESSAGE, FIXTURE_STACK),
+      buildPayload('TypeError', FIXTURE_MESSAGE, FIXTURE_STACK, breadcrumb),
     )) as Record<string, unknown>;
 
     expect(wire.sdk_version).toBe(declared.version);

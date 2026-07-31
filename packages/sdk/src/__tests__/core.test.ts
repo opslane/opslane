@@ -258,6 +258,27 @@ describe('Core Error Capture', () => {
     expect(payload.error.stack).not.toContain('synthetic caller stack');
   });
 
+  // The frame check runs on every uncaught error, and a stack carries the
+  // error message, which routinely holds text the page did not author. Scanning
+  // the whole stack with an unanchored quantifier in front of `:line:column`
+  // backtracked quadratically: 32k characters took 4.3 seconds of frozen main
+  // thread. Stalling the customer's app is worse than the error we came to
+  // report, so this stays anchored and per-line.
+  it('does not stall on a pathological stack', () => {
+    installGlobalHandlers();
+    const error = new Error('boom');
+    // The two shapes CodeQL named as triggers.
+    error.stack = `Error: boom\n    at ${'0'.repeat(40_000)}\n${'@blob://'.repeat(40_000)}`;
+
+    const started = performance.now();
+    window.dispatchEvent(new ErrorEvent('error', { message: error.message, error }));
+    const elapsed = performance.now() - started;
+
+    expect(transport.enqueueEvent).toHaveBeenCalledTimes(1);
+    // Generous next to seconds of backtracking, tight enough to catch a relapse.
+    expect(elapsed).toBeLessThan(250);
+  });
+
   it('should never throw even if internal processing fails', () => {
     // Make enqueueEvent throw
     (transport.enqueueEvent as ReturnType<typeof vi.fn>).mockImplementation(() => {
