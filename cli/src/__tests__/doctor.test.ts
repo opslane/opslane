@@ -236,13 +236,13 @@ describe('doctor', () => {
     expect(callCount).toBeGreaterThan(0);
   });
 
-  it('runs all 5 checks', async () => {
+  it('runs all 6 checks', async () => {
     const results = await doctor({
       cwd: tmpDir,
       fetchFn: mockFetch('error', 'error'),
     });
 
-    expect(results).toHaveLength(5);
+    expect(results).toHaveLength(6);
     expect(results.map((r) => r.name)).toEqual([
       'Project config',
       'Authentication',

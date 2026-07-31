@@ -2,7 +2,7 @@ import { captureException, init } from '@opslane/sdk';
 
 init({
   endpoint: import.meta.env['VITE_OPSLANE_ENDPOINT'] ?? 'http://localhost:8082',
-  apiKey: 'debug-id-browser-worker',
+  apiKey: 'opslane_pk_mzxw6ytboi3damrrgi3tknzxgq_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopq',
   maxBatchSize: 1,
   flushInterval: 50,
   replay: { enabled: false },

@@ -408,7 +408,7 @@ describe('Transport Layer', () => {
     resetConfig();
     loadConfig({
       endpoint: 'https://ingest.example.com',
-      apiKey: 'k',
+      apiKey: TEST_PK,
       beforeSend,
       errorThrottleMs: 0,
     });

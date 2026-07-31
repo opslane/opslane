@@ -432,6 +432,21 @@ export interface SourceMapPluginOptions {
   release?: string;
 }
 
+interface BundleAsset {
+  type: string;
+  source?: string;
+  fileName: string;
+}
+
+interface CollectedMap {
+  file_path: string;
+  source_map: string;
+}
+
+/**
+ * @deprecated Use opslaneVitePlugin for deterministic debug IDs. This legacy
+ * uploader remains unchanged until the authenticated upload flow replaces it.
+ */
 export function opslaneSourceMapPlugin(_options: SourceMapPluginOptions) {
   return {
     name: 'opslane-source-map',
@@ -450,4 +465,398 @@ export function opslaneSourceMapPlugin(_options: SourceMapPluginOptions) {
       );
     },
   };
+}
+
+/** Read VITE_OPSLANE_RELEASE without depending on @types/node globals. */
+function readReleaseEnv(): string | undefined {
+  const env = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env;
+  return env?.VITE_OPSLANE_RELEASE;
+}
+
+function stripMapSuffix(filePath: string): string {
+  return filePath.endsWith('.map') ? filePath.slice(0, -4) : filePath;
+}
+
+interface MapAsset {
+  type: string;
+  fileName: string;
+  source: string | Uint8Array;
+}
+
+/**
+ * Reverse the stamp so the file can be fingerprinted against the map that will
+ * actually ship beside it. The prelude and trailer are both reconstructible
+ * from the embedded ID, so this is exact or it fails.
+ */
+function unstamp(
+  code: string,
+  debugId: string,
+  format: string | undefined,
+): { code: string; prelude: string } | null {
+  const trailer = `\n//# debugId=${debugId}`;
+  if (!code.endsWith(trailer)) return null;
+  const body = code.slice(0, -trailer.length);
+
+  const preferred = preludeForFormat(format);
+  const candidates = [
+    ...(preferred ? [preferred] : []),
+    ESM_PRELUDE,
+    SCRIPT_PRELUDE,
+  ];
+  for (const prelude of candidates) {
+    const stamped = prelude.split(DEBUG_ID_PLACEHOLDER).join(debugId);
+    const index = body.indexOf(stamped);
+    if (index === -1) continue;
+    return {
+      code: body.slice(0, index) + body.slice(index + stamped.length),
+      prelude,
+    };
+  }
+  return null;
+}
+
+/**
+ * Mirror the stamped map onto `chunk.map`. It is a Rollup `SourceMap`
+ * instance, so it may be frozen or expose accessors; every step is guarded and
+ * a failure here never leaves an already-stamped chunk half-written.
+ */
+function applyStampToChunkMap(chunkMap: unknown, stampedMapSource: string): void {
+  try {
+    const asObject = JSON.parse(stampedMapSource) as Record<string, unknown>;
+    if (
+      chunkMap &&
+      typeof chunkMap === 'object' &&
+      !Object.isFrozen(chunkMap)
+    ) {
+      for (const key of [
+        'mappings',
+        'sources',
+        'sourcesContent',
+        'names',
+        'debugId',
+      ]) {
+        if (key in asObject) {
+          try {
+            (chunkMap as Record<string, unknown>)[key] = asObject[key];
+          } catch {
+            // Accessor-only property on this engine; the asset write stands.
+          }
+        }
+      }
+    }
+  } catch {
+    // chunk.map is unwritable here. The asset write and the writeBundle
+    // verification still apply.
+  }
+}
+
+function nodeFs():
+  | { readFileSync?: (path: string) => Uint8Array }
+  | undefined {
+  const processLike = (
+    globalThis as {
+      process?: {
+        getBuiltinModule?: (
+          name: string,
+        ) => { readFileSync?: (path: string) => Uint8Array };
+      };
+    }
+  ).process;
+  try {
+    return processLike?.getBuiltinModule?.('node:fs');
+  } catch {
+    return undefined;
+  }
+}
+
+function preludeForFormat(format: string | undefined): string | null {
+  if (format === 'es') return ESM_PRELUDE;
+  if (
+    format === 'iife' ||
+    format === 'umd' ||
+    format === 'cjs' ||
+    format === 'system'
+  ) {
+    return SCRIPT_PRELUDE;
+  }
+  return null;
+}
+
+function preludeInsertion(code: string): {
+  offset: number;
+  generatedLine: number;
+} {
+  let offset = 0;
+  if (code.startsWith('#!')) {
+    const newline = code.indexOf('\n');
+    offset = newline === -1 ? code.length : newline + 1;
+  }
+
+  const directives =
+    /^(?:[ \t]*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')[ \t]*;[ \t]*(?:\r?\n|$))+/;
+  const match = directives.exec(code.slice(offset));
+  if (match) offset += match[0].length;
+
+  return {
+    offset,
+    generatedLine: code.slice(0, offset).split('\n').length - 1,
+  };
+}
+
+function insertMappingLine(mappings: string, generatedLine: number): string {
+  const lines = mappings.split(';');
+  lines.splice(Math.min(generatedLine, lines.length), 0, '');
+  return lines.join(';');
+}
+
+function assetBytes(asset: { source: string | Uint8Array }): Uint8Array {
+  if (typeof asset.source === 'string') {
+    return new TextEncoder().encode(asset.source);
+  }
+  if (asset.source instanceof Uint8Array) return asset.source;
+  throw new Error('map asset source is not text');
+}
+
+function isSourceMapObject(
+  value: unknown,
+): value is Record<string, unknown> & { mappings: string } {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function normalizeSources(
+  map: Record<string, unknown> & { mappings: string },
+  mapFileName: string,
+  projectRoot: string | undefined,
+  outDir: string,
+): Record<string, unknown> & { mappings: string } {
+  if (
+    !projectRoot ||
+    map.sourceRoot !== undefined ||
+    !Array.isArray(map.sources) ||
+    !map.sources.every((source) => typeof source === 'string')
+  ) {
+    return map;
+  }
+
+  const root = normalizePath(projectRoot);
+  const mapDirectory = normalizePath(
+    `${isAbsolutePath(outDir) ? outDir : `${root}/${outDir}`}/${directoryOf(
+      mapFileName,
+    )}`,
+  );
+  const sources = map.sources.map((source) => {
+    if (
+      source.includes('://') ||
+      source.startsWith('data:') ||
+      source.startsWith('\0')
+    ) {
+      return source;
+    }
+    const candidates = [
+      normalizePath(
+        isAbsolutePath(source) ? source : `${mapDirectory}/${source}`,
+      ),
+    ];
+    const strippedParents = source.replace(/^(?:\.\.\/)+/, '');
+    if (strippedParents !== source) {
+      candidates.push(
+        normalizePath(
+          /^[A-Za-z]:\//.test(strippedParents)
+            ? strippedParents
+            : `/${strippedParents}`,
+        ),
+      );
+    }
+    for (const resolved of candidates) {
+      if (resolved === root) return '.';
+      if (resolved.startsWith(`${root}/`)) {
+        return resolved.slice(root.length + 1);
+      }
+    }
+    return source;
+  });
+  return { ...map, sources };
+}
+
+function normalizePath(value: string): string {
+  const normalized = value.replaceAll('\\', '/');
+  const prefix = normalized.startsWith('/')
+    ? '/'
+    : /^[A-Za-z]:\//.exec(normalized)?.[0] ?? '';
+  const rest = prefix ? normalized.slice(prefix.length) : normalized;
+  const parts: string[] = [];
+  for (const part of rest.split('/')) {
+    if (!part || part === '.') continue;
+    if (part === '..') {
+      if (parts.length > 0 && parts[parts.length - 1] !== '..') {
+        parts.pop();
+      } else if (!prefix) {
+        parts.push(part);
+      }
+      continue;
+    }
+    parts.push(part);
+  }
+  return `${prefix}${parts.join('/')}` || (prefix === '/' ? '/' : '.');
+}
+
+function isAbsolutePath(value: string): boolean {
+  return value.startsWith('/') || /^[A-Za-z]:[\\/]/.test(value);
+}
+
+function directoryOf(fileName: string): string {
+  const normalized = fileName.replaceAll('\\', '/');
+  const slash = normalized.lastIndexOf('/');
+  return slash === -1 ? '' : normalized.slice(0, slash);
+}
+
+function canonicalFilesystemPath(value: string): string {
+  const processLike = (
+    globalThis as {
+      process?: {
+        getBuiltinModule?: (
+          name: string,
+        ) => { realpathSync?: (path: string) => string };
+      };
+    }
+  ).process;
+  const realpathSync = processLike?.getBuiltinModule?.('node:fs').realpathSync;
+  if (!realpathSync) return normalizePath(value);
+  try {
+    return normalizePath(realpathSync(value));
+  } catch {
+    const parent = directoryOf(value);
+    if (!parent || parent === value) return normalizePath(value);
+    const name = value.replaceAll('\\', '/').slice(parent.length + 1);
+    return normalizePath(`${canonicalFilesystemPath(parent)}/${name}`);
+  }
+}
+
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes >= 1024 * 1024) {
+    return `${Math.ceil(bytes / (1024 * 1024))} MiB`;
+  }
+  if (bytes >= 1024) return `${Math.ceil(bytes / 1024)} KiB`;
+  return `${bytes} B`;
+}
+
+interface DetectedCommit {
+  sha: string;
+  source: string;
+}
+
+function detectCommit(explicit: string | undefined): DetectedCommit | null {
+  if (explicit && isCommitSHA(explicit)) {
+    return { sha: explicit, source: 'commitSha' };
+  }
+  const env = (
+    globalThis as {
+      process?: { env?: Record<string, string | undefined> };
+    }
+  ).process?.env;
+  const names = [
+    'OPSLANE_COMMIT_SHA',
+    'GITHUB_SHA',
+    'VERCEL_GIT_COMMIT_SHA',
+    'CF_PAGES_COMMIT_SHA',
+    'CI_COMMIT_SHA',
+    'RENDER_GIT_COMMIT',
+    'BITBUCKET_COMMIT',
+    'GIT_COMMIT',
+    'BUILD_SOURCEVERSION',
+  ];
+  for (const name of names) {
+    const value = env?.[name];
+    if (value && isCommitSHA(value)) return { sha: value, source: name };
+  }
+  const gitCommit = readGitCommit();
+  return gitCommit ? { sha: gitCommit, source: '.git/HEAD' } : null;
+}
+
+function isCommitSHA(value: string | undefined): boolean {
+  return (
+    typeof value === 'string' &&
+    /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(value)
+  );
+}
+
+function readGitCommit(): string | undefined {
+  const processLike = (
+    globalThis as {
+      process?: {
+        cwd?: () => string;
+        getBuiltinModule?: (
+          name: string,
+        ) => {
+          readFileSync?: (path: string, encoding: 'utf8') => string;
+          statSync?: (path: string) => { isDirectory(): boolean };
+        };
+      };
+    }
+  ).process;
+  const fs = processLike?.getBuiltinModule?.('node:fs');
+  const cwd = processLike?.cwd?.();
+  if (!fs?.readFileSync || !fs.statSync || !cwd) return undefined;
+
+  const read = (path: string): string | undefined => {
+    try {
+      return fs.readFileSync?.(path, 'utf8').trim();
+    } catch {
+      return undefined;
+    }
+  };
+
+  let directory = normalizePath(cwd);
+  while (directory) {
+    const dotGit = `${directory}/.git`;
+    let gitDirectory = dotGit;
+    try {
+      if (!fs.statSync(dotGit).isDirectory()) {
+        const pointer = read(dotGit);
+        if (!pointer?.startsWith('gitdir: ')) return undefined;
+        const target = pointer.slice('gitdir: '.length);
+        gitDirectory = normalizePath(
+          isAbsolutePath(target) ? target : `${directory}/${target}`,
+        );
+      }
+    } catch {
+      const parent = directoryOf(directory);
+      if (!parent || parent === directory) break;
+      directory = parent;
+      continue;
+    }
+
+    const head = read(`${gitDirectory}/HEAD`);
+    if (head && isCommitSHA(head)) return head;
+    if (!head?.startsWith('ref: ')) return undefined;
+    const reference = head.slice('ref: '.length);
+    const direct = read(`${gitDirectory}/${reference}`);
+    if (direct && isCommitSHA(direct)) return direct;
+
+    const commonPointer = read(`${gitDirectory}/commondir`);
+    const commonDirectory = commonPointer
+      ? normalizePath(
+          isAbsolutePath(commonPointer)
+            ? commonPointer
+            : `${gitDirectory}/${commonPointer}`,
+        )
+      : gitDirectory;
+    const commonRef = read(`${commonDirectory}/${reference}`);
+    if (commonRef && isCommitSHA(commonRef)) return commonRef;
+
+    const packedRefs = read(`${commonDirectory}/packed-refs`);
+    if (packedRefs) {
+      for (const line of packedRefs.split('\n')) {
+        if (line.startsWith('#') || line.startsWith('^')) continue;
+        const [sha, name] = line.trim().split(/\s+/, 2);
+        if (name === reference && isCommitSHA(sha)) return sha;
+      }
+    }
+    return undefined;
+  }
+  return undefined;
 }

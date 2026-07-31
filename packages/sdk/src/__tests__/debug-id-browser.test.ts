@@ -112,7 +112,7 @@ describe('production debug-ID browser matrix', () => {
           /init\(\{[\s\S]*?\}\);/,
           `init({
             endpoint: '${ingestOrigin}',
-            apiKey: 'debug-id-browser-page',
+            apiKey: 'opslane_pk_mzxw6ytboi3damrrgi3tknzxgq_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopq',
             flushInterval: 50,
             maxBatchSize: 1,
             replay: { enabled: false },
