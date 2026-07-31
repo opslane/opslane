@@ -159,4 +159,26 @@ describe('resolveTrackedFiles', () => {
   it('deduplicates repeated frames', () => {
     expect(resolveTrackedFiles(['src/main.ts', 'src/main.ts'], TRACKED)).toEqual(['src/main.ts']);
   });
+
+  // A monorepo builds from `frontend/`, so the source map records paths
+  // relative to that root while `git ls-files` reports them from the
+  // repository root. Stripping segments cannot bridge that gap.
+  const MONOREPO = new Set([
+    'frontend/src/components/UserCard.vue',
+    'frontend/src/main.ts',
+    'backend/main.go',
+  ]);
+
+  it('matches a tracked file that sits under an unmentioned directory', () => {
+    expect(resolveTrackedFiles(['src/main.ts'], MONOREPO)).toEqual(['frontend/src/main.ts']);
+  });
+
+  it('refuses to guess when two tracked files share the suffix', () => {
+    const ambiguous = new Set(['frontend/src/main.ts', 'admin/src/main.ts']);
+    expect(resolveTrackedFiles(['src/main.ts'], ambiguous)).toEqual([]);
+  });
+
+  it('does not match on a partial final segment', () => {
+    expect(resolveTrackedFiles(['ain.ts'], MONOREPO)).toEqual([]);
+  });
 });

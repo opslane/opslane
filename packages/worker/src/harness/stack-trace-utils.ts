@@ -124,11 +124,28 @@ export function resolveTrackedFiles(paths: string[], trackedFiles: Set<string>):
 function matchTrackedPath(path: string, trackedFiles: Set<string>): string | null {
   if (trackedFiles.has(path)) return path;
   const segments = path.split('/').filter(Boolean);
+  if (segments.length === 0) return null;
+
+  // The frame is more specific than the repository: drop the build machine's
+  // prefix off `/home/runner/work/app/src/main.ts`.
   for (let i = 1; i < segments.length; i++) {
     const candidate = segments.slice(i).join('/');
     if (trackedFiles.has(candidate)) return candidate;
   }
-  return null;
+
+  // The repository is more specific than the frame. A monorepo builds from
+  // `frontend/`, so the map records `src/main.ts` while `git ls-files` reports
+  // `frontend/src/main.ts`, and stripping segments can never close that gap.
+  // Only accept a single candidate: naming the wrong file sends the agent to
+  // edit the wrong package, which is worse than naming none.
+  const suffix = `/${segments.join('/')}`;
+  let unique: string | null = null;
+  for (const tracked of trackedFiles) {
+    if (!tracked.endsWith(suffix)) continue;
+    if (unique !== null) return null;
+    unique = tracked;
+  }
+  return unique;
 }
 
 export function hasNoAppFrames(
