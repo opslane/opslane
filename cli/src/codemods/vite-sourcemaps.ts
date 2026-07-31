@@ -164,7 +164,19 @@ function propertyName(name: ts.PropertyName): string | null {
   return null;
 }
 
-function arrayFromExpression(expression: ts.Expression): ts.ArrayLiteralExpression | null {
+/**
+ * The plugin array we may insert into.
+ *
+ * `.filter(Boolean)` is a real shape in the corpus and is safe, because the
+ * call we add returns an object. Any other predicate is not: it runs after our
+ * insertion and can drop us, leaving a config that reads as correct and
+ * registers nothing. Only the genuine global `Boolean` counts, since a local
+ * binding of that name can be any predicate at all.
+ */
+function arrayFromExpression(
+  expression: ts.Expression,
+  sourceFile: ts.SourceFile,
+): ts.ArrayLiteralExpression | null {
   const current = unwrap(expression);
   if (ts.isArrayLiteralExpression(current)) return current;
   if (
@@ -173,7 +185,13 @@ function arrayFromExpression(expression: ts.Expression): ts.ArrayLiteralExpressi
     && current.expression.name.text === 'filter'
   ) {
     const receiver = unwrap(current.expression.expression);
-    return ts.isArrayLiteralExpression(receiver) ? receiver : null;
+    if (!ts.isArrayLiteralExpression(receiver)) return null;
+    if (current.arguments.length !== 1) return null;
+    const predicate = unwrap(current.arguments[0]!);
+    if (!ts.isIdentifier(predicate) || predicate.text !== 'Boolean') return null;
+    const shadowed = topLevelBindingNames(sourceFile).has('Boolean')
+      || enclosingScopeBindings(current, sourceFile).has('Boolean');
+    return shadowed ? null : receiver;
   }
   return null;
 }
@@ -216,7 +234,7 @@ export function findPluginList(text: string, filename: string): PluginListLookup
     if (!ts.isPropertyAssignment(property)) {
       return { found: 'none', reason: 'plugins_not_array' };
     }
-    const list = arrayFromExpression(property.initializer);
+    const list = arrayFromExpression(property.initializer, sourceFile);
     if (!list) return { found: 'none', reason: 'plugins_not_array' };
     return { found: 'list', sourceFile, config, list };
   }
@@ -335,29 +353,28 @@ function importedFactoryLocalName(
   return null;
 }
 
+/**
+ * True only when the list holds `localName()` as a direct element.
+ *
+ * An earlier version searched anywhere inside an element, which reported
+ * `plugins: [process.env.CI && opslane()]` as already wired. That registers the
+ * plugin only when the condition happens to be true, so treating it as proof
+ * tells the customer source maps are on when they are not. A nested call is not
+ * a registration, and adding an unconditional sibling is the safe answer.
+ */
 function listCallsFactory(
   list: ts.ArrayLiteralExpression,
   sourceFile: ts.SourceFile,
   localName: string,
 ): boolean {
-  const containsCall = (node: ts.Node): boolean => {
-    if (
-      ts.isCallExpression(node)
-      && node.arguments.length === 0
-      && ts.isIdentifier(unwrap(node.expression))
-      && (unwrap(node.expression) as ts.Identifier).text === localName
-      && node.getSourceFile() === sourceFile
-    ) return true;
-    if (
-      ts.isArrowFunction(node)
-      || ts.isFunctionExpression(node)
-      || ts.isFunctionDeclaration(node)
-      || ts.isClassExpression(node)
-      || ts.isClassDeclaration(node)
-    ) return false;
-    return node.getChildren(sourceFile).some(containsCall);
-  };
-  return list.elements.some(containsCall);
+  return list.elements.some((element) => {
+    const call = unwrap(element);
+    if (!ts.isCallExpression(call) || call.arguments.length > 0) return false;
+    const callee = unwrap(call.expression);
+    return ts.isIdentifier(callee)
+      && callee.text === localName
+      && call.getSourceFile() === sourceFile;
+  });
 }
 
 function importedSpecifiers(sourceFile: ts.SourceFile): string[] {
@@ -414,6 +431,71 @@ function pluginWouldBeOverwritten(lookup: Exclude<PluginListLookup, { found: 'no
   );
 }
 
+function addBindingName(name: ts.BindingName, names: Set<string>): void {
+  if (ts.isIdentifier(name)) {
+    names.add(name.text);
+    return;
+  }
+  for (const element of name.elements) {
+    if (ts.isBindingElement(element)) addBindingName(element.name, names);
+  }
+}
+
+/** Declarations a single statement contributes to whatever scope holds it. */
+function addStatementBindings(statement: ts.Statement, names: Set<string>): void {
+  if (ts.isVariableStatement(statement)) {
+    for (const declaration of statement.declarationList.declarations) {
+      addBindingName(declaration.name, names);
+    }
+    return;
+  }
+  if (
+    (ts.isFunctionDeclaration(statement)
+      || ts.isClassDeclaration(statement)
+      || ts.isEnumDeclaration(statement)
+      || ts.isModuleDeclaration(statement)
+      || ts.isImportEqualsDeclaration(statement)
+      || ts.isTypeAliasDeclaration(statement)
+      || ts.isInterfaceDeclaration(statement))
+    && statement.name
+    && ts.isIdentifier(statement.name)
+  ) {
+    names.add(statement.name.text);
+  }
+}
+
+/**
+ * Names bound by the scopes between `node` and the top of the file. Our import
+ * is added at the top, so a call inserted inside one of these scopes resolves
+ * to the customer's binding rather than ours. The parser accepts that happily,
+ * and the file reads as correct while registering somebody else's plugin.
+ */
+function enclosingScopeBindings(node: ts.Node, sourceFile: ts.SourceFile): Set<string> {
+  const names = new Set<string>();
+  for (
+    let current: ts.Node | undefined = node.parent;
+    current && current !== sourceFile;
+    current = current.parent
+  ) {
+    if (ts.isFunctionLike(current)) {
+      for (const parameter of current.parameters) addBindingName(parameter.name, names);
+    }
+    if (ts.isBlock(current) || ts.isModuleBlock(current)) {
+      for (const statement of current.statements) addStatementBindings(statement, names);
+    }
+    if (
+      (ts.isForStatement(current) || ts.isForOfStatement(current) || ts.isForInStatement(current))
+      && current.initializer
+      && ts.isVariableDeclarationList(current.initializer)
+    ) {
+      for (const declaration of current.initializer.declarations) {
+        addBindingName(declaration.name, names);
+      }
+    }
+  }
+  return names;
+}
+
 /**
  * Every name the config already binds at the top level. Inserting our import
  * next to a binding of the same name is a redeclaration, which the TypeScript
@@ -421,15 +503,7 @@ function pluginWouldBeOverwritten(lookup: Exclude<PluginListLookup, { found: 'no
  */
 function topLevelBindingNames(sourceFile: ts.SourceFile): Set<string> {
   const names = new Set<string>();
-  const addBinding = (name: ts.BindingName): void => {
-    if (ts.isIdentifier(name)) {
-      names.add(name.text);
-      return;
-    }
-    for (const element of name.elements) {
-      if (ts.isBindingElement(element)) addBinding(element.name);
-    }
-  };
+  const addBinding = (name: ts.BindingName): void => addBindingName(name, names);
   // `var` is scoped to the module, not to the block it sits in, so a
   // declaration buried in top-level control flow still collides with the
   // import. Walk into those statements, but stop at anything that opens a new
@@ -463,26 +537,12 @@ function topLevelBindingNames(sourceFile: ts.SourceFile): Set<string> {
       if (bindings && ts.isNamedImports(bindings)) {
         for (const element of bindings.elements) names.add(element.name.text);
       }
-    } else if (ts.isVariableStatement(statement)) {
-      for (const declaration of statement.declarationList.declarations) {
-        addBinding(declaration.name);
-      }
-    } else if (
+    } else {
       // Enums, namespaces and `import x = require()` all declare a runtime
       // value. Type aliases and interfaces are erased, but a redeclaration
       // still fails the customer's own type check, and refusing costs them
       // only the documented manual path.
-      (ts.isFunctionDeclaration(statement)
-        || ts.isClassDeclaration(statement)
-        || ts.isEnumDeclaration(statement)
-        || ts.isModuleDeclaration(statement)
-        || ts.isImportEqualsDeclaration(statement)
-        || ts.isTypeAliasDeclaration(statement)
-        || ts.isInterfaceDeclaration(statement))
-      && statement.name
-      && ts.isIdentifier(statement.name)
-    ) {
-      names.add(statement.name.text);
+      addStatementBindings(statement, names);
     }
   }
   return names;
@@ -512,7 +572,15 @@ function policyTerminal(
   // `contract.exportName`. If the config already binds that name, the edit is a
   // redeclaration that parses cleanly and then fails at runtime, and any call
   // already in the plugin list silently changes meaning. Refuse instead.
-  if (!factoryLocal && topLevelBindingNames(lookup.sourceFile).has(contract.exportName)) {
+  // The import lands at the top of the file, but the call lands wherever the
+  // plugin list is. Both have to be clear of the name, so check the top level
+  // and every scope between it and the insertion point.
+  const insertionNode: ts.Node = lookup.found === 'list' ? lookup.list : lookup.config;
+  if (
+    !factoryLocal
+    && (topLevelBindingNames(lookup.sourceFile).has(contract.exportName)
+      || enclosingScopeBindings(insertionNode, lookup.sourceFile).has(contract.exportName))
+  ) {
     return { outcome: 'unsupported', reason: 'plugin_name_taken' };
   }
   return undefined;

@@ -174,12 +174,78 @@ export default defineConfig({
     }
   });
 
-  it('finds conditional registrations and refuses later overwriting spreads', () => {
+  // A call buried inside an element is not a registration. `enabled && opslane()`
+  // registers the plugin only when `enabled` happens to be true, so reporting it
+  // as wired tells the customer source maps are on when they may not be. Adding
+  // an unconditional sibling is the safe answer, and a second run then sees a
+  // direct element and stops.
+  it('does not treat a conditional element as a registration', () => {
     const conditional = `import { opslane } from '@opslane/sdk/vite-plugin'\nexport default { plugins: [enabled && opslane()] }`;
-    expect(addOpslanePlugin(conditional, 'vite.config.ts').outcome).toBe('already_wired');
+    const first = addOpslanePlugin(conditional, 'vite.config.ts');
+    expect(first.outcome).toBe('edited');
+    expect(addOpslanePlugin(first.text!, 'vite.config.ts').outcome).toBe('already_wired');
+  });
+
+  it.each([
+    ['a direct element', `export default { plugins: [opslane()] }`],
+    ['a direct element behind a cast', `export default { plugins: [opslane() as unknown] }`],
+  ])('treats %s as already wired', (_label, body) => {
+    const source = `import { opslane } from '@opslane/sdk/vite-plugin'\n${body}`;
+    expect(addOpslanePlugin(source, 'vite.config.ts').outcome).toBe('already_wired');
+  });
+
+  it('refuses later overwriting spreads', () => {
     const overwritten = `import { opslane } from '@opslane/sdk/vite-plugin'\nexport default { plugins: [opslane()], ...base }`;
     expect(addOpslanePlugin(overwritten, 'vite.config.ts'))
       .toMatchObject({ outcome: 'unsupported', reason: 'plugins_would_be_overwritten' });
+  });
+
+  // The import goes to the top of the file, but the call goes wherever the
+  // plugin list is. If anything between the two binds the name, the call we
+  // insert runs the customer's function instead of ours, and the file still
+  // reads as correct. 14 of the 70 measured configs are function shaped.
+  it.each([
+    ['a const in the callback body', `  const opslane = () => ({ name: 'not-ours' });\n  return { plugins: [] };`],
+    ['a let in the callback body', `  let opslane;\n  return { plugins: [] };`],
+    ['a function in the callback body', `  function opslane() { return {}; }\n  return { plugins: [] };`],
+  ])('refuses when %s shadows the plugin name', (_label, body) => {
+    const source = `import { defineConfig } from 'vite';\nexport default defineConfig(() => {\n${body}\n});\n`;
+    expect(addOpslanePlugin(source, 'vite.config.ts'))
+      .toMatchObject({ outcome: 'unsupported', reason: 'plugin_name_taken' });
+  });
+
+  it('refuses when a callback parameter shadows the plugin name', () => {
+    const source = `import { defineConfig } from 'vite';\nexport default defineConfig((opslane) => ({ plugins: [] }));\n`;
+    expect(addOpslanePlugin(source, 'vite.config.ts'))
+      .toMatchObject({ outcome: 'unsupported', reason: 'plugin_name_taken' });
+  });
+
+  it('still edits a function config that does not shadow the name', () => {
+    const source = `import { defineConfig } from 'vite';\nexport default defineConfig(() => {\n  const react = () => ({});\n  return { plugins: [react()] };\n});\n`;
+    expect(addOpslanePlugin(source, 'vite.config.ts').outcome).toBe('edited');
+  });
+
+  // `.filter(Boolean)` is safe because our call returns an object. Any other
+  // predicate runs after our insertion and can drop us, leaving a config that
+  // reads as correct and registers nothing.
+  it.each([
+    ['a custom predicate', `[a()].filter(p => p.name !== 'opslane-source-map')`],
+    ['an index predicate', `[a()].filter((_, i) => i < 1)`],
+  ])('refuses a plugin list filtered by %s', (_label, list) => {
+    expect(addOpslanePlugin(`export default { plugins: ${list} };`, 'vite.config.ts'))
+      .toMatchObject({ outcome: 'unsupported', reason: 'plugins_not_array' });
+  });
+
+  it('refuses .filter(Boolean) when Boolean is shadowed', () => {
+    const source = `const Boolean = (p) => p.name !== 'opslane-source-map';\n`
+      + `export default { plugins: [a()].filter(Boolean) };`;
+    expect(addOpslanePlugin(source, 'vite.config.ts'))
+      .toMatchObject({ outcome: 'unsupported', reason: 'plugins_not_array' });
+  });
+
+  it('still accepts a genuine .filter(Boolean)', () => {
+    expect(addOpslanePlugin(`export default { plugins: [a()].filter(Boolean) };`, 'vite.config.ts').outcome)
+      .toBe('suggested');
   });
 
   it('validates moved suggestions structurally', () => {
