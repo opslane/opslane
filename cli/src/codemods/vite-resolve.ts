@@ -6,6 +6,8 @@ import { readFile } from 'node:fs/promises';
 import { dirname, join, parse } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
+import { SUPPORTED_VITE_MAJORS } from './vite-contract.js';
+
 export type ViteResolveFailureReason =
   | 'vite_not_installed'
   | 'vite_version_unsupported'
@@ -105,7 +107,11 @@ export async function resolveInChild(
   );
   if (!viteVersion) return { ok: false, reason: 'vite_not_installed' };
   const major = majorVersion(viteVersion);
-  if (major === null || major < 6) {
+  if (
+    major === null
+    || major < SUPPORTED_VITE_MAJORS.minimum
+    || major > SUPPORTED_VITE_MAJORS.maximum
+  ) {
     return { ok: false, reason: 'vite_version_unsupported' };
   }
 

@@ -16,6 +16,8 @@ const contract: PluginContractDeps = {
   pluginName: 'fixture-plugin',
   importLine: "import { opslane } from 'fixture/plugin';",
   callText: 'opslane()',
+  exportNames: ['opslane', 'opslaneVitePlugin'],
+  viteMajors: { minimum: 6, maximum: 8 },
   minimumSdkVersion: '3.0.0',
 };
 
@@ -140,4 +142,24 @@ it('compares exact installed versions without a semver dependency', () => {
   expect(versionAtLeast('2.9.9', '3.0.0')).toBe(false);
   expect(versionAtLeast('3.0.0-beta.1', '3.0.0')).toBe(false);
   expect(versionAtLeast('3.1.0-beta.1', '3.0.0')).toBe(true);
+});
+
+/**
+ * The plugin declares support for Vite 6 to 8. Accepting a newer major would
+ * install into a build the plugin has never run in, moving the failure from
+ * this command into the customer's build.
+ */
+describe('discoverViteProject Vite version range', () => {
+  it.each([
+    ['5.4.21', 'vite_version_unsupported'],
+    ['6.0.0', 'ok'],
+    ['8.9.9', 'ok'],
+    ['9.0.0', 'vite_version_unsupported'],
+  ])('installed Vite %s', async (viteVersion, expected) => {
+    const root = await repo();
+    const result = await discoverViteProject({ repoRoot: root, contract }, {
+      installedVersion: async (_dir, name) => name === 'vite' ? viteVersion : '3.0.0',
+    });
+    expect(result.ok ? 'ok' : result.status).toBe(expected);
+  });
 });

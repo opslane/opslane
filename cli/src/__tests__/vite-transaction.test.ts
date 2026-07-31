@@ -24,6 +24,8 @@ const contract: PluginContractDeps = {
   pluginName: 'fixture-plugin',
   importLine: "import { fixturePlugin } from 'fixture/plugin';",
   callText: 'fixturePlugin()',
+  exportNames: ['fixturePlugin'],
+  viteMajors: { minimum: 6, maximum: 8 },
   minimumSdkVersion: '3.0.0',
 };
 

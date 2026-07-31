@@ -56,6 +56,8 @@ const CHILD_ENTRY = resolvePath(here, '../../dist/codemods/vite-resolve-child.js
 /** Matches the stand-in package written by `createApp`. */
 const contract: PluginContractDeps = {
   ...OPSLANE_VITE_PLUGIN,
+  exportNames: ['opslane', 'opslaneVitePlugin'],
+  viteMajors: { minimum: 6, maximum: 8 },
   minimumSdkVersion: '9.0.0',
 };
 

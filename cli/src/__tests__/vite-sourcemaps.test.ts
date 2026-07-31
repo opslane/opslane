@@ -320,3 +320,38 @@ describe('addOpslanePlugin with the plugin name already bound', () => {
     expect(addOpslanePlugin(source, 'vite.config.ts').outcome).toBe('already_wired');
   });
 });
+
+/**
+ * The SDK publishes one factory under two names. Treating the second as the
+ * deprecated uploader would tell a customer already on the current plugin to
+ * migrate off it.
+ */
+describe('addOpslanePlugin against the SDK subpath', () => {
+  const spec = '@opslane/sdk/vite-plugin';
+
+  it.each([
+    ['opslane', 'opslane'],
+    ['opslaneVitePlugin', 'opslaneVitePlugin'],
+  ])('treats an existing %s import as the current plugin', (_label, name) => {
+    const source = `import { ${name} } from '${spec}';\nexport default { plugins: [] };\n`;
+    const result = addOpslanePlugin(source, 'vite.config.ts');
+    expect(result.outcome).toBe('edited');
+    // The existing local binding is reused rather than importing a second time.
+    expect(result.text).toContain(`${name}()`);
+    expect(result.text!.match(new RegExp(`from '${spec}'`, 'g'))).toHaveLength(1);
+  });
+
+  it.each([
+    ['opslane', 'already_wired'],
+    ['opslaneVitePlugin', 'already_wired'],
+  ])('reports a registered %s as wired', (name, expected) => {
+    const source = `import { ${name} } from '${spec}';\nexport default { plugins: [${name}()] };\n`;
+    expect(addOpslanePlugin(source, 'vite.config.ts').outcome).toBe(expected);
+  });
+
+  it('still refuses the deprecated uploader', () => {
+    const source = `import { opslaneSourceMapPlugin } from '${spec}';\n`
+      + `export default { plugins: [opslaneSourceMapPlugin({})] };\n`;
+    expect(addOpslanePlugin(source, 'vite.config.ts').outcome).toBe('legacy_opslane_plugin');
+  });
+});

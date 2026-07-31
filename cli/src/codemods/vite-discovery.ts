@@ -169,11 +169,14 @@ export async function discoverViteProject(
       message: `Vite is not installed for ${appRelative}.`,
     };
   }
-  if (!versionAtLeast(viteVersion, '6.0.0')) {
+  const { minimum, maximum } = contract.viteMajors;
+  const viteMajor = Number(viteVersion.match(/^(\d+)\./)?.[1] ?? NaN);
+  if (!Number.isInteger(viteMajor) || viteMajor < minimum || viteMajor > maximum) {
     return {
       ok: false,
       status: 'vite_version_unsupported',
-      message: `Installed Vite ${viteVersion} is below the supported floor 6.0.0.`,
+      message: `Installed Vite ${viteVersion} is outside the supported range `
+        + `${minimum}.x to ${maximum}.x.`,
     };
   }
 

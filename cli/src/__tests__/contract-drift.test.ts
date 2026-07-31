@@ -3,7 +3,10 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { AGENT_STATUSES, type AgentStatusContract } from '../contract.js';
-import { OPSLANE_VITE_PLUGIN } from '../codemods/vite-contract.js';
+import {
+  OPSLANE_VITE_PLUGIN,
+  OPSLANE_VITE_PLUGIN_MIN_VERSION,
+} from '../codemods/vite-contract.js';
 import ts from 'typescript';
 
 const START = '<!-- BEGIN AGENT_STATUS_CONTRACT -->';
@@ -81,25 +84,89 @@ function sdkSourceFile(): ts.SourceFile {
   return ts.createSourceFile(url.pathname, source, ts.ScriptTarget.Latest, true);
 }
 
-function sdkExportsZeroArgFactory(sourceFile: ts.SourceFile, name: string): boolean {
+/** True when every parameter is optional, so `factory()` is a valid call. */
+function callableWithNoArguments(
+  parameters: readonly ts.ParameterDeclaration[],
+): boolean {
+  return parameters.every((parameter) =>
+    Boolean(parameter.initializer)
+    || Boolean(parameter.questionToken)
+    || Boolean(parameter.dotDotDotToken),
+  );
+}
+
+/**
+ * The local name behind an exported name. `export { opslaneVitePlugin as
+ * opslane }` is how the SDK actually publishes the factory, and an earlier
+ * version of this file only understood a directly exported declaration, so it
+ * reported the factory missing no matter what the SDK did.
+ */
+function localNameForExport(sourceFile: ts.SourceFile, exportedName: string): string | null {
+  for (const statement of sourceFile.statements) {
+    if (!ts.isExportDeclaration(statement) || statement.moduleSpecifier) continue;
+    const clause = statement.exportClause;
+    if (!clause || !ts.isNamedExports(clause)) continue;
+    for (const element of clause.elements) {
+      if (element.name.text === exportedName) {
+        return (element.propertyName ?? element.name).text;
+      }
+    }
+  }
+  return exportedName;
+}
+
+function sdkExportsZeroArgFactory(sourceFile: ts.SourceFile, exportedName: string): boolean {
+  const localName = localNameForExport(sourceFile, exportedName);
+  if (!localName) return false;
+  const aliased = localName !== exportedName;
   return sourceFile.statements.some((statement) => {
+    // An aliased declaration does not need its own export modifier; the
+    // `export { ... }` statement is what publishes it.
     const exported = ts.canHaveModifiers(statement)
       && ts.getModifiers(statement)?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword);
-    if (!exported) return false;
+    if (!exported && !aliased) return false;
     if (ts.isFunctionDeclaration(statement)) {
       return Boolean(statement.body)
-        && statement.name?.text === name
-        && statement.parameters.length === 0;
+        && statement.name?.text === localName
+        && callableWithNoArguments(statement.parameters);
     }
     if (!ts.isVariableStatement(statement)) return false;
     return statement.declarationList.declarations.some((declaration) =>
       ts.isIdentifier(declaration.name)
-      && declaration.name.text === name
+      && declaration.name.text === localName
       && declaration.initializer
       && (ts.isArrowFunction(declaration.initializer) || ts.isFunctionExpression(declaration.initializer))
-      && declaration.initializer.parameters.length === 0,
+      && callableWithNoArguments(declaration.initializer.parameters),
     );
   });
+}
+
+/**
+ * The value of the SDK's exported plugin-name constant.
+ *
+ * #224 exports `OPSLANE_VITE_PLUGIN_NAME` and the plugin object uses it, so
+ * reading the constant is exact where scanning for a string literal would break
+ * the moment the literal moved behind a name. Returns null when the SDK has no
+ * such constant, which is the state on this branch until #224 merges.
+ */
+function sdkPluginNameConstant(sourceFile: ts.SourceFile): string | null {
+  for (const statement of sourceFile.statements) {
+    if (!ts.isVariableStatement(statement)) continue;
+    const exported = ts.getModifiers(statement)
+      ?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword);
+    if (!exported) continue;
+    for (const declaration of statement.declarationList.declarations) {
+      if (
+        ts.isIdentifier(declaration.name)
+        && declaration.name.text === 'OPSLANE_VITE_PLUGIN_NAME'
+        && declaration.initializer
+        && ts.isStringLiteral(declaration.initializer)
+      ) {
+        return declaration.initializer.text;
+      }
+    }
+  }
+  return null;
 }
 
 describe('Vite plugin contract', () => {
@@ -110,9 +177,51 @@ describe('Vite plugin contract', () => {
     expect(diagnostics).toEqual([]);
   });
 
-  // EXPECTED TO FAIL until #224 ships opslane(). When #224 lands this flips to
-  // a hard failure and someone must set OPSLANE_VITE_PLUGIN_MIN_VERSION.
-  it.fails('SDK exports the zero-argument plugin factory this CLI inserts', () => {
-    expect(sdkExportsZeroArgFactory(sdkSourceFile(), OPSLANE_VITE_PLUGIN.exportName)).toBe(true);
+  // These prove the detectors work before they are pointed at the real SDK. An
+  // `it.fails` on the SDK itself passes when the helper throws or is simply
+  // wrong, which is how a rename ships unnoticed.
+  it.each([
+    ['a directly exported zero-argument function', `export function opslane() { return {}; }`, true],
+    ['a defaulted parameter', `export function opslane(options = {}) { return {}; }`, true],
+    ['an optional parameter', `export function opslane(options?: object) { return {}; }`, true],
+    ['an aliased export, which is what the SDK ships',
+      `function opslaneVitePlugin(options = {}) { return {}; }
+export { opslaneVitePlugin as opslane };`, true],
+    ['an aliased arrow', `const f = (o = {}) => ({});
+export { f as opslane };`, true],
+    ['a required parameter', `export function opslane(options: object) { return {}; }`, false],
+    ['no such export', `export function somethingElse() { return {}; }`, false],
+  ])('detects %s', (_label, source, expected) => {
+    const file = ts.createSourceFile('probe.ts', source, ts.ScriptTarget.Latest, true);
+    expect(sdkExportsZeroArgFactory(file, 'opslane')).toBe(expected);
+  });
+
+  it.each([
+    ['the exported constant', `export const OPSLANE_VITE_PLUGIN_NAME = 'opslane-debug-ids';`, 'opslane-debug-ids'],
+    ['a renamed constant value', `export const OPSLANE_VITE_PLUGIN_NAME = 'something-else';`, 'something-else'],
+    ['an unexported constant', `const OPSLANE_VITE_PLUGIN_NAME = 'opslane-debug-ids';`, null],
+    ['no such constant', `export const OTHER = 'opslane-debug-ids';`, null],
+  ])('reads %s', (_label, source, expected) => {
+    const file = ts.createSourceFile('probe.ts', source, ts.ScriptTarget.Latest, true);
+    expect(sdkPluginNameConstant(file)).toBe(expected);
+  });
+
+  /**
+   * #224 has not merged into this branch, so the SDK here still ships only the
+   * deprecated uploader. This asserts the current state rather than using
+   * `it.fails`, which passes whenever the body throws and therefore proves
+   * nothing about why.
+   *
+   * All three flip together when #224 lands, and each one silently breaks the
+   * installer on its own: the factory the codemod inserts, the plugin name
+   * verification matches on, and the version floor discovery gates on. When it
+   * lands, assert the constant equals OPSLANE_VITE_PLUGIN.pluginName. Update
+   * `vite-contract.ts` and this test in the same change.
+   */
+  it('pins exactly what the SDK still owes this contract', () => {
+    const sourceFile = sdkSourceFile();
+    expect(sdkExportsZeroArgFactory(sourceFile, OPSLANE_VITE_PLUGIN.exportName)).toBe(false);
+    expect(sdkPluginNameConstant(sourceFile)).toBeNull();
+    expect(OPSLANE_VITE_PLUGIN_MIN_VERSION).toBeNull();
   });
 });

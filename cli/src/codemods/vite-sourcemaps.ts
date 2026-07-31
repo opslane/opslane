@@ -344,9 +344,10 @@ function importedFactoryLocalName(
     ) continue;
     const bindings = statement.importClause?.namedBindings;
     if (statement.importClause?.isTypeOnly || !bindings || !ts.isNamedImports(bindings)) continue;
+    const current = new Set<string>(contract.exportNames ?? [contract.exportName]);
     const factory = bindings.elements.find(
       (element) => !element.isTypeOnly
-        && (element.propertyName?.text ?? element.name.text) === contract.exportName,
+        && current.has(element.propertyName?.text ?? element.name.text),
     );
     if (factory) return factory.name.text;
   }
@@ -557,8 +558,12 @@ function policyTerminal(
     return { outcome: 'unsupported', reason: 'plugins_would_be_overwritten' };
   }
   const factoryLocal = importedFactoryLocalName(lookup.sourceFile, contract);
+  // The SDK exports the same factory under more than one name. Importing any of
+  // them means the config is already on the current plugin; only a different
+  // export from that subpath is the deprecated uploader.
+  const currentNames = new Set<string>(contract.exportNames ?? [contract.exportName]);
   const contractImports = runtimeImportsFrom(lookup.sourceFile, contract.specifier);
-  if (contractImports.some((name) => name !== contract.exportName)) {
+  if (contractImports.some((name) => !currentNames.has(name))) {
     return { outcome: 'legacy_opslane_plugin' };
   }
   if (

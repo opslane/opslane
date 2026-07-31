@@ -54,7 +54,7 @@ The rows between the markers are machine parsed. Do not edit them without changi
 | `sourcemaps install-plugin` | `multiple_configs` | 1 | `stdout` | Several Vite configs were found and the command refuses to guess. |
 | `sourcemaps install-plugin` | `unsafe_config` | 1 | `stdout` | The selected config escapes the repository or is not a safe regular file. |
 | `sourcemaps install-plugin` | `vite_not_installed` | 1 | `stdout` | The selected app has no resolvable Vite installation. |
-| `sourcemaps install-plugin` | `vite_version_unsupported` | 1 | `stdout` | The installed Vite version is below the supported major-version floor. |
+| `sourcemaps install-plugin` | `vite_version_unsupported` | 1 | `stdout` | The installed Vite version is outside the supported major-version range. |
 | `sourcemaps install-plugin` | `sdk_not_installed` | 1 | `stdout` | The selected app has no resolvable Opslane SDK installation. |
 | `sourcemaps install-plugin` | `plugin_not_available_yet` | 1 | `stdout` | The installed SDK does not yet satisfy the frozen Vite plugin contract. |
 | `sourcemaps install-plugin` | `vite_config_broken_before_edit` | 1 | `stdout` | The original Vite config failed to resolve, so nothing was written. |

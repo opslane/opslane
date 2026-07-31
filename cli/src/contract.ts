@@ -67,7 +67,7 @@ export const AGENT_STATUSES = [
   agentStatus("sourcemaps install-plugin", "multiple_configs", 1, "stdout", "Several Vite configs were found and the command refuses to guess."),
   agentStatus("sourcemaps install-plugin", "unsafe_config", 1, "stdout", "The selected config escapes the repository or is not a safe regular file."),
   agentStatus("sourcemaps install-plugin", "vite_not_installed", 1, "stdout", "The selected app has no resolvable Vite installation."),
-  agentStatus("sourcemaps install-plugin", "vite_version_unsupported", 1, "stdout", "The installed Vite version is below the supported major-version floor."),
+  agentStatus("sourcemaps install-plugin", "vite_version_unsupported", 1, "stdout", "The installed Vite version is outside the supported major-version range."),
   agentStatus("sourcemaps install-plugin", "sdk_not_installed", 1, "stdout", "The selected app has no resolvable Opslane SDK installation."),
   agentStatus("sourcemaps install-plugin", "plugin_not_available_yet", 1, "stdout", "The installed SDK does not yet satisfy the frozen Vite plugin contract."),
   agentStatus("sourcemaps install-plugin", "vite_config_broken_before_edit", 1, "stdout", "The original Vite config failed to resolve, so nothing was written."),
