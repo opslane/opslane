@@ -120,32 +120,56 @@ export function resolveTrackedFiles(paths: string[], trackedFiles: Set<string>):
   return resolved;
 }
 
-/** Exact hit, else the longest suffix of the path that is tracked. */
+/** How many trailing path segments two split paths have in common. */
+function sharedTrailingSegments(a: string[], b: string[]): number {
+  let shared = 0;
+  while (
+    shared < a.length &&
+    shared < b.length &&
+    a[a.length - 1 - shared] === b[b.length - 1 - shared]
+  ) {
+    shared++;
+  }
+  return shared;
+}
+
+/** Exact hit, else the tracked file sharing the longest tail with the frame. */
 function matchTrackedPath(path: string, trackedFiles: Set<string>): string | null {
   if (trackedFiles.has(path)) return path;
   const segments = path.split('/').filter(Boolean);
   if (segments.length === 0) return null;
 
-  // The frame is more specific than the repository: drop the build machine's
-  // prefix off `/home/runner/work/app/src/main.ts`.
-  for (let i = 1; i < segments.length; i++) {
-    const candidate = segments.slice(i).join('/');
-    if (trackedFiles.has(candidate)) return candidate;
+  // A frame can be more specific than the repository (`/home/runner/work/app/`
+  // in front of `src/main.ts`) or less specific (a monorepo building from
+  // `frontend/`, so the map says `src/main.ts` and git says
+  // `frontend/src/main.ts`). Both are the same question: which tracked file
+  // shares the longest tail? Ranking answers both, where checking one
+  // direction and then the other lets a one-segment hit win over a
+  // three-segment one purely because it was tested first.
+  let best: string | null = null;
+  let bestScore = 0;
+  let tied = false;
+  for (const tracked of trackedFiles) {
+    const trackedSegments = tracked.split('/').filter(Boolean);
+    const score = sharedTrailingSegments(segments, trackedSegments);
+    // One side has to be fully consumed. Otherwise `src/main.ts` would match
+    // `other/main.ts` on the basename alone, which is a different file.
+    if (score === 0) continue;
+    if (score !== segments.length && score !== trackedSegments.length) continue;
+    if (score < bestScore) continue;
+    if (score === bestScore) {
+      tied = true;
+      continue;
+    }
+    best = tracked;
+    bestScore = score;
+    tied = false;
   }
 
-  // The repository is more specific than the frame. A monorepo builds from
-  // `frontend/`, so the map records `src/main.ts` while `git ls-files` reports
-  // `frontend/src/main.ts`, and stripping segments can never close that gap.
-  // Only accept a single candidate: naming the wrong file sends the agent to
-  // edit the wrong package, which is worse than naming none.
-  const suffix = `/${segments.join('/')}`;
-  let unique: string | null = null;
-  for (const tracked of trackedFiles) {
-    if (!tracked.endsWith(suffix)) continue;
-    if (unique !== null) return null;
-    unique = tracked;
-  }
-  return unique;
+  // Two equally good candidates means we cannot tell which file is meant.
+  // Naming the wrong one sends the agent to edit the wrong package, which is
+  // worse than naming none.
+  return tied ? null : best;
 }
 
 export function hasNoAppFrames(

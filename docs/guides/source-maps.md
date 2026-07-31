@@ -93,11 +93,20 @@ export default {
 a shared array reuses one plugin instance across builds and its per-build
 counters go wrong.
 
-When the plugin finds worker JavaScript that no pass stamped, it reports
-`OPSLANE_VITE_NESTED_BUILD_UNSTAMPED` and counts the file under
-`nested build not stamped` in the build summary. The worker's map is still
-removed from the output under the default `sourcemaps: 'remove'`, so an
-unregistered worker costs you symbolication, not privacy.
+When the plugin finds JavaScript that no pass stamped, it reports
+`OPSLANE_VITE_ASSET_UNSTAMPED` and counts the file under `emitted without a
+debug ID` in the build summary. A worker is the usual cause, but any plugin
+that emits JavaScript alongside a map produces the same shape, so the message
+names what it can see and offers the likely reason. The map is still removed
+from the output under the default `sourcemaps: 'remove'`, so an unregistered
+worker costs you symbolication, not privacy.
+
+Removing a map from the bundle is not the same as it never reaching disk. A
+plugin ordered after this one can write it back. After the build writes, the
+plugin re-checks every map it removed and reports
+`OPSLANE_VITE_MAP_NOT_REMOVED` for any that landed anyway. It warns rather than
+deleting, because by that point the file belongs to whichever plugin restored
+it.
 
 The build options are `commitSha`, `stamp` (default `true`), `logLevel`
 (`silent`, `warn`, or `debug`), `sourcemaps` (`remove` or `keep`), and

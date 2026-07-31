@@ -181,4 +181,32 @@ describe('resolveTrackedFiles', () => {
   it('does not match on a partial final segment', () => {
     expect(resolveTrackedFiles(['ain.ts'], MONOREPO)).toEqual([]);
   });
+
+  // Both mismatch directions are the same question, so they have to be ranked
+  // together. Checking one and then the other let a one-segment hit win over a
+  // better two-segment one purely because it was tested first.
+  it('prefers the tracked file sharing the longer tail', () => {
+    const both = new Set(['main.ts', 'frontend/src/main.ts']);
+    expect(resolveTrackedFiles(['src/main.ts'], both)).toEqual([
+      'frontend/src/main.ts',
+    ]);
+  });
+
+  it('refuses a basename-only match in a different directory', () => {
+    expect(resolveTrackedFiles(['src/main.ts'], new Set(['other/main.ts']))).toEqual([]);
+  });
+
+  it('still strips a build machine prefix', () => {
+    expect(
+      resolveTrackedFiles(['/home/runner/work/app/frontend/src/main.ts'], MONOREPO),
+    ).toEqual(['frontend/src/main.ts']);
+  });
+
+  // The frame says the file lives under `app/src/`, the repo says
+  // `frontend/src/`. Neither contains the other, so there is no honest answer.
+  it('refuses when the frame and the repo disagree on the directory', () => {
+    expect(
+      resolveTrackedFiles(['/home/runner/work/app/src/main.ts'], MONOREPO),
+    ).toEqual([]);
+  });
 });

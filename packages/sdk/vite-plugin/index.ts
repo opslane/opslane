@@ -37,6 +37,10 @@ interface StampStats {
   verifyFailed: string[];
 }
 
+/** Every extension Vite emits JavaScript under, and the maps beside them. */
+const JS_ASSET = /\.(?:js|mjs|cjs)$/;
+const JS_ASSET_MAP = /\.(?:js|mjs|cjs)\.map$/;
+
 /** The stamped `//# debugId=` trailer, used to recognise an already-stamped file. */
 const DEBUG_ID_TRAILER =
   /\n\/\/# debugId=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
@@ -62,6 +66,8 @@ export function opslaneVitePlugin(
   // Per-build state. Cleared at buildStart so watch rebuilds and multiple
   // outputs never verify against a previous build's fingerprints.
   const stampedIds = new Map<string, string>();
+  /** Maps removed from the bundle, re-checked on disk after the build writes. */
+  const discardedMaps = new Set<string>();
   const loggedCodes = new Set<string>();
   let stampingEnabled = options.stamp !== false;
   let sourcemapSetting: 'default' | 'hidden' | 'true' | 'inline' | 'false' =
@@ -167,11 +173,12 @@ export function opslaneVitePlugin(
     // for them to be generated, so deleting someone else's is not its call.
     if (!stampingEnabled || mapsRetained()) return;
     for (const key of Object.keys(bundle)) {
-      if (!key.endsWith('.js.map')) continue;
+      if (!JS_ASSET_MAP.test(key)) continue;
       // Only maps belonging to something this build emitted. An unrelated map
       // copied in as a static asset is the project's business, not ours.
       if (!(stripMapSuffix(key) in bundle)) continue;
       delete bundle[key];
+      discardedMaps.add(key);
     }
   };
 
@@ -181,7 +188,7 @@ export function opslaneVitePlugin(
     format: string | undefined,
   ): Promise<void> => {
     if (!stampingEnabled) return;
-    if (!value.fileName.endsWith('.js')) return;
+    if (!JS_ASSET.test(value.fileName)) return;
     if (typeof value.source !== 'string') return;
 
     const mapKey = `${value.fileName}.map`;
@@ -196,23 +203,22 @@ export function opslaneVitePlugin(
 
     const existing = DEBUG_ID_TRAILER.exec(value.source);
     if (!existing) {
-      // JavaScript with its own map that no hook of ours ever saw: a nested
-      // build ran without this plugin. The map is discarded with the rest, so
-      // the only lasting symptom is a chunk that can never be symbolicated.
-      skip('nested build not stamped', value.fileName);
+      // JavaScript with its own map that no hook of ours ever saw. A worker is
+      // the usual cause, but any plugin can emit this shape, so report what is
+      // observable and offer the likely reason rather than asserting it. The
+      // map is discarded with the rest, so the only lasting symptom is a file
+      // that can never be symbolicated.
+      skip('emitted without a debug ID', value.fileName);
       warnOnce(
-        'OPSLANE_VITE_NESTED_BUILD_UNSTAMPED',
-        `${value.fileName} came from a nested build that does not run this plugin, so it has no debug ID and its errors cannot be symbolicated. Vite builds web workers separately: add the plugin to worker.plugins as well as plugins. See docs/guides/source-maps.md#web-workers.`,
+        'OPSLANE_VITE_ASSET_UNSTAMPED',
+        `${value.fileName} was emitted with a source map but no debug ID, so its errors cannot be symbolicated. It came from a build pass this plugin does not run in. Vite builds web workers separately, so the usual cause is a missing worker.plugins entry. See docs/guides/source-maps.md#web-workers.`,
       );
       return;
     }
 
+    // Discarding is the sweep's job; recording what to verify on disk is this one's.
     const settle = (debugId: string): void => {
-      if (mapsRetained()) {
-        stampedIds.set(mapKey, debugId);
-      } else {
-        delete bundle[mapKey];
-      }
+      if (mapsRetained()) stampedIds.set(mapKey, debugId);
     };
 
     // Already consistent: the map beside it is the one that was fingerprinted.
@@ -264,6 +270,7 @@ export function opslaneVitePlugin(
       stats.skipped.clear();
       stats.verifyFailed.length = 0;
       stampedIds.clear();
+      discardedMaps.clear();
     },
 
     config(config: UserConfig) {
@@ -395,11 +402,8 @@ export function opslaneVitePlugin(
           applyStampToChunkMap(chunk.map, stamped.mapSource);
           stats.stamped++;
 
-          if (mapsRetained()) {
-            stampedIds.set(mapKey, stamped.debugId);
-          } else {
-            delete bundle[mapKey];
-          }
+          // Discarding is `discardRetiredMaps`'s job, below.
+          if (mapsRetained()) stampedIds.set(mapKey, stamped.debugId);
         } catch (error) {
           skip('invalid map', chunk.fileName);
           warnOnce(
@@ -417,9 +421,32 @@ export function opslaneVitePlugin(
     // bytes on disk are what an upload will be fingerprinted from.
     async writeBundle(outputOptions, bundle) {
       const dir = outputOptions.dir;
-      if (!dir || stampedIds.size === 0) return;
-      const readFileSync = nodeFs()?.readFileSync;
+      if (!dir) return;
+      const fs = nodeFs();
+      const readFileSync = fs?.readFileSync;
       if (!readFileSync) return;
+
+      // Removing a map from the bundle is not the same as it never reaching
+      // disk. Anything running after this hook can write one back, and a
+      // plugin ordered after us can restore it before the build ends. Check
+      // what actually landed instead of trusting the earlier delete. Warn
+      // rather than unlink: the file is another plugin's output by then, and
+      // deleting it could break a workflow the project meant to have.
+      const leaked = [...discardedMaps].filter((fileName) => {
+        try {
+          readFileSync(`${dir}/${fileName}`);
+          return true;
+        } catch {
+          return false;
+        }
+      });
+      if (leaked.length > 0 && logLevel !== 'silent') {
+        console.error(
+          `[opslane] OPSLANE_VITE_MAP_NOT_REMOVED: ${leaked.length} source map(s) reached disk after being removed from the bundle, publishing your original source. A plugin ordered after this one restored them.\n  Affected: ${leaked.join(', ')}\n  See docs/guides/source-maps.md#plugin-order.`,
+        );
+      }
+
+      if (stampedIds.size === 0) return;
 
       for (const [fileName, expectedId] of stampedIds) {
         // A map another plugin dropped from the bundle after we stamped was
@@ -648,26 +675,28 @@ function preludeInsertion(code: string): {
   generatedLine: number;
   addedLines: number;
 } {
-  let offset = 0;
+  // A shebang is only a shebang at byte zero, so it can never be re-emitted.
+  let shebangEnd = 0;
   if (code.startsWith('#!')) {
     const newline = code.indexOf('\n');
-    offset = newline === -1 ? code.length : newline + 1;
+    shebangEnd = newline === -1 ? code.length : newline + 1;
   }
 
-  // The trailing terminator is optional: a minified CJS chunk opens
-  // `"use strict";const a=1,...` with the whole program on one line.
+  // A directive ends at a semicolon or, under automatic semicolon insertion, at
+  // the newline alone. The terminator after a semicolon is optional too: a
+  // minified CJS chunk opens `"use strict";const a=1,...` all on one line.
   const directives =
-    /^(?:[ \t]*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')[ \t]*;[ \t]*(?:\r?\n)?)+/;
-  const match = directives.exec(code.slice(offset));
-  if (match) offset += match[0].length;
+    /^(?:[ \t]*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')[ \t]*(?:;[ \t]*(?:\r?\n)?|\r?\n))+/;
+  const match = directives.exec(code.slice(shebangEnd));
+  const prologueEnd = shebangEnd + (match ? match[0].length : 0);
 
   // The common case: the prologue ends on a line boundary, so the prelude gets
   // a line of its own and everything below it shifts down exactly one.
-  if (offset === 0 || code[offset - 1] === '\n') {
+  if (prologueEnd === 0 || code[prologueEnd - 1] === '\n') {
     return {
-      head: code.slice(0, offset),
-      offset,
-      generatedLine: code.slice(0, offset).split('\n').length - 1,
+      head: code.slice(0, prologueEnd),
+      offset: prologueEnd,
+      generatedLine: code.slice(0, prologueEnd).split('\n').length - 1,
       addedLines: 1,
     };
   }
@@ -675,12 +704,14 @@ function preludeInsertion(code: string): {
   // The prologue shares its line with real code. Splitting them would move that
   // code off column zero and invalidate every column on the line, so re-emit
   // the prologue on a line of its own and leave the original bytes untouched
-  // below the prelude. The now-repeated directive is a harmless no-op: it is no
-  // longer in prologue position, and the copy above it already applies.
+  // below the prelude. The repeated directive is a harmless no-op: it is no
+  // longer in prologue position, and the copy above it already applies. Resume
+  // the original bytes after the shebang rather than at zero, or the shebang is
+  // duplicated into the middle of the file and the output stops being parseable.
   return {
-    head: `${code.slice(0, offset)}\n`,
-    offset: 0,
-    generatedLine: 0,
+    head: `${code.slice(0, prologueEnd)}\n`,
+    offset: shebangEnd,
+    generatedLine: code.slice(0, shebangEnd).split('\n').length - 1,
     addedLines: 2,
   };
 }

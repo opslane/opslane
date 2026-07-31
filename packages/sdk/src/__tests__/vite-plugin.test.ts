@@ -188,6 +188,60 @@ describe('Vite debug-ID plugin', () => {
     expect(code.indexOf('use strict')).toBeLessThan(code.indexOf(REGISTRY_GLOBAL));
   });
 
+  // Prelude placement has two independent dimensions: whether a shebang is
+  // present, and how the directive prologue terminates. Testing them one at a
+  // time is what let `#!` + a minified directive through, where the shebang was
+  // duplicated into the middle of the file and the output stopped parsing.
+  // Cover the grid, not the bugs that happen to be known.
+  describe.each([
+    ['no prologue', '', 'var x=1'],
+    ['newline-terminated', '', '"use strict";\nvar x=1'],
+    ['minified, no newline', '', '"use strict";var x=1'],
+    ['semicolonless', '', '"use strict"\nvar x=1'],
+    ['shebang only', '#!/usr/bin/env node\n', 'var x=1'],
+    ['shebang + newline-terminated', '#!/usr/bin/env node\n', '"use strict";\nvar x=1'],
+    ['shebang + minified', '#!/usr/bin/env node\n', '"use strict";var x=1'],
+    ['shebang + semicolonless', '#!/usr/bin/env node\n', '"use strict"\nvar x=1'],
+  ])('prelude placement: %s', (_name, shebang, body) => {
+    const source = shebang + body;
+
+    it('keeps the file valid and the mapping shift honest', async () => {
+      const plugin = opslaneVitePlugin({
+        sourcemaps: 'keep',
+        logLevel: 'silent',
+      });
+      const bundle = makeBundle(source);
+      await stamp(plugin, bundle, 'cjs');
+      const code = bundle['assets/index.js'].code as string;
+
+      // A shebang is only a shebang at byte zero. A second one anywhere is a
+      // syntax error, and dropping it breaks the executable bit's whole point.
+      expect((code.match(/^#!/gm) ?? []).length).toBe(shebang ? 1 : 0);
+      if (shebang) expect(code.startsWith(shebang)).toBe(true);
+
+      // The directive has to stay ahead of the prelude or the chunk silently
+      // runs in sloppy mode.
+      if (body.includes('use strict')) {
+        expect(code.indexOf('use strict')).toBeLessThan(code.indexOf(REGISTRY_GLOBAL));
+      }
+
+      // The original body's last line must survive verbatim as a whole line.
+      // Nothing may be prepended to it, or its columns stop matching the map.
+      const lastOriginalLine = source.split('\n').at(-1) as string;
+      expect(code.split('\n')).toContain(lastOriginalLine);
+
+      // The map only shifts whole lines, so the segments it gained must equal
+      // the lines the prelude actually added. If these drift, every frame in
+      // the chunk resolves to the wrong original line.
+      const map = JSON.parse(bundle['assets/index.js.map'].source as string);
+      const segmentsGained = map.mappings.split(';').length - 1; // fixture has one
+      const trailerLine = 1; // the appended `//# debugId=` line
+      const linesGained =
+        code.split('\n').length - source.split('\n').length - trailerLine;
+      expect(segmentsGained).toBe(linesGained);
+    });
+  });
+
   it('shifts mappings past every line the prelude adds', async () => {
     const plugin = opslaneVitePlugin({
       sourcemaps: 'keep',
@@ -307,7 +361,7 @@ describe('Vite debug-ID plugin', () => {
     expect(bundle['assets/worker.js.map']).toBeUndefined();
   });
 
-  it('names the unregistered worker build rather than failing quietly', async () => {
+  it('names an asset that no pass stamped rather than failing quietly', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const plugin = opslaneVitePlugin({ sourcemaps: 'keep' });
     const bundle = makeBundle();
@@ -326,12 +380,12 @@ describe('Vite debug-ID plugin', () => {
     (plugin.closeBundle as Function).call(plugin);
 
     expect(warn).toHaveBeenCalledWith(
-      expect.stringContaining('OPSLANE_VITE_NESTED_BUILD_UNSTAMPED'),
+      expect.stringContaining('OPSLANE_VITE_ASSET_UNSTAMPED'),
     );
     // The unstamped file has to reach the denominator, or the summary reports
     // a clean build while a whole worker cannot be symbolicated.
     expect(warn).toHaveBeenCalledWith(
-      expect.stringContaining('1 skipped: 1 nested build not stamped'),
+      expect.stringContaining('1 skipped: 1 emitted without a debug ID'),
     );
     warn.mockRestore();
   });
