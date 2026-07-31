@@ -23,7 +23,7 @@
       "account_name": "Example Inc"
     }
   },
-  "sdk_version": "2.0.1",
+  "sdk_version": "3.0.0",
   "release": "web@2026.07.16",
   "commit_sha": "e60b4d1e113538d40f09e31717e949aaa08659f8",
   "debug_meta": {

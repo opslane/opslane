@@ -62,14 +62,14 @@ subsequent events carrying its `session_id`.
 
 ## Build provenance and debug images
 
-Browser SDK 2.1.0 adds two optional top-level fields:
+Browser SDK 3.0.0 adds two optional top-level fields:
 
 - `commit_sha` is a lowercase 40- or 64-character hexadecimal commit ID.
 - `debug_meta` is an object whose optional `images` member is an array of
   `{ "type": "sourcemap", "code_file": "<exact bundle URL>", "debug_id": "<UUID>" }`.
 
-The corresponding frozen fixtures are `v2.1.0-minimal.json` (both fields
-omitted) and `v2.1.0-full.json` (both populated). Older payloads remain valid.
+The corresponding frozen fixtures are `v3.0.0-minimal.json` (both fields
+omitted) and `v3.0.0-full.json` (both populated). Older payloads remain valid.
 
 Debug-image metadata is advisory and must never make event ingestion fail.
 Ingestion sanitizes it before storage:
