@@ -12,7 +12,7 @@ export interface OpslaneViteOptions {
   /** Disable mutation for integrity-checked builds. Defaults to true. */
   stamp?: boolean;
   /** Diagnostic verbosity. Defaults to warn. */
-  logLevel?: 'silent' | 'warn' | 'debug';
+  logLevel?: 'silent' | 'warn';
   /** Retain or remove generated source-map assets. Defaults to remove. */
   sourcemaps?: 'remove' | 'keep';
   /** Maximum raw source-map asset size. Defaults to 32 MiB. */
@@ -33,7 +33,7 @@ const SCRIPT_PRELUDE = `;(function(){try{var g=typeof globalThis!=="undefined"?g
 interface StampStats {
   chunks: number;
   stamped: number;
-  skipped: Map<string, string[]>;
+  skipped: Map<string, number>;
   verifyFailed: string[];
 }
 
@@ -63,6 +63,14 @@ const JS_ASSET_MAP = /\.(?:js|mjs|cjs)\.map$/;
 const DEBUG_ID_TRAILER =
   /\n\/\/# debugId=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
 
+/** Thrown by `stampOne` so callers can tell a size refusal from a bad map. */
+class MapTooLargeError extends Error {
+  constructor(readonly bytes: number) {
+    super(`map is ${formatBytes(bytes)}, over the limit`);
+    this.name = 'MapTooLargeError';
+  }
+}
+
 interface StampResult {
   code: string;
   mapSource: string;
@@ -90,15 +98,16 @@ export function opslaneVitePlugin(
   let stampingEnabled = options.stamp !== false;
   let sourcemapSetting: 'default' | 'hidden' | 'true' | 'inline' | 'false' =
     'default';
-  let legacyPluginPresent = false;
+  /** True when this plugin, not the project, switched source maps on. */
+  let pluginRequestedMaps = false;
   let projectRoot: string | undefined;
+  /** Where the build wrote, captured so closeBundle can re-read it. */
+  let writtenDir: string | undefined;
   let outDir = 'dist';
   const commit = detectCommit(options.commitSha);
 
-  const skip = (reason: string, fileName: string): void => {
-    const files = stats.skipped.get(reason) ?? [];
-    files.push(fileName);
-    stats.skipped.set(reason, files);
+  const skip = (reason: string, _fileName: string): void => {
+    stats.skipped.set(reason, (stats.skipped.get(reason) ?? 0) + 1);
   };
   const warnOnce = (code: string, message: string): void => {
     if (logLevel === 'silent' || loggedCodes.has(code)) return;
@@ -107,19 +116,22 @@ export function opslaneVitePlugin(
   };
 
   /**
-   * Only clean up maps this plugin caused to exist.
+   * Will source maps remain in the build output?
    *
-   * With no `build.sourcemap` set, the config hook switches maps on so there is
-   * something to fingerprint. Deleting those again is undoing our own side
-   * effect, and it is the whole reason a default install ships no maps.
+   * The plugin removes only the maps it caused to exist. With no
+   * `build.sourcemap` of its own it switches maps on so there is something to
+   * fingerprint, and removing them again is undoing that side effect. A
+   * `build.sourcemap` the project set itself was not caused here: those maps
+   * are usually wanted by an uploader that reads them off disk once the build
+   * writes, and deleting them breaks that tool with a green build and no
+   * message.
    *
-   * A `build.sourcemap` the project set itself is a different thing. Those maps
-   * were wanted, usually by an uploader that reads them off disk after the
-   * build writes, and deleting them breaks that tool with a green build and no
-   * message. They are not ours to remove.
+   * Deliberately keyed on `pluginRequestedMaps` rather than `stampingEnabled`.
+   * SRI detection switches stamping off in `configResolved`, which runs after
+   * `config` has already asked for the maps, so a stamping check here would
+   * leave maps on disk that only this plugin caused.
    */
-  const mapsRetained = (): boolean =>
-    keepSourceMaps || legacyPluginPresent || sourcemapSetting !== 'default';
+  const mapsWillShip = (): boolean => !pluginRequestedMaps || keepSourceMaps;
 
   /**
    * Fingerprint `mapAsset` as it stands, then return the code and map bytes
@@ -131,9 +143,7 @@ export function opslaneVitePlugin(
     prelude: string,
   ): Promise<StampResult> => {
     const raw = assetBytes(mapAsset);
-    if (raw.byteLength > maxMapBytes) {
-      throw new Error(`map is ${formatBytes(raw.byteLength)}, over the limit`);
-    }
+    if (raw.byteLength > maxMapBytes) throw new MapTooLargeError(raw.byteLength);
 
     // Strictly validate the raw artifact before JSON.parse can erase
     // duplicate keys or normalize malformed input.
@@ -159,10 +169,6 @@ export function opslaneVitePlugin(
     const stampedPrelude = prelude
       .split(DEBUG_ID_PLACEHOLDER)
       .join(fingerprint.debugId);
-    if (stampedPrelude.includes(DEBUG_ID_PLACEHOLDER)) {
-      throw new Error('debug-ID placeholder substitution failed');
-    }
-
     return {
       code:
         insertion.head +
@@ -193,7 +199,7 @@ export function opslaneVitePlugin(
   const discardRetiredMaps = (bundle: Record<string, unknown>): void => {
     // With stamping off the plugin is not managing maps at all: it never asked
     // for them to be generated, so deleting someone else's is not its call.
-    if (!stampingEnabled || mapsRetained()) return;
+    if (mapsWillShip()) return;
     for (const key of Object.keys(bundle)) {
       if (!JS_ASSET_MAP.test(key)) continue;
       // Only maps belonging to something this build emitted. An unrelated map
@@ -202,6 +208,59 @@ export function opslaneVitePlugin(
       delete bundle[key];
       discardedMaps.add(key);
     }
+  };
+
+  /**
+   * Removing a map from the bundle is not the same as it never reaching disk.
+   * A plugin ordered after this one can write it back, and its `writeBundle`
+   * runs after ours, so the question can only be settled in `closeBundle`.
+   *
+   * Warn rather than unlink. By that point the file is another plugin's
+   * output, and deleting it could break something the project meant to have.
+   */
+  const reportRestoredMaps = (): void => {
+    if (!writtenDir || discardedMaps.size === 0 || logLevel === 'silent') return;
+    const readFileSync = nodeFs()?.readFileSync;
+    if (!readFileSync) return;
+    const restored = [...discardedMaps].filter((fileName) => {
+      try {
+        readFileSync(`${writtenDir}/${fileName}`);
+        return true;
+      } catch {
+        return false;
+      }
+    });
+    if (restored.length === 0) return;
+    console.error(
+      `[opslane] OPSLANE_VITE_MAP_NOT_REMOVED: ${restored.length} source map(s) reached disk after being removed from the bundle, publishing your original source. A plugin ordered after this one restored them.\n  Affected: ${restored.join(', ')}\n  See docs/guides/source-maps.md#plugin-order.`,
+    );
+  };
+
+  /** The build summary's source-map sentence. */
+  const describeMaps = (): string => {
+    if (sourcemapSetting === 'false') return 'Source maps: disabled.';
+    if (sourcemapSetting === 'inline') return 'Source maps: inline in the chunks.';
+    const setting = sourcemapSetting === 'default' ? 'hidden' : sourcemapSetting;
+    return `Source maps: ${setting}, ${
+      mapsWillShip() ? 'kept in output' : 'removed from output'
+    }.`;
+  };
+
+  /** Why a file could not be stamped. Shared so both paths report alike. */
+  const reportStampFailure = (fileName: string, error: unknown): void => {
+    if (error instanceof MapTooLargeError) {
+      skip(`map over ${formatBytes(maxMapBytes)}`, fileName);
+      warnOnce(
+        'OPSLANE_VITE_MAP_TOO_LARGE',
+        `${fileName}'s map is ${formatBytes(error.bytes)}, above maxMapBytes=${formatBytes(maxMapBytes)}. The file was left unchanged. Raise maxMapBytes or reduce the map. See docs/guides/source-maps.md#map-size-limit.`,
+      );
+      return;
+    }
+    skip('invalid map', fileName);
+    warnOnce(
+      'OPSLANE_VITE_MAP_INVALID',
+      `${fileName} was left unchanged because its map could not be fingerprinted (${messageOf(error)}). Fix or disable the plugin producing the invalid map. See docs/guides/source-maps.md#diagnostics.`,
+    );
   };
 
   /**
@@ -247,7 +306,7 @@ export function opslaneVitePlugin(
 
     // Discarding is the sweep's job; recording what to verify on disk is this one's.
     const settle = (debugId: string): void => {
-      if (mapsRetained()) stampedIds.set(mapKey, debugId);
+      if (mapsWillShip()) stampedIds.set(mapKey, debugId);
     };
 
     // Already consistent: the map beside it is the one that was fingerprinted.
@@ -280,11 +339,7 @@ export function opslaneVitePlugin(
       stats.stamped++;
       settle(stamped.debugId);
     } catch (error) {
-      skip('invalid map', value.fileName);
-      warnOnce(
-        'OPSLANE_VITE_MAP_INVALID',
-        `${value.fileName} was left unchanged because its map could not be fingerprinted (${messageOf(error)}). Fix or disable the plugin producing the invalid map. See docs/guides/source-maps.md#diagnostics.`,
-      );
+      reportStampFailure(value.fileName, error);
     }
   };
 
@@ -300,6 +355,7 @@ export function opslaneVitePlugin(
       stats.verifyFailed.length = 0;
       stampedIds.clear();
       discardedMaps.clear();
+      writtenDir = undefined;
     },
 
     config(config: UserConfig) {
@@ -335,6 +391,7 @@ export function opslaneVitePlugin(
       const result: UserConfig = {};
       if (!hasExplicitSourcemap && stampingEnabled) {
         result.build = { sourcemap: 'hidden' };
+        pluginRequestedMaps = true;
       }
       if (commit) {
         result.define = {
@@ -350,7 +407,6 @@ export function opslaneVitePlugin(
         ? canonicalFilesystemPath(config.build.outDir)
         : config.build.outDir;
       const pluginNames = new Set(config.plugins.map((plugin) => plugin.name));
-      legacyPluginPresent = pluginNames.has(LEGACY_VITE_PLUGIN_NAME);
       const detectedSRI = [...KNOWN_SRI_PLUGINS].find((name) =>
         pluginNames.has(name),
       );
@@ -410,15 +466,6 @@ export function opslaneVitePlugin(
           continue;
         }
 
-        if (assetBytes(mapAsset).byteLength > maxMapBytes) {
-          skip(`map over ${formatBytes(maxMapBytes)}`, chunk.fileName);
-          warnOnce(
-            'OPSLANE_VITE_MAP_TOO_LARGE',
-            `${chunk.fileName}'s map is ${formatBytes(assetBytes(mapAsset).byteLength)}, above maxMapBytes=${formatBytes(maxMapBytes)}. The chunk was left unchanged. Raise maxMapBytes or reduce the map. See docs/guides/source-maps.md#map-size-limit.`,
-          );
-          continue;
-        }
-
         try {
           const stamped = await stampOne(chunk.code, mapAsset, prelude);
 
@@ -432,13 +479,9 @@ export function opslaneVitePlugin(
           stats.stamped++;
 
           // Discarding is `discardRetiredMaps`'s job, below.
-          if (mapsRetained()) stampedIds.set(mapKey, stamped.debugId);
+          if (mapsWillShip()) stampedIds.set(mapKey, stamped.debugId);
         } catch (error) {
-          skip('invalid map', chunk.fileName);
-          warnOnce(
-            'OPSLANE_VITE_MAP_INVALID',
-            `${chunk.fileName} was left unchanged because its map could not be fingerprinted (${messageOf(error)}). Fix or disable the plugin producing the invalid map. See docs/guides/source-maps.md#diagnostics.`,
-          );
+          reportStampFailure(chunk.fileName, error);
         }
       }
 
@@ -455,26 +498,7 @@ export function opslaneVitePlugin(
       const readFileSync = fs?.readFileSync;
       if (!readFileSync) return;
 
-      // Removing a map from the bundle is not the same as it never reaching
-      // disk. Anything running after this hook can write one back, and a
-      // plugin ordered after us can restore it before the build ends. Check
-      // what actually landed instead of trusting the earlier delete. Warn
-      // rather than unlink: the file is another plugin's output by then, and
-      // deleting it could break a workflow the project meant to have.
-      const leaked = [...discardedMaps].filter((fileName) => {
-        try {
-          readFileSync(`${dir}/${fileName}`);
-          return true;
-        } catch {
-          return false;
-        }
-      });
-      if (leaked.length > 0 && logLevel !== 'silent') {
-        console.error(
-          `[opslane] OPSLANE_VITE_MAP_NOT_REMOVED: ${leaked.length} source map(s) reached disk after being removed from the bundle, publishing your original source. A plugin ordered after this one restored them.\n  Affected: ${leaked.join(', ')}\n  See docs/guides/source-maps.md#plugin-order.`,
-        );
-      }
-
+      writtenDir = dir;
       if (stampedIds.size === 0) return;
 
       for (const [fileName, expectedId] of stampedIds) {
@@ -504,10 +528,11 @@ export function opslaneVitePlugin(
     },
 
     closeBundle() {
+      reportRestoredMaps();
       if (logLevel === 'silent') return;
       const skipped = stats.chunks - stats.stamped;
       const detail = [...stats.skipped.entries()]
-        .map(([reason, files]) => `${files.length} ${reason}`)
+        .map(([reason, count]) => `${count} ${reason}`)
         .join(', ');
       console.warn(
         `[opslane] Stamped ${stats.stamped}/${stats.chunks} chunks with debug IDs` +
@@ -521,9 +546,7 @@ export function opslaneVitePlugin(
           commit
             ? `Commit ${commit.sha.slice(0, 7)} detected from ${commit.source}.`
             : 'Commit not detected.'
-        } Source maps: ${sourcemapSetting === 'default' ? 'hidden' : sourcemapSetting}, ${
-          mapsRetained() ? 'kept in output' : 'removed from output'
-        }.`,
+        } ${describeMaps()}`,
       );
     },
   };
@@ -537,16 +560,7 @@ export interface SourceMapPluginOptions {
   release?: string;
 }
 
-interface BundleAsset {
-  type: string;
-  source?: string;
-  fileName: string;
-}
 
-interface CollectedMap {
-  file_path: string;
-  source_map: string;
-}
 
 /**
  * @deprecated Use opslaneVitePlugin for deterministic debug IDs. This legacy
@@ -572,11 +586,6 @@ export function opslaneSourceMapPlugin(_options: SourceMapPluginOptions) {
   };
 }
 
-/** Read VITE_OPSLANE_RELEASE without depending on @types/node globals. */
-function readReleaseEnv(): string | undefined {
-  const env = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env;
-  return env?.VITE_OPSLANE_RELEASE;
-}
 
 function stripMapSuffix(filePath: string): string {
   return filePath.endsWith('.map') ? filePath.slice(0, -4) : filePath;
@@ -711,11 +720,17 @@ function preludeInsertion(code: string): {
     shebangEnd = newline === -1 ? code.length : newline + 1;
   }
 
-  // A directive ends at a semicolon or, under automatic semicolon insertion, at
-  // the newline alone. The terminator after a semicolon is optional too: a
+  // A directive ends at a semicolon or, under automatic semicolon insertion,
+  // at the newline alone. The terminator after a semicolon is optional too: a
   // minified CJS chunk opens `"use strict";const a=1,...` all on one line.
+  //
+  // A newline only ends the statement when the next line cannot continue the
+  // expression. `"x"\n(foo)` is a call and `"x"\n[0]` is a member access, so
+  // neither string is a directive and splitting them changes what the code
+  // does. The lookahead refuses the bare-newline form in front of anything
+  // that keeps the expression going.
   const directives =
-    /^(?:[ \t]*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')[ \t]*(?:;[ \t]*(?:\r?\n)?|\r?\n))+/;
+    /^(?:[ \t]*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')[ \t]*(?:;[ \t]*(?:\r?\n)?|\r?\n(?![ \t]*[([+\-*\/,.`?:=])))+/;
   const match = directives.exec(code.slice(shebangEnd));
   const prologueEnd = shebangEnd + (match ? match[0].length : 0);
 

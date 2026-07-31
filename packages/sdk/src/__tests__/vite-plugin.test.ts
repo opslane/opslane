@@ -243,6 +243,27 @@ describe('Vite debug-ID plugin', () => {
     });
   });
 
+  // A newline only ends a statement when the next line cannot continue it.
+  // `"x"\n(foo)` is a call and `"x"\n[0]` is a member access, so neither
+  // string is a directive; treating them as one and inserting between splits
+  // a single expression into two statements and changes what the code does.
+  it.each([
+    ['call continuation', '"x"\n(foo)'],
+    ['member continuation', '"x"\n[0]'],
+    ['operator continuation', '"x"\n+foo'],
+  ])('does not treat a %s as a directive prologue', async (_name, source) => {
+    const plugin = opslaneVitePlugin({
+      sourcemaps: 'keep',
+      logLevel: 'silent',
+    });
+    const bundle = makeBundle(source);
+    await stamp(plugin, bundle, 'cjs');
+
+    const code = bundle['assets/index.js'].code as string;
+    // The expression must survive intact: nothing inserted between its parts.
+    expect(code).toContain(source);
+  });
+
   it('shifts mappings past every line the prelude adds', async () => {
     const plugin = opslaneVitePlugin({
       sourcemaps: 'keep',
@@ -435,6 +456,43 @@ describe('Vite debug-ID plugin', () => {
     await stamp(plugin, bundle);
 
     expect(bundle['assets/index.js'].code).toBe('console.log("hello");');
+  });
+
+  // The plugin switches maps on in `config`, then SRI detection switches
+  // stamping off in `configResolved`, which runs later. Gating cleanup on
+  // stamping therefore abandoned maps that only this plugin caused, while the
+  // summary still reported them as removed.
+  it('still removes the maps it caused when SRI disables stamping', async () => {
+    const plugin = opslaneVitePlugin({ logLevel: 'silent' });
+    (plugin.config as Function).call(plugin, {});
+    (plugin.configResolved as Function).call(plugin, {
+      root: process.cwd(),
+      build: { outDir: 'dist' },
+      plugins: [{ name: 'opslane-debug-ids' }, { name: 'vite-plugin-sri' }],
+    });
+    const bundle = makeBundle();
+
+    await stamp(plugin, bundle);
+
+    expect(bundle['assets/index.js'].code).toBe('console.log("hello");');
+    expect(bundle['assets/index.js.map']).toBeUndefined();
+  });
+
+  it('leaves the project\'s own maps alone even when SRI disables stamping', async () => {
+    const plugin = opslaneVitePlugin({ logLevel: 'silent' });
+    (plugin.config as Function).call(plugin, {
+      build: { sourcemap: 'hidden' },
+    });
+    (plugin.configResolved as Function).call(plugin, {
+      root: process.cwd(),
+      build: { outDir: 'dist' },
+      plugins: [{ name: 'opslane-debug-ids' }, { name: 'vite-plugin-sri' }],
+    });
+    const bundle = makeBundle();
+
+    await stamp(plugin, bundle);
+
+    expect(bundle['assets/index.js.map']).toBeDefined();
   });
 
   it('disables stamping when a known SRI plugin is present', async () => {

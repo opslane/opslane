@@ -133,7 +133,7 @@ ID in the JavaScript against the one in its map. Vite 8 runs on Rolldown rather
 than Rollup; the plugin uses only hooks both engines implement.
 
 The build options are `commitSha`, `stamp` (default `true`), `logLevel`
-(`silent`, `warn`, or `debug`), `sourcemaps` (`remove` or `keep`), and
+(`silent` or `warn`), `sourcemaps` (`remove` or `keep`), and
 `maxMapBytes` (default 32 MiB). Each diagnostic has a stable
 `OPSLANE_VITE_*` code, and every build prints a stamped/skipped summary unless
 logging is silent.

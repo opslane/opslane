@@ -9,7 +9,6 @@ secret to the browser.
 
 | Variable | Required | Purpose |
 | --- | --- | --- |
-| `VITE_OPSLANE_RELEASE` | for the published legacy plugin unless its `release` option is set | Release key used to upload source maps. It must match `init({ release })`. |
 | `OPSLANE_COMMIT_SHA` | no | First environment override used by debug-ID build provenance. |
 | `GITHUB_SHA` | no | GitHub Actions commit fallback. |
 | `VERCEL_GIT_COMMIT_SHA` | no | Vercel commit fallback. |
@@ -94,6 +93,7 @@ The worker starts with only `DATABASE_URL` and logs a warning for missing `ANTHR
 
 | Variable | Status |
 | --- | --- |
+| `VITE_OPSLANE_RELEASE` | Read by no code in this repository. It fed the published legacy uploader's `release`; that plugin now throws, and debug IDs replaced release matching. Your own application may still read it to pass `init({ release })`, which is display metadata only. |
 | `ALLOW_REGISTRATION` | Read by nothing; there is no self-serve registration path (sign-in is GitHub OAuth). |
 | `OPSLANE_ADMIN_EMAILS` | Host-side name that docker-compose.yml maps into the ingestion service's `ADMIN_EMAILS`; consumed by Compose interpolation, not read by code directly. |
 | `ENCRYPTION_KEY` | Read by nothing except a sandbox scrub list; at-rest token encryption is not implemented (see [trust](../architecture/trust.md#honest-gaps-current-state)). |
