@@ -72,6 +72,33 @@ It respects an explicit Vite `build.sourcemap` setting:
 | `false` | Leaves chunks unchanged and reports `OPSLANE_VITE_SOURCEMAP_DISABLED` |
 | `'inline'` | Leaves chunks unchanged and reports `OPSLANE_VITE_INLINE_MAP` |
 
+<a id="web-workers"></a>
+
+### Web workers
+
+Vite builds a web worker as a separate pass with its own plugin list, then copies
+the result into the main bundle. A plugin listed only under `plugins` never runs
+for that pass, so worker chunks come out with no debug ID and errors thrown
+inside a worker cannot be symbolicated. Nothing else in the build fails, which is
+why it is easy to miss. Register the plugin in both places:
+
+```ts
+export default {
+  plugins: [opslane()],
+  worker: { plugins: () => [opslane()] },
+};
+```
+
+`worker.plugins` must be a function. Vite calls it once per worker build; passing
+a shared array reuses one plugin instance across builds and its per-build
+counters go wrong.
+
+When the plugin finds worker JavaScript that no pass stamped, it reports
+`OPSLANE_VITE_NESTED_BUILD_UNSTAMPED` and counts the file under
+`nested build not stamped` in the build summary. The worker's map is still
+removed from the output under the default `sourcemaps: 'remove'`, so an
+unregistered worker costs you symbolication, not privacy.
+
 The build options are `commitSha`, `stamp` (default `true`), `logLevel`
 (`silent`, `warn`, or `debug`), `sourcemaps` (`remove` or `keep`), and
 `maxMapBytes` (default 32 MiB). Each diagnostic has a stable
