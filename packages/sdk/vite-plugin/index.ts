@@ -111,7 +111,11 @@ export function opslaneVitePlugin(
     const insertion = preludeInsertion(code);
     const correctedMap = {
       ...normalizeSources(parsed, mapAsset.fileName, projectRoot, outDir),
-      mappings: insertMappingLine(parsed.mappings, insertion.generatedLine),
+      mappings: insertMappingLines(
+        parsed.mappings,
+        insertion.generatedLine,
+        insertion.addedLines,
+      ),
     };
     const correctedMapSource = JSON.stringify(correctedMap);
     const fingerprint = await computeDebugId(
@@ -126,7 +130,7 @@ export function opslaneVitePlugin(
 
     return {
       code:
-        code.slice(0, insertion.offset) +
+        insertion.head +
         stampedPrelude +
         code.slice(insertion.offset) +
         `\n//# debugId=${fingerprint.debugId}`,
@@ -145,6 +149,32 @@ export function opslaneVitePlugin(
    * the parent's unstamped map survives beside it. Re-fingerprint those files
    * against the map that is actually going to ship.
    */
+  /**
+   * `sourcemaps: 'remove'` is a privacy promise, not a size optimisation: a map
+   * that reaches disk publishes the original source under a predictable URL.
+   *
+   * Stamping gives up for reasons outside this plugin's control. The loudest is
+   * a worker: Vite runs `worker.plugins` as a separate build and copies the
+   * result into the parent bundle as plain assets, so a project that lists the
+   * plugin only under `plugins` hands us worker JavaScript that no hook ever
+   * stamped. Every one of those paths used to leave the sibling map in the
+   * bundle while the build summary still reported the maps as removed.
+   *
+   * Sweeping last keeps the promise regardless of what happened above.
+   */
+  const discardRetiredMaps = (bundle: Record<string, unknown>): void => {
+    // With stamping off the plugin is not managing maps at all: it never asked
+    // for them to be generated, so deleting someone else's is not its call.
+    if (!stampingEnabled || mapsRetained()) return;
+    for (const key of Object.keys(bundle)) {
+      if (!key.endsWith('.js.map')) continue;
+      // Only maps belonging to something this build emitted. An unrelated map
+      // copied in as a static asset is the project's business, not ours.
+      if (!(stripMapSuffix(key) in bundle)) continue;
+      delete bundle[key];
+    }
+  };
+
   const restampEmittedAsset = async (
     value: { type: string; fileName: string; source?: string | Uint8Array },
     bundle: Record<string, unknown>,
@@ -154,12 +184,28 @@ export function opslaneVitePlugin(
     if (!value.fileName.endsWith('.js')) return;
     if (typeof value.source !== 'string') return;
 
-    const existing = DEBUG_ID_TRAILER.exec(value.source);
-    if (!existing) return;
-
     const mapKey = `${value.fileName}.map`;
     const mapAsset = (bundle as Record<string, MapAsset | undefined>)[mapKey];
     if (!mapAsset || mapAsset.type !== 'asset') return;
+
+    // JavaScript with a sibling map is a stamping candidate however it got here,
+    // so it belongs in the denominator. Counting it only on the paths that
+    // succeed lets `skip()` record a reason the summary then hides, because the
+    // summary derives its skipped count from chunks minus stamped.
+    stats.chunks++;
+
+    const existing = DEBUG_ID_TRAILER.exec(value.source);
+    if (!existing) {
+      // JavaScript with its own map that no hook of ours ever saw: a nested
+      // build ran without this plugin. The map is discarded with the rest, so
+      // the only lasting symptom is a chunk that can never be symbolicated.
+      skip('nested build not stamped', value.fileName);
+      warnOnce(
+        'OPSLANE_VITE_NESTED_BUILD_UNSTAMPED',
+        `${value.fileName} came from a nested build that does not run this plugin, so it has no debug ID and its errors cannot be symbolicated. Vite builds web workers separately: add the plugin to worker.plugins as well as plugins. See docs/guides/source-maps.md#web-workers.`,
+      );
+      return;
+    }
 
     const settle = (debugId: string): void => {
       if (mapsRetained()) {
@@ -170,9 +216,11 @@ export function opslaneVitePlugin(
     };
 
     // Already consistent: the map beside it is the one that was fingerprinted.
+    // A nested build that does run this plugin lands here, and it is stamped.
     try {
       const { debugId } = await computeDebugId(assetBytes(mapAsset));
       if (debugId === existing[1]) {
+        stats.stamped++;
         settle(debugId);
         return;
       }
@@ -186,7 +234,6 @@ export function opslaneVitePlugin(
       return;
     }
 
-    stats.chunks++;
     try {
       const stamped = await stampOne(
         unstamped.code,
@@ -361,6 +408,8 @@ export function opslaneVitePlugin(
           );
         }
       }
+
+      discardRetiredMaps(bundle);
       },
     },
 
@@ -582,9 +631,22 @@ function preludeForFormat(format: string | undefined): string | null {
   return null;
 }
 
+/**
+ * Where the prelude goes, and what the generated code looks like before it.
+ *
+ * The prelude has to run before the module's own code but must not displace a
+ * shebang or a directive prologue: put it ahead of `"use strict"` and the
+ * directive becomes an ordinary string expression, silently dropping the whole
+ * chunk into sloppy mode.
+ *
+ * `head` is emitted verbatim ahead of the prelude and `code.slice(offset)`
+ * follows it, so `addedLines` counts every generated line the pair introduces.
+ */
 function preludeInsertion(code: string): {
+  head: string;
   offset: number;
   generatedLine: number;
+  addedLines: number;
 } {
   let offset = 0;
   if (code.startsWith('#!')) {
@@ -592,20 +654,45 @@ function preludeInsertion(code: string): {
     offset = newline === -1 ? code.length : newline + 1;
   }
 
+  // The trailing terminator is optional: a minified CJS chunk opens
+  // `"use strict";const a=1,...` with the whole program on one line.
   const directives =
-    /^(?:[ \t]*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')[ \t]*;[ \t]*(?:\r?\n|$))+/;
+    /^(?:[ \t]*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')[ \t]*;[ \t]*(?:\r?\n)?)+/;
   const match = directives.exec(code.slice(offset));
   if (match) offset += match[0].length;
 
+  // The common case: the prologue ends on a line boundary, so the prelude gets
+  // a line of its own and everything below it shifts down exactly one.
+  if (offset === 0 || code[offset - 1] === '\n') {
+    return {
+      head: code.slice(0, offset),
+      offset,
+      generatedLine: code.slice(0, offset).split('\n').length - 1,
+      addedLines: 1,
+    };
+  }
+
+  // The prologue shares its line with real code. Splitting them would move that
+  // code off column zero and invalidate every column on the line, so re-emit
+  // the prologue on a line of its own and leave the original bytes untouched
+  // below the prelude. The now-repeated directive is a harmless no-op: it is no
+  // longer in prologue position, and the copy above it already applies.
   return {
-    offset,
-    generatedLine: code.slice(0, offset).split('\n').length - 1,
+    head: `${code.slice(0, offset)}\n`,
+    offset: 0,
+    generatedLine: 0,
+    addedLines: 2,
   };
 }
 
-function insertMappingLine(mappings: string, generatedLine: number): string {
+function insertMappingLines(
+  mappings: string,
+  generatedLine: number,
+  count: number,
+): string {
   const lines = mappings.split(';');
-  lines.splice(Math.min(generatedLine, lines.length), 0, '');
+  const at = Math.min(generatedLine, lines.length);
+  lines.splice(at, 0, ...new Array<string>(count).fill(''));
   return lines.join(';');
 }
 

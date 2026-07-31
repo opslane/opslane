@@ -171,6 +171,40 @@ describe('Vite debug-ID plugin', () => {
     );
   });
 
+  // esbuild emits `"use strict";const a=1,b=2,...` as a single line for a
+  // minified CJS build, so the prologue has no trailing newline to match on.
+  // Inserting ahead of it demotes the directive to an ordinary string
+  // expression and the whole chunk silently runs in sloppy mode.
+  it('keeps a minified directive prologue as the first statement', async () => {
+    const plugin = opslaneVitePlugin({
+      sourcemaps: 'keep',
+      logLevel: 'silent',
+    });
+    const bundle = makeBundle('"use strict";var x=1');
+    await stamp(plugin, bundle, 'cjs');
+
+    const code = bundle['assets/index.js'].code as string;
+    expect(code).toMatch(/^"use strict";/);
+    expect(code.indexOf('use strict')).toBeLessThan(code.indexOf(REGISTRY_GLOBAL));
+  });
+
+  it('shifts mappings past every line the prelude adds', async () => {
+    const plugin = opslaneVitePlugin({
+      sourcemaps: 'keep',
+      logLevel: 'silent',
+    });
+    const bundle = makeBundle('"use strict";var x=1');
+    await stamp(plugin, bundle, 'cjs');
+
+    const code = bundle['assets/index.js'].code as string;
+    const map = JSON.parse(bundle['assets/index.js.map'].source as string);
+    // The original code is emitted verbatim, so the mapping for its first
+    // segment has to name the generated line it actually landed on.
+    const originalLine = code.split('\n').findIndex((line) => line.includes('var x=1'));
+    const blankLeadingLines = map.mappings.split(';').findIndex((seg: string) => seg !== '');
+    expect(blankLeadingLines).toBe(originalLine);
+  });
+
   it('keeps a shebang on line one', async () => {
     const plugin = opslaneVitePlugin({
       sourcemaps: 'keep',
@@ -239,6 +273,88 @@ describe('Vite debug-ID plugin', () => {
     await stamp(plugin, bundle);
 
     expect(bundle['assets/index.js.map']).toBeUndefined();
+  });
+
+  // Vite runs a worker build as a nested build and copies its output into the
+  // parent bundle as plain assets. Unless the plugin is also listed under
+  // `worker.plugins`, that JavaScript arrives unstamped, and every path that
+  // gives up on stamping used to leave the map in the bundle. The summary still
+  // said the maps had been removed, so a default install published the original
+  // source without ever saying so.
+  it('removes an unstamped sibling map instead of publishing its sources', async () => {
+    const plugin = opslaneVitePlugin({ logLevel: 'silent' });
+    (plugin.config as Function).call(plugin, {});
+    const bundle = makeBundle();
+    bundle['assets/worker.js'] = {
+      type: 'asset',
+      fileName: 'assets/worker.js',
+      source: 'self.onmessage=function(){};',
+    };
+    bundle['assets/worker.js.map'] = {
+      type: 'asset',
+      fileName: 'assets/worker.js.map',
+      source: JSON.stringify({
+        version: 3,
+        file: 'assets/worker.js',
+        sources: ['src/worker.ts'],
+        sourcesContent: ['// the customer\'s private source'],
+        names: [],
+        mappings: 'AAAA',
+      }),
+    };
+    await stamp(plugin, bundle);
+
+    expect(bundle['assets/worker.js.map']).toBeUndefined();
+  });
+
+  it('names the unregistered worker build rather than failing quietly', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const plugin = opslaneVitePlugin({ sourcemaps: 'keep' });
+    const bundle = makeBundle();
+    bundle['assets/worker.js'] = {
+      type: 'asset',
+      fileName: 'assets/worker.js',
+      source: 'self.onmessage=function(){};',
+    };
+    bundle['assets/worker.js.map'] = {
+      type: 'asset',
+      fileName: 'assets/worker.js.map',
+      source: '{"version":3,"sources":[],"names":[],"mappings":""}',
+    };
+
+    await stamp(plugin, bundle);
+    (plugin.closeBundle as Function).call(plugin);
+
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('OPSLANE_VITE_NESTED_BUILD_UNSTAMPED'),
+    );
+    // The unstamped file has to reach the denominator, or the summary reports
+    // a clean build while a whole worker cannot be symbolicated.
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('1 skipped: 1 nested build not stamped'),
+    );
+    warn.mockRestore();
+  });
+
+  it('keeps an unstamped sibling map when maps are retained', async () => {
+    const plugin = opslaneVitePlugin({
+      sourcemaps: 'keep',
+      logLevel: 'silent',
+    });
+    const bundle = makeBundle();
+    bundle['assets/worker.js'] = {
+      type: 'asset',
+      fileName: 'assets/worker.js',
+      source: 'self.onmessage=function(){};',
+    };
+    bundle['assets/worker.js.map'] = {
+      type: 'asset',
+      fileName: 'assets/worker.js.map',
+      source: '{"version":3,"sources":[],"names":[],"mappings":""}',
+    };
+    await stamp(plugin, bundle);
+
+    expect(bundle['assets/worker.js.map']).toBeDefined();
   });
 
   it('defines an explicit valid commit SHA before chunk hashing', () => {
