@@ -37,6 +37,24 @@ interface StampStats {
   verifyFailed: string[];
 }
 
+/**
+ * The name this plugin registers under, frozen as an export.
+ *
+ * Tooling that installs the plugin has to confirm it is actually present in a
+ * resolved Vite config, and the only handle it gets is this string. Comparing
+ * against a copy pasted into another package makes a rename a silent
+ * 100%-failure: the install looks fine, the check never matches, and a correct
+ * edit gets rolled back. Import this instead of retyping it.
+ *
+ * Deliberately not `opslane-source-map`: that name belongs to the deprecated
+ * uploader stub below, which throws. Sharing a name would make the working
+ * plugin and the failing one indistinguishable in a plugin list.
+ */
+export const OPSLANE_VITE_PLUGIN_NAME = 'opslane-debug-ids';
+
+/** The deprecated uploader stub's name. It throws; do not match on it. */
+export const LEGACY_VITE_PLUGIN_NAME = 'opslane-source-map';
+
 /** Every extension Vite emits JavaScript under, and the maps beside them. */
 const JS_ASSET = /\.(?:js|mjs|cjs)$/;
 const JS_ASSET_MAP = /\.(?:js|mjs|cjs)\.map$/;
@@ -149,13 +167,6 @@ export function opslaneVitePlugin(
   };
 
   /**
-   * Vite emits a worker build's output into the parent bundle as plain assets.
-   * When the file name is already taken Rollup keeps the *existing* asset
-   * source, so a worker chunk's stamped JS can replace the parent's chunk while
-   * the parent's unstamped map survives beside it. Re-fingerprint those files
-   * against the map that is actually going to ship.
-   */
-  /**
    * `sourcemaps: 'remove'` is a privacy promise, not a size optimisation: a map
    * that reaches disk publishes the original source under a predictable URL.
    *
@@ -182,6 +193,13 @@ export function opslaneVitePlugin(
     }
   };
 
+  /**
+   * Vite emits a worker build's output into the parent bundle as plain assets.
+   * When the file name is already taken Rollup keeps the *existing* asset
+   * source, so a worker chunk's stamped JS can replace the parent's chunk while
+   * the parent's unstamped map survives beside it. Re-fingerprint those files
+   * against the map that is actually going to ship.
+   */
   const restampEmittedAsset = async (
     value: { type: string; fileName: string; source?: string | Uint8Array },
     bundle: Record<string, unknown>,
@@ -260,7 +278,7 @@ export function opslaneVitePlugin(
   };
 
   return {
-    name: 'opslane-debug-ids',
+    name: OPSLANE_VITE_PLUGIN_NAME,
     apply: 'build',
     enforce: 'post',
 
@@ -321,7 +339,7 @@ export function opslaneVitePlugin(
         ? canonicalFilesystemPath(config.build.outDir)
         : config.build.outDir;
       const pluginNames = new Set(config.plugins.map((plugin) => plugin.name));
-      legacyPluginPresent = pluginNames.has('opslane-source-map');
+      legacyPluginPresent = pluginNames.has(LEGACY_VITE_PLUGIN_NAME);
       const detectedSRI = [...KNOWN_SRI_PLUGINS].find((name) =>
         pluginNames.has(name),
       );
@@ -525,7 +543,7 @@ interface CollectedMap {
  */
 export function opslaneSourceMapPlugin(_options: SourceMapPluginOptions) {
   return {
-    name: 'opslane-source-map',
+    name: LEGACY_VITE_PLUGIN_NAME,
     apply: 'build' as const,
     enforce: 'post' as const,
 

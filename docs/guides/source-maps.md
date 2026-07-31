@@ -67,10 +67,18 @@ It respects an explicit Vite `build.sourcemap` setting:
 
 | Vite setting | Result |
 | --- | --- |
-| unset | Uses `hidden`; stamps chunks; removes maps by default |
-| `true` or `'hidden'` | Stamps; maps are removed unless `sourcemaps: 'keep'` |
+| unset | Uses `hidden`; stamps chunks; removes maps from the output |
+| `'hidden'` | Stamps; removes maps unless `sourcemaps: 'keep'` |
+| `true` | Stamps; **keeps maps in the output**, so they deploy |
 | `false` | Leaves chunks unchanged and reports `OPSLANE_VITE_SOURCEMAP_DISABLED` |
 | `'inline'` | Leaves chunks unchanged and reports `OPSLANE_VITE_INLINE_MAP` |
+
+`true` and `'hidden'` differ on purpose. In Vite, `'hidden'` means "write the
+maps but do not reference them from the JavaScript", which is what an upload
+flow wants; `true` means "write the maps and point the browser at them", which
+is a deliberate request to ship them. The plugin honours that request and
+leaves those maps in the output. If you want stamping without deploying your
+original source, use `'hidden'` or leave the setting unset.
 
 <a id="web-workers"></a>
 
@@ -107,6 +115,13 @@ plugin re-checks every map it removed and reports
 `OPSLANE_VITE_MAP_NOT_REMOVED` for any that landed anyway. It warns rather than
 deleting, because by that point the file belongs to whichever plugin restored
 it.
+
+### Supported Vite versions
+
+The plugin declares `vite` as a peer on `^5 || ^6 || ^7 || ^8`, and each of those
+majors is exercised with a real `vite build` that stamps a chunk and checks the
+ID in the JavaScript against the one in its map. Vite 8 runs on Rolldown rather
+than Rollup; the plugin uses only hooks both engines implement.
 
 The build options are `commitSha`, `stamp` (default `true`), `logLevel`
 (`silent`, `warn`, or `debug`), `sourcemaps` (`remove` or `keep`), and
