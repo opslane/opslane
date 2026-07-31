@@ -106,9 +106,20 @@ export function opslaneVitePlugin(
     console.warn(`[opslane] ${code}: ${message}`);
   };
 
-  /** Maps are only kept in the output when one of these is true. */
+  /**
+   * Only clean up maps this plugin caused to exist.
+   *
+   * With no `build.sourcemap` set, the config hook switches maps on so there is
+   * something to fingerprint. Deleting those again is undoing our own side
+   * effect, and it is the whole reason a default install ships no maps.
+   *
+   * A `build.sourcemap` the project set itself is a different thing. Those maps
+   * were wanted, usually by an uploader that reads them off disk after the
+   * build writes, and deleting them breaks that tool with a green build and no
+   * message. They are not ours to remove.
+   */
   const mapsRetained = (): boolean =>
-    keepSourceMaps || legacyPluginPresent || sourcemapSetting === 'true';
+    keepSourceMaps || legacyPluginPresent || sourcemapSetting !== 'default';
 
   /**
    * Fingerprint `mapAsset` as it stands, then return the code and map bytes

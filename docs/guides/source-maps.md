@@ -67,18 +67,27 @@ It respects an explicit Vite `build.sourcemap` setting:
 
 | Vite setting | Result |
 | --- | --- |
-| unset | Uses `hidden`; stamps chunks; removes maps from the output |
-| `'hidden'` | Stamps; removes maps unless `sourcemaps: 'keep'` |
-| `true` | Stamps; **keeps maps in the output**, so they deploy |
+| unset | Uses `hidden`; stamps chunks; **removes the maps it caused** |
+| `'hidden'` or `true` | Stamps; leaves your maps alone |
 | `false` | Leaves chunks unchanged and reports `OPSLANE_VITE_SOURCEMAP_DISABLED` |
 | `'inline'` | Leaves chunks unchanged and reports `OPSLANE_VITE_INLINE_MAP` |
 
-`true` and `'hidden'` differ on purpose. In Vite, `'hidden'` means "write the
-maps but do not reference them from the JavaScript", which is what an upload
-flow wants; `true` means "write the maps and point the browser at them", which
-is a deliberate request to ship them. The plugin honours that request and
-leaves those maps in the output. If you want stamping without deploying your
-original source, use `'hidden'` or leave the setting unset.
+The rule is that the plugin only cleans up after itself. With no
+`build.sourcemap` of your own, it switches maps on so there is something to
+fingerprint, then removes them again so a default install never publishes your
+source. Set `build.sourcemap` yourself and those maps are yours: the plugin
+stamps them and leaves them in the output.
+
+That matters if you also run a source-map uploader. Tools like
+`@sentry/vite-plugin` read the `.map` files off disk after the build writes
+them, so a plugin that deletes them first breaks the upload with a green build
+and no message. Because you had to set `build.sourcemap` to make that uploader
+work in the first place, the plugin sees an explicit setting and stays out of
+the way.
+
+Those maps then deploy with the rest of your output unless something removes
+them. That was already true before this plugin, and it stays your call: Sentry
+has `sourcemaps.filesToDeleteAfterUpload` for exactly this.
 
 <a id="web-workers"></a>
 

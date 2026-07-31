@@ -93,7 +93,8 @@ describe('Vite debug-ID plugin', () => {
       config: { build: { sourcemap: 'hidden' } },
       requested: undefined,
       stamped: true,
-      retained: false,
+      // Explicitly asked for by the project, so not ours to delete.
+      retained: true,
     },
     {
       name: 'true',
