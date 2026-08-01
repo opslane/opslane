@@ -1,10 +1,13 @@
 # CLI agent contract
 
-This deterministic reference is sourced from `cli/src/contract.ts` and the setup protocol in `cli/src/setup.ts`. It covers the agent-facing `setup`, `snippet`, `verify`, and `status` commands, and `onboard` when invoked non-interactively.
+This deterministic reference is sourced from `cli/src/contract.ts` and the setup protocol in `cli/src/setup.ts`. It covers the agent-facing `setup`, `snippet`, `verify`, `status`, and `sourcemaps install-plugin` commands, and `onboard` when invoked non-interactively.
 
 ## Output and persistence invariants
 
 - Each covered command writes exactly one JSON document to stdout per invocation. It never mixes prose, progress, or a second JSON document into stdout. `onboard` is covered only on its non-TTY path, which emits `tty_required` and exits 1; under a TTY it is an interactive human command and, like `login` and `init`, is exempt.
+- `sourcemaps install-plugin` emits one terminal JSON document. Its interactive
+  preview and prompt use the terminal before that document; non-TTY, `--json`,
+  `--yes`, and `--check` never mix prose into stdout.
 - Diagnostics go to stderr. Blocking `setup` writes the interim `auth_required` document, including the human authorization URL, to stderr and reserves stdout for its one terminal document. `setup --start` instead returns `auth_required` as its terminal stdout document.
 - `auth_required`, `pending`, an informational `already_configured`, `completed`, `ok`, and `configured` exit 0. Failures and usage errors exit 1. A refused `setup --force` is the documented exception where `already_configured` exits 1 because the repo already has a project.
 - `login` and `init` are interactive human commands and are exempt from this JSON/stream contract.
@@ -41,7 +44,49 @@ The rows between the markers are machine parsed. Do not edit them without changi
 | `verify` | `ok` | 0 | `stdout` | The API is reachable; has_events says whether the first event arrived. |
 | `verify` | `error` | 1 | `stdout` | Connection verification failed after credentials were resolved. |
 | `status` | `configured` | 0 | `stdout` | Credentials for the current API origin and repository are configured. |
+| `sourcemaps install-plugin` | `consent_required` | 1 | `stdout` | The proposed edit and disclosure are ready, but explicit consent is required before writing. |
+| `sourcemaps install-plugin` | `edited` | 0 | `stdout` | The Vite config was edited, reread, resolved, and the Opslane plugin was registered. |
+| `sourcemaps install-plugin` | `usage_error` | 1 | `stdout` | The command-line arguments are invalid or mutually exclusive. |
+| `sourcemaps install-plugin [--check]` | `already_wired` | 0 | `stdout` | The resolved Vite plugin list already contains the Opslane plugin. |
+| `sourcemaps install-plugin` | `unsupported` | 1 | `stdout` | The config shape cannot be edited safely; follow the returned manual completion path. |
+| `sourcemaps install-plugin` | `legacy_opslane_plugin` | 1 | `stdout` | The config uses the legacy Opslane plugin and must be migrated instead of double-registered. |
+| `sourcemaps install-plugin` | `config_not_found` | 1 | `stdout` | No Vite config was found in the selected app directory. |
+| `sourcemaps install-plugin` | `multiple_configs` | 1 | `stdout` | Several Vite configs were found and the command refuses to guess. |
+| `sourcemaps install-plugin` | `unsafe_config` | 1 | `stdout` | The selected config escapes the repository or is not a safe regular file. |
+| `sourcemaps install-plugin` | `vite_not_installed` | 1 | `stdout` | The selected app has no resolvable Vite installation. |
+| `sourcemaps install-plugin` | `vite_version_unsupported` | 1 | `stdout` | The installed Vite version is outside the supported major-version range. |
+| `sourcemaps install-plugin` | `sdk_not_installed` | 1 | `stdout` | The selected app has no resolvable Opslane SDK installation. |
+| `sourcemaps install-plugin` | `plugin_not_available_yet` | 1 | `stdout` | The installed SDK does not yet satisfy the frozen Vite plugin contract. |
+| `sourcemaps install-plugin` | `vite_config_broken_before_edit` | 1 | `stdout` | The original Vite config failed to resolve, so nothing was written. |
+| `sourcemaps install-plugin` | `vite_config_parse_failed` | 1 | `stdout` | The written config did not parse and the original file was restored. |
+| `sourcemaps install-plugin` | `vite_config_structure_mismatch` | 1 | `stdout` | The reread config did not contain the expected structure and the original file was restored. |
+| `sourcemaps install-plugin` | `vite_plugin_not_registered` | 1 | `stdout` | The resolved config omitted the Opslane plugin; any command edit was restored. |
+| `sourcemaps install-plugin` | `vite_config_broken_after_edit` | 1 | `stdout` | The edited Vite config failed to resolve and the original file was restored. |
+| `sourcemaps install-plugin` | `vite_config_resolve_timeout` | 1 | `stdout` | Post-edit Vite resolution timed out, the child stopped, and the original file was restored. |
+| `sourcemaps install-plugin` | `config_changed_before_write` | 1 | `stdout` | The config changed after preview, so the command refused to overwrite it. |
+| `sourcemaps install-plugin` | `repo_changed_during_verification` | 1 | `stdout` | Config execution changed another repository path; the command stopped and restored its edit. |
+| `sourcemaps install-plugin` | `write_failed` | 1 | `stdout` | The atomic config write failed; the config was never replaced, so nothing needed restoring. |
+| `sourcemaps install-plugin` | `restore_failed` | 1 | `stdout` | The original config could not be restored; recovery details and a backup path are reported. |
 <!-- END AGENT_STATUS_CONTRACT -->
+
+## `sourcemaps install-plugin`
+
+`--config <path>` selects a nonstandard config, `--app-dir <path>` selects the
+app in a monorepo, `--yes` applies after deterministic checks without prompting,
+`--json` returns the proposal without prompting, and `--check` only resolves the
+config and verifies registration. `--check` never writes.
+
+Without a terminal and without `--yes`, the command returns
+`consent_required` with `file`, `diff`, `disclosure`, and `warnings`, exits 1,
+and writes nothing. A tool must show the disclosure to a human before retrying
+with `--yes`.
+
+The command treats exit 1 as a terminal result, including safe refusals and
+restored verification failures. Source maps are optional to error capture:
+onboarding S7 must surface the returned remediation but treat exit 1 from this
+command as non-fatal and continue. `restore_failed` is the exception that needs
+immediate attention because the selected config may still contain the attempted
+edit; its JSON includes `restoreFailures` and `recoveryPath`.
 
 ## `setup`
 

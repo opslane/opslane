@@ -1,5 +1,7 @@
 ---
 covers:
+  - cli/src/sourcemaps.ts
+  - cli/src/codemods/vite-*.ts
   - packages/sdk/vite-plugin/**
   - packages/worker/src/source-map.ts
 ---
@@ -24,6 +26,28 @@ them, the worker sees your original source.
 Keep using `opslaneSourceMapPlugin` in installable setup instructions until a
 package containing the new export is published. Do not copy an
 `opslaneVitePlugin` import into an application pinned to 2.0.1.
+
+## Adding the plugin
+
+`opslane sourcemaps install-plugin` makes the edit below for you. It previews
+the exact two lines, states that verifying the result executes your Vite config,
+keeps the original bytes and permissions so any failure restores the file, and
+then asks your own Vite to confirm the plugin reached the resolved build.
+
+```bash
+opslane sourcemaps install-plugin          # preview, then confirm
+opslane sourcemaps install-plugin --check  # verify a manual edit, never writes
+```
+
+Without a terminal it prints the proposal as JSON and writes nothing, so an
+agent or CI job must show that disclosure to a human before re-running with
+`--yes`. Use `--app-dir` and `--config` for a monorepo or a nonstandard
+filename. Configs it cannot edit safely are refused with the two lines to paste
+instead; nothing is written in that case either.
+
+It edits the top-level `plugins` list only. If your build has web workers, add
+the `worker.plugins` entry yourself as described in [web workers](#web-workers),
+or worker chunks ship unstamped.
 
 ## Current Vite setup
 
