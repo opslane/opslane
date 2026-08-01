@@ -37,7 +37,10 @@ func TestCreateAndLookupProjectKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.ProjectID != projectID || got.OrgID != orgID || got.Scope != db.ScopeIngest {
+	if got.ID != minted.ID ||
+		got.ProjectID != projectID ||
+		got.OrgID != orgID ||
+		got.Scope != db.ScopeIngest {
 		t.Fatalf("lookup = %+v", got)
 	}
 }

@@ -57,6 +57,7 @@ type ParsedProjectKey struct {
 }
 
 type ProjectKeyLookup struct {
+	ID                      string
 	KeyID                   string
 	ProjectID               string
 	OrgID                   string
@@ -189,13 +190,13 @@ func (q *Queries) LookupProjectKey(ctx context.Context, raw string) (*ProjectKey
 		revokedAt  *time.Time
 	)
 	err = q.pool.QueryRow(ctx,
-		`SELECT k.project_id, p.org_id, k.scope, k.secret_hash, k.revoked_at,
+		`SELECT k.id, k.project_id, p.org_id, k.scope, k.secret_hash, k.revoked_at,
 		        p.allowed_origins, p.allow_payload_environment
 		 FROM project_api_keys k
 		 JOIN projects p ON p.id = k.project_id
 		 WHERE k.key_id = $1`,
 		parsed.KeyID,
-	).Scan(&out.ProjectID, &out.OrgID, &out.Scope, &storedHash, &revokedAt,
+	).Scan(&out.ID, &out.ProjectID, &out.OrgID, &out.Scope, &storedHash, &revokedAt,
 		&out.AllowedOrigins, &out.AllowPayloadEnvironment)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrProjectKeyInvalid
