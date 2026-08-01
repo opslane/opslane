@@ -23,6 +23,7 @@ The worker pushes only to a reserved Opslane fix branch (`opslane/fix-<group-id>
 | --- | --- | --- |
 | Anthropic API | Error details, stack traces, relevant source file contents, test output | Only during investigation, only with `ANTHROPIC_API_KEY` set |
 | E2B sandbox | A clone of the connected repository, the candidate fix, dependency installs, test runs | Only during fix verification, only with `E2B_API_KEY` set |
+| Configured object storage (ingestion) | Source maps (file paths, source-to-generated mappings, optionally embedded source content) | During source-map upload via source-map-scoped project key |
 | GitHub (worker) | The fix branch (pushed **before** PR creation — if the PR call then fails, the pushed branch remains and the incident ends `needs_human`), then the PR body (root cause, diff, verification evidence). The setup-PR flow likewise pushes an `opslane/setup` branch and opens a PR. | During fix delivery and setup-PR |
 | Configured identity provider | OAuth code exchange and user/email lookup (sign-in); email verification codes when the OAuth provider requires verification | During dashboard sign-in and OAuth email verification |
 | GitHub (ingestion) | Installation and repository listing (App setup) | During GitHub App setup |
@@ -72,7 +73,7 @@ See [replay privacy and masking](../guides/replay-privacy.md) for what replay da
 
 ## Credential storage
 
-- **Ingest API keys** are stored as SHA-256 hashes; the raw key is shown once at creation.
+- **Project API keys** (ingest-scoped and source-map-scoped) are stored as SHA-256 hashes; the raw key is shown once at creation.
 - **User sessions** are JWTs signed with `JWT_SECRET`, mated with rotating refresh-token families (token hashes only in the database).
 - **Passwords** (when password authentication is enabled) are not stored locally — registration, authentication, and reset are handled by the configured identity provider (WorkOS).
 - **GitHub App private key** and worker credentials are environment variables — supplied by your deployment, never written to the database.
