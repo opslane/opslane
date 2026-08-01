@@ -21,6 +21,7 @@ import { createHash } from 'node:crypto';
 import {
   existsSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   symlinkSync,
   writeFileSync,
@@ -44,6 +45,7 @@ import {
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolvePath(here, '../../..');
 const REAL_VITE = join(repoRoot, 'test-fixtures/vue-app/node_modules/vite');
+const REAL_SDK = join(repoRoot, 'packages/sdk');
 
 /**
  * The forked child is found next to the running module, which under vitest is
@@ -125,6 +127,8 @@ interface AppOptions {
   dependencies?: Record<string, string>;
   /** Extra installed packages, keyed by name, valued by module source. */
   extraPackages?: Record<string, string>;
+  /** Link the real built @opslane/sdk instead of writing a stand-in. */
+  realSdk?: boolean;
 }
 
 /**
@@ -146,7 +150,12 @@ async function createApp(options: AppOptions): Promise<string> {
   const app = await mkdtemp(join(tmpdir(), 'opslane-vite-e2e-'));
   createdApps.push(app);
   mkdirSync(join(app, 'src'));
-  mkdirSync(join(app, 'node_modules/@opslane/sdk/dist'), { recursive: true });
+  mkdirSync(join(app, 'node_modules/@opslane'), { recursive: true });
+  if (options.realSdk) {
+    symlinkSync(REAL_SDK, join(app, 'node_modules/@opslane/sdk'), 'dir');
+  } else {
+    mkdirSync(join(app, 'node_modules/@opslane/sdk/dist'), { recursive: true });
+  }
   symlinkSync(REAL_VITE, join(app, 'node_modules/vite'), 'dir');
 
   writeFileSync(join(app, 'package.json'), `${JSON.stringify({
@@ -156,7 +165,7 @@ async function createApp(options: AppOptions): Promise<string> {
     version: '0.0.0',
     dependencies: { vite: '6.4.3', '@opslane/sdk': '9.9.9', ...options.dependencies },
   }, null, 2)}\n`);
-  writeFileSync(
+  if (!options.realSdk) writeFileSync(
     join(app, 'node_modules/@opslane/sdk/package.json'),
     JSON.stringify({
       name: '@opslane/sdk',
@@ -165,7 +174,7 @@ async function createApp(options: AppOptions): Promise<string> {
       exports: { './vite-plugin': { import: './dist/vite-plugin.js' } },
     }),
   );
-  writeFileSync(
+  if (!options.realSdk) writeFileSync(
     join(app, 'node_modules/@opslane/sdk/dist/vite-plugin.js'),
     options.plugin ?? WORKING_PLUGIN,
   );
@@ -350,5 +359,40 @@ export function sentryVitePlugin() {
     expect(build.ok, build.output).toBe(true);
     expect(existsSync(join(app, HOOK_MARKER)), 'our plugin did not run').toBe(true);
     expect(existsSync(join(app, SENTRY_MARKER)), 'the other plugin did not run').toBe(true);
+  }, 60_000);
+
+  /**
+   * Everything above substitutes the plugin contract, because the factory did
+   * not exist while this command was written. It does now. This is the same
+   * transaction against the real built @opslane/sdk, proving the two lines the
+   * codemod writes load the actual plugin and that it does its job in a real
+   * build: a debug ID footer in every chunk is something only the real plugin
+   * can produce.
+   */
+  it('installs the real SDK plugin, which stamps a real build', async () => {
+    const app = await createApp({
+      config: MULTI_LINE,
+      realSdk: true,
+      dependencies: { '@opslane/sdk': '2.0.1' },
+    });
+
+    const result = await runViteTransaction({ repoRoot: app, apply: true }, {
+      contract: { ...OPSLANE_VITE_PLUGIN, exportNames: ['opslane', 'opslaneVitePlugin'],
+        viteMajors: { minimum: 5, maximum: 8 }, minimumSdkVersion: '2.0.1' },
+      resolve: (options) => resolveViteConfig({ ...options, childEntry: CHILD_ENTRY }),
+    });
+    expect(result.status).toBe('edited');
+    expect(git(app, 'status', '--porcelain').split('\n')).toEqual(['M vite.config.ts']);
+
+    const build = viteBuild(app);
+    expect(build.ok, build.output).toBe(true);
+
+    const assets = join(app, 'dist', 'assets');
+    const chunks = readdirSync(assets).filter((file) => file.endsWith('.js'));
+    expect(chunks.length).toBeGreaterThan(0);
+    for (const chunk of chunks) {
+      expect(readFileSync(join(assets, chunk), 'utf8'), `${chunk} was not stamped`)
+        .toContain('//# debugId=');
+    }
   }, 60_000);
 });

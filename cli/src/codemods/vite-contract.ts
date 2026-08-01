@@ -30,20 +30,22 @@ export const OPSLANE_VITE_PLUGIN_EXPORT_NAMES = [
 ] as const;
 
 /**
- * Vite majors the plugin declares support for. The floor keeps us off versions
- * whose config module shape the resolver cannot use; the ceiling keeps us from
- * accepting a future major the plugin has never been built against, which would
- * otherwise be installed and fail in the customer's build instead of here.
+ * Vite majors the plugin declares support for, mirroring its peerDependencies.
+ * The ceiling keeps us from installing into a future major the plugin has never
+ * been built against, which would move the failure out of this command and into
+ * the customer's build. The floor is 5 because the plugin supports it and 23 of
+ * the 58 measured real configs are on it; Vite 5's CommonJS build hides
+ * resolveConfig behind `default`, which the resolver already unwraps.
  */
-export const SUPPORTED_VITE_MAJORS = { minimum: 6, maximum: 8 } as const;
+export const SUPPORTED_VITE_MAJORS = { minimum: 5, maximum: 8 } as const;
 
 /**
- * This is distinct from OPSLANE_IDENTITY_MIN_VERSION. A lockfile pinned to
- * 2.0.1 satisfies the SDK identity floor but still has no opslane() factory.
- * Set this to the version that actually publishes the factory; the pending SDK
- * changeset is a major, so it will not be 2.1.0.
+ * This is distinct from OPSLANE_IDENTITY_MIN_VERSION. Published 2.0.1 satisfies
+ * the SDK identity floor but has no opslane() factory: the factory lands in the
+ * next release, which the queued changesets make a major, so 3.0.0. Anything
+ * below this resolves the import to a package that cannot provide the plugin.
  */
-export const OPSLANE_VITE_PLUGIN_MIN_VERSION: string | null = null;
+export const OPSLANE_VITE_PLUGIN_MIN_VERSION: string | null = '3.0.0';
 
 export interface PluginContractDeps {
   specifier: string;

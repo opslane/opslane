@@ -17,7 +17,7 @@ const contract: PluginContractDeps = {
   importLine: "import { opslane } from 'fixture/plugin';",
   callText: 'opslane()',
   exportNames: ['opslane', 'opslaneVitePlugin'],
-  viteMajors: { minimum: 6, maximum: 8 },
+  viteMajors: { minimum: 5, maximum: 8 },
   minimumSdkVersion: '3.0.0',
 };
 
@@ -65,7 +65,7 @@ describe('discoverViteProject', () => {
 
   it.each([
     ['vite_not_installed', null, '3.1.0'],
-    ['vite_version_unsupported', '5.4.0', '3.1.0'],
+    ['vite_version_unsupported', '4.5.0', '3.1.0'],
     ['sdk_not_installed', '6.0.0', null],
     ['plugin_not_available_yet', '6.0.0', '2.9.9'],
   ] as const)('returns %s', async (status, vite, sdk) => {
@@ -151,7 +151,8 @@ it('compares exact installed versions without a semver dependency', () => {
  */
 describe('discoverViteProject Vite version range', () => {
   it.each([
-    ['5.4.21', 'vite_version_unsupported'],
+    ['4.5.0', 'vite_version_unsupported'],
+    ['5.4.21', 'ok'],
     ['6.0.0', 'ok'],
     ['8.9.9', 'ok'],
     ['9.0.0', 'vite_version_unsupported'],

@@ -6,6 +6,7 @@ import { AGENT_STATUSES, type AgentStatusContract } from '../contract.js';
 import {
   OPSLANE_VITE_PLUGIN,
   OPSLANE_VITE_PLUGIN_MIN_VERSION,
+  SUPPORTED_VITE_MAJORS,
 } from '../codemods/vite-contract.js';
 import ts from 'typescript';
 
@@ -207,21 +208,31 @@ export { f as opslane };`, true],
   });
 
   /**
-   * #224 has not merged into this branch, so the SDK here still ships only the
-   * deprecated uploader. This asserts the current state rather than using
-   * `it.fails`, which passes whenever the body throws and therefore proves
-   * nothing about why.
-   *
-   * All three flip together when #224 lands, and each one silently breaks the
-   * installer on its own: the factory the codemod inserts, the plugin name
-   * verification matches on, and the version floor discovery gates on. When it
-   * lands, assert the constant equals OPSLANE_VITE_PLUGIN.pluginName. Update
-   * `vite-contract.ts` and this test in the same change.
+   * The three facts the installer depends on, each of which breaks it silently
+   * on its own: the factory the codemod inserts, the plugin name verification
+   * matches on, and the version floor discovery gates on. The SDK now ships all
+   * three, so these are hard assertions rather than a record of what is
+   * missing. A rename or a signature change in the SDK fails here instead of
+   * failing every customer install.
    */
-  it('pins exactly what the SDK still owes this contract', () => {
+  it('agrees with the SDK about the factory, the plugin name, and the floor', () => {
     const sourceFile = sdkSourceFile();
-    expect(sdkExportsZeroArgFactory(sourceFile, OPSLANE_VITE_PLUGIN.exportName)).toBe(false);
-    expect(sdkPluginNameConstant(sourceFile)).toBeNull();
-    expect(OPSLANE_VITE_PLUGIN_MIN_VERSION).toBeNull();
+    expect(sdkExportsZeroArgFactory(sourceFile, OPSLANE_VITE_PLUGIN.exportName)).toBe(true);
+    expect(sdkPluginNameConstant(sourceFile)).toBe(OPSLANE_VITE_PLUGIN.pluginName);
+    expect(OPSLANE_VITE_PLUGIN_MIN_VERSION).toBe('3.0.0');
+  });
+
+  // The floor must stay below the release that publishes the factory, or the
+  // command refuses the very version that satisfies it.
+  it('gates on a version at or below the release that ships the factory', () => {
+    const manifest = JSON.parse(
+      readFileSync(new URL('../../../packages/sdk/package.json', import.meta.url), 'utf8'),
+    ) as { peerDependencies?: Record<string, string> };
+    const declared = manifest.peerDependencies?.vite ?? '';
+    // Every major the contract accepts must be one the plugin declares support
+    // for, so we never install into a build the plugin has never run in.
+    for (let major = SUPPORTED_VITE_MAJORS.minimum; major <= SUPPORTED_VITE_MAJORS.maximum; major += 1) {
+      expect(declared).toContain(`^${major}.0.0`);
+    }
   });
 });

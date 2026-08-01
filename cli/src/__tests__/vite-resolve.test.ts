@@ -75,9 +75,18 @@ describe('resolveInChild', () => {
     }))
       .toMatchObject({ ok: false, reason: 'vite_not_installed' });
 
-    const old = await viteFixture('5.4.0', `export const resolveConfig = async () => ({ plugins: [] })`);
+    const old = await viteFixture('4.5.0', `export const resolveConfig = async () => ({ plugins: [] })`);
     expect(await resolveInChild({ appDir: old, configPath: join(old, 'vite.config.ts') }))
       .toMatchObject({ ok: false, reason: 'vite_version_unsupported' });
+
+    // Vite 5 is supported, and its CommonJS build exposes resolveConfig only
+    // under `default`, which is the shape the resolver has to unwrap.
+    const five = await viteFixture(
+      '5.4.21',
+      `export default { resolveConfig: async () => ({ plugins: [{ name: 'p' }] }) }`,
+    );
+    expect(await resolveInChild({ appDir: five, configPath: join(five, 'vite.config.ts') }))
+      .toMatchObject({ ok: true, pluginNames: ['p'] });
 
     const unusable = await viteFixture('6.0.0', `export const value = 1`);
     expect(await resolveInChild({ appDir: unusable, configPath: join(unusable, 'vite.config.ts') }))
