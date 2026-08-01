@@ -3,7 +3,7 @@
 // license, and every built entry point declared in package.json exports.
 // Run after `pnpm build`; fails (exit 1) listing anything missing.
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -32,4 +32,25 @@ if (missing.length > 0) {
   for (const f of missing) console.error(`  - ${f}`);
   process.exit(1);
 }
+
+const NODE_BUILTIN_IMPORT =
+  /(?:from\s*["']|require\(\s*["']|import\(\s*["'])node:[a-z_]+["']/;
+const distDir = join(pkgDir, 'dist');
+const pending = [distDir];
+while (pending.length > 0) {
+  const current = pending.pop();
+  if (!current) break;
+  for (const name of readdirSync(current)) {
+    const path = join(current, name);
+    if (statSync(path).isDirectory()) {
+      pending.push(path);
+      continue;
+    }
+    if (NODE_BUILTIN_IMPORT.test(readFileSync(path, 'utf8'))) {
+      console.error(`✗ ${path} contains a Node built-in import`);
+      process.exit(1);
+    }
+  }
+}
+
 console.log(`✓ ${pkg.name} tarball contains README, LICENSE, and all ${required.size - 2} declared entry files (${packed.size} files total)`);

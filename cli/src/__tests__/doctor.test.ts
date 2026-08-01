@@ -236,20 +236,68 @@ describe('doctor', () => {
     expect(callCount).toBeGreaterThan(0);
   });
 
-  it('runs all 5 checks', async () => {
+  it('runs all 6 checks', async () => {
     const results = await doctor({
       cwd: tmpDir,
       fetchFn: mockFetch('error', 'error'),
     });
 
-    expect(results).toHaveLength(5);
+    expect(results).toHaveLength(6);
     expect(results.map((r) => r.name)).toEqual([
       'Project config',
       'Authentication',
       'Ingestion service',
       'Session',
       'Ingest key',
+      'Debug IDs',
     ]);
+  });
+
+  it('treats missing build output as not built yet', async () => {
+    const results = await doctor({
+      cwd: tmpDir,
+      dist: 'missing-dist',
+      fetchFn: mockFetch('error', 'error'),
+    });
+
+    const check = results.find((result) => result.name === 'Debug IDs');
+    expect(check?.passed).toBe(true);
+    expect(check?.message).toContain('not built yet');
+  });
+
+  it('fails when a non-empty build has no stamped chunks', async () => {
+    const dist = join(tmpDir, 'custom-dist');
+    await mkdir(dist, { recursive: true });
+    await writeFile(join(dist, 'app.js'), 'console.log("unstamped");');
+
+    const results = await doctor({
+      cwd: tmpDir,
+      dist,
+      fetchFn: mockFetch('error', 'error'),
+    });
+
+    const check = results.find((result) => result.name === 'Debug IDs');
+    expect(check?.passed).toBe(false);
+    expect(check?.remediation).toContain('Opslane Vite plugin');
+  });
+
+  it('passes when production output contains a stamped chunk', async () => {
+    const dist = join(tmpDir, 'custom-dist', 'assets');
+    await mkdir(dist, { recursive: true });
+    await writeFile(
+      join(dist, 'app.js'),
+      'console.log("ok");\n//# debugId=01234567-89ab-cdef-0123-456789abcdef',
+    );
+
+    const results = await doctor({
+      cwd: tmpDir,
+      dist: join(tmpDir, 'custom-dist'),
+      fetchFn: mockFetch('error', 'error'),
+    });
+
+    const check = results.find((result) => result.name === 'Debug IDs');
+    expect(check?.passed).toBe(true);
+    expect(check?.message).toContain('1/1');
   });
 
   it('each result has name, passed, and message', async () => {

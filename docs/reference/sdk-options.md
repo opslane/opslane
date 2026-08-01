@@ -19,4 +19,25 @@ All options accepted by `init()` from `@opslane/sdk`, mirrored from `SdkInitOpti
 | `errorThrottleMs` | `number` | `1000` | Minimum interval between reports of the same error. |
 | `beforeSend` | `(event) => event \| null` | `undefined` | Final hook: mutate the outgoing payload or return `null` to drop it. |
 
+Debug-image metadata is assembled from the final scrubbed stack immediately
+before `beforeSend`, so the hook can inspect, alter, or remove `debug_meta` and
+`commit_sha` like any other event field.
+
+
+## Vite build options
+
+The repository's forthcoming debug-ID plugin accepts:
+
+| Option | Type | Default | Description |
+| --- | --- | --- | --- |
+| **commitSha** | `string` | detected | Explicit build commit; must be lowercase 40- or 64-character hex. |
+| **stamp** | `boolean` | `true` | Enables source-map fingerprinting, chunk stamping, and runtime registration. |
+| **logLevel** | `'silent' \| 'warn' \| 'debug'` | `'warn'` | Controls stable diagnostics and the build summary. |
+| **sourcemaps** | `'remove' \| 'keep'` | `'remove'` | Keeps or removes stamped map assets from the output. |
+| **maxMapBytes** | `number` | `33554432` | Raw source-map size limit. Oversized maps and chunks are left unchanged. |
+
+The export is not present in published `@opslane/sdk@2.0.1`; keep using
+`opslaneSourceMapPlugin` until the package release containing it is available.
+See the [source-map migration matrix](../guides/source-maps.md#migration-matrix).
+
 Related exports: `captureException(err)`, `setUser({ id })`, `clearUser()`, `destroy()`, `opslaneVuePlugin`, and (from `@opslane/sdk/react`) `OpslaneErrorBoundary` / `captureReactError`. The `@opslane/sdk/vite-plugin` export is temporarily fail-loud while batch source-map upload is unavailable — see the [SDK README](../../packages/sdk/README.md).

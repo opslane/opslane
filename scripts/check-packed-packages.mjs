@@ -31,8 +31,9 @@ const TARGETS = [
         [
           "import { init, captureException, OpslaneSDK } from '@opslane/sdk';",
           "import type { SdkInitOptions } from '@opslane/sdk';",
+          "import { opslane, opslaneSourceMapPlugin } from '@opslane/sdk/vite-plugin';",
           'const opts: SdkInitOptions = { apiKey: "k", endpoint: "https://example.com" };',
-          'void opts; void init; void captureException; void OpslaneSDK;',
+          'void opts; void init; void captureException; void OpslaneSDK; void opslane; void opslaneSourceMapPlugin;',
         ].join('\n')
       );
       writeFileSync(
@@ -56,7 +57,7 @@ const TARGETS = [
       );
       execFileSync(
         'npm',
-        ['install', '--ignore-scripts', '--no-audit', '--no-fund', '--save-dev', 'typescript@5'],
+        ['install', '--ignore-scripts', '--no-audit', '--no-fund', '--save-dev', 'typescript@5', 'vite@6'],
         { cwd: consumerDir, stdio: 'inherit' }
       );
       execFileSync('npx', ['tsc', '--noEmit', '-p', consumerDir], {
@@ -64,6 +65,32 @@ const TARGETS = [
         stdio: 'inherit',
       });
       console.log(`  ✓ consumer typecheck passed`);
+
+      writeFileSync(join(consumerDir, 'main.js'), 'console.log("consumer");\n');
+      writeFileSync(
+        join(consumerDir, 'probe-build.mjs'),
+        [
+          "import { readFileSync, readdirSync } from 'node:fs';",
+          "import { join } from 'node:path';",
+          "import { build } from 'vite';",
+          "import { opslane, opslaneSourceMapPlugin } from '@opslane/sdk/vite-plugin';",
+          'const run = (outDir, plugin) => build({',
+          '  root: process.cwd(), configFile: false, logLevel: "silent", plugins: [plugin],',
+          '  build: { outDir, emptyOutDir: true, rollupOptions: { input: join(process.cwd(), "main.js") } },',
+          '});',
+          'await run("dist-debug", opslane({ logLevel: "silent" }));',
+          'const debugName = readdirSync("dist-debug/assets").find((name) => name.endsWith(".js"));',
+          'if (!debugName || !readFileSync(join("dist-debug/assets", debugName), "utf8").includes("//# debugId=")) {',
+          '  throw new Error("new Vite plugin export did not stamp the consumer build");',
+          '}',
+          'await run("dist-legacy", opslaneSourceMapPlugin({ endpoint: "https://invalid.example", apiKey: "" }));',
+        ].join('\n'),
+      );
+      execFileSync('node', ['probe-build.mjs'], {
+        cwd: consumerDir,
+        stdio: 'inherit',
+      });
+      console.log(`  ✓ both Vite plugin exports build in a clean consumer`);
     },
   },
   {

@@ -36,6 +36,16 @@ export interface User {
 
 // === SDK → Ingestion payload ===
 
+export interface DebugImage {
+  type: 'sourcemap';
+  code_file: string;
+  debug_id: string;
+}
+
+export interface DebugMeta {
+  images?: DebugImage[];
+}
+
 export interface ErrorEventPayload {
   timestamp: string; // ISO 8601
   platform?: 'javascript' | 'python';
@@ -67,6 +77,8 @@ export interface ErrorEventPayload {
   };
   sdk_version: string;
   release?: string;      // source map lookup
+  commit_sha?: string;   // build provenance
+  debug_meta?: DebugMeta;
   session_id?: string;   // links error event to replay
   environment?: string;  // project-scoped environment name override
 }

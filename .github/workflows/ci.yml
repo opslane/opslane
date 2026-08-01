@@ -238,8 +238,8 @@ jobs:
       - name: Apply migrations
         run: MIGRATION_DIR=packages/ingestion/db/migrations ./scripts/run-migrations.sh
       - run: pnpm install --frozen-lockfile
-      - name: Install Playwright chromium (SDK browser tests)
-        run: pnpm --filter @opslane/sdk exec playwright install --with-deps chromium
+      - name: Install Playwright browsers (SDK browser tests)
+        run: pnpm --filter @opslane/sdk exec playwright install --with-deps chromium firefox webkit
       - run: pnpm -r build
       - run: pnpm test:unit
       - name: License-boundary check (MIT-published packages)

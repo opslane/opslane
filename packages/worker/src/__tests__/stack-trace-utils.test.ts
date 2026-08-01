@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { extractStackTraceFiles, hasNoAppFrames, scrubDevPaths } from '../harness/stack-trace-utils.js';
+import { extractStackTraceFiles, hasNoAppFrames, resolveTrackedFiles, scrubDevPaths } from '../harness/stack-trace-utils.js';
 
 describe('extractStackTraceFiles', () => {
   it('extracts files from V8-style stack traces', () => {
@@ -117,5 +117,96 @@ describe('scrubDevPaths', () => {
     expect(scrubDevPaths('at boot (/Users/abhi/project/vite.config.ts:5:1)')).toBe(
       'at boot (vite.config.ts:5:1)',
     );
+  });
+});
+
+describe('resolveTrackedFiles', () => {
+  // A real production stack from a minified Vite bundle. None of these paths
+  // exist in the customer's repository.
+  const MINIFIED_STACK = [
+    "TypeError: Cannot read properties of null (reading 'name')",
+    '    at t.render (https://app.example.com/assets/index-Dk3f8xBq.js:17:8237)',
+    '    at Tn (https://app.example.com/assets/vendor-B7kR2wjN.js:1:89012)',
+  ].join('\n');
+
+  const RESOLVED_STACK = [
+    "TypeError: Cannot read properties of null (reading 'name')",
+    '    at Proxy.render (src/components/UserCard.vue:10:30)',
+  ].join('\n');
+
+  const TRACKED = new Set(['src/components/UserCard.vue', 'src/main.ts', 'package.json']);
+
+  it('drops bundle paths that do not exist in the repository', () => {
+    const extracted = extractStackTraceFiles(MINIFIED_STACK);
+    // The extractor does find the bundle paths; that part is working.
+    expect(extracted.length).toBeGreaterThan(0);
+
+    // Nothing survives the tracked-file filter. This is what stops the scope
+    // guard from telling the agent its correct edit is out of scope, and stops
+    // the diff judge being told the error "references" a nonexistent file.
+    expect(resolveTrackedFiles(extracted, TRACKED)).toEqual([]);
+  });
+
+  it('keeps real source paths untouched', () => {
+    const extracted = extractStackTraceFiles(RESOLVED_STACK);
+    expect(resolveTrackedFiles(extracted, TRACKED)).toEqual(['src/components/UserCard.vue']);
+  });
+
+  it('matches a tracked file through a longer absolute prefix', () => {
+    expect(resolveTrackedFiles(['/home/user/repo/src/main.ts'], TRACKED)).toEqual(['src/main.ts']);
+  });
+
+  it('deduplicates repeated frames', () => {
+    expect(resolveTrackedFiles(['src/main.ts', 'src/main.ts'], TRACKED)).toEqual(['src/main.ts']);
+  });
+
+  // A monorepo builds from `frontend/`, so the source map records paths
+  // relative to that root while `git ls-files` reports them from the
+  // repository root. Stripping segments cannot bridge that gap.
+  const MONOREPO = new Set([
+    'frontend/src/components/UserCard.vue',
+    'frontend/src/main.ts',
+    'backend/main.go',
+  ]);
+
+  it('matches a tracked file that sits under an unmentioned directory', () => {
+    expect(resolveTrackedFiles(['src/main.ts'], MONOREPO)).toEqual(['frontend/src/main.ts']);
+  });
+
+  it('refuses to guess when two tracked files share the suffix', () => {
+    const ambiguous = new Set(['frontend/src/main.ts', 'admin/src/main.ts']);
+    expect(resolveTrackedFiles(['src/main.ts'], ambiguous)).toEqual([]);
+  });
+
+  it('does not match on a partial final segment', () => {
+    expect(resolveTrackedFiles(['ain.ts'], MONOREPO)).toEqual([]);
+  });
+
+  // Both mismatch directions are the same question, so they have to be ranked
+  // together. Checking one and then the other let a one-segment hit win over a
+  // better two-segment one purely because it was tested first.
+  it('prefers the tracked file sharing the longer tail', () => {
+    const both = new Set(['main.ts', 'frontend/src/main.ts']);
+    expect(resolveTrackedFiles(['src/main.ts'], both)).toEqual([
+      'frontend/src/main.ts',
+    ]);
+  });
+
+  it('refuses a basename-only match in a different directory', () => {
+    expect(resolveTrackedFiles(['src/main.ts'], new Set(['other/main.ts']))).toEqual([]);
+  });
+
+  it('still strips a build machine prefix', () => {
+    expect(
+      resolveTrackedFiles(['/home/runner/work/app/frontend/src/main.ts'], MONOREPO),
+    ).toEqual(['frontend/src/main.ts']);
+  });
+
+  // The frame says the file lives under `app/src/`, the repo says
+  // `frontend/src/`. Neither contains the other, so there is no honest answer.
+  it('refuses when the frame and the repo disagree on the directory', () => {
+    expect(
+      resolveTrackedFiles(['/home/runner/work/app/src/main.ts'], MONOREPO),
+    ).toEqual([]);
   });
 });

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"sort"
 	"sync"
 	"sync/atomic"
 
@@ -13,7 +14,17 @@ import (
 // === Atomic counters for Prometheus-compatible metrics ===
 
 var (
-	eventsIngestedTotal                atomic.Int64
+	eventsIngestedTotal struct {
+		mu         sync.Mutex
+		byPlatform map[string]*atomic.Int64
+	}
+	debugMetaDiscardedTotal struct {
+		mu       sync.Mutex
+		byReason map[string]*atomic.Int64
+	}
+	commitSHADiscardedTotal            atomic.Int64
+	eventsWithDebugImagesTotal         atomic.Int64
+	debugMetaRegistryZeroMatchedTotal  atomic.Int64
 	jobsEnqueuedTotal                  atomic.Int64
 	stacklessEventsTotal               atomic.Int64
 	ingestEnvironmentFallbackDisabled  atomic.Int64
@@ -40,13 +51,51 @@ var (
 
 func init() {
 	ingestErrorsTotal.byType = make(map[string]*atomic.Int64)
+	eventsIngestedTotal.byPlatform = map[string]*atomic.Int64{
+		"javascript": {},
+		"python":     {},
+	}
+	debugMetaDiscardedTotal.byReason = make(map[string]*atomic.Int64)
 	ingestDuration.buckets = []float64{0.01, 0.05, 0.1, 0.25, 0.5, 1.0}
 	ingestDuration.counts = make([]atomic.Int64, len(ingestDuration.buckets))
 }
 
 // RecordEventIngested increments the events ingested counter.
-func RecordEventIngested() {
-	eventsIngestedTotal.Add(1)
+func RecordEventIngested(platform string) {
+	eventsIngestedTotal.mu.Lock()
+	counter, ok := eventsIngestedTotal.byPlatform[platform]
+	if !ok {
+		counter = &atomic.Int64{}
+		eventsIngestedTotal.byPlatform[platform] = counter
+	}
+	eventsIngestedTotal.mu.Unlock()
+	counter.Add(1)
+}
+
+func RecordDebugMetaDiscard(reason string) {
+	switch reason {
+	case "malformed_container", "malformed_images", "non_object_image",
+		"bad_type", "bad_code_file", "bad_debug_id",
+		"ambiguous_code_file", "over_limit":
+	default:
+		return
+	}
+	debugMetaDiscardedTotal.mu.Lock()
+	counter, ok := debugMetaDiscardedTotal.byReason[reason]
+	if !ok {
+		counter = &atomic.Int64{}
+		debugMetaDiscardedTotal.byReason[reason] = counter
+	}
+	debugMetaDiscardedTotal.mu.Unlock()
+	counter.Add(1)
+}
+
+func RecordCommitSHADiscarded() { commitSHADiscardedTotal.Add(1) }
+
+func RecordEventWithDebugImages() { eventsWithDebugImagesTotal.Add(1) }
+
+func RecordDebugMetaRegistryZeroMatched() {
+	debugMetaRegistryZeroMatchedTotal.Add(1)
 }
 
 // RecordJobEnqueued increments the jobs enqueued counter.
@@ -123,7 +172,43 @@ func Metrics(w http.ResponseWriter, r *http.Request) {
 	// opslane_events_ingested_total
 	fmt.Fprintf(w, "# HELP opslane_events_ingested_total Total error events ingested\n")
 	fmt.Fprintf(w, "# TYPE opslane_events_ingested_total counter\n")
-	fmt.Fprintf(w, "opslane_events_ingested_total %d\n\n", eventsIngestedTotal.Load())
+	eventsIngestedTotal.mu.Lock()
+	platforms := make([]string, 0, len(eventsIngestedTotal.byPlatform))
+	for platform := range eventsIngestedTotal.byPlatform {
+		platforms = append(platforms, platform)
+	}
+	sort.Strings(platforms)
+	for _, platform := range platforms {
+		fmt.Fprintf(w, "opslane_events_ingested_total{platform=%q} %d\n", platform, eventsIngestedTotal.byPlatform[platform].Load())
+	}
+	eventsIngestedTotal.mu.Unlock()
+	fmt.Fprintln(w)
+
+	fmt.Fprintln(w, "# HELP opslane_debug_meta_images_discarded_total Debug metadata images discarded during validation")
+	fmt.Fprintln(w, "# TYPE opslane_debug_meta_images_discarded_total counter")
+	debugMetaDiscardedTotal.mu.Lock()
+	reasons := []string{"malformed_container", "malformed_images", "non_object_image", "bad_type", "bad_code_file", "bad_debug_id", "ambiguous_code_file", "over_limit"}
+	for _, reason := range reasons {
+		count := int64(0)
+		if counter := debugMetaDiscardedTotal.byReason[reason]; counter != nil {
+			count = counter.Load()
+		}
+		fmt.Fprintf(w, "opslane_debug_meta_images_discarded_total{reason=%q} %d\n", reason, count)
+	}
+	debugMetaDiscardedTotal.mu.Unlock()
+	fmt.Fprintln(w)
+
+	fmt.Fprintln(w, "# HELP opslane_commit_sha_discarded_total Invalid optional commit SHA fields discarded")
+	fmt.Fprintln(w, "# TYPE opslane_commit_sha_discarded_total counter")
+	fmt.Fprintf(w, "opslane_commit_sha_discarded_total %d\n\n", commitSHADiscardedTotal.Load())
+
+	fmt.Fprintln(w, "# HELP opslane_events_with_debug_images_total Events ingested with at least one validated debug image")
+	fmt.Fprintln(w, "# TYPE opslane_events_with_debug_images_total counter")
+	fmt.Fprintf(w, "opslane_events_with_debug_images_total %d\n\n", eventsWithDebugImagesTotal.Load())
+
+	fmt.Fprintln(w, "# HELP opslane_debug_meta_registry_present_zero_matched_total Instrumented events whose SDK registry matched no stack frame")
+	fmt.Fprintln(w, "# TYPE opslane_debug_meta_registry_present_zero_matched_total counter")
+	fmt.Fprintf(w, "opslane_debug_meta_registry_present_zero_matched_total %d\n\n", debugMetaRegistryZeroMatchedTotal.Load())
 
 	// opslane_jobs_enqueued_total
 	fmt.Fprintf(w, "# HELP opslane_jobs_enqueued_total Total jobs enqueued\n")

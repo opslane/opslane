@@ -4,6 +4,7 @@ import { resetConfig, loadConfig } from '../config';
 import { addBreadcrumb, clearBreadcrumbs, getBreadcrumbs } from '../breadcrumbs';
 import * as transport from '../transport';
 import { TEST_PK } from './test-keys';
+import { COMMIT_SHA_GLOBAL } from '../build/registry-contract';
 
 vi.mock('../transport', () => ({
   enqueueEvent: vi.fn(),
@@ -24,6 +25,7 @@ describe('Core Error Capture', () => {
     resetConfig();
     clearBreadcrumbs();
     vi.restoreAllMocks();
+    delete (globalThis as Record<string, unknown>)[COMMIT_SHA_GLOBAL];
   });
 
   it('should capture errors from window.onerror', () => {
@@ -161,6 +163,27 @@ describe('Core Error Capture', () => {
     expect(payload.environment).toBe('staging');
   });
 
+  it('includes only a valid injected commit SHA', () => {
+    const commit = 'e60b4d1e113538d40f09e31717e949aaa08659f8';
+    (globalThis as Record<string, unknown>)[COMMIT_SHA_GLOBAL] = commit;
+    const breadcrumb = {
+      type: 'error' as const,
+      timestamp: new Date().toISOString(),
+      category: 'error',
+      message: 'boom',
+    };
+
+    expect(
+      buildPayload('Error', 'boom', 'at app.js:1:1', breadcrumb).commit_sha,
+    ).toBe(commit);
+
+    (globalThis as Record<string, unknown>)[COMMIT_SHA_GLOBAL] =
+      commit.toUpperCase();
+    expect(
+      buildPayload('Error', 'boom', 'at app.js:1:1', breadcrumb).commit_sha,
+    ).toBeUndefined();
+  });
+
   it('should restore original handlers on uninstall', () => {
     const originalOnError = window.onerror;
     const originalOnUnhandled = window.onunhandledrejection;
@@ -214,6 +237,46 @@ describe('Core Error Capture', () => {
     expect(transport.enqueueEvent).toHaveBeenCalledTimes(1);
     const payload = (transport.enqueueEvent as ReturnType<typeof vi.fn>).mock.calls[0][0];
     expect(payload.error.stack).not.toContain('--- synthetic caller stack ---');
+  });
+
+  it('does not append a synthetic stack to Firefox/WebKit URL frames', () => {
+    installGlobalHandlers();
+    const error = new Error('firefox boom');
+    error.stack =
+      'trigger@https://app.example.com/assets/index.js:10:20';
+
+    window.dispatchEvent(
+      new ErrorEvent('error', {
+        message: error.message,
+        error,
+      }),
+    );
+
+    const payload = (transport.enqueueEvent as ReturnType<typeof vi.fn>).mock
+      .calls[0][0];
+    expect(payload.error.stack).toBe(error.stack);
+    expect(payload.error.stack).not.toContain('synthetic caller stack');
+  });
+
+  // The frame check runs on every uncaught error, and a stack carries the
+  // error message, which routinely holds text the page did not author. Scanning
+  // the whole stack with an unanchored quantifier in front of `:line:column`
+  // backtracked quadratically: 32k characters took 4.3 seconds of frozen main
+  // thread. Stalling the customer's app is worse than the error we came to
+  // report, so this stays anchored and per-line.
+  it('does not stall on a pathological stack', () => {
+    installGlobalHandlers();
+    const error = new Error('boom');
+    // The two shapes CodeQL named as triggers.
+    error.stack = `Error: boom\n    at ${'0'.repeat(40_000)}\n${'@blob://'.repeat(40_000)}`;
+
+    const started = performance.now();
+    window.dispatchEvent(new ErrorEvent('error', { message: error.message, error }));
+    const elapsed = performance.now() - started;
+
+    expect(transport.enqueueEvent).toHaveBeenCalledTimes(1);
+    // Generous next to seconds of backtracking, tight enough to catch a relapse.
+    expect(elapsed).toBeLessThan(250);
   });
 
   it('should never throw even if internal processing fails', () => {

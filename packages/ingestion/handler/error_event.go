@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -14,6 +15,8 @@ import (
 )
 
 var rePlatformToken = regexp.MustCompile(`^[a-z0-9_-]{1,32}$`)
+var reDebugID = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+var reCommitSHA = regexp.MustCompile(`^(?:[0-9a-f]{40}|[0-9a-f]{64})$`)
 
 // IngestEvent handles POST /api/v1/events (error events only).
 func (d *Dependencies) IngestEvent(w http.ResponseWriter, r *http.Request) {
@@ -70,6 +73,8 @@ func (d *Dependencies) ingestErrorEvent(w http.ResponseWriter, r *http.Request, 
 		Runtime     json.RawMessage `json:"runtime"`
 		SDKVersion  string          `json:"sdk_version"`
 		Release     string          `json:"release"`
+		DebugMeta   json.RawMessage `json:"debug_meta"`
+		CommitSHA   json.RawMessage `json:"commit_sha"`
 		SessionID   string          `json:"session_id"`
 		Environment string          `json:"environment"`
 	}
@@ -97,6 +102,8 @@ func (d *Dependencies) ingestErrorEvent(w http.ResponseWriter, r *http.Request, 
 	if payload.Platform == "" || !rePlatformToken.MatchString(payload.Platform) {
 		payload.Platform = "javascript"
 	}
+	debugMeta := sanitizeDebugMeta(payload.DebugMeta)
+	commitSHA := sanitizeCommitSHA(payload.CommitSHA)
 
 	// Track stackless events so we can measure recovery volume in prod.
 	if payload.Error.Stack == "" {
@@ -220,6 +227,8 @@ func (d *Dependencies) ingestErrorEvent(w http.ResponseWriter, r *http.Request, 
 		Breadcrumbs:        breadcrumbs,
 		Context:            ctx,
 		Release:            payload.Release,
+		DebugMeta:          debugMeta.JSON,
+		CommitSHA:          commitSHA,
 		SessionID:          payload.SessionID,
 		Platform:           payload.Platform,
 		EndUserID:          endUser.ID,
@@ -233,7 +242,13 @@ func (d *Dependencies) ingestErrorEvent(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	RecordEventIngested()
+	RecordEventIngested(payload.Platform)
+	if debugMeta.ImageCount > 0 {
+		RecordEventWithDebugImages()
+	}
+	if debugMeta.RegistryPresentZeroMatched {
+		RecordDebugMetaRegistryZeroMatched()
+	}
 	if result.IsNew || result.Requeued {
 		RecordJobEnqueued()
 	}
@@ -246,4 +261,138 @@ func (d *Dependencies) ingestErrorEvent(w http.ResponseWriter, r *http.Request, 
 		"group_id":       result.GroupID,
 		"error_group_id": result.GroupID,
 	})
+}
+
+type validatedDebugImage struct {
+	Type     string `json:"type"`
+	CodeFile string `json:"code_file"`
+	DebugID  string `json:"debug_id"`
+}
+
+type debugMetaValidation struct {
+	JSON                       string
+	ImageCount                 int
+	RegistryPresentZeroMatched bool
+}
+
+func sanitizeCommitSHA(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil || !reCommitSHA.MatchString(value) {
+		RecordCommitSHADiscarded()
+		return ""
+	}
+	return value
+}
+
+func sanitizeDebugMeta(raw json.RawMessage) debugMetaValidation {
+	result := debugMetaValidation{JSON: `{"images":[]}`}
+	if len(raw) == 0 {
+		return result
+	}
+
+	var container map[string]json.RawMessage
+	if trimmed := bytes.TrimSpace(raw); len(trimmed) == 0 || trimmed[0] != '{' ||
+		json.Unmarshal(trimmed, &container) != nil || container == nil {
+		RecordDebugMetaDiscard("malformed_container")
+		return result
+	}
+	rawImages, present := container["images"]
+	if !present {
+		return result
+	}
+	trimmedImages := bytes.TrimSpace(rawImages)
+	if len(trimmedImages) == 0 || trimmedImages[0] != '[' {
+		RecordDebugMetaDiscard("malformed_images")
+		return result
+	}
+
+	var entries []json.RawMessage
+	if err := json.Unmarshal(trimmedImages, &entries); err != nil || entries == nil {
+		RecordDebugMetaDiscard("malformed_images")
+		return result
+	}
+	if len(entries) == 0 {
+		result.RegistryPresentZeroMatched = true
+		return result
+	}
+
+	valid := make([]validatedDebugImage, 0, len(entries))
+	seen := make(map[string]struct{})
+	for _, entry := range entries {
+		var object map[string]json.RawMessage
+		trimmedEntry := bytes.TrimSpace(entry)
+		if len(trimmedEntry) == 0 || trimmedEntry[0] != '{' ||
+			json.Unmarshal(trimmedEntry, &object) != nil || object == nil {
+			RecordDebugMetaDiscard("non_object_image")
+			continue
+		}
+
+		var image validatedDebugImage
+		if err := json.Unmarshal(object["type"], &image.Type); err != nil || image.Type != "sourcemap" {
+			RecordDebugMetaDiscard("bad_type")
+			continue
+		}
+		if err := json.Unmarshal(object["code_file"], &image.CodeFile); err != nil || !validCodeFile(image.CodeFile) {
+			RecordDebugMetaDiscard("bad_code_file")
+			continue
+		}
+		if err := json.Unmarshal(object["debug_id"], &image.DebugID); err != nil || !reDebugID.MatchString(image.DebugID) {
+			RecordDebugMetaDiscard("bad_debug_id")
+			continue
+		}
+
+		pair := image.CodeFile + "\x00" + image.DebugID
+		if _, duplicate := seen[pair]; duplicate {
+			continue
+		}
+		seen[pair] = struct{}{}
+		valid = append(valid, image)
+	}
+
+	idsByFile := make(map[string]map[string]struct{})
+	for _, image := range valid {
+		ids := idsByFile[image.CodeFile]
+		if ids == nil {
+			ids = make(map[string]struct{})
+			idsByFile[image.CodeFile] = ids
+		}
+		ids[image.DebugID] = struct{}{}
+	}
+
+	retained := make([]validatedDebugImage, 0, min(len(valid), 64))
+	for _, image := range valid {
+		if len(idsByFile[image.CodeFile]) > 1 {
+			RecordDebugMetaDiscard("ambiguous_code_file")
+			continue
+		}
+		if len(retained) == 64 {
+			RecordDebugMetaDiscard("over_limit")
+			continue
+		}
+		retained = append(retained, image)
+	}
+
+	normalized, err := json.Marshal(struct {
+		Images []validatedDebugImage `json:"images"`
+	}{Images: retained})
+	if err == nil {
+		result.JSON = string(normalized)
+	}
+	result.ImageCount = len(retained)
+	return result
+}
+
+func validCodeFile(value string) bool {
+	if len(value) < 1 || len(value) > 4096 {
+		return false
+	}
+	for _, character := range []byte(value) {
+		if character < 0x20 || character == 0x7f {
+			return false
+		}
+	}
+	return true
 }

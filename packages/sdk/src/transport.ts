@@ -5,6 +5,7 @@ import type { ReplayTriggerType } from './replay';
 import { flushReplayBufferForError } from './replay';
 import { scrubEvent } from './scrub';
 import { shouldThrottle } from './throttle';
+import { assembleDebugMeta } from './debug-images.js';
 
 const MAX_QUEUE_SIZE = 100;
 
@@ -59,15 +60,19 @@ export function enqueueEvent(event: IngestPayload, replayTrigger?: ReplayTrigger
 
     // Defense-in-depth: scrub PII before the customer hook and before queueing.
     const scrubbed: IngestPayload = scrubEvent(event);
-    let processed: IngestPayload | null = scrubbed;
+    const debugMeta = assembleDebugMeta(scrubbed.error.stack);
+    const instrumented = debugMeta
+      ? { ...scrubbed, debug_meta: debugMeta }
+      : scrubbed;
+    let processed: IngestPayload | null = instrumented;
 
     if (config.beforeSend) {
       try {
-        processed = config.beforeSend(scrubbed);
+        processed = config.beforeSend(instrumented);
       } catch {
         // A throwing beforeSend must not drop the event silently nor crash the SDK;
         // fall back to the already-scrubbed copy (a throwing hook can't have mutated it).
-        processed = scrubbed;
+        processed = instrumented;
       }
     }
     if (!processed) return; // beforeSend returned null → drop

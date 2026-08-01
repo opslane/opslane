@@ -94,6 +94,84 @@ export function extractStackTraceFiles(
  * Minified app-bundle frames (e.g. assets/index-abc123.js) DO count as app
  * frames — they may be source-mappable, so let the normal flow try and give up.
  */
+/**
+ * Keep only the frames that name a file the repository actually contains.
+ *
+ * A minified production stack names bundle artifacts (`assets/index-Dk3f8xBq.js`)
+ * that exist nowhere in the customer's source. Passing those downstream is worse
+ * than passing nothing: the scope-review middleware tells the agent that its
+ * correct edit is "not referenced in the stack trace" and invites it to revert,
+ * and the diff judge is told the error references a file the repo does not have.
+ *
+ * Mirrors the tracked-file resolution the Python path has always done via
+ * `resolveFrames`, so both platforms narrow to real source before any consumer
+ * reads the list. An empty result is the correct answer for an unsymbolicated
+ * stack, and every consumer already treats empty as "no stack file information".
+ */
+export function resolveTrackedFiles(paths: string[], trackedFiles: Set<string>): string[] {
+  const resolved: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of paths) {
+    const match = matchTrackedPath(raw, trackedFiles);
+    if (match === null || seen.has(match)) continue;
+    seen.add(match);
+    resolved.push(match);
+  }
+  return resolved;
+}
+
+/** How many trailing path segments two split paths have in common. */
+function sharedTrailingSegments(a: string[], b: string[]): number {
+  let shared = 0;
+  while (
+    shared < a.length &&
+    shared < b.length &&
+    a[a.length - 1 - shared] === b[b.length - 1 - shared]
+  ) {
+    shared++;
+  }
+  return shared;
+}
+
+/** Exact hit, else the tracked file sharing the longest tail with the frame. */
+function matchTrackedPath(path: string, trackedFiles: Set<string>): string | null {
+  if (trackedFiles.has(path)) return path;
+  const segments = path.split('/').filter(Boolean);
+  if (segments.length === 0) return null;
+
+  // A frame can be more specific than the repository (`/home/runner/work/app/`
+  // in front of `src/main.ts`) or less specific (a monorepo building from
+  // `frontend/`, so the map says `src/main.ts` and git says
+  // `frontend/src/main.ts`). Both are the same question: which tracked file
+  // shares the longest tail? Ranking answers both, where checking one
+  // direction and then the other lets a one-segment hit win over a
+  // three-segment one purely because it was tested first.
+  let best: string | null = null;
+  let bestScore = 0;
+  let tied = false;
+  for (const tracked of trackedFiles) {
+    const trackedSegments = tracked.split('/').filter(Boolean);
+    const score = sharedTrailingSegments(segments, trackedSegments);
+    // One side has to be fully consumed. Otherwise `src/main.ts` would match
+    // `other/main.ts` on the basename alone, which is a different file.
+    if (score === 0) continue;
+    if (score !== segments.length && score !== trackedSegments.length) continue;
+    if (score < bestScore) continue;
+    if (score === bestScore) {
+      tied = true;
+      continue;
+    }
+    best = tracked;
+    bestScore = score;
+    tied = false;
+  }
+
+  // Two equally good candidates means we cannot tell which file is meant.
+  // Naming the wrong one sends the agent to edit the wrong package, which is
+  // worse than naming none.
+  return tied ? null : best;
+}
+
 export function hasNoAppFrames(
   stackTrace: string,
   platform: Platform = 'javascript',

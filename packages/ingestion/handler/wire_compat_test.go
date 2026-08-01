@@ -32,6 +32,8 @@ type wireFixture struct {
 	Runtime     json.RawMessage `json:"runtime"`
 	SDKVersion  string          `json:"sdk_version"`
 	Release     string          `json:"release"`
+	DebugMeta   json.RawMessage `json:"debug_meta"`
+	CommitSHA   string          `json:"commit_sha"`
 	SessionID   string          `json:"session_id"`
 	Environment string          `json:"environment"`
 	ContextUser *struct {
@@ -170,17 +172,19 @@ func TestWireFixtures_AcceptedAndStored(t *testing.T) {
 			var (
 				timestamp                                                         time.Time
 				errorType, errorMessage, stack, release, sessionID, eventPlatform string
-				breadcrumbsText, contextText, groupID                             string
+				breadcrumbsText, contextText, debugMetaText, commitSHA, groupID   string
 				endUserID                                                         *string
 			)
 			if err := pool.QueryRow(context.Background(), `
 				SELECT "timestamp", error_type, error_message, stack_trace_raw,
 				       COALESCE(release,''), COALESCE(session_id,''),
-				       breadcrumbs::text, context::text,
+				       breadcrumbs::text, context::text, debug_meta::text,
+				       COALESCE(commit_sha, ''),
 				       error_group_id::text, end_user_id::text, platform
 				FROM error_events WHERE id = $1`, eventID).
 				Scan(&timestamp, &errorType, &errorMessage, &stack, &release, &sessionID,
-					&breadcrumbsText, &contextText, &groupID, &endUserID, &eventPlatform); err != nil {
+					&breadcrumbsText, &contextText, &debugMetaText, &commitSHA,
+					&groupID, &endUserID, &eventPlatform); err != nil {
 				t.Fatalf("query stored event: %v", err)
 			}
 
@@ -215,6 +219,14 @@ func TestWireFixtures_AcceptedAndStored(t *testing.T) {
 			}
 			semanticJSONEqual(t, "breadcrumbs", breadcrumbsText, fixture.Breadcrumbs)
 			semanticJSONEqual(t, "context", contextText, expectedStoredContext(t, fixture))
+			expectedDebugMeta := fixture.DebugMeta
+			if len(expectedDebugMeta) == 0 {
+				expectedDebugMeta = json.RawMessage(`{"images":[]}`)
+			}
+			semanticJSONEqual(t, "debug_meta", debugMetaText, expectedDebugMeta)
+			if commitSHA != fixture.CommitSHA {
+				t.Errorf("commit_sha = %q, want %q", commitSHA, fixture.CommitSHA)
+			}
 
 			wantPlatform := fixture.Platform
 			if wantPlatform == "" {

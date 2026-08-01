@@ -13,6 +13,7 @@ import { _resetThrottle } from '../throttle';
 import { setUser, clearUser } from '../core';
 import type { ErrorEventPayload } from '@opslane/shared';
 import { TEST_PK } from './test-keys';
+import { REGISTRY_GLOBAL } from '../build/registry-contract';
 
 const replayMocks = vi.hoisted(() => ({
   flushReplayBufferForError: vi.fn(),
@@ -68,6 +69,7 @@ describe('Transport Layer', () => {
     resetConfig();
     vi.useRealTimers();
     vi.restoreAllMocks();
+    delete (globalThis as Record<string, unknown>)[REGISTRY_GLOBAL];
   });
 
   it('should enqueue events and flush sends them individually via fetch', async () => {
@@ -394,6 +396,61 @@ describe('Transport Layer', () => {
     await flushEvents();
     const body = JSON.parse(fetchMock.mock.calls[0][1].body);
     expect(body.context.url).toBe('https://app.com/p');
+  });
+
+  it('assembles debug images after scrubbing and before beforeSend', async () => {
+    const codeFile = 'https://app.com/assets/index.js';
+    const debugId = '01234567-89ab-cdef-0123-456789abcdef';
+    (globalThis as Record<string, unknown>)[REGISTRY_GLOBAL] = {
+      [codeFile]: [debugId],
+    };
+    const beforeSend = vi.fn((event: ErrorEventPayload) => event);
+    resetConfig();
+    loadConfig({
+      endpoint: 'https://ingest.example.com',
+      apiKey: TEST_PK,
+      beforeSend,
+      errorThrottleMs: 0,
+    });
+    const stack = `Error: boom\n    at fn (${codeFile}:1:2)`;
+
+    enqueueEvent(
+      makeEvent({
+        error: { type: 'Error', message: 'boom', stack },
+      }),
+    );
+    await flushEvents();
+
+    expect(beforeSend).toHaveBeenCalledWith(
+      expect.objectContaining({
+        debug_meta: {
+          images: [
+            { type: 'sourcemap', code_file: codeFile, debug_id: debugId },
+          ],
+        },
+      }),
+    );
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.error.stack).toBe(stack);
+  });
+
+  it('reports zero matches when scrubbing changes a registered URL', async () => {
+    const codeFile = 'https://app.com/assets/index.js?token=secret';
+    (globalThis as Record<string, unknown>)[REGISTRY_GLOBAL] = {
+      [codeFile]: ['01234567-89ab-cdef-0123-456789abcdef'],
+    };
+    const stack = `Error: boom\n    at fn (${codeFile}:1:2)`;
+
+    enqueueEvent(
+      makeEvent({
+        error: { type: 'Error', message: 'boom', stack },
+      }),
+    );
+    await flushEvents();
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.error.stack).not.toBe(stack);
+    expect(body.debug_meta).toEqual({ images: [] });
   });
 
   it('beforeSend can transform the event', async () => {

@@ -21,6 +21,50 @@ function buildPatchCommand(patchContent: string): string {
   return `echo '${b64}' | base64 -d | git apply --whitespace=fix`;
 }
 
+
+/**
+ * The JS eval fixture repos declare `"build": "vite build"` but ship no
+ * `index.html`, so `npm run build` fails with "Could not resolve entry module".
+ * The harness treats a failing build as a failed fix, which means every
+ * JavaScript case fails regardless of the agent or the crash report.
+ *
+ * Scaffold the missing entry after clone so the build gate measures the agent's
+ * patch instead of a broken fixture. Idempotent and additive: it writes only
+ * when the files are absent, and never touches a repo that already builds.
+ * Remove this once the fixture repos carry their own entry point.
+ */
+function buildEntryScaffoldCommand(app: string): string {
+  const isReact = app.includes('react');
+  const mount = isReact
+    ? [
+        "import { createRoot } from 'react-dom/client';",
+        "import App from './App';",
+        "createRoot(document.getElementById('root')!).render(<App />);",
+      ].join('\n')
+    : [
+        "import { createApp } from 'vue';",
+        "import App from './App.vue';",
+        "createApp(App).mount('#app');",
+      ].join('\n');
+  const entryFile = isReact ? 'src/main.tsx' : 'src/main.ts';
+  const rootId = isReact ? 'root' : 'app';
+  const html = [
+    '<!doctype html>',
+    '<html><body>',
+    `<div id="${rootId}"></div>`,
+    `<script type="module" src="/${entryFile}"></script>`,
+    '</body></html>',
+  ].join('\n');
+
+  const htmlB64 = Buffer.from(html).toString('base64');
+  const mountB64 = Buffer.from(mount).toString('base64');
+  // Only create what is missing, so a fixture that gains a real entry later wins.
+  return [
+    `[ -f index.html ] || echo '${htmlB64}' | base64 -d > index.html`,
+    `[ -f ${entryFile} ] || echo '${mountB64}' | base64 -d > ${entryFile}`,
+  ].join(' && ');
+}
+
 function githubRepoFromUrl(repoUrl: string): string {
   const pathname = new URL(repoUrl).pathname.replace(/^\/|\/$/g, '').replace(/\.git$/, '');
   if (pathname.split('/').length !== 2) {
@@ -46,6 +90,10 @@ export async function callPipeline(
 
   // Build setup commands to apply the bug patch after clone+install
   const setupCommands: string[] = [];
+  // Scaffold before the patch: the patch targets src/, never the entry.
+  if (evalCase.error_event.platform !== 'python') {
+    setupCommands.push(buildEntryScaffoldCommand(evalCase.app));
+  }
   if (evalCase.bug_patch) {
     const patchPath = path.join(casesDir, evalCase.id, evalCase.bug_patch);
     const patchContent = await readFile(patchPath, 'utf-8');

@@ -62,7 +62,8 @@ program
   .option('--fix', 'Attempt to auto-fix common issues')
   .option('--api-url <url>', 'Opslane API URL')
   .option('--repo <owner/repo>', 'Repository to inspect')
-  .action(async (opts: { fix?: boolean; apiUrl?: string; repo?: string }) => {
+  .option('--dist <path>', 'Production build output directory')
+  .action(async (opts: { fix?: boolean; apiUrl?: string; repo?: string; dist?: string }) => {
     await doctor(opts);
   });
 

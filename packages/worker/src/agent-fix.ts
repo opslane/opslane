@@ -4,7 +4,7 @@ import type { SandboxRuntime } from './harness/sandbox-runtime.js';
 import { runAgentLoop } from './harness/agent-loop.js';
 import { createToolBridge } from './harness/tool-bridge.js';
 import { createDefaultMiddleware } from './harness/tool-middleware.js';
-import { extractStackTraceFiles } from './harness/stack-trace-utils.js';
+import { extractStackTraceFiles, resolveTrackedFiles } from './harness/stack-trace-utils.js';
 import { parsePythonFrames, resolveFrames } from './harness/python-frames.js';
 import { judgeDiff } from './harness/diff-judge.js';
 import { investigateError } from './investigate.js';
@@ -677,22 +677,28 @@ export async function runAgentFix(input: AgentFixInput): Promise<AgentFixResult>
       }
     }
 
-    // Extract stack trace files early — used for both preloading and agent state
+    // Extract stack trace files early — used for both preloading and agent state.
+    // Both platforms narrow to files the repo actually contains. A minified
+    // production stack names bundle artifacts that exist nowhere in the source;
+    // handing those to the scope guard makes it tell the agent that its correct
+    // edit is out of scope, and handing them to the diff judge misinforms it.
+    // Empty is the honest answer for an unsymbolicated stack.
+    const tracked = await sandbox.commands.run(
+      `cd ${SANDBOX_REPO_PATH} && git ls-files`,
+      { timeoutMs: 10_000 },
+    );
+    const trackedFiles = new Set(tracked.stdout.split('\n').filter(Boolean));
     let stackTraceFiles: string[];
     if (platform === 'python') {
-      const tracked = await sandbox.commands.run(
-        `cd ${SANDBOX_REPO_PATH} && git ls-files`,
-        { timeoutMs: 10_000 },
-      );
       // Parse deeper than the 5 we ultimately preload: frames are dropped by
       // the tracked-file filter below, so capping before resolution would let
       // unresolvable top-of-stack frames crowd out the real application file.
-      stackTraceFiles = resolveFrames(
-        parsePythonFrames(input.stackTrace, 25),
-        new Set(tracked.stdout.split('\n').filter(Boolean)),
-      );
+      stackTraceFiles = resolveFrames(parsePythonFrames(input.stackTrace, 25), trackedFiles);
     } else {
-      stackTraceFiles = extractStackTraceFiles(input.stackTrace);
+      stackTraceFiles = resolveTrackedFiles(
+        extractStackTraceFiles(input.stackTrace),
+        trackedFiles,
+      );
     }
 
     // Pre-load stack trace files to eliminate exploration turns

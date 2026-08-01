@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -1159,5 +1160,217 @@ func TestIngestEvent_PersistsClientTimestamp(t *testing.T) {
 	}
 	if !stored.Equal(clientTime) {
 		t.Errorf("error_events.timestamp = %v, want client time %v", stored, clientTime)
+	}
+}
+
+func metricsSnapshot(t *testing.T) string {
+	t.Helper()
+	request := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	recorder := httptest.NewRecorder()
+	handler.Metrics(recorder, request)
+	return recorder.Body.String()
+}
+
+func metricValue(t *testing.T, metrics, family, label string) int64 {
+	t.Helper()
+	for _, line := range strings.Split(metrics, "\n") {
+		if !strings.HasPrefix(line, family) || (label != "" && !strings.Contains(line, label)) {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			continue
+		}
+		value, err := strconv.ParseInt(fields[1], 10, 64)
+		if err != nil {
+			t.Fatalf("parse metric %q: %v", line, err)
+		}
+		return value
+	}
+	t.Fatalf("metric %s %s not found in:\n%s", family, label, metrics)
+	return 0
+}
+
+func debugMetaPayload(t *testing.T, debugMeta, commitSHA any) string {
+	t.Helper()
+	payload := map[string]any{
+		"timestamp": "2026-07-30T00:00:00Z",
+		"platform":  "javascript",
+		"error": map[string]any{
+			"type":    "TypeError",
+			"message": "debug metadata validation",
+			"stack":   "at fn (https://app.example.com/assets/index.js:1:2)",
+		},
+		"breadcrumbs": []any{},
+		"context":     map[string]any{},
+		"sdk_version": "2.0.1",
+		"debug_meta":  debugMeta,
+	}
+	if commitSHA != nil {
+		payload["commit_sha"] = commitSHA
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	return string(encoded)
+}
+
+func storedDebugMetadata(t *testing.T, pool *pgxpool.Pool, eventID string) (map[string]any, string) {
+	t.Helper()
+	var raw, commit string
+	if err := pool.QueryRow(context.Background(),
+		`SELECT debug_meta::text, COALESCE(commit_sha, '') FROM error_events WHERE id = $1`,
+		eventID,
+	).Scan(&raw, &commit); err != nil {
+		t.Fatalf("query stored debug metadata: %v", err)
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal([]byte(raw), &metadata); err != nil {
+		t.Fatalf("decode stored debug metadata: %v", err)
+	}
+	return metadata, commit
+}
+
+func TestDebugMetaMalformedOptionalFieldsStillAcceptEvent(t *testing.T) {
+	tests := []struct {
+		name       string
+		debugMeta  any
+		reason     string
+		discarded  int64
+		commitSHA  any
+		commitDrop int64
+	}{
+		{name: "commit sha number", debugMeta: map[string]any{"images": []any{}}, commitSHA: 123, commitDrop: 1},
+		{name: "container array", debugMeta: []any{}, reason: "malformed_container", discarded: 1},
+		{name: "container null", debugMeta: nil, reason: "malformed_container", discarded: 1},
+		{name: "container string", debugMeta: "x", reason: "malformed_container", discarded: 1},
+		{name: "images object", debugMeta: map[string]any{"images": map[string]any{}}, reason: "malformed_images", discarded: 1},
+		{name: "scalar images", debugMeta: map[string]any{"images": []any{1, 2}}, reason: "non_object_image", discarded: 2},
+		{name: "uppercase commit", debugMeta: map[string]any{"images": []any{}}, commitSHA: strings.Repeat("A", 40), commitDrop: 1},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			deps, pool := testDeps(t)
+			_, _, _, rawKey := seedTenant(t, deps.Queries)
+			before := metricsSnapshot(t)
+			response := postErrorPayload(t, deps, rawKey, debugMetaPayload(t, test.debugMeta, test.commitSHA))
+			metadata, commit := storedDebugMetadata(t, pool, response["event_id"])
+
+			if got := metadata["images"].([]any); len(got) != 0 {
+				t.Fatalf("stored images = %+v, want empty", got)
+			}
+			if commit != "" {
+				t.Fatalf("stored commit_sha = %q, want empty", commit)
+			}
+			after := metricsSnapshot(t)
+			if test.reason != "" {
+				label := fmt.Sprintf(`reason="%s"`, test.reason)
+				delta := metricValue(t, after, "opslane_debug_meta_images_discarded_total", label) -
+					metricValue(t, before, "opslane_debug_meta_images_discarded_total", label)
+				if delta != test.discarded {
+					t.Fatalf("%s discard delta = %d, want %d", test.reason, delta, test.discarded)
+				}
+			}
+			if test.commitDrop > 0 {
+				delta := metricValue(t, after, "opslane_commit_sha_discarded_total", "") -
+					metricValue(t, before, "opslane_commit_sha_discarded_total", "")
+				if delta != test.commitDrop {
+					t.Fatalf("commit discard delta = %d, want %d", delta, test.commitDrop)
+				}
+			}
+		})
+	}
+}
+
+func TestDebugMetaConflictBeyondLimitIsOrderIndependent(t *testing.T) {
+	deps, pool := testDeps(t)
+	_, _, _, rawKey := seedTenant(t, deps.Queries)
+	const firstID = "01234567-89ab-cdef-0123-456789abcdef"
+	const secondID = "fedcba98-7654-3210-fedc-ba9876543210"
+
+	images := make([]any, 0, 65)
+	for index := 0; index < 64; index++ {
+		images = append(images, map[string]any{
+			"type":      "sourcemap",
+			"code_file": fmt.Sprintf("https://app.example.com/assets/%02d.js", index),
+			"debug_id":  firstID,
+		})
+	}
+	conflict := map[string]any{
+		"type":      "sourcemap",
+		"code_file": "https://app.example.com/assets/02.js",
+		"debug_id":  secondID,
+	}
+	images = append(images, conflict)
+
+	before := metricsSnapshot(t)
+	first := postErrorPayload(t, deps, rawKey, debugMetaPayload(t, map[string]any{"images": images}, nil))
+	firstMeta, _ := storedDebugMetadata(t, pool, first["event_id"])
+
+	permuted := append([]any{}, images...)
+	permuted[2], permuted[64] = permuted[64], permuted[2]
+	second := postErrorPayload(t, deps, rawKey, debugMetaPayload(t, map[string]any{"images": permuted}, nil))
+	secondMeta, _ := storedDebugMetadata(t, pool, second["event_id"])
+
+	if !reflect.DeepEqual(firstMeta, secondMeta) {
+		t.Fatalf("stored results differ by conflict placement:\nfirst=%+v\nsecond=%+v", firstMeta, secondMeta)
+	}
+	storedImages := firstMeta["images"].([]any)
+	if len(storedImages) != 63 {
+		t.Fatalf("stored image count = %d, want 63", len(storedImages))
+	}
+	for _, raw := range storedImages {
+		if raw.(map[string]any)["code_file"] == "https://app.example.com/assets/02.js" {
+			t.Fatal("ambiguous code_file was retained")
+		}
+	}
+	after := metricsSnapshot(t)
+	label := `reason="ambiguous_code_file"`
+	delta := metricValue(t, after, "opslane_debug_meta_images_discarded_total", label) -
+		metricValue(t, before, "opslane_debug_meta_images_discarded_total", label)
+	if delta != 4 {
+		t.Fatalf("ambiguous discard delta = %d, want 4 across two events", delta)
+	}
+}
+
+func TestDebugMetaPersistsMaxCodeFileAndValidCommit(t *testing.T) {
+	deps, pool := testDeps(t)
+	_, _, _, rawKey := seedTenant(t, deps.Queries)
+	prefix := "https://app.example.com/"
+	codeFile := prefix + strings.Repeat("a", 4096-len(prefix))
+	const debugID = "01234567-89ab-cdef-0123-456789abcdef"
+	const commit = "e60b4d1e113538d40f09e31717e949aaa08659f8"
+	debugMeta := map[string]any{"images": []any{map[string]any{
+		"type": "sourcemap", "code_file": codeFile, "debug_id": debugID,
+	}}}
+
+	before := metricsSnapshot(t)
+	response := postErrorPayload(t, deps, rawKey, debugMetaPayload(t, debugMeta, commit))
+	metadata, storedCommit := storedDebugMetadata(t, pool, response["event_id"])
+
+	if storedCommit != commit {
+		t.Fatalf("commit_sha = %q, want %q", storedCommit, commit)
+	}
+	stored := metadata["images"].([]any)
+	if len(stored) != 1 || stored[0].(map[string]any)["code_file"] != codeFile {
+		t.Fatalf("stored images = %+v, want maximal code_file", stored)
+	}
+	afterImage := metricsSnapshot(t)
+	if delta := metricValue(t, afterImage, "opslane_events_with_debug_images_total", "") -
+		metricValue(t, before, "opslane_events_with_debug_images_total", ""); delta != 1 {
+		t.Fatalf("events-with-images delta = %d, want 1", delta)
+	}
+	if delta := metricValue(t, afterImage, "opslane_events_ingested_total", `platform="javascript"`) -
+		metricValue(t, before, "opslane_events_ingested_total", `platform="javascript"`); delta != 1 {
+		t.Fatalf("javascript ingest delta = %d, want 1", delta)
+	}
+
+	postErrorPayload(t, deps, rawKey, debugMetaPayload(t, map[string]any{"images": []any{}}, nil))
+	afterEmpty := metricsSnapshot(t)
+	if delta := metricValue(t, afterEmpty, "opslane_debug_meta_registry_present_zero_matched_total", "") -
+		metricValue(t, afterImage, "opslane_debug_meta_registry_present_zero_matched_total", ""); delta != 1 {
+		t.Fatalf("zero-matched delta = %d, want 1", delta)
 	}
 }

@@ -71,5 +71,7 @@ Run `throw new Error('opslane vanilla smoke test')` from your app (not the devto
 
 ## Next
 
-- [Upload source maps](source-maps.md) so minified stacks resolve
+- [Upload source maps](source-maps.md) so minified stacks resolve. The guide
+  distinguishes the currently published Vite upload plugin from the forthcoming
+  debug-ID export.
 - All init options: [SDK options reference](../reference/sdk-options.md)

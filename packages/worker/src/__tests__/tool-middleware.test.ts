@@ -123,5 +123,43 @@ describe('tool-middleware', () => {
       const result = await mw.preCompletion!(state);
       expect(result).toBeUndefined();
     });
+
+    // The agent edited the file that actually causes the error.
+    const EDITED_THE_RIGHT_FILE = {
+      stdout: 'src/components/UserCard.vue\n',
+      stderr: '',
+      exitCode: 0,
+    };
+
+    it('does not challenge a correct edit when the stack named no repo files', async () => {
+      // An unsymbolicated production stack resolves to zero repo files, so the
+      // guard has no basis to judge scope and must stay silent. Before this,
+      // stackTraceFiles held bundle paths like assets/index-Dk3f8xBq.js, every
+      // real source edit looked out of scope, and the agent was invited to
+      // revert the one change that fixed the bug.
+      const sandbox = { commands: { run: async () => EDITED_THE_RIGHT_FILE } };
+      const mw = createDefaultMiddleware(sandbox as never);
+      const state = makeState({ testsRan: true, stackTraceFiles: [] });
+
+      const result = await mw.preCompletion!(state);
+      expect(result).toBeUndefined();
+    });
+
+    it('still challenges an unrelated edit when the stack named a real file', async () => {
+      const sandbox = {
+        commands: {
+          run: async () => ({ stdout: 'src/components/UserCard.vue\nREADME.md\n', stderr: '', exitCode: 0 }),
+        },
+      };
+      const mw = createDefaultMiddleware(sandbox as never);
+      const state = makeState({
+        testsRan: true,
+        stackTraceFiles: ['src/components/UserCard.vue'],
+      });
+
+      const result = await mw.preCompletion!(state);
+      expect(result?.inject).toContain('README.md');
+      expect(result?.inject).not.toContain('UserCard.vue, README.md');
+    });
   });
 });

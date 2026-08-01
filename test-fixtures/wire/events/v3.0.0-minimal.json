@@ -1,0 +1,14 @@
+{
+  "timestamp": "2026-07-16T00:00:00.000Z",
+  "error": {
+    "type": "TypeError",
+    "message": "Cannot read properties of null (reading 'name')",
+    "stack": "TypeError: Cannot read properties of null (reading 'name')\n    at UserCard (https://app.example.com/assets/index.js:8:20)"
+  },
+  "breadcrumbs": [],
+  "context": {
+    "url": "https://app.example.com/dashboard",
+    "user_agent": "Mozilla/5.0"
+  },
+  "sdk_version": "3.0.0"
+}
