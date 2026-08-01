@@ -115,6 +115,36 @@ func (c *Client) GetObject(ctx context.Context, objectKey string) ([]byte, error
 	return io.ReadAll(obj)
 }
 
+// GetObjectBounded downloads at most maxBytes. It reads one sentinel byte past
+// the limit so callers never accept a truncated object as complete.
+func (c *Client) GetObjectBounded(ctx context.Context, objectKey string, maxBytes int64) ([]byte, error) {
+	if maxBytes < 0 {
+		return nil, fmt.Errorf("max bytes must be non-negative")
+	}
+	obj, err := c.mc.GetObject(ctx, c.bucket, objectKey, minio.GetObjectOptions{})
+	if err != nil {
+		return nil, err
+	}
+	defer obj.Close()
+	data, err := io.ReadAll(io.LimitReader(obj, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf("object exceeds %d bytes", maxBytes)
+	}
+	return data, nil
+}
+
+// CopyObject copies an object inside the bucket without routing the bytes
+// through this process. Source-map promotion moves up to 100 MiB per file.
+func (c *Client) CopyObject(ctx context.Context, srcKey, dstKey string) error {
+	_, err := c.mc.CopyObject(ctx,
+		minio.CopyDestOptions{Bucket: c.bucket, Object: dstKey},
+		minio.CopySrcOptions{Bucket: c.bucket, Object: srcKey})
+	return err
+}
+
 // RemoveObject deletes the object at objectKey.
 //
 // Deleting a key that does not exist is not an error: retention sweeps are

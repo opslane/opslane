@@ -14,6 +14,8 @@ import (
 	"github.com/gowebpki/jcs"
 )
 
+const maxCanonicalBytes = 104857600
+
 // Error reports the stable rejection reason shared by the TypeScript and Go
 // implementations.
 type Error struct {
@@ -28,6 +30,8 @@ func (e *Error) Error() string {
 type Result struct {
 	DebugID       string
 	ContentSHA256 string
+	Canonical     []byte
+	CanonicalSize int64
 }
 
 // Compute validates and canonicalizes a source map before hashing it.
@@ -59,6 +63,9 @@ func Compute(input []byte) (Result, error) {
 	if err != nil {
 		return Result{}, reject("invalid_json")
 	}
+	if int64(len(canonical)) > maxCanonicalBytes {
+		return Result{}, reject("too_large")
+	}
 
 	digest := sha256.Sum256(canonical)
 	contentSHA256 := hex.EncodeToString(digest[:])
@@ -73,6 +80,8 @@ func Compute(input []byte) (Result, error) {
 			id[16:20],
 			id[20:32],
 		),
+		Canonical:     canonical,
+		CanonicalSize: int64(len(canonical)),
 	}, nil
 }
 

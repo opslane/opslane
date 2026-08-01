@@ -1,6 +1,7 @@
 package minio_test
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -25,6 +26,57 @@ func testClient(t *testing.T) *minioPkg.Client {
 		t.Fatalf("minio client: %v", err)
 	}
 	return c
+}
+
+func TestCopyObject(t *testing.T) {
+	c := testClient(t)
+	ctx := context.Background()
+	suffix := time.Now().UnixNano()
+	srcKey := fmt.Sprintf("test/a-%d/x.map", suffix)
+	dstKey := fmt.Sprintf("test/b-%d/x.map", suffix)
+	want := []byte(`{"version":3,"mappings":"AAAA"}`)
+
+	t.Cleanup(func() {
+		_ = c.RemoveObject(context.Background(), srcKey)
+		_ = c.RemoveObject(context.Background(), dstKey)
+	})
+
+	if err := c.PutObject(ctx, srcKey, want, "application/json"); err != nil {
+		t.Fatalf("put source: %v", err)
+	}
+	if err := c.CopyObject(ctx, srcKey, dstKey); err != nil {
+		t.Fatalf("copy: %v", err)
+	}
+
+	src, err := c.GetObject(ctx, srcKey)
+	if err != nil {
+		t.Fatalf("get source: %v", err)
+	}
+	dst, err := c.GetObject(ctx, dstKey)
+	if err != nil {
+		t.Fatalf("get destination: %v", err)
+	}
+	if !bytes.Equal(src, dst) {
+		t.Fatalf("copied bytes differ: source %q, destination %q", src, dst)
+	}
+}
+
+func TestGetObjectBounded(t *testing.T) {
+	c := testClient(t)
+	ctx := context.Background()
+	key := fmt.Sprintf("test/bounded-%d.json", time.Now().UnixNano())
+	t.Cleanup(func() { _ = c.RemoveObject(context.Background(), key) })
+
+	if err := c.PutObject(ctx, key, []byte("12345"), "application/json"); err != nil {
+		t.Fatal(err)
+	}
+	data, err := c.GetObjectBounded(ctx, key, 5)
+	if err != nil || string(data) != "12345" {
+		t.Fatalf("exact bounded read = %q, %v", data, err)
+	}
+	if _, err := c.GetObjectBounded(ctx, key, 4); err == nil {
+		t.Fatal("oversized bounded read succeeded")
+	}
 }
 
 func TestRemoveObject(t *testing.T) {
