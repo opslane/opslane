@@ -25,15 +25,24 @@ const (
 	matrixRevoked   matrixCredential = "revoked"
 	matrixMalformed matrixCredential = "malformed"
 	matrixOtherPK   matrixCredential = "wrong-project-pk"
+	matrixOtherSK   matrixCredential = "wrong-project-sk"
 	matrixSession   matrixCredential = "session"
 )
 
+type matrixPrincipal string
+
+const (
+	matrixIngestPrincipal    matrixPrincipal = "ingest"
+	matrixSourcemapPrincipal matrixPrincipal = "sourcemaps"
+	matrixSessionPrincipal   matrixPrincipal = "session"
+)
+
 type matrixRoute struct {
-	method  string
-	pattern string
-	path    string
-	body    string
-	read    bool
+	method    string
+	pattern   string
+	path      string
+	body      string
+	principal matrixPrincipal
 }
 
 type matrixEnvironment struct {
@@ -81,6 +90,10 @@ func newMatrixEnvironment(t *testing.T) *matrixEnvironment {
 	if err != nil {
 		t.Fatal(err)
 	}
+	otherSK, err := q.CreateProjectKey(ctx, second.Project.ID, db.ScopeSourcemaps, "other-sk", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	deps := &handler.Dependencies{
 		Queries:   q,
 		JWTSecret: sessionReadSecret,
@@ -95,6 +108,7 @@ func newMatrixEnvironment(t *testing.T) *matrixEnvironment {
 			matrixRevoked:   revoked.Raw,
 			matrixMalformed: "not-a-key",
 			matrixOtherPK:   other.Raw,
+			matrixOtherSK:   otherSK.Raw,
 		},
 	}
 }
@@ -121,38 +135,90 @@ func (e *matrixEnvironment) call(
 	return response.Code, payload.Code
 }
 
-// TestRouteMatrixDenyByDefault exercises every project-key route and the three
-// reads that previously accepted a public key. For valid ingest keys, handler
-// validation or infrastructure may return any non-auth status; the invariant
-// here is that authentication passed. Every other credential is exact.
+func matrixRoutes(projectID string) []matrixRoute {
+	return []matrixRoute{
+		{
+			method: http.MethodPost, pattern: "/api/v1/events", path: "/api/v1/events",
+			body:      `{"timestamp":"2026-07-30T00:00:00Z","error":{"type":"Error","message":"matrix","stack":"at x (a.js:1:1)"}}`,
+			principal: matrixIngestPrincipal,
+		},
+		{
+			method: http.MethodPost, pattern: "/api/v1/replays/init", path: "/api/v1/replays/init",
+			body: `{"session_id":"matrix-replay","trigger_type":"manual"}`, principal: matrixIngestPrincipal,
+		},
+		{
+			method: http.MethodPost, pattern: "/api/v1/replays/{replayID}/complete",
+			path: "/api/v1/replays/00000000-0000-0000-0000-000000000000/complete",
+			body: `{}`, principal: matrixIngestPrincipal,
+		},
+		{
+			method: http.MethodPost, pattern: "/api/v1/replays/{replayID}/fail",
+			path: "/api/v1/replays/00000000-0000-0000-0000-000000000000/fail",
+			body: `{}`, principal: matrixIngestPrincipal,
+		},
+		{
+			method: http.MethodPost, pattern: "/api/v1/sessions/init", path: "/api/v1/sessions/init",
+			body: `{"session_id":"matrix-session"}`, principal: matrixIngestPrincipal,
+		},
+		{
+			method: http.MethodPost, pattern: "/api/v1/sessions/{sessionID}/chunks/{seq}",
+			path: "/api/v1/sessions/matrix-session/chunks/0", body: `{}`, principal: matrixIngestPrincipal,
+		},
+		{
+			method: http.MethodPost, pattern: "/api/v1/ingest/ping", path: "/api/v1/ingest/ping",
+			principal: matrixIngestPrincipal,
+		},
+		{
+			method: http.MethodPost, pattern: "/api/v1/sourcemaps/batches", path: "/api/v1/sourcemaps/batches",
+			body: `{}`, principal: matrixSourcemapPrincipal,
+		},
+		{
+			method: http.MethodPut, pattern: "/api/v1/sourcemaps/batches/{batchID}/files/{debugID}",
+			path: "/api/v1/sourcemaps/batches/00000000-0000-0000-0000-000000000000/files/00000000-0000-0000-0000-000000000000",
+			body: `{}`, principal: matrixSourcemapPrincipal,
+		},
+		{
+			method: http.MethodPost, pattern: "/api/v1/sourcemaps/batches/{batchID}/complete",
+			path: "/api/v1/sourcemaps/batches/00000000-0000-0000-0000-000000000000/complete",
+			body: `{}`, principal: matrixSourcemapPrincipal,
+		},
+		{
+			method: http.MethodGet, pattern: "/api/v1/projects/{projectID}/event-count",
+			path: "/api/v1/projects/" + projectID + "/event-count", principal: matrixSessionPrincipal,
+		},
+		{
+			method: http.MethodGet, pattern: "/api/v1/projects/{projectID}/incidents",
+			path: "/api/v1/projects/" + projectID + "/incidents", principal: matrixSessionPrincipal,
+		},
+		{
+			method: http.MethodGet, pattern: "/api/v1/projects/{projectID}/incidents/{incidentID}",
+			path:      "/api/v1/projects/" + projectID + "/incidents/00000000-0000-0000-0000-000000000000",
+			principal: matrixSessionPrincipal,
+		},
+		{
+			method: http.MethodPost, pattern: "/api/v1/projects/{projectID}/sourcemaps/verify",
+			path: "/api/v1/projects/" + projectID + "/sourcemaps/verify",
+			body: `{}`, principal: matrixSessionPrincipal,
+		},
+	}
+}
+
+// TestRouteMatrixDenyByDefault exercises the ingest-key routes, the source-map
+// family, and representative dashboard reads. Once the expected principal
+// authenticates, handler validation or infrastructure may return any non-auth
+// status; every rejected credential is exact.
 func TestRouteMatrixDenyByDefault(t *testing.T) {
 	env := newMatrixEnvironment(t)
 
-	routes := []matrixRoute{
-		{http.MethodPost, "/api/v1/events", "/api/v1/events",
-			`{"timestamp":"2026-07-30T00:00:00Z","error":{"type":"Error","message":"matrix","stack":"at x (a.js:1:1)"}}`, false},
-		{http.MethodPost, "/api/v1/replays/init", "/api/v1/replays/init",
-			`{"session_id":"matrix-replay","trigger_type":"manual"}`, false},
-		{http.MethodPost, "/api/v1/replays/{replayID}/complete", "/api/v1/replays/00000000-0000-0000-0000-000000000000/complete", `{}`, false},
-		{http.MethodPost, "/api/v1/replays/{replayID}/fail", "/api/v1/replays/00000000-0000-0000-0000-000000000000/fail", `{}`, false},
-		{http.MethodPost, "/api/v1/sessions/init", "/api/v1/sessions/init",
-			`{"session_id":"matrix-session"}`, false},
-		{http.MethodPost, "/api/v1/sessions/{sessionID}/chunks/{seq}", "/api/v1/sessions/matrix-session/chunks/0", `{}`, false},
-		{http.MethodPost, "/api/v1/ingest/ping", "/api/v1/ingest/ping", ``, false},
-		{http.MethodGet, "/api/v1/projects/{projectID}/event-count", "/api/v1/projects/" + env.projectID + "/event-count", ``, true},
-		{http.MethodGet, "/api/v1/projects/{projectID}/incidents", "/api/v1/projects/" + env.projectID + "/incidents", ``, true},
-		{http.MethodGet, "/api/v1/projects/{projectID}/incidents/{incidentID}", "/api/v1/projects/" + env.projectID + "/incidents/00000000-0000-0000-0000-000000000000", ``, true},
-	}
-
 	credentials := []matrixCredential{
 		matrixNone, matrixPK, matrixSK, matrixRevoked,
-		matrixMalformed, matrixOtherPK, matrixSession,
+		matrixMalformed, matrixOtherPK, matrixOtherSK, matrixSession,
 	}
-	for _, route := range routes {
+	for _, route := range matrixRoutes(env.projectID) {
 		for _, credential := range credentials {
 			t.Run(string(credential)+" "+route.pattern, func(t *testing.T) {
 				status, code := env.call(t, route, credential)
-				if route.read {
+				if route.principal == matrixSessionPrincipal {
 					if credential == matrixSession {
 						if status == http.StatusUnauthorized || status == http.StatusForbidden {
 							t.Fatalf("valid session was denied: status=%d code=%q", status, code)
@@ -172,15 +238,27 @@ func TestRouteMatrixDenyByDefault(t *testing.T) {
 					return
 				}
 
-				if credential == matrixPK || credential == matrixOtherPK {
+				var validKey, wrongScope bool
+				switch route.principal {
+				case matrixIngestPrincipal:
+					validKey = credential == matrixPK || credential == matrixOtherPK
+					wrongScope = credential == matrixSK || credential == matrixOtherSK
+				case matrixSourcemapPrincipal:
+					validKey = credential == matrixSK || credential == matrixOtherSK
+					wrongScope = credential == matrixPK || credential == matrixOtherPK
+				default:
+					t.Fatalf("unsupported route principal %q", route.principal)
+				}
+				if validKey {
 					if status == http.StatusUnauthorized || status == http.StatusForbidden {
-						t.Fatalf("valid ingest key failed authentication: status=%d code=%q", status, code)
+						t.Fatalf("valid %s key failed authentication: status=%d code=%q",
+							route.principal, status, code)
 					}
 					return
 				}
-				if credential == matrixSK {
+				if wrongScope {
 					if status != http.StatusForbidden || code != "insufficient_scope" {
-						t.Fatalf("source-map key status/code=%d/%q, want 403/insufficient_scope", status, code)
+						t.Fatalf("wrong-scope key status/code=%d/%q, want 403/insufficient_scope", status, code)
 					}
 					return
 				}
@@ -192,7 +270,12 @@ func TestRouteMatrixDenyByDefault(t *testing.T) {
 	}
 }
 
-func TestRouteMatrixCoversEveryProjectKeyRoute(t *testing.T) {
+func isSourceMapMatrixRoute(pattern string) bool {
+	return strings.HasPrefix(pattern, "/api/v1/sourcemaps") ||
+		strings.HasSuffix(pattern, "/sourcemaps/verify")
+}
+
+func TestRouteMatrixCoversEverySourceMapRoute(t *testing.T) {
 	_, q, _ := authTestRouter(t)
 	deps := &handler.Dependencies{Queries: q, JWTSecret: sessionReadSecret}
 	router := handler.NewRouter(deps)
@@ -203,29 +286,22 @@ func TestRouteMatrixCoversEveryProjectKeyRoute(t *testing.T) {
 		_ http.Handler,
 		middlewares ...func(http.Handler) http.Handler,
 	) error {
-		for _, middleware := range middlewares {
-			fn := runtime.FuncForPC(reflect.ValueOf(middleware).Pointer())
-			if fn != nil && strings.Contains(fn.Name(), ".ProjectKey.") {
-				got[method+" "+route] = true
-				break
-			}
+		if isSourceMapMatrixRoute(route) {
+			got[method+" "+route] = true
 		}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
 
-	want := map[string]bool{
-		"POST /api/v1/events":                            true,
-		"POST /api/v1/replays/init":                      true,
-		"POST /api/v1/replays/{replayID}/complete":       true,
-		"POST /api/v1/replays/{replayID}/fail":           true,
-		"POST /api/v1/sessions/init":                     true,
-		"POST /api/v1/sessions/{sessionID}/chunks/{seq}": true,
-		"POST /api/v1/ingest/ping":                       true,
+	want := map[string]bool{}
+	for _, route := range matrixRoutes("matrix-project") {
+		if isSourceMapMatrixRoute(route.pattern) {
+			want[route.method+" "+route.pattern] = true
+		}
 	}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("project-key routes = %#v, want %#v", got, want)
+		t.Fatalf("source-map routes = %#v, want %#v", got, want)
 	}
 }
 
@@ -239,11 +315,10 @@ var handlerAuthenticatedRoutes = map[string]bool{
 	"POST /api/v1/github/webhook":        true,
 }
 
-// TestEveryAPIRouteHasAnAuthenticator closes the gap the scope check cannot:
-// TestRouteMatrixCoversEveryProjectKeyRoute pins which routes take a project
-// key, but a new route registered with no middleware at all would satisfy it.
-// This asserts the complement — every /api/v1 route either attaches an
-// authenticator or is on the allowlist above.
+// TestEveryAPIRouteHasAnAuthenticator closes the gap the route matrix cannot:
+// a new route registered with no middleware at all would otherwise escape the
+// credential-polarity assertions. Every /api/v1 route must either attach an
+// authenticator or appear on the allowlist above.
 //
 // This reads chi internals (middleware are only exposed to chi.Walk from
 // v5.3.1 onward), so re-read it on any chi bump: if Walk stops passing

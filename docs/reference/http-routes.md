@@ -1,6 +1,6 @@
 # HTTP routes
 
-All routes registered by the ingestion API (`packages/ingestion/handler/routes.go`). Auth column legend: **none** (public), **poll token** (`X-Opslane-Poll-Token` for one agent session), **SDK** (`X-API-Key` project-scoped public ingest key; rate-limited per project, and origin-gated — unconditionally on the browser-only endpoints, and on `/api/v1/events` only when the request presents `Origin` or `Referer`), and **session** (dashboard JWT cookie or CLI token).
+All routes registered by the ingestion API (`packages/ingestion/handler/routes.go`). Auth column legend: **none** (public), **poll token** (`X-Opslane-Poll-Token` for one agent session), **SDK** (`X-API-Key` project-scoped public ingest key; rate-limited per project, and origin-gated — unconditionally on the browser-only endpoints, and on `/api/v1/events` only when the request presents `Origin` or `Referer`), **source-map key** (`X-API-Key` project-scoped, write-only `opslane_sk_` key with `sourcemaps` scope), and **session** (dashboard JWT cookie or CLI token).
 
 These are curated tables, not a stability contract — the API is early-stage and may change. The [drift check](../../scripts/check-docs-drift.mjs) fails the repository test gate (`pnpm test`, which CI runs) if this page and `routes.go` disagree.
 
@@ -44,6 +44,16 @@ The agent callback requires `code`, `installation_id`, and UUID `state`; definit
 | POST | `/api/v1/sessions/{sessionID}/chunks/{seq}` | yes | Store and commit one gzipped replay chunk (max 5MiB) |
 | POST | `/api/v1/ingest/ping` | no | Verify that a public ingest key still authenticates; returns 204 without project data |
 
+## Source-map upload (X-API-Key)
+
+These routes accept only a write-only `opslane_sk_` key with `sourcemaps` scope. They do not expose a source-map read route.
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| POST | `/api/v1/sourcemaps/batches` | Declare an immutable source-map manifest; requires a UUID `Idempotency-Key` |
+| PUT | `/api/v1/sourcemaps/batches/{batchID}/files/{debugID}` | Upload one declared map; validates its size and computed debug ID before private staging |
+| POST | `/api/v1/sourcemaps/batches/{batchID}/complete` | Atomically activate a fully uploaded batch; repeated completion is idempotent |
+
 ## Session (dashboard/CLI)
 
 | Method | Path | Purpose |
@@ -64,6 +74,7 @@ The agent callback requires `code`, `installation_id`, and UUID `state`; definit
 | POST | `/api/v1/projects` | Create project |
 | PATCH | `/api/v1/projects/{projectID}` | Update project settings, including `friction_autonomy`, `pr_posture`, and the admin-gated `allow_payload_environment` override flag (partial: omitted/null fields are preserved, so `github_repo` can no longer be cleared here) |
 | GET | `/api/v1/projects/{projectID}/fix-stats` | Per-kind fix generation and PR outcome receipts |
+| POST | `/api/v1/projects/{projectID}/sourcemaps/verify` | Resolve one generated position in a completed batch without returning map bytes or source text |
 | GET | `/api/v1/projects/{projectID}/environments` | List environments |
 | POST | `/api/v1/projects/{projectID}/environments` | Create environment |
 | GET | `/api/v1/projects/{projectID}/event-count` | Event count stats |

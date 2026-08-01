@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/opslane/opslane/packages/ingestion/auth"
 	"github.com/opslane/opslane/packages/ingestion/db"
@@ -28,6 +29,7 @@ const (
 	ctxAllowPayloadEnvironment
 	ctxRole
 	ctxKeyScope
+	ctxKeyDBID
 )
 
 // ProjectIDFromCtx extracts the project_id set by auth middleware.
@@ -75,6 +77,13 @@ func AllowPayloadEnvironmentFromCtx(ctx context.Context) bool {
 	return v
 }
 
+// KeyDBIDFromCtx returns the project_api_keys.id of the authenticated key.
+// Source-map batches record it so an upload can be attributed to one credential.
+func KeyDBIDFromCtx(ctx context.Context) string {
+	v, _ := ctx.Value(ctxKeyDBID).(string)
+	return v
+}
+
 // Dependencies holds shared service dependencies (DB, etc.) for handlers.
 type Dependencies struct {
 	Queries       *db.Queries
@@ -85,8 +94,12 @@ type Dependencies struct {
 	resetSessionStore passwordResetSessionStore
 	Health            *HealthChecker
 	MinIO             *minioPkg.Client
-	JWTSecret         []byte
-	PendingCipher     *auth.PendingCipher
+	// Narrow source-map test seams. Production falls back to Queries and MinIO.
+	sourcemapCopier func(ctx context.Context, srcKey, dstKey string) error
+	sourcemapNow    func() time.Time
+	completionWait  time.Duration
+	JWTSecret       []byte
+	PendingCipher   *auth.PendingCipher
 	// AuthProvider is selected explicitly at boot. Nil retains the OSS GitHub
 	// default for narrow tests that construct Dependencies directly.
 	AuthProvider auth.AuthProvider

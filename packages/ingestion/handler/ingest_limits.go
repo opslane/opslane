@@ -14,6 +14,13 @@ var (
 	eventsLimiter  = newRateLimiter(600) // ~10 errors/sec sustained
 	replaysLimiter = newRateLimiter(120)
 
+	// Per-replica, in-memory, reset each minute. Contract 7.2 wants these
+	// cluster-wide; #226 does that.
+	sourcemapBatchLimiter    = newRateLimiter(20)
+	sourcemapFileLimiter     = newRateLimiter(600)
+	sourcemapCompleteLimiter = newRateLimiter(60)
+	sourcemapVerifyLimiter   = newRateLimiter(30)
+
 	// Always-on recording: every session uploads a chunk every ~30s, and each
 	// chunk now costs 1 ingestion request (#194 collapsed the upload-url +
 	// storage POST + commit handshake into a single call). 6000/min therefore
@@ -39,7 +46,7 @@ func rateLimitByProject(limiter *rateLimiter) func(http.Handler) http.Handler {
 			}
 			if !limiter.allow(projectID) {
 				slog.Warn("ingest rate limit exceeded", "project_id", projectID, "path", r.URL.Path)
-				writeJSONError(w, http.StatusTooManyRequests, "rate limit exceeded")
+				writeJSONErrorCode(w, http.StatusTooManyRequests, "rate limit exceeded", "rate_limited")
 				return
 			}
 			next.ServeHTTP(w, r)
