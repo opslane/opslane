@@ -93,6 +93,13 @@ func NewRouterWithPool(deps *Dependencies, pool *pgxpool.Pool) *chi.Mux {
 		r.With(ingestKey, rateLimitByProject(eventsLimiter)).Post("/ingest/ping",
 			func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
 
+		// Source-map upload endpoints are authenticated by a write-only,
+		// sourcemaps-scoped project key.
+		sourcemapKey := deps.ProjectKey(db.ScopeSourcemaps)
+		r.With(sourcemapKey, rateLimitByProject(sourcemapBatchLimiter)).Post("/sourcemaps/batches", deps.CreateSourceMapBatch)
+		r.With(sourcemapKey, rateLimitByProject(sourcemapFileLimiter)).Put("/sourcemaps/batches/{batchID}/files/{debugID}", deps.UploadSourceMapFile)
+		r.With(sourcemapKey, rateLimitByProject(sourcemapCompleteLimiter)).Post("/sourcemaps/batches/{batchID}/complete", deps.CompleteSourceMapBatch)
+
 		// Session-authenticated endpoints (dashboard + CLI)
 		r.With(deps.AuthenticateUserSession).Get("/auth/me", deps.AuthMe)
 		r.With(deps.AuthenticateUserSession).Get("/auth/verify", deps.AuthVerify)
@@ -127,6 +134,7 @@ func NewRouterWithPool(deps *Dependencies, pool *pgxpool.Pool) *chi.Mux {
 		// Fix-stats is dashboard-only (session auth): it backs the autonomy
 		// settings receipts, which no SDK/CLI caller consumes.
 		r.With(deps.AuthenticateUserSession).Get("/projects/{projectID}/fix-stats", deps.GetFixStatsEndpoint)
+		r.With(deps.AuthenticateUserSession).Post("/projects/{projectID}/sourcemaps/verify", deps.VerifySourceMap)
 
 		// Incidents are user-session reads.
 		r.With(deps.AuthenticateUserSession).Get("/projects/{projectID}/incidents", deps.ListIncidents)
@@ -169,7 +177,21 @@ func NewRouterWithPool(deps *Dependencies, pool *pgxpool.Pool) *chi.Mux {
 		// Setup PR
 		r.With(deps.AuthenticateUserSession).Post("/projects/{projectID}/setup-pr", deps.SetupPR)
 		r.With(deps.AuthenticateUserSession).Get("/projects/{projectID}/setup-pr", deps.GetSetupPR)
+
+		r.NotFound(func(w http.ResponseWriter, _ *http.Request) {
+			writeJSONErrorCode(w, http.StatusNotFound, "not found", "not_found")
+		})
+		r.MethodNotAllowed(func(w http.ResponseWriter, _ *http.Request) {
+			writeJSONErrorCode(w, http.StatusMethodNotAllowed, "method not allowed", "method_not_allowed")
+		})
 	})
+
+	// Keep every API version out of the dashboard catch-all. The more-specific
+	// /api/v1 mount above continues to handle its registered routes and emits
+	// its own JSON 404/405 responses.
+	r.Handle("/api/*", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeJSONErrorCode(w, http.StatusNotFound, "not found", "not_found")
+	}))
 
 	// Serve dashboard SPA (must be last — catch-all).
 	// DASHBOARD_DIR should point to the Vite build output containing index.html.
@@ -177,7 +199,7 @@ func NewRouterWithPool(deps *Dependencies, pool *pgxpool.Pool) *chi.Mux {
 	if dashboardDir != "" {
 		cleanRoot := filepath.Clean(dashboardDir)
 		fileServer := http.FileServer(http.Dir(dashboardDir))
-		r.Handle("/*", http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		spa := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 			// Clean path to prevent traversal oracle via os.Stat
 			cleaned := filepath.Join(cleanRoot, filepath.Clean("/"+req.URL.Path))
 			if !strings.HasPrefix(cleaned, cleanRoot+string(os.PathSeparator)) && cleaned != cleanRoot {
@@ -196,7 +218,12 @@ func NewRouterWithPool(deps *Dependencies, pool *pgxpool.Pool) *chi.Mux {
 			}
 			// Fall back to index.html for SPA client-side routing
 			http.ServeFile(w, req, cleanRoot+"/index.html")
-		}))
+		})
+		// Read-only verbs only: the catch-all must not answer POST/PUT/DELETE
+		// with the SPA shell. chi does not fall back HEAD->GET, so HEAD is
+		// registered explicitly; uptime checks and CDNs rely on it.
+		r.Method(http.MethodGet, "/*", spa)
+		r.Method(http.MethodHead, "/*", spa)
 	}
 
 	return r
@@ -224,7 +251,10 @@ func corsMiddleware() func(http.Handler) http.Handler {
 			origin := r.Header.Get("Origin")
 			w.Header().Add("Vary", "Origin")
 
-			if isSDKEndpoint(r.URL.Path) {
+			if isSourcemapUploadEndpoint(r.URL.Path) {
+				// Source-map keys are server-to-server credentials; never
+				// authorize a browser origin to call the upload routes.
+			} else if isSDKEndpoint(r.URL.Path) {
 				if origin != "" {
 					w.Header().Set("Access-Control-Allow-Origin", origin)
 				} else {
@@ -246,6 +276,14 @@ func corsMiddleware() func(http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// isSourcemapUploadEndpoint marks the server-to-server upload routes. They get
+// no browser CORS of any kind, not even the dashboard origin: no browser is
+// supposed to hold an opslane_sk_.
+func isSourcemapUploadEndpoint(path string) bool {
+	const prefix = "/api/v1/sourcemaps/batches"
+	return path == prefix || strings.HasPrefix(path, prefix+"/")
 }
 
 // isSDKEndpoint reports paths receiving permissive browser CORS. Boundary

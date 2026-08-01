@@ -90,3 +90,56 @@ func TestProjectKeyMiddlewareStatuses(t *testing.T) {
 		})
 	}
 }
+
+func TestProjectKeyMiddlewareSetsKeyDatabaseID(t *testing.T) {
+	_, q, pool := authTestRouter(t)
+	ctx := context.Background()
+	org, err := q.CreateOrg(ctx, "middleware-key-database-id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { cleanupTenantHandler(t, pool, org.ID) })
+	provisioning, err := q.ProvisionProject(ctx, org.ID, "key-id-app", nil, "key-id-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := q.CreateProjectKey(
+		ctx, provisioning.Project.ID, db.ScopeSourcemaps, "source maps", nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(
+		ctx, `DELETE FROM environments WHERE project_id = $1`, provisioning.Project.ID,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	deps := &handler.Dependencies{Queries: q}
+	srv := httptest.NewServer(
+		deps.ProjectKey(db.ScopeSourcemaps)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if got := handler.KeyDBIDFromCtx(r.Context()); got != key.ID {
+				t.Errorf("KeyDBIDFromCtx() = %q, want %q", got, key.ID)
+			}
+			if got := handler.EnvironmentIDFromCtx(r.Context()); got != "" {
+				t.Errorf("EnvironmentIDFromCtx() = %q, want empty for sourcemaps scope", got)
+			}
+			w.WriteHeader(http.StatusNoContent)
+		})),
+	)
+	t.Cleanup(srv.Close)
+
+	req, err := http.NewRequest(http.MethodPost, srv.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-API-Key", key.Raw)
+	response, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", response.StatusCode, http.StatusNoContent)
+	}
+}

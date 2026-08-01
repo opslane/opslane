@@ -40,19 +40,23 @@ func (d *Dependencies) ProjectKey(requiredScope string) func(http.Handler) http.
 				return
 			}
 
-			envID, err := d.environmentNameResolver().resolve(
-				r.Context(), lookup.ProjectID, "production",
-			)
-			if err != nil {
-				slog.Error("resolve production environment failed",
-					"error", err, "project_id", lookup.ProjectID)
-				writeJSONErrorCode(w, http.StatusInternalServerError, "internal error", "internal_error")
-				return
-			}
-			if envID == "" {
-				slog.Error("project has no production environment", "project_id", lookup.ProjectID)
-				writeJSONErrorCode(w, http.StatusInternalServerError, "internal error", "internal_error")
-				return
+			var envID string
+			if requiredScope == db.ScopeIngest {
+				var err error
+				envID, err = d.environmentNameResolver().resolve(
+					r.Context(), lookup.ProjectID, "production",
+				)
+				if err != nil {
+					slog.Error("resolve production environment failed",
+						"error", err, "project_id", lookup.ProjectID)
+					writeJSONErrorCode(w, http.StatusInternalServerError, "internal error", "internal_error")
+					return
+				}
+				if envID == "" {
+					slog.Error("project has no production environment", "project_id", lookup.ProjectID)
+					writeJSONErrorCode(w, http.StatusInternalServerError, "internal error", "internal_error")
+					return
+				}
 			}
 
 			RecordKeyAuth("ok")
@@ -61,6 +65,7 @@ func (d *Dependencies) ProjectKey(requiredScope string) func(http.Handler) http.
 			ctx = context.WithValue(ctx, ctxOrgID, lookup.OrgID)
 			ctx = context.WithValue(ctx, ctxEnvironmentID, envID)
 			ctx = context.WithValue(ctx, ctxKeyScope, lookup.Scope)
+			ctx = context.WithValue(ctx, ctxKeyDBID, lookup.ID)
 			ctx = context.WithValue(ctx, ctxAllowedOrigins, lookup.AllowedOrigins)
 			ctx = context.WithValue(ctx, ctxAllowPayloadEnvironment, lookup.AllowPayloadEnvironment)
 			next.ServeHTTP(w, r.WithContext(ctx))
