@@ -1,0 +1,160 @@
+{
+  "cases": [
+    {
+      "name": "mapped and unmapped segments",
+      "map": {
+        "version": 3,
+        "sources": ["src/a.ts", "src/b.ts"],
+        "names": [],
+        "mappings": "AAAA;A",
+        "sourcesContent": ["const x = 1;\n", "const y = 2;\n"]
+      },
+      "queries": [
+        {
+          "line": 1,
+          "column": 0,
+          "expect": {
+            "source": "src/a.ts",
+            "line": 1,
+            "column": 0,
+            "name": null
+          }
+        },
+        {
+          "line": 1,
+          "column": 3,
+          "expect": {
+            "source": "src/a.ts",
+            "line": 1,
+            "column": 0,
+            "name": null
+          }
+        },
+        {"line": 2, "column": 0, "expect": null},
+        {"line": 2, "column": 3, "expect": null},
+        {"line": 3, "column": 0, "expect": null}
+      ]
+    },
+    {
+      "name": "named segment",
+      "map": {
+        "version": 3,
+        "sources": ["src/a.ts"],
+        "names": ["namedValue"],
+        "mappings": "AAAAA"
+      },
+      "queries": [
+        {
+          "line": 1,
+          "column": 0,
+          "expect": {
+            "source": "src/a.ts",
+            "line": 1,
+            "column": 0,
+            "name": "namedValue"
+          }
+        },
+        {
+          "line": 1,
+          "column": 8,
+          "expect": {
+            "source": "src/a.ts",
+            "line": 1,
+            "column": 0,
+            "name": "namedValue"
+          }
+        }
+      ]
+    },
+    {
+      "name": "empty name is present",
+      "map": {
+        "version": 3,
+        "sources": ["src/a.ts"],
+        "names": [""],
+        "mappings": "AAAAA"
+      },
+      "queries": [
+        {
+          "line": 1,
+          "column": 0,
+          "expect": {
+            "source": "src/a.ts",
+            "line": 1,
+            "column": 0,
+            "name": ""
+          }
+        }
+      ]
+    },
+    {
+      "name": "leading gap and empty line",
+      "map": {
+        "version": 3,
+        "sources": ["src/b.ts"],
+        "names": [],
+        "mappings": "KACA;;AAAA"
+      },
+      "queries": [
+        {"line": 1, "column": 0, "expect": null},
+        {"line": 1, "column": 4, "expect": null},
+        {
+          "line": 1,
+          "column": 5,
+          "expect": {
+            "source": "src/b.ts",
+            "line": 2,
+            "column": 0,
+            "name": null
+          }
+        },
+        {
+          "line": 1,
+          "column": 12,
+          "expect": {
+            "source": "src/b.ts",
+            "line": 2,
+            "column": 0,
+            "name": null
+          }
+        },
+        {"line": 2, "column": 0, "expect": null},
+        {
+          "line": 3,
+          "column": 0,
+          "expect": {
+            "source": "src/b.ts",
+            "line": 2,
+            "column": 0,
+            "name": null
+          }
+        },
+        {"line": 4, "column": 0, "expect": null}
+      ]
+    },
+    {
+      "name": "source root is ignored by parser",
+      "map": {
+        "version": 3,
+        "sourceRoot": "",
+        "file": "bundle.js",
+        "sources": ["src/rooted.ts"],
+        "names": [],
+        "mappings": "AAAA",
+        "sourcesContent": ["secret source"]
+      },
+      "queries": [
+        {
+          "line": 1,
+          "column": 0,
+          "expect": {
+            "source": "src/rooted.ts",
+            "line": 1,
+            "column": 0,
+            "name": null
+          }
+        }
+      ]
+    }
+  ]
+}
