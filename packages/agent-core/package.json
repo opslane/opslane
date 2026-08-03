@@ -24,9 +24,9 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@ai-sdk/openai-compatible": "3.0.14",
-    "@anthropic-ai/sdk": "0.112.4",
-    "ai": "7.0.34"
+    "@ai-sdk/openai-compatible": "3.0.20",
+    "@anthropic-ai/sdk": "0.115.0",
+    "ai": "7.0.47"
   },
   "devDependencies": {
     "@types/node": "^26.1.1",
