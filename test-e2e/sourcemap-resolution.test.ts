@@ -3,16 +3,18 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { computeDebugId } from '../packages/sdk/src/build/debug-id.js';
-import { closePool, getConfig, getPool } from './helpers.js';
+import { closePool, getConfig, getPool, seedTenant, type TestTenant } from './helpers.js';
 import { isPlaywrightAvailable } from './browser-helpers.js';
 import { startBuiltFixture } from './build-helpers.js';
 
-const PROJECT_A = '00000000-0000-0000-0000-000000000010';
-const PROJECT_B = '00000000-0000-0000-0000-000000000020';
-const PK_A = 'opslane_pk_mzxw6ytboi3damrrgi3tknzxgq_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopq';
-const PK_B = 'opslane_pk_ndxw6ytboi3damrrgi3tknzxgq_E2EINGESTSECRETBBBBBBBBBBBBBBBBBBBBBBBBBBBB';
-const SK_A = 'opslane_sk_nbxw6ytboi3damrrgi3tknzxgq_E2ESOURCEMAPSECRETAAAAAAAAAAAAAAAAAAAAAAAAA';
-const SK_B = 'opslane_sk_ncxw6ytboi3damrrgi3tknzxgq_E2ESOURCEMAPSECRETBBBBBBBBBBBBBBBBBBBBBBBBB';
+// Two tenants seeded at run time, the way every other suite here gets its
+// credentials. An earlier revision hardcoded the UUIDs and keys from
+// scripts/seed-e2e.sql, which is a local-dev convenience applied by hand --
+// nothing in CI runs it, so every upload came back 401 and the isolation
+// assertion could only ever pass on a machine where someone had seeded first.
+let tenantA: TestTenant;
+let tenantB: TestTenant;
+
 const FIXTURE = resolve(__dirname, '../test-fixtures/vue-app');
 const playwrightAvailable = await isPlaywrightAvailable();
 
@@ -76,10 +78,10 @@ describe.skipIf(!playwrightAvailable).sequential(
   'source maps resolve end to end',
   () => {
     beforeAll(async () => {
-      await getPool().query(
-        `DELETE FROM sourcemap_files WHERE project_id = ANY($1::uuid[])`,
-        [[PROJECT_A, PROJECT_B]],
-      );
+      // Fresh projects per run, so no cleanup is needed: their sourcemap_files
+      // and error_events start empty by construction.
+      tenantA = await seedTenant();
+      tenantB = await seedTenant();
     });
 
     afterAll(async () => {
@@ -90,9 +92,9 @@ describe.skipIf(!playwrightAvailable).sequential(
       const startedAt = new Date();
       const fixture = await startBuiltFixture({
         fixtureDir: FIXTURE,
-        apiKey: PK_A,
+        apiKey: tenantA.ingestKey,
         ingestionUrl: getConfig().ingestionUrl,
-        sourcemapKey: SK_A,
+        sourcemapKey: tenantA.sourceMapKey,
       });
       const { chromium } = await import('@playwright/test');
       const browser = await chromium.launch();
@@ -100,7 +102,7 @@ describe.skipIf(!playwrightAvailable).sequential(
         const rows = await getPool().query<{ debug_id: string }>(
           `SELECT debug_id FROM sourcemap_files
            WHERE project_id = $1 AND created_at > $2`,
-          [PROJECT_A, startedAt],
+          [tenantA.projectId, startedAt],
         );
         expect(rows.rowCount).toBeGreaterThan(0);
 
@@ -126,7 +128,7 @@ describe.skipIf(!playwrightAvailable).sequential(
         await page.click('[data-testid="debug-id-eager"]');
         expect((await posted).status()).toBe(202);
 
-        const event = await pollResolution(PROJECT_A, startedAt);
+        const event = await pollResolution(tenantA.projectId, startedAt);
         expect(event.resolution_status).toBe('resolved');
         const envelope = event.stack_trace_resolved as {
           version: number;
@@ -155,14 +157,14 @@ describe.skipIf(!playwrightAvailable).sequential(
       const { debugId } = await computeDebugId(new TextEncoder().encode(map));
       const denied = await fetch(
         `${getConfig().ingestionUrl}/api/v1/sourcemaps/${debugId}`,
-        { method: 'PUT', headers: { 'X-API-Key': PK_A }, body: map },
+        { method: 'PUT', headers: { 'X-API-Key': tenantA.ingestKey }, body: map },
       );
       expect(denied.status).toBe(403);
       expect((await denied.json() as { code: string }).code).toBe('insufficient_scope');
 
       const eventDenied = await fetch(`${getConfig().ingestionUrl}/api/v1/events`, {
         method: 'POST',
-        headers: { 'X-API-Key': SK_A, 'Content-Type': 'application/json' },
+        headers: { 'X-API-Key': tenantA.sourceMapKey, 'Content-Type': 'application/json' },
         body: '{}',
       });
       expect(eventDenied.status).toBe(403);
@@ -187,22 +189,22 @@ describe.skipIf(!playwrightAvailable).sequential(
         { method: 'PUT', headers: { 'X-API-Key': key }, body: map },
       );
 
-      expect([200, 201]).toContain((await upload(SK_A)).status);
+      expect([200, 201]).toContain((await upload(tenantA.sourceMapKey)).status);
       const firstStart = new Date();
-      expect((await postCraftedEvent(PK_B, debugId, `isolation-before-${Date.now()}`)).status).toBe(202);
-      expect((await pollResolution(PROJECT_B, firstStart)).resolution_status).toBe('map_not_found');
+      expect((await postCraftedEvent(tenantB.ingestKey, debugId, `isolation-before-${Date.now()}`)).status).toBe(202);
+      expect((await pollResolution(tenantB.projectId, firstStart)).resolution_status).toBe('map_not_found');
 
-      expect([200, 201]).toContain((await upload(SK_B)).status);
+      expect([200, 201]).toContain((await upload(tenantB.sourceMapKey)).status);
       const secondStart = new Date();
-      expect((await postCraftedEvent(PK_B, debugId, `isolation-after-${Date.now()}`)).status).toBe(202);
-      expect((await pollResolution(PROJECT_B, secondStart)).resolution_status).toBe('resolved');
+      expect((await postCraftedEvent(tenantB.ingestKey, debugId, `isolation-after-${Date.now()}`)).status).toBe(202);
+      expect((await pollResolution(tenantB.projectId, secondStart)).resolution_status).toBe('resolved');
 
       const stored = await getPool().query<{ object_key: string }>(
         `SELECT object_key FROM sourcemap_files
          WHERE project_id = $1 AND debug_id = $2`,
-        [PROJECT_B, debugId],
+        [tenantB.projectId, debugId],
       );
-      expect(stored.rows[0]?.object_key).toContain(`sourcemaps/${PROJECT_B}/`);
+      expect(stored.rows[0]?.object_key).toContain(`sourcemaps/${tenantB.projectId}/`);
     }, 180_000);
   },
 );
