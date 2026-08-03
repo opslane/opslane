@@ -316,7 +316,13 @@ jobs:
       # worker's harness loop now lives in @opslane/agent-core, whose exports
       # point at dist. The login browser smoke serves the dashboard's dist via
       # vite preview, so the dashboard build must exist too.
-      - run: pnpm --filter @opslane/shared --filter @opslane/agent-core --filter @opslane/worker --filter @opslane/dashboard build
+      # The trailing "..." selects each package *and its workspace
+      # dependencies*, so this list tracks package.json instead of being
+      # hand-maintained. Spelling the members out meant the worker gaining a
+      # dependency (@opslane/sdk, for debug-ID recompute) broke this job with an
+      # unresolvable-module error that no dev machine reproduces, because there
+      # dist survives from an earlier build. Same idiom as release-npm.yml.
+      - run: pnpm --filter '@opslane/worker...' --filter '@opslane/dashboard...' build
       - name: Install Playwright chromium (browser smoke)
         run: pnpm --filter @opslane/test-e2e exec playwright install --with-deps chromium
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
