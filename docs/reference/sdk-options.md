@@ -6,7 +6,7 @@ All options accepted by `init()` from `@opslane/sdk`, mirrored from `SdkInitOpti
 | --- | --- | --- | --- |
 | `apiKey` | `string` | *(required)* | Project-scoped public ingest key. It must start with `opslane_pk_`; `init` refuses to start without it. |
 | `endpoint` | `string` | `https://api.opslane.com` | Your Opslane instance; validated as an http(s) URL. |
-| `release` | `string` | `''` | Immutable build identifier (git SHA); must match uploaded source maps. |
+| `release` | `string` | `''` | Optional immutable deployment identifier; source maps match by debug ID. |
 | `environment` | `string` | `''` | Optional deployment name sent with events and session initialization. The server uses it only when payload overrides are enabled for the project; existing session environment assignment takes precedence. |
 | `maxBreadcrumbs` | `number` | `50` | Ring-buffer size for breadcrumbs attached to each event. |
 | `breadcrumbMaxAge` | `number` | `30000` | Milliseconds before a breadcrumb is considered stale and dropped. |
@@ -26,18 +26,17 @@ before `beforeSend`, so the hook can inspect, alter, or remove `debug_meta` and
 
 ## Vite build options
 
-The repository's forthcoming debug-ID plugin accepts:
+The Vite debug-ID and source-map upload plugin accepts:
 
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
 | **commitSha** | `string` | detected | Explicit build commit; must be lowercase 40- or 64-character hex. |
 | **stamp** | `boolean` | `true` | Enables source-map fingerprinting, chunk stamping, and runtime registration. |
-| **logLevel** | `'silent' \| 'warn' \| 'debug'` | `'warn'` | Controls stable diagnostics and the build summary. |
+| **logLevel** | `'silent' \| 'warn'` | `'warn'` | Controls stable diagnostics and the build summary. |
 | **sourcemaps** | `'remove' \| 'keep'` | `'remove'` | Keeps or removes stamped map assets from the output. |
 | **maxMapBytes** | `number` | `33554432` | Raw source-map size limit. Oversized maps and chunks are left unchanged. |
 
-The export is not present in published `@opslane/sdk@2.0.1`; keep using
-`opslaneSourceMapPlugin` until the package release containing it is available.
-See the [source-map migration matrix](../guides/source-maps.md#migration-matrix).
+Uploads require private build-time `OPSLANE_ENDPOINT` and
+`OPSLANE_SOURCEMAP_KEY` variables. See the [source-map guide](../guides/source-maps.md).
 
-Related exports: `captureException(err)`, `setUser({ id })`, `clearUser()`, `destroy()`, `opslaneVuePlugin`, and (from `@opslane/sdk/react`) `OpslaneErrorBoundary` / `captureReactError`. The `@opslane/sdk/vite-plugin` export is temporarily fail-loud while batch source-map upload is unavailable — see the [SDK README](../../packages/sdk/README.md).
+Related exports: `captureException(err)`, `setUser({ id })`, `clearUser()`, `destroy()`, `opslaneVuePlugin`, and (from `@opslane/sdk/react`) `OpslaneErrorBoundary` / `captureReactError`. The `@opslane/sdk/vite-plugin` export stamps and uploads source maps during production builds — see the [SDK README](../../packages/sdk/README.md).

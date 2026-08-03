@@ -18,6 +18,11 @@ const ESCAPES =
 const ESCAPES_CANONICAL =
   '{"mappings":";AACA","names":[],"sourceRoot":"https://example.com/雪/","sources":["src/escape.ts"],"sourcesContent":["line 1\\nline 2\\t\\"quoted\\"\\\\slash\\u0001"],"version":3}';
 
+const WITHOUT_SOURCES_CONTENT =
+  '{"version":3,"sources":["src/no-content.ts"],"names":[],"mappings":"AAAA"}';
+const WITHOUT_SOURCES_CONTENT_CANONICAL =
+  '{"mappings":"AAAA","names":[],"sources":["src/no-content.ts"],"version":3}';
+
 const cases = [
   {
     name: 'basic-debugid-excluded',
@@ -55,6 +60,14 @@ const cases = [
     canonical_b64: b64(BASIC_CANONICAL),
     sha256: '158399f31dad138635b298c34317d52e058db2d329438e3161b0c04bcd82b9df',
     debug_id: '158399f3-1dad-1386-35b2-98c34317d52e',
+  },
+  {
+    name: 'without-sources-content',
+    input_b64: b64(WITHOUT_SOURCES_CONTENT),
+    outcome: 'ok',
+    canonical_b64: b64(WITHOUT_SOURCES_CONTENT_CANONICAL),
+    sha256: 'd69d15a47db4e7b0137dd6845c4c4db5d6a3866056164d581670fcb0362d7230',
+    debug_id: 'd69d15a4-7db4-e7b0-137d-d6845c4c4db5',
   },
 ];
 

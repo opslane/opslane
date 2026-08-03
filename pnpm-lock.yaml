@@ -285,6 +285,9 @@ importers:
       '@opslane/agent-core':
         specifier: workspace:*
         version: link:../agent-core
+      '@opslane/sdk':
+        specifier: workspace:*
+        version: link:../sdk
       '@opslane/shared':
         specifier: workspace:*
         version: link:../../shared

@@ -12,16 +12,19 @@ WORKDIR /app
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
 COPY shared/package.json shared/
 COPY packages/agent-core/package.json packages/agent-core/
+COPY packages/sdk/package.json packages/sdk/
 COPY packages/worker/package.json packages/worker/
 
 RUN corepack enable pnpm && pnpm install --frozen-lockfile
 
 COPY shared/ shared/
 COPY packages/agent-core/ packages/agent-core/
+COPY packages/sdk/ packages/sdk/
 COPY packages/worker/ packages/worker/
 
 RUN pnpm --filter @opslane/shared build && \
     pnpm --filter @opslane/agent-core build && \
+    pnpm --filter @opslane/sdk build && \
     pnpm --filter @opslane/worker build
 
 RUN chown -R opslane:opslane /app

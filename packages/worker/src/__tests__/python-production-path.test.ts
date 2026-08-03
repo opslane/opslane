@@ -24,6 +24,14 @@ vi.mock('../poller.js', () => ({ createPoller: vi.fn(() => ({ start: vi.fn(), st
 vi.mock('../github-app.js', () => ({ getInstallationToken: vi.fn() }));
 vi.mock('../setup-pr.js', () => ({ processSetupPrJob: vi.fn() }));
 vi.mock('../source-map.js', () => ({ parseStackFrames: vi.fn(() => []), resolveFrame: vi.fn() }));
+// Only the storage-backed resolver is stubbed; framesFromEnvelope is a pure
+// reshape of an already-stored row and the real one is what index.ts calls.
+vi.mock('../resolve-stack.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../resolve-stack.js')>()),
+  resolveEventStack: vi.fn(async () => ({
+    status: 'no_debug_ids', frames: null, envelope: null,
+  })),
+}));
 vi.mock('../visual-analysis.js', () => ({ runVisualAnalysis: vi.fn() }));
 vi.mock('../ci-watch.js', () => ({ processCIWatchJob: vi.fn() }));
 vi.mock('../tracing.js', () => ({

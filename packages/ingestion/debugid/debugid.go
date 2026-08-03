@@ -26,8 +26,9 @@ func (e *Error) Error() string {
 
 // Result contains the 128-bit debug ID and the full content digest.
 type Result struct {
-	DebugID       string
-	ContentSHA256 string
+	DebugID           string
+	ContentSHA256     string
+	HasSourcesContent bool
 }
 
 // Compute validates and canonicalizes a source map before hashing it.
@@ -49,6 +50,7 @@ func Compute(input []byte) (Result, error) {
 	if err := validateSourceMap(root); err != nil {
 		return Result{}, err
 	}
+	_, hasSourcesContent := root["sourcesContent"]
 
 	delete(root, "debugId")
 	reduced, err := json.Marshal(root)
@@ -64,7 +66,8 @@ func Compute(input []byte) (Result, error) {
 	contentSHA256 := hex.EncodeToString(digest[:])
 	id := contentSHA256[:32]
 	return Result{
-		ContentSHA256: contentSHA256,
+		ContentSHA256:     contentSHA256,
+		HasSourcesContent: hasSourcesContent,
 		DebugID: fmt.Sprintf(
 			"%s-%s-%s-%s-%s",
 			id[:8],
@@ -100,12 +103,14 @@ func validateSourceMap(root map[string]json.RawMessage) error {
 	if raw, ok := root["mappings"]; !ok || json.Unmarshal(raw, &mappings) != nil {
 		return reject("bad_field_type")
 	}
-	sourcesContent, err := stringArray(root["sourcesContent"])
-	if err != nil {
-		return reject("bad_field_type")
-	}
-	if len(sources) != len(sourcesContent) {
-		return reject("sources_content_mismatch")
+	if raw, ok := root["sourcesContent"]; ok {
+		sourcesContent, err := stringArray(raw)
+		if err != nil {
+			return reject("bad_field_type")
+		}
+		if len(sources) != len(sourcesContent) {
+			return reject("sources_content_mismatch")
+		}
 	}
 	return nil
 }

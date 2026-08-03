@@ -23,7 +23,8 @@ vi.mock('../db.js', () => ({
   getEnvironmentNamesForGroup: vi.fn(async () => ({ names: [], totalCount: 0 })),
   getPlayableChunkMetas: vi.fn(),
   getReplayArtifacts: vi.fn(),
-  getSourceMaps: vi.fn(),
+  getSourceMapRows: vi.fn(async () => []),
+  setEventResolution: vi.fn(),
   requeueStaleJobs: vi.fn(),
   resolveInactiveGroups: vi.fn(),
   resolveSilentMergedGroups: vi.fn(),
@@ -59,6 +60,15 @@ vi.mock('../github-app.js', () => ({ getInstallationToken: vi.fn() }));
 vi.mock('../setup-pr.js', () => ({ processSetupPrJob: vi.fn() }));
 vi.mock('../pr.js', () => ({}));
 vi.mock('../source-map.js', () => ({ parseStackFrames: vi.fn(() => []), resolveFrame: vi.fn() }));
+// Only the storage-backed resolver is stubbed. framesFromEnvelope is a pure
+// reshape of an already-stored row, so the real one keeps this suite honest
+// about the shape the prompts actually receive.
+vi.mock('../resolve-stack.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../resolve-stack.js')>()),
+  resolveEventStack: vi.fn(async () => ({
+    status: 'no_debug_ids', frames: null, envelope: null,
+  })),
+}));
 vi.mock('../tracing.js', () => ({
   initTracing: vi.fn(),
   shutdownTracing: vi.fn(),
@@ -137,6 +147,7 @@ function makeEvent(stack: string): ErrorEventData {
     error_message: 'Script error.',
     stack_trace_raw: stack,
     stack_trace_resolved: null,
+    debug_meta: null,
     breadcrumbs: '[]',
     context: '{}',
     release: null,
@@ -246,6 +257,7 @@ describe('processFixJob — preserves writeup on failure (no revert/null)', () =
     mockGetErrorEvent.mockResolvedValue({
       id: 'e1', error_type: 'TypeError', error_message: 'x of undefined',
       stack_trace_raw: 'at App.vue:42', stack_trace_resolved: null,
+      debug_meta: null,
       breadcrumbs: '[]', context: '{}', release: null, session_id: null,
     } as ErrorEventData);
     mockGetProject.mockResolvedValue({
@@ -259,7 +271,7 @@ describe('processFixJob — preserves writeup on failure (no revert/null)', () =
     vi.mocked(db.getProjectGitHubInstallation).mockResolvedValue(null as never);
     vi.mocked(db.getReplayForGroup).mockResolvedValue(null as never);
     vi.mocked(db.getReplayArtifacts).mockResolvedValue([] as never);
-    vi.mocked(db.getSourceMaps).mockResolvedValue([] as never);
+    vi.mocked(db.getSourceMapRows).mockResolvedValue([] as never);
     vi.mocked(db.getGroupInvestigation).mockResolvedValue({ rootCause: 'null deref in App.vue', suggestedMitigation: 'guard' });
     process.env['GITHUB_TOKEN'] = 'gh-test';
   });
@@ -347,7 +359,7 @@ describe('processFixJob — preserves writeup on failure (no revert/null)', () =
       platform: 'python',
       customerRuntime: { name: 'CPython', version: '3.11.8' },
     }));
-    expect(db.getSourceMaps).not.toHaveBeenCalled();
+    expect(db.getSourceMapRows).not.toHaveBeenCalled();
   });
 
   it('rethrows verification infrastructure errors while the job has retries remaining', async () => {
@@ -453,7 +465,7 @@ describe('friction worker path', () => {
 
     expect(mockGetErrorEvent).not.toHaveBeenCalled();
     expect(db.getReplayForGroup).not.toHaveBeenCalled();
-    expect(db.getSourceMaps).not.toHaveBeenCalled();
+    expect(db.getSourceMapRows).not.toHaveBeenCalled();
     expect(db.updateGroupAndCreateFixJob).not.toHaveBeenCalled();
     expect(db.updateGroupInvestigation).toHaveBeenCalledWith(
       'grp-1', 'proj-1', 'awaiting_approval', expect.objectContaining({ confidence: 'high' }),

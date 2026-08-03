@@ -93,6 +93,10 @@ func NewRouterWithPool(deps *Dependencies, pool *pgxpool.Pool) *chi.Mux {
 		r.With(ingestKey, rateLimitByProject(eventsLimiter)).Post("/ingest/ping",
 			func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
 
+		// Source-map uploads use the secret, sourcemaps-scoped project key.
+		sourcemapKey := deps.ProjectKey(db.ScopeSourcemaps)
+		r.With(sourcemapKey, sourcemapRateLimit(sourcemapsLimiter)).Put("/sourcemaps/{debugID}", deps.UploadSourceMap)
+
 		// Session-authenticated endpoints (dashboard + CLI)
 		r.With(deps.AuthenticateUserSession).Get("/auth/me", deps.AuthMe)
 		r.With(deps.AuthenticateUserSession).Get("/auth/verify", deps.AuthVerify)

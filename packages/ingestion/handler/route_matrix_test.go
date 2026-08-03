@@ -29,11 +29,12 @@ const (
 )
 
 type matrixRoute struct {
-	method  string
-	pattern string
-	path    string
-	body    string
-	read    bool
+	method    string
+	pattern   string
+	path      string
+	body      string
+	read      bool
+	sourcemap bool
 }
 
 type matrixEnvironment struct {
@@ -130,18 +131,21 @@ func TestRouteMatrixDenyByDefault(t *testing.T) {
 
 	routes := []matrixRoute{
 		{http.MethodPost, "/api/v1/events", "/api/v1/events",
-			`{"timestamp":"2026-07-30T00:00:00Z","error":{"type":"Error","message":"matrix","stack":"at x (a.js:1:1)"}}`, false},
+			`{"timestamp":"2026-07-30T00:00:00Z","error":{"type":"Error","message":"matrix","stack":"at x (a.js:1:1)"}}`, false, false},
 		{http.MethodPost, "/api/v1/replays/init", "/api/v1/replays/init",
-			`{"session_id":"matrix-replay","trigger_type":"manual"}`, false},
-		{http.MethodPost, "/api/v1/replays/{replayID}/complete", "/api/v1/replays/00000000-0000-0000-0000-000000000000/complete", `{}`, false},
-		{http.MethodPost, "/api/v1/replays/{replayID}/fail", "/api/v1/replays/00000000-0000-0000-0000-000000000000/fail", `{}`, false},
+			`{"session_id":"matrix-replay","trigger_type":"manual"}`, false, false},
+		{http.MethodPost, "/api/v1/replays/{replayID}/complete", "/api/v1/replays/00000000-0000-0000-0000-000000000000/complete", `{}`, false, false},
+		{http.MethodPost, "/api/v1/replays/{replayID}/fail", "/api/v1/replays/00000000-0000-0000-0000-000000000000/fail", `{}`, false, false},
 		{http.MethodPost, "/api/v1/sessions/init", "/api/v1/sessions/init",
-			`{"session_id":"matrix-session"}`, false},
-		{http.MethodPost, "/api/v1/sessions/{sessionID}/chunks/{seq}", "/api/v1/sessions/matrix-session/chunks/0", `{}`, false},
-		{http.MethodPost, "/api/v1/ingest/ping", "/api/v1/ingest/ping", ``, false},
-		{http.MethodGet, "/api/v1/projects/{projectID}/event-count", "/api/v1/projects/" + env.projectID + "/event-count", ``, true},
-		{http.MethodGet, "/api/v1/projects/{projectID}/incidents", "/api/v1/projects/" + env.projectID + "/incidents", ``, true},
-		{http.MethodGet, "/api/v1/projects/{projectID}/incidents/{incidentID}", "/api/v1/projects/" + env.projectID + "/incidents/00000000-0000-0000-0000-000000000000", ``, true},
+			`{"session_id":"matrix-session"}`, false, false},
+		{http.MethodPost, "/api/v1/sessions/{sessionID}/chunks/{seq}", "/api/v1/sessions/matrix-session/chunks/0", `{}`, false, false},
+		{http.MethodPost, "/api/v1/ingest/ping", "/api/v1/ingest/ping", ``, false, false},
+		{method: http.MethodPut, pattern: "/api/v1/sourcemaps/{debugID}",
+			path: "/api/v1/sourcemaps/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+			body: `{}`, sourcemap: true},
+		{http.MethodGet, "/api/v1/projects/{projectID}/event-count", "/api/v1/projects/" + env.projectID + "/event-count", ``, true, false},
+		{http.MethodGet, "/api/v1/projects/{projectID}/incidents", "/api/v1/projects/" + env.projectID + "/incidents", ``, true, false},
+		{http.MethodGet, "/api/v1/projects/{projectID}/incidents/{incidentID}", "/api/v1/projects/" + env.projectID + "/incidents/00000000-0000-0000-0000-000000000000", ``, true, false},
 	}
 
 	credentials := []matrixCredential{
@@ -168,6 +172,25 @@ func TestRouteMatrixDenyByDefault(t *testing.T) {
 					if credential != matrixNone && credential != matrixSession &&
 						code != "invalid_api_key" {
 						t.Fatalf("read rejection code=%q, want invalid_api_key", code)
+					}
+					return
+				}
+
+				if route.sourcemap {
+					if credential == matrixSK {
+						if status == http.StatusUnauthorized || status == http.StatusForbidden {
+							t.Fatalf("valid source-map key failed authentication: status=%d code=%q", status, code)
+						}
+						return
+					}
+					if credential == matrixPK || credential == matrixOtherPK {
+						if status != http.StatusForbidden || code != "insufficient_scope" {
+							t.Fatalf("ingest key status/code=%d/%q, want 403/insufficient_scope", status, code)
+						}
+						return
+					}
+					if status != http.StatusUnauthorized || code != "invalid_api_key" {
+						t.Fatalf("%s status/code=%d/%q, want 401/invalid_api_key", credential, status, code)
 					}
 					return
 				}
@@ -223,6 +246,7 @@ func TestRouteMatrixCoversEveryProjectKeyRoute(t *testing.T) {
 		"POST /api/v1/sessions/init":                     true,
 		"POST /api/v1/sessions/{sessionID}/chunks/{seq}": true,
 		"POST /api/v1/ingest/ping":                       true,
+		"PUT /api/v1/sourcemaps/{debugID}":               true,
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("project-key routes = %#v, want %#v", got, want)

@@ -274,14 +274,20 @@ function validateSourceMap(value: JsonValue): asserts value is JsonObject {
     !sources.values.every((entry) => typeof entry === 'string') ||
     !isArray(names) ||
     !names.values.every((entry) => typeof entry === 'string') ||
-    typeof mappings !== 'string' ||
-    !isArray(sourcesContent) ||
-    !sourcesContent.values.every((entry) => typeof entry === 'string')
+    typeof mappings !== 'string'
   ) {
     throw new DebugIdError('bad_field_type');
   }
-  if (sources.values.length !== sourcesContent.values.length) {
-    throw new DebugIdError('sources_content_mismatch');
+  if (sourcesContent !== undefined) {
+    if (
+      !isArray(sourcesContent) ||
+      !sourcesContent.values.every((entry) => typeof entry === 'string')
+    ) {
+      throw new DebugIdError('bad_field_type');
+    }
+    if (sources.values.length !== sourcesContent.values.length) {
+      throw new DebugIdError('sources_content_mismatch');
+    }
   }
 }
 

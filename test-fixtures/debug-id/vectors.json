@@ -34,6 +34,14 @@
       "debug_id": "158399f3-1dad-1386-35b2-98c34317d52e"
     },
     {
+      "name": "without-sources-content",
+      "input_b64": "eyJ2ZXJzaW9uIjozLCJzb3VyY2VzIjpbInNyYy9uby1jb250ZW50LnRzIl0sIm5hbWVzIjpbXSwibWFwcGluZ3MiOiJBQUFBIn0=",
+      "outcome": "ok",
+      "canonical_b64": "eyJtYXBwaW5ncyI6IkFBQUEiLCJuYW1lcyI6W10sInNvdXJjZXMiOlsic3JjL25vLWNvbnRlbnQudHMiXSwidmVyc2lvbiI6M30=",
+      "sha256": "d69d15a47db4e7b0137dd6845c4c4db5d6a3866056164d581670fcb0362d7230",
+      "debug_id": "d69d15a4-7db4-e7b0-137d-d6845c4c4db5"
+    },
+    {
       "name": "reject-bom",
       "input_b64": "77u/eyJ2ZXJzaW9uIjozLCJzb3VyY2VzIjpbXSwibmFtZXMiOltdLCJtYXBwaW5ncyI6IiIsInNvdXJjZXNDb250ZW50IjpbXX0=",
       "outcome": "reject",

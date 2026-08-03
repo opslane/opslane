@@ -1,0 +1,208 @@
+import { computeDebugId } from '@opslane/sdk/build/debug-id';
+import type { ResolvedStackEnvelope } from './db.js';
+import {
+  isParseableMap,
+  parseStackFrames,
+  resolveFrame,
+  type ResolvedFrame,
+  type StackFrame,
+} from './source-map.js';
+
+const MAX_FRAMES = 10;
+const DEBUG_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+export type ResolutionStatus =
+  | 'resolved'
+  | 'partial'
+  | 'no_debug_ids'
+  | 'map_not_found'
+  | 'invalid_map'
+  | 'resolution_failed';
+
+export interface StackResolution {
+  status: ResolutionStatus;
+  frames: ResolvedFrame[] | null;
+  envelope: ResolvedStackEnvelope | null;
+}
+
+export interface SourceMapRow {
+  debug_id: string;
+  object_key: string;
+  content_sha256: string;
+}
+
+export interface ResolveDeps {
+  getMapRows(projectId: string, debugIds: string[]): Promise<SourceMapRow[]>;
+  fetchMap(objectKey: string): Promise<string | null>;
+}
+
+interface DebugImage {
+  type: 'sourcemap';
+  code_file: string;
+  debug_id: string;
+}
+
+function parseImages(debugMeta: string | null): DebugImage[] {
+  if (!debugMeta) return [];
+  try {
+    const parsed = JSON.parse(debugMeta) as unknown;
+    if (typeof parsed !== 'object' || parsed === null) return [];
+    const images = (parsed as { images?: unknown }).images;
+    if (!Array.isArray(images)) return [];
+    return images.filter((image): image is DebugImage => {
+      if (typeof image !== 'object' || image === null) return false;
+      const candidate = image as Record<string, unknown>;
+      return candidate['type'] === 'sourcemap'
+        && typeof candidate['code_file'] === 'string'
+        && typeof candidate['debug_id'] === 'string'
+        && DEBUG_ID.test(candidate['debug_id']);
+    });
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Read frames a previous job stored, in the shape the prompts already use.
+ *
+ * `stack_trace_resolved` holds the pinned v1 envelope (snake_case, with the
+ * generated position and debug ID for auditing); the prompt builders receive
+ * `ResolvedFrame[]`. Both get serialized straight into the model's context, so
+ * handing over the raw envelope would put two different schemas under the same
+ * "Resolved Stack Trace" heading depending on which branch produced it.
+ */
+export function framesFromEnvelope(stored: unknown): ResolvedFrame[] | null {
+  if (typeof stored !== 'object' || stored === null) return null;
+  const frames = (stored as { frames?: unknown }).frames;
+  if (!Array.isArray(frames)) return null;
+  const mapped: ResolvedFrame[] = [];
+  for (const frame of frames) {
+    if (typeof frame !== 'object' || frame === null) continue;
+    const candidate = frame as Record<string, unknown>;
+    const file = candidate['original_file'];
+    const line = candidate['original_line'];
+    const column = candidate['original_column'];
+    if (
+      typeof file !== 'string'
+      || typeof line !== 'number'
+      || typeof column !== 'number'
+    ) {
+      continue;
+    }
+    const snippet = candidate['source_snippet'];
+    mapped.push({
+      originalFile: file,
+      originalLine: line,
+      originalColumn: column,
+      sourceSnippet: typeof snippet === 'string' ? snippet : null,
+    });
+  }
+  return mapped.length > 0 ? mapped : null;
+}
+
+export async function resolveEventStack(
+  input: { stackTraceRaw: string; debugMeta: string | null; projectId: string },
+  deps: ResolveDeps,
+): Promise<StackResolution> {
+  try {
+    const images = parseImages(input.debugMeta);
+    if (images.length === 0) {
+      return { status: 'no_debug_ids', frames: null, envelope: null };
+    }
+
+    const byCodeFile = new Map(
+      images.map((image) => [image.code_file, image.debug_id]),
+    );
+    const matched = parseStackFrames(input.stackTraceRaw)
+      .map((frame) => ({ frame, debugId: byCodeFile.get(frame.file) }))
+      .filter(
+        (entry): entry is { frame: StackFrame; debugId: string } =>
+          entry.debugId !== undefined,
+      )
+      .slice(0, MAX_FRAMES);
+    if (matched.length === 0) {
+      return { status: 'no_debug_ids', frames: null, envelope: null };
+    }
+
+    const rows = await deps.getMapRows(
+      input.projectId,
+      [...new Set(matched.map(({ debugId }) => debugId))],
+    );
+    if (rows.length === 0) {
+      return { status: 'map_not_found', frames: null, envelope: null };
+    }
+    const rowByDebugID = new Map(rows.map((row) => [row.debug_id, row]));
+    const mapCache = new Map<string, string | null>();
+    const resolved: ResolvedFrame[] = [];
+    const envelopeFrames: ResolvedStackEnvelope['frames'] = [];
+    let fetchedAny = false;
+    let sawValidMap = false;
+
+    for (const { frame, debugId } of matched) {
+      const row = rowByDebugID.get(debugId);
+      if (!row) continue;
+
+      let mapContent = mapCache.get(row.object_key);
+      if (mapContent === undefined) {
+        // Scoped to the one object. A stack usually spans several chunks, and
+        // letting a single unreachable map reach the function-wide catch would
+        // discard every frame the other maps could still resolve.
+        try {
+          mapContent = await deps.fetchMap(row.object_key);
+        } catch {
+          mapContent = null;
+        }
+        if (mapContent !== null) {
+          fetchedAny = true;
+          try {
+            const { contentSha256 } = await computeDebugId(
+              new TextEncoder().encode(mapContent),
+            );
+            if (contentSha256 !== row.content_sha256) mapContent = null;
+          } catch {
+            mapContent = null;
+          }
+        }
+        mapCache.set(row.object_key, mapContent);
+      }
+      if (mapContent === null) continue;
+
+      const result = resolveFrame(
+        { ...frame, column: Math.max(0, frame.column - 1) },
+        mapContent,
+      );
+      if (result) {
+        sawValidMap = true;
+        resolved.push(result);
+        envelopeFrames.push({
+          original_file: result.originalFile,
+          original_line: result.originalLine,
+          original_column: result.originalColumn,
+          source_snippet: result.sourceSnippet,
+          generated_file: frame.file,
+          generated_line: frame.line,
+          generated_column: frame.column,
+          debug_id: debugId,
+        });
+      } else if (isParseableMap(mapContent)) {
+        sawValidMap = true;
+      }
+    }
+
+    const envelope: ResolvedStackEnvelope | null = envelopeFrames.length > 0
+      ? { version: 1, frames: envelopeFrames }
+      : null;
+    if (resolved.length === matched.length) {
+      return { status: 'resolved', frames: resolved, envelope };
+    }
+    if (resolved.length > 0) {
+      return { status: 'partial', frames: resolved, envelope };
+    }
+    if (fetchedAny && !sawValidMap) {
+      return { status: 'invalid_map', frames: null, envelope: null };
+    }
+    return { status: 'resolution_failed', frames: null, envelope: null };
+  } catch {
+    return { status: 'resolution_failed', frames: null, envelope: null };
+  }
+}

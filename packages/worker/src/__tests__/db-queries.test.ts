@@ -19,7 +19,8 @@ import {
   getSessionPointerForGroup,
   getPlayableChunkMetas,
   getReplayArtifacts,
-  getSourceMaps,
+  getSourceMapRows,
+  setEventResolution,
   requeueStaleJobs,
   getFrictionSignalsForGroup,
   getScrubbedChunksForSession,
@@ -265,6 +266,7 @@ describe('getErrorEvent', () => {
       rows: [{
         id: 'e1', error_type: 'TypeError', error_message: 'x is not defined',
         stack_trace_raw: 'at foo.js:1', stack_trace_resolved: null,
+        debug_meta: null,
         breadcrumbs: '[]', context: '{}', release: 'v1.0.0', session_id: 'sess-1',
       }],
     });
@@ -274,6 +276,7 @@ describe('getErrorEvent', () => {
     }));
     expect(mockQuery.mock.calls[0][0]).toContain('breadcrumbs::text AS breadcrumbs');
     expect(mockQuery.mock.calls[0][0]).toContain('context::text AS context');
+    expect(mockQuery.mock.calls[0][0]).toContain('debug_meta::text AS debug_meta');
     expect(mockQuery.mock.calls[0][1]).toEqual(['e1', 'p1']);
   });
 });
@@ -374,22 +377,61 @@ describe('getReplayArtifacts', () => {
   });
 });
 
-describe('getSourceMaps', () => {
+describe('source-map resolution queries', () => {
   beforeEach(() => mockQuery.mockReset());
 
-  it('returns source map entries for release', async () => {
+  it('returns project-scoped rows for debug IDs', async () => {
     mockQuery.mockResolvedValueOnce({
-      rows: [{ id: 's1', filename: 'main.js', object_key: 'sourcemaps/p1/v1/main.js.map' }],
+      rows: [{
+        debug_id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+        object_key: 'sourcemaps/p1/a/map',
+        content_sha256: '1'.repeat(64),
+      }],
     });
-    const maps = await getSourceMaps('p1', 'v1.0.0');
+    const maps = await getSourceMapRows('p1', [
+      'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+    ]);
     expect(maps).toHaveLength(1);
-    expect(maps[0].filename).toBe('main.js');
+    expect(maps[0]?.object_key).toContain('sourcemaps/p1/');
+    expect(mockQuery.mock.calls[0]?.[1]).toEqual([
+      'p1',
+      ['aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'],
+    ]);
   });
 
-  it('returns empty array when no maps exist', async () => {
+  it('persists status and the pinned envelope with event and project scope', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [] });
-    const maps = await getSourceMaps('p1', 'v2.0.0');
-    expect(maps).toEqual([]);
+    await setEventResolution('e1', 'p1', 'resolved', {
+      version: 1,
+      frames: [{
+        original_file: 'src/a.ts', original_line: 1, original_column: 0,
+        source_snippet: 'source', generated_file: 'app.js',
+        generated_line: 1, generated_column: 1,
+        debug_id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      }],
+    });
+    expect(mockQuery.mock.calls[0]?.[0]).toContain(
+      'WHERE id = $1 AND project_id = $2',
+    );
+    expect(mockQuery.mock.calls[0]?.[1]?.slice(0, 3)).toEqual([
+      'e1', 'p1', 'resolved',
+    ]);
+  });
+
+  // Investigate and fix both resolve the same sample event, so a fix job
+  // running during a storage blip must not erase the frames investigate stored.
+  it('never overwrites a stored envelope with a failed re-resolution', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+    await setEventResolution('e1', 'p1', 'resolution_failed', null);
+    const sql = mockQuery.mock.calls[0]?.[0] as string;
+    expect(sql).toContain(
+      'stack_trace_resolved = COALESCE($4::jsonb, stack_trace_resolved)',
+    );
+    // The status has to move with the envelope or the pair can disagree.
+    expect(sql).toContain(
+      'WHEN $4::jsonb IS NULL AND stack_trace_resolved IS NOT NULL',
+    );
+    expect(mockQuery.mock.calls[0]?.[1]?.[3]).toBeNull();
   });
 });
 

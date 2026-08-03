@@ -197,11 +197,11 @@ jobs:
       # packages/sdk/dist on disk. This job used to be part of js, which ran
       # `pnpm -r build` first and supplied that implicitly.
       #
-      # Only the SDK is needed: it has no workspace dependencies of its own,
-      # and those two fixtures depend on nothing else in the repo. Should a
-      # future runnable snippet import another package, this job fails --
-      # it is always-on, so the gap surfaces immediately rather than rotting.
-      - run: pnpm --filter @opslane/sdk build
+      # The trailing "..." pulls in the SDK's own workspace dependencies (it
+      # has one, @opslane/shared) rather than assuming it has none. Should a
+      # future runnable snippet import another package, this job fails -- it is
+      # always-on, so the gap surfaces immediately rather than rotting.
+      - run: pnpm --filter '@opslane/sdk...' build
       - run: pnpm test:repo
 
   js:
@@ -316,7 +316,13 @@ jobs:
       # worker's harness loop now lives in @opslane/agent-core, whose exports
       # point at dist. The login browser smoke serves the dashboard's dist via
       # vite preview, so the dashboard build must exist too.
-      - run: pnpm --filter @opslane/shared --filter @opslane/agent-core --filter @opslane/worker --filter @opslane/dashboard build
+      # The trailing "..." selects each package *and its workspace
+      # dependencies*, so this list tracks package.json instead of being
+      # hand-maintained. Spelling the members out meant the worker gaining a
+      # dependency (@opslane/sdk, for debug-ID recompute) broke this job with an
+      # unresolvable-module error that no dev machine reproduces, because there
+      # dist survives from an earlier build. Same idiom as release-npm.yml.
+      - run: pnpm --filter '@opslane/worker...' --filter '@opslane/dashboard...' build
       - name: Install Playwright chromium (browser smoke)
         run: pnpm --filter @opslane/test-e2e exec playwright install --with-deps chromium
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0

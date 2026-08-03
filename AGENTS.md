@@ -31,6 +31,11 @@ pnpm test
 docker compose config --quiet
 ```
 
+Two ways that gate reports success without having run:
+
+- `pnpm test` marks database-gated suites *skipped*, not failed, when `DATABASE_URL` is unset. Export it (Compose's Postgres) before treating a green suite as proof, and read the skip count rather than the pass count.
+- `dist/` is gitignored but survives between runs, so a local build proves nothing about a clean checkout. After adding a workspace dependency, rebuild with the dists removed.
+
 - Shared types or workspace metadata: run `pnpm -r build` and affected tests.
 - CLI: run `pnpm --filter @opslane/cli build` and `pnpm --filter @opslane/cli test`.
 - Compose or health checks: validate config, start services, and inspect health. Build any affected Compose image after Dockerfile changes.

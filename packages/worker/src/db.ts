@@ -1041,6 +1041,7 @@ export interface ErrorEventData {
   error_message: string;
   stack_trace_raw: string;
   stack_trace_resolved: unknown;
+  debug_meta: string | null;
   breadcrumbs: string;
   context: string;
   release: string | null;
@@ -1052,6 +1053,7 @@ export async function getErrorEvent(eventId: string, projectId: string): Promise
   const pool = getPool();
   const { rows } = await pool.query<ErrorEventData>(
     `SELECT id, error_type, error_message, stack_trace_raw, stack_trace_resolved,
+            debug_meta::text AS debug_meta,
             breadcrumbs::text AS breadcrumbs, context::text AS context, release, session_id, platform
      FROM error_events WHERE id = $1 AND project_id = $2`,
     [eventId, projectId],
@@ -1291,20 +1293,75 @@ export async function getReplayArtifacts(replayId: string, projectId: string): P
   return rows;
 }
 
-export interface SourceMapEntry {
-  id: string;
-  filename: string;
+export interface SourceMapRow {
+  debug_id: string;
   object_key: string;
+  content_sha256: string;
 }
 
-export async function getSourceMaps(projectId: string, release: string): Promise<SourceMapEntry[]> {
+export async function getSourceMapRows(
+  projectId: string,
+  debugIds: string[],
+): Promise<SourceMapRow[]> {
   const pool = getPool();
-  const { rows } = await pool.query<SourceMapEntry>(
-    `SELECT id, filename, object_key
-     FROM source_maps WHERE project_id = $1 AND release = $2`,
-    [projectId, release],
+  const { rows } = await pool.query<SourceMapRow>(
+    `SELECT debug_id, object_key, content_sha256
+     FROM sourcemap_files WHERE project_id = $1 AND debug_id = ANY($2)`,
+    [projectId, debugIds],
   );
   return rows;
+}
+
+export interface ResolvedStackEnvelope {
+  version: 1;
+  frames: {
+    original_file: string;
+    original_line: number;
+    original_column: number;
+    source_snippet: string | null;
+    generated_file: string;
+    generated_line: number;
+    generated_column: number;
+    debug_id: string;
+  }[];
+}
+
+/**
+ * Record one resolution outcome, without ever destroying a better one.
+ *
+ * Both the investigate and the fix job resolve the same sample event, so this
+ * runs more than once per event and the two runs can disagree. Resolution
+ * depends on object storage, so the disagreement is usually a transient fetch
+ * failure rather than new information: a fix job running while MinIO blinks
+ * would otherwise overwrite a stored envelope with NULL and downgrade a
+ * `resolved` event to `resolution_failed`, losing frames nothing recomputes.
+ *
+ * A run that produced no envelope therefore leaves a stored one alone, and the
+ * status stays with it so the pair can never describe different outcomes.
+ */
+export async function setEventResolution(
+  eventId: string,
+  projectId: string,
+  status: string,
+  envelope: ResolvedStackEnvelope | null,
+): Promise<void> {
+  const pool = getPool();
+  await pool.query(
+    `UPDATE error_events
+     SET resolution_status = CASE
+           WHEN $4::jsonb IS NULL AND stack_trace_resolved IS NOT NULL
+             THEN resolution_status
+           ELSE $3
+         END,
+         stack_trace_resolved = COALESCE($4::jsonb, stack_trace_resolved)
+     WHERE id = $1 AND project_id = $2`,
+    [
+      eventId,
+      projectId,
+      status,
+      envelope === null ? null : JSON.stringify(envelope),
+    ],
+  );
 }
 
 // === Investigation lifecycle queries ===

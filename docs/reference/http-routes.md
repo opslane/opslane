@@ -44,6 +44,12 @@ The agent callback requires `code`, `installation_id`, and UUID `state`; definit
 | POST | `/api/v1/sessions/{sessionID}/chunks/{seq}` | yes | Store and commit one gzipped replay chunk (max 5MiB) |
 | POST | `/api/v1/ingest/ping` | no | Verify that a public ingest key still authenticates; returns 204 without project data |
 
+## Source-map upload (X-API-Key)
+
+| Method | Path | Auth | Purpose |
+| --- | --- | --- | --- |
+| PUT | `/api/v1/sourcemaps/{debugID}` | secret source-map key | Upload one immutable source map after server-side debug-ID verification |
+
 ## Session (dashboard/CLI)
 
 | Method | Path | Purpose |

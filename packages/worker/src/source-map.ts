@@ -20,6 +20,18 @@ export interface StackFrame {
   column: number;
 }
 
+/** True when the content constructs a usable TraceMap. */
+export function isParseableMap(sourceMapContent: string): boolean {
+  try {
+    new TraceMap(
+      JSON.parse(sourceMapContent) as ConstructorParameters<typeof TraceMap>[0],
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Extracts structured stack frames from a raw stack trace string.
  * Handles V8 formats:

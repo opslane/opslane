@@ -1444,16 +1444,6 @@ func (q *Queries) CompleteReplay(ctx context.Context, replayID string, signals s
 	return tx.Commit(ctx)
 }
 
-// InsertSourceMap upserts a source map entry.
-func (q *Queries) InsertSourceMap(ctx context.Context, projectID, release, filename, objectKey string) error {
-	_, err := q.pool.Exec(ctx,
-		`INSERT INTO source_maps (project_id, release, filename, object_key)
-		 VALUES ($1, $2, $3, $4)
-		 ON CONFLICT (project_id, release, filename) DO UPDATE SET object_key = $4, uploaded_at = now()`,
-		projectID, release, filename, objectKey)
-	return err
-}
-
 // UpdateErrorGroupStatus updates the status of an error group.
 // If status is 'needs_human', reason fields are required.
 type StatusUpdate struct {

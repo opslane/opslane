@@ -67,3 +67,32 @@ func TestCompute(t *testing.T) {
 		})
 	}
 }
+
+func TestComputeWithoutSourcesContent(t *testing.T) {
+	input := []byte(`{"version":3,"sources":["a.ts"],"names":[],"mappings":"AAAA"}`)
+	result, err := Compute(input)
+	if err != nil {
+		t.Fatalf("expected acceptance without sourcesContent, got %v", err)
+	}
+	if result.HasSourcesContent {
+		t.Fatal("HasSourcesContent must be false when the field is absent")
+	}
+}
+
+func TestComputeSourcesContentPresent(t *testing.T) {
+	input := []byte(`{"version":3,"sources":["a.ts"],"sourcesContent":["x"],"names":[],"mappings":"AAAA"}`)
+	result, err := Compute(input)
+	if err != nil {
+		t.Fatalf("expected acceptance, got %v", err)
+	}
+	if !result.HasSourcesContent {
+		t.Fatal("HasSourcesContent must be true when the field is present")
+	}
+}
+
+func TestComputeSourcesContentLengthMismatchStillRejected(t *testing.T) {
+	input := []byte(`{"version":3,"sources":["a.ts","b.ts"],"sourcesContent":["x"],"names":[],"mappings":"AAAA"}`)
+	if _, err := Compute(input); err == nil {
+		t.Fatal("expected sources_content_mismatch rejection")
+	}
+}

@@ -85,8 +85,11 @@ type Dependencies struct {
 	resetSessionStore passwordResetSessionStore
 	Health            *HealthChecker
 	MinIO             *minioPkg.Client
-	JWTSecret         []byte
-	PendingCipher     *auth.PendingCipher
+	// SourcemapStore is a narrow upload-handler test seam. Production falls
+	// back to MinIO when it is nil.
+	SourcemapStore objectStore
+	JWTSecret      []byte
+	PendingCipher  *auth.PendingCipher
 	// AuthProvider is selected explicitly at boot. Nil retains the OSS GitHub
 	// default for narrow tests that construct Dependencies directly.
 	AuthProvider auth.AuthProvider

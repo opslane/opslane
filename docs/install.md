@@ -32,13 +32,13 @@ NEXT_PUBLIC_OPSLANE_API_KEY=<your Opslane ingest key>
 NEXT_PUBLIC_OPSLANE_RELEASE=<your git SHA>
 ```
 
-`release` should match the source maps you upload for that deploy. In CI, use the commit SHA or another immutable build identifier.
+`release` is optional deployment metadata; source maps match events by debug ID.
 
-For Vite production builds, configure the currently published
-`opslaneSourceMapPlugin` and verify the output/upload as described in the
-[source-map guide](guides/source-maps.md). Debug-ID stamping is present in this
-repository but its new plugin export is not part of the published 2.0.1
-package, so keep the legacy setup until a package release announces it.
+For Vite production builds, add `opslane()` from
+`@opslane/sdk/vite-plugin`, set private `OPSLANE_ENDPOINT` and
+`OPSLANE_SOURCEMAP_KEY` build variables, and verify the upload as described in
+the [source-map guide](guides/source-maps.md). Never expose the secret key with
+a `VITE_` or other browser-public prefix.
 
 ## Manual Fallback
 

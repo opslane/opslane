@@ -4,6 +4,25 @@
 
 **Status:** frozen
 
+## Amendment — 2026-08-03 (v1 tracer bullet)
+
+Implemented by `docs/plans/2026-08-03-v1-sourcemaps-simplification.md`. The
+following sections are superseded for v1; everything not listed stays frozen.
+
+| Section | Status |
+| --- | --- |
+| §3 key CRUD endpoints (3.4–3.7) | Keys are minted by `cmd/mint-key`; revocation is the documented exact-key SQL statement. |
+| §3.2 lifecycle invariants | Unchanged: minting does not revoke, and revocation is a separate explicit action. |
+| Onboarding “sk never touches disk” posture | Relaxed to “sk never enters a tracked file or bundle”; an operator-managed gitignored `.env.local` is acceptable. |
+| §5 SDK release | The uploading plugin is a major SDK change targeting 3.0.0 through Changesets. |
+| §6 map validity | `sourcesContent` is optional and recorded as `has_sources_content`; the canonical hash algorithm is unchanged. |
+| §6 per-file limit | 32 MiB of wire bytes. |
+| §7 batch protocol | Replaced by identity-encoded `PUT /api/v1/sourcemaps/{debugID}` and a process-local 60/minute per-project limiter. |
+| §8 batch tables | Replaced by `sourcemap_files` and `sourcemap_tombstones`. |
+| §9 verify and §11 status endpoints | Dropped for v1. |
+| §10 resolution persistence | `resolution_status` and `stack_trace_resolved` only. |
+| §12 deletion loop | Tombstone trigger plus documented manual purge; automatic sweeping is deferred. |
+
 **Parent design:** [Keys, source maps, and onboarding](./2026-07-29-keys-sourcemaps-onboarding.md)
 
 This appendix is the implementation boundary between ingestion, the browser SDK,
