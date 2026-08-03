@@ -17,11 +17,12 @@ export default defineConfig({
         index: resolve(__dirname, 'src/index.ts'),
         react: resolve(__dirname, 'src/react.tsx'),
         'vite-plugin': resolve(__dirname, 'vite-plugin/index.ts'),
+        'build/debug-id': resolve(__dirname, 'src/build/debug-id.ts'),
       },
       formats: ['es'],
     },
     rollupOptions: {
-      external: ['vue', 'react', 'react-dom', 'react/jsx-runtime'],
+      external: ['vue', 'react', 'react-dom', 'react/jsx-runtime', 'vite'],
     },
     sourcemap: false,
     outDir: 'dist',

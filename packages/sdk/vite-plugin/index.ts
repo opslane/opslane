@@ -1,6 +1,10 @@
 import type { Plugin, UserConfig } from 'vite';
 import { computeDebugId } from '../src/build/debug-id.js';
 import {
+  uploadSourceMaps,
+  type UploadEntry,
+} from './upload.js';
+import {
   COMMIT_SHA_GLOBAL,
   DEBUG_ID_PLACEHOLDER,
   REGISTRY_GLOBAL,
@@ -92,6 +96,8 @@ export function opslaneVitePlugin(
   // Per-build state. Cleared at buildStart so watch rebuilds and multiple
   // outputs never verify against a previous build's fingerprints.
   const stampedIds = new Map<string, string>();
+  /** Final stamped map bytes, used when the privacy mode removes maps. */
+  const uploadPayloads = new Map<string, UploadEntry>();
   /** Maps removed from the bundle, re-checked on disk after the build writes. */
   const discardedMaps = new Set<string>();
   const loggedCodes = new Set<string>();
@@ -101,6 +107,7 @@ export function opslaneVitePlugin(
   /** True when this plugin, not the project, switched source maps on. */
   let pluginRequestedMaps = false;
   let projectRoot: string | undefined;
+  let fileEnv: Record<string, string> = {};
   /** Where the build wrote, captured so closeBundle can re-read it. */
   let writtenDir: string | undefined;
   let outDir = 'dist';
@@ -236,6 +243,40 @@ export function opslaneVitePlugin(
     );
   };
 
+  /** Re-read retained maps at upload time and only send bytes that still
+   * match the debug ID stamped into their JavaScript. */
+  const collectVerifiedFromDisk = async (): Promise<UploadEntry[]> => {
+    const readFileSync = nodeFs()?.readFileSync;
+    if (!writtenDir || !readFileSync) return [];
+    const entries: UploadEntry[] = [];
+    for (const [fileName, expectedID] of stampedIds) {
+      if (
+        stats.verifyFailed.some((failure) => failure.startsWith(fileName))
+      ) {
+        continue;
+      }
+      try {
+        const bytes = readFileSync(`${writtenDir}/${fileName}`);
+        const { debugId } = await computeDebugId(bytes);
+        if (debugId !== expectedID) {
+          warnOnce(
+            'OPSLANE_VITE_UPLOAD_STALE_MAP',
+            `${fileName} changed on disk after verification; skipping its upload.`,
+          );
+          continue;
+        }
+        entries.push({
+          debugId,
+          mapSource: new TextDecoder().decode(bytes),
+          fileName,
+        });
+      } catch {
+        // A later plugin may have removed a map after writeBundle.
+      }
+    }
+    return entries;
+  };
+
   /** The build summary's source-map sentence. */
   const describeMaps = (): string => {
     if (sourcemapSetting === 'false') return 'Source maps: disabled.';
@@ -278,6 +319,9 @@ export function opslaneVitePlugin(
     if (!stampingEnabled) return;
     if (!JS_ASSET.test(value.fileName)) return;
     if (typeof value.source !== 'string') return;
+    if (!mapsWillShip()) {
+      value.source = stripSourceMappingURLDirectives(value.source);
+    }
 
     const mapKey = `${value.fileName}.map`;
     const mapAsset = (bundle as Record<string, MapAsset | undefined>)[mapKey];
@@ -316,6 +360,13 @@ export function opslaneVitePlugin(
       if (debugId === existing[1]) {
         stats.stamped++;
         settle(debugId);
+        uploadPayloads.set(mapKey, {
+          debugId,
+          mapSource: typeof mapAsset.source === 'string'
+            ? mapAsset.source
+            : new TextDecoder().decode(mapAsset.source),
+          fileName: mapKey,
+        });
         return;
       }
     } catch {
@@ -338,6 +389,11 @@ export function opslaneVitePlugin(
       mapAsset.source = stamped.mapSource;
       stats.stamped++;
       settle(stamped.debugId);
+      uploadPayloads.set(mapKey, {
+        debugId: stamped.debugId,
+        mapSource: stamped.mapSource,
+        fileName: mapKey,
+      });
     } catch (error) {
       reportStampFailure(value.fileName, error);
     }
@@ -354,6 +410,7 @@ export function opslaneVitePlugin(
       stats.skipped.clear();
       stats.verifyFailed.length = 0;
       stampedIds.clear();
+      uploadPayloads.clear();
       discardedMaps.clear();
       writtenDir = undefined;
     },
@@ -401,7 +458,7 @@ export function opslaneVitePlugin(
       return result;
     },
 
-    configResolved(config) {
+    async configResolved(config) {
       projectRoot = canonicalFilesystemPath(config.root);
       outDir = isAbsolutePath(config.build.outDir)
         ? canonicalFilesystemPath(config.build.outDir)
@@ -416,6 +473,14 @@ export function opslaneVitePlugin(
           `[opslane] OPSLANE_VITE_SRI_DETECTED: ${detectedSRI} computes integrity before debug-ID stamping. Stamping was disabled to prevent browsers rejecting every chunk. Remove the integrity plugin or set stamp:false explicitly. See docs/guides/source-maps.md#subresource-integrity.`,
         );
       }
+      if (maxMapBytes > DEFAULT_MAX_MAP_BYTES) {
+        warnOnce(
+          'OPSLANE_VITE_MAP_OVER_SERVER_LIMIT',
+          `maxMapBytes=${formatBytes(maxMapBytes)} exceeds the server upload limit of ${formatBytes(DEFAULT_MAX_MAP_BYTES)}; larger maps will stamp but fail to upload.`,
+        );
+      }
+      const { loadEnv } = await import('vite');
+      fileEnv = loadEnv(config.mode || 'production', config.root, 'OPSLANE_');
     },
 
     // `order: 'post'` is load-bearing. Vite's own `vite:build-import-analysis`
@@ -432,6 +497,9 @@ export function opslaneVitePlugin(
         }
         stats.chunks++;
         const chunk = value;
+        if (!mapsWillShip()) {
+          chunk.code = stripSourceMappingURLDirectives(chunk.code);
+        }
 
         if (!stampingEnabled) {
           skip(
@@ -472,6 +540,11 @@ export function opslaneVitePlugin(
           // Atomic mutation: nothing above this point changes the bundle.
           chunk.code = stamped.code;
           mapAsset.source = stamped.mapSource;
+          uploadPayloads.set(mapKey, {
+            debugId: stamped.debugId,
+            mapSource: stamped.mapSource,
+            fileName: mapKey,
+          });
           // Vite and Rollup both re-serialise from `chunk.map` on some paths
           // (workers, later code rewrites), so the map object has to agree
           // with the asset or a different map reaches disk than was hashed.
@@ -527,8 +600,44 @@ export function opslaneVitePlugin(
       }
     },
 
-    closeBundle() {
+    async closeBundle() {
       reportRestoredMaps();
+
+      const key = process.env['OPSLANE_SOURCEMAP_KEY']
+        ?? fileEnv['OPSLANE_SOURCEMAP_KEY'];
+      const endpoint = process.env['OPSLANE_ENDPOINT']
+        ?? fileEnv['OPSLANE_ENDPOINT'];
+      if (key) {
+        if (!endpoint) {
+          warnOnce(
+            'OPSLANE_VITE_UPLOAD_NO_ENDPOINT',
+            'OPSLANE_SOURCEMAP_KEY is set but OPSLANE_ENDPOINT is not; skipping source-map upload.',
+          );
+        } else if (!key.startsWith('opslane_sk_')) {
+          warnOnce(
+            'OPSLANE_VITE_UPLOAD_WRONG_KEY',
+            'OPSLANE_SOURCEMAP_KEY is not an opslane_sk_ secret key; skipping source-map upload.',
+          );
+        } else {
+          const entries = mapsWillShip()
+            ? await collectVerifiedFromDisk()
+            : [...uploadPayloads.values()];
+          const outcome = await uploadSourceMaps(entries, { endpoint, key });
+          if (outcome.failed.length > 0 && logLevel !== 'silent') {
+            console.error(
+              `[opslane] OPSLANE_VITE_UPLOAD_FAILED: ${outcome.failed.length} source map(s) failed to upload; stack traces for these chunks will stay minified.`
+              + (keepSourceMaps
+                ? ' The listed .map files are still in your build output — do not deploy them.'
+                : '')
+              + `\n  ${outcome.failed.map((failure) => `${failure.fileName}: ${failure.reason}`).join('\n  ')}`,
+            );
+          }
+          if (logLevel !== 'silent') {
+            console.warn(`[opslane] Uploaded ${outcome.uploaded}/${entries.length} source maps.`);
+          }
+        }
+      }
+
       if (logLevel === 'silent') return;
       const skipped = stats.chunks - stats.stamped;
       const detail = [...stats.skipped.entries()]
@@ -589,6 +698,26 @@ export function opslaneSourceMapPlugin(_options: SourceMapPluginOptions) {
 
 function stripMapSuffix(filePath: string): string {
   return filePath.endsWith('.map') ? filePath.slice(0, -4) : filePath;
+}
+
+/**
+ * Remove standalone source-map URL directives when maps are private.
+ *
+ * Each replacement leaves the newline itself in place, so generated line
+ * numbers and the sibling map stay aligned. Anchoring to a whole trimmed line
+ * avoids corrupting libraries that parse the directive with a regex or carry
+ * the text in a string literal.
+ */
+function stripSourceMappingURLDirectives(code: string): string {
+  return code
+    .replace(
+      /^[ \t]*\/\*[@#][ \t]*sourceMappingURL[ \t]*=[^\r\n]*?\*\/[ \t]*(?=\r?$)/gm,
+      '',
+    )
+    .replace(
+      /^[ \t]*\/\/[@#][ \t]*sourceMappingURL[ \t]*=[^\r\n]*(?=\r?$)/gm,
+      '',
+    );
 }
 
 interface MapAsset {

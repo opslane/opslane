@@ -3,6 +3,7 @@ package minio
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -11,6 +12,10 @@ import (
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 )
+
+// ErrObjectNotFound reports a StatObject/GetObject miss. Callers use
+// errors.Is so storage fakes can share the concrete client's semantics.
+var ErrObjectNotFound = errors.New("object not found")
 
 // Client wraps the MinIO SDK client with bucket and endpoint configuration.
 type Client struct {
@@ -99,9 +104,16 @@ func (c *Client) PutObject(ctx context.Context, objectKey string, data []byte, c
 func (c *Client) StatObject(ctx context.Context, objectKey string) (int64, error) {
 	info, err := c.mc.StatObject(ctx, c.bucket, objectKey, minio.StatObjectOptions{})
 	if err != nil {
-		return 0, err
+		return 0, mapStatObjectError(err, objectKey)
 	}
 	return info.Size, nil
+}
+
+func mapStatObjectError(err error, objectKey string) error {
+	if minio.ToErrorResponse(err).Code == "NoSuchKey" {
+		return fmt.Errorf("%w: %s", ErrObjectNotFound, objectKey)
+	}
+	return err
 }
 
 // GetObject downloads the object at objectKey and returns its bytes. Callers should

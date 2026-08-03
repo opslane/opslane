@@ -24,6 +24,10 @@
     "./vite-plugin": {
       "types": "./dist/vite-plugin.d.ts",
       "import": "./dist/vite-plugin.js"
+    },
+    "./build/debug-id": {
+      "types": "./dist/debug-id.d.ts",
+      "import": "./dist/build/debug-id.js"
     }
   },
   "files": [

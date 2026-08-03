@@ -9,6 +9,10 @@ func RateLimitByProjectForTest(maxPerMinute int) func(http.Handler) http.Handler
 	return rateLimitByProject(newRateLimiter(maxPerMinute))
 }
 
+func SourcemapRateLimitForTest(maxPerMinute int) func(http.Handler) http.Handler {
+	return sourcemapRateLimit(newRateLimiter(maxPerMinute))
+}
+
 func WithProjectIDForTest(ctx context.Context, projectID string) context.Context {
 	return context.WithValue(ctx, ctxProjectID, projectID)
 }

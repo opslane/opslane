@@ -17,6 +17,7 @@
     "@arizeai/openinference-instrumentation-anthropic": "^0.1.15",
     "@aws-sdk/client-s3": "^3.1091.0",
     "@opslane/agent-core": "workspace:*",
+    "@opslane/sdk": "workspace:*",
     "@opslane/shared": "workspace:*",
     "@jridgewell/trace-mapping": "^0.3.31",
     "@langfuse/otel": "^5.9.1",

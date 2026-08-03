@@ -1,278 +1,170 @@
 ---
 covers:
-  - cli/src/sourcemaps.ts
-  - cli/src/codemods/vite-*.ts
+  - packages/ingestion/cmd/mint-key/**
+  - packages/ingestion/handler/sourcemap_upload.go
   - packages/sdk/vite-plugin/**
-  - packages/worker/src/source-map.ts
+  - packages/worker/src/resolve-stack.ts
 ---
 # Source maps
 
-> Source-map upload is unavailable in this release. Remove `opslaneSourceMapPlugin()` from your Vite configuration until batch upload ships in [#218](https://github.com/opslane/opslane-oss/issues/218); leaving it enabled now fails the build deliberately.
+Opslane's Vite plugin stamps each production chunk with a deterministic debug
+ID, uploads the matching source map with a secret project key, and removes the
+map from the build output by default. Browser events carry the chunk URL and
+debug ID; the worker uses that exact pair to resolve original source positions.
+The SDK's `release` option is still useful deployment metadata, but it is not
+part of source-map matching.
 
-Without source maps, production stack traces point at minified bundles and investigations can end in `sourcemap_unresolved` or `unfixable_no_sourcemap`. Batch upload is tracked in [#218](https://github.com/opslane/opslane-oss/issues/218).
-Without source maps, production stack traces point at minified bundles and
-investigations end in `sourcemap_unresolved` or `unfixable_no_sourcemap`. With
-them, the worker sees your original source.
+## Configure a Vite build
 
-## What works today
-
-| Capability | Published `@opslane/sdk@2.0.1` | This repository |
-| --- | --- | --- |
-| Upload maps by release | `opslaneSourceMapPlugin` | Supported |
-| Stamp chunks and maps with deterministic debug IDs | Not published | Implemented by the next `opslaneVitePlugin` export |
-| Send matching debug images with browser events | Not published | Implemented |
-| Resolve stored maps by debug ID | Not yet | Follow-up upload/symbolication slice |
-
-Keep using `opslaneSourceMapPlugin` in installable setup instructions until a
-package containing the new export is published. Do not copy an
-`opslaneVitePlugin` import into an application pinned to 2.0.1.
-
-## Adding the plugin
-
-`opslane sourcemaps install-plugin` makes the edit below for you. It previews
-the exact two lines, states that verifying the result executes your Vite config,
-keeps the original bytes and permissions so any failure restores the file, and
-then asks your own Vite to confirm the plugin reached the resolved build.
-
-```bash
-opslane sourcemaps install-plugin          # preview, then confirm
-opslane sourcemaps install-plugin --check  # verify a manual edit, never writes
-```
-
-Without a terminal it prints the proposal as JSON and writes nothing, so an
-agent or CI job must show that disclosure to a human before re-running with
-`--yes`. Use `--app-dir` and `--config` for a monorepo or a nonstandard
-filename. Configs it cannot edit safely are refused with the two lines to paste
-instead; nothing is written in that case either.
-
-It edits the top-level `plugins` list only. If your build has web workers, add
-the `worker.plugins` entry yourself as described in [web workers](#web-workers),
-or worker chunks ship unstamped.
-
-## Current Vite setup
-
-Do not add `opslaneSourceMapPlugin()` to Vite yet. In this release the plugin fails
-production builds immediately with a clear error, because the old single-map upload route
-has been removed and the replacement batch API is not available. It does not collect,
-delete, or upload map assets.
 ```ts
 // vite.config.ts
 import { opslane } from '@opslane/sdk/vite-plugin';
 
 export default {
   plugins: [opslane()],
-  // A web worker is a separate build pass and needs the plugin too, or its
-  // chunks ship unstamped.
+  // Workers are separate Vite build passes and need their own plugin instance.
   worker: { plugins: () => [opslane()] },
 };
 ```
 
-`opslaneSourceMapPlugin()` is gone from that list on purpose. The single-map
-route it posted to has been removed, and the batch replacement is not shipped
-yet ([#218](https://github.com/opslane/opslane-oss/issues/218)), so the plugin
-now fails the build rather than deleting your maps and uploading nothing.
-`release` no longer participates in matching at all: the debug ID replaces it.
+Set these server-side build variables in CI:
 
-## Debug-ID stamping behavior
+```bash
+OPSLANE_ENDPOINT=https://your-opslane-instance.example.com
+OPSLANE_SOURCEMAP_KEY=opslane_sk_...
+```
 
-The plugin computes a deterministic ID from each source map, writes
-the same ID to the map's root `debugId` field and the chunk's
-`//# debugId=<id>` footer, and registers the exact runtime chunk URL. The SDK
-matches stack-frame URLs against that registry and sends only exact matches in
-`debug_meta.images`.
+The plugin reads `process.env` first, then Vite's `OPSLANE_` variables from the
+project's env files. A gitignored `.env.local` therefore works for local
+production builds:
 
-You may continue sending an immutable `release` value with SDK events. Once batch upload
-ships, the value used for uploaded maps must be byte-identical to the value passed to
-`init({ release })`; a git SHA is a reliable choice.
-By default it requests hidden source maps and removes map assets after stamping.
-It respects an explicit Vite `build.sourcemap` setting:
+```dotenv
+OPSLANE_ENDPOINT=http://localhost:8082
+OPSLANE_SOURCEMAP_KEY=opslane_sk_...
+```
 
-<a id="sourcemap-mode"></a>
+Do not prefix either variable with `VITE_`, `NEXT_PUBLIC_`, or another browser
+environment prefix. The source-map key is a secret and must never enter the
+JavaScript bundle or a tracked file. Browser initialization continues to use a
+public `VITE_OPSLANE_API_KEY=opslane_pk_...` ingest key.
 
-| Vite setting | Result |
+Uploads happen during `closeBundle`. Each final map is sent with
+`PUT /api/v1/sourcemaps/{debugID}`; HTTP 200 and 201 are success. Rate-limited
+uploads honor `Retry-After`, network errors get one retry, and upload failures
+are reported without failing the production build.
+
+## Mint and revoke an upload key
+
+Self-hosted operators mint a key from the ingestion package:
+
+```bash
+cd packages/ingestion
+DATABASE_URL=postgres://... go run ./cmd/mint-key \
+  -project 00000000-0000-0000-0000-000000000000 \
+  -label "production source maps"
+```
+
+The command prints the raw `opslane_sk_` value once and prints its key ID. To
+revoke exactly that key, run the statement it prints:
+
+```sql
+UPDATE project_api_keys SET revoked_at = now() WHERE key_id = '<key-id>';
+```
+
+Minting another key does not revoke existing keys. Revocation is always an
+explicit, exact-key operation.
+
+## Map custody
+
+The default `sourcemaps: 'remove'` mode asks Vite for hidden maps, stamps them,
+uploads the final in-memory bytes, and removes the `.map` assets before deploy.
+An explicitly configured Vite source-map setting belongs to the project and is
+left in the output unless `sourcemaps: 'remove'` applies to maps the plugin
+requested itself.
+
+| Setting | Result |
 | --- | --- |
-| unset | Uses `hidden`; stamps chunks; **removes the maps it caused** |
-| `'hidden'` or `true` | Stamps; leaves your maps alone |
-| `false` | Leaves chunks unchanged and reports `OPSLANE_VITE_SOURCEMAP_DISABLED` |
-| `'inline'` | Leaves chunks unchanged and reports `OPSLANE_VITE_INLINE_MAP` |
+| Vite `build.sourcemap` unset | Generates hidden maps, stamps and uploads them, then removes them |
+| `build.sourcemap: 'hidden'` or `true` | Stamps and uploads disk-verified maps; keeps the project-owned files |
+| `build.sourcemap: false` | No map is available; emits `OPSLANE_VITE_SOURCEMAP_DISABLED` |
+| `build.sourcemap: 'inline'` | Leaves the chunk unchanged; emits `OPSLANE_VITE_INLINE_MAP` |
 
-The rule is that the plugin only cleans up after itself. With no
-`build.sourcemap` of your own, it switches maps on so there is something to
-fingerprint, then removes them again so a default install never publishes your
-source. Set `build.sourcemap` yourself and those maps are yours: the plugin
-stamps them and leaves them in the output.
+Set `opslane({ sourcemaps: 'keep' })` only when another trusted uploader needs
+the files. Retained maps can expose original source if the build directory is
+served publicly. Opslane re-reads and fingerprints every retained map at upload
+time so a later plugin cannot make the uploaded bytes disagree with the chunk.
 
-That matters if you also run a source-map uploader. Tools like
-`@sentry/vite-plugin` read the `.map` files off disk after the build writes
-them, so a plugin that deletes them first breaks the upload with a green build
-and no message. Because you had to set `build.sourcemap` to make that uploader
-work in the first place, the plugin sees an explicit setting and stays out of
-the way.
+When a project is deleted, ingestion writes a `sourcemap_tombstones` row before
+the project row disappears. Until the automatic sweeper ships, purge the
+recorded prefix manually and then remove the tombstone:
 
-Those maps then deploy with the rest of your output unless something removes
-them. That was already true before this plugin, and it stays your call: Sentry
-has `sourcemaps.filesToDeleteAfterUpload` for exactly this.
-
-<a id="web-workers"></a>
-
-### Web workers
-
-Vite builds a web worker as a separate pass with its own plugin list, then copies
-the result into the main bundle. A plugin listed only under `plugins` never runs
-for that pass, so worker chunks come out with no debug ID and errors thrown
-inside a worker cannot be symbolicated. Nothing else in the build fails, which is
-why it is easy to miss. Register the plugin in both places:
-
-```ts
-export default {
-  plugins: [opslane()],
-  worker: { plugins: () => [opslane()] },
-};
+```bash
+mc rm -r --force <bucket>/sourcemaps/<projectID>/
 ```
 
-`worker.plugins` must be a function. Vite calls it once per worker build; passing
-a shared array reuses one plugin instance across builds and its per-build
-counters go wrong.
+```sql
+DELETE FROM sourcemap_tombstones WHERE project_id = '<projectID>';
+```
 
-When the plugin finds JavaScript that no pass stamped, it reports
-`OPSLANE_VITE_ASSET_UNSTAMPED` and counts the file under `emitted without a
-debug ID` in the build summary. A worker is the usual cause, but any plugin
-that emits JavaScript alongside a map produces the same shape, so the message
-names what it can see and offers the likely reason. The map is still removed
-from the output under the default `sourcemaps: 'remove'`, so an unregistered
-worker costs you symbolication, not privacy.
+Only delete the tombstone after object removal succeeds.
 
-Removing a map from the bundle is not the same as it never reaching disk. A
-plugin ordered after this one can write it back. After the build writes, the
-plugin re-checks every map it removed and reports
-`OPSLANE_VITE_MAP_NOT_REMOVED` for any that landed anyway. It warns rather than
-deleting, because by that point the file belongs to whichever plugin restored
-it.
+## Diagnostics and limits
 
-### Supported Vite versions
+The server accepts at most 32 MiB of identity-encoded bytes per map. The plugin
+uses the same default `maxMapBytes`; raising it allows stamping but not upload
+of larger maps and emits `OPSLANE_VITE_MAP_OVER_SERVER_LIMIT`.
 
-The plugin declares `vite` as a peer on `^5 || ^6 || ^7 || ^8`, and each of those
-majors is exercised with a real `vite build` that stamps a chunk and checks the
-ID in the JavaScript against the one in its map. Vite 8 runs on Rolldown rather
-than Rollup; the plugin uses only hooks both engines implement.
+Important stable build codes include:
+
+- `OPSLANE_VITE_UPLOAD_NO_ENDPOINT`: a key is set without an endpoint.
+- `OPSLANE_VITE_UPLOAD_WRONG_KEY`: the value is not an `opslane_sk_` key.
+- `OPSLANE_VITE_UPLOAD_FAILED`: one or more maps were rejected or unavailable.
+- `OPSLANE_VITE_UPLOAD_STALE_MAP`: a retained map changed after verification.
+- `OPSLANE_VITE_MAP_VERIFY_FAILED`: disk bytes no longer match the stamped ID.
+- `OPSLANE_VITE_ASSET_UNSTAMPED`: a separate build pass, commonly a worker,
+  emitted JavaScript without running the plugin.
+- `OPSLANE_VITE_MAP_NOT_REMOVED`: another plugin restored a private map after
+  Opslane removed it from the bundle.
 
 The build options are `commitSha`, `stamp` (default `true`), `logLevel`
-(`silent` or `warn`), `sourcemaps` (`remove` or `keep`), and
-`maxMapBytes` (default 32 MiB). Each diagnostic has a stable
-`OPSLANE_VITE_*` code, and every build prints a stamped/skipped summary unless
-logging is silent.
-
-Keep generating and retaining source maps according to your deployment policy, but do not
-send them to Opslane in this release. Do not put an `opslane_sk_` source-map key or any
-other secret in a `VITE_`, `NEXT_PUBLIC_`, or browser-bundled environment variable.
-Run `opslane doctor --dist <build-output>` after a production build. The Debug
-IDs check reports how many JavaScript chunks contain the footer. Without
-`--dist`, doctor uses Vite's resolved `build.outDir`, then falls back to
-`dist/`. A missing directory means “not built yet”; a non-empty output with no
-stamps is a failure.
-
-### Output formats
-
-ES modules and script-like Rollup outputs (`iife`, `umd`, `cjs`, and `system`)
-receive a safe registry prelude. Other formats are left unchanged with
-`OPSLANE_VITE_FORMAT_UNSUPPORTED`.
-
-### Map size limit
-
-There is no upload to verify until #218 ships. If `opslaneSourceMapPlugin()` remains in a
-Vite configuration, `vite build` must fail rather than silently deleting maps or reporting
-a successful upload.
-
-## Other bundlers
-
-No other bundler has a supported upload path in this release.
-Maps larger than `maxMapBytes` are left unchanged so a pathological asset cannot
-stall the build. Raise the limit only when the map is expected and the build
-machine has sufficient memory.
+(`silent` or `warn`), `sourcemaps` (`remove` or `keep`), and `maxMapBytes`
+(default 32 MiB).
 
 ### Plugin order
 
-The debug-ID plugin must see each chunk and its sibling `.map` asset. Place it
-before any plugin that removes or renames maps. A missing sibling produces
-`OPSLANE_VITE_MAP_MISSING`.
+The plugin fingerprints in a post-ordered `generateBundle` hook so Vite has
+finished rewriting chunks. Place it before plugins that remove or rename maps.
+If another uploader needs maps, configure Vite to retain them and let that
+uploader delete them after its own successful upload.
 
-The plugin fingerprints in a `generateBundle` hook declared `order: 'post'`.
-That is deliberate: Vite's own `vite:build-import-analysis` rewrites chunk code
-during `generateBundle` and re-serialises the sibling map from `chunk.map`,
-discarding anything an earlier hook wrote. Fingerprinting last is the only way
-the map that reaches disk is the map that was hashed. A plugin that removes maps
-should therefore also declare `order: 'post'` (the deprecated
-`opslaneSourceMapPlugin` does) so that "place Opslane first" still holds.
+### Web workers
 
-### Verification
-
-After the files are written, the plugin reads each shipped `.map` back off disk
-and recomputes its fingerprint. A map that no longer matches the ID stamped into
-its JavaScript would be rejected on upload, so it is reported at error level with
-the stable code `OPSLANE_VITE_MAP_VERIFY_FAILED`, listed by file name, and
-counted in the build summary. The build still exits `0`: a broken fingerprint is
-an Opslane defect to fix, not a reason to block a deploy. Maps that another
-plugin deliberately removed from the bundle are not verified.
+Vite builds workers separately. Register `opslane()` under both `plugins` and
+`worker.plugins`; `worker.plugins` must be a function returning a fresh plugin
+instance.
 
 ### Subresource integrity
 
-Stamping changes chunk bytes. Known SRI plugins that calculate integrity first
-would make browsers reject the result, so detection disables stamping and emits
-`OPSLANE_VITE_SRI_DETECTED`. Do not combine the plugins until integrity is
-calculated after the final stamped bytes; use `stamp: false` when integrity is
-required.
+Stamping changes chunk bytes. Known SRI plugins that calculate integrity too
+early disable stamping and emit `OPSLANE_VITE_SRI_DETECTED`. Calculate SRI only
+after the final stamped bytes, or use `stamp: false`.
 
-## Migration matrix
+## Verify resolution
 
-The repository's plugin tests cover all four configurations:
-
-| Configuration | Plugin order | Result |
-| --- | --- | --- |
-| Legacy only | `opslaneSourceMapPlugin()` | Existing release-keyed upload remains unchanged |
-| New only | forthcoming debug-ID plugin | Chunks/maps are stamped; maps are kept or removed by its option |
-| Both | debug-ID plugin, then legacy upload plugin | Stamped maps remain available to the legacy uploader; the new plugin retains them for coexistence |
-| Sentry | Opslane debug-ID plugin before `sentryVitePlugin()` | Sentry receives final Opslane-stamped maps; keep Opslane before Sentry and do not add an earlier SRI pass |
-
-The “both” configuration is the migration path after the new export ships:
-retain release uploads while debug-ID storage and symbolication roll out. Remove
-the legacy plugin only after that server-side path is available.
-
-## Build provenance
-
-The plugin embeds a commit SHA when it can prove one. Resolution is explicit
-`commitSha`, then `OPSLANE_COMMIT_SHA`, `GITHUB_SHA`,
-`VERCEL_GIT_COMMIT_SHA`, `CF_PAGES_COMMIT_SHA`, `CI_COMMIT_SHA`,
-`RENDER_GIT_COMMIT`, `BITBUCKET_COMMIT`, `GIT_COMMIT`,
-`BUILD_SOURCEVERSION`, and finally `.git/HEAD`. Only lowercase 40- or
-64-character hexadecimal values are accepted. The build log names the rung that
-won; no `git` executable is invoked.
-
-## Verify the current upload path
-
-Each accepted legacy upload returns HTTP `201` with its storage key:
-
-```json
-{"status": "uploaded", "object_key": "sourcemaps/<project>/<release>/index-abc123.js.map"}
-```
-
-Self-hosters can inspect `source_maps`:
+After a production build, `sourcemap_files` should contain project-scoped rows:
 
 ```sql
-SELECT release, filename FROM source_maps ORDER BY uploaded_at DESC LIMIT 5;
+SELECT debug_id, has_sources_content, size_bytes, created_at
+FROM sourcemap_files
+WHERE project_id = '<projectID>'
+ORDER BY created_at DESC;
 ```
 
-Then trigger an error from the built app. The absence of
-`sourcemap_unresolved` / `unfixable_no_sourcemap`, plus a root-cause write-up
-that names real source files, is the observable success signal.
+Trigger an error from the built app and inspect its event. `resolution_status`
+is `resolved`, `partial`, `no_debug_ids`, `map_not_found`, `invalid_map`, or
+`resolution_failed`; successful frames are stored in the versioned
+`stack_trace_resolved` envelope. Opslane exposes no source-map download API.
 
-## Other bundlers
-
-Only Vite has a first-party plugin today. Other builds can upload maps through
-the existing release endpoint:
-
-```bash
-curl -X POST "$OPSLANE_ENDPOINT/api/v1/sourcemaps" \
-  -H "X-API-Key: $OPSLANE_API_KEY" \
-  -F "release=$GIT_SHA" \
-  -F "file=@dist/assets/index-abc123.js.map"
-```
+Only Vite has a first-party upload integration today. Other bundlers may call
+the single-map PUT route if they reproduce the same canonical debug-ID
+algorithm and stamp the matching ID into runtime debug metadata.

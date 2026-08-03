@@ -37,6 +37,72 @@ ON CONFLICT (id) DO UPDATE SET
   revoked_at = NULL,
   revoked_by_user_id = NULL;
 
+-- Secret source-map key for the primary fixture (raw, shown only for E2E):
+-- opslane_sk_nbxw6ytboi3damrrgi3tknzxgq_E2ESOURCEMAPSECRETAAAAAAAAAAAAAAAAAAAAAAAAA
+INSERT INTO project_api_keys
+  (id, key_id, project_id, scope, token_prefix, secret_hash, label)
+VALUES
+  ('00000000-0000-0000-0000-000000001100',
+   'nbxw6ytboi3damrrgi3tknzxgq',
+   '00000000-0000-0000-0000-000000000010',
+   'sourcemaps',
+   'opslane_sk',
+   '67d260caf3fb036990b4d21bf0733af700155609945bfcb1ae7355a5b6357ee9',
+   'e2e source maps')
+ON CONFLICT (id) DO UPDATE SET
+  project_id = EXCLUDED.project_id,
+  secret_hash = EXCLUDED.secret_hash,
+  revoked_at = NULL,
+  revoked_by_user_id = NULL;
+
+-- A second fixed project makes cross-project source-map isolation
+-- discriminating: it can report an event carrying project 1's debug ID before
+-- project 2 uploads the same map.
+INSERT INTO projects (id, org_id, name, github_repo, default_branch) VALUES
+  ('00000000-0000-0000-0000-000000000020', '00000000-0000-0000-0000-000000000001',
+   'Opslane Isolation Fixture', 'opslane/defender-test-fixture', 'main')
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO environments (id, project_id, name) VALUES
+  ('00000000-0000-0000-0000-000000000200', '00000000-0000-0000-0000-000000000020', 'production')
+ON CONFLICT (id) DO NOTHING;
+
+-- Raw project-2 ingest key:
+-- opslane_pk_ndxw6ytboi3damrrgi3tknzxgq_E2EINGESTSECRETBBBBBBBBBBBBBBBBBBBBBBBBBBBB
+INSERT INTO project_api_keys
+  (id, key_id, project_id, scope, token_prefix, secret_hash, label)
+VALUES
+  ('00000000-0000-0000-0000-000000002000',
+   'ndxw6ytboi3damrrgi3tknzxgq',
+   '00000000-0000-0000-0000-000000000020',
+   'ingest',
+   'opslane_pk',
+   '8560f0955838c94371bc064e9f40ce4a2390107a0d80651e3886251e675a90a4',
+   'e2e isolation ingest')
+ON CONFLICT (id) DO UPDATE SET
+  project_id = EXCLUDED.project_id,
+  secret_hash = EXCLUDED.secret_hash,
+  revoked_at = NULL,
+  revoked_by_user_id = NULL;
+
+-- Raw project-2 source-map key:
+-- opslane_sk_ncxw6ytboi3damrrgi3tknzxgq_E2ESOURCEMAPSECRETBBBBBBBBBBBBBBBBBBBBBBBBB
+INSERT INTO project_api_keys
+  (id, key_id, project_id, scope, token_prefix, secret_hash, label)
+VALUES
+  ('00000000-0000-0000-0000-000000002100',
+   'ncxw6ytboi3damrrgi3tknzxgq',
+   '00000000-0000-0000-0000-000000000020',
+   'sourcemaps',
+   'opslane_sk',
+   'a61a22ece1ef51461677aae27b2014ed72e33eae0de334d7188c16e47acd0e36',
+   'e2e isolation source maps')
+ON CONFLICT (id) DO UPDATE SET
+  project_id = EXCLUDED.project_id,
+  secret_hash = EXCLUDED.secret_hash,
+  revoked_at = NULL,
+  revoked_by_user_id = NULL;
+
 -- Test user for auth E2E (password: testpassword123, bcrypt cost 10)
 INSERT INTO users (id, org_id, email, password_hash, name) VALUES
   ('00000000-0000-0000-0000-000000010000', '00000000-0000-0000-0000-000000000001',

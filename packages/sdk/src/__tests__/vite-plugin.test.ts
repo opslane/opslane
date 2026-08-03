@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+vi.mock('vite', () => ({ loadEnv: vi.fn(() => ({})) }));
 import {
   opslane,
   opslaneSourceMapPlugin,
@@ -328,6 +329,80 @@ describe('Vite debug-ID plugin', () => {
     );
   });
 
+  it('uploads exactly the final stamped maps when private build env is set', async () => {
+    const previousKey = process.env['OPSLANE_SOURCEMAP_KEY'];
+    const previousEndpoint = process.env['OPSLANE_ENDPOINT'];
+    process.env['OPSLANE_SOURCEMAP_KEY'] = 'opslane_sk_test';
+    process.env['OPSLANE_ENDPOINT'] = 'https://ingestion.example';
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response('', { status: 201 }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      const plugin = opslaneVitePlugin({ logLevel: 'silent' });
+      (plugin.config as Function).call(plugin, {});
+      const bundle = makeBundle();
+      await stamp(plugin, bundle);
+      await (plugin.closeBundle as Function).call(plugin);
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const [url, request] = fetchMock.mock.calls[0] ?? [];
+      expect(String(url)).toMatch(/\/api\/v1\/sourcemaps\/[0-9a-f-]+$/);
+      expect(request?.body).toContain('"debugId"');
+      expect(bundle['assets/index.js.map']).toBeUndefined();
+    } finally {
+      vi.unstubAllGlobals();
+      if (previousKey === undefined) delete process.env['OPSLANE_SOURCEMAP_KEY'];
+      else process.env['OPSLANE_SOURCEMAP_KEY'] = previousKey;
+      if (previousEndpoint === undefined) delete process.env['OPSLANE_ENDPOINT'];
+      else process.env['OPSLANE_ENDPOINT'] = previousEndpoint;
+    }
+  });
+
+  it('does not upload without a source-map key', async () => {
+    const previousKey = process.env['OPSLANE_SOURCEMAP_KEY'];
+    delete process.env['OPSLANE_SOURCEMAP_KEY'];
+    const fetchMock = vi.fn<typeof fetch>();
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      const plugin = opslaneVitePlugin({ logLevel: 'silent' });
+      (plugin.config as Function).call(plugin, {});
+      const bundle = makeBundle();
+      await stamp(plugin, bundle);
+      await (plugin.closeBundle as Function).call(plugin);
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+      if (previousKey === undefined) delete process.env['OPSLANE_SOURCEMAP_KEY'];
+      else process.env['OPSLANE_SOURCEMAP_KEY'] = previousKey;
+    }
+  });
+
+  it('reports a rejected upload without failing the build', async () => {
+    const previousKey = process.env['OPSLANE_SOURCEMAP_KEY'];
+    const previousEndpoint = process.env['OPSLANE_ENDPOINT'];
+    process.env['OPSLANE_SOURCEMAP_KEY'] = 'opslane_sk_test';
+    process.env['OPSLANE_ENDPOINT'] = 'https://ingestion.example';
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockResolvedValue(
+      new Response('', { status: 500 }),
+    ));
+    try {
+      const plugin = opslaneVitePlugin({ logLevel: 'silent' });
+      (plugin.config as Function).call(plugin, {});
+      const bundle = makeBundle();
+      await stamp(plugin, bundle);
+      await expect(
+        (plugin.closeBundle as Function).call(plugin),
+      ).resolves.toBeUndefined();
+    } finally {
+      vi.unstubAllGlobals();
+      if (previousKey === undefined) delete process.env['OPSLANE_SOURCEMAP_KEY'];
+      else process.env['OPSLANE_SOURCEMAP_KEY'] = previousKey;
+      if (previousEndpoint === undefined) delete process.env['OPSLANE_ENDPOINT'];
+      else process.env['OPSLANE_ENDPOINT'] = previousEndpoint;
+    }
+  });
+
   it('leaves a chunk unchanged when its map is invalid', async () => {
     const plugin = opslaneVitePlugin({
       sourcemaps: 'keep',
@@ -349,6 +424,25 @@ describe('Vite debug-ID plugin', () => {
     await stamp(plugin, bundle);
 
     expect(bundle['assets/index.js.map']).toBeUndefined();
+  });
+
+  it('removes standalone sourceMappingURL directives with private maps', async () => {
+    const plugin = opslaneVitePlugin({ logLevel: 'silent' });
+    (plugin.config as Function).call(plugin, {});
+    const bundle = makeBundle([
+      'const parser = /\\/\\*# sourceMappingURL=/;',
+      '/*# sourceMappingURL=vendor.js.map */',
+      'console.log("hello");',
+      '//# sourceMappingURL=index.js.map',
+    ].join('\n'));
+
+    await stamp(plugin, bundle);
+
+    const code = bundle['assets/index.js'].code as string;
+    expect(code).toContain('const parser = /\\/\\*# sourceMappingURL=/;');
+    expect(code.split(/\r?\n/).some(
+      (line) => /^(?:\/\/[@#]|\/\*[@#])\s*sourceMappingURL\s*=/.test(line.trim()),
+    )).toBe(false);
   });
 
   // Vite runs a worker build as a nested build and copies its output into the

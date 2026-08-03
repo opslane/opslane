@@ -29,7 +29,7 @@ must start with `opslane_pk_`. Never put an `opslane_sk_` source-map key in brow
 
 `init` installs global `error`/`unhandledrejection` handlers and instruments `console`, `fetch`, and `XMLHttpRequest` for breadcrumbs. Calling it twice is a no-op. `destroy()` reverses everything.
 
-`release` should match the source maps you upload for that deploy — use the commit SHA or another immutable build identifier.
+`release` is optional deployment metadata. Source maps match by debug ID, not release.
 
 ## Framework integrations
 
@@ -64,24 +64,30 @@ React and Vue are optional peer dependencies — installing the SDK pulls in nei
 
 ### Vite source maps
 
-> Source-map upload is unavailable in this release. Remove `opslaneSourceMapPlugin()` from your Vite configuration until batch upload ships in [#218](https://github.com/opslane/opslane-oss/issues/218); leaving it enabled now fails the build deliberately.
+The Vite plugin stamps and uploads production source maps when the two private
+build variables `OPSLANE_ENDPOINT` and `OPSLANE_SOURCEMAP_KEY` are set:
 
-Keep the plugin out of your Vite configuration for now. It does not remove or upload map
-assets while the replacement batch API is unavailable.
+```ts
+import { opslane } from '@opslane/sdk/vite-plugin';
 
-`opslaneSourceMapPlugin` is the setup supported by the currently published
-`@opslane/sdk@2.0.1`. This repository also contains the next debug-ID stamping
-plugin, but do not import its `opslaneVitePlugin` export from 2.0.1: that export
-has not been published yet. See the [source-map guide](../../docs/guides/source-maps.md)
-for the availability and migration matrix.
+export default {
+  plugins: [opslane()],
+  worker: { plugins: () => [opslane()] },
+};
+```
 
-When that export ships, its build options will be:
+Never use a `VITE_` prefix for the secret `opslane_sk_` key. The plugin also
+reads gitignored Vite env files such as `.env.local`. Upload errors are reported
+without failing the build, and generated maps are removed from output by
+default. See the [source-map guide](../../docs/guides/source-maps.md).
+
+Build options:
 
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
 | `commitSha` | `string` | CI environment or `.git/HEAD` | Lowercase 40- or 64-character build commit. |
 | `stamp` | `boolean` | `true` | Set `false` to leave chunks and maps unchanged. |
-| `logLevel` | `'silent' \| 'warn' \| 'debug'` | `'warn'` | Build diagnostics and summary verbosity. |
+| `logLevel` | `'silent' \| 'warn'` | `'warn'` | Build diagnostics and summary verbosity. |
 | `sourcemaps` | `'remove' \| 'keep'` | `'remove'` | Whether emitted map assets remain in the build output. |
 | `maxMapBytes` | `number` | `33554432` | Maximum raw map size eligible for stamping. |
 

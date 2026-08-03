@@ -24,6 +24,24 @@ const vectors = JSON.parse(
 ) as { cases: DebugIdVector[] };
 
 describe('computeDebugId', () => {
+
+  it('accepts a map without sourcesContent', async () => {
+    const map = JSON.stringify({ version: 3, sources: ['a.ts'], names: [], mappings: 'AAAA' });
+    const result = await computeDebugId(new TextEncoder().encode(map));
+    expect(result.debugId).toMatch(/^[0-9a-f]{8}-/);
+  });
+
+  it('still rejects a sources/sourcesContent length mismatch', async () => {
+    const map = JSON.stringify({
+      version: 3,
+      sources: ['a.ts', 'b.ts'],
+      sourcesContent: ['x'],
+      names: [],
+      mappings: 'AAAA',
+    });
+    await expect(computeDebugId(new TextEncoder().encode(map))).rejects.toThrow();
+  });
+
   for (const vector of vectors.cases.filter((entry) => entry.outcome === 'ok')) {
     it(`${vector.name}: matches the frozen fingerprint`, async () => {
       const bytes = Buffer.from(vector.input_b64, 'base64');
