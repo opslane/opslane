@@ -197,11 +197,11 @@ jobs:
       # packages/sdk/dist on disk. This job used to be part of js, which ran
       # `pnpm -r build` first and supplied that implicitly.
       #
-      # Only the SDK is needed: it has no workspace dependencies of its own,
-      # and those two fixtures depend on nothing else in the repo. Should a
-      # future runnable snippet import another package, this job fails --
-      # it is always-on, so the gap surfaces immediately rather than rotting.
-      - run: pnpm --filter @opslane/sdk build
+      # The trailing "..." pulls in the SDK's own workspace dependencies (it
+      # has one, @opslane/shared) rather than assuming it has none. Should a
+      # future runnable snippet import another package, this job fails -- it is
+      # always-on, so the gap surfaces immediately rather than rotting.
+      - run: pnpm --filter '@opslane/sdk...' build
       - run: pnpm test:repo
 
   js:
