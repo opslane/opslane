@@ -14,7 +14,7 @@ The SDK catches the error via global handlers (or a framework hook), attaches br
 
 ## 2. Ingest and group (ingestion API)
 
-The event is authenticated by API key, origin-checked for browser traffic, rate-limited, and masked again server-side (sensitive headers, API-key prefixes, URL credentials). It is fingerprinted on platform + error type + message + stack; matching events join an existing **error group**, new fingerprints create one. New groups enqueue an `investigate` job — a Postgres row, not a message queue — and enqueue `issue.created` events for enabled notification destinations.
+The event is authenticated by API key, origin-checked for browser traffic, rate-limited, and masked again server-side (sensitive headers, API-key prefixes, URL credentials). Known JavaScript noise (ResizeObserver loops, stackless Script error., extension-only stacks) is dropped before persistence. Surviving events are fingerprinted: JavaScript stale-deploy asset failures (failed to fetch dynamically imported module and similar) share one family fingerprint per project; others on platform + error type + message + stack. Matching events join an existing **error group**, new fingerprints create one. New groups enqueue an `investigate` job — a Postgres row, not a message queue — and enqueue `issue.created` events for enabled notification destinations.
 
 ## 3. Claim (worker)
 
