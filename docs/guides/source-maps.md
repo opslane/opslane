@@ -57,9 +57,21 @@ are reported without failing the production build.
 
 ## Mint and revoke an upload key
 
-Self-hosted operators mint a key from the ingestion package. Minting a
-source-map key requires the public origin uploads must reach, because that
-origin is sealed into the key:
+Minting a source-map key requires the public origin uploads must reach,
+because that origin is sealed into the key.
+
+The ingestion image ships the `mint-key` binary, and the running container
+already has `DATABASE_URL` and `OPSLANE_PUBLIC_INGEST_URL` in its
+environment, so on a deployment it is one command:
+
+```bash
+docker exec <ingestion-container> mint-key \
+  -project 00000000-0000-0000-0000-000000000000 \
+  -scope sourcemaps \
+  -label "production source maps"
+```
+
+From a repository checkout, the equivalent is:
 
 ```bash
 cd packages/ingestion
@@ -98,6 +110,8 @@ re-keying an app whose legacy key was removed by an upgrade):
 # find the project UUID first
 psql "$DATABASE_URL" -c "SELECT id, name, github_repo FROM projects;"
 
+docker exec <ingestion-container> mint-key -project <uuid> -scope ingest
+# or, from a checkout:
 cd packages/ingestion
 DATABASE_URL=postgres://... go run ./cmd/mint-key -project <uuid> -scope ingest
 ```
