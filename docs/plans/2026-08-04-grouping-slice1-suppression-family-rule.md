@@ -1,5 +1,10 @@
 # Grouping Slice 1: Suppression + Stale-Deploy Family Rule Implementation Plan
 
+Status: implemented (revision 2)
+Date: 2026-08-04
+Shipped-in: PR #269
+Outcome: see "Execution outcome" at the end — all seven tasks landed, with five deviations worth reading before rung 2.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Revision 2** — incorporates Codex review rounds 1 and 2 (18 further findings: fixed test expectations, canonical-group self-closure exclusion, in-transaction reclassification, event-level platform, honest suppression response, run()-error structure, audit manifest, deterministic outputs, disposable-DB smoke with polling).
@@ -37,7 +42,7 @@
 **Interfaces:**
 - Produces: JSON array consumed by Task 3's Go test (and later by the worker's TS triage-detector tests — same file, so the two sides cannot drift). Schema per entry: `{"message": string, "family": "stale-deploy" | null, "note": string}`.
 
-- [ ] **Step 1: Write the fixture**
+- [x] **Step 1: Write the fixture**
 
 ```json
 [
@@ -59,12 +64,12 @@
 ]
 ```
 
-- [ ] **Step 2: Validate it parses**
+- [x] **Step 2: Validate it parses**
 
 Run from the repo root: `python3 -c "import json; d=json.load(open('test-fixtures/grouping/stale-deploy-corpus.json')); print(len(d), 'entries')"`
 Expected: `15 entries`
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add test-fixtures/grouping/stale-deploy-corpus.json
@@ -82,7 +87,7 @@ git commit -m "test: add shared stale-deploy family corpus fixture"
 **Interfaces:**
 - Produces: `func Suppress(platform, errorMessage, stackTrace string) (rule string, suppressed bool)` — rule is `"resize_observer"`, `"script_error"`, `"extension_only"`, or `""`. Package-private `func classifyStackLines(stackTrace string) (parsedSchemes []string, unparsed int)`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```go
 package grouping
@@ -126,12 +131,12 @@ func TestSuppress(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cd packages/ingestion && go test ./grouping -run TestSuppress -v`
 Expected: FAIL — `undefined: Suppress`
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 ```go
 package grouping
@@ -218,12 +223,12 @@ func Suppress(platform, errorMessage, stackTrace string) (string, bool) {
 }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cd packages/ingestion && go test ./grouping -run TestSuppress -v`
 Expected: PASS (all 16 subtests)
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add packages/ingestion/grouping/suppress.go packages/ingestion/grouping/suppress_test.go
@@ -240,7 +245,7 @@ Identical to Revision 1 (unchanged by round 2): create `packages/ingestion/group
 - Consumes: `test-fixtures/grouping/stale-deploy-corpus.json` (relative path `../../../test-fixtures/grouping/`).
 - Produces: `func FamilyFingerprint(platform, errorMessage string) (fingerprint string, matched bool)`, `const FamilyTitleStaleDeploy = "Stale deploy: hashed asset failed to load after release"`. Fingerprint is the exact constant `js|v2|r1|3394fed5608cf6c6b509abd8fbadef76`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```go
 package grouping
@@ -294,7 +299,7 @@ func TestFamilyFingerprintPlatformScope(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run to verify FAIL** (`undefined: FamilyFingerprint`), then **Step 3: implement**:
+- [x] **Step 2: Run to verify FAIL** (`undefined: FamilyFingerprint`), then **Step 3: implement**:
 
 ```go
 package grouping
@@ -344,9 +349,9 @@ func FamilyFingerprint(platform, errorMessage string) (string, bool) {
 }
 ```
 
-- [ ] **Step 4: Run** `cd packages/ingestion && go test ./grouping` — PASS with no regressions.
+- [x] **Step 4: Run** `cd packages/ingestion && go test ./grouping` — PASS with no regressions.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add packages/ingestion/grouping/family.go packages/ingestion/grouping/family_test.go
@@ -366,7 +371,7 @@ git commit -m "feat(ingestion): rung-1 stale-deploy family rule with shared corp
 - Consumes: `grouping.Suppress`, `grouping.FamilyFingerprint`, `grouping.Fingerprint`, `grouping.FamilyTitleStaleDeploy`.
 - Produces: `func groupingDecision(platform, errorType, errorMessage, stackTrace string) (suppressRule string, fingerprint string, title string)`, `func RecordSuppressed(rule string)`.
 
-- [ ] **Step 1: Write the failing pure test** — exactly as Revision 1 (family constant `js|v2|r1|3394fed5608cf6c6b509abd8fbadef76`, legacy title/fingerprint preservation, python untouched, 200-char truncation):
+- [x] **Step 1: Write the failing pure test** — exactly as Revision 1 (family constant `js|v2|r1|3394fed5608cf6c6b509abd8fbadef76`, legacy title/fingerprint preservation, python untouched, 200-char truncation):
 
 ```go
 package handler
@@ -412,9 +417,9 @@ func TestGroupingDecision(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run to verify FAIL** (`undefined: groupingDecision`)
+- [x] **Step 2: Run to verify FAIL** (`undefined: groupingDecision`)
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 `groupingDecision` in `error_event.go` above `handleErrorEvent`:
 
@@ -492,21 +497,21 @@ Metrics text output next to `opslane_stackless_events_total` (~line 221) — wit
 	fmt.Fprintf(w, "opslane_suppressed_events_total{rule=\"extension_only\"} %d\n\n", suppressedExtensionOnlyTotal.Load())
 ```
 
-- [ ] **Step 4: Run the pure test** — PASS.
+- [x] **Step 4: Run the pure test** — PASS.
 
-- [ ] **Step 5: Write the integration test** — copy the existing setup pattern from `error_event_test.go` (do not invent a new harness; use whatever DB mechanism its DB-backed tests use). Assert:
+- [x] **Step 5: Write the integration test** — copy the existing setup pattern from `error_event_test.go` (do not invent a new harness; use whatever DB mechanism its DB-backed tests use). Assert:
 
 1. **Suppressed event**: POST message `ResizeObserver loop limit exceeded` → 202; body `event_id == ""`, `group_id == ""`, `error_group_id == ""`, `suppressed == true`; `error_events` and `error_group_jobs` counts for the project unchanged; a NORMAL event posted before and after still returns non-empty ids and no `suppressed` field.
 2. **Family collapse**: POST two events, messages `Failed to fetch dynamically imported module: https://a.com/assets/chunk-index.AAA111.js` / `...BBB222.js` → exactly one `error_groups` row with `fingerprint = 'js|v2|r1|3394fed5608cf6c6b509abd8fbadef76'`, `occurrence_count = 2`, `title = 'Stale deploy: hashed asset failed to load after release'`, exactly one job enqueued.
 
-- [ ] **Step 6: Run** `cd packages/ingestion && go test ./handler ./grouping` — PASS. If an existing handler test posts `Script error.`/ResizeObserver fixtures to exercise the old terminalization path, change the fixture message to a non-suppressed one rather than weakening its assertion.
+- [x] **Step 6: Run** `cd packages/ingestion && go test ./handler ./grouping` — PASS. If an existing handler test posts `Script error.`/ResizeObserver fixtures to exercise the old terminalization path, change the fixture message to a non-suppressed one rather than weakening its assertion.
 
-- [ ] **Step 7: Audit fingerprint-format assumptions**
+- [x] **Step 7: Audit fingerprint-format assumptions**
 
 Run: `grep -rn "fingerprint" packages/dashboard/src packages/worker/src shared/ --include="*.ts" --include="*.vue" -il`
 Skim hits for hex/length assumptions (regex `[0-9a-f]{32}`, slicing, parsing). Expected: opaque strings everywhere; fix any violation in this task.
 
-- [ ] **Step 8: Build and commit**
+- [x] **Step 8: Build and commit**
 
 ```bash
 cd packages/ingestion && go build ./... && go test ./...
@@ -527,7 +532,7 @@ git commit -m "feat(ingestion): wire rung-0/rung-1 ladder into ingest with count
 - Consumes: `grouping.Suppress`, `grouping.FamilyFingerprint`. DB via `DATABASE_URL`, read-only session.
 - Produces: `go run ./shadow-regroup --project <uuid> [--project <uuid>…]` prints a deterministic per-project report covering EVERY requested project (zero-event projects print `zero events`). Core: `type EventRow struct{ ProjectID, GroupID, Platform, ErrorMessage, StackRaw string }` (Platform is the EVENT's platform), `func Predict(rows []EventRow) Report`, `type ProjectReport struct{ SuppressedByRule map[string]int; FamilyEvents int; FamilyCollapsed []string; NoiseOnly []string; MixedGroups []string; UnchangedGroups int }`, `type Report struct{ PerProject map[string]ProjectReport }`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```go
 package main
@@ -589,9 +594,9 @@ func equalStrings(a, b []string) bool {
 }
 ```
 
-- [ ] **Step 2: Run to verify FAIL** (`undefined: Predict`)
+- [x] **Step 2: Run to verify FAIL** (`undefined: Predict`)
 
-- [ ] **Step 3: Implement predict.go**
+- [x] **Step 3: Implement predict.go**
 
 ```go
 package main
@@ -701,9 +706,9 @@ func Predict(rows []EventRow) Report {
 }
 ```
 
-- [ ] **Step 4: Run to verify PASS**
+- [x] **Step 4: Run to verify PASS**
 
-- [ ] **Step 5: Implement main.go**
+- [x] **Step 5: Implement main.go**
 
 ```go
 // Command shadow-regroup classifies stored events under the slice-1 grouping
@@ -822,7 +827,7 @@ func run() error {
 }
 ```
 
-- [ ] **Step 6: Build and commit**
+- [x] **Step 6: Build and commit**
 
 Run: `cd packages/ingestion && go build ./shadow-regroup && go test ./shadow-regroup`
 
@@ -843,7 +848,7 @@ git commit -m "feat(ingestion): shadow-regroup deterministic read-only cutover p
 - Consumes: `grouping.Suppress`/`grouping.FamilyFingerprint` per EVENT (with `error_events.platform`). DB via `DATABASE_URL`. Flags: `--project <uuid>` (required), `--apply` (default false), `--audit <path>` (required with `--apply`), `--ids <file>` (pass-2 restriction), `--skipped <path>` (write removable-but-wrong-status ids, sorted, machine-readable).
 - Produces: closes eligible groups (`status='resolved'`, `resolved_reason='superseded_by_regrouping'`, `resolved_at=now()`, `updated_at=now()`) in ONE transaction that re-locks, re-checks status, AND reclassifies events under the lock; audit JSONL = metadata header line, one full pre-image row per closed group, and a final committed manifest line; deterministic sorted output.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```go
 package main
@@ -878,9 +883,9 @@ func TestGroupRemovable(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run to verify FAIL** (`undefined: groupRemovable`)
+- [x] **Step 2: Run to verify FAIL** (`undefined: groupRemovable`)
 
-- [ ] **Step 3: Implement main.go**
+- [x] **Step 3: Implement main.go**
 
 ```go
 // Command cutover-close closes old-scheme groups superseded by the slice-1
@@ -1183,12 +1188,12 @@ func run() error {
 }
 ```
 
-- [ ] **Step 4: Run tests, build**
+- [x] **Step 4: Run tests, build**
 
 Run: `cd packages/ingestion && go test ./cutover-close -v && go build ./cutover-close`
 Expected: PASS, clean build.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add packages/ingestion/cutover-close/
@@ -1201,11 +1206,11 @@ git commit -m "feat(ingestion): transactional cutover-close with in-tx reclassif
 
 **Files:** none — verification per root `AGENTS.md` and `packages/ingestion/AGENTS.md`.
 
-- [ ] **Step 1: Full ingestion gate**
+- [x] **Step 1: Full ingestion gate**
 
 Run: `cd packages/ingestion && go build ./... && go test ./...`
 
-- [ ] **Step 2: DISPOSABLE database + rebuild ingestion AND worker**
+- [x] **Step 2: DISPOSABLE database + rebuild ingestion AND worker**
 
 The smoke asserts absolute counts, so it needs a clean slate (root AGENTS.md: use a disposable database for clean-state verification; the compose dev DB is disposable):
 
@@ -1216,14 +1221,14 @@ docker compose up -d --build postgres minio ingestion worker
 docker compose ps   # wait for healthy
 ```
 
-- [ ] **Step 3: Seed**
+- [x] **Step 3: Seed**
 
 ```bash
 docker compose exec -T postgres psql -U opslane -d opslane < scripts/seed-e2e.sql
 ```
 Note the seeded project UUID and public ingest key (`pk_…`) from `scripts/seed-e2e.sql`; export as `PROJECT` and `KEY`.
 
-- [ ] **Step 4: Smoke the family rule — two deploys, one group**
+- [x] **Step 4: Smoke the family rule — two deploys, one group**
 
 Use a frozen wire fixture from `test-fixtures/wire/` as the payload template (never edit those files); change only type/message/stack:
 
@@ -1240,7 +1245,7 @@ docker compose exec -T postgres psql -U opslane -d opslane -c \
 ```
 Expected: both HTTP 202 with non-empty `event_id`/`group_id` and NO `suppressed` field; exactly ONE group row, `occurrence_count = 2`, title `Stale deploy: hashed asset failed to load after release`.
 
-- [ ] **Step 5: Smoke suppression — 202, honest body, no rows, counter up**
+- [x] **Step 5: Smoke suppression — 202, honest body, no rows, counter up**
 
 ```bash
 code=$(curl -sS -o /tmp/supp.json -w '%{http_code}' -X POST http://localhost:8082/api/v1/events \
@@ -1253,7 +1258,7 @@ curl -sS http://localhost:8082/metrics | grep opslane_suppressed_events_total
 ```
 Expected: HTTP 202; body `{"event_id":"","group_id":"","error_group_id":"","suppressed":true}`; event count exactly 2 (the family events only — clean DB makes this absolute); `opslane_suppressed_events_total{rule="resize_observer"} 1`. (If the metrics route differs from `/metrics`, use wherever `opslane_stackless_events_total` is served.)
 
-- [ ] **Step 6: Poll the family job to a terminal state; zero jobs for suppressed**
+- [x] **Step 6: Poll the family job to a terminal state; zero jobs for suppressed**
 
 ```bash
 for i in $(seq 1 24); do
@@ -1271,7 +1276,7 @@ docker compose exec -T postgres psql -U opslane -d opslane -tAc \
 ```
 Expected: the loop exits within ~2 minutes on a TERMINAL status (with the worker's shipped triage rubric, the stale-deploy family terminalizes as fixable-with-mitigation, not `unfixable_infra` — the exact status string comes from the worker's terminal set; a status still in the polling set after 24 tries is a FAILURE). Total job count for the project is exactly 1 — the family group's; the suppressed event produced none (absolute count valid on the clean DB).
 
-- [ ] **Step 7: Smoke the shadow + cutover tools against the compose DB**
+- [x] **Step 7: Smoke the shadow + cutover tools against the compose DB**
 
 ```bash
 cd packages/ingestion
@@ -1280,7 +1285,7 @@ DATABASE_URL=postgres://opslane:opslane@localhost:5432/opslane go run ./cutover-
 ```
 Expected: shadow-regroup prints the project with 2 family events and deterministic ordering; cutover-close dry-run prints `would close 0 groups` — the ONE existing family group is new-scheme (`js|v2|…`) and therefore EXCLUDED by the fingerprint filter (this directly exercises the canonical-group protection), and exits 0 without writing.
 
-- [ ] **Step 8: Final gate**
+- [x] **Step 8: Final gate**
 
 ```bash
 cd packages/ingestion && go build ./... && go test ./...
@@ -1307,3 +1312,96 @@ git status --short   # clean, or only intended changes
 - **Round-2 P0s:** finding 1 — `TestPredict` expectations corrected (g5 mixed, not collapsed; unchanged=4 with the added python row); finding 2 — `fingerprint NOT LIKE 'js|v2|%'` in the candidate query, exercised by smoke step 7; finding 3 — in-transaction reclassification after `FOR UPDATE`.
 - **Round-2 P1/P2s:** event-level platform everywhere (4; `error_events.platform` verified NOT NULL via migration 016); `$1::uuid[]` cast (5); `--all-projects` removed (6); family/noise-only split in report (7); suppression placement made an explicit contract (8); honest empty-id + `suppressed:true` response (9); `run() error` structure in both commands (10); audit metadata + committed manifest (11); deterministic ordering + `--skipped` file (12); disposable-DB smoke (13); polling loop with failure condition (14); absolute job-count assertion on clean DB (15); separate `SET` execs (16); zero-event projects enumerated (17); first-non-blank header handling with corrected comment and test (18).
 - **Placeholder scan:** clean. **Type consistency:** `eventForClose{Platform,Message,Stack}` consistent between test and implementation; `FamilyCollapsed`/`NoiseOnly`/`MixedGroups` consistent between `Predict`, its test, and main.go printing; family constant identical in Tasks 3/4/7.
+
+---
+
+## Execution outcome (2026-08-04, PR #269)
+
+All seven tasks landed as eight commits, grouped by concern rather than one per
+task, so each commit builds and vets on its own. Five things diverged from the
+plan as written. Read these before writing the rung-2 plan.
+
+### 1. A plan-anticipated test fix was missed, and only a real database found it
+
+Task 4 Step 6 said: if an existing handler test posts `Script error.` or
+ResizeObserver fixtures, change the fixture message rather than weaken the
+assertion. That was done for `ingest_unit_test.go` but missed for
+`TestIngestStacklessEvent_AcceptedAndDefaultsType` in `error_event_test.go`.
+
+It hid because suppression returns 202. The test's status assertion still
+passed; it failed one line later on the row lookup. And it never ran at all
+until `DATABASE_URL` was exported — `testDeps` skips without it, so
+`go test ./...` reported ok while the assertion never executed.
+
+**For rung 2:** any step that says "verify X in the database" is unverified
+until the suite runs with `DATABASE_URL` set. Read the skip count, not the
+pass count. `main` now carries this warning in AGENTS.md.
+
+### 2. The runbook's smoke commands used the wrong auth header
+
+Task 7 Steps 4 and 5 and the cutover runbook used `X-Opslane-Key`. The server
+wants `X-API-Key` and 401s otherwise, so an operator following the runbook
+verbatim would have gotten 401 on every call. Fixed in place.
+
+### 3. Step 6's predicted triage outcome was wrong
+
+The plan expected the family group to terminalize "as fixable-with-mitigation,
+not `unfixable_infra`". It actually terminalized as:
+
+```
+status      | reason_code
+needs_human | unfixable_no_app_frames
+```
+
+Terminal, so the polling gate passed, but the customer-visible outcome is still
+"needs_human, no mitigation offered". The #256 rubric change that would propose
+`vite:preloadError` is not in this slice. **Slice 1 delivers the dedup, not the
+resolution.**
+
+### 4. The cutover smoke passes without exercising the classifier
+
+Task 7 Step 7 correctly predicts `would close 0 groups` — the only group is
+new-scheme and excluded by the fingerprint filter. That verifies the
+canonical-group protection and nothing else: zero candidates means
+`groupRemovable` never runs.
+
+Legacy-scheme groups had to be seeded to drive it. All four branches then
+checked out: a 500-event noise group closed, a mixed group short-circuited on
+its first ordinary event, an empty group correctly not removable, and a
+`pr_created` noise group routed to `--skipped`. `--apply` wrote a valid audit
+(meta + pre-image + `{"committed":1}`), and `O_EXCL` refused to overwrite an
+existing audit, aborting before the transaction so a second closeable group was
+left untouched.
+
+**For rung 2:** a smoke whose expected result is "nothing happened" proves the
+guard, not the mechanism. Seed the positive case too.
+
+### 5. Four defects fixed during review, none of them in the plan
+
+- **Title truncation split UTF-8 runes.** `title[:200]` is a byte slice;
+  Postgres rejects invalid byte sequences on TEXT input, so a long localized
+  message would have failed its insert and 500'd on retry. Pre-existing, but
+  inside the function this plan introduces. Now truncates on a rune boundary.
+- **The stackless counter counted dropped events.** `RecordStacklessAccepted()`
+  sat above the suppression return, and `script_error` fires only on an empty
+  stack, so a counter documented as "accepted" was filling with events that were
+  never accepted. Moved below.
+- **Suppression rules and metric counters could drift silently.** A new rule
+  with no counter would delete customer events with no metric and no log line.
+  `grouping.SuppressRules` is now canonical and a test walks it.
+- **`cutover-close` loaded every event of a group into memory.** Unbounded, on
+  the project's highest-volume noise groups by construction. Now streams and
+  stops at the first ordinary event.
+
+### Documentation placement
+
+The design notes were briefly filed under `docs/architecture/`, which is in the
+docs-site loader allowlist and publishes to the public site. They carry prod
+evidence, design-partner references, and partner-scoped queries. `check-docs-scope`
+caught it (published count 24 -> 25). They live in `docs/decisions/` now.
+
+### Not delivered by this plan, by design
+
+Rung 2 and #258 (the cross-browser split the branch is named for), the #256
+triage rubric change, and the production cutover itself — the runbook below has
+not been run against prod.
