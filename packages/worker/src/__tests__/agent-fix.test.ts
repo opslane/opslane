@@ -1203,3 +1203,89 @@ describe('sandbox unavailability outranks any agent-reported outcome', () => {
     );
   });
 });
+
+describe('sandbox death before the agent loop', () => {
+  /** Fake whose commands.run dies only on the commands matching `dieOn`. */
+  function sandboxDyingOn(dieOn: (cmd: string) => boolean, SandboxNotFoundError: new (m: string) => Error) {
+    const base = passingSandboxFake();
+    return {
+      ...base,
+      sandboxId: 'sbx-early-death',
+      commands: {
+        run: vi.fn(async (cmd: string, opts?: { timeoutMs?: number }) => {
+          if (dieOn(cmd)) throw new SandboxNotFoundError('Sandbox is probably not running anymore');
+          return base.commands.run(cmd, opts);
+        }),
+      },
+    };
+  }
+
+  it('classifies a death during git clone as infra, not a clone failure', async () => {
+    // sandbox-repo.ts wraps clone-phase errors in `clone failed: ...`, and
+    // agent-fix matches that string and RETURNS needs_human. If the typed class
+    // is not preserved, this job terminalizes as the customer's repo being
+    // unclonable and never requeues.
+    const { SandboxNotFoundError } = await import('e2b');
+    createE2BSandbox.mockResolvedValue(
+      sandboxDyingOn((cmd) => cmd.includes('git clone'), SandboxNotFoundError),
+    );
+
+    await expect(runAgentFix(makeInput())).rejects.toBeInstanceOf(VerificationInfraError);
+  });
+
+  it('classifies a death during BRANCH RESOLUTION as infra, not a clone failure', async () => {
+    // The GitRunner adapter synthesizes { exitCode: 1 } from any thrown error.
+    // If it swallows the typed class, resolveClonedBranch reports
+    // CloneResolutionError and the customer is blamed for an E2B outage.
+    // Clone succeeds here; only the ls-remote/rev-parse probes hit the corpse.
+    const { SandboxNotFoundError } = await import('e2b');
+    createE2BSandbox.mockResolvedValue(
+      sandboxDyingOn(
+        (cmd) => cmd.includes('ls-remote') || cmd.includes('symbolic-ref'),
+        SandboxNotFoundError,
+      ),
+    );
+
+    await expect(runAgentFix(makeInput())).rejects.toBeInstanceOf(VerificationInfraError);
+  });
+
+  it('carries evidence for a setup-time death, before any sandbox is returned', async () => {
+    // Proves the evidence recorder really is constructed above createRepoSandbox:
+    // VerificationInfraError requires a non-optional EvidenceRecord.
+    const { SandboxNotFoundError } = await import('e2b');
+    createE2BSandbox.mockResolvedValue(
+      sandboxDyingOn((cmd) => cmd.includes('git clone'), SandboxNotFoundError),
+    );
+
+    await runAgentFix(makeInput()).then(
+      () => { throw new Error('expected rejection'); },
+      (err: VerificationInfraError) => {
+        expect(err.evidence.checks.some((c) => c.outcome === 'infra_error')).toBe(true);
+      },
+    );
+  });
+
+  it('does not start the agent cascade when setup already latched a death', async () => {
+    // `rm -f /home/user/.netrc` is swallowed by design (`.catch(() => {})`), so
+    // the death latches without throwing. Entering the cascade anyway would burn
+    // the whole agent budget against a machine already known to be gone.
+    // The credential cleanup only runs when a token was supplied.
+    // Match only the cleanup `rm -f`; the earlier `chmod 600 /home/user/.netrc`
+    // is NOT swallowed and would exercise the setup path instead.
+    const { SandboxNotFoundError } = await import('e2b');
+    const errorSpy = vi.spyOn(logger, 'error');
+    createE2BSandbox.mockResolvedValue(
+      sandboxDyingOn((cmd) => cmd.startsWith('rm -f /home/user/.netrc'), SandboxNotFoundError),
+    );
+
+    await expect(runAgentFix(makeInput({ githubToken: 'ghp_test' })))
+      .rejects.toBeInstanceOf(VerificationInfraError);
+    expect(vi.mocked(runAgentLoop)).not.toHaveBeenCalled();
+    // Assert the phase: without it this passes via the setup-death path and
+    // says nothing about the pre-cascade check.
+    expect(errorSpy).toHaveBeenCalledWith(
+      'sandbox became unavailable',
+      expect.objectContaining({ 'error.phase': 'pre-agent-loop' }),
+    );
+  });
+});

@@ -787,6 +787,27 @@ export async function runAgentFix(input: AgentFixInput): Promise<AgentFixResult>
     // Summary from previous tier, passed to next tier to avoid repeating work
     let priorTierSummary: string | undefined;
 
+    // No agent verdict is trustworthy once the machine is gone, so every site
+    // that reads the latch raises the same way.
+    const raiseSandboxGone = (phase: string): never => {
+      evidence.addCheck('sandbox', 'infra_error', {
+        command: '',
+        output: 'The verification sandbox became unavailable during the fix attempt',
+      });
+      recordSandboxFailure(sandbox!, phase, 'SandboxUnavailableError');
+      throw new VerificationInfraError(
+        'The verification sandbox became unavailable during the fix attempt, so the fix could not be proven either way.',
+        evidence.record(),
+      );
+    };
+
+    // Setup, planTests, and the baseline suite all ran above, and each can latch
+    // a death without throwing (planTests swallows non-sandbox read failures by
+    // design). Entering the cascade anyway would spend the whole agent budget —
+    // up to 2 tiers x 2 attempts of real model calls — against a corpse, which
+    // is the burn opslane-oss#255 is named after.
+    if (sandbox.unavailable) raiseSandboxGone('pre-agent-loop');
+
     // Model cascade: try each model in order, escalate on failure or poor quality
     for (let tierIdx = 0; tierIdx < cascade.length; tierIdx++) {
       const tier = cascade[tierIdx];
@@ -885,17 +906,7 @@ export async function runAgentFix(input: AgentFixInput): Promise<AgentFixResult>
         // here — only as this latched flag. Checked before the gaveUp and
         // budget branches because no agent verdict is trustworthy once the
         // machine is gone.
-        if (sandbox.unavailable) {
-          evidence.addCheck('sandbox', 'infra_error', {
-            command: '',
-            output: 'The verification sandbox became unavailable during the fix attempt',
-          });
-          recordSandboxFailure(sandbox, 'agent-loop', 'SandboxUnavailableError');
-          throw new VerificationInfraError(
-            'The verification sandbox became unavailable during the fix attempt, so the fix could not be proven either way.',
-            evidence.record(),
-          );
-        }
+        if (sandbox.unavailable) raiseSandboxGone('agent-loop');
 
         // Agent explicitly gave up — not fixable with code, don't escalate
         if (agentState.gaveUp && agentState.giveUpReason) {

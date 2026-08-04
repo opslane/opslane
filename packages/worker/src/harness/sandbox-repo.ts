@@ -143,6 +143,11 @@ export async function createRepoSandbox(opts: {
           exitCode: 0,
         };
       } catch (err: unknown) {
+        // A dead sandbox is not "git exited 1". Synthesizing a failed git result
+        // here erases the class before the catch below can preserve it: the
+        // failure resurfaces as CloneResolutionError and terminalizes as a
+        // customer-facing clone failure with no infra retry.
+        if (err instanceof SandboxUnavailableError) throw err;
         const detail = err as { message?: string; stdout?: string; stderr?: string };
         return {
           stdout: String(detail.stdout ?? ''),
@@ -162,7 +167,12 @@ export async function createRepoSandbox(opts: {
       // the PR-base authority.
       await resolveClonedBranch(runner, opts.githubRepo ?? 'repo');
     } catch (err: unknown) {
-      if (err instanceof CloneResolutionError) throw err;
+      // Preserve both typed classes. Wrapping a dead sandbox in `clone failed:`
+      // erases the class, and agent-fix.ts matches that string and RETURNS a
+      // needs_human clone failure — so it never reaches the outer catch that
+      // raises VerificationInfraError. The customer would see "we couldn't
+      // clone your repo" for a provider outage, with no infra retry.
+      if (err instanceof CloneResolutionError || err instanceof SandboxUnavailableError) throw err;
       const detail = err as { message?: string; stderr?: string };
       const message = [
         detail.message ?? String(err),
