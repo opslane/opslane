@@ -363,7 +363,11 @@ describe('processFixJob — preserves writeup on failure (no revert/null)', () =
   });
 
   it('rethrows verification infrastructure errors while the job has retries remaining', async () => {
-    const evidence = { version: 1 as const, tier: 'E0' as const, checks: [] };
+    const evidence = {
+      version: 1 as const,
+      tier: null,
+      checks: [{ name: 'sandbox', outcome: 'infra_error' as const, command: '', output_tail: 'gone' }],
+    };
     mockRunPipeline.mockRejectedValue(new VerificationInfraError('runner crashed', evidence));
 
     await expect(processJobInner(
@@ -377,7 +381,11 @@ describe('processFixJob — preserves writeup on failure (no revert/null)', () =
   });
 
   it('converts a final verification infrastructure failure to needs_human with evidence', async () => {
-    const evidence = { version: 1 as const, tier: 'E0' as const, checks: [] };
+    const evidence = {
+      version: 1 as const,
+      tier: null,
+      checks: [{ name: 'sandbox', outcome: 'infra_error' as const, command: '', output_tail: 'gone' }],
+    };
     mockRunPipeline.mockRejectedValue(new VerificationInfraError('runner crashed', evidence));
 
     await processJobInner(
@@ -390,6 +398,7 @@ describe('processFixJob — preserves writeup on failure (no revert/null)', () =
     );
     expect(call?.[2]).toBe('needs_human');
     expect(call?.[3]?.evidence).toEqual(evidence);
+    expect(call?.[3]?.evidence?.checks).toHaveLength(1);
   });
 
   it('prefers session-pointer evidence fetched through ingestion', async () => {
