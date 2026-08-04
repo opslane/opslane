@@ -59,11 +59,13 @@ Self-hosted operators mint a key from the ingestion package:
 cd packages/ingestion
 DATABASE_URL=postgres://... go run ./cmd/mint-key \
   -project 00000000-0000-0000-0000-000000000000 \
+  -scope sourcemaps \
   -label "production source maps"
 ```
 
-The command prints the raw `opslane_sk_` value once and prints its key ID. To
-revoke exactly that key, run the statement it prints:
+The command prints the target project's name and repo, then the raw
+`opslane_sk_` value once, then its key ID. To revoke exactly that key, run the
+statement it prints:
 
 ```sql
 UPDATE project_api_keys SET revoked_at = now() WHERE key_id = '<key-id>';
@@ -71,6 +73,30 @@ UPDATE project_api_keys SET revoked_at = now() WHERE key_id = '<key-id>';
 
 Minting another key does not revoke existing keys. Revocation is always an
 explicit, exact-key operation.
+
+## Re-keying an app (ingest keys)
+
+To mint a browser ingest key for an existing project (for example when
+re-keying an app whose legacy key was removed by an upgrade):
+
+```bash
+# find the project UUID first
+psql "$DATABASE_URL" -c "SELECT id, name, github_repo FROM projects;"
+
+cd packages/ingestion
+DATABASE_URL=postgres://... go run ./cmd/mint-key -project <uuid> -scope ingest
+```
+
+The tool prints the project's name and repo before the key — read it and
+confirm it is the project you meant. The printed `opslane_pk_` value goes
+into the app's build environment (`VITE_OPSLANE_API_KEY` for Vite apps, or
+your framework's equivalent public variable); it takes effect when the app
+is rebuilt and redeployed, because the key ships inside the browser bundle.
+
+Cutover order when an upgrade removes old keys: deploy the server first,
+then mint per project, then update each app's environment and redeploy it.
+Ingestion for an app stays down from the server deploy until that app's
+redeploy — budget the window accordingly.
 
 ## Map custody
 
