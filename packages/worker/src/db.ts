@@ -208,6 +208,41 @@ export async function claimJob(
   };
 }
 
+export interface QueueDepthRow {
+  jobType: string;
+  eligible: number;
+  backedOff: number;
+  oldestEligibleSeconds: number | null;
+}
+
+/** Queue shape by job type, sampled on a timer rather than per claim. */
+export async function getQueueDepth(): Promise<QueueDepthRow[]> {
+  const { rows } = await getPool().query<{
+    job_type: string;
+    eligible: string;
+    backed_off: string;
+    oldest_eligible_seconds: string | null;
+  }>(
+    `SELECT job_type,
+            count(*) FILTER (WHERE available_at <= now())::text AS eligible,
+            count(*) FILTER (WHERE available_at > now())::text AS backed_off,
+            EXTRACT(EPOCH FROM (now() - min(created_at)
+              FILTER (WHERE available_at <= now())))::text AS oldest_eligible_seconds
+       FROM error_group_jobs
+      WHERE status = 'pending'
+      GROUP BY job_type`,
+  );
+  return rows.map((row) => ({
+    jobType: row.job_type,
+    eligible: Number(row.eligible),
+    backedOff: Number(row.backed_off),
+    oldestEligibleSeconds:
+      row.oldest_eligible_seconds === null
+        ? null
+        : Math.round(Number(row.oldest_eligible_seconds)),
+  }));
+}
+
 export class JobRescheduledError extends Error {
   constructor(jobId: string) {
     super(`Job ${jobId} was durably rescheduled`);

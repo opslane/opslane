@@ -18,6 +18,7 @@ import {
   reserveDelivery,
   recordDeliveryPushed,
   finalizeDelivery,
+  getQueueDepth,
 } from '../db.js';
 
 const DATABASE_URL = process.env['DATABASE_URL'];
@@ -76,6 +77,21 @@ async function seedErrorGroupAndJob(overrides?: {
   const jobId = jobResult.rows[0]!.id;
 
   return { errorGroupId, jobId };
+}
+
+async function seedPendingJob(options: {
+  jobType: 'session_analysis' | 'investigate';
+  availableAt: Date;
+  createdAt?: Date;
+}): Promise<string> {
+  const { jobId } = await seedErrorGroupAndJob();
+  await testPool.query(
+    `UPDATE error_group_jobs
+        SET job_type = $2, available_at = $3, created_at = $4
+      WHERE id = $1`,
+    [jobId, options.jobType, options.availableAt, options.createdAt ?? new Date()],
+  );
+  return jobId;
 }
 
 async function cleanupTestData(): Promise<void> {
@@ -380,6 +396,27 @@ describeDb('db.ts integration tests', () => {
       const job = await claimJob('worker-1', 60_000);
       expect(job).not.toBeNull();
       expect(job!.id).toBe(pendingJobId);
+    });
+  });
+
+  describe('getQueueDepth', () => {
+    it('reports eligible and backed-off depth separately per job type', async () => {
+      const oneMinuteAgo = new Date(Date.now() - 60_000);
+      await seedPendingJob({
+        jobType: 'session_analysis',
+        availableAt: oneMinuteAgo,
+        createdAt: oneMinuteAgo,
+      });
+      await seedPendingJob({
+        jobType: 'session_analysis',
+        availableAt: new Date(Date.now() + 600_000),
+      });
+
+      const depth = await getQueueDepth();
+      const row = depth.find((entry) => entry.jobType === 'session_analysis');
+      expect(row?.eligible).toBe(1);
+      expect(row?.backedOff).toBe(1);
+      expect(row?.oldestEligibleSeconds).toBeGreaterThanOrEqual(59);
     });
   });
 

@@ -23,6 +23,8 @@ export interface PollerOptions {
   workerId: string;
   /** Callback invoked when a job is claimed. */
   processJob: (job: ClaimedJob, signal: AbortSignal) => Promise<void>;
+  /** Fired once per successful claim, before processing. Metrics only. */
+  onClaim?: (job: ClaimedJob) => void;
   /**
    * Fault-injection seam for reliability tests only. Runs after processJob
    * resolves and before the completion write, so a test can simulate a crash
@@ -41,7 +43,14 @@ export interface PollerOptions {
 type JobOutcome = 'completed' | 'failed' | 'aborted';
 
 export function createPoller(options: PollerOptions): Poller {
-  const { intervalMs, leaseDurationMs, workerId, processJob, beforeComplete } = options;
+  const {
+    intervalMs,
+    leaseDurationMs,
+    workerId,
+    processJob,
+    onClaim,
+    beforeComplete,
+  } = options;
   const random = options.random ?? Math.random;
   const shutdownGraceMs = options.shutdownGraceMs ?? 25_000;
   const CLAIM_ERROR_BASE_MS = 1_000;
@@ -197,6 +206,13 @@ export function createPoller(options: PollerOptions): Poller {
       if (!job) {
         await interruptibleSleep(intervalMs);
         continue;
+      }
+
+      // Metrics callbacks must never break the claim loop.
+      try {
+        onClaim?.(job);
+      } catch {
+        // Ignore metrics failures.
       }
 
       // stop() may have fired while the claim was in flight. Return the job

@@ -1,8 +1,19 @@
 import crypto from 'node:crypto';
 import http from 'node:http';
-import type { ClaimedJob, ErrorEventData } from './db.js';
+import type { ClaimedJob, ErrorEventData, QueueDepthRow } from './db.js';
 import * as db from './db.js';
-import { requeueStaleJobs, updateGroupStatus, closePool, updateGroupInvestigation, updateGroupAndCreateFixJob, getGroupInvestigation, resolveInactiveGroups, resolveSilentMergedGroups, updateJobTraceUrl } from './db.js';
+import {
+  requeueStaleJobs,
+  updateGroupStatus,
+  closePool,
+  updateGroupInvestigation,
+  updateGroupAndCreateFixJob,
+  getGroupInvestigation,
+  resolveInactiveGroups,
+  resolveSilentMergedGroups,
+  updateJobTraceUrl,
+  getQueueDepth,
+} from './db.js';
 import { buildReason } from './reason-codes.js';
 import { logger, setWorkerId } from './logger.js';
 import { fetchObject, getMinIOConfig } from './minio-client.js';
@@ -138,7 +149,18 @@ const HEALTH_PORT = parseInt(
 let jobsProcessed = 0;
 let jobsFailed = 0;
 let lastJobAt: string | null = null;
+let jobsInFlight = 0;
+let claimsLastMinute = 0;
+let claimRatePerMinute = 0;
+let queueDepth: QueueDepthRow[] = [];
+let queueSampleInFlight: Promise<void> = Promise.resolve();
 const startTime = Date.now();
+
+/** Eligible work plus no claims and no active handler indicates a stalled loop. */
+function isStalled(): boolean {
+  const eligible = queueDepth.reduce((total, depth) => total + depth.eligible, 0);
+  return eligible > 0 && claimRatePerMinute === 0 && jobsInFlight === 0;
+}
 
 function checkAbort(signal: AbortSignal): void {
   if (signal.aborted) {
@@ -177,7 +199,17 @@ async function resolveStackForEvent(
 }
 
 export async function processJob(job: ClaimedJob, signal: AbortSignal): Promise<void> {
-  await withJobTrace(job.id, job.errorGroupId ?? job.sourceId ?? 'unknown', job.projectId, () => processJobInner(job, signal));
+  jobsInFlight += 1;
+  try {
+    await withJobTrace(
+      job.id,
+      job.errorGroupId ?? job.sourceId ?? 'unknown',
+      job.projectId,
+      () => processJobInner(job, signal),
+    );
+  } finally {
+    jobsInFlight -= 1;
+  }
 }
 
 export async function processJobInner(job: ClaimedJob, signal: AbortSignal): Promise<void> {
@@ -1006,12 +1038,14 @@ async function main(): Promise<void> {
     if (req.url === '/health') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
-        status: 'ok',
         worker_id: WORKER_ID,
         uptime_seconds: Math.floor((Date.now() - startTime) / 1000),
         jobs_processed: jobsProcessed,
         jobs_failed: jobsFailed,
         last_job_at: lastJobAt,
+        claims_per_minute: claimRatePerMinute,
+        queue_depth: queueDepth,
+        status: isStalled() ? 'stalled' : 'ok',
       }));
     } else {
       res.writeHead(404);
@@ -1027,9 +1061,24 @@ async function main(): Promise<void> {
     leaseDurationMs: LEASE_DURATION_MS,
     workerId: WORKER_ID,
     processJob,
+    onClaim: () => { claimsLastMinute += 1; },
     shutdownGraceMs: SHUTDOWN_GRACE_MS,
   });
   poller.start();
+
+  // Sampled on a timer, never per claim: the aggregate scans the pending set
+  // and the drain loop claims far too often to pay for it each time.
+  const queueSampleTimer = setInterval(() => {
+    claimRatePerMinute = claimsLastMinute;
+    claimsLastMinute = 0;
+    queueSampleInFlight = getQueueDepth()
+      .then((depth) => { queueDepth = depth; })
+      .catch((err: unknown) => {
+        logger.error('Queue depth sample failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+  }, 60_000);
 
   // Reaper: periodically reclaim jobs with expired leases
   const reaperTimer = setInterval(() => {
@@ -1099,9 +1148,11 @@ async function main(): Promise<void> {
     clearInterval(reaperTimer);
     clearInterval(silenceTimer);
     clearInterval(inactivityTimer);
+    clearInterval(queueSampleTimer);
     await poller.stop();
     healthServer.close();
     await shutdownTracing();
+    await queueSampleInFlight;
     await closePool();
     logger.info('Worker shutdown complete');
     process.exit(0);
