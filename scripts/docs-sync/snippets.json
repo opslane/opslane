@@ -90,6 +90,7 @@
         { "language": "bash", "classification": "config-template" },
         { "language": "sql", "classification": "config-template" },
         { "language": "bash", "classification": "config-template" },
+        { "language": "bash", "classification": "config-template" },
         { "language": "sql", "classification": "config-template" },
         { "language": "sql", "classification": "config-template" }
       ]
