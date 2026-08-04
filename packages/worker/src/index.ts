@@ -86,6 +86,19 @@ const POLL_INTERVAL_MS =
   POLL_INTERVAL_MS_RAW <= POLL_INTERVAL_MS_MAX
     ? POLL_INTERVAL_MS_RAW
     : POLL_INTERVAL_MS_DEFAULT;
+// An unvalidated NaN here becomes a 0ms deadline, so every deploy would
+// abandon its in-flight job instead of waiting for it.
+const SHUTDOWN_GRACE_MS_DEFAULT = 25_000;
+const SHUTDOWN_GRACE_MS_RAW = parseInt(
+  process.env['SHUTDOWN_GRACE_MS'] ?? String(SHUTDOWN_GRACE_MS_DEFAULT),
+  10,
+);
+const SHUTDOWN_GRACE_MS =
+  Number.isInteger(SHUTDOWN_GRACE_MS_RAW) &&
+  SHUTDOWN_GRACE_MS_RAW >= 1_000 &&
+  SHUTDOWN_GRACE_MS_RAW <= 120_000
+    ? SHUTDOWN_GRACE_MS_RAW
+    : SHUTDOWN_GRACE_MS_DEFAULT;
 const LEASE_DURATION_MS = parseInt(
   process.env['LEASE_DURATION_MS'] ?? '300000', // 5 minutes default
   10
@@ -1014,6 +1027,7 @@ async function main(): Promise<void> {
     leaseDurationMs: LEASE_DURATION_MS,
     workerId: WORKER_ID,
     processJob,
+    shutdownGraceMs: SHUTDOWN_GRACE_MS,
   });
   poller.start();
 
