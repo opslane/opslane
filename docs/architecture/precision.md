@@ -18,7 +18,7 @@ A PR is opened ready for review only when **all** of the following held during t
 3. The project's test suite was run once before the patch and once after it. Opslane compares per-test results where Vitest JSON is available: pre-existing failures are recorded and excluded, while pass→fail regressions and unexplained collection drops block the PR (E1). A coarse runner can support E1 only when its post-patch run exits cleanly.
 4. The fix carries **high confidence**. This is a hard, independent guard for locally verified delivery. (Medium/low-confidence *investigations* stop before fix generation entirely, posting their analysis as `investigated` for you to review and trigger.)
 
-If dependency installation fails, the test runner crashes, or a verification gate times out, Opslane records an `infra_error`. Infrastructure errors are retried and never count as evidence for or against the patch; persistent failure terminates as `verification_infra_error` only after the job retry budget is exhausted.
+If dependency installation fails, the test runner crashes, the sandbox becomes unavailable, or a verification gate times out, Opslane records an `infra_error`. Infrastructure errors are retried and never count as evidence for or against the patch; persistent failure terminates as `verification_infra_error` only after the job retry budget is exhausted.
 
 ## Evidence tiers
 

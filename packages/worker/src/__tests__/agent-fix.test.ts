@@ -1,10 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-// Mock e2b
-vi.mock('e2b', () => ({
-  Sandbox: {
-    create: vi.fn(),
-  },
+// Mock e2b. The factory MUST preserve the real exports: production code imports
+// SandboxNotFoundError, and `instanceof` only holds against the real class.
+const { createE2BSandbox } = vi.hoisted(() => ({ createE2BSandbox: vi.fn() }));
+vi.mock('e2b', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('e2b')>()),
+  Sandbox: { create: createE2BSandbox },
 }));
 
 // Mock the agent loop
@@ -65,6 +66,8 @@ import { runAgentLoop } from '../harness/agent-loop.js';
 import { judgeDiff } from '../harness/diff-judge.js';
 import { runBuildGate } from '../harness/sandbox-repo.js';
 import { planTests, runSuite } from '../harness/test-runner.js';
+import { VerificationInfraError } from '../harness/errors.js';
+import { logger } from '../logger.js';
 
 function makeAgentResult(overrides?: Partial<AgentCompletionResult>): AgentCompletionResult {
   return {
@@ -79,7 +82,9 @@ function makeAgentResult(overrides?: Partial<AgentCompletionResult>): AgentCompl
   };
 }
 
+/** Provider-shaped fake: `sandboxId` is what the adapter reads to expose `id`. */
 const mockSandbox = {
+  sandboxId: 'sbx-mock',
   files: { read: vi.fn(), write: vi.fn() },
   commands: { run: vi.fn() },
   kill: vi.fn(),
@@ -144,6 +149,27 @@ function mockSandboxWithPassingTests() {
     if (cmd.includes('git diff')) return { exitCode: 0, stdout: DIFF_STDOUT, stderr: '' };
     return { exitCode: 0, stdout: '', stderr: '' };
   });
+}
+
+/** Provider-shaped fake that carries a runAgentFix run all the way to fix_ready.
+ *  Extracted from the passing tests above so death tests can start from a setup
+ *  that is already known to survive clone + branch resolution. */
+function passingSandboxFake() {
+  return {
+    sandboxId: 'sbx-passing',
+    commands: {
+      run: async (cmd: string, _options?: { timeoutMs?: number }) => {
+        const resolution = gitResolutionResult(cmd);
+        if (resolution) return resolution;
+        if (cmd.includes('vitest.config') && cmd.includes('echo')) return { exitCode: 0, stdout: 'vitest', stderr: '' };
+        if (cmd.includes('npx vitest run')) return { exitCode: 0, stdout: '3 tests passed', stderr: '' };
+        if (cmd.includes('git diff')) return { exitCode: 0, stdout: DIFF_STDOUT, stderr: '' };
+        return { exitCode: 0, stdout: '', stderr: '' };
+      },
+    },
+    files: { read: async (_path: string) => '', write: async () => undefined },
+    kill: vi.fn(async () => undefined),
+  };
 }
 
 /** Helper: mock triage to return fixable (default for most tests) */
@@ -1108,5 +1134,158 @@ describe('runAgentFix', () => {
     expect(systemPrompt).toContain('env-19');
     expect(systemPrompt).not.toContain('env-20');
     expect(systemPrompt).toContain('[5 more environments omitted]');
+  });
+});
+
+describe('sandbox unavailability outranks any agent-reported outcome', () => {
+  /** Setup shared by every test here; beforeEach resets mocks, so call it per test. */
+  async function arrangeDeathDuringAgentLoop(): Promise<void> {
+    const { SandboxNotFoundError } = await import('e2b');
+    let dead = false;
+
+    // Start from the fake the passing tests use, then make it die on demand.
+    const base = passingSandboxFake();
+    createE2BSandbox.mockResolvedValue({
+      ...base,
+      sandboxId: 'sbx-dies',
+      commands: {
+        run: vi.fn(async (command: string, opts?: { timeoutMs?: number }) => {
+          if (dead) throw new SandboxNotFoundError('Sandbox is probably not running anymore');
+          return base.commands.run(command, opts);
+        }),
+      },
+      files: {
+        read: vi.fn(async (path: string) => {
+          if (dead) throw new SandboxNotFoundError('Sandbox is probably not running anymore');
+          return base.files.read(path);
+        }),
+        write: base.files.write,
+      },
+    });
+
+    vi.mocked(runAgentLoop).mockImplementation(async (options) => {
+      dead = true;
+      // Mimic tool-loop.ts:202-212 — invoke a tool, swallow the exception, and
+      // report success anyway. This is exactly how the latch must be reached.
+      const read = options.tools.find((t) => t.name === 'read');
+      try { await read?.execute({ path: '/home/user/repo/src/index.ts' }); } catch { /* erased */ }
+      return makeAgentResult({ summary: 'fixed it', testsRan: true });
+    });
+  }
+
+  it('throws VerificationInfraError even when the agent reported success', async () => {
+    await arrangeDeathDuringAgentLoop();
+    await expect(runAgentFix(makeInput())).rejects.toBeInstanceOf(VerificationInfraError);
+  });
+
+  it('carries a non-empty evidence record naming the failure', async () => {
+    await arrangeDeathDuringAgentLoop();
+    await runAgentFix(makeInput()).then(
+      () => { throw new Error('expected rejection'); },
+      (err: VerificationInfraError) => {
+        expect(err.evidence.checks.some((c) => c.outcome === 'infra_error')).toBe(true);
+      },
+    );
+  });
+
+  it('records sandbox identity and age when the machine dies', async () => {
+    // beforeEach resets mocks, so arrange explicitly — do not rely on a prior test.
+    await arrangeDeathDuringAgentLoop();
+    const errorSpy = vi.spyOn(logger, 'error');
+    await expect(runAgentFix(makeInput())).rejects.toBeInstanceOf(VerificationInfraError);
+    expect(errorSpy).toHaveBeenCalledWith(
+      'sandbox became unavailable',
+      expect.objectContaining({
+        'sandbox.id': 'sbx-dies',
+        'error.phase': expect.any(String),
+        'sandbox.age_at_error_ms': expect.any(Number),
+      }),
+    );
+  });
+});
+
+describe('sandbox death before the agent loop', () => {
+  /** Fake whose commands.run dies only on the commands matching `dieOn`. */
+  function sandboxDyingOn(dieOn: (cmd: string) => boolean, SandboxNotFoundError: new (m: string) => Error) {
+    const base = passingSandboxFake();
+    return {
+      ...base,
+      sandboxId: 'sbx-early-death',
+      commands: {
+        run: vi.fn(async (cmd: string, opts?: { timeoutMs?: number }) => {
+          if (dieOn(cmd)) throw new SandboxNotFoundError('Sandbox is probably not running anymore');
+          return base.commands.run(cmd, opts);
+        }),
+      },
+    };
+  }
+
+  it('classifies a death during git clone as infra, not a clone failure', async () => {
+    // sandbox-repo.ts wraps clone-phase errors in `clone failed: ...`, and
+    // agent-fix matches that string and RETURNS needs_human. If the typed class
+    // is not preserved, this job terminalizes as the customer's repo being
+    // unclonable and never requeues.
+    const { SandboxNotFoundError } = await import('e2b');
+    createE2BSandbox.mockResolvedValue(
+      sandboxDyingOn((cmd) => cmd.includes('git clone'), SandboxNotFoundError),
+    );
+
+    await expect(runAgentFix(makeInput())).rejects.toBeInstanceOf(VerificationInfraError);
+  });
+
+  it('classifies a death during BRANCH RESOLUTION as infra, not a clone failure', async () => {
+    // The GitRunner adapter synthesizes { exitCode: 1 } from any thrown error.
+    // If it swallows the typed class, resolveClonedBranch reports
+    // CloneResolutionError and the customer is blamed for an E2B outage.
+    // Clone succeeds here; only the ls-remote/rev-parse probes hit the corpse.
+    const { SandboxNotFoundError } = await import('e2b');
+    createE2BSandbox.mockResolvedValue(
+      sandboxDyingOn(
+        (cmd) => cmd.includes('ls-remote') || cmd.includes('symbolic-ref'),
+        SandboxNotFoundError,
+      ),
+    );
+
+    await expect(runAgentFix(makeInput())).rejects.toBeInstanceOf(VerificationInfraError);
+  });
+
+  it('carries evidence for a setup-time death, before any sandbox is returned', async () => {
+    // Proves the evidence recorder really is constructed above createRepoSandbox:
+    // VerificationInfraError requires a non-optional EvidenceRecord.
+    const { SandboxNotFoundError } = await import('e2b');
+    createE2BSandbox.mockResolvedValue(
+      sandboxDyingOn((cmd) => cmd.includes('git clone'), SandboxNotFoundError),
+    );
+
+    await runAgentFix(makeInput()).then(
+      () => { throw new Error('expected rejection'); },
+      (err: VerificationInfraError) => {
+        expect(err.evidence.checks.some((c) => c.outcome === 'infra_error')).toBe(true);
+      },
+    );
+  });
+
+  it('does not start the agent cascade when setup already latched a death', async () => {
+    // `rm -f /home/user/.netrc` is swallowed by design (`.catch(() => {})`), so
+    // the death latches without throwing. Entering the cascade anyway would burn
+    // the whole agent budget against a machine already known to be gone.
+    // The credential cleanup only runs when a token was supplied.
+    // Match only the cleanup `rm -f`; the earlier `chmod 600 /home/user/.netrc`
+    // is NOT swallowed and would exercise the setup path instead.
+    const { SandboxNotFoundError } = await import('e2b');
+    const errorSpy = vi.spyOn(logger, 'error');
+    createE2BSandbox.mockResolvedValue(
+      sandboxDyingOn((cmd) => cmd.startsWith('rm -f /home/user/.netrc'), SandboxNotFoundError),
+    );
+
+    await expect(runAgentFix(makeInput({ githubToken: 'ghp_test' })))
+      .rejects.toBeInstanceOf(VerificationInfraError);
+    expect(vi.mocked(runAgentLoop)).not.toHaveBeenCalled();
+    // Assert the phase: without it this passes via the setup-death path and
+    // says nothing about the pre-cascade check.
+    expect(errorSpy).toHaveBeenCalledWith(
+      'sandbox became unavailable',
+      expect.objectContaining({ 'error.phase': 'pre-agent-loop' }),
+    );
   });
 });

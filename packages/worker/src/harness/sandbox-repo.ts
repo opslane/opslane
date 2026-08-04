@@ -7,7 +7,7 @@ import {
   type GitRunner,
 } from '../repo-clone.js';
 import { redactCloneDetail, scrubSecrets } from './redact.js';
-import { createSandboxRuntime, type SandboxRuntime } from './sandbox-runtime.js';
+import { createSandboxRuntime, SandboxUnavailableError, type SandboxRuntime } from './sandbox-runtime.js';
 import type { Platform } from '../platform.js';
 import { sanitizeRuntimeValue, type RuntimeInfo } from '../runtime-info.js';
 import { TRAVERSAL_EXCLUSIONS } from './traversal-exclusions.js';
@@ -143,6 +143,11 @@ export async function createRepoSandbox(opts: {
           exitCode: 0,
         };
       } catch (err: unknown) {
+        // A dead sandbox is not "git exited 1". Synthesizing a failed git result
+        // here erases the class before the catch below can preserve it: the
+        // failure resurfaces as CloneResolutionError and terminalizes as a
+        // customer-facing clone failure with no infra retry.
+        if (err instanceof SandboxUnavailableError) throw err;
         const detail = err as { message?: string; stdout?: string; stderr?: string };
         return {
           stdout: String(detail.stdout ?? ''),
@@ -162,7 +167,12 @@ export async function createRepoSandbox(opts: {
       // the PR-base authority.
       await resolveClonedBranch(runner, opts.githubRepo ?? 'repo');
     } catch (err: unknown) {
-      if (err instanceof CloneResolutionError) throw err;
+      // Preserve both typed classes. Wrapping a dead sandbox in `clone failed:`
+      // erases the class, and agent-fix.ts matches that string and RETURNS a
+      // needs_human clone failure — so it never reaches the outer catch that
+      // raises VerificationInfraError. The customer would see "we couldn't
+      // clone your repo" for a provider outage, with no infra retry.
+      if (err instanceof CloneResolutionError || err instanceof SandboxUnavailableError) throw err;
       const detail = err as { message?: string; stderr?: string };
       const message = [
         detail.message ?? String(err),
@@ -314,6 +324,9 @@ async function runPythonSyntaxGate(sandbox: SandboxRuntime): Promise<BuildGateRe
       ? { outcome: 'passed', exitCode: 0, output }
       : { outcome: 'failed', exitCode: res.exitCode, output };
   } catch (err: unknown) {
+    if (err instanceof SandboxUnavailableError) {
+      return { outcome: 'infra_error', output: scrubSecrets(err.message) };
+    }
     const failure = err as BuildFailureLike;
     const rawMessage = err instanceof Error ? err.message : String(err);
     const detail = [failure.stderr, failure.stdout]
@@ -341,15 +354,26 @@ export async function runBuildGate(
   try {
     const raw = await sandbox.files.read(`${SANDBOX_REPO}/package.json`);
     pkg = JSON.parse(raw) as PackageJsonLike;
-  } catch {
+  } catch (err: unknown) {
+    if (err instanceof SandboxUnavailableError) {
+      return { outcome: 'infra_error', output: scrubSecrets(err.message) };
+    }
     // no package.json
   }
 
-  const tsconfigExists = await fileExists(sandbox, `${SANDBOX_REPO}/tsconfig.json`);
-  const pm: 'npm' | 'pnpm' | 'yarn' =
-    (await fileExists(sandbox, `${SANDBOX_REPO}/pnpm-lock.yaml`)) ? 'pnpm'
+  let tsconfigExists: boolean;
+  let pm: 'npm' | 'pnpm' | 'yarn';
+  try {
+    tsconfigExists = await fileExists(sandbox, `${SANDBOX_REPO}/tsconfig.json`);
+    pm = (await fileExists(sandbox, `${SANDBOX_REPO}/pnpm-lock.yaml`)) ? 'pnpm'
       : (await fileExists(sandbox, `${SANDBOX_REPO}/yarn.lock`)) ? 'yarn'
         : 'npm';
+  } catch (err: unknown) {
+    if (err instanceof SandboxUnavailableError) {
+      return { outcome: 'infra_error', output: scrubSecrets(err.message) };
+    }
+    throw err;
+  }
 
   const cmd = selectBuildCommand(pkg, tsconfigExists, pm);
   if (!cmd) return { outcome: 'skipped_no_runner', output: 'no build script or tsconfig' };
@@ -361,6 +385,9 @@ export async function runBuildGate(
       ? { outcome: 'passed', exitCode: 0, output }
       : { outcome: 'failed', exitCode: res.exitCode, output };
   } catch (err: unknown) {
+    if (err instanceof SandboxUnavailableError) {
+      return { outcome: 'infra_error', output: scrubSecrets(err.message) };
+    }
     const failure = err as BuildFailureLike;
     const rawMessage = err instanceof Error ? err.message : String(err);
     const detail = [failure.stderr, failure.stdout]
@@ -375,11 +402,19 @@ export async function runBuildGate(
   }
 }
 
+/**
+ * Note the deliberate asymmetry: a vanished sandbox must not read as "file
+ * absent", because runBuildGate would then report skipped_no_runner and
+ * computeTier accepts that as a satisfied build gate. Other read failures
+ * (permissions, transport) still return false — this narrows the hole, it does
+ * not close it.
+ */
 async function fileExists(sandbox: SandboxRuntime, path: string): Promise<boolean> {
   try {
     await sandbox.files.read(path);
     return true;
-  } catch {
+  } catch (err: unknown) {
+    if (err instanceof SandboxUnavailableError) throw err;
     return false;
   }
 }

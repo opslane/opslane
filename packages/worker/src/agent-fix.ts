@@ -1,6 +1,6 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import { createAnthropicClient } from './anthropic-client.js';
-import type { SandboxRuntime } from './harness/sandbox-runtime.js';
+import { SandboxUnavailableError, type SandboxRuntime } from './harness/sandbox-runtime.js';
 import { runAgentLoop } from './harness/agent-loop.js';
 import { createToolBridge } from './harness/tool-bridge.js';
 import { createDefaultMiddleware } from './harness/tool-middleware.js';
@@ -10,6 +10,7 @@ import { judgeDiff } from './harness/diff-judge.js';
 import { investigateError } from './investigate.js';
 import { logger } from './logger.js';
 import { traceSpan } from './tracing.js';
+import { trace } from '@opentelemetry/api';
 import type { CheckOutcome, ConfidenceLevel, EvidenceRecord, NeedsHumanReason, ReasonCode } from '@opslane/shared';
 import type { Platform } from './platform.js';
 import type { RuntimeInfo } from './runtime-info.js';
@@ -33,6 +34,33 @@ import {
   type FixNarrative,
   type NarrativeFallbackInput,
 } from './narrative.js';
+
+/**
+ * Record the machine's identity at the moment it failed. sandboxId appears
+ * nowhere in the worker today, so an incident cannot currently be correlated to
+ * the provider's own records. Logged as well as traced, because Langfuse export
+ * is a no-op when its keys are unset.
+ *
+ * Attaches to whichever span is active at the catch point — in practice the job
+ * root span, not the `agent-loop` span, which has already closed. That is
+ * acceptable: the job span is where an operator looks.
+ */
+function recordSandboxFailure(sandbox: SandboxRuntime, phase: string, errorClass: string): void {
+  const ageAtErrorMs = Date.now() - sandbox.createdAt;
+  const fields = {
+    'sandbox.id': sandbox.id,
+    'sandbox.created_at': sandbox.createdAt,
+    'sandbox.lifetime_ms': sandbox.lifetimeMs,
+    'sandbox.age_at_error_ms': ageAtErrorMs,
+    'error.class': errorClass,
+    'error.phase': phase,
+  };
+  const span = trace.getActiveSpan();
+  if (span) {
+    for (const [key, value] of Object.entries(fields)) span.setAttribute(key, value);
+  }
+  logger.error('sandbox became unavailable', fields);
+}
 
 export interface AgentFixInput {
   platform?: Platform;
@@ -601,7 +629,11 @@ export async function runAgentFix(input: AgentFixInput): Promise<AgentFixResult>
   }
 
   let sandbox: SandboxRuntime | null = null;
-  let evidence: EvidenceRecorder | null = null;
+  // Created before the sandbox: a setup-time death must still be able to
+  // construct a VerificationInfraError, which requires an evidence record.
+  // Note the type is no longer nullable — it was `EvidenceRecorder | null`
+  // only because assignment happened after createRepoSandbox returned.
+  const evidence: EvidenceRecorder = createEvidenceRecorder();
 
   try {
     let repoSandbox: RepoSandbox;
@@ -637,7 +669,6 @@ export async function runAgentFix(input: AgentFixInput): Promise<AgentFixResult>
     sandbox = repoSandbox.sandbox;
     const installOutcome = repoSandbox.installOutcome;
     const installFailed = installOutcome === 'failed';
-    evidence = createEvidenceRecorder();
 
     let verificationInfraError = false;
     const withInfraRetry = async <T extends { outcome: CheckOutcome }>(run: () => Promise<T>): Promise<T> => {
@@ -756,6 +787,27 @@ export async function runAgentFix(input: AgentFixInput): Promise<AgentFixResult>
     // Summary from previous tier, passed to next tier to avoid repeating work
     let priorTierSummary: string | undefined;
 
+    // No agent verdict is trustworthy once the machine is gone, so every site
+    // that reads the latch raises the same way.
+    const raiseSandboxGone = (phase: string): never => {
+      evidence.addCheck('sandbox', 'infra_error', {
+        command: '',
+        output: 'The verification sandbox became unavailable during the fix attempt',
+      });
+      recordSandboxFailure(sandbox!, phase, 'SandboxUnavailableError');
+      throw new VerificationInfraError(
+        'The verification sandbox became unavailable during the fix attempt, so the fix could not be proven either way.',
+        evidence.record(),
+      );
+    };
+
+    // Setup, planTests, and the baseline suite all ran above, and each can latch
+    // a death without throwing (planTests swallows non-sandbox read failures by
+    // design). Entering the cascade anyway would spend the whole agent budget —
+    // up to 2 tiers x 2 attempts of real model calls — against a corpse, which
+    // is the burn opslane-oss#255 is named after.
+    if (sandbox.unavailable) raiseSandboxGone('pre-agent-loop');
+
     // Model cascade: try each model in order, escalate on failure or poor quality
     for (let tierIdx = 0; tierIdx < cascade.length; tierIdx++) {
       const tier = cascade[tierIdx];
@@ -848,6 +900,13 @@ export async function runAgentFix(input: AgentFixInput): Promise<AgentFixResult>
             userMsg,
           ),
         );
+
+        // agent-core/tool-loop.ts converts every tool exception into
+        // model-visible text, so a dead sandbox cannot surface as an exception
+        // here — only as this latched flag. Checked before the gaveUp and
+        // budget branches because no agent verdict is trustworthy once the
+        // machine is gone.
+        if (sandbox.unavailable) raiseSandboxGone('agent-loop');
 
         // Agent explicitly gave up — not fixable with code, don't escalate
         if (agentState.gaveUp && agentState.giveUpReason) {
@@ -1059,6 +1118,10 @@ export async function runAgentFix(input: AgentFixInput): Promise<AgentFixResult>
       const { diff, affectedFiles } = candidateDiff ?? { diff: '', affectedFiles: [] };
 
       if (verificationInfraError) {
+        // runSuite and runBuildGate convert sandbox death into infra_error, so
+        // the most common gate path reaches this throw without passing either
+        // of the two sites above.
+        if (sandbox.unavailable) recordSandboxFailure(sandbox, 'verification-gate', 'SandboxUnavailableError');
         throw new VerificationInfraError(
           'Verification infrastructure failed (dependency install, test runner, build, or timeout), so the fix could not be proven either way.',
           evidence.record(),
@@ -1199,6 +1262,30 @@ export async function runAgentFix(input: AgentFixInput): Promise<AgentFixResult>
     };
   } catch (err: unknown) {
     if (err instanceof VerificationInfraError) throw err;
+    // Paths that throw rather than latch: the uncaught `git checkout` resets,
+    // clone/branch resolution, install, baseline cleanup, tracked-file
+    // discovery, tier reset, and extractDiff. Without this they all terminate
+    // as worker_runtime_error and never requeue.
+    // Also consult the latch: a dead sandbox can surface as some *other* plain
+    // error thrown downstream of the failure, which would otherwise terminate
+    // as worker_runtime_error.
+    if (err instanceof SandboxUnavailableError || sandbox?.unavailable) {
+      const detail = err instanceof Error ? err.message : String(err);
+      evidence.addCheck('sandbox', 'infra_error', { command: '', output: scrubSecrets(detail) });
+      if (sandbox) {
+        recordSandboxFailure(sandbox, 'harness', 'SandboxUnavailableError');
+      } else {
+        // Death during createRepoSandbox: identity is genuinely unavailable.
+        logger.error('sandbox became unavailable before it was returned', {
+          'error.class': 'SandboxUnavailableError',
+          'error.phase': 'sandbox-setup',
+        });
+      }
+      throw new VerificationInfraError(
+        'The verification sandbox became unavailable, so the fix could not be proven either way.',
+        evidence.record(),
+      );
+    }
     const rawMessage = err instanceof Error ? err.message : String(err);
     const message = rawMessage.replace(/https:\/\/[^@]+@/g, 'https://***@');
     return {
@@ -1208,7 +1295,7 @@ export async function runAgentFix(input: AgentFixInput): Promise<AgentFixResult>
         reason_message: `Agent harness error: ${message}`,
         remediation: 'Review the error manually — the agent harness encountered an unexpected error',
       },
-      ...(evidence ? { evidence: evidence.record() } : {}),
+      evidence: evidence.record(),
     };
   } finally {
     if (sandbox) {

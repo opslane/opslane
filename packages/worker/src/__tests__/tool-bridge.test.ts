@@ -1,9 +1,14 @@
 import { describe, it, expect, vi } from 'vitest';
 import { createToolBridge } from '../harness/tool-bridge.js';
 import type { AgentState } from '../harness/types.js';
+import type { SandboxRuntime } from '../harness/sandbox-runtime.js';
 
 function makeMockSandbox() {
   return {
+    id: 'fake-sandbox',
+    createdAt: 0,
+    lifetimeMs: 1_800_000,
+    unavailable: false,
     files: {
       read: vi.fn(),
       write: vi.fn(),
@@ -11,6 +16,7 @@ function makeMockSandbox() {
     commands: {
       run: vi.fn(),
     },
+    kill: vi.fn(),
   };
 }
 
@@ -31,7 +37,7 @@ function makeState(): AgentState {
 describe('createToolBridge', () => {
   it('creates 8 tools (read, write, edit, bash, read_many, search, patch, give_up)', () => {
     const sandbox = makeMockSandbox();
-    const tools = createToolBridge(sandbox as unknown as import('e2b').Sandbox, makeState());
+    const tools = createToolBridge(sandbox as unknown as SandboxRuntime, makeState());
     const names = tools.map(t => t.name).sort();
     expect(names).toEqual(['bash', 'edit', 'give_up', 'patch', 'read', 'read_many', 'search', 'write']);
   });
@@ -39,7 +45,7 @@ describe('createToolBridge', () => {
   it('read tool returns file contents from sandbox', async () => {
     const sandbox = makeMockSandbox();
     sandbox.files.read.mockResolvedValue('const x = 1;');
-    const tools = createToolBridge(sandbox as unknown as import('e2b').Sandbox, makeState());
+    const tools = createToolBridge(sandbox as unknown as SandboxRuntime, makeState());
     const readTool = tools.find(t => t.name === 'read')!;
     const result = await readTool.execute({ path: '/home/user/repo/src/foo.ts' });
     expect(result).toBe('const x = 1;');
@@ -48,7 +54,7 @@ describe('createToolBridge', () => {
   it('edit tool replaces exact string in file', async () => {
     const sandbox = makeMockSandbox();
     sandbox.files.read.mockResolvedValue('const x = 1;\nconst y = 2;');
-    const tools = createToolBridge(sandbox as unknown as import('e2b').Sandbox, makeState());
+    const tools = createToolBridge(sandbox as unknown as SandboxRuntime, makeState());
     const editTool = tools.find(t => t.name === 'edit')!;
     const result = await editTool.execute({
       path: '/home/user/repo/src/foo.ts',
@@ -65,7 +71,7 @@ describe('createToolBridge', () => {
   it('edit tool errors when old_string not found', async () => {
     const sandbox = makeMockSandbox();
     sandbox.files.read.mockResolvedValue('const x = 1;');
-    const tools = createToolBridge(sandbox as unknown as import('e2b').Sandbox, makeState());
+    const tools = createToolBridge(sandbox as unknown as SandboxRuntime, makeState());
     const editTool = tools.find(t => t.name === 'edit')!;
     const result = await editTool.execute({
       path: '/home/user/repo/src/foo.ts',
@@ -78,7 +84,7 @@ describe('createToolBridge', () => {
   it('bash tool returns stdout on success', async () => {
     const sandbox = makeMockSandbox();
     sandbox.commands.run.mockResolvedValue({ exitCode: 0, stdout: 'hello', stderr: '' });
-    const tools = createToolBridge(sandbox as unknown as import('e2b').Sandbox, makeState());
+    const tools = createToolBridge(sandbox as unknown as SandboxRuntime, makeState());
     const bashTool = tools.find(t => t.name === 'bash')!;
     const result = await bashTool.execute({ command: 'echo hello' });
     expect(result).toBe('hello');
@@ -87,7 +93,7 @@ describe('createToolBridge', () => {
   it('bash tool returns stderr on failure', async () => {
     const sandbox = makeMockSandbox();
     sandbox.commands.run.mockResolvedValue({ exitCode: 1, stdout: '', stderr: 'not found' });
-    const tools = createToolBridge(sandbox as unknown as import('e2b').Sandbox, makeState());
+    const tools = createToolBridge(sandbox as unknown as SandboxRuntime, makeState());
     const bashTool = tools.find(t => t.name === 'bash')!;
     const result = await bashTool.execute({ command: 'bad-cmd' });
     expect(result).toContain('Exit code: 1');
@@ -97,7 +103,7 @@ describe('createToolBridge', () => {
   it('give_up tool sets state.gaveUp and stores reason', async () => {
     const sandbox = makeMockSandbox();
     const state = makeState();
-    const tools = createToolBridge(sandbox as unknown as import('e2b').Sandbox, state);
+    const tools = createToolBridge(sandbox as unknown as SandboxRuntime, state);
     const giveUpTool = tools.find(t => t.name === 'give_up')!;
     await giveUpTool.execute({
       reason_code: 'worker_runtime_error',

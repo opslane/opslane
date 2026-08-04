@@ -1,5 +1,5 @@
 import type { CheckOutcome } from '@opslane/shared';
-import type { SandboxRuntime } from './sandbox-runtime.js';
+import { SandboxUnavailableError, type SandboxRuntime } from './sandbox-runtime.js';
 import { scrubSecrets } from './redact.js';
 import type { Platform } from '../platform.js';
 import { parseJUnitXml } from './junit.js';
@@ -123,11 +123,18 @@ export function compareSuiteRuns(
   };
 }
 
+/**
+ * Mirrors the guard in sandbox-repo.ts: a vanished sandbox must not read as
+ * "file absent". Otherwise planTests finds no runner, returns `{kind:'none'}`,
+ * and the suite gate records skipped_no_runner for a machine that is simply
+ * gone. Other read failures (permissions, transport) still return false.
+ */
 async function fileExists(sandbox: SandboxRuntime, path: string): Promise<boolean> {
   try {
     await sandbox.files.read(path);
     return true;
-  } catch {
+  } catch (err: unknown) {
+    if (err instanceof SandboxUnavailableError) throw err;
     return false;
   }
 }
@@ -142,7 +149,10 @@ export async function planTests(
   let pkg: PackageJsonLike = {};
   try {
     pkg = JSON.parse(await sandbox.files.read(`${SANDBOX_REPO}/package.json`)) as PackageJsonLike;
-  } catch {
+  } catch (err: unknown) {
+    // Same asymmetry as runBuildGate: a dead machine must not read as a repo
+    // that simply has no package.json.
+    if (err instanceof SandboxUnavailableError) throw err;
     // A repository without a root package.json has no supported Phase-1 runner.
   }
   if (pkg.workspaces || await fileExists(sandbox, `${SANDBOX_REPO}/pnpm-workspace.yaml`)) {
@@ -201,7 +211,30 @@ export async function runSuite(
     };
   }
 
-  await sandbox.commands.run(`rm -f ${plan.kind === 'pytest' ? PYTEST_RESULTS_PATH : SUITE_RESULTS_PATH}`, { timeoutMs: 10_000 });
+  // Cleanup gets its OWN catch. Folding it into the suite try would let an
+  // ordinary `rm` failure be reported as the customer's tests failing; leaving
+  // it uncaught (the previous code) let a dead sandbox throw past every
+  // classifier and surface as worker_runtime_error.
+  const cleanupCommand = `rm -f ${plan.kind === 'pytest' ? PYTEST_RESULTS_PATH : SUITE_RESULTS_PATH}`;
+  try {
+    await sandbox.commands.run(cleanupCommand, { timeoutMs: 10_000 });
+  } catch (error: unknown) {
+    // EVERY cleanup failure is infrastructure, not a verdict. Continuing would
+    // let the parser read a results file left by a previous run and report it
+    // as this patch's outcome — a stale-evidence false positive.
+    //
+    // Report the cleanup command, not plan.command: evidence is customer-facing,
+    // and pairing "npm test" with an `rm` failure reads as the suite failing.
+    const detail = error instanceof Error ? error.message : String(error);
+    return {
+      outcome: 'infra_error',
+      command: cleanupCommand,
+      tests: null,
+      total: null,
+      output: bound(scrubSecrets(detail)),
+    };
+  }
+
   let rawOutput = '';
   let exitCode = 0;
   try {
@@ -212,6 +245,15 @@ export async function runSuite(
     exitCode = result.exitCode;
     rawOutput = `${result.stdout ?? ''}\n${result.stderr ?? ''}`;
   } catch (error: unknown) {
+    if (error instanceof SandboxUnavailableError) {
+      return {
+        outcome: 'infra_error',
+        command: plan.command,
+        tests: null,
+        total: null,
+        output: bound(scrubSecrets(error.message)),
+      };
+    }
     const errorMessage = error instanceof Error ? error.message : String(error);
     const output = failureOutput(error);
     if (/timed out|timeout/i.test(errorMessage)) {
