@@ -118,18 +118,49 @@ func NewProjectKey(scope string) (*MintedProjectKey, error) {
 	}, nil
 }
 
+// ParseProjectKey recognises the raw credential and, for source-map keys,
+// validates any trailing endpoint payload. Every rejection returns the same
+// opaque message so an attacker cannot learn which part was recognised; the
+// reason tokens ParseSKPayload produces stay inside the codec.
 func ParseProjectKey(raw string) (*ParsedProjectKey, error) {
-	// The secret uses base64url and may contain underscores, so the fourth
-	// component must be the entire remainder.
+	if len(raw) > MaxRawKeyLen {
+		return nil, fmt.Errorf("malformed key")
+	}
+	// The secret and the payload both use base64url and may contain
+	// underscores, so the fourth component is the entire remainder and the
+	// secret is taken at its fixed width rather than by splitting again.
 	parts := strings.SplitN(raw, "_", 4)
 	if len(parts) != 4 {
 		return nil, fmt.Errorf("malformed key")
 	}
 	scope, ok := scopeForPrefix(parts[0] + "_" + parts[1])
-	if !ok || !keyIDRe.MatchString(parts[2]) || !secretRe.MatchString(parts[3]) {
+	if !ok || !keyIDRe.MatchString(parts[2]) {
 		return nil, fmt.Errorf("malformed key")
 	}
-	return &ParsedProjectKey{KeyID: parts[2], Secret: parts[3], Scope: scope}, nil
+	remainder := parts[3] // secret, optionally followed by "_" + payload
+	if len(remainder) < secretLen {
+		return nil, fmt.Errorf("malformed key")
+	}
+	secret := remainder[:secretLen]
+	if !secretRe.MatchString(secret) {
+		return nil, fmt.Errorf("malformed key")
+	}
+	switch {
+	case len(remainder) == secretLen:
+		// Bare key: still valid server-side for both scopes, because routing
+		// to an endpoint is a client concern.
+	case remainder[secretLen] != '_':
+		return nil, fmt.Errorf("malformed key")
+	default:
+		payload := remainder[secretLen+1:]
+		if scope != ScopeSourcemaps {
+			return nil, fmt.Errorf("malformed key") // payload on a pk
+		}
+		if _, err := ParseSKPayload(payload); err != nil {
+			return nil, fmt.Errorf("malformed key")
+		}
+	}
+	return &ParsedProjectKey{KeyID: parts[2], Secret: secret, Scope: scope}, nil
 }
 
 func (q *Queries) CreateProjectKey(
