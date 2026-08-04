@@ -247,6 +247,21 @@ func (q *Queries) provisionProjectTx(
 	return &result, nil
 }
 
+// GetProjectIdentity returns a project's name and repo for operator-facing
+// confirmation output (mint-key prints it before exposing a key). Scoped by
+// primary key; read-only.
+func (q *Queries) GetProjectIdentity(ctx context.Context, projectID string) (string, *string, error) {
+	var name string
+	var githubRepo *string
+	err := q.pool.QueryRow(ctx,
+		`SELECT name, github_repo FROM projects WHERE id = $1`, projectID,
+	).Scan(&name, &githubRepo)
+	if err != nil {
+		return "", nil, fmt.Errorf("get project identity: %w", err)
+	}
+	return name, githubRepo, nil
+}
+
 func (q *Queries) CreateEnvironment(ctx context.Context, projectID, name string) (*Environment, error) {
 	var env Environment
 	err := q.pool.QueryRow(ctx,
