@@ -1187,4 +1187,19 @@ describe('sandbox unavailability outranks any agent-reported outcome', () => {
       },
     );
   });
+
+  it('records sandbox identity and age when the machine dies', async () => {
+    // beforeEach resets mocks, so arrange explicitly — do not rely on a prior test.
+    await arrangeDeathDuringAgentLoop();
+    const errorSpy = vi.spyOn(logger, 'error');
+    await expect(runAgentFix(makeInput())).rejects.toBeInstanceOf(VerificationInfraError);
+    expect(errorSpy).toHaveBeenCalledWith(
+      'sandbox became unavailable',
+      expect.objectContaining({
+        'sandbox.id': 'sbx-dies',
+        'error.phase': expect.any(String),
+        'sandbox.age_at_error_ms': expect.any(Number),
+      }),
+    );
+  });
 });

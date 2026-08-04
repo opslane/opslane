@@ -10,6 +10,7 @@ import { judgeDiff } from './harness/diff-judge.js';
 import { investigateError } from './investigate.js';
 import { logger } from './logger.js';
 import { traceSpan } from './tracing.js';
+import { trace } from '@opentelemetry/api';
 import type { CheckOutcome, ConfidenceLevel, EvidenceRecord, NeedsHumanReason, ReasonCode } from '@opslane/shared';
 import type { Platform } from './platform.js';
 import type { RuntimeInfo } from './runtime-info.js';
@@ -33,6 +34,33 @@ import {
   type FixNarrative,
   type NarrativeFallbackInput,
 } from './narrative.js';
+
+/**
+ * Record the machine's identity at the moment it failed. sandboxId appears
+ * nowhere in the worker today, so an incident cannot currently be correlated to
+ * the provider's own records. Logged as well as traced, because Langfuse export
+ * is a no-op when its keys are unset.
+ *
+ * Attaches to whichever span is active at the catch point — in practice the job
+ * root span, not the `agent-loop` span, which has already closed. That is
+ * acceptable: the job span is where an operator looks.
+ */
+function recordSandboxFailure(sandbox: SandboxRuntime, phase: string, errorClass: string): void {
+  const ageAtErrorMs = Date.now() - sandbox.createdAt;
+  const fields = {
+    'sandbox.id': sandbox.id,
+    'sandbox.created_at': sandbox.createdAt,
+    'sandbox.lifetime_ms': sandbox.lifetimeMs,
+    'sandbox.age_at_error_ms': ageAtErrorMs,
+    'error.class': errorClass,
+    'error.phase': phase,
+  };
+  const span = trace.getActiveSpan();
+  if (span) {
+    for (const [key, value] of Object.entries(fields)) span.setAttribute(key, value);
+  }
+  logger.error('sandbox became unavailable', fields);
+}
 
 export interface AgentFixInput {
   platform?: Platform;
@@ -862,6 +890,7 @@ export async function runAgentFix(input: AgentFixInput): Promise<AgentFixResult>
             command: '',
             output: 'The verification sandbox became unavailable during the fix attempt',
           });
+          recordSandboxFailure(sandbox, 'agent-loop', 'SandboxUnavailableError');
           throw new VerificationInfraError(
             'The verification sandbox became unavailable during the fix attempt, so the fix could not be proven either way.',
             evidence.record(),
@@ -1078,6 +1107,10 @@ export async function runAgentFix(input: AgentFixInput): Promise<AgentFixResult>
       const { diff, affectedFiles } = candidateDiff ?? { diff: '', affectedFiles: [] };
 
       if (verificationInfraError) {
+        // runSuite and runBuildGate convert sandbox death into infra_error, so
+        // the most common gate path reaches this throw without passing either
+        // of the two sites above.
+        if (sandbox.unavailable) recordSandboxFailure(sandbox, 'verification-gate', 'SandboxUnavailableError');
         throw new VerificationInfraError(
           'Verification infrastructure failed (dependency install, test runner, build, or timeout), so the fix could not be proven either way.',
           evidence.record(),
@@ -1228,6 +1261,15 @@ export async function runAgentFix(input: AgentFixInput): Promise<AgentFixResult>
     if (err instanceof SandboxUnavailableError || sandbox?.unavailable) {
       const detail = err instanceof Error ? err.message : String(err);
       evidence.addCheck('sandbox', 'infra_error', { command: '', output: scrubSecrets(detail) });
+      if (sandbox) {
+        recordSandboxFailure(sandbox, 'harness', 'SandboxUnavailableError');
+      } else {
+        // Death during createRepoSandbox: identity is genuinely unavailable.
+        logger.error('sandbox became unavailable before it was returned', {
+          'error.class': 'SandboxUnavailableError',
+          'error.phase': 'sandbox-setup',
+        });
+      }
       throw new VerificationInfraError(
         'The verification sandbox became unavailable, so the fix could not be proven either way.',
         evidence.record(),
