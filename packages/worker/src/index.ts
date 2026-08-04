@@ -70,10 +70,22 @@ function mapDbSignals(raw: unknown): ReplaySignals | null {
   };
 }
 
-const POLL_INTERVAL_MS = parseInt(
-  process.env['POLL_INTERVAL_MS'] ?? '5000',
+const POLL_INTERVAL_MS_DEFAULT = 5000;
+const POLL_INTERVAL_MS_RAW = parseInt(
+  process.env['POLL_INTERVAL_MS'] ?? String(POLL_INTERVAL_MS_DEFAULT),
   10
 );
+// Guard against NaN/non-positive misconfiguration. Under the drain loop this is
+// the only pacing left on the empty-queue and claim-error paths: setTimeout
+// coerces NaN to 0, so a typo here would spin claims against Postgres.
+const POLL_INTERVAL_MS_MIN = 50;
+const POLL_INTERVAL_MS_MAX = 300_000;
+const POLL_INTERVAL_MS =
+  Number.isInteger(POLL_INTERVAL_MS_RAW) &&
+  POLL_INTERVAL_MS_RAW >= POLL_INTERVAL_MS_MIN &&
+  POLL_INTERVAL_MS_RAW <= POLL_INTERVAL_MS_MAX
+    ? POLL_INTERVAL_MS_RAW
+    : POLL_INTERVAL_MS_DEFAULT;
 const LEASE_DURATION_MS = parseInt(
   process.env['LEASE_DURATION_MS'] ?? '300000', // 5 minutes default
   10
