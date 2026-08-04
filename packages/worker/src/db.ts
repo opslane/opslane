@@ -108,9 +108,14 @@ function sessionAnalysisCapFromEnv(): number {
  *
  * Admission is serialized with a transaction-scoped advisory lock: without
  * it, simultaneous claimers all read the same running count and lane maxima
- * and can overshoot the cap by up to the fleet size. Claims are
- * millisecond-scale single-row updates against multi-second poll intervals,
- * so the serialization is not a throughput concern.
+ * and can overshoot the cap by up to the fleet size. Admission is serialized
+ * fleet-wide, so claim latency bounds total claim throughput. Measured at
+ * 4.05ms with 4k rows pending (the ORDER BY CASE matches no index, so every
+ * claim sorts the whole eligible set), giving a ceiling near 250 claims/sec
+ * that degrades linearly with backlog depth. A drain-looping worker claims at
+ * roughly 1/job-duration, so the margin is wide at current fleet size.
+ * Re-measure with EXPLAIN (ANALYZE, BUFFERS) before scaling the fleet or
+ * letting the pending set grow much larger.
  *
  * Lease and terminal-status semantics are untouched: only the candidate
  * selection changed. */
