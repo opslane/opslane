@@ -327,3 +327,45 @@ describe('runSuite taxonomy', () => {
     expect(run.outcome).toBe('infra_error');
   });
 });
+
+describe('planTests against an unavailable sandbox', () => {
+  it('propagates sandbox death instead of reporting no test runner', async () => {
+    // fileExists returning false for a dead machine makes the repo look like it
+    // has no runner, and the suite gate then records skipped_no_runner — the
+    // same silent misclassification as the build gate's path D.
+    const dead: SandboxRuntime = {
+      id: 'dead', createdAt: 0, lifetimeMs: 1_800_000, unavailable: true,
+      commands: { run: async () => ({ exitCode: 0, stdout: '', stderr: '' }) },
+      files: {
+        read: async () => { throw new SandboxUnavailableError('Sandbox is probably not running anymore'); },
+        write: async () => undefined,
+      },
+      kill: async () => undefined,
+    };
+
+    await expect(planTests(dead, 'javascript')).rejects.toBeInstanceOf(SandboxUnavailableError);
+  });
+
+  it('propagates a death that happens AFTER package.json is read', async () => {
+    // Without this case the suite passes even if fileExists still swallows
+    // sandbox death: the package.json read throws first and short-circuits.
+    // Mirrors the equivalent guard in sandbox-repo.test.ts.
+    let reads = 0;
+    const diesLater: SandboxRuntime = {
+      id: 'dies-later', createdAt: 0, lifetimeMs: 1_800_000, unavailable: true,
+      commands: { run: async () => ({ exitCode: 0, stdout: '', stderr: '' }) },
+      files: {
+        read: async (path: string) => {
+          reads++;
+          if (path.endsWith('package.json')) return JSON.stringify({ scripts: {} });
+          throw new SandboxUnavailableError('Sandbox is probably not running anymore');
+        },
+        write: async () => undefined,
+      },
+      kill: async () => undefined,
+    };
+
+    await expect(planTests(diesLater, 'javascript')).rejects.toBeInstanceOf(SandboxUnavailableError);
+    expect(reads).toBeGreaterThan(1);
+  });
+});
