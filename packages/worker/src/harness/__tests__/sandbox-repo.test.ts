@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import type { SandboxRuntime } from '../sandbox-runtime.js';
+import { SandboxUnavailableError, type SandboxRuntime } from '../sandbox-runtime.js';
 import { parseAffectedFiles, runBuildGate, selectBuildCommand } from '../sandbox-repo.js';
 
 function buildSandbox(opts: {
@@ -94,5 +94,53 @@ describe('runBuildGate taxonomy', () => {
       outcome: 'skipped_no_runner',
       output: 'no build script or tsconfig',
     });
+  });
+});
+
+describe('runBuildGate against an unavailable sandbox', () => {
+  const deadSandbox: SandboxRuntime = {
+    id: 'dead', createdAt: 0, lifetimeMs: 1_800_000, unavailable: true,
+    commands: {
+      run: async () => { throw new SandboxUnavailableError('Sandbox is probably not running anymore'); },
+    },
+    files: {
+      read: async () => { throw new SandboxUnavailableError('Sandbox is probably not running anymore'); },
+      write: async () => undefined,
+    },
+    kill: async () => undefined,
+  };
+
+  it('reports infra_error, never skipped_no_runner', async () => {
+    const result = await runBuildGate(deadSandbox, 'javascript');
+    // skipped_no_runner is the dangerous answer: computeTier accepts it as
+    // buildOk, so a vanished machine would satisfy the build gate.
+    expect(result.outcome).not.toBe('skipped_no_runner');
+    expect(result.outcome).toBe('infra_error');
+  });
+
+  it('reports infra_error when the sandbox dies AFTER package.json is read', async () => {
+    // Without this case the suite passes even if fileExists still swallows
+    // sandbox death: the package.json read throws first and short-circuits.
+    let reads = 0;
+    const diesLater: SandboxRuntime = {
+      ...deadSandbox,
+      files: {
+        read: async (path: string) => {
+          reads++;
+          if (path.endsWith('package.json')) return JSON.stringify({ scripts: {} });
+          throw new SandboxUnavailableError('Sandbox is probably not running anymore');
+        },
+        write: async () => undefined,
+      },
+    };
+
+    const result = await runBuildGate(diesLater, 'javascript');
+    expect(reads).toBeGreaterThan(1);
+    expect(result.outcome).toBe('infra_error');
+  });
+
+  it('reports infra_error for the python syntax gate too', async () => {
+    const result = await runBuildGate(deadSandbox, 'python');
+    expect(result.outcome).toBe('infra_error');
   });
 });

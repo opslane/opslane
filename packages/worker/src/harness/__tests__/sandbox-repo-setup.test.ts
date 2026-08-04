@@ -11,7 +11,10 @@ const state = vi.hoisted(() => ({
   kill: vi.fn(async () => undefined),
 }));
 
-vi.mock('../sandbox-runtime.js', () => ({
+// Preserve the real exports: sandbox-repo.ts narrows on SandboxUnavailableError,
+// and a factory that returns only createSandboxRuntime makes `instanceof` throw.
+vi.mock('../sandbox-runtime.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../sandbox-runtime.js')>()),
   createSandboxRuntime: vi.fn(async (): Promise<SandboxRuntime> => ({
     id: 'fake-sandbox',
     createdAt: 0,
