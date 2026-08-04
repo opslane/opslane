@@ -17,8 +17,8 @@ describe('SDK Package Exports', () => {
     expect(typeof sdk.opslaneVuePlugin.install).toBe('function');
   });
 
-  it('should export opslaneSourceMapPlugin from vite-plugin', async () => {
-    const plugin = await import('../../vite-plugin/index');
-    expect(typeof plugin.opslaneSourceMapPlugin).toBe('function');
+  it('should not export the removed opslaneSourceMapPlugin', async () => {
+    const plugin = await import('../../vite-plugin/index') as Record<string, unknown>;
+    expect(plugin['opslaneSourceMapPlugin']).toBeUndefined();
   });
 });
