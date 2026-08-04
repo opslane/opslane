@@ -1,5 +1,44 @@
 # @opslane/sdk changelog
 
+## 3.0.0
+
+### Major Changes
+
+- cf37de5: Remove the legacy `opslaneSourceMapPlugin` export. It had been a hard-fail stub since the key split; `opslane()` now uploads source maps itself when `OPSLANE_SOURCEMAP_KEY` and `OPSLANE_ENDPOINT` are set. Configs importing the old name fail at build time with a missing-export error; run `opslane sourcemaps install-plugin` to migrate.
+- 69a60c2: Separate public ingest keys from secret source-map keys.
+
+  **Breaking:** `init()` now refuses any `apiKey` that does not start with `opslane_pk_`.
+  It logs an error unconditionally (not only under `debug`) and does not initialize. A key
+  starting with `opslane_sk_` is a secret and must never ship in a browser bundle. Keys
+  minted before this release (`def_…`) are no longer accepted by the server either — re-run
+  `opslane onboard` and redeploy.
+
+  **Breaking:** `@opslane/sdk/vite-plugin` no longer uploads source maps. The single-map
+  upload route it posted to has been removed, and the replacement batch API is not available
+  yet (opslane/opslane-oss#218). `opslaneSourceMapPlugin()` now fails the build with an
+  explanatory error rather than silently stripping maps from the output and uploading
+  nothing. Remove it from your Vite plugins until batch upload ships.
+
+- b00600f: The Vite plugin uploads stamped source maps to Opslane when OPSLANE_SOURCEMAP_KEY and OPSLANE_ENDPOINT are set. Maps without sourcesContent are now accepted by debug-ID fingerprinting.
+
+### Minor Changes
+
+- de59ecd: Stamp Vite builds with deterministic debug IDs and carry them into error events.
+
+  `opslaneVitePlugin()` (exported as `opslane`) computes an ID from each source
+  map, writes it to the map's `debugId` field and the chunk's `//# debugId=`
+  footer, and registers the runtime chunk URL. The SDK matches stack-frame URLs
+  against that registry and attaches exact matches as `debug_meta.images`. The
+  raw stack is always preserved.
+
+  The plugin name is exported as `OPSLANE_VITE_PLUGIN_NAME` so tooling can detect
+  the plugin without copying the string.
+
+  By default the plugin requests hidden source maps and removes them from the
+  build output. Set `sourcemaps: 'keep'` to retain them.
+
+  Verified against Vite 5, 6, 7, and 8.
+
 ## 2.0.1
 
 ### Patch Changes
