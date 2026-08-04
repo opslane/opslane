@@ -3,7 +3,7 @@ set -eu
 
 INGESTION_PORT="${INGESTION_PORT:-18082}"
 RELIABILITY_DATABASE="opslane_reliability"
-LOCAL_RELIABILITY_DATABASE_URL="postgres://opslane:opslane_dev@localhost:5434/${RELIABILITY_DATABASE}"
+LOCAL_RELIABILITY_DATABASE_URL="postgres://opslane:opslane_dev@localhost:${OPSLANE_POSTGRES_HOST_PORT:-5434}/${RELIABILITY_DATABASE}"
 export INGESTION_PORT
 export OPSLANE_COMPOSE_DATABASE_URL="postgres://opslane:opslane_dev@postgres:5432/${RELIABILITY_DATABASE}?sslmode=disable"
 # The GitHub twin signs pull_request webhooks with this; ingestion must verify

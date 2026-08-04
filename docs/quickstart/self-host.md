@@ -29,7 +29,14 @@ curl http://localhost:8082/health
 
 If the `curl` returns `{"status":"ok"}`-style output with HTTP 200, the stack is up.
 
-> **Port conflict?** If `docker compose up` reports "port is already allocated", another service holds 8082/5434/9012. `docker ps` will show the holder. The compose command's output is the source of truth — a healthy response on 8082 can come from a different app entirely, so always check `docker compose ps` shows *these* services healthy.
+> **Port conflict?** If `docker compose up` reports "port is already allocated", another service holds 8082/5434/9012. `docker ps` will show the holder. Each port has an override, so you can move the whole stack instead of stopping the other service:
+>
+> ```bash
+> INGESTION_PORT=8092 OPSLANE_POSTGRES_HOST_PORT=5444 OPSLANE_MINIO_HOST_PORT=9022 docker compose up -d
+> curl http://localhost:8092/health
+> ```
+>
+> Put those in `.env` if you want them to stick — every later `docker compose` command in this directory needs the same values, or the services disagree about where to find each other. The compose command's output is the source of truth — a healthy response on 8082 can come from a different app entirely, so always check `docker compose ps` shows *these* services healthy.
 
 ## Path 1 — no credentials: watch an error become an incident
 
@@ -110,4 +117,5 @@ docker compose down -v     # stop and delete all local data (destructive)
 
 - **Event returns 401** — the API key header is wrong or the seed didn't run. Re-run the seed command; it's idempotent.
 - **Job stays pending** — check `docker compose ps`: the worker container must be up and healthy. `docker compose logs worker` shows claim/completion lines.
+- **`minio-setup exited (1)` and ingestion never starts** — the stack stops on purpose instead of hanging. Read the `minio-setup:` lines above the exit; they name the check and the fix. The usual cause is another Compose stack holding port 9012 — `docker ps --filter publish=9012` — in which case set `OPSLANE_MINIO_HOST_PORT` to a free port and re-run. Otherwise `docker compose logs minio` has the real error.
 - **Dashboard shows a login page you can't get past** — dashboard sign-in uses GitHub OAuth and needs a GitHub App configured (`GITHUB_APP_CLIENT_ID`, `GITHUB_APP_CLIENT_SECRET`) plus `DASHBOARD_ORIGIN=http://localhost:8082`, all set before `docker compose up`. Without `DASHBOARD_ORIGIN`, a successful GitHub sign-in redirects to port 3000, where nothing is listening in this setup. Path 1 doesn't require the dashboard.

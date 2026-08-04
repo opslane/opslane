@@ -39,7 +39,27 @@ Two ways that gate reports success without having run:
 - Shared types or workspace metadata: run `pnpm -r build` and affected tests.
 - CLI: run `pnpm --filter @opslane/cli build` and `pnpm --filter @opslane/cli test`.
 - Compose or health checks: validate config, start services, and inspect health. Build any affected Compose image after Dockerfile changes.
-- Pipeline changes require a live smoke: apply migrations, run `scripts/seed-e2e.sql`, rebuild ingestion and worker, send an event to `http://localhost:8082/api/v1/events`, and confirm the job reaches its expected terminal state. Use `test-fixtures/vue-app` or `test-fixtures/react-app` for browser fixtures.
+- Pipeline changes require a live smoke: apply migrations, run `scripts/seed-e2e.sql`, rebuild ingestion and worker, send an event to `$INGESTION_URL/api/v1/events`, and confirm the job reaches its expected terminal state. Use `test-fixtures/vue-app` or `test-fixtures/react-app` for browser fixtures.
+
+  From a git worktree, another stack may already hold the default host ports. Pick a free triple once and export the derived URLs together — host-side tests read the URLs, not the ports:
+
+  ```bash
+  export INGESTION_PORT=8092
+  export OPSLANE_POSTGRES_HOST_PORT=5444
+  export OPSLANE_MINIO_HOST_PORT=9022
+  export INGESTION_URL="http://localhost:$INGESTION_PORT"
+  export DATABASE_URL="postgres://opslane:opslane_dev@localhost:$OPSLANE_POSTGRES_HOST_PORT/opslane?sslmode=disable"
+  export MINIO_ENDPOINT="http://localhost:$OPSLANE_MINIO_HOST_PORT"
+  export REPLAY_STORE_ENDPOINT="$MINIO_ENDPOINT"
+  export REPLAY_STORE_PUBLIC_ENDPOINT="$MINIO_ENDPOINT"
+  # Storage credentials do not vary per stack, but host-side lanes skip or fail
+  # without them: Go storage tests `t.Skip`, and the friction e2e lane throws
+  # `ChunkReadError: MinIO not configured`.
+  export MINIO_ACCESS_KEY=minio MINIO_SECRET_KEY=minio12345 MINIO_BUCKET=opslane-replays
+  export REPLAY_STORE_ACCESS_KEY=minio REPLAY_STORE_SECRET_KEY=minio12345 REPLAY_STORE_BUCKET=opslane-replays
+  ```
+
+  Re-run the block as a unit when you change a port; the URLs do not follow on their own. Unset ports keep 8082/5434/9012. Setting a port without its URL is the silent failure: Go DB tests fall back to the hardcoded `localhost:5434` DSN and `t.Skip` instead of failing. After a worktree smoke, confirm `go test ./...` reported **zero** skips — a storage misconfiguration reports `ok` while ~30 tests never run.
 
 ## Cross-cutting conventions
 

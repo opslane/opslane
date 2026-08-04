@@ -152,6 +152,9 @@ jobs:
       # container is running rather than serving. minio-setup's own
       # `until mc alias set ...` loop is the real readiness gate, and `run --rm`
       # propagates its exit code -- `up` would swallow a failed policy apply.
+      # That loop is bounded (scripts/minio-setup.sh) and no longer ends in
+      # `|| true`, so both a readiness timeout and a failed policy apply now
+      # actually reach this step as a non-zero exit.
       - name: Start object storage
         working-directory: .
         run: |
