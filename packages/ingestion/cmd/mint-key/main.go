@@ -27,6 +27,43 @@ func resolveScope(raw string) (string, error) {
 	}
 }
 
+// resolveEndpoint decides the upload destination sealed into a source-map key.
+// A source-map key is only mintable when exactly one canonical destination is
+// known: silently preferring one of two disagreeing sources would mint a key
+// that uploads to the wrong deployment forever. An ingest key never carries a
+// destination, so the flag is refused there while the deployment-wide env var
+// is simply ignored.
+func resolveEndpoint(flagVal, envVal, scope string) (string, error) {
+	if scope != db.ScopeSourcemaps {
+		if flagVal != "" {
+			return "", fmt.Errorf("-endpoint is only valid with -scope %s", db.ScopeSourcemaps)
+		}
+		return "", nil
+	}
+	flagC, envC := "", ""
+	var err error
+	if flagVal != "" {
+		if flagC, err = db.CanonicalIngestURL(flagVal); err != nil {
+			return "", fmt.Errorf("-endpoint: %w", err)
+		}
+	}
+	if envVal != "" {
+		if envC, err = db.CanonicalIngestURL(envVal); err != nil {
+			return "", fmt.Errorf("OPSLANE_PUBLIC_INGEST_URL: %w", err)
+		}
+	}
+	switch {
+	case flagC != "" && envC != "" && flagC != envC:
+		return "", fmt.Errorf("-endpoint %q disagrees with OPSLANE_PUBLIC_INGEST_URL %q", flagC, envC)
+	case flagC != "":
+		return flagC, nil
+	case envC != "":
+		return envC, nil
+	default:
+		return "", fmt.Errorf("sourcemaps minting needs OPSLANE_PUBLIC_INGEST_URL or -endpoint")
+	}
+}
+
 // keyInstructions renders the show-once output. The two scopes ship to
 // different places: an sk is a CI secret; a pk is public by construction and
 // lands in the browser bundle, so it only takes effect when the app
@@ -44,7 +81,9 @@ func keyInstructions(scope, raw, keyID string) string {
 		out = "Source-map upload key (shown once — not retrievable later):\n" +
 			"  " + raw + "\n\n" +
 			"Set OPSLANE_SOURCEMAP_KEY to this value in CI, and/or in the\n" +
-			"repo's gitignored .env.local for local production builds.\n"
+			"repo's gitignored .env.local for local production builds. The key\n" +
+			"carries its own upload destination, so this single value is the\n" +
+			"whole configuration — there is no separate endpoint variable.\n"
 	default:
 		// resolveScope guards every caller; reaching this is a programming error.
 		panic("keyInstructions: unknown scope " + scope)
@@ -66,12 +105,21 @@ func main() {
 	projectID := flag.String("project", "", "project UUID")
 	scopeFlag := flag.String("scope", "", "REQUIRED key scope: ingest (browser pk) or sourcemaps (CI sk)")
 	label := flag.String("label", "", "key label (defaults per scope)")
+	endpointFlag := flag.String("endpoint", "",
+		"public ingest origin sealed into a sourcemaps key (defaults to OPSLANE_PUBLIC_INGEST_URL)")
 	flag.Parse()
 	if *projectID == "" {
-		fmt.Fprintln(os.Stderr, "usage: mint-key -project <uuid> -scope ingest|sourcemaps [-label <text>]")
+		fmt.Fprintln(os.Stderr, "usage: mint-key -project <uuid> -scope ingest|sourcemaps [-label <text>] [-endpoint <url>]")
 		os.Exit(2)
 	}
 	scope, err := resolveScope(*scopeFlag)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	// Resolve the destination before touching the database: a key that cannot
+	// be addressed must never reach an INSERT.
+	endpoint, err := resolveEndpoint(*endpointFlag, os.Getenv("OPSLANE_PUBLIC_INGEST_URL"), scope)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
@@ -104,9 +152,13 @@ func main() {
 	if githubRepo != nil {
 		repo = *githubRepo
 	}
-	fmt.Printf("Minting %s key for project %q (%s, %s)\n\n", scope, projectName, repo, *projectID)
+	fmt.Printf("Minting %s key for project %q (%s, %s)\n", scope, projectName, repo, *projectID)
+	if endpoint != "" {
+		fmt.Printf("Upload destination sealed into the key: %s\n", endpoint)
+	}
+	fmt.Println()
 
-	minted, err := queries.CreateProjectKey(ctx, *projectID, scope, *label, nil)
+	minted, err := queries.CreateProjectKey(ctx, *projectID, scope, *label, nil, endpoint)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "mint:", err)
 		os.Exit(1)

@@ -254,7 +254,7 @@ func (q *Queries) ProvisionAgentSession(ctx context.Context, in AgentProvisionIn
 		return nil, err
 	}
 	developmentKey, err := q.CreateProjectKeyTx(
-		ctx, tx, project.ID, ScopeIngest, "agent setup", nil,
+		ctx, tx, project.ID, ScopeIngest, "agent setup", nil, "",
 	)
 	if err != nil {
 		return nil, err

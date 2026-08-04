@@ -1,4 +1,6 @@
 // @vitest-environment node
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { describe, expect, it, vi } from 'vitest';
 import { uploadSourceMaps, type UploadEntry } from '../upload.js';
 
@@ -105,6 +107,56 @@ describe('uploadSourceMaps', () => {
       expect(delays).toEqual([30_000]);
     } finally {
       timeout.mockRestore();
+    }
+  });
+
+  // The upload URL is sealed into the key. Following a redirect would replay
+  // the key against a host the minter never authorised, so the transfer has to
+  // die at the 307 rather than chase the Location header.
+  it('refuses a redirect instead of re-sending the key elsewhere', async () => {
+    // The redirect target is a real server that would happily accept the key,
+    // so the assertion is about the client refusing, not about the target
+    // being unreachable.
+    const targetKeys: (string | undefined)[] = [];
+    const target = createServer((request, response) => {
+      targetKeys.push(request.headers['x-api-key'] as string | undefined);
+      response.writeHead(201);
+      response.end();
+    });
+    const listen = (server: ReturnType<typeof createServer>): Promise<number> =>
+      new Promise((resolve) => {
+        server.listen(0, '127.0.0.1', () => {
+          resolve((server.address() as AddressInfo).port);
+        });
+      });
+    const close = (server: ReturnType<typeof createServer>): Promise<void> =>
+      new Promise((resolve) => {
+        server.close(() => resolve());
+      });
+
+    const targetPort = await listen(target);
+    let hits = 0;
+    const redirector = createServer((_request, response) => {
+      hits += 1;
+      response.writeHead(307, {
+        Location: `http://127.0.0.1:${targetPort}/api/v1/sourcemaps/${ENTRY.debugId}`,
+      });
+      response.end();
+    });
+    const redirectorPort = await listen(redirector);
+    try {
+      const result = await uploadSourceMaps([ENTRY], {
+        endpoint: `http://127.0.0.1:${redirectorPort}`,
+        key: 'opslane_sk_test',
+      });
+      expect(hits).toBeGreaterThan(0);
+      expect(targetKeys).toEqual([]);
+      expect(result.uploaded).toBe(0);
+      expect(result.failed).toHaveLength(1);
+      expect(result.failed[0]?.fileName).toBe(ENTRY.fileName);
+    } finally {
+      await close(redirector);
+      await close(target);
     }
   });
 

@@ -61,6 +61,6 @@ The event should appear in your dashboard (or via the incidents API) within seco
 ## Next
 
 - [Upload source maps](source-maps.md) so stacks resolve to your `.vue`
-  sources. The plugin uploads them when OPSLANE_SOURCEMAP_KEY and
-  OPSLANE_ENDPOINT are set.
+  sources. The plugin uploads them when OPSLANE_SOURCEMAP_KEY is set; the key
+  carries the ingestion origin it was minted for.
 - All init options: [SDK options reference](../reference/sdk-options.md)

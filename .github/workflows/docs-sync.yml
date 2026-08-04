@@ -22,7 +22,9 @@ jobs:
       github.event.pull_request.head.repo.fork == false &&
       !startsWith(github.event.pull_request.head.ref, 'claude/')
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Per-doc reasoning is sequential, so the ceiling scales with how many
+    # covers: globs a branch hits. 15 minutes died at 11 matched docs.
+    timeout-minutes: 40
     permissions:
       contents: read
     outputs:

@@ -128,6 +128,18 @@ describe('writeEnvLocal refuses secrets', () => {
     })).rejects.toThrow(/only opslane_pk_ keys belong in browser code/);
   });
 
+  it('refuses an endpoint-bearing source-map secret key', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'envfile-sk-payload-'));
+    // vectors.valid[0].raw from test-fixtures/sourcemap-key/vectors.json: the
+    // refusal keys off the prefix, so the trailing payload changes nothing.
+    await expect(writeEnvLocal(dir, {
+      VITE_OPSLANE_API_KEY:
+        'opslane_sk_mzxw6ytboi3damrrgi3tknzxgq_E2ESOURCEMAPSECRETAAAAAAAAAAAAAAAAAAAAAAAAA'
+        + '_eyJ2IjoxLCJpYXQiOiIyMDI2LTA4LTA0VDAwOjAwOjAwWiIsInVybCI6Imh0dHBzOi8vaW5nZXN0Lm9wc2xhbmUuY29tIn0',
+    })).rejects.toThrow(/only opslane_pk_ keys belong in browser code/);
+    await expect(readFile(join(dir, '.env.local'), 'utf8')).rejects.toThrow();
+  });
+
   it('leaves no .env.local behind when it refuses', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'envfile-none-'));
     await expect(writeEnvLocal(dir, {

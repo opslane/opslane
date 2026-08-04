@@ -1,0 +1,74 @@
+{
+  "version": 1,
+  "valid": [
+    {
+      "name": "https origin",
+      "keyid": "mzxw6ytboi3damrrgi3tknzxgq",
+      "secret": "E2ESOURCEMAPSECRETAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "endpoint": "https://ingest.opslane.com",
+      "iat": "2026-08-04T00:00:00Z",
+      "raw": "opslane_sk_mzxw6ytboi3damrrgi3tknzxgq_E2ESOURCEMAPSECRETAAAAAAAAAAAAAAAAAAAAAAAAA_eyJ2IjoxLCJpYXQiOiIyMDI2LTA4LTA0VDAwOjAwOjAwWiIsInVybCI6Imh0dHBzOi8vaW5nZXN0Lm9wc2xhbmUuY29tIn0"
+    },
+    {
+      "name": "loopback http with port",
+      "keyid": "mzxw6ytboi3damrrgi3tknzxgq",
+      "secret": "E2ESOURCEMAPSECRETAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "endpoint": "http://localhost:8082",
+      "iat": "2026-08-04T00:00:00Z",
+      "raw": "opslane_sk_mzxw6ytboi3damrrgi3tknzxgq_E2ESOURCEMAPSECRETAAAAAAAAAAAAAAAAAAAAAAAAA_eyJ2IjoxLCJpYXQiOiIyMDI2LTA4LTA0VDAwOjAwOjAwWiIsInVybCI6Imh0dHA6Ly9sb2NhbGhvc3Q6ODA4MiJ9"
+    },
+    {
+      "name": "default port stripped",
+      "keyid": "mzxw6ytboi3damrrgi3tknzxgq",
+      "secret": "E2ESOURCEMAPSECRETAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "endpoint": "https://ingest.opslane.com:443/",
+      "canonical": "https://ingest.opslane.com",
+      "iat": "2026-08-04T00:00:00Z",
+      "raw": "opslane_sk_mzxw6ytboi3damrrgi3tknzxgq_E2ESOURCEMAPSECRETAAAAAAAAAAAAAAAAAAAAAAAAA_eyJ2IjoxLCJpYXQiOiIyMDI2LTA4LTA0VDAwOjAwOjAwWiIsInVybCI6Imh0dHBzOi8vaW5nZXN0Lm9wc2xhbmUuY29tIn0"
+    },
+    {
+      "name": "ipv6 loopback",
+      "keyid": "mzxw6ytboi3damrrgi3tknzxgq",
+      "secret": "E2ESOURCEMAPSECRETAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "endpoint": "http://[::1]:8082",
+      "iat": "2026-08-04T00:00:00Z",
+      "raw": "opslane_sk_mzxw6ytboi3damrrgi3tknzxgq_E2ESOURCEMAPSECRETAAAAAAAAAAAAAAAAAAAAAAAAA_eyJ2IjoxLCJpYXQiOiIyMDI2LTA4LTA0VDAwOjAwOjAwWiIsInVybCI6Imh0dHA6Ly9bOjoxXTo4MDgyIn0"
+    }
+  ],
+  "decoderInvalid": [
+    {"name": "bare key (no payload)", "raw": "opslane_sk_mzxw6ytboi3damrrgi3tknzxgq_E2ESOURCEMAPSECRETAAAAAAAAAAAAAAAAAAAAAAAAA", "acceptedByServer": true, "reason": "legacy_format"},
+    {"name": "empty payload segment", "rawSuffix": "_", "reason": "empty_payload"},
+    {"name": "bad base64", "payload": "!!!", "reason": "bad_base64"},
+    {"name": "padded base64", "payloadOf": "{\"v\":1,\"iat\":\"2026-08-04T00:00:00Z\",\"url\":\"https://a.example\"}", "padded": true, "reason": "bad_base64"},
+    {"name": "wrong version", "payloadJson": {"v": 2, "iat": "2026-08-04T00:00:00Z", "url": "https://a.example"}, "reason": "bad_version"},
+    {"name": "unknown field", "payloadJson": {"v": 1, "iat": "2026-08-04T00:00:00Z", "url": "https://a.example", "x": 1}, "reason": "unknown_field"},
+    {"name": "missing url", "payloadJson": {"v": 1, "iat": "2026-08-04T00:00:00Z"}, "reason": "missing_field"},
+    {"name": "duplicate field", "payloadRawJson": "{\"v\":1,\"v\":1,\"iat\":\"2026-08-04T00:00:00Z\",\"url\":\"https://a.example\"}", "reason": "duplicate_field"},
+    {"name": "bad iat", "payloadJson": {"v": 1, "iat": "yesterday", "url": "https://a.example"}, "reason": "bad_iat"},
+    {"name": "http non-loopback", "payloadJson": {"v": 1, "iat": "2026-08-04T00:00:00Z", "url": "http://ingestion:8080"}, "reason": "url_scheme"},
+    {"name": "url with path", "payloadJson": {"v": 1, "iat": "2026-08-04T00:00:00Z", "url": "https://a.example/api"}, "reason": "url_not_origin"},
+    {"name": "url with userinfo", "payloadJson": {"v": 1, "iat": "2026-08-04T00:00:00Z", "url": "https://u:p@a.example"}, "reason": "url_not_origin"},
+    {"name": "payload on pk", "raw": "opslane_pk_mzxw6ytboi3damrrgi3tknzxgq_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopq_eyJ2IjoxfQ", "reason": "payload_on_pk"},
+    {"name": "oversize", "oversizeTo": 5000, "reason": "too_long"},
+    {"name": "escaped duplicate key", "payloadRawJson": "{\"v\":1,\"\\u0076\":1,\"iat\":\"2026-08-04T00:00:00Z\",\"url\":\"https://a.example\"}", "reason": "duplicate_field"},
+    {"name": "trailing delimiter", "payloadOf": "{\"v\":1,\"iat\":\"2026-08-04T00:00:00Z\",\"url\":\"https://a.example\"}}", "reason": "bad_json"},
+    {"name": "non-UTC iat", "payloadJson": {"v": 1, "iat": "2026-08-04T01:00:00+01:00", "url": "https://a.example"}, "reason": "bad_iat"},
+    {"name": "wrong field type", "payloadJson": {"v": "1", "iat": "2026-08-04T00:00:00Z", "url": "https://a.example"}, "reason": "bad_field_type"},
+    {"name": "non-integer v literal", "payloadRawJson": "{\"v\":1.0,\"iat\":\"2026-08-04T00:00:00Z\",\"url\":\"https://a.example\"}", "reason": "bad_field_type"},
+    {"name": "url with query", "payloadJson": {"v": 1, "iat": "2026-08-04T00:00:00Z", "url": "https://a.example?x=1"}, "reason": "url_not_origin"},
+    {"name": "url with fragment", "payloadJson": {"v": 1, "iat": "2026-08-04T00:00:00Z", "url": "https://a.example#f"}, "reason": "url_not_origin"},
+    {"name": "empty host", "payloadJson": {"v": 1, "iat": "2026-08-04T00:00:00Z", "url": "https:///"}, "reason": "url_invalid"},
+    {"name": "unicode host", "payloadJson": {"v": 1, "iat": "2026-08-04T00:00:00Z", "url": "https://bücher.example"}, "reason": "url_host_ascii"},
+    {"name": "port leading zero", "payloadJson": {"v": 1, "iat": "2026-08-04T00:00:00Z", "url": "https://a.example:0443"}, "reason": "url_port"},
+    {"name": "port out of range", "payloadJson": {"v": 1, "iat": "2026-08-04T00:00:00Z", "url": "https://a.example:99999"}, "reason": "url_port"},
+    {"name": "bad keyid width", "raw": "opslane_sk_short_E2ESOURCEMAPSECRETAAAAAAAAAAAAAAAAAAAAAAAAA", "reason": "bad_grammar"},
+    {"name": "bad secret alphabet", "raw": "opslane_sk_mzxw6ytboi3damrrgi3tknzxgq_%%%SOURCEMAPSECRETAAAAAAAAAAAAAAAAAAAAAAAAA", "reason": "bad_grammar"},
+    {"name": "oversize url in payload", "urlOfLength": 2100, "reason": "url_too_long"}
+  ],
+  "encoderInvalid": [
+    {"endpoint": "ftp://a.example", "reason": "url_scheme"},
+    {"endpoint": "https://a.example/api", "reason": "url_not_origin"},
+    {"endpoint": "not a url", "reason": "url_invalid"},
+    {"endpoint": "http://internal-host:8080", "reason": "url_scheme"}
+  ]
+}

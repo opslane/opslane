@@ -51,6 +51,24 @@ test('generic token patterns fail while documentation placeholders pass', () => 
   assert.throws(() => assertSecretFree('AKIAABCDEFGHIJKLMNOP'), /secret pattern/);
 });
 
+test('an endpoint-bearing project key is refused, payload and all', () => {
+  // vectors.valid[0].raw from test-fixtures/sourcemap-key/vectors.json.
+  const canary =
+    'opslane_sk_mzxw6ytboi3damrrgi3tknzxgq_E2ESOURCEMAPSECRETAAAAAAAAAAAAAAAAAAAAAAAAA'
+    + '_eyJ2IjoxLCJpYXQiOiIyMDI2LTA4LTA0VDAwOjAwOjAwWiIsInVybCI6Imh0dHBzOi8vaW5nZXN0Lm9wc2xhbmUuY29tIn0';
+  assert.throws(
+    () => assertSecretFree(`Set \`OPSLANE_SOURCEMAP_KEY\` to ${canary} before building.\n`),
+    /secret pattern/,
+  );
+  // The bare (legacy) form is still a secret and still refused.
+  assert.throws(
+    () => assertSecretFree('opslane_sk_mzxw6ytboi3damrrgi3tknzxgq_E2ESOURCEMAPSECRETAAAAAAAAAAAAAAAAAAAAAAAAA'),
+    /secret pattern/,
+  );
+  // Prose about the key names is not a leak.
+  assert.doesNotThrow(() => assertSecretFree('Set OPSLANE_SOURCEMAP_KEY to the opslane_sk_ value you minted.\n'));
+});
+
 test('guarded push pins the recorded head SHA', async () => {
   const dirs = fixture();
   const calls = [];

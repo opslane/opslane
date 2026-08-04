@@ -61,15 +61,15 @@ func newMatrixEnvironment(t *testing.T) *matrixEnvironment {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pk, err := q.CreateProjectKey(ctx, first.Project.ID, db.ScopeIngest, "pk", nil)
+	pk, err := q.CreateProjectKey(ctx, first.Project.ID, db.ScopeIngest, "pk", nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	sk, err := q.CreateProjectKey(ctx, first.Project.ID, db.ScopeSourcemaps, "sk", nil)
+	sk, err := q.CreateProjectKey(ctx, first.Project.ID, db.ScopeSourcemaps, "sk", nil, "https://ingest.test")
 	if err != nil {
 		t.Fatal(err)
 	}
-	revoked, err := q.CreateProjectKey(ctx, first.Project.ID, db.ScopeIngest, "revoked", nil)
+	revoked, err := q.CreateProjectKey(ctx, first.Project.ID, db.ScopeIngest, "revoked", nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +78,7 @@ func newMatrixEnvironment(t *testing.T) *matrixEnvironment {
 		revoked.KeyID); err != nil {
 		t.Fatal(err)
 	}
-	other, err := q.CreateProjectKey(ctx, second.Project.ID, db.ScopeIngest, "other", nil)
+	other, err := q.CreateProjectKey(ctx, second.Project.ID, db.ScopeIngest, "other", nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}

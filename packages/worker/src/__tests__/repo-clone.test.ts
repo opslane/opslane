@@ -60,6 +60,7 @@ describe('scrubbedEnv', () => {
     'ENCRYPTION_KEY',
     'GITHUB_APP_PRIVATE_KEY',
     'GITHUB_APP_CLIENT_SECRET',
+    'OPSLANE_SOURCEMAP_KEY',
   ];
   const saved: Record<string, string | undefined> = {};
 
@@ -83,6 +84,17 @@ describe('scrubbedEnv', () => {
       expect(env[key], key).toBeUndefined();
     }
     expect(env['PATH']).toBe(process.env['PATH']);
+  });
+
+  it('keeps the endpoint-bearing source-map key out of spawned processes', () => {
+    // vectors.valid[0].raw from test-fixtures/sourcemap-key/vectors.json.
+    const canary =
+      'opslane_sk_mzxw6ytboi3damrrgi3tknzxgq_E2ESOURCEMAPSECRETAAAAAAAAAAAAAAAAAAAAAAAAA'
+      + '_eyJ2IjoxLCJpYXQiOiIyMDI2LTA4LTA0VDAwOjAwOjAwWiIsInVybCI6Imh0dHBzOi8vaW5nZXN0Lm9wc2xhbmUuY29tIn0';
+    process.env['OPSLANE_SOURCEMAP_KEY'] = canary;
+    const env = scrubbedEnv();
+    expect(env['OPSLANE_SOURCEMAP_KEY']).toBeUndefined();
+    expect(Object.values(env)).not.toContain(canary);
   });
 });
 

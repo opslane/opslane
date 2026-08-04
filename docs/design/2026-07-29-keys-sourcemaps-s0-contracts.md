@@ -23,6 +23,36 @@ following sections are superseded for v1; everything not listed stays frozen.
 | §10 resolution persistence | `resolution_status` and `stack_trace_resolved` only. |
 | §12 deletion loop | Tombstone trigger plus documented manual purge; automatic sweeping is deferred. |
 
+## Amendment — 2026-08-04 (endpoint-bearing source-map keys)
+
+Implemented by `docs/plans/2026-08-04-sourcemap-token.md`; decision recorded in
+`docs/decisions/endpoint-bearing-sk.md`. This amends §3.1 only.
+
+The `opslane_sk_` grammar gains a trailing payload segment:
+
+```text
+opslane_sk_<key_id>_<secret>_<payload>
+```
+
+`<payload>` is unpadded base64url over UTF-8 JSON `{"v":1,"iat":<RFC 3339 UTC>,
+"url":<canonical ingestion origin>}`. It carries routing, not authority: only
+the 43-character secret is hashed and compared, so §3.2, §3.3, and the
+authentication procedure are unchanged. The whole raw key is capped at 4096
+bytes and the embedded URL at 2048; the origin must be `https`, or `http` only
+for the loopback hosts `localhost`, `127.0.0.1`, and `[::1]`, with an ASCII
+host, no userinfo, path, query, or fragment, a lowercase scheme and host,
+default ports stripped, and no trailing slash.
+
+`opslane_pk_` is untouched: a public key carrying a trailing payload is
+rejected outright.
+
+A bare `opslane_sk_<key_id>_<secret>` remains a valid server credential — it
+authenticates and uploads exactly as before, so deploys need no ordering — but
+nothing mints one any more. `NewProjectKey` requires an endpoint for the
+sourcemaps scope, and the Vite plugin refuses a bare key with reason
+`legacy_format` because there is no destination to read out of it. Operators
+re-mint and then explicitly revoke the old key IDs, per §3.2.
+
 **Parent design:** [Keys, source maps, and onboarding](./2026-07-29-keys-sourcemaps-onboarding.md)
 
 This appendix is the implementation boundary between ingestion, the browser SDK,
@@ -261,6 +291,9 @@ not classify lookalike paths as SDK routes.
 opslane_pk_<key_id>_<token>
 opslane_sk_<key_id>_<secret>
 ```
+
+> Amended 2026-08-04: minted `opslane_sk_` values carry a trailing
+> endpoint payload. See the amendment above.
 
 - `key_id`: 128 random bits, RFC 4648 lowercase base32 without padding,
   26 characters matching `^[a-z2-7]{26}$`.

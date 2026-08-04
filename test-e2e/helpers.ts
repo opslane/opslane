@@ -75,6 +75,32 @@ export interface TestTenant {
 type ProjectKeyScope = 'ingest' | 'sourcemaps';
 
 /**
+ * The origin a minted source-map key routes uploads to.
+ *
+ * A source-map key carries its own destination, so the E2E stack's own URL has
+ * to be sealed into every key this harness mints. The decoder only accepts a
+ * canonical origin; a trailing slash is the one deviation a hand-set
+ * INGESTION_URL plausibly carries, so drop it here rather than mint keys the
+ * plugin and the server both refuse.
+ */
+function sealedIngestOrigin(): string {
+  return getConfig().ingestionUrl.replace(/\/+$/, '');
+}
+
+/**
+ * Builds the trailing payload segment of a source-map key: unpadded base64url
+ * over `{v, iat, url}`, byte-for-byte what `db.EncodeSKPayload` produces.
+ *
+ * `iat` is never compared by a test, but it must still be a Z-suffixed RFC 3339
+ * timestamp with no fractional seconds or the decoder rejects the whole key.
+ */
+function encodeSourceMapPayload(canonicalUrl: string): string {
+  const iat = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+  const body = JSON.stringify({ v: 1, iat, url: canonicalUrl });
+  return Buffer.from(body, 'utf8').toString('base64url');
+}
+
+/**
  * Inserts a project-scoped API key row and returns its raw wire form plus
  * the key_id (needed by callers that revoke the key right after minting it).
  *
@@ -108,7 +134,12 @@ async function mintProjectKey<T extends string>(
   // Boundary: the key is random bytes we just inserted under `scope`, so its
   // wire string is known by construction to be the credential T names. This
   // is where an unbranded value legitimately becomes a branded credential.
-  const key = `${tokenPrefix}_${keyId}_${secret}` as T;
+  // Source-map keys additionally carry the upload origin; only the secret is
+  // hashed, so the payload never touches the row inserted above.
+  const bare = `${tokenPrefix}_${keyId}_${secret}`;
+  const key = (scope === 'sourcemaps'
+    ? `${bare}_${encodeSourceMapPayload(sealedIngestOrigin())}`
+    : bare) as T;
   return { keyId, key };
 }
 
