@@ -1469,8 +1469,18 @@ describeDb('db.ts integration tests', () => {
       const claimed = await claimJob('worker-1', 60_000);
       await failJob(jobId, 'worker-1', claimed!.leaseGeneration, 'transient boom');
 
+      // toBeNull, not `?.id !== jobId`: optional chaining makes a null return
+      // satisfy the assertion for any reason at all, so a globally broken
+      // claimJob would pass. The positive control below rules that out.
       const retry = await claimJob('other-worker', 30_000);
-      expect(retry?.id).not.toBe(jobId);
+      expect(retry).toBeNull();
+
+      await testPool.query(
+        `UPDATE error_group_jobs SET available_at = now() WHERE id = $1`,
+        [jobId],
+      );
+      const afterWindow = await claimJob('other-worker', 30_000);
+      expect(afterWindow?.id).toBe(jobId);
     });
 
     it('leaves available_at alone when the job dead-letters', async () => {
