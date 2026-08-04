@@ -1,5 +1,6 @@
 import type { Plugin, UserConfig } from 'vite';
 import { computeDebugId } from '../src/build/debug-id.js';
+import { parseSourceMapKey } from './sk-key.js';
 import {
   uploadSourceMaps,
   type UploadEntry,
@@ -600,26 +601,33 @@ export function opslaneVitePlugin(
     async closeBundle() {
       reportRestoredMaps();
 
-      const key = process.env['OPSLANE_SOURCEMAP_KEY']
+      // One variable configures uploads: the key carries its own destination.
+      const rawKey = process.env['OPSLANE_SOURCEMAP_KEY']
         ?? fileEnv['OPSLANE_SOURCEMAP_KEY'];
-      const endpoint = process.env['OPSLANE_ENDPOINT']
-        ?? fileEnv['OPSLANE_ENDPOINT'];
-      if (key) {
-        if (!endpoint) {
+      if (process.env['OPSLANE_ENDPOINT'] ?? fileEnv['OPSLANE_ENDPOINT']) {
+        warnOnce(
+          'OPSLANE_VITE_ENDPOINT_REMOVED',
+          'OPSLANE_ENDPOINT is no longer used: the key itself carries the upload URL. Remove the variable.',
+        );
+      }
+      if (rawKey) {
+        const parsed = parseSourceMapKey(rawKey);
+        if (!parsed.ok) {
+          // The reason is a stable token from the shared vector contract, never
+          // any part of the key itself.
           warnOnce(
-            'OPSLANE_VITE_UPLOAD_NO_ENDPOINT',
-            'OPSLANE_SOURCEMAP_KEY is set but OPSLANE_ENDPOINT is not; skipping source-map upload.',
-          );
-        } else if (!key.startsWith('opslane_sk_')) {
-          warnOnce(
-            'OPSLANE_VITE_UPLOAD_WRONG_KEY',
-            'OPSLANE_SOURCEMAP_KEY is not an opslane_sk_ secret key; skipping source-map upload.',
+            'OPSLANE_VITE_KEY_INVALID',
+            `OPSLANE_SOURCEMAP_KEY is not a valid endpoint-bearing key (${parsed.reason}). `
+            + 'Re-mint the key with a current server; bare keys from before the format change are no longer accepted. Upload skipped.',
           );
         } else {
           const entries = mapsWillShip()
             ? await collectVerifiedFromDisk()
             : [...uploadPayloads.values()];
-          const outcome = await uploadSourceMaps(entries, { endpoint, key });
+          const outcome = await uploadSourceMaps(entries, {
+            endpoint: parsed.url,
+            key: rawKey,
+          });
           if (outcome.failed.length > 0 && logLevel !== 'silent') {
             console.error(
               `[opslane] OPSLANE_VITE_UPLOAD_FAILED: ${outcome.failed.length} source map(s) failed to upload; stack traces for these chunks will stay minified.`
@@ -662,10 +670,10 @@ export { opslaneVitePlugin as opslane };
 
 // opslaneSourceMapPlugin (the release-keyed legacy uploader, later a
 // hard-fail stub) was removed in 3.0.0. opslane() uploads maps itself when
-// OPSLANE_SOURCEMAP_KEY and OPSLANE_ENDPOINT are set; old imports now fail
-// at build time with a missing-export error, and
-// `opslane sourcemaps install-plugin` still detects and reports configs that
-// reference the old name.
+// OPSLANE_SOURCEMAP_KEY is set — that one variable carries the upload URL, so
+// OPSLANE_ENDPOINT is gone. Old imports now fail at build time with a
+// missing-export error, and `opslane sourcemaps install-plugin` still detects
+// and reports configs that reference the old name.
 
 
 function stripMapSuffix(filePath: string): string {

@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 vi.mock('vite', () => ({ loadEnv: vi.fn(() => ({})) }));
 import {
@@ -10,6 +12,25 @@ import {
   DEBUG_ID_PLACEHOLDER,
   REGISTRY_GLOBAL,
 } from '../build/registry-contract';
+
+/**
+ * The upload canary is the shared fixture's first valid vector: a real
+ * endpoint-bearing key whose payload names https://ingest.opslane.com.
+ */
+const CANARY = (
+  JSON.parse(
+    // Resolved from the vitest project root (packages/sdk): this suite runs in
+    // the jsdom environment, where import.meta.url is an http URL.
+    readFileSync(
+      resolve(process.cwd(), '../../test-fixtures/sourcemap-key/vectors.json'),
+      'utf8',
+    ),
+  ) as { valid: { endpoint: string; raw: string }[] }
+).valid[0]!;
+
+/** Grammatically valid, but pre-cutover: no endpoint sealed in. */
+const BARE_KEY =
+  'opslane_sk_mzxw6ytboi3damrrgi3tknzxgq_E2ESOURCEMAPSECRETAAAAAAAAAAAAAAAAAAAAAAAAA';
 
 /** Both plugins declare generateBundle as an ordered hook descriptor. */
 function callGenerateBundle(
@@ -328,11 +349,9 @@ describe('Vite debug-ID plugin', () => {
     );
   });
 
-  it('uploads exactly the final stamped maps when private build env is set', async () => {
+  it('uploads exactly the final stamped maps to the URL sealed into the key', async () => {
     const previousKey = process.env['OPSLANE_SOURCEMAP_KEY'];
-    const previousEndpoint = process.env['OPSLANE_ENDPOINT'];
-    process.env['OPSLANE_SOURCEMAP_KEY'] = 'opslane_sk_test';
-    process.env['OPSLANE_ENDPOINT'] = 'https://ingestion.example';
+    process.env['OPSLANE_SOURCEMAP_KEY'] = CANARY.raw;
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
       new Response('', { status: 201 }),
     );
@@ -346,10 +365,74 @@ describe('Vite debug-ID plugin', () => {
 
       expect(fetchMock).toHaveBeenCalledTimes(1);
       const [url, request] = fetchMock.mock.calls[0] ?? [];
+      // No endpoint variable is set: the destination came out of the key.
+      expect(String(url).startsWith(`${CANARY.endpoint}/api/v1/sourcemaps/`)).toBe(true);
       expect(String(url)).toMatch(/\/api\/v1\/sourcemaps\/[0-9a-f-]+$/);
       expect(request?.body).toContain('"debugId"');
+      // The whole raw key authenticates: the payload rides along untouched.
+      expect((request?.headers as Record<string, string>)['X-API-Key']).toBe(CANARY.raw);
       expect(bundle['assets/index.js.map']).toBeUndefined();
     } finally {
+      vi.unstubAllGlobals();
+      if (previousKey === undefined) delete process.env['OPSLANE_SOURCEMAP_KEY'];
+      else process.env['OPSLANE_SOURCEMAP_KEY'] = previousKey;
+    }
+  });
+
+  it('refuses a pre-cutover bare key and names the reason without the key', async () => {
+    const previousKey = process.env['OPSLANE_SOURCEMAP_KEY'];
+    process.env['OPSLANE_SOURCEMAP_KEY'] = BARE_KEY;
+    const fetchMock = vi.fn<typeof fetch>();
+    vi.stubGlobal('fetch', fetchMock);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const plugin = opslaneVitePlugin({ logLevel: 'warn' });
+      (plugin.config as Function).call(plugin, {});
+      const bundle = makeBundle();
+      await stamp(plugin, bundle);
+      await (plugin.closeBundle as Function).call(plugin);
+
+      expect(fetchMock).not.toHaveBeenCalled();
+      const warning = warn.mock.calls
+        .map((call) => String(call[0]))
+        .find((message) => message.includes('OPSLANE_VITE_KEY_INVALID'));
+      expect(warning).toContain('legacy_format');
+      expect(warning).not.toContain(BARE_KEY);
+      expect(warning).not.toContain('E2ESOURCEMAPSECRET');
+    } finally {
+      warn.mockRestore();
+      vi.unstubAllGlobals();
+      if (previousKey === undefined) delete process.env['OPSLANE_SOURCEMAP_KEY'];
+      else process.env['OPSLANE_SOURCEMAP_KEY'] = previousKey;
+    }
+  });
+
+  it('reports that OPSLANE_ENDPOINT is no longer read', async () => {
+    const previousKey = process.env['OPSLANE_SOURCEMAP_KEY'];
+    const previousEndpoint = process.env['OPSLANE_ENDPOINT'];
+    process.env['OPSLANE_SOURCEMAP_KEY'] = CANARY.raw;
+    process.env['OPSLANE_ENDPOINT'] = 'https://stale.example';
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response('', { status: 201 }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const plugin = opslaneVitePlugin({ logLevel: 'warn' });
+      (plugin.config as Function).call(plugin, {});
+      const bundle = makeBundle();
+      await stamp(plugin, bundle);
+      await (plugin.closeBundle as Function).call(plugin);
+
+      expect(
+        warn.mock.calls
+          .map((call) => String(call[0]))
+          .some((message) => message.includes('OPSLANE_VITE_ENDPOINT_REMOVED')),
+      ).toBe(true);
+      // The stale variable is reported, never obeyed.
+      expect(String(fetchMock.mock.calls[0]?.[0])).toContain(CANARY.endpoint);
+    } finally {
+      warn.mockRestore();
       vi.unstubAllGlobals();
       if (previousKey === undefined) delete process.env['OPSLANE_SOURCEMAP_KEY'];
       else process.env['OPSLANE_SOURCEMAP_KEY'] = previousKey;
@@ -379,9 +462,7 @@ describe('Vite debug-ID plugin', () => {
 
   it('reports a rejected upload without failing the build', async () => {
     const previousKey = process.env['OPSLANE_SOURCEMAP_KEY'];
-    const previousEndpoint = process.env['OPSLANE_ENDPOINT'];
-    process.env['OPSLANE_SOURCEMAP_KEY'] = 'opslane_sk_test';
-    process.env['OPSLANE_ENDPOINT'] = 'https://ingestion.example';
+    process.env['OPSLANE_SOURCEMAP_KEY'] = CANARY.raw;
     vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockResolvedValue(
       new Response('', { status: 500 }),
     ));
@@ -397,8 +478,6 @@ describe('Vite debug-ID plugin', () => {
       vi.unstubAllGlobals();
       if (previousKey === undefined) delete process.env['OPSLANE_SOURCEMAP_KEY'];
       else process.env['OPSLANE_SOURCEMAP_KEY'] = previousKey;
-      if (previousEndpoint === undefined) delete process.env['OPSLANE_ENDPOINT'];
-      else process.env['OPSLANE_ENDPOINT'] = previousEndpoint;
     }
   });
 

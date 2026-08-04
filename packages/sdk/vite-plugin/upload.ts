@@ -40,6 +40,9 @@ export async function uploadSourceMaps(
             'Content-Type': 'application/json',
           },
           body: entry.mapSource,
+          // The endpoint is sealed into the key; following a redirect would
+          // hand the key to a host the minter never authorised.
+          redirect: 'error',
         },
       );
       if (response.status === 200 || response.status === 201) {

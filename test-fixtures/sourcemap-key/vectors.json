@@ -63,7 +63,7 @@
     {"name": "port out of range", "payloadJson": {"v": 1, "iat": "2026-08-04T00:00:00Z", "url": "https://a.example:99999"}, "reason": "url_port"},
     {"name": "bad keyid width", "raw": "opslane_sk_short_E2ESOURCEMAPSECRETAAAAAAAAAAAAAAAAAAAAAAAAA", "reason": "bad_grammar"},
     {"name": "bad secret alphabet", "raw": "opslane_sk_mzxw6ytboi3damrrgi3tknzxgq_%%%SOURCEMAPSECRETAAAAAAAAAAAAAAAAAAAAAAAAA", "reason": "bad_grammar"},
-    {"name": "oversize url in payload", "urlOfLength": 3000, "reason": "url_too_long"}
+    {"name": "oversize url in payload", "urlOfLength": 2100, "reason": "url_too_long"}
   ],
   "encoderInvalid": [
     {"endpoint": "ftp://a.example", "reason": "url_scheme"},
