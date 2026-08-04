@@ -1,6 +1,7 @@
 {
   "name": "@opslane/agent-core",
   "version": "0.0.1",
+  "private": true,
   "description": "Provider-neutral agent loop and safe local tools for Opslane",
   "license": "AGPL-3.0-only",
   "type": "module",
