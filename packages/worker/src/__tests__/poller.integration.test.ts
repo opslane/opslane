@@ -49,6 +49,22 @@ async function seedInvestigateJob(): Promise<{ groupId: string; jobId: string }>
   return { groupId, jobId: job.rows[0]!.id };
 }
 
+async function seedJobsInOneProject(count: number): Promise<string[]> {
+  const { groupId, jobId } = await seedInvestigateJob();
+  const ids = [jobId];
+  for (let i = 0; i < count - 1; i += 1) {
+    const job = await pool.query<{ id: string }>(
+      `INSERT INTO error_group_jobs
+         (error_group_id, project_id, status, job_type, attempts, max_attempts)
+       VALUES ($1, $2, 'pending', 'investigate', 0, 3)
+       RETURNING id`,
+      [groupId, projectId],
+    );
+    ids.push(job.rows[0]!.id);
+  }
+  return ids;
+}
+
 async function fixJobCount(groupId: string): Promise<number> {
   const r = await pool.query<{ n: string }>(
     `SELECT count(*)::text AS n FROM error_group_jobs WHERE error_group_id=$1 AND job_type='fix'`, [groupId]);
@@ -77,6 +93,14 @@ async function waitFor(predicate: () => Promise<boolean>, timeoutMs = 5000): Pro
 function makeProcessJob() {
   return async (job: ClaimedJob, _signal: AbortSignal): Promise<void> => {
     if (job.jobType !== 'investigate') return;
+    const group = await pool.query<{ status: string }>(
+      `SELECT status FROM error_groups WHERE id = $1 AND project_id = $2`,
+      [job.errorGroupId, job.projectId],
+    );
+    // Match processInvestigateJob's reclaimed-outcome adoption guard. Once a
+    // prior attempt committed the fixing state, its retry must not enqueue a
+    // second fix even if the first fix has already drained to completion.
+    if (!['new', 'queued', 'analyzing', 'candidate'].includes(group.rows[0]!.status)) return;
     await updateGroupStatus(job.errorGroupId!, job.projectId, 'analyzing', undefined, job);
     await updateGroupAndCreateFixJob(job.errorGroupId!, job.projectId,
       { rootCause: 'nullable value', confidence: 'high' }, job);
@@ -147,10 +171,90 @@ describeDb('real poller under lease loss', () => {
       // crash leaves the investigate job claimed with its fix job already created
       await waitFor(async () => (await fixJobCount(groupId)) >= 1 && (await jobStatus(jobId)) === 'claimed');
       expect(await requeueStaleJobs()).toBe(1);            // reaper reclaims the zombie
+      // Retry spacing is production behavior. This test is about fencing and
+      // idempotency after a later reclaim, so advance this fixture's window.
+      await pool.query(
+        `UPDATE error_group_jobs SET available_at = now() WHERE id = $1`,
+        [jobId],
+      );
       await waitFor(async () => (await jobStatus(jobId)) === 'completed'); // reprocessed to done
       expect(await fixJobCount(groupId)).toBe(1);
     } finally {
       await poller.stop();
     }
   }, 20_000);
+
+  it('drains a seeded backlog without waiting a poll interval per job', async () => {
+    const jobIds = await seedJobsInOneProject(10);
+    const poller = createPoller({
+      intervalMs: 5000,
+      leaseDurationMs: 30_000,
+      workerId: 'drain-it',
+      processJob: makeProcessJob(),
+    });
+    const started = Date.now();
+
+    poller.start();
+    await waitFor(async () => {
+      const { rows } = await pool.query<{ n: string }>(
+        `SELECT count(*)::text AS n
+           FROM error_group_jobs
+          WHERE id = ANY($1) AND status = 'completed'`,
+        [jobIds],
+      );
+      return Number(rows[0]!.n) === 10;
+    }, 10_000);
+    const elapsed = Date.now() - started;
+    await poller.stop();
+
+    expect(elapsed).toBeLessThan(5000);
+  });
+
+  it('leaves no claimed job behind after stop() resolves', async () => {
+    await seedInvestigateJob();
+    const poller = createPoller({
+      intervalMs: 50,
+      leaseDurationMs: 30_000,
+      workerId: 'shutdown-it',
+      processJob: makeProcessJob(),
+    });
+
+    poller.start();
+    await poller.stop();
+
+    const { rows } = await pool.query<{ n: string }>(
+      `SELECT count(*)::text AS n
+         FROM error_group_jobs
+        WHERE worker_id = 'shutdown-it' AND status = 'claimed'`,
+    );
+    expect(Number(rows[0]!.n)).toBe(0);
+  });
+
+  it('does not re-claim a failed job before its backoff window elapses', async () => {
+    const { jobId } = await seedInvestigateJob();
+    const poller = createPoller({
+      intervalMs: 50,
+      leaseDurationMs: 30_000,
+      workerId: 'backoff-it',
+      processJob: async () => { throw new Error('boom'); },
+    });
+
+    poller.start();
+    await waitFor(async () => {
+      const { rows } = await pool.query<{ attempts: number }>(
+        `SELECT attempts FROM error_group_jobs WHERE id = $1`,
+        [jobId],
+      );
+      return rows[0]!.attempts === 1;
+    }, 5000);
+    await sleep(1000);
+    await poller.stop();
+
+    const { rows } = await pool.query<{ attempts: number; status: string }>(
+      `SELECT attempts, status FROM error_group_jobs WHERE id = $1`,
+      [jobId],
+    );
+    expect(rows[0]!.attempts).toBe(1);
+    expect(rows[0]!.status).toBe('pending');
+  });
 });
