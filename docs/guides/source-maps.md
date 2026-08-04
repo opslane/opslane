@@ -25,23 +25,27 @@ export default {
 };
 ```
 
-Set these server-side build variables in CI:
+Set one server-side build variable in CI:
 
 ```bash
-OPSLANE_ENDPOINT=https://your-opslane-instance.example.com
 OPSLANE_SOURCEMAP_KEY=opslane_sk_...
 ```
+
+That single value is the whole upload configuration. A source-map key is
+`opslane_sk_<key id>_<secret>_<payload>`, where the payload is the ingestion
+origin the key was minted for; the plugin reads the destination out of the key
+and uploads there. There is no endpoint variable and no default: a key minted
+against the wrong deployment uploads nowhere else.
 
 The plugin reads `process.env` first, then Vite's `OPSLANE_` variables from the
 project's env files. A gitignored `.env.local` therefore works for local
 production builds:
 
 ```dotenv
-OPSLANE_ENDPOINT=http://localhost:8082
 OPSLANE_SOURCEMAP_KEY=opslane_sk_...
 ```
 
-Do not prefix either variable with `VITE_`, `NEXT_PUBLIC_`, or another browser
+Do not prefix the variable with `VITE_`, `NEXT_PUBLIC_`, or another browser
 environment prefix. The source-map key is a secret and must never enter the
 JavaScript bundle or a tracked file. Browser initialization continues to use a
 public `VITE_OPSLANE_API_KEY=opslane_pk_...` ingest key.
@@ -53,19 +57,30 @@ are reported without failing the production build.
 
 ## Mint and revoke an upload key
 
-Self-hosted operators mint a key from the ingestion package:
+Self-hosted operators mint a key from the ingestion package. Minting a
+source-map key requires the public origin uploads must reach, because that
+origin is sealed into the key:
 
 ```bash
 cd packages/ingestion
-DATABASE_URL=postgres://... go run ./cmd/mint-key \
+DATABASE_URL=postgres://... \
+OPSLANE_PUBLIC_INGEST_URL=https://your-opslane-instance.example.com \
+go run ./cmd/mint-key \
   -project 00000000-0000-0000-0000-000000000000 \
   -scope sourcemaps \
   -label "production source maps"
 ```
 
+`-endpoint <url>` supplies the same value per invocation; if both are set they
+must canonicalize to the same origin. The origin must be an absolute
+`https://` URL — `http://` is accepted only for `localhost`, `127.0.0.1`, and
+`[::1]` — with no userinfo, path, query, or fragment. Minting fails before it
+touches the database when the origin is missing or unusable.
+
 The command prints the target project's name and repo, then the raw
-`opslane_sk_` value once, then its key ID. To revoke exactly that key, run the
-statement it prints:
+`opslane_sk_` value once, then its key ID. Moving a deployment to a new origin
+means minting new keys and revoking the old ones; the sealed origin cannot be
+edited. To revoke exactly that key, run the statement it prints:
 
 ```sql
 UPDATE project_api_keys SET revoked_at = now() WHERE key_id = '<key-id>';
@@ -140,8 +155,14 @@ of larger maps and emits `OPSLANE_VITE_MAP_OVER_SERVER_LIMIT`.
 
 Important stable build codes include:
 
-- `OPSLANE_VITE_UPLOAD_NO_ENDPOINT`: a key is set without an endpoint.
-- `OPSLANE_VITE_UPLOAD_WRONG_KEY`: the value is not an `opslane_sk_` key.
+- `OPSLANE_VITE_KEY_INVALID`: `OPSLANE_SOURCEMAP_KEY` is not a valid
+  endpoint-bearing key, so no upload destination could be read from it. The
+  warning names a stable reason (for example `legacy_format` for a key minted
+  before the format change, or `bad_grammar` for a public `opslane_pk_` key)
+  and never echoes key material. Re-mint the key.
+- `OPSLANE_VITE_ENDPOINT_REMOVED`: the retired endpoint variable from the old
+  two-variable setup is still set. The warning names it. It is reported, never
+  obeyed; delete it.
 - `OPSLANE_VITE_UPLOAD_FAILED`: one or more maps were rejected or unavailable.
 - `OPSLANE_VITE_UPLOAD_STALE_MAP`: a retained map changed after verification.
 - `OPSLANE_VITE_MAP_VERIFY_FAILED`: disk bytes no longer match the stamped ID.

@@ -95,7 +95,7 @@ it('loads the upload credential from the project .env.local and routes to its se
 
   expect(fetchMock).toHaveBeenCalledTimes(1);
   const url = String(fetchMock.mock.calls[0]?.[0]);
-  // No OPSLANE_ENDPOINT anywhere: the destination came out of the key.
+  // No endpoint variable anywhere: the destination came out of the key.
   expect(url.startsWith(`${CANARY.endpoint}/api/v1/sourcemaps/`)).toBe(true);
   expect(url).toMatch(/\/api\/v1\/sourcemaps\/[0-9a-f-]+$/);
   const request = fetchMock.mock.calls[0]?.[1] as RequestInit;

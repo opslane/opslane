@@ -36,7 +36,10 @@ export async function startBuiltFixture(opts: {
     VITE_OPSLANE_ENDPOINT: opts.ingestionUrl,
     VITE_OPSLANE_API_KEY: opts.apiKey,
     VITE_OPSLANE_RELEASE: opts.release ?? '',
-    OPSLANE_ENDPOINT: opts.ingestionUrl,
+    // Never set, always cleared: the source-map key carries its own upload
+    // origin now, and an ambient value would only trigger the plugin's
+    // removal notice.
+    OPSLANE_ENDPOINT: undefined,
     OPSLANE_SOURCEMAP_KEY: opts.sourcemapKey,
   };
 

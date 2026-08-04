@@ -37,8 +37,14 @@ ON CONFLICT (id) DO UPDATE SET
   revoked_at = NULL,
   revoked_by_user_id = NULL;
 
--- Secret source-map key for the primary fixture (raw, shown only for E2E):
--- opslane_sk_nbxw6ytboi3damrrgi3tknzxgq_E2ESOURCEMAPSECRETAAAAAAAAAAAAAAAAAAAAAAAAA
+-- Secret source-map key for the primary fixture (raw, shown only for E2E).
+-- A source-map key ends in a base64url payload carrying the upload origin, so
+-- the raw value is per-deployment; the payload is elided here (it is neither
+-- hashed nor stored, and a fully formed key is refused by the docs publisher):
+-- opslane_sk_nbxw6ytboi3damrrgi3tknzxgq_E2ESOURCEMAPSECRETAAAA…_<payload>
+-- Mint a usable one with:
+--   OPSLANE_PUBLIC_INGEST_URL=http://localhost:8082 go run ./cmd/mint-key \
+--     -project 00000000-0000-0000-0000-000000000010 -scope sourcemaps
 INSERT INTO project_api_keys
   (id, key_id, project_id, scope, token_prefix, secret_hash, label)
 VALUES
@@ -85,8 +91,8 @@ ON CONFLICT (id) DO UPDATE SET
   revoked_at = NULL,
   revoked_by_user_id = NULL;
 
--- Raw project-2 source-map key:
--- opslane_sk_ncxw6ytboi3damrrgi3tknzxgq_E2ESOURCEMAPSECRETBBBBBBBBBBBBBBBBBBBBBBBBB
+-- Raw project-2 source-map key (payload elided, as above):
+-- opslane_sk_ncxw6ytboi3damrrgi3tknzxgq_E2ESOURCEMAPSECRETBBBB…_<payload>
 INSERT INTO project_api_keys
   (id, key_id, project_id, scope, token_prefix, secret_hash, label)
 VALUES

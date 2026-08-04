@@ -57,6 +57,9 @@ services:
       JWT_SECRET: opslane-dev-jwt-secret-key-minimum-32-bytes-long
       AUTH_PROVIDER: ${AUTH_PROVIDER:-github}
       AUTH_CALLBACK_ORIGIN: ${AUTH_CALLBACK_ORIGIN:-http://localhost:8082}
+      # Sealed into every source-map key minted by `cmd/mint-key`, so builds
+      # need no endpoint variable of their own.
+      OPSLANE_PUBLIC_INGEST_URL: ${OPSLANE_PUBLIC_INGEST_URL:-http://localhost:8082}
       WORKOS_API_KEY: ${WORKOS_API_KEY:-}
       WORKOS_CLIENT_ID: ${WORKOS_CLIENT_ID:-}
       AUTH_WORKOS_SOCIAL: ${AUTH_WORKOS_SOCIAL:-}

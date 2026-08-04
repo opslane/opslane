@@ -671,9 +671,9 @@ export { opslaneVitePlugin as opslane };
 // opslaneSourceMapPlugin (the release-keyed legacy uploader, later a
 // hard-fail stub) was removed in 3.0.0. opslane() uploads maps itself when
 // OPSLANE_SOURCEMAP_KEY is set — that one variable carries the upload URL, so
-// OPSLANE_ENDPOINT is gone. Old imports now fail at build time with a
-// missing-export error, and `opslane sourcemaps install-plugin` still detects
-// and reports configs that reference the old name.
+// the separate endpoint variable is gone too. Old imports now fail at build
+// time with a missing-export error, and `opslane sourcemaps install-plugin`
+// still detects and reports configs that reference the old name.
 
 
 function stripMapSuffix(filePath: string): string {
