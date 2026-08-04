@@ -58,14 +58,14 @@ func TestIngestErrorEvent_RejectsEmptyMessage(t *testing.T) {
 }
 
 func TestIngestErrorEvent_AcceptsStacklessEvent(t *testing.T) {
-	// A real browser error with no stack (cross-origin "Script error." or a
-	// non-Error promise rejection) must NOT be rejected. With no DB configured,
+	// A real browser error with no stack (for example, a non-Error promise
+	// rejection) must NOT be rejected. With no DB configured,
 	// passing validation surfaces as 500 (database unavailable) — which proves
 	// the request got past the required-field gate instead of being 400'd.
 	deps := &Dependencies{}
 	body := map[string]interface{}{
 		"timestamp": "2026-02-20T00:00:00Z",
-		"error":     map[string]string{"type": "Error", "message": "Script error.", "stack": ""},
+		"error":     map[string]string{"type": "Error", "message": "Promise rejected without a reason", "stack": ""},
 	}
 	b, _ := json.Marshal(body)
 	req := httptest.NewRequest("POST", "/api/v1/events", bytes.NewReader(b))

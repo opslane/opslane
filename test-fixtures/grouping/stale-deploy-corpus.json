@@ -1,0 +1,17 @@
+[
+  {"message": "Failed to fetch dynamically imported module: https://app.customer.com/assets/chunk-index.Dlu29ZBh.js", "family": "stale-deploy", "note": "Chrome wording, dot-segment hash (real prod shape)"},
+  {"message": "Failed to fetch dynamically imported module: https://app.customer.com/assets/chunk-BdA9x2Lq.js", "family": "stale-deploy", "note": "Chrome wording, dash-hash Vite default"},
+  {"message": "error loading dynamically imported module: https://app.customer.com/assets/settings-Cq2w8xLp.js", "family": "stale-deploy", "note": "Firefox wording (lowercase start, mid-string match required)"},
+  {"message": "TypeError: error loading dynamically imported module", "family": "stale-deploy", "note": "Firefox wording with type prefix baked into message"},
+  {"message": "Importing a module script failed.", "family": "stale-deploy", "note": "Safari wording"},
+  {"message": "  Failed to fetch dynamically imported module: https://a.com/x.js", "family": "stale-deploy", "note": "leading whitespace must not defeat the match"},
+  {"message": "Unable to preload CSS for /assets/index-BUccYFyj.css", "family": "stale-deploy", "note": "Vite CSS preload, all-letter hash (real prod title)"},
+  {"message": "unable to preload CSS for /assets/asset-SettingsRow.OdZiYodm.css", "family": "stale-deploy", "note": "case-insensitivity check"},
+  {"message": "Cannot read properties of null (reading 'includes')", "family": null, "note": "ordinary TypeError must not match"},
+  {"message": "Error loading vendor.min.js", "family": null, "note": "generic load error is NOT the family"},
+  {"message": "Failed to fetch", "family": null, "note": "bare fetch failure (network/CORS) is NOT the family"},
+  {"message": "Loading chunk 26 failed", "family": null, "note": "webpack wording — out of scope for v1, must not match"},
+  {"message": "NetworkError when attempting to fetch resource.", "family": null, "note": "generic network error"},
+  {"message": "Помилка завантаження модуля", "family": null, "note": "localized wording — out of scope for v1 (unicode passthrough must not crash)"},
+  {"message": "Widget error: user saw \"Failed to fetch dynamically imported module\" banner", "family": "stale-deploy", "note": "KNOWN ACCEPTED FALSE POSITIVE — quoted family wording matches by design (locked predicate is message-pattern-only); documented here so nobody 'fixes' the corpus without revisiting the locked decision"}
+]
