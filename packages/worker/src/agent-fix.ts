@@ -1,6 +1,6 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import { createAnthropicClient } from './anthropic-client.js';
-import type { SandboxRuntime } from './harness/sandbox-runtime.js';
+import { SandboxUnavailableError, type SandboxRuntime } from './harness/sandbox-runtime.js';
 import { runAgentLoop } from './harness/agent-loop.js';
 import { createToolBridge } from './harness/tool-bridge.js';
 import { createDefaultMiddleware } from './harness/tool-middleware.js';
@@ -601,7 +601,11 @@ export async function runAgentFix(input: AgentFixInput): Promise<AgentFixResult>
   }
 
   let sandbox: SandboxRuntime | null = null;
-  let evidence: EvidenceRecorder | null = null;
+  // Created before the sandbox: a setup-time death must still be able to
+  // construct a VerificationInfraError, which requires an evidence record.
+  // Note the type is no longer nullable — it was `EvidenceRecorder | null`
+  // only because assignment happened after createRepoSandbox returned.
+  const evidence: EvidenceRecorder = createEvidenceRecorder();
 
   try {
     let repoSandbox: RepoSandbox;
@@ -637,7 +641,6 @@ export async function runAgentFix(input: AgentFixInput): Promise<AgentFixResult>
     sandbox = repoSandbox.sandbox;
     const installOutcome = repoSandbox.installOutcome;
     const installFailed = installOutcome === 'failed';
-    evidence = createEvidenceRecorder();
 
     let verificationInfraError = false;
     const withInfraRetry = async <T extends { outcome: CheckOutcome }>(run: () => Promise<T>): Promise<T> => {
@@ -848,6 +851,22 @@ export async function runAgentFix(input: AgentFixInput): Promise<AgentFixResult>
             userMsg,
           ),
         );
+
+        // agent-core/tool-loop.ts converts every tool exception into
+        // model-visible text, so a dead sandbox cannot surface as an exception
+        // here — only as this latched flag. Checked before the gaveUp and
+        // budget branches because no agent verdict is trustworthy once the
+        // machine is gone.
+        if (sandbox.unavailable) {
+          evidence.addCheck('sandbox', 'infra_error', {
+            command: '',
+            output: 'The verification sandbox became unavailable during the fix attempt',
+          });
+          throw new VerificationInfraError(
+            'The verification sandbox became unavailable during the fix attempt, so the fix could not be proven either way.',
+            evidence.record(),
+          );
+        }
 
         // Agent explicitly gave up — not fixable with code, don't escalate
         if (agentState.gaveUp && agentState.giveUpReason) {
@@ -1199,6 +1218,21 @@ export async function runAgentFix(input: AgentFixInput): Promise<AgentFixResult>
     };
   } catch (err: unknown) {
     if (err instanceof VerificationInfraError) throw err;
+    // Paths that throw rather than latch: the uncaught `git checkout` resets,
+    // clone/branch resolution, install, baseline cleanup, tracked-file
+    // discovery, tier reset, and extractDiff. Without this they all terminate
+    // as worker_runtime_error and never requeue.
+    // Also consult the latch: a dead sandbox can surface as some *other* plain
+    // error thrown downstream of the failure, which would otherwise terminate
+    // as worker_runtime_error.
+    if (err instanceof SandboxUnavailableError || sandbox?.unavailable) {
+      const detail = err instanceof Error ? err.message : String(err);
+      evidence.addCheck('sandbox', 'infra_error', { command: '', output: scrubSecrets(detail) });
+      throw new VerificationInfraError(
+        'The verification sandbox became unavailable, so the fix could not be proven either way.',
+        evidence.record(),
+      );
+    }
     const rawMessage = err instanceof Error ? err.message : String(err);
     const message = rawMessage.replace(/https:\/\/[^@]+@/g, 'https://***@');
     return {
@@ -1208,7 +1242,7 @@ export async function runAgentFix(input: AgentFixInput): Promise<AgentFixResult>
         reason_message: `Agent harness error: ${message}`,
         remediation: 'Review the error manually — the agent harness encountered an unexpected error',
       },
-      ...(evidence ? { evidence: evidence.record() } : {}),
+      evidence: evidence.record(),
     };
   } finally {
     if (sandbox) {

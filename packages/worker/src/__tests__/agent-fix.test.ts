@@ -66,6 +66,8 @@ import { runAgentLoop } from '../harness/agent-loop.js';
 import { judgeDiff } from '../harness/diff-judge.js';
 import { runBuildGate } from '../harness/sandbox-repo.js';
 import { planTests, runSuite } from '../harness/test-runner.js';
+import { VerificationInfraError } from '../harness/errors.js';
+import { logger } from '../logger.js';
 
 function makeAgentResult(overrides?: Partial<AgentCompletionResult>): AgentCompletionResult {
   return {
@@ -147,6 +149,27 @@ function mockSandboxWithPassingTests() {
     if (cmd.includes('git diff')) return { exitCode: 0, stdout: DIFF_STDOUT, stderr: '' };
     return { exitCode: 0, stdout: '', stderr: '' };
   });
+}
+
+/** Provider-shaped fake that carries a runAgentFix run all the way to fix_ready.
+ *  Extracted from the passing tests above so death tests can start from a setup
+ *  that is already known to survive clone + branch resolution. */
+function passingSandboxFake() {
+  return {
+    sandboxId: 'sbx-passing',
+    commands: {
+      run: async (cmd: string, _options?: { timeoutMs?: number }) => {
+        const resolution = gitResolutionResult(cmd);
+        if (resolution) return resolution;
+        if (cmd.includes('vitest.config') && cmd.includes('echo')) return { exitCode: 0, stdout: 'vitest', stderr: '' };
+        if (cmd.includes('npx vitest run')) return { exitCode: 0, stdout: '3 tests passed', stderr: '' };
+        if (cmd.includes('git diff')) return { exitCode: 0, stdout: DIFF_STDOUT, stderr: '' };
+        return { exitCode: 0, stdout: '', stderr: '' };
+      },
+    },
+    files: { read: async (_path: string) => '', write: async () => undefined },
+    kill: vi.fn(async () => undefined),
+  };
 }
 
 /** Helper: mock triage to return fixable (default for most tests) */
@@ -1111,5 +1134,57 @@ describe('runAgentFix', () => {
     expect(systemPrompt).toContain('env-19');
     expect(systemPrompt).not.toContain('env-20');
     expect(systemPrompt).toContain('[5 more environments omitted]');
+  });
+});
+
+describe('sandbox unavailability outranks any agent-reported outcome', () => {
+  /** Setup shared by every test here; beforeEach resets mocks, so call it per test. */
+  async function arrangeDeathDuringAgentLoop(): Promise<void> {
+    const { SandboxNotFoundError } = await import('e2b');
+    let dead = false;
+
+    // Start from the fake the passing tests use, then make it die on demand.
+    const base = passingSandboxFake();
+    createE2BSandbox.mockResolvedValue({
+      ...base,
+      sandboxId: 'sbx-dies',
+      commands: {
+        run: vi.fn(async (command: string, opts?: { timeoutMs?: number }) => {
+          if (dead) throw new SandboxNotFoundError('Sandbox is probably not running anymore');
+          return base.commands.run(command, opts);
+        }),
+      },
+      files: {
+        read: vi.fn(async (path: string) => {
+          if (dead) throw new SandboxNotFoundError('Sandbox is probably not running anymore');
+          return base.files.read(path);
+        }),
+        write: base.files.write,
+      },
+    });
+
+    vi.mocked(runAgentLoop).mockImplementation(async (options) => {
+      dead = true;
+      // Mimic tool-loop.ts:202-212 — invoke a tool, swallow the exception, and
+      // report success anyway. This is exactly how the latch must be reached.
+      const read = options.tools.find((t) => t.name === 'read');
+      try { await read?.execute({ path: '/home/user/repo/src/index.ts' }); } catch { /* erased */ }
+      return makeAgentResult({ summary: 'fixed it', testsRan: true });
+    });
+  }
+
+  it('throws VerificationInfraError even when the agent reported success', async () => {
+    await arrangeDeathDuringAgentLoop();
+    await expect(runAgentFix(makeInput())).rejects.toBeInstanceOf(VerificationInfraError);
+  });
+
+  it('carries a non-empty evidence record naming the failure', async () => {
+    await arrangeDeathDuringAgentLoop();
+    await runAgentFix(makeInput()).then(
+      () => { throw new Error('expected rejection'); },
+      (err: VerificationInfraError) => {
+        expect(err.evidence.checks.some((c) => c.outcome === 'infra_error')).toBe(true);
+      },
+    );
   });
 });
