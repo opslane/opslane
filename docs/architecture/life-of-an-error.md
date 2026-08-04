@@ -18,7 +18,7 @@ The event is authenticated by API key, origin-checked for browser traffic, rate-
 
 ## 3. Claim (worker)
 
-The worker polls Postgres and claims jobs with `FOR UPDATE SKIP LOCKED` under a lease. If a worker dies mid-job, the lease expires and a reaper makes the job claimable again (`lease_lost` is reported if a worker discovers it lost its lease).
+The worker polls Postgres and claims jobs with `FOR UPDATE SKIP LOCKED` under a lease. If a worker dies mid-job, the lease expires and a reaper schedules a retry with exponential backoff (`lease_lost` is reported if a worker discovers it lost its lease).
 
 ## 4. Triage
 
