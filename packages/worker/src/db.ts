@@ -288,6 +288,11 @@ export async function completeJob(
   return (result.rowCount ?? 0) > 0;
 }
 
+/** Retry backoff floor and ceiling, shared by failJob and the reaper.
+ *  The tick used to be the only retry spacing; these replace it. */
+export const RETRY_BACKOFF_BASE_SECONDS = 30;
+export const RETRY_BACKOFF_CAP_SECONDS = 900;
+
 /**
  * Fails a job: increments attempts and records the error.
  * Resets to 'pending' for retry, or 'dead_letter' at max_attempts.
@@ -325,6 +330,12 @@ export async function failJob(
              WHEN attempts + 1 >= max_attempts THEN lease_expires_at
              ELSE NULL
            END,
+           available_at = CASE
+             WHEN attempts + 1 >= max_attempts THEN available_at
+             ELSE now() + make_interval(secs => LEAST(
+                    $5::double precision * power(2, attempts) * (0.5 + random()),
+                    $6::double precision))
+           END,
            updated_at = now()
        WHERE id = $1
          AND worker_id = $2
@@ -332,7 +343,14 @@ export async function failJob(
          AND status = 'claimed'
          AND lease_expires_at > now()
        RETURNING status, job_type, project_id`,
-      [jobId, workerId, leaseGeneration, error]
+      [
+        jobId,
+        workerId,
+        leaseGeneration,
+        error,
+        RETRY_BACKOFF_BASE_SECONDS,
+        RETRY_BACKOFF_CAP_SECONDS,
+      ]
     );
     const row = result.rows[0];
     // Dead-lettered session analysis must not strand its claimed signals or
@@ -396,9 +414,16 @@ export async function requeueStaleJobs(): Promise<number> {
              WHEN attempts + 1 >= max_attempts THEN lease_expires_at
              ELSE NULL
            END,
+           available_at = CASE
+             WHEN attempts + 1 >= max_attempts THEN available_at
+             ELSE now() + make_interval(secs => LEAST(
+                    $1::double precision * power(2, attempts) * (0.5 + random()),
+                    $2::double precision))
+           END,
            updated_at = now()
        WHERE status = 'claimed' AND lease_expires_at < now()
-       RETURNING id, error_group_id, session_id, project_id, job_type, status`
+       RETURNING id, error_group_id, session_id, project_id, job_type, status`,
+      [RETRY_BACKOFF_BASE_SECONDS, RETRY_BACKOFF_CAP_SECONDS],
     );
     rows = result.rows;
 

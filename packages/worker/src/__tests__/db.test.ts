@@ -109,6 +109,14 @@ async function expireAndReclaimWithSameWorker(): Promise<{
   );
   expect(await requeueStaleJobs()).toBe(1);
 
+  // The reaper now backs retries off. This helper is specifically exercising
+  // generation fencing after a later reclaim, so make that retry eligible
+  // without weakening any of the stale-generation assertions below.
+  await testPool.query(
+    `UPDATE error_group_jobs SET available_at = now() WHERE id = $1`,
+    [jobId],
+  );
+
   const currentClaim = await claimJob('worker-reused', 60_000);
   expect(currentClaim?.id).toBe(jobId);
   expect(BigInt(currentClaim!.leaseGeneration)).toBe(
@@ -1397,6 +1405,55 @@ describeDb('db.ts integration tests', () => {
       expect(row.lease_expires_at).toBeNull();
     });
 
+    it('schedules a retry in the future instead of immediately', async () => {
+      const { jobId } = await seedErrorGroupAndJob();
+      const claimed = await claimJob('worker-1', 60_000);
+      const before = Date.now();
+
+      await failJob(jobId, 'worker-1', claimed!.leaseGeneration, 'transient boom');
+
+      const { rows } = await testPool.query<{
+        status: string;
+        available_at: Date;
+        attempts: number;
+      }>(
+        `SELECT status, available_at, attempts FROM error_group_jobs WHERE id = $1`,
+        [jobId],
+      );
+      expect(rows[0]!.status).toBe('pending');
+      expect(rows[0]!.attempts).toBe(1);
+      const delayMs = rows[0]!.available_at.getTime() - before;
+      expect(delayMs).toBeGreaterThan(14_000);
+      expect(delayMs).toBeLessThan(46_000);
+    });
+
+    it('does not let a backed-off job be claimed before its window elapses', async () => {
+      const { jobId } = await seedErrorGroupAndJob();
+      const claimed = await claimJob('worker-1', 60_000);
+      await failJob(jobId, 'worker-1', claimed!.leaseGeneration, 'transient boom');
+
+      const retry = await claimJob('other-worker', 30_000);
+      expect(retry?.id).not.toBe(jobId);
+    });
+
+    it('leaves available_at alone when the job dead-letters', async () => {
+      const { jobId } = await seedErrorGroupAndJob({ attempts: 2, max_attempts: 3 });
+      const claimed = await claimJob('worker-1', 60_000);
+      const { rows: pre } = await testPool.query<{ available_at: Date }>(
+        `SELECT available_at FROM error_group_jobs WHERE id = $1`,
+        [jobId],
+      );
+
+      await failJob(jobId, 'worker-1', claimed!.leaseGeneration, 'final boom');
+
+      const { rows: post } = await testPool.query<{ status: string; available_at: Date }>(
+        `SELECT status, available_at FROM error_group_jobs WHERE id = $1`,
+        [jobId],
+      );
+      expect(post[0]!.status).toBe('dead_letter');
+      expect(post[0]!.available_at.getTime()).toBe(pre[0]!.available_at.getTime());
+    });
+
     it('should dead-letter when at max_attempts', async () => {
       const { jobId } = await seedErrorGroupAndJob({
         attempts: 2,
@@ -1462,6 +1519,25 @@ describeDb('db.ts integration tests', () => {
       expect(row.worker_id).toBeNull();
       expect(row.claimed_at).toBeNull();
       expect(row.lease_expires_at).toBeNull();
+    });
+
+    it('spaces reaper requeues the same way failJob does', async () => {
+      const { jobId } = await seedErrorGroupAndJob({
+        status: 'claimed',
+        worker_id: 'dead-worker',
+        claimed_at: new Date(Date.now() - 120_000),
+        lease_expires_at: new Date(Date.now() - 60_000),
+      });
+      const before = Date.now();
+
+      await requeueStaleJobs();
+
+      const { rows } = await testPool.query<{ status: string; available_at: Date }>(
+        `SELECT status, available_at FROM error_group_jobs WHERE id = $1`,
+        [jobId],
+      );
+      expect(rows[0]!.status).toBe('pending');
+      expect(rows[0]!.available_at.getTime()).toBeGreaterThan(before + 14_000);
     });
 
     it('should dead-letter expired jobs at max_attempts and preserve ownership for forensics', async () => {
