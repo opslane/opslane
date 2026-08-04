@@ -6,7 +6,10 @@ services:
       MINIO_ROOT_USER: minio
       MINIO_ROOT_PASSWORD: minio12345
     ports:
-      - "9012:9000"
+      # Infrastructure publishes on loopback only: the credentials above are
+      # committed dev defaults. Override the bind address for Colima or a
+      # remote DOCKER_HOST, where "localhost" is inside the VM.
+      - "${OPSLANE_INFRA_BIND_ADDR:-127.0.0.1}:${OPSLANE_MINIO_HOST_PORT:-9012}:9000"
     volumes:
       - minio-data:/data
 
@@ -16,10 +19,18 @@ services:
     depends_on:
       minio:
         condition: service_started
-    entrypoint: >
-      sh -c "until mc alias set local http://minio:9000 minio minio12345; do sleep 1; done &&
-      mc mb -p local/opslane-replays || true &&
-      mc anonymous set none local/opslane-replays || true"
+    volumes:
+      - ./scripts/minio-setup.sh:/minio-setup.sh:ro
+    entrypoint: ["/minio-setup.sh"]
+    environment:
+      MINIO_INTERNAL_URL: http://minio:9000
+      # Host-side port, passed in only so a failure can name it. The container
+      # itself never dials it.
+      MINIO_HOST_PORT: ${OPSLANE_MINIO_HOST_PORT:-9012}
+      MINIO_READY_TIMEOUT_SECONDS: ${OPSLANE_MINIO_READY_TIMEOUT_SECONDS:-60}
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: minio12345
+      MINIO_BUCKET: opslane-replays
 
   postgres:
     image: postgres:16
@@ -28,7 +39,8 @@ services:
       POSTGRES_PASSWORD: opslane_dev
       POSTGRES_DB: opslane
     ports:
-      - "5434:5432"
+      # Loopback only; see the note on minio's published port.
+      - "${OPSLANE_INFRA_BIND_ADDR:-127.0.0.1}:${OPSLANE_POSTGRES_HOST_PORT:-5434}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./packages/ingestion/db/migrations:/migrations
@@ -49,17 +61,25 @@ services:
       PORT: "8080"
       DASHBOARD_DIR: /app/dashboard
       REPLAY_STORE_ENDPOINT: http://minio:9000
-      REPLAY_STORE_PUBLIC_ENDPOINT: http://localhost:9012
+      # Browser-visible: ingestion signs presigned replay uploads against this
+      # origin, so it must name the HOST port, not the compose-network one.
+      # It follows OPSLANE_MINIO_HOST_PORT automatically; setting this
+      # explicitly WINS and stops it following. Keep both in sync, or set
+      # neither. Point it at your public origin for a non-local self-host.
+      REPLAY_STORE_PUBLIC_ENDPOINT: ${REPLAY_STORE_PUBLIC_ENDPOINT:-http://localhost:${OPSLANE_MINIO_HOST_PORT:-9012}}
       REPLAY_STORE_BUCKET: opslane-replays
       REPLAY_STORE_REGION: us-east-1
       REPLAY_STORE_ACCESS_KEY: minio
       REPLAY_STORE_SECRET_KEY: minio12345
       JWT_SECRET: opslane-dev-jwt-secret-key-minimum-32-bytes-long
       AUTH_PROVIDER: ${AUTH_PROVIDER:-github}
-      AUTH_CALLBACK_ORIGIN: ${AUTH_CALLBACK_ORIGIN:-http://localhost:8082}
+      # Follows INGESTION_PORT: a second stack that pinned 8082 here would send
+      # its OAuth callback to the first stack's ingestion.
+      AUTH_CALLBACK_ORIGIN: ${AUTH_CALLBACK_ORIGIN:-http://localhost:${INGESTION_PORT:-8082}}
       # Sealed into every source-map key minted by `cmd/mint-key`, so builds
-      # need no endpoint variable of their own.
-      OPSLANE_PUBLIC_INGEST_URL: ${OPSLANE_PUBLIC_INGEST_URL:-http://localhost:8082}
+      # need no endpoint variable of their own. Follows INGESTION_PORT for the
+      # same second-stack reason as AUTH_CALLBACK_ORIGIN.
+      OPSLANE_PUBLIC_INGEST_URL: ${OPSLANE_PUBLIC_INGEST_URL:-http://localhost:${INGESTION_PORT:-8082}}
       WORKOS_API_KEY: ${WORKOS_API_KEY:-}
       WORKOS_CLIENT_ID: ${WORKOS_CLIENT_ID:-}
       AUTH_WORKOS_SOCIAL: ${AUTH_WORKOS_SOCIAL:-}

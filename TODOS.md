@@ -230,3 +230,59 @@ It was deliberately left alone by the issue-list polish plan, which is scoped da
 **Context:** Raised as a sub-point of Codex's blocking finding 1 during `/autoplan` on 2026-07-30, and folded into V0's exit criteria in `docs/plans/2026-07-30-s2a-debug-ids-implementation.md`. Related consequence worth recording: the map's root `file` member carries the content-hashed filename and participates in the debug-ID hash, so an unrelated filename change moves the debug ID even when `mappings` are byte-identical.
 
 **Depends on / blocked by:** Nothing; it is part of V0. Listed here so it survives if V0 is compressed.
+
+## Give contributors a command that allocates worktree stack ports instead of a checklist
+
+**What:** `scripts/worktree-stack.sh` — derive a deterministic port triple from the
+worktree directory name, write `.env`, and print the export block a smoke needs.
+The runnable block added to `AGENTS.md` under `## Verification` is its spec;
+extracting it is mechanical.
+
+**Why:** issue #268 made collision avoidance *possible* but left allocation manual.
+Two agents working in parallel can still pick the same ports, and a contributor who
+forgets the block hits the original failure. Both the CEO and DX reviews (2026-08-04
+`/autoplan`) independently called the documented block "unenforceable ritual" versus a
+mechanism; it was kept as a block because the script needs the env vars as substrate
+and the block doubles as the spec.
+
+**Context:** The block must stay in sync with the script — host-side tests read the
+URLs (`DATABASE_URL`, `INGESTION_URL`, `MINIO_ENDPOINT`, `REPLAY_STORE_*`), not the
+ports, and Go DB tests `t.Skipf` rather than failing when the DSN is unreachable
+(`packages/ingestion/db/testhelper_test.go:11`). Setting a port without its URL is a
+green test run that tested nothing.
+
+## Stop publishing Postgres to the host by default
+
+**What:** Move the `postgres` published port behind a dev/CI profile or an override
+file, so `docker compose up` for a self-hoster publishes only ingestion.
+
+**Why:** `docs/quickstart/self-host.md` routes every psql through
+`docker compose exec -T postgres`, so a self-hoster never uses the published 5434.
+It exists for host-run Go tests and `test-e2e` only — a contributor need billed to
+the user's port budget and prerequisites list. Removing it deletes a port from the
+quickstart rather than adding a variable to work around it.
+
+**Context:** Raised by both voices during the 2026-08-04 `/autoplan` review and
+deferred as a topology change, not a port fix. It breaks two CI jobs as written:
+`ingestion-go` (host `go test` against `localhost:5434`, `ci.yml:119-133`) and
+`e2e-keyless` (`ci.yml:361`). Those need a profile opt-in before the default can
+change. `scripts/check-compose-ports.mjs` encodes the current contract and would
+need its `PUBLIC_SERVICES` set revisited.
+
+## Document the remote self-host story for REPLAY_STORE_PUBLIC_ENDPOINT
+
+**What:** `docker-compose.yml` now lets `REPLAY_STORE_PUBLIC_ENDPOINT` be set
+explicitly (it otherwise follows `OPSLANE_MINIO_HOST_PORT`). Nothing tells a
+self-hoster running on a VPS or LAN box that they must set it.
+
+**Why:** ingestion signs browser-facing presigned replay uploads against this origin
+(`packages/ingestion/main.go:48`). The default names `localhost`, which is the
+*user's own machine* when the browser is not on the Docker host — so replay upload
+fails for every remote self-host install, silently, with no Opslane error because the
+request never reaches Opslane.
+
+**Context:** Found during the 2026-08-04 `/autoplan` review by both CEO voices. That
+review made the value overridable, which is the prerequisite; the docs and a MinIO
+CORS/origin story are the remaining work. Note MinIO must also be reachable from the
+browser, which interacts with the loopback bind added at the same time
+(`OPSLANE_INFRA_BIND_ADDR`).

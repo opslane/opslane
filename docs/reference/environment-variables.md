@@ -97,4 +97,9 @@ The worker starts with only `DATABASE_URL` and logs a warning for missing `ANTHR
 | `VITE_OPSLANE_RELEASE` | Read by no code in this repository. It fed the published legacy uploader's `release`; that plugin now throws, and debug IDs replaced release matching. Your own application may still read it to pass `init({ release })`, which is display metadata only. |
 | `ALLOW_REGISTRATION` | Read by nothing; there is no self-serve registration path (sign-in is GitHub OAuth). |
 | `OPSLANE_ADMIN_EMAILS` | Host-side name that docker-compose.yml maps into the ingestion service's `ADMIN_EMAILS`; consumed by Compose interpolation, not read by code directly. |
+| `INGESTION_PORT` | Host port published for the ingestion API and dashboard (default 8082). Compose interpolation only. `AUTH_CALLBACK_ORIGIN` follows it unless set explicitly. |
+| `OPSLANE_POSTGRES_HOST_PORT` | Host port published for the bundled Postgres (default 5434). Compose interpolation only. Set it, plus a matching `DATABASE_URL`, to run a second stack beside an existing one. |
+| `OPSLANE_MINIO_HOST_PORT` | Host port published for the bundled MinIO (default 9012). Compose interpolation only. `REPLAY_STORE_PUBLIC_ENDPOINT` follows it unless set explicitly — browsers upload replay chunks to that origin, so the two must agree. |
+| `OPSLANE_INFRA_BIND_ADDR` | Interface the Postgres and MinIO host ports bind to (default `127.0.0.1`; they carry committed dev credentials). Compose interpolation only. Widen it only when loopback is inside a VM, as with Colima or a remote `DOCKER_HOST`. |
+| `OPSLANE_MINIO_READY_TIMEOUT_SECONDS` | How long `minio-setup` waits for MinIO before exiting non-zero with a diagnostic (default 60). Compose interpolation only. |
 | `ENCRYPTION_KEY` | Read by nothing except a sandbox scrub list; at-rest token encryption is not implemented (see [trust](../architecture/trust.md#honest-gaps-current-state)). |
