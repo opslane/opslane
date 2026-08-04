@@ -280,3 +280,60 @@ func TestEncodeSKPayloadNormalizesIATToUTC(t *testing.T) {
 		t.Fatalf("iat = %q, want the Z-suffixed UTC instant", payload.IAT)
 	}
 }
+
+// TestNewProjectKeyEndpointDiscipline pins the constructor contract that makes
+// a bare sk unconstructable: sourcemaps keys demand an endpoint, every other
+// scope refuses one, so a pk can never grow a payload.
+func TestNewProjectKeyEndpointDiscipline(t *testing.T) {
+	if _, err := NewProjectKey(ScopeSourcemaps, ""); err == nil {
+		t.Fatal("sourcemaps key without endpoint must be unconstructable")
+	}
+	if _, err := NewProjectKey(ScopeIngest, "https://a.example"); err == nil {
+		t.Fatal("ingest key with endpoint must be rejected")
+	}
+	if _, err := NewProjectKey(ScopeSourcemaps, "ftp://ingest.example"); err == nil {
+		t.Fatal("uncanonicalizable endpoint must be rejected")
+	}
+	minted, err := NewProjectKey(ScopeSourcemaps, "https://ingest.opslane.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := ParseProjectKey(minted.Raw)
+	if err != nil || parsed.Scope != ScopeSourcemaps {
+		t.Fatalf("minted key must round-trip: %v", err)
+	}
+	if HashSecret(parsed.Secret) != minted.SecretHash {
+		t.Fatal("SecretHash must hash only the secret component")
+	}
+	if len(minted.Raw) <= secretEnd || minted.Raw[secretEnd] != '_' {
+		t.Fatalf("minted sk must carry a payload: %q", minted.Raw)
+	}
+	payload, err := ParseSKPayload(minted.Raw[secretEnd+1:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if payload.URL != "https://ingest.opslane.com" {
+		t.Fatalf("payload url = %q", payload.URL)
+	}
+
+	// A non-canonical endpoint is canonicalized rather than refused.
+	normalized, err := NewProjectKey(ScopeSourcemaps, "HTTPS://Ingest.Opslane.com:443/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := ParseSKPayload(normalized.Raw[secretEnd+1:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.URL != "https://ingest.opslane.com" {
+		t.Fatalf("endpoint was not canonicalized: %q", got.URL)
+	}
+
+	pk, err := NewProjectKey(ScopeIngest, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pk.Raw) != secretEnd {
+		t.Fatalf("pk grammar must be unchanged: %q", pk.Raw)
+	}
+}

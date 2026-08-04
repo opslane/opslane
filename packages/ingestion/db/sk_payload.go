@@ -25,6 +25,11 @@ const (
 	maxPayloadURL = 2048
 	// Grammar widths: "opslane_sk_" + keyid(26) + "_" + secret(43) [+ "_" + payload].
 	secretLen = 43
+	keyIDLen  = 26
+	// secretEnd is the offset one past the secret: the full length of a bare
+	// key, and where a source-map key's "_" + payload begins. Both prefixes are
+	// the same width, so one offset covers pk and sk alike.
+	secretEnd = len(prefixSourcemaps) + 1 + keyIDLen + 1 + secretLen
 )
 
 type SKPayload struct {

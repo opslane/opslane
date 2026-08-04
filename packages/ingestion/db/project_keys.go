@@ -92,10 +92,24 @@ func HashSecret(secret string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func NewProjectKey(scope string) (*MintedProjectKey, error) {
+// NewProjectKey mints a credential. endpoint is the upload destination sealed
+// into a source-map key: it is REQUIRED for ScopeSourcemaps and must be empty
+// for every other scope. Making the pairing part of the signature is what keeps
+// a bare sk unconstructable and stops a pk from ever growing a payload.
+func NewProjectKey(scope, endpoint string) (*MintedProjectKey, error) {
 	prefix, err := prefixForScope(scope)
 	if err != nil {
 		return nil, err
+	}
+	switch scope {
+	case ScopeSourcemaps:
+		if endpoint == "" {
+			return nil, fmt.Errorf("sourcemaps keys require an endpoint")
+		}
+	default:
+		if endpoint != "" {
+			return nil, fmt.Errorf("endpoint is only valid for sourcemaps keys")
+		}
 	}
 
 	idRaw := make([]byte, keyIDBytes)
@@ -109,12 +123,26 @@ func NewProjectKey(scope string) (*MintedProjectKey, error) {
 
 	keyID := strings.ToLower(base32NoPad.EncodeToString(idRaw))
 	secret := base64.RawURLEncoding.EncodeToString(secretRaw)
+	raw := prefix + "_" + keyID + "_" + secret
+	if scope == ScopeSourcemaps {
+		canonical, err := CanonicalIngestURL(endpoint)
+		if err != nil {
+			return nil, err
+		}
+		payload, err := EncodeSKPayload(canonical, time.Now())
+		if err != nil {
+			return nil, err
+		}
+		raw += "_" + payload
+	}
 	return &MintedProjectKey{
 		KeyID:       keyID,
 		Scope:       scope,
 		TokenPrefix: prefix,
-		SecretHash:  HashSecret(secret),
-		Raw:         prefix + "_" + keyID + "_" + secret,
+		// The stored hash covers the secret alone: the payload is public
+		// routing data and must not participate in authentication.
+		SecretHash: HashSecret(secret),
+		Raw:        raw,
 	}, nil
 }
 
@@ -167,8 +195,9 @@ func (q *Queries) CreateProjectKey(
 	ctx context.Context,
 	projectID, scope, label string,
 	createdByUserID *string,
+	endpoint string,
 ) (*MintedProjectKey, error) {
-	minted, err := NewProjectKey(scope)
+	minted, err := NewProjectKey(scope, endpoint)
 	if err != nil {
 		return nil, err
 	}
@@ -190,8 +219,9 @@ func (q *Queries) CreateProjectKeyTx(
 	tx pgx.Tx,
 	projectID, scope, label string,
 	createdByUserID *string,
+	endpoint string,
 ) (*MintedProjectKey, error) {
-	minted, err := NewProjectKey(scope)
+	minted, err := NewProjectKey(scope, endpoint)
 	if err != nil {
 		return nil, err
 	}

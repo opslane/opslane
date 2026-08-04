@@ -1023,7 +1023,7 @@ func TestLookupProjectKeyResolvesTenantAndHonorsRevocation(t *testing.T) {
 	q := db.New(pool)
 	orgID, projID, _, _ := seedGroup(t, pool, q, "api-key")
 
-	key, err := q.CreateProjectKey(ctx, projID, db.ScopeIngest, "test", nil)
+	key, err := q.CreateProjectKey(ctx, projID, db.ScopeIngest, "test", nil, "")
 	if err != nil {
 		t.Fatalf("CreateProjectKey: %v", err)
 	}

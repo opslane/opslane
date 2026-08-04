@@ -224,7 +224,7 @@ func (q *Queries) provisionProjectTx(
 	}
 
 	apiKey, err := q.CreateProjectKeyTx(
-		ctx, tx, result.Project.ID, ScopeIngest, "onboarding", nil,
+		ctx, tx, result.Project.ID, ScopeIngest, "onboarding", nil, "",
 	)
 	if err != nil {
 		return nil, fmt.Errorf("provision project: %w", err)

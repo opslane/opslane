@@ -11,18 +11,30 @@ var (
 	secretPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{43}$`)
 )
 
+// testEndpoint is the destination sealed into every source-map key minted by
+// this suite; ingest keys must never carry one.
+const testEndpoint = "https://ingest.test"
+
 func TestNewProjectKeyFormat(t *testing.T) {
-	for _, scope := range []string{ScopeIngest, ScopeSourcemaps} {
-		minted, err := NewProjectKey(scope)
+	for scope, endpoint := range map[string]string{
+		ScopeIngest:     "",
+		ScopeSourcemaps: testEndpoint,
+	} {
+		minted, err := NewProjectKey(scope, endpoint)
 		if err != nil {
 			t.Fatalf("NewProjectKey(%q): %v", scope, err)
 		}
 		if !keyIDPattern.MatchString(minted.KeyID) {
 			t.Errorf("key_id %q has invalid shape", minted.KeyID)
 		}
+		// The secret sits at a fixed offset because a source-map key appends
+		// "_" + payload after it, and both segments are base64url.
 		parts := strings.SplitN(minted.Raw, "_", 4)
-		if len(parts) != 4 || !secretPattern.MatchString(parts[3]) {
-			t.Errorf("raw key %q has invalid shape", minted.Raw)
+		if len(parts) != 4 {
+			t.Fatalf("raw key %q has invalid shape", minted.Raw)
+		}
+		if len(parts[3]) < secretLen || !secretPattern.MatchString(parts[3][:secretLen]) {
+			t.Errorf("raw key %q has invalid secret", minted.Raw)
 		}
 		if len(minted.SecretHash) != 64 {
 			t.Errorf("secret hash %q has invalid shape", minted.SecretHash)
@@ -31,14 +43,14 @@ func TestNewProjectKeyFormat(t *testing.T) {
 }
 
 func TestNewProjectKeyPrefixMatchesScope(t *testing.T) {
-	ingest, err := NewProjectKey(ScopeIngest)
+	ingest, err := NewProjectKey(ScopeIngest, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.HasPrefix(ingest.Raw, "opslane_pk_") || ingest.TokenPrefix != "opslane_pk" {
 		t.Errorf("unexpected ingest key: %+v", ingest)
 	}
-	sourcemaps, err := NewProjectKey(ScopeSourcemaps)
+	sourcemaps, err := NewProjectKey(ScopeSourcemaps, testEndpoint)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,8 +60,11 @@ func TestNewProjectKeyPrefixMatchesScope(t *testing.T) {
 }
 
 func TestNewProjectKeyRejectsUnknownScope(t *testing.T) {
-	if _, err := NewProjectKey("admin"); err == nil {
+	if _, err := NewProjectKey("admin", ""); err == nil {
 		t.Fatal("expected unknown scope to fail")
+	}
+	if _, err := NewProjectKey("admin", testEndpoint); err == nil {
+		t.Fatal("expected unknown scope to fail even with an endpoint")
 	}
 }
 
@@ -70,7 +85,7 @@ func TestParseProjectKeySecretContainingUnderscores(t *testing.T) {
 }
 
 func TestParseProjectKeyRoundTrip(t *testing.T) {
-	minted, err := NewProjectKey(ScopeIngest)
+	minted, err := NewProjectKey(ScopeIngest, "")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -43,7 +43,7 @@ func TestProjectFlagScansAndAPIKeyLookup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	key, err := q.CreateProjectKey(ctx, project.ID, db.ScopeIngest, "test", nil)
+	key, err := q.CreateProjectKey(ctx, project.ID, db.ScopeIngest, "test", nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}

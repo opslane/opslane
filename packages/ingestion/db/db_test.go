@@ -42,7 +42,7 @@ func TestCreatesOrgProjectEnvironmentHierarchy(t *testing.T) {
 	}
 
 	// Create a project-scoped ingest key.
-	key, err := q.CreateProjectKey(ctx, project.ID, db.ScopeIngest, "test", nil)
+	key, err := q.CreateProjectKey(ctx, project.ID, db.ScopeIngest, "test", nil, "")
 	if err != nil {
 		t.Fatalf("CreateProjectKey: %v", err)
 	}
