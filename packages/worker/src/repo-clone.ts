@@ -300,7 +300,7 @@ export function validateDiffPaths(diff: string): { valid: boolean; error?: strin
  */
 export function scrubbedEnv(): Record<string, string> {
   const env = { ...process.env } as Record<string, string>;
-  for (const key of ['GITHUB_TOKEN', 'ANTHROPIC_API_KEY', 'DATABASE_URL', 'MINIO_SECRET_KEY', 'REPLAY_STORE_SECRET_KEY', 'ENCRYPTION_KEY', 'GITHUB_APP_PRIVATE_KEY', 'GITHUB_APP_CLIENT_SECRET']) {
+  for (const key of ['GITHUB_TOKEN', 'ANTHROPIC_API_KEY', 'DATABASE_URL', 'MINIO_SECRET_KEY', 'REPLAY_STORE_SECRET_KEY', 'ENCRYPTION_KEY', 'GITHUB_APP_PRIVATE_KEY', 'GITHUB_APP_CLIENT_SECRET', 'OPSLANE_SOURCEMAP_KEY']) {
     delete env[key];
   }
   return env;

@@ -7,7 +7,10 @@ export function scrubSecrets(raw: string): string {
     .replace(/https:\/\/[^@\s]+@/g, 'https://***@')
     .replace(/github_pat_[A-Za-z0-9_]+/g, '[REDACTED]')
     .replace(/gh[pousr]_[A-Za-z0-9_]+/g, '[REDACTED]')
-    .replace(/sk-ant-[A-Za-z0-9_-]+/g, '[REDACTED]');
+    .replace(/sk-ant-[A-Za-z0-9_-]+/g, '[REDACTED]')
+    // Opslane project keys. The greedy tail must span the endpoint payload an
+    // sk carries after its secret, so the whole credential goes, not its head.
+    .replace(/opslane_(?:pk|sk)_[A-Za-z0-9_-]+/g, '[REDACTED]');
 }
 
 const CLONE_DETAIL_LIMIT = 2_000;
