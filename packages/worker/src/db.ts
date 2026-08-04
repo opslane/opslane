@@ -108,9 +108,14 @@ function sessionAnalysisCapFromEnv(): number {
  *
  * Admission is serialized with a transaction-scoped advisory lock: without
  * it, simultaneous claimers all read the same running count and lane maxima
- * and can overshoot the cap by up to the fleet size. Claims are
- * millisecond-scale single-row updates against multi-second poll intervals,
- * so the serialization is not a throughput concern.
+ * and can overshoot the cap by up to the fleet size. Admission is serialized
+ * fleet-wide, so claim latency bounds total claim throughput. Measured at
+ * 4.05ms with 4k rows pending (the ORDER BY CASE matches no index, so every
+ * claim sorts the whole eligible set), giving a ceiling near 250 claims/sec
+ * that degrades linearly with backlog depth. A drain-looping worker claims at
+ * roughly 1/job-duration, so the margin is wide at current fleet size.
+ * Re-measure with EXPLAIN (ANALYZE, BUFFERS) before scaling the fleet or
+ * letting the pending set grow much larger.
  *
  * Lease and terminal-status semantics are untouched: only the candidate
  * selection changed. */
@@ -208,6 +213,41 @@ export async function claimJob(
   };
 }
 
+export interface QueueDepthRow {
+  jobType: string;
+  eligible: number;
+  backedOff: number;
+  oldestEligibleSeconds: number | null;
+}
+
+/** Queue shape by job type, sampled on a timer rather than per claim. */
+export async function getQueueDepth(): Promise<QueueDepthRow[]> {
+  const { rows } = await getPool().query<{
+    job_type: string;
+    eligible: string;
+    backed_off: string;
+    oldest_eligible_seconds: string | null;
+  }>(
+    `SELECT job_type,
+            count(*) FILTER (WHERE available_at <= now())::text AS eligible,
+            count(*) FILTER (WHERE available_at > now())::text AS backed_off,
+            EXTRACT(EPOCH FROM (now() - min(created_at)
+              FILTER (WHERE available_at <= now())))::text AS oldest_eligible_seconds
+       FROM error_group_jobs
+      WHERE status = 'pending'
+      GROUP BY job_type`,
+  );
+  return rows.map((row) => ({
+    jobType: row.job_type,
+    eligible: Number(row.eligible),
+    backedOff: Number(row.backed_off),
+    oldestEligibleSeconds:
+      row.oldest_eligible_seconds === null
+        ? null
+        : Math.round(Number(row.oldest_eligible_seconds)),
+  }));
+}
+
 export class JobRescheduledError extends Error {
   constructor(jobId: string) {
     super(`Job ${jobId} was durably rescheduled`);
@@ -288,6 +328,11 @@ export async function completeJob(
   return (result.rowCount ?? 0) > 0;
 }
 
+/** Retry backoff floor and ceiling, shared by failJob and the reaper.
+ *  The tick used to be the only retry spacing; these replace it. */
+export const RETRY_BACKOFF_BASE_SECONDS = 30;
+export const RETRY_BACKOFF_CAP_SECONDS = 900;
+
 /**
  * Fails a job: increments attempts and records the error.
  * Resets to 'pending' for retry, or 'dead_letter' at max_attempts.
@@ -325,6 +370,12 @@ export async function failJob(
              WHEN attempts + 1 >= max_attempts THEN lease_expires_at
              ELSE NULL
            END,
+           available_at = CASE
+             WHEN attempts + 1 >= max_attempts THEN available_at
+             ELSE now() + make_interval(secs => LEAST(
+                    $5::double precision * power(2, attempts) * (0.5 + random()),
+                    $6::double precision))
+           END,
            updated_at = now()
        WHERE id = $1
          AND worker_id = $2
@@ -332,7 +383,14 @@ export async function failJob(
          AND status = 'claimed'
          AND lease_expires_at > now()
        RETURNING status, job_type, project_id`,
-      [jobId, workerId, leaseGeneration, error]
+      [
+        jobId,
+        workerId,
+        leaseGeneration,
+        error,
+        RETRY_BACKOFF_BASE_SECONDS,
+        RETRY_BACKOFF_CAP_SECONDS,
+      ]
     );
     const row = result.rows[0];
     // Dead-lettered session analysis must not strand its claimed signals or
@@ -396,9 +454,16 @@ export async function requeueStaleJobs(): Promise<number> {
              WHEN attempts + 1 >= max_attempts THEN lease_expires_at
              ELSE NULL
            END,
+           available_at = CASE
+             WHEN attempts + 1 >= max_attempts THEN available_at
+             ELSE now() + make_interval(secs => LEAST(
+                    $1::double precision * power(2, attempts) * (0.5 + random()),
+                    $2::double precision))
+           END,
            updated_at = now()
        WHERE status = 'claimed' AND lease_expires_at < now()
-       RETURNING id, error_group_id, session_id, project_id, job_type, status`
+       RETURNING id, error_group_id, session_id, project_id, job_type, status`,
+      [RETRY_BACKOFF_BASE_SECONDS, RETRY_BACKOFF_CAP_SECONDS],
     );
     rows = result.rows;
 

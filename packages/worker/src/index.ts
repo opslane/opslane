@@ -1,8 +1,19 @@
 import crypto from 'node:crypto';
 import http from 'node:http';
-import type { ClaimedJob, ErrorEventData } from './db.js';
+import type { ClaimedJob, ErrorEventData, QueueDepthRow } from './db.js';
 import * as db from './db.js';
-import { requeueStaleJobs, updateGroupStatus, closePool, updateGroupInvestigation, updateGroupAndCreateFixJob, getGroupInvestigation, resolveInactiveGroups, resolveSilentMergedGroups, updateJobTraceUrl } from './db.js';
+import {
+  requeueStaleJobs,
+  updateGroupStatus,
+  closePool,
+  updateGroupInvestigation,
+  updateGroupAndCreateFixJob,
+  getGroupInvestigation,
+  resolveInactiveGroups,
+  resolveSilentMergedGroups,
+  updateJobTraceUrl,
+  getQueueDepth,
+} from './db.js';
 import { buildReason } from './reason-codes.js';
 import { logger, setWorkerId } from './logger.js';
 import { fetchObject, getMinIOConfig } from './minio-client.js';
@@ -70,10 +81,57 @@ function mapDbSignals(raw: unknown): ReplaySignals | null {
   };
 }
 
-const POLL_INTERVAL_MS = parseInt(
-  process.env['POLL_INTERVAL_MS'] ?? '5000',
+const POLL_INTERVAL_MS_DEFAULT = 5000;
+const POLL_INTERVAL_MS_RAW = parseInt(
+  process.env['POLL_INTERVAL_MS'] ?? String(POLL_INTERVAL_MS_DEFAULT),
   10
 );
+// Guard against NaN/non-positive misconfiguration. Under the drain loop this is
+// the only pacing left on the empty-queue and claim-error paths: setTimeout
+// coerces NaN to 0, so a typo here would spin claims against Postgres.
+const POLL_INTERVAL_MS_MIN = 50;
+const POLL_INTERVAL_MS_MAX = 300_000;
+const POLL_INTERVAL_MS =
+  Number.isInteger(POLL_INTERVAL_MS_RAW) &&
+  POLL_INTERVAL_MS_RAW >= POLL_INTERVAL_MS_MIN &&
+  POLL_INTERVAL_MS_RAW <= POLL_INTERVAL_MS_MAX
+    ? POLL_INTERVAL_MS_RAW
+    : POLL_INTERVAL_MS_DEFAULT;
+// An unvalidated NaN here becomes a 0ms deadline, so every deploy would
+// abandon its in-flight job instead of waiting for it.
+const SHUTDOWN_GRACE_MS_DEFAULT = 25_000;
+const SHUTDOWN_GRACE_MS_RAW = parseInt(
+  process.env['SHUTDOWN_GRACE_MS'] ?? String(SHUTDOWN_GRACE_MS_DEFAULT),
+  10,
+);
+const SHUTDOWN_GRACE_MS_MIN = 1_000;
+const SHUTDOWN_GRACE_MS_MAX = 120_000;
+const SHUTDOWN_GRACE_MS =
+  Number.isInteger(SHUTDOWN_GRACE_MS_RAW) &&
+  SHUTDOWN_GRACE_MS_RAW >= SHUTDOWN_GRACE_MS_MIN &&
+  SHUTDOWN_GRACE_MS_RAW <= SHUTDOWN_GRACE_MS_MAX
+    ? SHUTDOWN_GRACE_MS_RAW
+    : SHUTDOWN_GRACE_MS_DEFAULT;
+// Silently clamping to the default is how an operator ends up debugging a value
+// the process never used. Say so once, at the point of rejection.
+for (const clamped of [
+  { name: 'POLL_INTERVAL_MS', raw: process.env['POLL_INTERVAL_MS'], applied: POLL_INTERVAL_MS,
+    rejected: POLL_INTERVAL_MS !== POLL_INTERVAL_MS_RAW,
+    min: POLL_INTERVAL_MS_MIN, max: POLL_INTERVAL_MS_MAX },
+  { name: 'SHUTDOWN_GRACE_MS', raw: process.env['SHUTDOWN_GRACE_MS'], applied: SHUTDOWN_GRACE_MS,
+    rejected: SHUTDOWN_GRACE_MS !== SHUTDOWN_GRACE_MS_RAW,
+    min: SHUTDOWN_GRACE_MS_MIN, max: SHUTDOWN_GRACE_MS_MAX },
+]) {
+  if (clamped.raw !== undefined && clamped.rejected) {
+    logger.warn('Ignoring out-of-range environment value; using the default', {
+      variable: clamped.name,
+      provided: clamped.raw,
+      applied_ms: clamped.applied,
+      accepted_min_ms: clamped.min,
+      accepted_max_ms: clamped.max,
+    });
+  }
+}
 const LEASE_DURATION_MS = parseInt(
   process.env['LEASE_DURATION_MS'] ?? '300000', // 5 minutes default
   10
@@ -113,7 +171,65 @@ const HEALTH_PORT = parseInt(
 let jobsProcessed = 0;
 let jobsFailed = 0;
 let lastJobAt: string | null = null;
+let jobsInFlight = 0;
+let claimsLastMinute = 0;
+let claimRatePerMinute = 0;
+let queueDepth: QueueDepthRow[] = [];
+let queueSampleInFlight: Promise<void> = Promise.resolve();
+/** Epoch ms of the last SUCCESSFUL sample. Null until the first one lands. */
+let queueSampleAt: number | null = null;
+let queueSampleError: string | null = null;
+const QUEUE_SAMPLE_INTERVAL_MS = 60_000;
 const startTime = Date.now();
+
+export interface HealthInput {
+  queueDepth: QueueDepthRow[];
+  claimRatePerMinute: number;
+  jobsInFlight: number;
+  /** Epoch ms of the last successful sample, or null if none has landed. */
+  queueSampleAt: number | null;
+  now: number;
+  startedAt: number;
+  sampleIntervalMs: number;
+}
+
+/**
+ * Health verdict as a pure function of sampled state, so the decision can be
+ * tested without booting the worker.
+ *
+ * `unknown` before any successful sample and once a sample goes stale: a failed
+ * sample must not read as health. getQueueDepth and claimJob fail from the same
+ * cause, so treating a missing sample as "no eligible work" would report ok
+ * during exactly the database outage this field exists to surface.
+ *
+ * `stalled` needs all three of eligible work, no claims, and nothing in flight.
+ * A single multi-minute fix job legitimately produces zero claims across several
+ * windows while eligible work waits, and flagging that would fire on healthy
+ * operation. The uptime guard exists because claimRatePerMinute is only computed
+ * at the first sample tick, so before then it reads 0 for a worker that has been
+ * claiming fine since boot.
+ */
+export function computeHealthStatus(input: HealthInput): 'ok' | 'stalled' | 'unknown' {
+  if (input.queueSampleAt === null) return 'unknown';
+  if (input.now - input.queueSampleAt > input.sampleIntervalMs * 2) return 'unknown';
+  if (input.now - input.startedAt < input.sampleIntervalMs) return 'ok';
+  const eligible = input.queueDepth.reduce((total, depth) => total + depth.eligible, 0);
+  return eligible > 0 && input.claimRatePerMinute === 0 && input.jobsInFlight === 0
+    ? 'stalled'
+    : 'ok';
+}
+
+function healthStatus(): 'ok' | 'stalled' | 'unknown' {
+  return computeHealthStatus({
+    queueDepth,
+    claimRatePerMinute,
+    jobsInFlight,
+    queueSampleAt,
+    now: Date.now(),
+    startedAt: startTime,
+    sampleIntervalMs: QUEUE_SAMPLE_INTERVAL_MS,
+  });
+}
 
 function checkAbort(signal: AbortSignal): void {
   if (signal.aborted) {
@@ -152,7 +268,17 @@ async function resolveStackForEvent(
 }
 
 export async function processJob(job: ClaimedJob, signal: AbortSignal): Promise<void> {
-  await withJobTrace(job.id, job.errorGroupId ?? job.sourceId ?? 'unknown', job.projectId, () => processJobInner(job, signal));
+  jobsInFlight += 1;
+  try {
+    await withJobTrace(
+      job.id,
+      job.errorGroupId ?? job.sourceId ?? 'unknown',
+      job.projectId,
+      () => processJobInner(job, signal),
+    );
+  } finally {
+    jobsInFlight -= 1;
+  }
 }
 
 export async function processJobInner(job: ClaimedJob, signal: AbortSignal): Promise<void> {
@@ -981,12 +1107,24 @@ async function main(): Promise<void> {
     if (req.url === '/health') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
-        status: 'ok',
         worker_id: WORKER_ID,
         uptime_seconds: Math.floor((Date.now() - startTime) / 1000),
         jobs_processed: jobsProcessed,
         jobs_failed: jobsFailed,
         last_job_at: lastJobAt,
+        claims_per_minute: claimRatePerMinute,
+        // Serialized snake_case to match the rest of the payload; QueueDepthRow
+        // stays camelCase as the internal type.
+        queue_depth: queueDepth.map((depth) => ({
+          job_type: depth.jobType,
+          eligible: depth.eligible,
+          backed_off: depth.backedOff,
+          oldest_eligible_seconds: depth.oldestEligibleSeconds,
+        })),
+        queue_depth_sampled_at:
+          queueSampleAt === null ? null : new Date(queueSampleAt).toISOString(),
+        queue_sample_error: queueSampleError,
+        status: healthStatus(),
       }));
     } else {
       res.writeHead(404);
@@ -1002,8 +1140,38 @@ async function main(): Promise<void> {
     leaseDurationMs: LEASE_DURATION_MS,
     workerId: WORKER_ID,
     processJob,
+    onClaim: () => { claimsLastMinute += 1; },
+    shutdownGraceMs: SHUTDOWN_GRACE_MS,
   });
   poller.start();
+
+  // Sampled on a timer, never per claim: the aggregate scans the pending set
+  // and the drain loop claims far too often to pay for it each time.
+  function sampleQueueDepth(): void {
+    queueSampleInFlight = getQueueDepth()
+      .then((depth) => {
+        queueDepth = depth;
+        queueSampleAt = Date.now();
+        queueSampleError = null;
+      })
+      .catch((err: unknown) => {
+        // Leave queueDepth alone and record the failure. healthStatus() reads
+        // queueSampleAt, so a stale sample degrades to 'unknown' rather than
+        // being mistaken for an empty queue.
+        queueSampleError = err instanceof Error ? err.message : String(err);
+        logger.error('Queue depth sample failed', { error: queueSampleError });
+      });
+  }
+
+  // Prime once so /health has a verdict before the first interval fires,
+  // instead of reporting on an empty array for the first minute.
+  sampleQueueDepth();
+
+  const queueSampleTimer = setInterval(() => {
+    claimRatePerMinute = claimsLastMinute;
+    claimsLastMinute = 0;
+    sampleQueueDepth();
+  }, QUEUE_SAMPLE_INTERVAL_MS);
 
   // Reaper: periodically reclaim jobs with expired leases
   const reaperTimer = setInterval(() => {
@@ -1060,6 +1228,7 @@ async function main(): Promise<void> {
   logger.info('Worker ready', {
     worker_id: WORKER_ID,
     poll_interval_ms: POLL_INTERVAL_MS,
+    shutdown_grace_ms: SHUTDOWN_GRACE_MS,
     lease_duration_ms: LEASE_DURATION_MS,
     reaper_interval_ms: REAPER_INTERVAL_MS,
     silence_check_interval_ms: SILENCE_CHECK_INTERVAL_MS,
@@ -1073,9 +1242,11 @@ async function main(): Promise<void> {
     clearInterval(reaperTimer);
     clearInterval(silenceTimer);
     clearInterval(inactivityTimer);
+    clearInterval(queueSampleTimer);
     await poller.stop();
     healthServer.close();
     await shutdownTracing();
+    await queueSampleInFlight;
     await closePool();
     logger.info('Worker shutdown complete');
     process.exit(0);

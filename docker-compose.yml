@@ -142,6 +142,7 @@ services:
       LANGFUSE_BASE_URL: ${LANGFUSE_BASE_URL:-https://us.cloud.langfuse.com}
       LANGFUSE_PROJECT_ID: ${LANGFUSE_PROJECT_ID:-}
       POLL_INTERVAL_MS: "5000"
+      SHUTDOWN_GRACE_MS: "25000"
       HEALTH_PORT: "8081"
       MINIO_ENDPOINT: http://minio:9000
       MINIO_ACCESS_KEY: minio
@@ -159,6 +160,10 @@ services:
       interval: 10s
       timeout: 5s
       retries: 3
+    # Must exceed SHUTDOWN_GRACE_MS or Docker SIGKILLs the worker before the
+    # poll loop's own deadline fires and the graceful path never runs. Compose
+    # defaults to 10s, which is below the 25s grace.
+    stop_grace_period: 30s
 
   migrate:
     image: postgres:16

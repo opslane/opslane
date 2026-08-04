@@ -18,6 +18,7 @@ import {
   reserveDelivery,
   recordDeliveryPushed,
   finalizeDelivery,
+  getQueueDepth,
 } from '../db.js';
 
 const DATABASE_URL = process.env['DATABASE_URL'];
@@ -78,6 +79,21 @@ async function seedErrorGroupAndJob(overrides?: {
   return { errorGroupId, jobId };
 }
 
+async function seedPendingJob(options: {
+  jobType: 'session_analysis' | 'investigate';
+  availableAt: Date;
+  createdAt?: Date;
+}): Promise<string> {
+  const { jobId } = await seedErrorGroupAndJob();
+  await testPool.query(
+    `UPDATE error_group_jobs
+        SET job_type = $2, available_at = $3, created_at = $4
+      WHERE id = $1`,
+    [jobId, options.jobType, options.availableAt, options.createdAt ?? new Date()],
+  );
+  return jobId;
+}
+
 async function cleanupTestData(): Promise<void> {
   // Delete in reverse FK order
   await testPool.query(`DELETE FROM friction_signals WHERE project_id = $1`, [testProjectId]);
@@ -108,6 +124,14 @@ async function expireAndReclaimWithSameWorker(): Promise<{
     [jobId],
   );
   expect(await requeueStaleJobs()).toBe(1);
+
+  // The reaper now backs retries off. This helper is specifically exercising
+  // generation fencing after a later reclaim, so make that retry eligible
+  // without weakening any of the stale-generation assertions below.
+  await testPool.query(
+    `UPDATE error_group_jobs SET available_at = now() WHERE id = $1`,
+    [jobId],
+  );
 
   const currentClaim = await claimJob('worker-reused', 60_000);
   expect(currentClaim?.id).toBe(jobId);
@@ -372,6 +396,27 @@ describeDb('db.ts integration tests', () => {
       const job = await claimJob('worker-1', 60_000);
       expect(job).not.toBeNull();
       expect(job!.id).toBe(pendingJobId);
+    });
+  });
+
+  describe('getQueueDepth', () => {
+    it('reports eligible and backed-off depth separately per job type', async () => {
+      const oneMinuteAgo = new Date(Date.now() - 60_000);
+      await seedPendingJob({
+        jobType: 'session_analysis',
+        availableAt: oneMinuteAgo,
+        createdAt: oneMinuteAgo,
+      });
+      await seedPendingJob({
+        jobType: 'session_analysis',
+        availableAt: new Date(Date.now() + 600_000),
+      });
+
+      const depth = await getQueueDepth();
+      const row = depth.find((entry) => entry.jobType === 'session_analysis');
+      expect(row?.eligible).toBe(1);
+      expect(row?.backedOff).toBe(1);
+      expect(row?.oldestEligibleSeconds).toBeGreaterThanOrEqual(59);
     });
   });
 
@@ -1397,6 +1442,65 @@ describeDb('db.ts integration tests', () => {
       expect(row.lease_expires_at).toBeNull();
     });
 
+    it('schedules a retry in the future instead of immediately', async () => {
+      const { jobId } = await seedErrorGroupAndJob();
+      const claimed = await claimJob('worker-1', 60_000);
+      const before = Date.now();
+
+      await failJob(jobId, 'worker-1', claimed!.leaseGeneration, 'transient boom');
+
+      const { rows } = await testPool.query<{
+        status: string;
+        available_at: Date;
+        attempts: number;
+      }>(
+        `SELECT status, available_at, attempts FROM error_group_jobs WHERE id = $1`,
+        [jobId],
+      );
+      expect(rows[0]!.status).toBe('pending');
+      expect(rows[0]!.attempts).toBe(1);
+      const delayMs = rows[0]!.available_at.getTime() - before;
+      expect(delayMs).toBeGreaterThan(14_000);
+      expect(delayMs).toBeLessThan(46_000);
+    });
+
+    it('does not let a backed-off job be claimed before its window elapses', async () => {
+      const { jobId } = await seedErrorGroupAndJob();
+      const claimed = await claimJob('worker-1', 60_000);
+      await failJob(jobId, 'worker-1', claimed!.leaseGeneration, 'transient boom');
+
+      // toBeNull, not `?.id !== jobId`: optional chaining makes a null return
+      // satisfy the assertion for any reason at all, so a globally broken
+      // claimJob would pass. The positive control below rules that out.
+      const retry = await claimJob('other-worker', 30_000);
+      expect(retry).toBeNull();
+
+      await testPool.query(
+        `UPDATE error_group_jobs SET available_at = now() WHERE id = $1`,
+        [jobId],
+      );
+      const afterWindow = await claimJob('other-worker', 30_000);
+      expect(afterWindow?.id).toBe(jobId);
+    });
+
+    it('leaves available_at alone when the job dead-letters', async () => {
+      const { jobId } = await seedErrorGroupAndJob({ attempts: 2, max_attempts: 3 });
+      const claimed = await claimJob('worker-1', 60_000);
+      const { rows: pre } = await testPool.query<{ available_at: Date }>(
+        `SELECT available_at FROM error_group_jobs WHERE id = $1`,
+        [jobId],
+      );
+
+      await failJob(jobId, 'worker-1', claimed!.leaseGeneration, 'final boom');
+
+      const { rows: post } = await testPool.query<{ status: string; available_at: Date }>(
+        `SELECT status, available_at FROM error_group_jobs WHERE id = $1`,
+        [jobId],
+      );
+      expect(post[0]!.status).toBe('dead_letter');
+      expect(post[0]!.available_at.getTime()).toBe(pre[0]!.available_at.getTime());
+    });
+
     it('should dead-letter when at max_attempts', async () => {
       const { jobId } = await seedErrorGroupAndJob({
         attempts: 2,
@@ -1462,6 +1566,25 @@ describeDb('db.ts integration tests', () => {
       expect(row.worker_id).toBeNull();
       expect(row.claimed_at).toBeNull();
       expect(row.lease_expires_at).toBeNull();
+    });
+
+    it('spaces reaper requeues the same way failJob does', async () => {
+      const { jobId } = await seedErrorGroupAndJob({
+        status: 'claimed',
+        worker_id: 'dead-worker',
+        claimed_at: new Date(Date.now() - 120_000),
+        lease_expires_at: new Date(Date.now() - 60_000),
+      });
+      const before = Date.now();
+
+      await requeueStaleJobs();
+
+      const { rows } = await testPool.query<{ status: string; available_at: Date }>(
+        `SELECT status, available_at FROM error_group_jobs WHERE id = $1`,
+        [jobId],
+      );
+      expect(rows[0]!.status).toBe('pending');
+      expect(rows[0]!.available_at.getTime()).toBeGreaterThan(before + 14_000);
     });
 
     it('should dead-letter expired jobs at max_attempts and preserve ownership for forensics', async () => {
