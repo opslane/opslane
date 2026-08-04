@@ -27,6 +27,9 @@ var (
 	debugMetaRegistryZeroMatchedTotal  atomic.Int64
 	jobsEnqueuedTotal                  atomic.Int64
 	stacklessEventsTotal               atomic.Int64
+	suppressedResizeObserverTotal      atomic.Int64
+	suppressedScriptErrorTotal         atomic.Int64
+	suppressedExtensionOnlyTotal       atomic.Int64
 	ingestEnvironmentFallbackDisabled  atomic.Int64
 	ingestEnvironmentFallbackUnknown   atomic.Int64
 	ingestEnvironmentFallbackInvalid   atomic.Int64
@@ -108,6 +111,20 @@ func RecordJobEnqueued() {
 // Tracks recovery volume after the stack-optional ingest change.
 func RecordStacklessAccepted() {
 	stacklessEventsTotal.Add(1)
+}
+
+// RecordSuppressed increments a fixed-cardinality rung-0 counter. Unknown rule
+// names are ignored so detector changes cannot accidentally create metric-label
+// cardinality.
+func RecordSuppressed(rule string) {
+	switch rule {
+	case "resize_observer":
+		suppressedResizeObserverTotal.Add(1)
+	case "script_error":
+		suppressedScriptErrorTotal.Add(1)
+	case "extension_only":
+		suppressedExtensionOnlyTotal.Add(1)
+	}
 }
 
 // RecordEnvironmentOverrideFallback keeps the label cardinality fixed.
@@ -219,6 +236,12 @@ func Metrics(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "# HELP opslane_stackless_events_total Total accepted events with no stack trace\n")
 	fmt.Fprintf(w, "# TYPE opslane_stackless_events_total counter\n")
 	fmt.Fprintf(w, "opslane_stackless_events_total %d\n\n", stacklessEventsTotal.Load())
+
+	fmt.Fprintln(w, "# HELP opslane_suppressed_events_total Total error events intentionally dropped before grouping")
+	fmt.Fprintln(w, "# TYPE opslane_suppressed_events_total counter")
+	fmt.Fprintf(w, "opslane_suppressed_events_total{rule=\"resize_observer\"} %d\n", suppressedResizeObserverTotal.Load())
+	fmt.Fprintf(w, "opslane_suppressed_events_total{rule=\"script_error\"} %d\n", suppressedScriptErrorTotal.Load())
+	fmt.Fprintf(w, "opslane_suppressed_events_total{rule=\"extension_only\"} %d\n\n", suppressedExtensionOnlyTotal.Load())
 
 	fmt.Fprintln(w, "# HELP opslane_ingest_env_override_fallback_total Total payload environment overrides that fell back to the key-bound environment")
 	fmt.Fprintln(w, "# TYPE opslane_ingest_env_override_fallback_total counter")
