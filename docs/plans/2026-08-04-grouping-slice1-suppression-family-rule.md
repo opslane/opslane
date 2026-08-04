@@ -10,7 +10,7 @@
 
 **Tech Stack:** Go 1.24, pgx (existing), `atomic.Int64` counters + text metrics endpoint (existing `handler/metrics.go` pattern), shared JSON fixture corpus under `test-fixtures/grouping/`.
 
-**Design authority:** `docs/architecture/grouping-ladder.md` → `LOCKED PLAN` section, build-order item 1. Rungs 2/3, the key table, and the Go resolver are explicitly OUT of this plan (separate plan after this lands).
+**Design authority:** `docs/decisions/grouping-ladder.md` → `LOCKED PLAN` section, build-order item 1. Rungs 2/3, the key table, and the Go resolver are explicitly OUT of this plan (separate plan after this lands).
 
 ## Global Constraints
 
@@ -1293,7 +1293,7 @@ git status --short   # clean, or only intended changes
 
 0. Run every command from a checkout of the EXACT deployed git revision (`git checkout <deployed-sha>`).
 1. `DATABASE_URL=<prod> go run ./shadow-regroup --project <partner-uuid>` — paste the report into the rollout PR. Predictions to beat (2026-08-03 prod evidence): ~86 family groups join the family; Script error./ResizeObserver-only groups disappear; MIXED list gets a human decision per group (cutover won't touch them regardless).
-2. Release-tagging precondition (locked plan): run the scoped query in `docs/architecture/grouping-ladder.md`. If `missing/total` is not near 0, fix the partner's SDK `release` config BEFORE cutover.
+2. Release-tagging precondition (locked plan): run the scoped query in `docs/decisions/grouping-ladder.md`. If `missing/total` is not near 0, fix the partner's SDK `release` config BEFORE cutover.
 3. Deploy the ladder.
 4. `go run ./cutover-close --project <partner-uuid> --skipped skipped.txt` (dry run) → review, especially `[HAS PR]` rows → `--apply --audit cutover-$(date +%F).jsonl`.
 5. Once skipped ids' jobs settle: dry-run with `--ids skipped.txt`; close the now-eligible with `--apply --audit cutover-pass2-$(date +%F).jsonl --ids skipped.txt`. Ids that terminalized as `pr_created`/`resolved`/`merged` keep their real provenance — designed outcome, not a leak.
