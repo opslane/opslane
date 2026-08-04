@@ -1,5 +1,5 @@
 import type { CheckOutcome } from '@opslane/shared';
-import type { SandboxRuntime } from './sandbox-runtime.js';
+import { SandboxUnavailableError, type SandboxRuntime } from './sandbox-runtime.js';
 import { scrubSecrets } from './redact.js';
 import type { Platform } from '../platform.js';
 import { parseJUnitXml } from './junit.js';
@@ -201,7 +201,29 @@ export async function runSuite(
     };
   }
 
-  await sandbox.commands.run(`rm -f ${plan.kind === 'pytest' ? PYTEST_RESULTS_PATH : SUITE_RESULTS_PATH}`, { timeoutMs: 10_000 });
+  // Cleanup gets its OWN catch. Folding it into the suite try would let an
+  // ordinary `rm` failure be reported as the customer's tests failing; leaving
+  // it uncaught (the previous code) let a dead sandbox throw past every
+  // classifier and surface as worker_runtime_error.
+  try {
+    await sandbox.commands.run(
+      `rm -f ${plan.kind === 'pytest' ? PYTEST_RESULTS_PATH : SUITE_RESULTS_PATH}`,
+      { timeoutMs: 10_000 },
+    );
+  } catch (error: unknown) {
+    // EVERY cleanup failure is infrastructure, not a verdict. Continuing would
+    // let the parser read a results file left by a previous run and report it
+    // as this patch's outcome — a stale-evidence false positive.
+    const detail = error instanceof Error ? error.message : String(error);
+    return {
+      outcome: 'infra_error',
+      command: plan.command,
+      tests: null,
+      total: null,
+      output: bound(scrubSecrets(detail)),
+    };
+  }
+
   let rawOutput = '';
   let exitCode = 0;
   try {
@@ -212,6 +234,15 @@ export async function runSuite(
     exitCode = result.exitCode;
     rawOutput = `${result.stdout ?? ''}\n${result.stderr ?? ''}`;
   } catch (error: unknown) {
+    if (error instanceof SandboxUnavailableError) {
+      return {
+        outcome: 'infra_error',
+        command: plan.command,
+        tests: null,
+        total: null,
+        output: bound(scrubSecrets(error.message)),
+      };
+    }
     const errorMessage = error instanceof Error ? error.message : String(error);
     const output = failureOutput(error);
     if (/timed out|timeout/i.test(errorMessage)) {

@@ -8,7 +8,7 @@ import {
   selectTestCommand,
   type SuiteRun,
 } from '../test-runner.js';
-import type { SandboxRuntime } from '../sandbox-runtime.js';
+import { SandboxUnavailableError, type SandboxRuntime } from '../sandbox-runtime.js';
 
 describe('selectTestCommand', () => {
   it('prefers repo-local vitest with an explicit JSON reporter and never uses npx', () => {
@@ -276,5 +276,54 @@ describe('runSuite taxonomy', () => {
   it('skips a none plan without claiming evidence', async () => {
     const result = await runSuite(fakeSandbox({}), { kind: 'none', command: null });
     expect(result.outcome).toBe('skipped_no_runner');
+  });
+
+  it('classifies a vanished sandbox during the SUITE COMMAND as infra_error', async () => {
+    // Cleanup succeeds; only the suite command hits the dead machine.
+    // Deliberately an npm-script plan: a vitest plan reaches infra_error anyway
+    // because the results file is missing, so it cannot tell the new typed
+    // branch apart from the pre-existing unparseable-report path.
+    const run = await runSuite(
+      fakeSandbox({
+        onRun: (command) => {
+          if (command.startsWith('rm -f')) return { exitCode: 0 };
+          throw new SandboxUnavailableError('Sandbox is probably not running anymore');
+        },
+      }),
+      { kind: 'npm-script', command: 'npm test' },
+    );
+    expect(run.outcome).toBe('infra_error');
+  });
+
+  it('classifies a vanished sandbox during PRE-RUN CLEANUP as infra_error', async () => {
+    // `rm -f <results path>` used to sit outside the try, so a dead sandbox
+    // threw straight past every classifier and out of runSuite entirely.
+    const run = await runSuite(
+      fakeSandbox({
+        onRun: (command) => {
+          if (command.startsWith('rm -f')) {
+            throw new SandboxUnavailableError('Sandbox is probably not running anymore');
+          }
+          return { exitCode: 0 };
+        },
+      }),
+      { kind: 'vitest', command: './node_modules/.bin/vitest run' },
+    );
+    expect(run.outcome).toBe('infra_error');
+  });
+
+  it('treats an ordinary cleanup failure as infra_error, never a failed suite', async () => {
+    // A failed `rm` must never read as the customer's tests failing, and must
+    // not continue — a stale results file would be parsed as this run's result.
+    const run = await runSuite(
+      fakeSandbox({
+        onRun: (command) => {
+          if (command.startsWith('rm -f')) throw new Error('rm: permission denied');
+          return { exitCode: 0, stdout: '{"testResults":[],"numTotalTests":0}' };
+        },
+      }),
+      { kind: 'npm-script', command: 'npm test' },
+    );
+    expect(run.outcome).toBe('infra_error');
   });
 });
