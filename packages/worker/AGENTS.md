@@ -17,6 +17,18 @@ The worker polls Postgres and owns investigation, fix verification, lease handli
   block the whole fleet's analysis lane for five minutes.
 - `POLL_INTERVAL_MS` is the empty-queue wait, not a claim cadence: the poller drains
   continuously while work exists. It no longer throttles throughput under load.
+- Retry spacing lives in `available_at`, not in the poll tick. `failJob` and the reaper
+  both push a failed job out by capped exponential backoff with jitter
+  (`RETRY_BACKOFF_BASE_SECONDS`, `RETRY_BACKOFF_CAP_SECONDS` in `src/db.ts`). A job that
+  is `pending` is not necessarily claimable; claim queries must keep honoring
+  `available_at` or a poison job spins at drain speed.
+- `/health` is a queue-shape report, not just liveness. `status` is `ok`, `stalled`
+  (eligible work, zero claims in the last minute, and nothing in flight — all three), or
+  `unknown` (no successful queue sample yet, or the newest one is older than two sample
+  intervals). A failed sample must degrade to `unknown`, never to `ok`: the sample and the
+  claim fail from the same cause, so treating a missing sample as an empty queue would
+  report health during the exact outage the field exists to surface. Keep the payload
+  snake_case; `QueueDepthRow` stays camelCase as the internal type.
 
 ## Verification
 

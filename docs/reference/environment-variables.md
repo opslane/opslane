@@ -72,13 +72,13 @@ Ingestion reads **only** the `REPLAY_STORE_*` names; `MINIO_*` names appear in i
 | `GITHUB_APP_ID` / `GITHUB_APP_PRIVATE_KEY` | the other mode | GitHub App installation tokens |
 | `DASHBOARD_URL` | no | Public or private HTTP(S) dashboard base URL used for reader-facing incident links in PR bodies and notifications. Configure it explicitly; loopback URLs are rejected, and the ingestion service's `DASHBOARD_ORIGIN` is not used as a fallback. |
 | `WORKER_ID` | no (generated) | Stable worker identity for lease ownership |
-| `POLL_INTERVAL_MS` | no (5000) | How long the worker waits when the queue is empty (it drains continuously while work exists) |
+| `POLL_INTERVAL_MS` | no (5000) | How long the worker waits when the queue is empty (it drains continuously while work exists). Accepted range 50-300000; out-of-range or non-integer values log a warning and fall back to the default |
 | `SHUTDOWN_GRACE_MS` | no (25000) | Maximum time to wait for the poll loop during shutdown. Must stay below the platform's container termination grace period, or the container is killed before the graceful path runs. Compose sets `stop_grace_period: 30s` on the worker for this reason; Docker's 10s default is *below* the 25s grace. Accepted range 1000-120000; out-of-range values log a warning and fall back to the default |
 | `LEASE_DURATION_MS` / `REAPER_INTERVAL_MS` / `SILENCE_CHECK_INTERVAL_MS` | no | Queue lease and maintenance tuning |
 | `RESOLVE_AGE_DAYS` | no (14) | Days without a new occurrence before `needs_human` and `investigated` issues are auto-resolved |
 | `INACTIVITY_CHECK_INTERVAL_MS` | no (900000) | How often the worker sweeps for inactive issues (15 minutes by default) |
 | `SESSION_ANALYSIS_MAX_CONCURRENT` | no (2) | Fleet-wide cap on concurrently claimed `session_analysis` jobs; `0` disables analysis claiming entirely; raising it has no effect at fleet size 1 |
-| `HEALTH_PORT` | no (8081) | Health endpoint port |
+| `HEALTH_PORT` | no (8081) | Health endpoint port. The worker's `/health` returns `status: ok`, `stalled` (eligible work waiting, no claims in the last minute, nothing in flight), or `unknown` (no queue sample has landed, or the last one is stale), plus `claims_per_minute` and a per-job-type `queue_depth` carrying eligible, backed-off, and oldest-eligible-seconds counts. The queue is sampled once a minute, not per claim |
 | `REPLAY_STORE_ENDPOINT` / `REPLAY_STORE_ACCESS_KEY` / `REPLAY_STORE_SECRET_KEY` / `REPLAY_STORE_BUCKET` | for replay analysis | Reading stored replays |
 | `MINIO_ENDPOINT` / `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` / `MINIO_BUCKET` | legacy aliases | Worker-side fallback names for the same settings |
 | `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` / `LANGFUSE_BASE_URL` / `LANGFUSE_PROJECT_ID` | no | Optional LLM tracing |
