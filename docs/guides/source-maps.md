@@ -11,8 +11,6 @@ Opslane's Vite plugin stamps each production chunk with a deterministic debug
 ID, uploads the matching source map with a secret project key, and removes the
 map from the build output by default. Browser events carry the chunk URL and
 debug ID; the worker uses that exact pair to resolve original source positions.
-The SDK's `release` option is still useful deployment metadata, but it is not
-part of source-map matching.
 
 ## Configure a Vite build
 

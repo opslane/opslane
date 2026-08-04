@@ -6,21 +6,22 @@ covers:
 ---
 # Migrating the legacy Vite source-map plugin
 
-The legacy API uses `opslaneSourceMapPlugin({ endpoint, apiKey, release })`.
-The zero-argument `opslane()` plugin tracked in
-[#224](https://github.com/opslane/opslane-oss/issues/224) replaces it.
+The legacy API was `opslaneSourceMapPlugin({ endpoint, apiKey, release })`.
+It was removed in `@opslane/sdk` 3.0.0: the zero-argument `opslane()` plugin
+replaces it, uploading maps itself when `OPSLANE_SOURCEMAP_KEY` and
+`OPSLANE_ENDPOINT` are set in the build environment. A config that still
+imports the legacy name fails at build time with a missing-export error.
 
 `opslane sourcemaps install-plugin` intentionally refuses to add a second
 registration when it finds the legacy import. A double registration can change
 which uploader sees or removes a map.
 
-Until #224 is published, leave the legacy setup in place or skip source maps.
-After the new SDK version is installed:
+To migrate after installing the 3.x SDK:
 
 1. Remove the legacy import and `opslaneSourceMapPlugin(...)` call.
 2. Run `opslane sourcemaps install-plugin`.
-3. Watch the first production build and confirm the new uploader reports a
-   completed batch.
+3. Set `OPSLANE_SOURCEMAP_KEY` and `OPSLANE_ENDPOINT` where the production
+   build runs, then watch the first build log for `Uploaded N/N source maps`.
 4. Run `opslane sourcemaps install-plugin --check` to verify the resolved Vite
    config contains the new plugin.
 

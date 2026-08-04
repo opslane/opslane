@@ -2,7 +2,6 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 vi.mock('vite', () => ({ loadEnv: vi.fn(() => ({})) }));
 import {
   opslane,
-  opslaneSourceMapPlugin,
   opslaneVitePlugin,
 } from '../../vite-plugin/index';
 import { computeDebugId } from '../build/debug-id';
@@ -649,20 +648,12 @@ describe('Vite debug-ID plugin', () => {
   });
 });
 
-// From main: the legacy uploader now fails the build rather than silently
-// deleting maps and posting to a route that no longer exists (#218).
-describe('legacy opslaneSourceMapPlugin', () => {
-  const legacyOpts = { apiKey: 'unused', endpoint: 'https://api.test' };
-
-  it('fails the build instead of silently dropping source maps', () => {
-    const plugin = opslaneSourceMapPlugin(legacyOpts) as {
-      configResolved: (config: unknown) => void;
-    };
-    expect(() => plugin.configResolved({})).toThrow(/source-map upload is unavailable/);
-  });
-
-  it('no longer removes map assets from the bundle', () => {
-    const plugin = opslaneSourceMapPlugin(legacyOpts) as Record<string, unknown>;
-    expect(plugin.generateBundle).toBeUndefined();
+// The legacy opslaneSourceMapPlugin was removed in 3.0.0; old imports fail at
+// build time with a missing-export error.
+describe('legacy opslaneSourceMapPlugin removal', () => {
+  it('is no longer exported', async () => {
+    const mod = await import('../../vite-plugin/index') as Record<string, unknown>;
+    expect(mod['opslaneSourceMapPlugin']).toBeUndefined();
+    expect(mod['LEGACY_VITE_PLUGIN_NAME']).toBeUndefined();
   });
 });

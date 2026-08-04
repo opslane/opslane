@@ -61,6 +61,6 @@ The event should appear in your dashboard (or via the incidents API) within seco
 ## Next
 
 - [Upload source maps](source-maps.md) so stacks resolve to your `.vue`
-  sources. For Vite, use the published legacy plugin today; the guide tracks
-  debug-ID plugin availability and migration order.
+  sources. The plugin uploads them when OPSLANE_SOURCEMAP_KEY and
+  OPSLANE_ENDPOINT are set.
 - All init options: [SDK options reference](../reference/sdk-options.md)

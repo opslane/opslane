@@ -50,14 +50,11 @@ interface StampStats {
  * 100%-failure: the install looks fine, the check never matches, and a correct
  * edit gets rolled back. Import this instead of retyping it.
  *
- * Deliberately not `opslane-source-map`: that name belongs to the deprecated
- * uploader stub below, which throws. Sharing a name would make the working
- * plugin and the failing one indistinguishable in a plugin list.
+ * Deliberately not `opslane-source-map`: that name belonged to the legacy
+ * uploader removed in 3.0.0. Never reuse it, or tooling that still encounters
+ * old builds could confuse the two.
  */
 export const OPSLANE_VITE_PLUGIN_NAME = 'opslane-debug-ids';
-
-/** The deprecated uploader stub's name. It throws; do not match on it. */
-export const LEGACY_VITE_PLUGIN_NAME = 'opslane-source-map';
 
 /** Every extension Vite emits JavaScript under, and the maps beside them. */
 const JS_ASSET = /\.(?:js|mjs|cjs)$/;
@@ -663,37 +660,12 @@ export function opslaneVitePlugin(
 
 export { opslaneVitePlugin as opslane };
 
-export interface SourceMapPluginOptions {
-  endpoint: string;
-  apiKey: string;
-  release?: string;
-}
-
-
-
-/**
- * @deprecated Use opslaneVitePlugin for deterministic debug IDs. This legacy
- * uploader remains unchanged until the authenticated upload flow replaces it.
- */
-export function opslaneSourceMapPlugin(_options: SourceMapPluginOptions) {
-  return {
-    name: LEGACY_VITE_PLUGIN_NAME,
-    apply: 'build' as const,
-    enforce: 'post' as const,
-
-    configResolved(): never {
-      // Source-map upload moved to a batch API that does not exist yet
-      // (tracked in #218). Failing the build is better than silently
-      // deleting maps and uploading nothing, which is what a 404 here
-      // would produce.
-      throw new Error(
-        '[opslane] source-map upload is unavailable in this release. ' +
-        'Remove opslaneSourceMapPlugin() from your Vite plugins until @opslane/sdk ships batch upload ' +
-        '(see opslane/opslane-oss#218).',
-      );
-    },
-  };
-}
+// opslaneSourceMapPlugin (the release-keyed legacy uploader, later a
+// hard-fail stub) was removed in 3.0.0. opslane() uploads maps itself when
+// OPSLANE_SOURCEMAP_KEY and OPSLANE_ENDPOINT are set; old imports now fail
+// at build time with a missing-export error, and
+// `opslane sourcemaps install-plugin` still detects and reports configs that
+// reference the old name.
 
 
 function stripMapSuffix(filePath: string): string {

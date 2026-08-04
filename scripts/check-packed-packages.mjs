@@ -31,9 +31,10 @@ const TARGETS = [
         [
           "import { init, captureException, OpslaneSDK } from '@opslane/sdk';",
           "import type { SdkInitOptions } from '@opslane/sdk';",
-          "import { opslane, opslaneSourceMapPlugin } from '@opslane/sdk/vite-plugin';",
+          "import * as vitePluginModule from '@opslane/sdk/vite-plugin';",
+          "const { opslane } = vitePluginModule;",
           'const opts: SdkInitOptions = { apiKey: "k", endpoint: "https://example.com" };',
-          'void opts; void init; void captureException; void OpslaneSDK; void opslane; void opslaneSourceMapPlugin;',
+          'void opts; void init; void captureException; void OpslaneSDK; void opslane;',
         ].join('\n')
       );
       writeFileSync(
@@ -73,7 +74,8 @@ const TARGETS = [
           "import { readFileSync, readdirSync } from 'node:fs';",
           "import { join } from 'node:path';",
           "import { build } from 'vite';",
-          "import { opslane, opslaneSourceMapPlugin } from '@opslane/sdk/vite-plugin';",
+          "import * as vitePluginModule from '@opslane/sdk/vite-plugin';",
+          "const { opslane } = vitePluginModule;",
           'const run = (outDir, plugin) => build({',
           '  root: process.cwd(), configFile: false, logLevel: "silent", plugins: [plugin],',
           '  build: { outDir, emptyOutDir: true, rollupOptions: { input: join(process.cwd(), "main.js") } },',
@@ -83,14 +85,18 @@ const TARGETS = [
           'if (!debugName || !readFileSync(join("dist-debug/assets", debugName), "utf8").includes("//# debugId=")) {',
           '  throw new Error("new Vite plugin export did not stamp the consumer build");',
           '}',
-          'await run("dist-legacy", opslaneSourceMapPlugin({ endpoint: "https://invalid.example", apiKey: "" }));',
+          '// Removed in 3.0.0: a packed tarball must not quietly reintroduce the',
+          '// legacy uploader whose only behavior was failing the build.',
+          'if ("opslaneSourceMapPlugin" in vitePluginModule) {',
+          '  throw new Error("legacy opslaneSourceMapPlugin is still exported from the packed tarball");',
+          '}',
         ].join('\n'),
       );
       execFileSync('node', ['probe-build.mjs'], {
         cwd: consumerDir,
         stdio: 'inherit',
       });
-      console.log(`  ✓ both Vite plugin exports build in a clean consumer`);
+      console.log(`  ✓ Vite plugin builds in a clean consumer; legacy export absent`);
     },
   },
   {

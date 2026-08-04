@@ -60,6 +60,5 @@ The event should appear in your dashboard (or via the incidents API) within seco
 ## Next
 
 - [Upload source maps](source-maps.md) so stacks resolve to your JSX/TSX
-  sources. For Vite, use the published legacy plugin today; the guide tracks
-  debug-ID plugin availability and migration order.
+  sources.
 - All init options: [SDK options reference](../reference/sdk-options.md)
