@@ -159,6 +159,25 @@ describe('createSandboxRuntime', () => {
     expect(runtime.lifetimeMs).toBe(1_800_000);
   });
 
+  it('provisions the Python sandbox with its template AND the resolved lifetime', async () => {
+    // The Python path moved off a hardcoded PYTHON_SANDBOX_LIFETIME_MS onto the
+    // shared resolver. Without this, a regression there is invisible: every
+    // other lifetime test drives the JavaScript branch.
+    delete process.env['OPSLANE_SANDBOX_BACKEND'];
+    process.env['SANDBOX_LIFETIME_MS'] = '900000';
+    createE2BSandbox.mockResolvedValue({
+      sandboxId: 'sbx-py', commands: { run: vi.fn() },
+      files: { read: vi.fn(), write: vi.fn() }, kill: vi.fn(),
+    });
+
+    const runtime = await createSandboxRuntime('python');
+    expect(runtime.lifetimeMs).toBe(900_000);
+    expect(createE2BSandbox).toHaveBeenCalledWith(
+      'opslane-python',
+      expect.objectContaining({ timeoutMs: 900_000 }),
+    );
+  });
+
   it('raises SandboxUnavailableError from the local backend after kill', async () => {
     process.env['OPSLANE_SANDBOX_BACKEND'] = 'local';
     process.env['OPSLANE_RELIABILITY_HARNESS'] = '1';
