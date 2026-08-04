@@ -7,15 +7,28 @@ const { createE2BSandbox } = vi.hoisted(() => ({
   createE2BSandbox: vi.fn(),
 }));
 
-vi.mock('e2b', () => ({
+vi.mock('e2b', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('e2b')>()),
   Sandbox: { create: createE2BSandbox },
 }));
 
-import { createSandboxRuntime } from '../sandbox-runtime.js';
+import { createSandboxRuntime, SandboxUnavailableError } from '../sandbox-runtime.js';
 
 const ENV_KEYS = [
   'OPSLANE_SANDBOX_BACKEND',
   'OPSLANE_RELIABILITY_HARNESS',
+  'SANDBOX_LIFETIME_MS',
+  'ANTHROPIC_API_KEY',
+  'GITHUB_TOKEN',
+  'DATABASE_URL',
+  'MINIO_SECRET_KEY',
+  'E2B_API_KEY',
+  'LANGFUSE_PUBLIC_KEY',
+  'LANGFUSE_SECRET_KEY',
+] as const;
+
+/** Worker secrets that must never reach a sandbox command environment. */
+const SECRET_ENV_KEYS = [
   'ANTHROPIC_API_KEY',
   'GITHUB_TOKEN',
   'DATABASE_URL',
@@ -44,11 +57,63 @@ afterEach(() => {
 describe('createSandboxRuntime', () => {
   it('uses E2B by default', async () => {
     delete process.env['OPSLANE_SANDBOX_BACKEND'];
-    const e2bRuntime = { marker: 'e2b' };
-    createE2BSandbox.mockResolvedValue(e2bRuntime);
+    createE2BSandbox.mockResolvedValue({
+      sandboxId: 'sbx-default',
+      commands: { run: vi.fn() },
+      files: { read: vi.fn(), write: vi.fn() },
+      kill: vi.fn(),
+    });
 
-    await expect(createSandboxRuntime()).resolves.toBe(e2bRuntime);
+    const runtime = await createSandboxRuntime();
+    expect(runtime.id).toBe('sbx-default');
     expect(createE2BSandbox).toHaveBeenCalledOnce();
+  });
+
+  it('exports SandboxNotFoundError from the installed E2B version', async () => {
+    const e2b = await vi.importActual<typeof import('e2b')>('e2b');
+    expect(typeof e2b.SandboxNotFoundError).toBe('function');
+  });
+
+  it('latches unavailable and throws SandboxUnavailableError when E2B reports the sandbox is gone', async () => {
+    delete process.env['OPSLANE_SANDBOX_BACKEND'];
+    const { SandboxNotFoundError } = await vi.importActual<typeof import('e2b')>('e2b');
+    const dead = new SandboxNotFoundError('Sandbox is probably not running anymore');
+    createE2BSandbox.mockResolvedValue({
+      sandboxId: 'sbx-test-1',
+      commands: { run: vi.fn().mockRejectedValue(dead) },
+      files: { read: vi.fn().mockRejectedValue(dead), write: vi.fn() },
+      kill: vi.fn(),
+    });
+
+    const runtime = await createSandboxRuntime();
+    expect(runtime.id).toBe('sbx-test-1');
+    expect(runtime.unavailable).toBe(false);
+
+    await expect(runtime.commands.run('echo hi')).rejects.toBeInstanceOf(SandboxUnavailableError);
+    expect(runtime.unavailable).toBe(true);
+  });
+
+  it('does not latch unavailable for an ordinary command failure', async () => {
+    delete process.env['OPSLANE_SANDBOX_BACKEND'];
+    createE2BSandbox.mockResolvedValue({
+      sandboxId: 'sbx-test-2',
+      commands: { run: vi.fn().mockRejectedValue(new Error('Command exited with code 1')) },
+      files: { read: vi.fn(), write: vi.fn() },
+      kill: vi.fn(),
+    });
+
+    const runtime = await createSandboxRuntime();
+    await expect(runtime.commands.run('false')).rejects.toThrow('Command exited with code 1');
+    expect(runtime.unavailable).toBe(false);
+  });
+
+  it('raises SandboxUnavailableError from the local backend after kill', async () => {
+    process.env['OPSLANE_SANDBOX_BACKEND'] = 'local';
+    process.env['OPSLANE_RELIABILITY_HARNESS'] = '1';
+    const sandbox = await createSandboxRuntime();
+    await sandbox.kill();
+    await expect(sandbox.commands.run('echo hi')).rejects.toBeInstanceOf(SandboxUnavailableError);
+    expect(sandbox.unavailable).toBe(true);
   });
 
   it('maps virtual paths and commands into a disposable local filesystem', async () => {
@@ -72,7 +137,7 @@ describe('createSandboxRuntime', () => {
   it('isolates temporary files and removes worker secrets from command environments', async () => {
     process.env['OPSLANE_SANDBOX_BACKEND'] = 'local';
     process.env['OPSLANE_RELIABILITY_HARNESS'] = '1';
-    for (const key of ENV_KEYS.slice(2)) process.env[key] = `secret-${key}`;
+    for (const key of SECRET_ENV_KEYS) process.env[key] = `secret-${key}`;
     const sandbox = await createSandboxRuntime();
 
     await sandbox.files.write('/tmp/provider.patch', 'fixture');

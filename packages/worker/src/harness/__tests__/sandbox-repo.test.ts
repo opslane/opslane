@@ -7,6 +7,10 @@ function buildSandbox(opts: {
   run?: (command: string) => Promise<{ exitCode: number; stdout: string; stderr: string }>;
 }): SandboxRuntime {
   return {
+    id: 'fake-sandbox',
+    createdAt: 0,
+    lifetimeMs: 1_800_000,
+    unavailable: false,
     files: {
       read: async (path) => {
         const content = opts.files?.[path];

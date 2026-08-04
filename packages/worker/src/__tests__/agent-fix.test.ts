@@ -1,10 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-// Mock e2b
-vi.mock('e2b', () => ({
-  Sandbox: {
-    create: vi.fn(),
-  },
+// Mock e2b. The factory MUST preserve the real exports: production code imports
+// SandboxNotFoundError, and `instanceof` only holds against the real class.
+const { createE2BSandbox } = vi.hoisted(() => ({ createE2BSandbox: vi.fn() }));
+vi.mock('e2b', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('e2b')>()),
+  Sandbox: { create: createE2BSandbox },
 }));
 
 // Mock the agent loop
@@ -79,7 +80,9 @@ function makeAgentResult(overrides?: Partial<AgentCompletionResult>): AgentCompl
   };
 }
 
+/** Provider-shaped fake: `sandboxId` is what the adapter reads to expose `id`. */
 const mockSandbox = {
+  sandboxId: 'sbx-mock',
   files: { read: vi.fn(), write: vi.fn() },
   commands: { run: vi.fn() },
   kill: vi.fn(),

@@ -128,6 +128,10 @@ function fakeSandbox(opts: {
   onRun?: (command: string) => { exitCode?: number; stdout?: string; stderr?: string; throwMsg?: string };
 }): SandboxRuntime {
   return {
+    id: 'fake-sandbox',
+    createdAt: 0,
+    lifetimeMs: 1_800_000,
+    unavailable: false,
     commands: {
       run: async (command: string) => {
         const behavior = opts.onRun?.(command);

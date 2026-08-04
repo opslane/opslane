@@ -13,6 +13,10 @@ const state = vi.hoisted(() => ({
 
 vi.mock('../sandbox-runtime.js', () => ({
   createSandboxRuntime: vi.fn(async (): Promise<SandboxRuntime> => ({
+    id: 'fake-sandbox',
+    createdAt: 0,
+    lifetimeMs: 1_800_000,
+    unavailable: false,
     commands: {
       run: async (command: string) => {
         state.commands.push(command);
