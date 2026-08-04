@@ -127,6 +127,14 @@ describe('event-to-pr reliability system tracer', () => {
       [staleInvestigateJob!.id],
     );
     expect(await workerDb.requeueStaleJobs()).toBe(1);
+    // The reaper now spaces retries with an available_at backoff, so a requeued
+    // job is pending but not yet claimable. This tracer is about generation
+    // fencing across a reclaim, not retry timing, so make the window elapse
+    // without weakening any assertion below.
+    await db.query(
+      `UPDATE error_group_jobs SET available_at = now() WHERE id = $1`,
+      [staleInvestigateJob!.id],
+    );
 
     const investigateJob = await workerDb.claimJob(workerId, 120_000);
     expect(investigateJob).toMatchObject({
