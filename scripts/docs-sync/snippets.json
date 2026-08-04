@@ -22,6 +22,16 @@
         }
       ]
     },
+    "docs/quickstart/agent.md": {
+      "fences": [
+        { "language": "bash", "classification": "illustrative" },
+        { "language": "json", "classification": "expected-output" },
+        { "language": "bash", "classification": "config-template" },
+        { "language": "bash", "classification": "illustrative" },
+        { "language": "bash", "classification": "illustrative" },
+        { "language": "bash", "classification": "config-template" }
+      ]
+    },
     "docs/quickstart/self-host.md": {
       "fences": [
         { "language": "bash", "classification": "illustrative" },
@@ -56,15 +66,32 @@
     "docs/guides/replay-privacy.md": {
       "fences": [
         { "language": "html", "classification": "fragment" },
+        { "language": "ts", "classification": "fragment" },
+        { "language": "ts", "classification": "fragment" },
         { "language": "ts", "classification": "fragment" }
       ]
+    },
+    "docs/guides/slack-notifications.md": {
+      "fences": [
+        { "language": "bash", "classification": "config-template" }
+      ]
+    },
+    "docs/guides/source-map-privacy.md": {
+      "fences": []
+    },
+    "docs/guides/source-maps-migration.md": {
+      "fences": []
     },
     "docs/guides/source-maps.md": {
       "fences": [
         { "language": "ts", "classification": "config-template" },
-        { "language": "yaml", "classification": "config-template" },
-        { "language": "json", "classification": "expected-output" },
-        { "language": "bash", "classification": "config-template" }
+        { "language": "bash", "classification": "config-template" },
+        { "language": "dotenv", "classification": "config-template" },
+        { "language": "bash", "classification": "config-template" },
+        { "language": "sql", "classification": "config-template" },
+        { "language": "bash", "classification": "config-template" },
+        { "language": "sql", "classification": "config-template" },
+        { "language": "sql", "classification": "config-template" }
       ]
     },
     "docs/guides/vanilla.md": {

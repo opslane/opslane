@@ -155,7 +155,7 @@ function assertNoSymlinkParents(root, target) {
   }
 }
 
-function isSetupDoc(docPath) {
+export function isSetupDoc(docPath) {
   return docPath === 'docs/install.md' || docPath.startsWith('docs/guides/') || docPath.startsWith('docs/quickstart/');
 }
 

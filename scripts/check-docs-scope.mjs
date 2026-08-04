@@ -7,6 +7,12 @@ import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
+  isSetupDoc,
+  loadSnippetManifest,
+  parseMarkdownFences,
+  validateSnippetContract,
+} from './docs-sync/validation.mjs';
+import {
   MANUAL_DOC_COVERS,
   PUBLISHED_DOCS_POLICY,
   docTypeOf,
@@ -94,12 +100,17 @@ export function publishedDocs(root, loaderSource) {
     .sort();
 }
 
+function readDoc(root, path) {
+  return readFileSync(join(root, path), 'utf8');
+}
+
 export function checkDocsScope({
   root = DEFAULT_ROOT,
   policy = PUBLISHED_DOCS_POLICY,
   manualMappings = MANUAL_DOC_COVERS,
   loaderSource = readFileSync(join(root, 'docs-site/src/loaders/repo-docs.ts'), 'utf8'),
   sidebarSource = readFileSync(join(root, 'docs-site/astro.config.mjs'), 'utf8'),
+  snippetManifest = loadSnippetManifest(join(root, 'scripts/docs-sync/snippets.json')),
 } = {}) {
   const problems = [];
   const published = publishedDocs(root, loaderSource);
@@ -159,6 +170,29 @@ export function checkDocsScope({
   for (const path of Object.keys(manualMappings)) {
     if (!(policy.manual ?? []).includes(path)) {
       problems.push(`${path} has a manual staleness mapping but is not manual policy`);
+    }
+  }
+
+  // Hold every published setup doc to the contract docs-sync will enforce on it
+  // later. Both halves of that contract used to be invisible until a sync
+  // happened to target the page, which can be many merges after it drifted: a
+  // page added under docs/guides/ was never declared at all, and an edit that
+  // added a fence to a declared page left the counts disagreeing. Running the
+  // real validator here -- rather than re-deriving a weaker version of it --
+  // means the two can never diverge.
+  for (const path of published) {
+    if (!isSetupDoc(path)) continue;
+    try {
+      validateSnippetContract(path, parseMarkdownFences(readDoc(root, path)), snippetManifest);
+    } catch (error) {
+      problems.push(`${path}: ${error.message}`);
+    }
+  }
+  for (const path of Object.keys(snippetManifest.documents ?? {})) {
+    if (!published.includes(path)) {
+      problems.push(`${path} has a snippet-manifest entry but is not a published page`);
+    } else if (!isSetupDoc(path)) {
+      problems.push(`${path} has a snippet-manifest entry but is not setup documentation`);
     }
   }
 

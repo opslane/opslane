@@ -102,6 +102,9 @@ test('new loader-allowed content enters P instead of being hidden by a duplicate
     root,
     loaderSource,
     sidebarSource: 'export default { sidebar: [] };',
+    // Injected like every other source here: this root is a bare docs tree with
+    // no scripts/ directory to read a manifest from.
+    snippetManifest: { version: 1, documents: { 'docs/install.md': { fences: [] } } },
     policy: {
       prose: ['docs/install.md'],
       deterministic: [],
@@ -113,5 +116,52 @@ test('new loader-allowed content enters P instead of being hidden by a duplicate
   assert.ok(result.published.includes('docs/new-public/page.md'));
   assert.ok(
     result.problems.includes('docs/new-public/page.md is published but has no declared policy'),
+  );
+});
+
+// The snippet contract used to be checked only when docs-sync happened to
+// target a page, so a guide could be added -- or gain a fence -- and stay
+// broken for many merges. These pin both halves at repo-check time.
+test('flags a published setup doc with no snippet-manifest entry', () => {
+  const manifest = { version: 1, documents: {} };
+  const result = checkDocsScope({ root: ROOT, snippetManifest: manifest });
+
+  assert.ok(
+    result.problems.some((problem) =>
+      problem.startsWith('docs/guides/source-maps.md:')
+      && problem.includes('not classified'),
+    ),
+    `expected an undeclared-setup-doc problem, got ${JSON.stringify(result.problems)}`,
+  );
+});
+
+test('flags a snippet-manifest entry whose fence count has drifted', () => {
+  const manifest = JSON.parse(
+    readFileSync(join(ROOT, 'scripts/docs-sync/snippets.json'), 'utf8'),
+  );
+  manifest.documents['docs/guides/source-maps.md'].fences.pop();
+  const result = checkDocsScope({ root: ROOT, snippetManifest: manifest });
+
+  assert.ok(
+    result.problems.some((problem) =>
+      problem.includes('docs/guides/source-maps.md')
+      && problem.includes('count mismatch'),
+    ),
+    `expected a fence-count problem, got ${JSON.stringify(result.problems)}`,
+  );
+});
+
+test('flags a snippet-manifest entry for a page that is not published', () => {
+  const manifest = JSON.parse(
+    readFileSync(join(ROOT, 'scripts/docs-sync/snippets.json'), 'utf8'),
+  );
+  manifest.documents['docs/guides/does-not-exist.md'] = { fences: [] };
+  const result = checkDocsScope({ root: ROOT, snippetManifest: manifest });
+
+  assert.ok(
+    result.problems.includes(
+      'docs/guides/does-not-exist.md has a snippet-manifest entry but is not a published page',
+    ),
+    `expected an unpublished-entry problem, got ${JSON.stringify(result.problems)}`,
   );
 });
