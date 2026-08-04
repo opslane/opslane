@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"regexp"
 	"time"
+	"unicode/utf8"
 
 	"github.com/opslane/opslane/packages/ingestion/db"
 	"github.com/opslane/opslane/packages/ingestion/grouping"
@@ -17,6 +18,34 @@ import (
 var rePlatformToken = regexp.MustCompile(`^[a-z0-9_-]{1,32}$`)
 var reDebugID = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 var reCommitSHA = regexp.MustCompile(`^(?:[0-9a-f]{40}|[0-9a-f]{64})$`)
+
+// truncateTitle caps a title at maxBytes without splitting a UTF-8 rune.
+// Postgres rejects invalid byte sequences on TEXT input, so a mid-rune cut turns
+// any long multi-byte message (localized apps) into a 500 on insert.
+func truncateTitle(title string, maxBytes int) string {
+	if len(title) <= maxBytes {
+		return title
+	}
+	for maxBytes > 0 && !utf8.RuneStart(title[maxBytes]) {
+		maxBytes--
+	}
+	return title[:maxBytes]
+}
+
+// groupingDecision runs the rung-0/rung-1 ladder in front of the legacy
+// fingerprint. A non-empty suppressRule means the event is known noise and
+// should not produce a fingerprint or event row.
+func groupingDecision(platform, errorType, errorMessage, stackTrace string) (suppressRule, fingerprint, title string) {
+	if rule, drop := grouping.Suppress(platform, errorMessage, stackTrace); drop {
+		return rule, "", ""
+	}
+
+	title = truncateTitle(errorType+": "+errorMessage, 200)
+	if familyFingerprint, ok := grouping.FamilyFingerprint(platform, errorMessage); ok {
+		return "", familyFingerprint, grouping.FamilyTitleStaleDeploy
+	}
+	return "", grouping.Fingerprint(platform, errorType, errorMessage, stackTrace), title
+}
 
 // IngestEvent handles POST /api/v1/events (error events only).
 func (d *Dependencies) IngestEvent(w http.ResponseWriter, r *http.Request) {
@@ -105,20 +134,6 @@ func (d *Dependencies) ingestErrorEvent(w http.ResponseWriter, r *http.Request, 
 	debugMeta := sanitizeDebugMeta(payload.DebugMeta)
 	commitSHA := sanitizeCommitSHA(payload.CommitSHA)
 
-	// Track stackless events so we can measure recovery volume in prod.
-	if payload.Error.Stack == "" {
-		RecordStacklessAccepted()
-	}
-
-	// Compute fingerprint
-	fingerprint := grouping.Fingerprint(payload.Platform, payload.Error.Type, payload.Error.Message, payload.Error.Stack)
-
-	// Generate title: "Type: Message" truncated to 200 chars
-	title := payload.Error.Type + ": " + payload.Error.Message
-	if len(title) > 200 {
-		title = title[:200]
-	}
-
 	// Default breadcrumbs/context
 	breadcrumbs := "[]"
 	if len(payload.Breadcrumbs) > 0 {
@@ -172,6 +187,38 @@ func (d *Dependencies) ingestErrorEvent(w http.ResponseWriter, r *http.Request, 
 		}
 	}
 
+	// Redact secrets before either suppression or persistence. End-user identity
+	// was already extracted from raw context above, so B2B tracking remains
+	// intact. RedactBreadcrumbs walks the whole array; retain the serialized
+	// body/URL pass as defense in depth for malformed or future shapes.
+	breadcrumbs = masking.RedactURL(masking.RedactBody(string(masking.RedactBreadcrumbs([]byte(breadcrumbs)))))
+	ctx = string(masking.RedactContext([]byte(ctx)))
+
+	suppressRule, fingerprint, title := groupingDecision(
+		payload.Platform, payload.Error.Type, payload.Error.Message, payload.Error.Stack,
+	)
+	if suppressRule != "" {
+		RecordSuppressed(suppressRule)
+		RecordIngestDuration(time.Since(start).Seconds())
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"event_id":       "",
+			"group_id":       "",
+			"error_group_id": "",
+			"suppressed":     true,
+		})
+		return
+	}
+
+	// Track stackless events so we can measure recovery volume in prod. This must
+	// stay BELOW the suppression return: the script_error rule fires only on an
+	// empty stack, so counting before it would fill an "accepted" counter with
+	// events that were dropped.
+	if payload.Error.Stack == "" {
+		RecordStacklessAccepted()
+	}
+
 	if d.Queries == nil {
 		RecordIngestError("no_db")
 		writeJSONError(w, http.StatusInternalServerError, "database unavailable")
@@ -207,13 +254,6 @@ func (d *Dependencies) ingestErrorEvent(w http.ResponseWriter, r *http.Request, 
 		}
 	}
 	environmentID = resolvedEnvironmentID
-
-	// Redact secrets before persistence. End-user identity was already extracted
-	// from raw context above, so B2B tracking remains intact. RedactBreadcrumbs walks
-	// the whole array; retain the serialized body/URL pass as defense in depth for
-	// malformed or future breadcrumb shapes.
-	breadcrumbs = masking.RedactURL(masking.RedactBody(string(masking.RedactBreadcrumbs([]byte(breadcrumbs)))))
-	ctx = string(masking.RedactContext([]byte(ctx)))
 
 	result, err := d.Queries.InsertErrorEventAndGroup(r.Context(), db.IngestParams{
 		ProjectID:          projectID,

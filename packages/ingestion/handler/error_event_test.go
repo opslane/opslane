@@ -184,6 +184,103 @@ func postErrorPayload(t *testing.T, deps *handler.Dependencies, rawKey, body str
 	return response
 }
 
+func postErrorPayloadAny(t *testing.T, deps *handler.Dependencies, rawKey, body string) map[string]any {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/events", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", rawKey)
+	recorder := httptest.NewRecorder()
+	handler.NewRouter(deps).ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d (%s)", recorder.Code, recorder.Body.String())
+	}
+	var response map[string]any
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	return response
+}
+
+func TestIngest_SuppressionDropsEventAndJob(t *testing.T) {
+	deps, pool := testDeps(t)
+	_, projectID, _, rawKey := seedTenant(t, deps.Queries)
+	ctx := context.Background()
+
+	normalBody := `{"platform":"javascript","error":{"type":"TypeError","message":"ordinary error","stack":"at fn (https://a.com/app.js:1:1)"},"breadcrumbs":[],"context":{}}`
+	first := postErrorPayloadAny(t, deps, rawKey, normalBody)
+	if first["event_id"] == "" || first["group_id"] == "" || first["error_group_id"] == "" {
+		t.Fatalf("normal response must contain ids: %#v", first)
+	}
+	if _, present := first["suppressed"]; present {
+		t.Fatalf("normal response unexpectedly contains suppressed: %#v", first)
+	}
+
+	counts := func() (events, jobs int) {
+		t.Helper()
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM error_events WHERE project_id = $1`, projectID).Scan(&events); err != nil {
+			t.Fatalf("count events: %v", err)
+		}
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM error_group_jobs WHERE project_id = $1`, projectID).Scan(&jobs); err != nil {
+			t.Fatalf("count jobs: %v", err)
+		}
+		return events, jobs
+	}
+	beforeEvents, beforeJobs := counts()
+
+	suppressed := postErrorPayloadAny(t, deps, rawKey,
+		`{"platform":"javascript","error":{"type":"Error","message":"ResizeObserver loop limit exceeded","stack":""},"breadcrumbs":[],"context":{}}`)
+	if suppressed["event_id"] != "" || suppressed["group_id"] != "" || suppressed["error_group_id"] != "" || suppressed["suppressed"] != true {
+		t.Fatalf("unexpected suppression response: %#v", suppressed)
+	}
+	if events, jobs := counts(); events != beforeEvents || jobs != beforeJobs {
+		t.Fatalf("suppression changed persistence counts: events %d -> %d, jobs %d -> %d", beforeEvents, events, beforeJobs, jobs)
+	}
+
+	second := postErrorPayloadAny(t, deps, rawKey, normalBody)
+	if second["event_id"] == "" || second["group_id"] == "" || second["error_group_id"] == "" {
+		t.Fatalf("normal response after suppression must contain ids: %#v", second)
+	}
+	if _, present := second["suppressed"]; present {
+		t.Fatalf("normal response after suppression unexpectedly contains suppressed: %#v", second)
+	}
+}
+
+func TestIngest_StaleDeployFamilyCollapses(t *testing.T) {
+	deps, pool := testDeps(t)
+	_, projectID, _, rawKey := seedTenant(t, deps.Queries)
+
+	for _, hash := range []string{"AAA111", "BBB222"} {
+		postErrorPayloadAny(t, deps, rawKey, fmt.Sprintf(
+			`{"platform":"javascript","error":{"type":"TypeError","message":"Failed to fetch dynamically imported module: https://a.com/assets/chunk-index.%s.js","stack":""},"breadcrumbs":[],"context":{}}`,
+			hash,
+		))
+	}
+
+	var groupID, fingerprint, title string
+	var occurrenceCount int
+	if err := pool.QueryRow(context.Background(), `
+		SELECT id, fingerprint, title, occurrence_count
+		FROM error_groups
+		WHERE project_id = $1 AND fingerprint = $2`,
+		projectID, "js|v2|r1|3394fed5608cf6c6b509abd8fbadef76",
+	).Scan(&groupID, &fingerprint, &title, &occurrenceCount); err != nil {
+		t.Fatalf("query family group: %v", err)
+	}
+	if fingerprint != "js|v2|r1|3394fed5608cf6c6b509abd8fbadef76" || occurrenceCount != 2 || title != "Stale deploy: hashed asset failed to load after release" {
+		t.Fatalf("unexpected family group: fingerprint=%q title=%q occurrences=%d", fingerprint, title, occurrenceCount)
+	}
+	var groupCount, jobCount int
+	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM error_groups WHERE project_id = $1`, projectID).Scan(&groupCount); err != nil {
+		t.Fatalf("count family groups: %v", err)
+	}
+	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM error_group_jobs WHERE project_id = $1 AND error_group_id = $2`, projectID, groupID).Scan(&jobCount); err != nil {
+		t.Fatalf("count family jobs: %v", err)
+	}
+	if groupCount != 1 || jobCount != 1 {
+		t.Fatalf("family collapse counts: groups=%d jobs=%d, want 1/1", groupCount, jobCount)
+	}
+}
+
 func TestIngest_PythonPlatformStored(t *testing.T) {
 	deps, pool := testDeps(t)
 	_, _, _, rawKey := seedTenant(t, deps.Queries)
@@ -760,11 +857,13 @@ func TestIngestStacklessEvent_AcceptedAndDefaultsType(t *testing.T) {
 	srv := httptest.NewServer(router)
 	defer srv.Close()
 
-	// Cross-origin "Script error." with empty type and empty stack — the exact
-	// shape that was being 400'd before the stack-optional change.
+	// A non-Error promise rejection: empty type and empty stack — the exact shape
+	// that was being 400'd before the stack-optional change. The message must stay
+	// off the rung-0 suppression list, or this asserts nothing: suppressed events
+	// also return 202 but write no row.
 	payload := `{
 		"timestamp": "2026-02-20T00:00:00Z",
-		"error": {"type": "", "message": "Script error.", "stack": ""},
+		"error": {"type": "", "message": "Promise rejected without a reason", "stack": ""},
 		"breadcrumbs": [],
 		"context": {"url": "https://example.com"},
 		"sdk_version": "0.2.0"
