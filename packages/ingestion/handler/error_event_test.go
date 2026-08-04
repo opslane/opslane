@@ -68,7 +68,7 @@ func seedTenant(t *testing.T, q *db.Queries) (orgID, projectID, envID, rawKey st
 		t.Fatalf("create environment: %v", err)
 	}
 
-	key, err := q.CreateProjectKey(ctx, proj.ID, db.ScopeIngest, "test", nil)
+	key, err := q.CreateProjectKey(ctx, proj.ID, db.ScopeIngest, "test", nil, "")
 	if err != nil {
 		t.Fatalf("create api key: %v", err)
 	}

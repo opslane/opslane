@@ -24,6 +24,9 @@ var secretRedactors = []struct {
 	{regexp.MustCompile(`npm_[A-Za-z0-9]+`), "[REDACTED]"},
 	{regexp.MustCompile(`xox[a-z]-[A-Za-z0-9-]+`), "[REDACTED]"},
 	{regexp.MustCompile(`AKIA[0-9A-Z]{16}`), "[REDACTED]"},
+	// Opslane project keys. The greedy tail must span the endpoint payload an
+	// sk carries after its secret, so the whole credential goes, not its head.
+	{regexp.MustCompile(`opslane_(?:pk|sk)_[A-Za-z0-9_-]+`), "[REDACTED]"},
 	// \b keeps hyphenated words like "disk-space" intact while still catching keys.
 	{regexp.MustCompile(`\bsk-[A-Za-z0-9_-]{6,}`), "[REDACTED]"},
 	{regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+`), "[REDACTED]"},

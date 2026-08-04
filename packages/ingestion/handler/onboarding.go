@@ -76,7 +76,7 @@ func (d *Dependencies) OnboardingSetup(w http.ResponseWriter, r *http.Request) {
 
 	// 3. Create API key
 	apiKey, err := d.Queries.CreateProjectKeyTx(
-		r.Context(), tx, project.ID, db.ScopeIngest, "onboarding", nil,
+		r.Context(), tx, project.ID, db.ScopeIngest, "onboarding", nil, "",
 	)
 	if err != nil {
 		slog.Error("onboarding: create api key", "error", err)

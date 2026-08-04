@@ -31,6 +31,7 @@ systems use it for a branch name.
 | `DATABASE_URL` | yes | Postgres connection string |
 | `PORT` | no (8080) | HTTP listen port |
 | `JWT_SECRET` | yes | Signs session tokens and derives the notification destination encryption key (≥32 bytes). Rotating it invalidates stored webhook configs; users must re-enter their webhook URLs. |
+| `OPSLANE_PUBLIC_INGEST_URL` | for minting source-map keys | Public origin that source-map uploads should reach this deployment on. Read by `cmd/mint-key`, which seals it into every `-scope sourcemaps` key it prints; a build therefore configures uploads with that one key and no endpoint variable. Must be an absolute origin — https, or http only for loopback — with no path, query, or fragment. `-endpoint` overrides it and must agree if both are set. |
 | `AUTH_PROVIDER` | no | Identity provider: `github` (default) or `workos`. Selection is explicit and invalid/partial WorkOS configuration fails boot. |
 | `AUTH_CALLBACK_ORIGIN` | no | Public ingestion origin used to construct the allowlisted `/auth/callback` URL. Never derived from the request Host header. Defaults to the local ingestion port; Compose sets `http://localhost:8082`. |
 | `WORKOS_API_KEY` | when `AUTH_PROVIDER=workos` | WorkOS secret API key used for AuthKit code exchange. |

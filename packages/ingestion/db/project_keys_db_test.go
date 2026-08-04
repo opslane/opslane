@@ -28,7 +28,7 @@ func seedProjectKeyTest(t *testing.T, label string) (*db.Queries, string, string
 func TestCreateAndLookupProjectKey(t *testing.T) {
 	q, orgID, projectID := seedProjectKeyTest(t, "project-keys-lookup")
 	minted, err := q.CreateProjectKey(
-		context.Background(), projectID, db.ScopeIngest, "test key", nil,
+		context.Background(), projectID, db.ScopeIngest, "test key", nil, "",
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -45,7 +45,7 @@ func TestCreateAndLookupProjectKey(t *testing.T) {
 func TestLookupProjectKeyRejectsWrongSecretPrefixAndRevocation(t *testing.T) {
 	q, _, projectID := seedProjectKeyTest(t, "project-keys-rejections")
 	ctx := context.Background()
-	minted, err := q.CreateProjectKey(ctx, projectID, db.ScopeIngest, "test", nil)
+	minted, err := q.CreateProjectKey(ctx, projectID, db.ScopeIngest, "test", nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,11 +84,11 @@ func TestLookupProjectKeyRejectsWrongSecretPrefixAndRevocation(t *testing.T) {
 func TestCreateProjectKeyDoesNotRevokeOthers(t *testing.T) {
 	q, _, projectID := seedProjectKeyTest(t, "project-keys-no-revoke")
 	ctx := context.Background()
-	first, err := q.CreateProjectKey(ctx, projectID, db.ScopeIngest, "first", nil)
+	first, err := q.CreateProjectKey(ctx, projectID, db.ScopeIngest, "first", nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := q.CreateProjectKey(ctx, projectID, db.ScopeIngest, "second", nil)
+	second, err := q.CreateProjectKey(ctx, projectID, db.ScopeIngest, "second", nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +102,7 @@ func TestCreateProjectKeyDoesNotRevokeOthers(t *testing.T) {
 func TestLookupProjectKeyDistinguishesDatabaseFailure(t *testing.T) {
 	q, _, projectID := seedProjectKeyTest(t, "project-keys-db-failure")
 	minted, err := q.CreateProjectKey(
-		context.Background(), projectID, db.ScopeIngest, "test", nil,
+		context.Background(), projectID, db.ScopeIngest, "test", nil, "",
 	)
 	if err != nil {
 		t.Fatal(err)

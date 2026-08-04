@@ -76,6 +76,10 @@ services:
       # Follows INGESTION_PORT: a second stack that pinned 8082 here would send
       # its OAuth callback to the first stack's ingestion.
       AUTH_CALLBACK_ORIGIN: ${AUTH_CALLBACK_ORIGIN:-http://localhost:${INGESTION_PORT:-8082}}
+      # Sealed into every source-map key minted by `cmd/mint-key`, so builds
+      # need no endpoint variable of their own. Follows INGESTION_PORT for the
+      # same second-stack reason as AUTH_CALLBACK_ORIGIN.
+      OPSLANE_PUBLIC_INGEST_URL: ${OPSLANE_PUBLIC_INGEST_URL:-http://localhost:${INGESTION_PORT:-8082}}
       WORKOS_API_KEY: ${WORKOS_API_KEY:-}
       WORKOS_CLIENT_ID: ${WORKOS_CLIENT_ID:-}
       AUTH_WORKOS_SOCIAL: ${AUTH_WORKOS_SOCIAL:-}

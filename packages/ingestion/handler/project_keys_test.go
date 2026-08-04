@@ -23,11 +23,11 @@ func TestProjectKeyMiddlewareStatuses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pk, err := q.CreateProjectKey(ctx, provisioning.Project.ID, db.ScopeIngest, "pk", nil)
+	pk, err := q.CreateProjectKey(ctx, provisioning.Project.ID, db.ScopeIngest, "pk", nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	sk, err := q.CreateProjectKey(ctx, provisioning.Project.ID, db.ScopeSourcemaps, "sk", nil)
+	sk, err := q.CreateProjectKey(ctx, provisioning.Project.ID, db.ScopeSourcemaps, "sk", nil, "https://ingest.test")
 	if err != nil {
 		t.Fatal(err)
 	}

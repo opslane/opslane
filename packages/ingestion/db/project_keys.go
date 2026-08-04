@@ -92,10 +92,24 @@ func HashSecret(secret string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func NewProjectKey(scope string) (*MintedProjectKey, error) {
+// NewProjectKey mints a credential. endpoint is the upload destination sealed
+// into a source-map key: it is REQUIRED for ScopeSourcemaps and must be empty
+// for every other scope. Making the pairing part of the signature is what keeps
+// a bare sk unconstructable and stops a pk from ever growing a payload.
+func NewProjectKey(scope, endpoint string) (*MintedProjectKey, error) {
 	prefix, err := prefixForScope(scope)
 	if err != nil {
 		return nil, err
+	}
+	switch scope {
+	case ScopeSourcemaps:
+		if endpoint == "" {
+			return nil, fmt.Errorf("sourcemaps keys require an endpoint")
+		}
+	default:
+		if endpoint != "" {
+			return nil, fmt.Errorf("endpoint is only valid for sourcemaps keys")
+		}
 	}
 
 	idRaw := make([]byte, keyIDBytes)
@@ -109,35 +123,81 @@ func NewProjectKey(scope string) (*MintedProjectKey, error) {
 
 	keyID := strings.ToLower(base32NoPad.EncodeToString(idRaw))
 	secret := base64.RawURLEncoding.EncodeToString(secretRaw)
+	raw := prefix + "_" + keyID + "_" + secret
+	if scope == ScopeSourcemaps {
+		canonical, err := CanonicalIngestURL(endpoint)
+		if err != nil {
+			return nil, err
+		}
+		payload, err := EncodeSKPayload(canonical, time.Now())
+		if err != nil {
+			return nil, err
+		}
+		raw += "_" + payload
+	}
 	return &MintedProjectKey{
 		KeyID:       keyID,
 		Scope:       scope,
 		TokenPrefix: prefix,
-		SecretHash:  HashSecret(secret),
-		Raw:         prefix + "_" + keyID + "_" + secret,
+		// The stored hash covers the secret alone: the payload is public
+		// routing data and must not participate in authentication.
+		SecretHash: HashSecret(secret),
+		Raw:        raw,
 	}, nil
 }
 
+// ParseProjectKey recognises the raw credential and, for source-map keys,
+// validates any trailing endpoint payload. Every rejection returns the same
+// opaque message so an attacker cannot learn which part was recognised; the
+// reason tokens ParseSKPayload produces stay inside the codec.
 func ParseProjectKey(raw string) (*ParsedProjectKey, error) {
-	// The secret uses base64url and may contain underscores, so the fourth
-	// component must be the entire remainder.
+	if len(raw) > MaxRawKeyLen {
+		return nil, fmt.Errorf("malformed key")
+	}
+	// The secret and the payload both use base64url and may contain
+	// underscores, so the fourth component is the entire remainder and the
+	// secret is taken at its fixed width rather than by splitting again.
 	parts := strings.SplitN(raw, "_", 4)
 	if len(parts) != 4 {
 		return nil, fmt.Errorf("malformed key")
 	}
 	scope, ok := scopeForPrefix(parts[0] + "_" + parts[1])
-	if !ok || !keyIDRe.MatchString(parts[2]) || !secretRe.MatchString(parts[3]) {
+	if !ok || !keyIDRe.MatchString(parts[2]) {
 		return nil, fmt.Errorf("malformed key")
 	}
-	return &ParsedProjectKey{KeyID: parts[2], Secret: parts[3], Scope: scope}, nil
+	remainder := parts[3] // secret, optionally followed by "_" + payload
+	if len(remainder) < secretLen {
+		return nil, fmt.Errorf("malformed key")
+	}
+	secret := remainder[:secretLen]
+	if !secretRe.MatchString(secret) {
+		return nil, fmt.Errorf("malformed key")
+	}
+	switch {
+	case len(remainder) == secretLen:
+		// Bare key: still valid server-side for both scopes, because routing
+		// to an endpoint is a client concern.
+	case remainder[secretLen] != '_':
+		return nil, fmt.Errorf("malformed key")
+	default:
+		payload := remainder[secretLen+1:]
+		if scope != ScopeSourcemaps {
+			return nil, fmt.Errorf("malformed key") // payload on a pk
+		}
+		if _, err := ParseSKPayload(payload); err != nil {
+			return nil, fmt.Errorf("malformed key")
+		}
+	}
+	return &ParsedProjectKey{KeyID: parts[2], Secret: secret, Scope: scope}, nil
 }
 
 func (q *Queries) CreateProjectKey(
 	ctx context.Context,
 	projectID, scope, label string,
 	createdByUserID *string,
+	endpoint string,
 ) (*MintedProjectKey, error) {
-	minted, err := NewProjectKey(scope)
+	minted, err := NewProjectKey(scope, endpoint)
 	if err != nil {
 		return nil, err
 	}
@@ -159,8 +219,9 @@ func (q *Queries) CreateProjectKeyTx(
 	tx pgx.Tx,
 	projectID, scope, label string,
 	createdByUserID *string,
+	endpoint string,
 ) (*MintedProjectKey, error) {
-	minted, err := NewProjectKey(scope)
+	minted, err := NewProjectKey(scope, endpoint)
 	if err != nil {
 		return nil, err
 	}

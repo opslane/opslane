@@ -36,7 +36,8 @@ The Vite debug-ID and source-map upload plugin accepts:
 | **sourcemaps** | `'remove' \| 'keep'` | `'remove'` | Keeps or removes stamped map assets from the output. |
 | **maxMapBytes** | `number` | `33554432` | Raw source-map size limit. Oversized maps and chunks are left unchanged. |
 
-Uploads require private build-time `OPSLANE_ENDPOINT` and
-`OPSLANE_SOURCEMAP_KEY` variables. See the [source-map guide](../guides/source-maps.md).
+Uploads require one private build-time variable, `OPSLANE_SOURCEMAP_KEY`: the
+key carries the ingestion origin it was minted for, so it configures both the
+credential and the destination. See the [source-map guide](../guides/source-maps.md).
 
 Related exports: `captureException(err)`, `setUser({ id })`, `clearUser()`, `destroy()`, `opslaneVuePlugin`, and (from `@opslane/sdk/react`) `OpslaneErrorBoundary` / `captureReactError`. The `@opslane/sdk/vite-plugin` export stamps and uploads source maps during production builds — see the [SDK README](../../packages/sdk/README.md).

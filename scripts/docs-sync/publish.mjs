@@ -15,6 +15,10 @@ const SECRET_PATTERNS = [
   /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/,
   /\b(?:sk-ant-(?:api|oat)\d*|sk_live|gh[opusr]_|github_pat_)[A-Za-z0-9_-]{16,}\b/,
   /\bAKIA[0-9A-Z]{16}\b/,
+  // Opslane project keys: prefix, 26-char key id, then the secret (and, on an
+  // sk, the endpoint payload). Documentation may name the prefixes in prose;
+  // only a fully formed key -- key id and material -- is refused.
+  /opslane_(?:pk|sk)_[A-Za-z0-9_-]{26}_[A-Za-z0-9_-]+/,
   /\bAIza[0-9A-Za-z_-]{35}\b/,
   /\bxox[baprs]-[A-Za-z0-9-]{20,}\b/,
   /\b(?:CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_API_KEY)\s*[:=]\s*\S+/i,

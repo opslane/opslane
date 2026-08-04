@@ -64,8 +64,9 @@ React and Vue are optional peer dependencies — installing the SDK pulls in nei
 
 ### Vite source maps
 
-The Vite plugin stamps and uploads production source maps when the two private
-build variables `OPSLANE_ENDPOINT` and `OPSLANE_SOURCEMAP_KEY` are set:
+The Vite plugin stamps and uploads production source maps when the single
+private build variable `OPSLANE_SOURCEMAP_KEY` is set. The key carries the
+ingestion origin it was minted for, so there is nothing else to configure:
 
 ```ts
 import { opslane } from '@opslane/sdk/vite-plugin';

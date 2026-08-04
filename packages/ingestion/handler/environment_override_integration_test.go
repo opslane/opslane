@@ -58,7 +58,7 @@ func TestPayloadEnvironmentAndSessionPrecedenceThroughHTTPAndPostgres(t *testing
 	project, _ := q.CreateProject(ctx, org.ID, "p1", nil)
 	_, _ = q.CreateEnvironment(ctx, project.ID, "production")
 	staging, _ := q.CreateEnvironment(ctx, project.ID, "staging")
-	key, _ := q.CreateProjectKey(ctx, project.ID, db.ScopeIngest, "test", nil)
+	key, _ := q.CreateProjectKey(ctx, project.ID, db.ScopeIngest, "test", nil, "")
 	allow := true
 	if _, err := q.UpdateProject(ctx, org.ID, project.ID, nil, nil, nil, &allow); err != nil {
 		t.Fatal(err)
@@ -66,7 +66,7 @@ func TestPayloadEnvironmentAndSessionPrecedenceThroughHTTPAndPostgres(t *testing
 
 	other, _ := q.CreateProject(ctx, org.ID, "p2", nil)
 	otherEnvironment, _ := q.CreateEnvironment(ctx, other.ID, "production")
-	otherKey, _ := q.CreateProjectKey(ctx, other.ID, db.ScopeIngest, "test", nil)
+	otherKey, _ := q.CreateProjectKey(ctx, other.ID, db.ScopeIngest, "test", nil, "")
 	router := handler.NewRouter(deps)
 
 	overriddenEventID := postEnvironmentEvent(t, router, key.Raw, "", "staging", "payload override "+uuid.NewString())
@@ -163,8 +163,8 @@ func TestReplayInitRejectsSessionOwnedByAnotherProject(t *testing.T) {
 	p2, _ := q.CreateProject(ctx, org.ID, "p2", nil)
 	_, _ = q.CreateEnvironment(ctx, p1.ID, "production")
 	_, _ = q.CreateEnvironment(ctx, p2.ID, "production")
-	k1, _ := q.CreateProjectKey(ctx, p1.ID, db.ScopeIngest, "test", nil)
-	k2, _ := q.CreateProjectKey(ctx, p2.ID, db.ScopeIngest, "test", nil)
+	k1, _ := q.CreateProjectKey(ctx, p1.ID, db.ScopeIngest, "test", nil, "")
+	k2, _ := q.CreateProjectKey(ctx, p2.ID, db.ScopeIngest, "test", nil, "")
 	router := handler.NewRouter(deps)
 	sessionID := "sess_" + uuid.NewString()
 	if response := postEnvironmentSession(t, router, k1.Raw, sessionID, ""); response.Code != http.StatusOK {

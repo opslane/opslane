@@ -68,6 +68,29 @@ func TestRedactAdminErrorCoversCommonCredentialShapes(t *testing.T) {
 	}
 }
 
+// skCanary is vectors.valid[0].raw from
+// test-fixtures/sourcemap-key/vectors.json: a full endpoint-bearing sk. Its
+// key id is the frozen fixture id allowlisted in .gitleaks.toml, so this
+// canary authenticates nothing.
+const skCanary = "opslane_sk_mzxw6ytboi3damrrgi3tknzxgq_E2ESOURCEMAPSECRETAAAAAAAAAAAAAAAAAAAAAAAAA" +
+	"_eyJ2IjoxLCJpYXQiOiIyMDI2LTA4LTA0VDAwOjAwOjAwWiIsInVybCI6Imh0dHBzOi8vaW5nZXN0Lm9wc2xhbmUuY29tIn0"
+
+func TestRedactAdminErrorSwallowsEndpointBearingProjectKey(t *testing.T) {
+	got := redactAdminError("upload rejected for key " + skCanary + " end")
+	for _, remnant := range []string{
+		"opslane_sk_",
+		"E2ESOURCEMAPSECRET",
+		"eyJ2IjoxLCJpYXQiOiIyMDI2LTA4LTA0VDAwOjAwOjAwWiIsInVybCI6Imh0dHBzOi8vaW5nZXN0Lm9wc2xhbmUuY29tIn0",
+	} {
+		if strings.Contains(got, remnant) {
+			t.Errorf("redacted error still contains %q: %s", remnant, got)
+		}
+	}
+	if want := "upload rejected for key [REDACTED] end"; got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
 func TestRedactAdminErrorPreservesBenignText(t *testing.T) {
 	in := "disk-space exhausted while writing task-output to /var/tmp"
 	if got := redactAdminError(in); got != in {

@@ -102,6 +102,11 @@ func TestRedactsProjectKeys(t *testing.T) {
 		"public key": "opslane_pk_mzxw6ytboi3damrrgi3tknzxgq_aB-_cD3fGhIjKlMnOpQrStUvWxYz0123456789",
 		"secret key": "opslane_sk_mzxw6ytboi3damrrgi3tknzxgq_aB-_cD3fGhIjKlMnOpQrStUvWxYz0123456789",
 		"legacy key": "def_2f1c9a44-1b3e-4f4a-9c7a-4b2d8e6f0a11",
+		// vectors.valid[0].raw from test-fixtures/sourcemap-key/vectors.json.
+		// The greedy tail must swallow the trailing payload too, not stop at
+		// the secret.
+		"endpoint-bearing secret key": "opslane_sk_mzxw6ytboi3damrrgi3tknzxgq_E2ESOURCEMAPSECRETAAAAAAAAAAAAAAAAAAAAAAAAA" +
+			"_eyJ2IjoxLCJpYXQiOiIyMDI2LTA4LTA0VDAwOjAwOjAwWiIsInVybCI6Imh0dHBzOi8vaW5nZXN0Lm9wc2xhbmUuY29tIn0",
 	}
 	for name, key := range cases {
 		t.Run(name, func(t *testing.T) {
