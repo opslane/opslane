@@ -28,7 +28,7 @@
 - Consumes: `db.ScopeIngest` / `db.ScopeSourcemaps` (string constants, `db/project_keys.go:21-22`), `db.CreateProjectKey(ctx, projectID, scope, label, nil)` (unchanged).
 - Produces: `resolveScope(raw string) (string, error)` and `keyInstructions(scope, raw, keyID string) string` — pure, unit-tested; `main()` becomes a thin shell around them.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `packages/ingestion/cmd/mint-key/main_test.go`:
 
@@ -100,7 +100,7 @@ func TestKeyInstructionsPerScope(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run (from repo root — no DB or network needed; this package's tests are pure. The db package's own DB-backed suite is exercised separately in the final verification with `--network host` and a live `DATABASE_URL`):
 ```bash
@@ -110,7 +110,7 @@ docker run --rm -v "$PWD":/repo -v /tmp/gocache:/gocache -w /repo/packages/inges
 ```
 Expected: FAIL — `resolveScope` and `keyInstructions` undefined.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Replace `packages/ingestion/cmd/mint-key/main.go` with:
 
@@ -233,12 +233,12 @@ func main() {
 }
 ```
 
-- [ ] **Step 4: Run tests and build**
+- [x] **Step 4: Run tests and build**
 
 Same container command as Step 2, plus `go build ./...` first.
 Expected: PASS, build clean.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add packages/ingestion/cmd/mint-key/
@@ -256,7 +256,7 @@ git commit -m "feat(mint-key): -scope flag mints ingest keys for existing projec
 - Consumes: Task 1's flag semantics.
 - Produces: operator docs covering both scopes; a proven end-to-end pk mint.
 
-- [ ] **Step 1: Update the guide**
+- [x] **Step 1: Update the guide**
 
 Two edits in `docs/guides/source-maps.md`:
 
@@ -289,7 +289,7 @@ redeploy — budget the window accordingly.
 
 Run `node scripts/check-docs-drift.mjs` — expected: clean (mint-key flags are not in the drift-checked surfaces, but the guide is covered prose; the check must stay green).
 
-- [ ] **Step 2: Live smoke against a disposable database**
+- [x] **Step 2: Live smoke against a disposable database**
 
 With the compose stack from the E2E setup running (or any disposable Postgres with migrations applied and one project row):
 
@@ -323,7 +323,7 @@ curl -s -o /dev/null -w '%{http_code}\n' -X PUT -H "X-API-Key: <printed pk>" \
 ```
 Expected: `ingest | manual ingest key`, the seeded project's UUID, and `403`.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add docs/guides/source-maps.md
@@ -335,5 +335,5 @@ git commit -m "docs: document mint-key -scope ingest for re-keying existing apps
 ## Self-Review Notes
 
 - Spec coverage: `-scope` flag with validation → Task 1; pk-specific operator guidance (bundle/redeploy semantics) → Task 1 instructions + Task 2 docs; proof a minted pk actually ingests → Task 2 smoke.
-- Default-behavior preservation is pinned by the `{"", db.ScopeSourcemaps, false}` test case.
+- The required-scope refusal is pinned by the `{"", "", true}` test case.
 - No placeholder text; all code complete; names (`resolveScope`, `keyInstructions`, `defaultLabel`) consistent across tasks.

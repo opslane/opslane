@@ -40,11 +40,14 @@ func keyInstructions(scope, raw, keyID string) string {
 			"Set VITE_OPSLANE_API_KEY (or your app's equivalent) to this value,\n" +
 			"then rebuild and redeploy the app: the key ships inside the browser\n" +
 			"bundle, so it takes effect on the next app deploy, not on mint.\n"
-	default:
+	case db.ScopeSourcemaps:
 		out = "Source-map upload key (shown once — not retrievable later):\n" +
 			"  " + raw + "\n\n" +
 			"Set OPSLANE_SOURCEMAP_KEY to this value in CI, and/or in the\n" +
 			"repo's gitignored .env.local for local production builds.\n"
+	default:
+		// resolveScope guards every caller; reaching this is a programming error.
+		panic("keyInstructions: unknown scope " + scope)
 	}
 	out += "\nKey ID (for exact revocation): " + keyID + "\n" +
 		"To revoke exactly this key:\n" +
@@ -91,11 +94,8 @@ func main() {
 
 	// Print the target's identity before minting so a wrong-but-valid UUID is
 	// caught by the operator instead of silently routing another tenant's data.
-	var projectName string
-	var githubRepo *string
-	err = pool.QueryRow(ctx,
-		`SELECT name, github_repo FROM projects WHERE id = $1`, *projectID,
-	).Scan(&projectName, &githubRepo)
+	queries := db.New(pool)
+	projectName, githubRepo, err := queries.GetProjectIdentity(ctx, *projectID)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "no such project %s: %v\n", *projectID, err)
 		os.Exit(1)
@@ -106,7 +106,7 @@ func main() {
 	}
 	fmt.Printf("Minting %s key for project %q (%s, %s)\n\n", scope, projectName, repo, *projectID)
 
-	minted, err := db.New(pool).CreateProjectKey(ctx, *projectID, scope, *label, nil)
+	minted, err := queries.CreateProjectKey(ctx, *projectID, scope, *label, nil)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "mint:", err)
 		os.Exit(1)
