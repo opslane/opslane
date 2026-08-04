@@ -10,8 +10,33 @@ const execFile = promisify(execFileCallback);
 const VIRTUAL_HOME = '/home/user';
 /** Must match the template name in packages/worker/e2b-python/e2b.toml. */
 const DEFAULT_PYTHON_TEMPLATE = 'opslane-python';
-const PYTHON_SANDBOX_LIFETIME_MS = 1_800_000;
 const VIRTUAL_TMP = '/tmp';
+
+/**
+ * Measured worst-case run is ~606s (Langfuse agent-loop p100 x4 attempts plus
+ * gates, opslane-oss#255). The floor guards against gross misconfiguration; it
+ * is not a proof of sufficiency, because the phase timeout caps are not all
+ * simultaneously reachable and their sum exceeds this. The default matches the
+ * Python path, which already runs 1_800_000 in production and therefore proves
+ * this account's tier accepts it.
+ */
+const SANDBOX_LIFETIME_FLOOR_MS = 900_000;
+const SANDBOX_LIFETIME_DEFAULT_MS = 1_800_000;
+/**
+ * E2B enforces account-tier maximums and rejects creation above them. 1_800_000
+ * is the only value proven acceptable on this account (the Python path has run
+ * it in production). Anything higher is clamped rather than risking a creation
+ * failure that would look like an unrelated outage.
+ */
+const SANDBOX_LIFETIME_CEILING_MS = 1_800_000;
+
+function resolveSandboxLifetimeMs(): number {
+  const raw = parseInt(process.env['SANDBOX_LIFETIME_MS'] ?? String(SANDBOX_LIFETIME_DEFAULT_MS), 10);
+  if (!Number.isInteger(raw)) return SANDBOX_LIFETIME_DEFAULT_MS;
+  if (raw < SANDBOX_LIFETIME_FLOOR_MS) return SANDBOX_LIFETIME_DEFAULT_MS;
+  if (raw > SANDBOX_LIFETIME_CEILING_MS) return SANDBOX_LIFETIME_CEILING_MS;
+  return raw;
+}
 
 export interface SandboxCommandResult {
   exitCode: number;
@@ -109,20 +134,20 @@ function adaptE2BSandbox(sbx: E2BSandboxLike, lifetimeMs: number, createdAt: num
 export async function createSandboxRuntime(platform: Platform = 'javascript'): Promise<SandboxRuntime> {
   const backend = process.env['OPSLANE_SANDBOX_BACKEND']?.trim().toLowerCase() || 'e2b';
   if (backend === 'e2b') {
+    // The lifetime is a ceiling, not a reservation: agent-fix.ts kills the
+    // sandbox in a finally and E2B bills actual uptime, so a job finishing in
+    // 60s costs 60s regardless. The accepted cost is crash exposure — if the
+    // worker process dies, finally never runs and the orphan leaks for up to
+    // the ceiling rather than 5 minutes. The Python path already carries this.
+    const lifetimeMs = resolveSandboxLifetimeMs();
     // Captured BEFORE the await: creation takes real time, and age-at-error must
     // measure from when provisioning started, not when the promise resolved.
     const createdAt = Date.now();
     if (platform !== 'python') {
-      // 300_000 is E2B's default. `Sandbox.defaultSandboxTimeoutMs` is
-      // `protected static` in v2.35 and will not compile. Task 2 deletes this line.
-      return adaptE2BSandbox(await Sandbox.create(), 300_000, createdAt);
+      return adaptE2BSandbox(await Sandbox.create({ timeoutMs: lifetimeMs }), lifetimeMs, createdAt);
     }
     const template = process.env['OPSLANE_E2B_PYTHON_TEMPLATE']?.trim() || DEFAULT_PYTHON_TEMPLATE;
-    return adaptE2BSandbox(
-      await Sandbox.create(template, { timeoutMs: PYTHON_SANDBOX_LIFETIME_MS }),
-      PYTHON_SANDBOX_LIFETIME_MS,
-      createdAt,
-    );
+    return adaptE2BSandbox(await Sandbox.create(template, { timeoutMs: lifetimeMs }), lifetimeMs, createdAt);
   }
   if (backend === 'local') {
     if (process.env['OPSLANE_RELIABILITY_HARNESS'] !== '1') {

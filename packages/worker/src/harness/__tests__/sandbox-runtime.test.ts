@@ -107,6 +107,58 @@ describe('createSandboxRuntime', () => {
     expect(runtime.unavailable).toBe(false);
   });
 
+  it('provisions the JavaScript sandbox with an explicit lifetime, not the SDK default', async () => {
+    delete process.env['OPSLANE_SANDBOX_BACKEND'];
+    delete process.env['SANDBOX_LIFETIME_MS'];
+    createE2BSandbox.mockResolvedValue({
+      sandboxId: 'sbx-life', commands: { run: vi.fn() },
+      files: { read: vi.fn(), write: vi.fn() }, kill: vi.fn(),
+    });
+
+    const runtime = await createSandboxRuntime('javascript');
+    expect(runtime.lifetimeMs).toBe(1_800_000);
+    expect(createE2BSandbox).toHaveBeenCalledWith(expect.objectContaining({ timeoutMs: 1_800_000 }));
+  });
+
+  it('clamps a lifetime below the floor back to the default', async () => {
+    delete process.env['OPSLANE_SANDBOX_BACKEND'];
+    process.env['SANDBOX_LIFETIME_MS'] = '60000';
+    createE2BSandbox.mockResolvedValue({
+      sandboxId: 'sbx-low', commands: { run: vi.fn() },
+      files: { read: vi.fn(), write: vi.fn() }, kill: vi.fn(),
+    });
+
+    const runtime = await createSandboxRuntime('javascript');
+    expect(runtime.lifetimeMs).toBe(1_800_000);
+  });
+
+  it('honours a lifetime at or above the floor', async () => {
+    delete process.env['OPSLANE_SANDBOX_BACKEND'];
+    process.env['SANDBOX_LIFETIME_MS'] = '900000';
+    createE2BSandbox.mockResolvedValue({
+      sandboxId: 'sbx-ok', commands: { run: vi.fn() },
+      files: { read: vi.fn(), write: vi.fn() }, kill: vi.fn(),
+    });
+
+    const runtime = await createSandboxRuntime('javascript');
+    expect(runtime.lifetimeMs).toBe(900_000);
+    // Assert the provisioning argument, not just the metadata: the two could
+    // disagree and the sandbox would still be created with the wrong ceiling.
+    expect(createE2BSandbox).toHaveBeenCalledWith(expect.objectContaining({ timeoutMs: 900_000 }));
+  });
+
+  it('clamps a lifetime above the account ceiling', async () => {
+    delete process.env['OPSLANE_SANDBOX_BACKEND'];
+    process.env['SANDBOX_LIFETIME_MS'] = '999999999';
+    createE2BSandbox.mockResolvedValue({
+      sandboxId: 'sbx-high', commands: { run: vi.fn() },
+      files: { read: vi.fn(), write: vi.fn() }, kill: vi.fn(),
+    });
+
+    const runtime = await createSandboxRuntime('javascript');
+    expect(runtime.lifetimeMs).toBe(1_800_000);
+  });
+
   it('raises SandboxUnavailableError from the local backend after kill', async () => {
     process.env['OPSLANE_SANDBOX_BACKEND'] = 'local';
     process.env['OPSLANE_RELIABILITY_HARNESS'] = '1';

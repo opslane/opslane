@@ -82,6 +82,7 @@ Ingestion reads **only** the `REPLAY_STORE_*` names; `MINIO_*` names appear in i
 | `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` / `LANGFUSE_BASE_URL` / `LANGFUSE_PROJECT_ID` | no | Optional LLM tracing |
 | `ANTHROPIC_BASE_URL` | no (Anthropic default) | Alternate Claude API endpoint; used by the hermetic test harness's fake model server |
 | `OPSLANE_SANDBOX_BACKEND` | no (`e2b`) | Fix-verification sandbox backend; `local` is only for trusted reliability fixtures and also requires `OPSLANE_RELIABILITY_HARNESS=1` |
+| `SANDBOX_LIFETIME_MS` | no (`1800000`) | Wall-clock ceiling for a verification sandbox. Values below `900000` fall back to the default; values above `1800000` are clamped to it (E2B enforces account-tier maximums). The ceiling is not billed unless consumed; raising it increases orphan exposure if the worker crashes. |
 | `OPSLANE_PYTHON_PIPELINE` | no (off) | Enables durable Python incident routing for `1` or `true`; the effective platform is persisted on the fix job. |
 | `OPSLANE_E2B_PYTHON_TEMPLATE` | no (`opslane-python`) | Overrides the E2B template name used by Python fix jobs. |
 | `OPSLANE_RELIABILITY_HARNESS` | no | Explicit guard required before the non-isolating local sandbox test transport can run |
