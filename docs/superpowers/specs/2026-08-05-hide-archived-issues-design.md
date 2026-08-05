@@ -29,8 +29,11 @@ An explicit status filter always wins over the default. There is no third state
 and no separate include-archived flag to keep in sync with the status filter.
 
 Account incident **counts** are brought in line with the same rule: a count
-means *visible incidents*, matching the list rendered beneath it. See
-"Account views" below.
+means *visible incidents*. It matches the list rendered beneath it up to
+`ListErrorGroups`' `LIMIT 100`; past that the count keeps climbing while the
+list stops at 100. That residual gap is left alone — "101 incidents" over 100
+rows is a far milder lie than "3 incidents" over an empty list. See "Account
+views" below.
 
 ## Shared visibility predicates
 
@@ -169,9 +172,13 @@ it here. So the copy is unconditional in the other direction: a brand-new
 project with no events shows a link to an empty archived list. Accepted
 tradeoff.
 
-`packages/dashboard/src/components/FilterBar.vue` is untouched. The existing
-"Archived" option (line 158) already sends exactly the request that reveals
-them.
+`packages/dashboard/src/components/FilterBar.vue` gains one method,
+`showArchived()`, added to its existing `defineExpose`. Its status dropdown and
+options are unchanged — the existing "Archived" option (line 158) already sends
+exactly the request that reveals them. The link routes through this method
+rather than pushing a route itself, because `FilterBar` already owns the
+watcher that syncs status to the URL and re-emits the filter set; duplicating
+that in `IssuesList.vue` would drift.
 
 ## Out of scope
 

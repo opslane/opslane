@@ -15,8 +15,8 @@
 - The rule, verbatim: **archived issues are excluded from every incident list unless the caller explicitly filters for `status=archived`.** An explicit status filter always wins.
 - No `include_archived` / `exclude_status` compatibility parameter. `AGENTS.md` forbids legacy shims by default; this is an explicit contract change.
 - `ListAccountIncidents` gains **no** `status` passthrough. There is no account-scoped archived view.
-- Account `incident_count` means *visible* incidents — it must match the length of the list rendered beneath it.
-- Go DB tests require `DATABASE_URL`. They `t.Skip` without it and the suite still prints `ok`. Confirm **zero skips** before believing a green run.
+- Account `incident_count` means *visible* incidents. It equals the length of the list rendered beneath it **only below 100** — `ListErrorGroups` caps at `LIMIT 100` while the count is unbounded, so an account with 101 visible incidents shows "101 incidents" over a 100-row list. That residual mismatch is out of scope and deliberately left alone; it is a far milder symptom than the "3 incidents / No incidents for this account" contradiction this change fixes.
+- Go DB tests `t.Skip` when Postgres is unreachable, and the suite still prints `ok`. Note `testPool` (`testhelper_test.go:17`) falls back to `defaultTestDSN` = `postgres://opslane:opslane_dev@localhost:5434/opslane?sslmode=disable` when `DATABASE_URL` is unset, so exporting that exact DSN changes nothing — a skip means Postgres is not reachable at all, not that the variable is missing. Confirm **zero skips** before believing a green run.
 - Dashboard verification requires both `build` and `test` (`packages/dashboard/AGENTS.md:13`).
 - Every query below aliases `error_groups` as `eg`.
 
@@ -197,7 +197,8 @@ func TestListErrorGroupsArchivedFloodDoesNotEvictLiveGroups(t *testing.T) {
 	}{
 		{name: "error arm environment filtered", kind: "error", filterByEnv: true},
 		{name: "friction arm environment filtered", kind: "friction", filterByEnv: true},
-		{name: "unfiltered branch", kind: "error", filterByEnv: false},
+		{name: "unfiltered branch error", kind: "error", filterByEnv: false},
+		{name: "unfiltered branch friction", kind: "friction", filterByEnv: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := testPool(t)
@@ -269,13 +270,12 @@ func TestListErrorGroupsArchivedFloodDoesNotEvictLiveGroups(t *testing.T) {
 - [ ] **Step 2: Run the tests to verify they fail**
 
 ```bash
-export DATABASE_URL="postgres://opslane:opslane_dev@localhost:5434/opslane?sslmode=disable"
 (cd packages/ingestion && go test ./db/ -run 'TestListErrorGroups(HidesArchived|ArchivedFlood)' -v)
 ```
 
-Expected: all three FAIL. `HidesArchivedUnlessRequested` and `HidesArchivedInEnvironmentFilteredArms` report the archived group appearing where it should not; `ArchivedFloodDoesNotEvictLiveGroups` reports the live group evicted in all three subtests.
+Expected: all three FAIL. `HidesArchivedUnlessRequested` and `HidesArchivedInEnvironmentFilteredArms` report the archived group appearing where it should not; `ArchivedFloodDoesNotEvictLiveGroups` reports the live group evicted in all four subtests.
 
-If instead they SKIP, `DATABASE_URL` is not reaching the suite — fix that before continuing. A skip is not a failing test.
+If instead they SKIP, Postgres is unreachable — start it (`docker compose up -d postgres`) and re-run. A skip is not a failing test, and no amount of `DATABASE_URL` juggling fixes it: `testPool` already defaults to the local dev DSN.
 
 - [ ] **Step 3: Promote the predicates to package-level constants**
 
@@ -332,7 +332,7 @@ Both arms already have `eg` in scope: the error arm joins `error_groups eg ON eg
 (cd packages/ingestion && go test ./db/ -run 'TestListErrorGroups(HidesArchived|ArchivedFlood)' -v)
 ```
 
-Expected: PASS, five test cases total (two top-level plus three subtests), zero skips.
+Expected: PASS, six test cases total (two top-level plus four subtests), zero skips.
 
 - [ ] **Step 6: Run the full ingestion suite for regressions**
 
@@ -434,6 +434,8 @@ func TestAccountIncidentCountExcludesArchivedAndMatchesTheList(t *testing.T) {
 	}
 
 	// The count must equal the list rendered beneath it in AccountDetail.vue.
+	// This equality only holds below ListErrorGroups' LIMIT 100; the fixture is
+	// deliberately one incident, so the cap is not in play here.
 	incidents, err := q.ListErrorGroups(ctx, projID, &db.ErrorGroupFilters{AccountID: "acct-archived"})
 	if err != nil {
 		t.Fatalf("ListErrorGroups by account: %v", err)
@@ -486,7 +488,22 @@ func TestAccountIncidentCountExcludesOrdinaryCandidates(t *testing.T) {
 		t.Fatal("GetAccountByID returned nil for an account whose only incident is a candidate")
 	}
 	if account.IncidentCount != 0 {
-		t.Errorf("IncidentCount = %d, want 0 (ordinary candidates are hidden workflow records)", account.IncidentCount)
+		t.Errorf("GetAccountByID IncidentCount = %d, want 0 (ordinary candidates are hidden workflow records)", account.IncidentCount)
+	}
+
+	// Assert ListAccounts separately: the two queries are edited independently,
+	// so covering only GetAccountByID would let a missing visibleCandidateSQL
+	// in ListAccounts ship green.
+	accounts, err := q.ListAccounts(ctx, projID, nil)
+	if err != nil {
+		t.Fatalf("ListAccounts: %v", err)
+	}
+	listed := accountByID(accounts, "acct-candidate")
+	if listed == nil {
+		t.Fatal("account with only a candidate incident vanished from ListAccounts")
+	}
+	if listed.IncidentCount != 0 {
+		t.Errorf("ListAccounts IncidentCount = %d, want 0", listed.IncidentCount)
 	}
 }
 ```
@@ -713,10 +730,22 @@ the URL sync are preserved, and it hides when already viewing archived."
 
 ## Final verification
 
-Run the full repository gate before opening a PR:
+Run the full repository gate before opening a PR. `DATABASE_URL` alone is not enough for a zero-skip run — the Go storage tests `t.Skip` without the MinIO variables, so export the whole block from `AGENTS.md` as a unit and start the services first:
 
 ```bash
-export DATABASE_URL="postgres://opslane:opslane_dev@localhost:5434/opslane?sslmode=disable"
+docker compose up -d postgres minio
+
+export INGESTION_PORT=8082
+export OPSLANE_POSTGRES_HOST_PORT=5434
+export OPSLANE_MINIO_HOST_PORT=9012
+export INGESTION_URL="http://localhost:$INGESTION_PORT"
+export DATABASE_URL="postgres://opslane:opslane_dev@localhost:$OPSLANE_POSTGRES_HOST_PORT/opslane?sslmode=disable"
+export MINIO_ENDPOINT="http://localhost:$OPSLANE_MINIO_HOST_PORT"
+export REPLAY_STORE_ENDPOINT="$MINIO_ENDPOINT"
+export REPLAY_STORE_PUBLIC_ENDPOINT="$MINIO_ENDPOINT"
+export MINIO_ACCESS_KEY=minio MINIO_SECRET_KEY=minio12345 MINIO_BUCKET=opslane-replays
+export REPLAY_STORE_ACCESS_KEY=minio REPLAY_STORE_SECRET_KEY=minio12345 REPLAY_STORE_BUCKET=opslane-replays
+
 pnpm install --frozen-lockfile
 pnpm -r build
 pnpm test
@@ -724,4 +753,6 @@ pnpm test
 docker compose config --quiet
 ```
 
-Read the **skip count**, not the pass count. `go test ./...` printing `ok` while ~30 DB tests silently skipped is the documented failure mode of this gate.
+If this runs from a worktree where another stack already holds the default ports, pick a free triple and re-export the whole block — the URLs do not follow the ports on their own.
+
+Read the **skip count**, not the pass count. `go test ./...` printing `ok` while ~30 storage tests silently skipped is the documented failure mode of this gate.
