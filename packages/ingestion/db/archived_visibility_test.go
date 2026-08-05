@@ -176,14 +176,14 @@ func TestListErrorGroupsArchivedFloodDoesNotEvictLiveGroups(t *testing.T) {
 				)
 			} else {
 				result, err := q.InsertErrorEventAndGroup(ctx, db.IngestParams{
-					ProjectID:     project.ID,
-					EnvironmentID: environment.ID,
-					ErrorType:     "TypeError",
-					ErrorMessage:  "live under flood",
-					StackTraceRaw: "at live.js:1:1",
-					Fingerprint:   "fp-live-under-flood",
-					Title:         "TypeError: live under flood",
-					EventTime:     base,
+					ProjectID:            project.ID,
+					DefaultEnvironmentID: environment.ID,
+					ErrorType:            "TypeError",
+					ErrorMessage:         "live under flood",
+					StackTraceRaw:        "at live.js:1:1",
+					Fingerprint:          "fp-live-under-flood",
+					Title:                "TypeError: live under flood",
+					EventTime:            base,
 				})
 				if err != nil {
 					t.Fatalf("InsertErrorEventAndGroup: %v", err)
