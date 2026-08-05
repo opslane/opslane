@@ -239,6 +239,31 @@ func linkAccountUser(
 	}
 }
 
+// insertGroupWithStatus inserts one group with an explicit status and
+// adjudication_status so the visibility predicates can be exercised directly.
+// adjudicationStatus is nil for everything except an exhausted 'unchecked'
+// candidate — the column's CHECK admits no other value.
+func insertGroupWithStatus(
+	t *testing.T,
+	pool *pgxpool.Pool,
+	projectID, environmentID, fingerprint, status string,
+	adjudicationStatus *string,
+) string {
+	t.Helper()
+	var id string
+	if err := pool.QueryRow(context.Background(), `
+		INSERT INTO error_groups
+		  (project_id, fingerprint, title, first_seen, last_seen, occurrence_count,
+		   status, kind, environment_id, adjudication_status)
+		VALUES ($1, $2, $2, now(), now(), 1, $3::error_group_status, 'friction', $4, $5)
+		RETURNING id`,
+		projectID, fingerprint, status, environmentID, adjudicationStatus,
+	).Scan(&id); err != nil {
+		t.Fatalf("insert %s group %s: %v", status, fingerprint, err)
+	}
+	return id
+}
+
 func accountByID(accounts []db.Account, externalAccountID string) *db.Account {
 	for i := range accounts {
 		if accounts[i].ExternalAccountID == externalAccountID {
@@ -246,6 +271,74 @@ func accountByID(accounts []db.Account, externalAccountID string) *db.Account {
 		}
 	}
 	return nil
+}
+
+// Every other account assertion in this file expects zero, which a join that
+// never matches would also satisfy — mutating the ON clause to an impossible
+// condition leaves those tests green. This one pins a non-zero count, so the
+// join has to actually match, and it covers the visible half of
+// visibleCandidateSQL: an exhausted 'unchecked' candidate still counts.
+func TestAccountIncidentCountCountsVisibleIncidents(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	q := db.New(pool)
+	_, projID, envID, liveErrorGroupID := seedGroup(t, pool, q, "account-visible-count")
+
+	const externalAccountID = "acct-mixed"
+	unchecked := "unchecked"
+
+	visible := []string{
+		liveErrorGroupID, // seeded kind='error', status='new'
+		insertGroupWithStatus(t, pool, projID, envID, "fp-mixed-insight", "insight", nil),
+		insertGroupWithStatus(t, pool, projID, envID, "fp-mixed-unchecked", "candidate", &unchecked),
+	}
+	hidden := []string{
+		insertGroupWithStatus(t, pool, projID, envID, "fp-mixed-archived", "archived", nil),
+		insertGroupWithStatus(t, pool, projID, envID, "fp-mixed-candidate", "candidate", nil),
+	}
+
+	for i, groupID := range append(append([]string{}, visible...), hidden...) {
+		linkAccountUser(t, pool, projID, groupID, fmt.Sprintf("user-mixed-%d", i), externalAccountID)
+	}
+
+	want := len(visible)
+
+	account, err := q.GetAccountByID(ctx, projID, externalAccountID)
+	if err != nil {
+		t.Fatalf("GetAccountByID: %v", err)
+	}
+	if account == nil {
+		t.Fatal("GetAccountByID returned nil for an account with visible incidents")
+	}
+	if account.IncidentCount != want {
+		t.Errorf("GetAccountByID IncidentCount = %d, want %d", account.IncidentCount, want)
+	}
+
+	accounts, err := q.ListAccounts(ctx, projID, nil)
+	if err != nil {
+		t.Fatalf("ListAccounts: %v", err)
+	}
+	listed := accountByID(accounts, externalAccountID)
+	if listed == nil {
+		t.Fatalf("account %s missing from ListAccounts", externalAccountID)
+	}
+	if listed.IncidentCount != want {
+		t.Errorf("ListAccounts IncidentCount = %d, want %d", listed.IncidentCount, want)
+	}
+
+	// The header count and the list beneath it must agree on the same fixture.
+	incidents, err := q.ListErrorGroups(ctx, projID, &db.ErrorGroupFilters{AccountID: externalAccountID})
+	if err != nil {
+		t.Fatalf("ListErrorGroups by account: %v", err)
+	}
+	if len(incidents) != want {
+		t.Errorf("list length %d, want %d", len(incidents), want)
+	}
+	for _, groupID := range hidden {
+		if containsGroup(incidents, groupID) {
+			t.Errorf("hidden group %s appeared in the account incident list", groupID)
+		}
+	}
 }
 
 func TestAccountIncidentCountExcludesArchivedAndMatchesTheList(t *testing.T) {

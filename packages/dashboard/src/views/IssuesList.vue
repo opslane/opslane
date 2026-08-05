@@ -93,9 +93,12 @@ async function fetchIncidents(filters?: IncidentFilters) {
 async function pollForNew() {
   try {
     const latest = await listIncidents(projectId.value, currentFilters.value);
-    if (latest.length > incidents.value.length) {
-      newIncidentCount.value = latest.length - incidents.value.length;
-    }
+    // Count unseen ids rather than a length delta. Archiving removes rows from
+    // the default feed, so a shrink can cancel out an arrival: 3 archived plus
+    // 2 new reads as a net -1, the banner stays hidden, and since the banner is
+    // the only thing that refetches, the feed freezes on stale rows.
+    const known = new Set(incidents.value.map((incident) => incident.id));
+    newIncidentCount.value = latest.filter((incident) => !known.has(incident.id)).length;
   } catch {
     // Silent — polling failure is non-fatal
   }
@@ -235,7 +238,7 @@ onUnmounted(() => stopPolling());
           class="mx-auto mt-3 block text-sm text-muted underline underline-offset-4 hover:text-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
           @click="viewArchived"
         >
-          Archived issues are hidden — view archived
+          View archived issues
         </button>
       </EmptyState>
       <EmptyState
@@ -256,7 +259,7 @@ onUnmounted(() => stopPolling());
           class="mx-auto mt-3 block text-sm text-muted underline underline-offset-4 hover:text-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
           @click="viewArchived"
         >
-          Archived issues are hidden — view archived
+          View archived issues
         </button>
       </EmptyState>
     </template>

@@ -702,7 +702,7 @@ Then add this block inside **both** `<EmptyState>` elements — the `v-if="hasAc
           class="mx-auto mt-3 block text-sm text-muted underline underline-offset-4 hover:text-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
           @click="viewArchived"
         >
-          Archived issues are hidden — view archived
+          View archived issues
         </button>
 ```
 

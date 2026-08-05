@@ -481,7 +481,11 @@ describe('IssuesList archived escape hatch', () => {
     wrapper.unmount();
   });
 
-  it('offers the archived view from a wholly empty feed', async () => {
+  // The button is rendered twice — once per EmptyState variant — so this
+  // exercises the "No issues yet" copy's own click wiring. Asserting only that
+  // it exists would let a broken handler on this copy ship green, and this is
+  // the likelier path: a fresh project, or one whose issues are all archived.
+  it('offers a working archived view from a wholly empty feed', async () => {
     mocks.route.query = { project_id: 'p1' };
     window.history.replaceState({}, '', '/?project_id=p1');
     mocks.listIncidents.mockResolvedValue([]);
@@ -490,6 +494,17 @@ describe('IssuesList archived escape hatch', () => {
     await flushPromises();
 
     expect(wrapper.find('[data-testid="view-archived"]').exists()).toBe(true);
+
+    await wrapper.get('[data-testid="view-archived"]').trigger('click');
+    await flushPromises();
+
+    expect(mocks.listIncidents).toHaveBeenLastCalledWith('p1', { status: 'archived' });
+    expect(mocks.replace).toHaveBeenCalledWith({
+      query: {
+        project_id: 'p1',
+        status: 'archived',
+      },
+    });
 
     wrapper.unmount();
   });

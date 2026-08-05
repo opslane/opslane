@@ -1016,6 +1016,7 @@ func (q *Queries) ListAccounts(ctx context.Context, projectID string, query *str
 	        FROM end_users eu
 	        LEFT JOIN error_group_affected_users eau ON eau.end_user_id = eu.id
 	        LEFT JOIN error_groups eg ON eg.id = eau.error_group_id
+	             AND eg.project_id = eu.project_id
 	             AND ` + notArchivedSQL + `
 	             AND ` + visibleCandidateSQL + `
 	        WHERE eu.project_id = $1 AND eu.external_account_id IS NOT NULL`
@@ -1059,6 +1060,7 @@ func (q *Queries) GetAccountByID(ctx context.Context, projectID, externalAccount
 		 FROM end_users eu
 		 LEFT JOIN error_group_affected_users eau ON eau.end_user_id = eu.id
 		 LEFT JOIN error_groups eg ON eg.id = eau.error_group_id
+		      AND eg.project_id = eu.project_id
 		      AND `+notArchivedSQL+`
 		      AND `+visibleCandidateSQL+`
 		 WHERE eu.project_id = $1 AND eu.external_account_id = $2
