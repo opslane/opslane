@@ -527,15 +527,19 @@ describe('createRedactor', () => {
     expect(redact('key sk-lf-abc123DEF-_x rejected')).toBe('key [redacted] rejected');
   });
 
-  it('removes bearer tokens and authorization headers', () => {
+  it('removes bearer tokens and whole authorization headers', () => {
     const redact = createRedactor([]);
     expect(redact('Bearer abc.def-123')).toBe('[redacted]');
+    // The scheme AND the credential must go: a value-only pattern would leave
+    // the base64 behind.
     expect(redact('authorization: Basic cGs6c2s=')).toBe('[redacted]');
   });
 
-  it('ignores short secrets that would over-redact', () => {
-    const redact = createRedactor(['ab']);
-    expect(redact('a stable abstraction')).toBe('a stable abstraction');
+  it('redacts a configured secret regardless of how short it is', () => {
+    // No length floor: a floor would exempt exactly the credentials we were
+    // handed. Over-redaction is the cheaper failure.
+    const redact = createRedactor(['abcd']);
+    expect(redact('key abcd rejected')).toBe('key [redacted] rejected');
   });
 });
 
@@ -682,13 +686,14 @@ import { logger, safeErrorMessage } from './logger.js';
 const DEFAULT_WINDOW_MS = 60_000;
 const DEFAULT_MAX_FINGERPRINTS = 50;
 const MAX_MESSAGE_LENGTH = 500;
-const MIN_REDACTABLE_SECRET_LENGTH = 8;
 
 /** Shapes that must never survive into a log line. */
 const SECRET_PATTERNS: readonly RegExp[] = [
   /\b(?:pk|sk)-lf-[A-Za-z0-9_-]+/gi,
   /\bBearer\s+[A-Za-z0-9._~+/-]+=*/gi,
-  /\bauthorization\b\s*[:=]\s*\S+/gi,
+  // Consume the rest of the line. A value-only `\S+` stops at the first space
+  // and would leave the credential behind in `authorization: Basic <base64>`.
+  /\bauthorization\b\s*[:=].*/gi,
 ];
 
 export interface DiagThrottleOptions {
@@ -770,7 +775,10 @@ export class DiagThrottle {
  * substrings. Literal matching uses split/join so no regex escaping is needed.
  */
 export function createRedactor(secrets: readonly string[]): (text: string) => string {
-  const literals = secrets.filter((s) => s.length >= MIN_REDACTABLE_SECRET_LENGTH);
+  // No length floor. An explicitly configured credential is always redacted:
+  // over-redacting a log line is strictly cheaper than leaking a key, and a
+  // floor would silently exempt exactly the credentials we were handed.
+  const literals = secrets.filter((s) => s.length > 0);
   return (text: string): string => {
     let out = text;
     for (const literal of literals) out = out.split(literal).join('[redacted]');
@@ -929,7 +937,13 @@ describe('initTracing', () => {
     vi.clearAllMocks();
     setEnv({});
   });
-  afterEach(() => {
+  afterEach(async () => {
+    // vi.resetModules() does NOT clear OpenTelemetry's global diag registration
+    // — it lives on a globalThis symbol and survives module resets. Without
+    // this, adapters leak between tests and later setLogger calls emit
+    // "current logger will be overwritten" through a stale logger object.
+    const { diag } = await import('@opentelemetry/api');
+    diag.disable();
     setEnv({});
     vi.restoreAllMocks();
   });
@@ -1159,6 +1173,35 @@ let tracer: Tracer | null = null;
 let activeConfig: EnabledTracingConfig | null = null;
 let diagThrottle: DiagThrottle | null = null;
 let initialized = false;
+/** Set once the config resolves to enabled. SDK errors can quote the keys. */
+let redactError: (text: string) => string = (text) => text;
+
+/**
+ * `logger.warn` can throw — it JSON.stringifies its fields unguarded. Shutdown
+ * and rollback promise never to throw, so every emission on those paths goes
+ * through here; otherwise a logging failure would reject shutdown and skip
+ * `diag.disable()`.
+ */
+function safeWarn(message: string, fields?: Record<string, unknown>): void {
+  try {
+    logger.warn(message, fields);
+  } catch {
+    // Nothing further is possible; never propagate out of a lifecycle path.
+  }
+}
+
+/**
+ * Stringify a lifecycle error for logging. Redacts first: a processor or SDK
+ * exception can quote the configured credentials, and these call sites are
+ * outside the diag adapter that already redacts.
+ */
+function lifecycleError(err: unknown): string {
+  try {
+    return redactError(safeErrorMessage(err));
+  } catch {
+    return 'unserializable error';
+  }
+}
 
 /**
  * Shut a NodeSDK down without ever hanging or throwing. Used by both the normal
@@ -1179,8 +1222,8 @@ async function shutdownWithTimeout(target: { shutdown(): Promise<void> }): Promi
     ]);
   } catch (err) {
     // Swallowing this entirely would recreate the silence this change removes.
-    logger.warn('Langfuse tracing shutdown did not complete cleanly', {
-      error: safeErrorMessage(err),
+    safeWarn('Langfuse tracing shutdown did not complete cleanly', {
+      error: lifecycleError(err),
     });
   }
 }
@@ -1188,8 +1231,12 @@ async function shutdownWithTimeout(target: { shutdown(): Promise<void> }): Promi
 /** Report and clear whatever the throttle is still holding. */
 function drainDiagnostics(): void {
   if (diagThrottle === null) return;
-  for (const { fingerprint, suppressed } of diagThrottle.drain()) {
-    logger.warn('otel diag: suppressed diagnostics at shutdown', { fingerprint, suppressed });
+  try {
+    for (const { fingerprint, suppressed } of diagThrottle.drain()) {
+      safeWarn('otel diag: suppressed diagnostics at shutdown', { fingerprint, suppressed });
+    }
+  } catch {
+    // Draining is best effort and must never block shutdown.
   }
 }
 ```
@@ -1232,6 +1279,11 @@ export async function initTracing(): Promise<void> {
   let instrumentation: { disable?: () => void } | undefined;
   let nodeSdk: { start(): void; shutdown(): Promise<void> } | undefined;
 
+  // Built BEFORE the try so the catch below can redact too — an exception from
+  // the processor constructor is a credential-bearing string like any other.
+  const redact = createRedactor([config.credentials.publicKey, config.credentials.secretKey]);
+  redactError = redact;
+
   try {
     // Dynamic imports keep the heavy SDK out of the disabled path.
     const [{ NodeSDK }, { LangfuseSpanProcessor }, { AnthropicInstrumentation }, AnthropicModule] =
@@ -1242,10 +1294,9 @@ export async function initTracing(): Promise<void> {
         import('@anthropic-ai/sdk'),
       ]);
 
-    const redact = createRedactor([config.credentials.publicKey, config.credentials.secretKey]);
     diagThrottle = new DiagThrottle({
       onEvict: ({ fingerprint, suppressed }) => {
-        logger.warn('otel diag: suppressed diagnostics dropped', { fingerprint, suppressed });
+        safeWarn('otel diag: suppressed diagnostics dropped', { fingerprint, suppressed });
       },
     });
     diag.setLogger(createDiagLogger(diagThrottle, redact), DiagLogLevel.WARN);
@@ -1286,7 +1337,7 @@ export async function initTracing(): Promise<void> {
     logger.info('Langfuse tracing instrumentation enabled', describeConfig(config));
   } catch (err) {
     await rollbackPartialInit(instrumentation, nodeSdk);
-    logger.warn('Langfuse tracing failed to initialize', { error: safeErrorMessage(err) });
+    safeWarn('Langfuse tracing failed to initialize', { error: lifecycleError(err) });
   }
 }
 
@@ -1316,6 +1367,8 @@ async function rollbackPartialInit(
   tracer = null;
   activeConfig = null;
   diagThrottle = null;
+  // `redactError` is deliberately NOT reset here: initTracing's catch logs the
+  // failure *after* calling this, and that message still needs redacting.
 }
 ```
 
@@ -1343,6 +1396,7 @@ export async function shutdownTracing(): Promise<void> {
   activeConfig = null;
   diagThrottle = null;
   initialized = false;
+  redactError = (text) => text;
 }
 ```
 
@@ -1416,7 +1470,19 @@ git commit -m "fix(worker): refuse to start tracing on a partial Langfuse config
 
 `index.test.ts` already mocks `../db.js` (with `updateJobTraceUrl`), `../logger.js`, and `../tracing.js`, and imports `processJobInner` directly, so this branch is testable without new harness.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Extend the logger mock**
+
+`index.ts` will now import `safeErrorMessage` from `./logger.js`, but the existing mock factory at `packages/worker/src/__tests__/index.test.ts:42-45` only provides `logger` and `setWorkerId`. Without this the new import is `undefined` and the test fails with a TypeError before ever reaching `logger.warn`:
+
+```ts
+vi.mock('../logger.js', () => ({
+  logger: { info: vi.fn(), error: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+  setWorkerId: vi.fn(),
+  safeErrorMessage: (err: unknown) => (err instanceof Error ? err.message : String(err)),
+}));
+```
+
+- [ ] **Step 2: Write the failing test**
 
 Add to `packages/worker/src/__tests__/index.test.ts`, inside the existing top-level `describe`. Reuse whatever job fixture the neighbouring `processJobInner` tests build (see the calls near lines 373 and 391) rather than inventing a new shape:
 
@@ -1443,12 +1509,12 @@ Add to `packages/worker/src/__tests__/index.test.ts`, inside the existing top-le
 
 If the neighbouring tests build their job inline rather than via a helper, inline the same object here instead of calling `makeJob()`.
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 3: Run test to verify it fails**
 
 Run: `pnpm --filter @opslane/worker test -- index`
 Expected: FAIL — `logger.warn` is never called; the rejection is swallowed by `.catch(() => {})`.
 
-- [ ] **Step 3: Replace the swallowing catch**
+- [ ] **Step 4: Replace the swallowing catch**
 
 In `processJobInner`, update the import to include `safeErrorMessage`, then replace:
 
@@ -1481,17 +1547,17 @@ with:
       });
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **Step 5: Run test to verify it passes**
 
 Run: `pnpm --filter @opslane/worker test -- index`
 Expected: PASS.
 
-- [ ] **Step 5: Build and run the full worker suite**
+- [ ] **Step 6: Build and run the full worker suite**
 
 Run: `pnpm --filter @opslane/worker build && pnpm --filter @opslane/worker test`
 Expected: no type errors, no new failures.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 git add packages/worker/src/index.ts packages/worker/src/__tests__/index.test.ts
