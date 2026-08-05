@@ -55,14 +55,14 @@ func TestRollupBackfillRecomputesExactSourceAggregatesAndIsIdempotent(t *testing
 		{staging.ID, base.Add(time.Hour)},
 	} {
 		result, err := q.InsertErrorEventAndGroup(ctx, db.IngestParams{
-			ProjectID:     project.ID,
-			EnvironmentID: occurrence.environmentID,
-			ErrorType:     "TypeError",
-			ErrorMessage:  "backfill",
-			StackTraceRaw: "at app.js:1:1",
-			Fingerprint:   "fp-rollup-backfill",
-			Title:         "TypeError: backfill",
-			EventTime:     occurrence.at,
+			ProjectID:            project.ID,
+			DefaultEnvironmentID: occurrence.environmentID,
+			ErrorType:            "TypeError",
+			ErrorMessage:         "backfill",
+			StackTraceRaw:        "at app.js:1:1",
+			Fingerprint:          "fp-rollup-backfill",
+			Title:                "TypeError: backfill",
+			EventTime:            occurrence.at,
 		})
 		if err != nil {
 			t.Fatalf("InsertErrorEventAndGroup %d: %v", i, err)
@@ -208,13 +208,13 @@ func TestRollupBackfillAllowsOnlyOneRunner(t *testing.T) {
 		t.Fatalf("CreateEnvironment: %v", err)
 	}
 	result, err := q.InsertErrorEventAndGroup(ctx, db.IngestParams{
-		ProjectID:     project.ID,
-		EnvironmentID: environment.ID,
-		ErrorType:     "TypeError",
-		ErrorMessage:  "single runner",
-		StackTraceRaw: "at app.js:1:1",
-		Fingerprint:   "fp-rollup-single-runner",
-		Title:         "TypeError: single runner",
+		ProjectID:            project.ID,
+		DefaultEnvironmentID: environment.ID,
+		ErrorType:            "TypeError",
+		ErrorMessage:         "single runner",
+		StackTraceRaw:        "at app.js:1:1",
+		Fingerprint:          "fp-rollup-single-runner",
+		Title:                "TypeError: single runner",
 	})
 	if err != nil {
 		t.Fatalf("InsertErrorEventAndGroup: %v", err)
@@ -294,7 +294,7 @@ func TestRollupBackfillStaysExactWithConcurrentIngest(t *testing.T) {
 	}
 	base := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
 	first, err := q.InsertErrorEventAndGroup(ctx, db.IngestParams{
-		ProjectID: project.ID, EnvironmentID: environment.ID,
+		ProjectID: project.ID, DefaultEnvironmentID: environment.ID,
 		ErrorType: "TypeError", ErrorMessage: "concurrent backfill",
 		StackTraceRaw: "at app.js:1:1", Fingerprint: "fp-backfill-concurrent",
 		Title: "concurrent backfill", EventTime: base,
@@ -337,7 +337,7 @@ func TestRollupBackfillStaysExactWithConcurrentIngest(t *testing.T) {
 	ingestDone := make(chan error, 1)
 	go func() {
 		_, ingestErr := q.InsertErrorEventAndGroup(context.Background(), db.IngestParams{
-			ProjectID: project.ID, EnvironmentID: environment.ID,
+			ProjectID: project.ID, DefaultEnvironmentID: environment.ID,
 			ErrorType: "TypeError", ErrorMessage: "concurrent backfill",
 			StackTraceRaw: "at app.js:1:1", Fingerprint: "fp-backfill-concurrent",
 			Title: "concurrent backfill", EventTime: base.Add(time.Hour),

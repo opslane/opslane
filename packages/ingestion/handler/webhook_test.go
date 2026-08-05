@@ -194,6 +194,7 @@ func seedWebhookPR(t *testing.T, pool *pgxpool.Pool, queries *db.Queries) (repo,
 			`DELETE FROM error_events WHERE project_id IN (SELECT id FROM projects WHERE org_id = $1)`,
 			`DELETE FROM error_groups WHERE project_id IN (SELECT id FROM projects WHERE org_id = $1)`,
 			`DELETE FROM project_api_keys WHERE project_id IN (SELECT id FROM projects WHERE org_id = $1)`,
+			`UPDATE projects SET default_environment_id = NULL WHERE org_id = $1`,
 			`DELETE FROM environments WHERE project_id IN (SELECT id FROM projects WHERE org_id = $1)`,
 			`DELETE FROM projects WHERE org_id = $1`,
 			`DELETE FROM orgs WHERE id = $1`,
@@ -215,13 +216,13 @@ func seedWebhookPR(t *testing.T, pool *pgxpool.Pool, queries *db.Queries) (repo,
 		t.Fatalf("create environment: %v", err)
 	}
 	result, err := queries.InsertErrorEventAndGroup(ctx, db.IngestParams{
-		ProjectID:     project.ID,
-		EnvironmentID: environment.ID,
-		ErrorType:     "TypeError",
-		ErrorMessage:  "webhook receipt test",
-		StackTraceRaw: "at app.js:1:1",
-		Fingerprint:   "webhook-" + suffix,
-		Title:         "Webhook receipt test",
+		ProjectID:            project.ID,
+		DefaultEnvironmentID: environment.ID,
+		ErrorType:            "TypeError",
+		ErrorMessage:         "webhook receipt test",
+		StackTraceRaw:        "at app.js:1:1",
+		Fingerprint:          "webhook-" + suffix,
+		Title:                "Webhook receipt test",
 	})
 	if err != nil {
 		t.Fatalf("insert error event and group: %v", err)

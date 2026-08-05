@@ -52,13 +52,14 @@ SDK 1.1.0 adds the optional top-level `environment` string. The corresponding
 frozen fixtures are `v1.1.0-minimal.json` (field omitted) and
 `v1.1.0-full.json` (`"environment": "staging"`). Older payloads remain valid.
 
-An environment name is only an override request. The server accepts names made
-from 1–64 letters, digits, dots, underscores, or hyphens and resolves them
-inside the API key's project. Projects must explicitly enable payload overrides;
-otherwise the API key's environment remains authoritative. Unknown or invalid
-names fall back to the key environment without rejecting the event. Once a
-same-project session exists, that session's environment is authoritative for
-subsequent events carrying its `session_id`.
+The server accepts exact, case-sensitive labels made from 1–64 letters, digits,
+dots, underscores, or hyphens. A valid label selects the matching project
+environment, creating it in the same transaction as the first committed event
+when necessary. An absent, empty, or invalid label uses the project's current
+default without rejecting the event; invalid raw values are not persisted.
+Once a same-project session exists, that session's stored environment is
+authoritative for subsequent events carrying its `session_id`, and a conflicting
+event label does not create an unused environment.
 
 ## Build provenance and debug images
 

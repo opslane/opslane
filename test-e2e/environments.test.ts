@@ -11,10 +11,8 @@ import {
   listIncidents,
   listSessions,
   postEvent,
-  seedEnvironment,
   seedTenant,
   seedUserWithJWT,
-  type IngestKey,
   type TestTenant,
   type UserSession,
 } from './helpers.js';
@@ -30,7 +28,7 @@ function metricValue(metrics: string, name: string, labels = ''): number {
 describe.skipIf(!configured)('first-class environment ingestion', () => {
   let tenant: TestTenant;
   let otherTenant: TestTenant;
-  let staging: { environmentId: string; ingestKey: IngestKey };
+  let stagingEnvironmentId = '';
   let jwt: UserSession;
 
   async function scrapeMetrics(): Promise<string> {
@@ -39,15 +37,8 @@ describe.skipIf(!configured)('first-class environment ingestion', () => {
     return response.text();
   }
 
-  async function setPayloadOverride(enabled: boolean): Promise<void> {
-    await getPool().query(
-      `UPDATE projects SET allow_payload_environment = $2 WHERE id = $1`,
-      [tenant.projectId, enabled],
-    );
-  }
-
   async function ingest(
-    ingestKey: IngestKey,
+    ingestKey: TestTenant['ingestKey'],
     marker: string,
     options: { environment?: string; sessionId?: string; sharedFingerprint?: boolean } = {},
   ): Promise<{ eventId: string; groupId: string; environmentId: string }> {
@@ -79,9 +70,20 @@ describe.skipIf(!configured)('first-class environment ingestion', () => {
     };
   }
 
+  async function listObservedEnvironments(
+    usedBy: 'incidents' | 'sessions',
+  ): Promise<Array<{ id: string; name: string }>> {
+    const response = await fetch(
+      `${getConfig().ingestionUrl}/api/v1/projects/${tenant.projectId}/environments?used_by=${usedBy}`,
+      { headers: { Authorization: `Bearer ${jwt}` } },
+    );
+    expect(response.status).toBe(200);
+    const body = await response.json() as { environments: Array<{ id: string; name: string }> };
+    return body.environments;
+  }
+
   beforeAll(async () => {
     tenant = await seedTenant();
-    staging = await seedEnvironment(tenant.projectId, 'staging');
     otherTenant = await seedTenant('other-org/other-repo');
     // Boundary: seedUserWithJWT signs a plain JWT string; this test's use of
     // it to read incidents/sessions is what makes it a session credential.
@@ -96,65 +98,70 @@ describe.skipIf(!configured)('first-class environment ingestion', () => {
   });
 
   it('keeps one group across payload environments with exact per-environment counts', async () => {
+    const project = await getPool().query<{ default_environment_id: string }>(
+      `SELECT default_environment_id FROM projects WHERE id = $1`, [tenant.projectId],
+    );
+    expect(project.rows[0]?.default_environment_id).toBe(tenant.environmentId);
+    const beforeDiscovery = await getPool().query(
+      `SELECT id FROM environments WHERE project_id = $1 AND name = 'staging'`, [tenant.projectId],
+    );
+    expect(beforeDiscovery.rowCount).toBe(0);
     const marker = `environment-shared-${crypto.randomUUID()}`;
     const productionEvent = await ingest(tenant.ingestKey, marker, { sharedFingerprint: true });
-    const stagingEvent = await ingest(staging.ingestKey, marker, {
+    const stagingEvent = await ingest(tenant.ingestKey, marker, {
       environment: 'staging',
       sharedFingerprint: true,
     });
+    stagingEnvironmentId = stagingEvent.environmentId;
 
     expect(stagingEvent.groupId).toBe(productionEvent.groupId);
     const all = await listIncidents(tenant.userSession, tenant.projectId);
     const production = await listIncidents(tenant.userSession, tenant.projectId, tenant.environmentId);
-    const stagingOnly = await listIncidents(tenant.userSession, tenant.projectId, staging.environmentId);
+    const stagingOnly = await listIncidents(tenant.userSession, tenant.projectId, stagingEnvironmentId);
     expect(all.find((incident) => incident.id === productionEvent.groupId)?.occurrence_count).toBe(2);
     expect(production.find((incident) => incident.id === productionEvent.groupId)?.occurrence_count).toBe(1);
     expect(stagingOnly.find((incident) => incident.id === productionEvent.groupId)?.occurrence_count).toBe(1);
   });
 
-  it('resolves opted-in names and falls back invalid overrides to production', async () => {
+  it('uses exact labels, discovers valid names, and falls back invalid labels to the default', async () => {
     const before = await scrapeMetrics();
-    const beforeDisabled = metricValue(
-      before,
-      'opslane_ingest_env_override_fallback_total',
-      '{reason="disabled"}',
-    );
-    const beforeUnknown = metricValue(
-      before,
-      'opslane_ingest_env_override_fallback_total',
-      '{reason="unknown_name"}',
-    );
-    const beforeInvalid = metricValue(
-      before,
-      'opslane_ingest_env_override_fallback_total',
-      '{reason="invalid_name"}',
-    );
-
-    await setPayloadOverride(true);
+    const beforeCreated = metricValue(before, 'opslane_ingest_environment_resolution_total', '{outcome="created"}');
+    const beforeInvalid = metricValue(before, 'opslane_ingest_environment_resolution_total', '{outcome="invalid_label"}');
     expect((await ingest(tenant.ingestKey, 'valid-override', { environment: 'staging' })).environmentId)
-      .toBe(staging.environmentId);
-
-    await setPayloadOverride(false);
-    expect((await ingest(tenant.ingestKey, 'disabled-override', { environment: 'staging' })).environmentId)
-      .toBe(tenant.environmentId);
-
-    await setPayloadOverride(true);
-    expect((await ingest(tenant.ingestKey, 'unknown-override', { environment: 'does-not-exist' })).environmentId)
-      .toBe(tenant.environmentId);
+      .toBe(stagingEnvironmentId);
+    const discovered = await ingest(tenant.ingestKey, 'new-label', { environment: 'qa-west' });
+    expect(discovered.environmentId).not.toBe(tenant.environmentId);
     expect((await ingest(tenant.ingestKey, 'invalid-override', { environment: 'bad environment/name' })).environmentId)
       .toBe(tenant.environmentId);
 
     const after = await scrapeMetrics();
-    expect(metricValue(after, 'opslane_ingest_env_override_fallback_total', '{reason="disabled"}'))
-      .toBe(beforeDisabled + 1);
-    expect(metricValue(after, 'opslane_ingest_env_override_fallback_total', '{reason="unknown_name"}'))
-      .toBe(beforeUnknown + 1);
-    expect(metricValue(after, 'opslane_ingest_env_override_fallback_total', '{reason="invalid_name"}'))
+    expect(metricValue(after, 'opslane_ingest_environment_resolution_total', '{outcome="created"}'))
+      .toBe(beforeCreated + 1);
+    expect(metricValue(after, 'opslane_ingest_environment_resolution_total', '{outcome="invalid_label"}'))
       .toBe(beforeInvalid + 1);
   });
 
+  it('applies a changed default prospectively', async () => {
+    const historical = await ingest(tenant.ingestKey, 'before-default-change');
+    expect(historical.environmentId).toBe(tenant.environmentId);
+    await getPool().query(
+      `UPDATE projects p SET default_environment_id = e.id
+       FROM environments e WHERE p.id = $1 AND e.project_id = p.id AND e.name = 'staging'`,
+      [tenant.projectId],
+    );
+    const after = await ingest(tenant.ingestKey, 'after-default-change');
+    expect(after.environmentId).toBe(stagingEnvironmentId);
+    const unchanged = await getPool().query<{ environment_id: string }>(
+      `SELECT environment_id FROM error_events WHERE id = $1`, [historical.eventId],
+    );
+    expect(unchanged.rows[0]?.environment_id).toBe(tenant.environmentId);
+    await getPool().query(
+      `UPDATE projects SET default_environment_id = $2 WHERE id = $1`,
+      [tenant.projectId, tenant.environmentId],
+    );
+  });
+
   it('supports out-of-order events, makes the existing same-project session authoritative, and rejects cross-project claims', async () => {
-    await setPayloadOverride(true);
     const sessionId = `env_e2e_${crypto.randomUUID().replaceAll('-', '')}`;
     const before = await scrapeMetrics();
     const divergenceBefore = metricValue(before, 'opslane_ingest_env_session_divergence_total');
@@ -164,7 +171,7 @@ describe.skipIf(!configured)('first-class environment ingestion', () => {
       environment: 'staging',
       sessionId,
     });
-    expect(beforeSession.environmentId).toBe(staging.environmentId);
+    expect(beforeSession.environmentId).toBe(stagingEnvironmentId);
 
     const sessionInit = await fetch(`${getConfig().ingestionUrl}/api/v1/sessions/init`, {
       method: 'POST',
@@ -193,10 +200,30 @@ describe.skipIf(!configured)('first-class environment ingestion', () => {
     const stagingSessions = await listSessions(
       jwt,
       tenant.projectId,
-      staging.environmentId,
+      stagingEnvironmentId,
     );
     expect(productionSessions.some((session) => session.id === sessionId)).toBe(true);
     expect(stagingSessions.some((session) => session.id === sessionId)).toBe(false);
+
+    const sessionOnlyLabel = `session-only-${crypto.randomUUID()}`;
+    const sessionOnlyInit = await fetch(`${getConfig().ingestionUrl}/api/v1/sessions/init`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-API-Key': tenant.ingestKey },
+      body: JSON.stringify({
+        session_id: `env_e2e_${crypto.randomUUID().replaceAll('-', '')}`,
+        started_at: new Date().toISOString(),
+        page_url: 'https://app.example.test/session-only',
+        environment: sessionOnlyLabel,
+      }),
+    });
+    expect(sessionOnlyInit.status).toBe(200);
+    const incidentEnvironments = await listObservedEnvironments('incidents');
+    const sessionEnvironments = await listObservedEnvironments('sessions');
+    expect(incidentEnvironments.map(({ id }) => id)).toContain(stagingEnvironmentId);
+    expect(incidentEnvironments.map(({ name }) => name)).not.toContain(sessionOnlyLabel);
+    expect(sessionEnvironments.map(({ id }) => id)).toContain(tenant.environmentId);
+    expect(sessionEnvironments.map(({ name }) => name)).toContain(sessionOnlyLabel);
+    expect(sessionEnvironments.map(({ id }) => id)).not.toContain(stagingEnvironmentId);
 
     const crossProjectInit = await fetch(`${getConfig().ingestionUrl}/api/v1/sessions/init`, {
       method: 'POST',
@@ -228,5 +255,13 @@ describe.skipIf(!configured)('first-class environment ingestion', () => {
       .toBeGreaterThan(divergenceBefore);
     expect(metricValue(after, 'opslane_ingest_session_cross_project_conflict_total'))
       .toBe(conflictBefore + 1);
+  });
+
+  it('does not expose manual environment creation', async () => {
+    const response = await fetch(
+      `${getConfig().ingestionUrl}/api/v1/projects/${tenant.projectId}/environments`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${jwt}` }, body: '{"name":"manual"}' },
+    );
+    expect(response.status).toBe(404);
   });
 });

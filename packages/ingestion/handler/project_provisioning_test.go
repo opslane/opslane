@@ -108,13 +108,17 @@ func TestRequireRoleIfCloudAndProvisioningRoutes(t *testing.T) {
 		{http.MethodPost, "/api/v1/onboarding/setup"},
 		{http.MethodPost, "/api/v1/projects"},
 		{http.MethodPatch, "/api/v1/projects/" + project.ID},
-		{http.MethodPost, "/api/v1/projects/" + project.ID + "/environments"},
 	} {
 		response := postJSONRequest(cloudRouter, route.method, route.path, token, `{}`)
 		if response.Code != http.StatusForbidden {
 			t.Errorf("cloud member %s %s = %d, want 403: %s",
 				route.method, route.path, response.Code, response.Body.String())
 		}
+	}
+	removedEnvironmentRoute := postJSONRequest(cloudRouter, http.MethodPost,
+		"/api/v1/projects/"+project.ID+"/environments", token, `{}`)
+	if removedEnvironmentRoute.Code != http.StatusNotFound {
+		t.Fatalf("removed environment route = %d, want 404", removedEnvironmentRoute.Code)
 	}
 	removedKeyRoute := postJSONRequest(cloudRouter, http.MethodPost,
 		"/api/v1/environments/"+environment.ID+"/api-keys", token, `{}`)

@@ -34,13 +34,13 @@ func TestInsertErrorEventAndGroupAtomic_NewGroup(t *testing.T) {
 
 	// Ingest a new error event
 	result, err := q.InsertErrorEventAndGroup(ctx, db.IngestParams{
-		ProjectID:     proj.ID,
-		EnvironmentID: env.ID,
-		ErrorType:     "TypeError",
-		ErrorMessage:  "Cannot read properties of undefined",
-		StackTraceRaw: "at foo.js:1:1",
-		Fingerprint:   "fp-atomic-new",
-		Title:         "TypeError: Cannot read properties of undefined",
+		ProjectID:            proj.ID,
+		DefaultEnvironmentID: env.ID,
+		ErrorType:            "TypeError",
+		ErrorMessage:         "Cannot read properties of undefined",
+		StackTraceRaw:        "at foo.js:1:1",
+		Fingerprint:          "fp-atomic-new",
+		Title:                "TypeError: Cannot read properties of undefined",
 	})
 	if err != nil {
 		t.Fatalf("InsertErrorEventAndGroup: %v", err)
@@ -134,13 +134,13 @@ func TestInsertErrorEventAndGroupAtomic_RecurringGroup(t *testing.T) {
 
 	// First ingest
 	r1, err := q.InsertErrorEventAndGroup(ctx, db.IngestParams{
-		ProjectID:     proj.ID,
-		EnvironmentID: env.ID,
-		ErrorType:     "ReferenceError",
-		ErrorMessage:  "x is not defined",
-		StackTraceRaw: "at bar.js:10:5",
-		Fingerprint:   fingerprint,
-		Title:         "ReferenceError: x is not defined",
+		ProjectID:            proj.ID,
+		DefaultEnvironmentID: env.ID,
+		ErrorType:            "ReferenceError",
+		ErrorMessage:         "x is not defined",
+		StackTraceRaw:        "at bar.js:10:5",
+		Fingerprint:          fingerprint,
+		Title:                "ReferenceError: x is not defined",
 	})
 	if err != nil {
 		t.Fatalf("first InsertErrorEventAndGroup: %v", err)
@@ -151,13 +151,13 @@ func TestInsertErrorEventAndGroupAtomic_RecurringGroup(t *testing.T) {
 
 	// Second ingest with same fingerprint
 	r2, err := q.InsertErrorEventAndGroup(ctx, db.IngestParams{
-		ProjectID:     proj.ID,
-		EnvironmentID: env.ID,
-		ErrorType:     "ReferenceError",
-		ErrorMessage:  "x is not defined",
-		StackTraceRaw: "at bar.js:10:5",
-		Fingerprint:   fingerprint,
-		Title:         "ReferenceError: x is not defined",
+		ProjectID:            proj.ID,
+		DefaultEnvironmentID: env.ID,
+		ErrorType:            "ReferenceError",
+		ErrorMessage:         "x is not defined",
+		StackTraceRaw:        "at bar.js:10:5",
+		Fingerprint:          fingerprint,
+		Title:                "ReferenceError: x is not defined",
 	})
 	if err != nil {
 		t.Fatalf("second InsertErrorEventAndGroup: %v", err)
@@ -263,13 +263,13 @@ func TestInsertErrorEventAndGroupAtomic_EnvironmentProjectMismatch(t *testing.T)
 
 	// Try to ingest into project A using project B's environment
 	_, err = q.InsertErrorEventAndGroup(ctx, db.IngestParams{
-		ProjectID:     projA.ID,
-		EnvironmentID: envB.ID,
-		ErrorType:     "TypeError",
-		ErrorMessage:  "mismatch test",
-		StackTraceRaw: "at test.js:1:1",
-		Fingerprint:   "fp-env-mismatch",
-		Title:         "TypeError: mismatch test",
+		ProjectID:            projA.ID,
+		DefaultEnvironmentID: envB.ID,
+		ErrorType:            "TypeError",
+		ErrorMessage:         "mismatch test",
+		StackTraceRaw:        "at test.js:1:1",
+		Fingerprint:          "fp-env-mismatch",
+		Title:                "TypeError: mismatch test",
 	})
 	if err == nil {
 		t.Fatal("expected error for environment-project mismatch, got nil")
@@ -313,13 +313,13 @@ func TestInsertErrorEventAndGroupAtomic_CrossProjectIsolation(t *testing.T) {
 
 	// Ingest into project A
 	rA, err := q.InsertErrorEventAndGroup(ctx, db.IngestParams{
-		ProjectID:     projA.ID,
-		EnvironmentID: envA.ID,
-		ErrorType:     "SyntaxError",
-		ErrorMessage:  "Unexpected token",
-		StackTraceRaw: "at parse.js:5:3",
-		Fingerprint:   sharedFingerprint,
-		Title:         "SyntaxError: Unexpected token",
+		ProjectID:            projA.ID,
+		DefaultEnvironmentID: envA.ID,
+		ErrorType:            "SyntaxError",
+		ErrorMessage:         "Unexpected token",
+		StackTraceRaw:        "at parse.js:5:3",
+		Fingerprint:          sharedFingerprint,
+		Title:                "SyntaxError: Unexpected token",
 	})
 	if err != nil {
 		t.Fatalf("InsertErrorEventAndGroup A: %v", err)
@@ -327,13 +327,13 @@ func TestInsertErrorEventAndGroupAtomic_CrossProjectIsolation(t *testing.T) {
 
 	// Ingest into project B with same fingerprint
 	rB, err := q.InsertErrorEventAndGroup(ctx, db.IngestParams{
-		ProjectID:     projB.ID,
-		EnvironmentID: envB.ID,
-		ErrorType:     "SyntaxError",
-		ErrorMessage:  "Unexpected token",
-		StackTraceRaw: "at parse.js:5:3",
-		Fingerprint:   sharedFingerprint,
-		Title:         "SyntaxError: Unexpected token",
+		ProjectID:            projB.ID,
+		DefaultEnvironmentID: envB.ID,
+		ErrorType:            "SyntaxError",
+		ErrorMessage:         "Unexpected token",
+		StackTraceRaw:        "at parse.js:5:3",
+		Fingerprint:          sharedFingerprint,
+		Title:                "SyntaxError: Unexpected token",
 	})
 	if err != nil {
 		t.Fatalf("InsertErrorEventAndGroup B: %v", err)
@@ -414,13 +414,13 @@ func setupTenantAndIngest(t *testing.T, orgName, fingerprint string) (
 	}
 
 	result, err := q.InsertErrorEventAndGroup(ctx, db.IngestParams{
-		ProjectID:     proj.ID,
-		EnvironmentID: env.ID,
-		ErrorType:     "TypeError",
-		ErrorMessage:  "test error",
-		StackTraceRaw: "at test.js:1:1",
-		Fingerprint:   fingerprint,
-		Title:         "TypeError: test error",
+		ProjectID:            proj.ID,
+		DefaultEnvironmentID: env.ID,
+		ErrorType:            "TypeError",
+		ErrorMessage:         "test error",
+		StackTraceRaw:        "at test.js:1:1",
+		Fingerprint:          fingerprint,
+		Title:                "TypeError: test error",
 	})
 	if err != nil {
 		t.Fatalf("InsertErrorEventAndGroup: %v", err)
@@ -462,13 +462,13 @@ func TestRequeueOnRecurrence_ResolvedGroup(t *testing.T) {
 
 	// Second ingest with same fingerprint — should re-queue
 	r2, err := q.InsertErrorEventAndGroup(ctx, db.IngestParams{
-		ProjectID:     proj.ID,
-		EnvironmentID: env.ID,
-		ErrorType:     "TypeError",
-		ErrorMessage:  "test error",
-		StackTraceRaw: "at test.js:1:1",
-		Fingerprint:   fingerprint,
-		Title:         "TypeError: test error",
+		ProjectID:            proj.ID,
+		DefaultEnvironmentID: env.ID,
+		ErrorType:            "TypeError",
+		ErrorMessage:         "test error",
+		StackTraceRaw:        "at test.js:1:1",
+		Fingerprint:          fingerprint,
+		Title:                "TypeError: test error",
 	})
 	if err != nil {
 		t.Fatalf("second InsertErrorEventAndGroup: %v", err)
@@ -554,13 +554,13 @@ func TestRequeueOnRecurrence_NeedsHumanRetriable(t *testing.T) {
 
 	// Second ingest with same fingerprint — should re-queue (retriable reason)
 	r2, err := q.InsertErrorEventAndGroup(ctx, db.IngestParams{
-		ProjectID:     proj.ID,
-		EnvironmentID: env.ID,
-		ErrorType:     "TypeError",
-		ErrorMessage:  "test error",
-		StackTraceRaw: "at test.js:1:1",
-		Fingerprint:   fingerprint,
-		Title:         "TypeError: test error",
+		ProjectID:            proj.ID,
+		DefaultEnvironmentID: env.ID,
+		ErrorType:            "TypeError",
+		ErrorMessage:         "test error",
+		StackTraceRaw:        "at test.js:1:1",
+		Fingerprint:          fingerprint,
+		Title:                "TypeError: test error",
 	})
 	if err != nil {
 		t.Fatalf("second InsertErrorEventAndGroup: %v", err)
@@ -652,13 +652,13 @@ func TestNoRequeueOnRecurrence_NeedsHumanNonRetriable(t *testing.T) {
 
 			// Second ingest with same fingerprint — should NOT re-queue
 			r2, err := q.InsertErrorEventAndGroup(ctx, db.IngestParams{
-				ProjectID:     proj.ID,
-				EnvironmentID: env.ID,
-				ErrorType:     "TypeError",
-				ErrorMessage:  "test error",
-				StackTraceRaw: "at test.js:1:1",
-				Fingerprint:   fingerprint,
-				Title:         "TypeError: test error",
+				ProjectID:            proj.ID,
+				DefaultEnvironmentID: env.ID,
+				ErrorType:            "TypeError",
+				ErrorMessage:         "test error",
+				StackTraceRaw:        "at test.js:1:1",
+				Fingerprint:          fingerprint,
+				Title:                "TypeError: test error",
 			})
 			if err != nil {
 				t.Fatalf("second InsertErrorEventAndGroup: %v", err)
@@ -735,13 +735,13 @@ func TestNoRequeueOnRecurrence_ActiveStates(t *testing.T) {
 
 			// Second ingest with same fingerprint — should NOT re-queue
 			r2, err := q.InsertErrorEventAndGroup(ctx, db.IngestParams{
-				ProjectID:     proj.ID,
-				EnvironmentID: env.ID,
-				ErrorType:     "TypeError",
-				ErrorMessage:  "test error",
-				StackTraceRaw: "at test.js:1:1",
-				Fingerprint:   fingerprint,
-				Title:         "TypeError: test error",
+				ProjectID:            proj.ID,
+				DefaultEnvironmentID: env.ID,
+				ErrorType:            "TypeError",
+				ErrorMessage:         "test error",
+				StackTraceRaw:        "at test.js:1:1",
+				Fingerprint:          fingerprint,
+				Title:                "TypeError: test error",
 			})
 			if err != nil {
 				t.Fatalf("second InsertErrorEventAndGroup: %v", err)

@@ -232,8 +232,8 @@ func TestProvisionAgentSession_NewOrgUserProjectKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("count environment and key: %v", err)
 	}
-	if environmentCount != 2 || keyCount != 1 {
-		t.Errorf("environments/keys = %d/%d, want 2/1", environmentCount, keyCount)
+	if environmentCount != 1 || keyCount != 1 {
+		t.Errorf("environments/keys = %d/%d, want 1/1", environmentCount, keyCount)
 	}
 	lookup, err := q.LookupProjectKey(ctx, strings.TrimPrefix(*after.APIKeySealed, "sealed:"))
 	if err != nil {

@@ -272,15 +272,7 @@ func TestDefaultBranchNullableMigrationPreservesExistingRows(t *testing.T) {
 	}
 }
 
-// TestMigrations_PreserveOperatorPayloadEnvironmentOptOut pins the one-shot
-// guard on 028's backfill. The migration runner has no ledger — it replays
-// every file on every boot — while allow_payload_environment stays
-// operator-settable via PATCH /api/v1/projects/{id} and the dashboard toggle.
-// An unguarded `UPDATE projects SET allow_payload_environment = true` would
-// therefore re-enable payload-environment overrides on every restart, silently
-// reversing a deliberate opt-out. Schema-snapshot idempotency cannot catch
-// this: the column definition is identical either way, only the row data moves.
-func TestMigrations_PreserveOperatorPayloadEnvironmentOptOut(t *testing.T) {
+func TestMigrations_PreserveSelectedProjectDefaultOnReplay(t *testing.T) {
 	admin := testPool(t)
 	psql := findPsql(t)
 	pool, dsn := disposableDB(t, admin)
@@ -295,14 +287,28 @@ func TestMigrations_PreserveOperatorPayloadEnvironmentOptOut(t *testing.T) {
 	ctx := context.Background()
 	var orgID string
 	if err := pool.QueryRow(ctx,
-		`INSERT INTO orgs (name) VALUES ('payload-env-optout') RETURNING id`,
+		`INSERT INTO orgs (name) VALUES ('project-default-replay') RETURNING id`,
 	).Scan(&orgID); err != nil {
 		t.Fatal(err)
 	}
+	var projectID, productionID, stagingID string
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO projects (org_id, name) VALUES ($1, 'default-replay') RETURNING id`,
+		orgID).Scan(&projectID); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO environments (project_id, name) VALUES ($1, 'production') RETURNING id`,
+		projectID).Scan(&productionID); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO environments (project_id, name) VALUES ($1, 'staging') RETURNING id`,
+		projectID).Scan(&stagingID); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := pool.Exec(ctx,
-		`INSERT INTO projects (org_id, name, allow_payload_environment)
-		 VALUES ($1, 'opted-out', false)`,
-		orgID); err != nil {
+		`UPDATE projects SET default_environment_id = $2 WHERE id = $1`, projectID, stagingID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -313,14 +319,41 @@ func TestMigrations_PreserveOperatorPayloadEnvironmentOptOut(t *testing.T) {
 		}
 	}
 
-	var allowed bool
+	var got string
 	if err := pool.QueryRow(ctx,
-		`SELECT allow_payload_environment FROM projects WHERE name = 'opted-out'`,
-	).Scan(&allowed); err != nil {
+		`SELECT default_environment_id FROM projects WHERE id = $1`, projectID,
+	).Scan(&got); err != nil {
 		t.Fatal(err)
 	}
-	if allowed {
-		t.Fatal("replaying migrations re-enabled allow_payload_environment on a " +
-			"project whose owner turned it off; 028's backfill must run at most once")
+	if got != stagingID || got == productionID {
+		t.Fatalf("default after replay = %s, want staging %s", got, stagingID)
+	}
+}
+
+func TestProjectDefaultCompositeForeignKeyRejectsCrossProjectEnvironment(t *testing.T) {
+	admin := testPool(t)
+	psql := findPsql(t)
+	pool, dsn := disposableDB(t, admin)
+	for _, file := range migrationFiles(t) {
+		if err := applyMigration(t, psql, dsn, file); err != nil {
+			t.Fatalf("migration %s failed: %v", file, err)
+		}
+	}
+	ctx := context.Background()
+	var orgID, firstProjectID, secondProjectID, secondEnvironmentID string
+	if err := pool.QueryRow(ctx, `INSERT INTO orgs (name) VALUES ('cross-default') RETURNING id`).Scan(&orgID); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `INSERT INTO projects (org_id, name) VALUES ($1, 'first') RETURNING id`, orgID).Scan(&firstProjectID); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `INSERT INTO projects (org_id, name) VALUES ($1, 'second') RETURNING id`, orgID).Scan(&secondProjectID); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `INSERT INTO environments (project_id, name) VALUES ($1, 'production') RETURNING id`, secondProjectID).Scan(&secondEnvironmentID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE projects SET default_environment_id = $2 WHERE id = $1`, firstProjectID, secondEnvironmentID); err == nil {
+		t.Fatal("cross-project default update succeeded")
 	}
 }

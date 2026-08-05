@@ -36,13 +36,13 @@ func TestAdminOverviewOnboardingFunnel(t *testing.T) {
 		t.Fatalf("create environment: %v", err)
 	}
 	if _, err := q.InsertErrorEventAndGroup(ctx, db.IngestParams{
-		ProjectID:     projectWithEvent.ID,
-		EnvironmentID: environment.ID,
-		ErrorType:     "TypeError",
-		ErrorMessage:  "onboarding activation fixture",
-		StackTraceRaw: "at fixture.ts:1:1",
-		Fingerprint:   "funnel-activation",
-		Title:         "Onboarding activation fixture",
+		ProjectID:            projectWithEvent.ID,
+		DefaultEnvironmentID: environment.ID,
+		ErrorType:            "TypeError",
+		ErrorMessage:         "onboarding activation fixture",
+		StackTraceRaw:        "at fixture.ts:1:1",
+		Fingerprint:          "funnel-activation",
+		Title:                "Onboarding activation fixture",
 	}); err != nil {
 		t.Fatalf("insert activation event: %v", err)
 	}

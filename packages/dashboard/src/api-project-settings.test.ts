@@ -16,7 +16,7 @@ describe('project settings API', () => {
       github_repo: 'acme/example',
       friction_autonomy: 'ask_first' as const,
       pr_posture: 'draft_when_unverified' as const,
-      allow_payload_environment: true,
+      default_environment_id: 'env-production',
       created_at: '2026-07-17T00:00:00Z',
     };
     const fetchMock = vi.fn().mockResolvedValue({
@@ -37,14 +37,14 @@ describe('project settings API', () => {
     }));
   });
 
-  it('sends the payload-environment opt-in as a partial project PATCH', async () => {
+  it('sends the project default as a partial project PATCH', async () => {
     const project = {
       id: 'project-1',
       name: 'Example',
       github_repo: 'acme/example',
       friction_autonomy: 'ask_first' as const,
       pr_posture: 'verified_only' as const,
-      allow_payload_environment: true,
+      default_environment_id: 'env-staging',
       created_at: '2026-07-17T00:00:00Z',
     };
     const fetchMock = vi.fn().mockResolvedValue({
@@ -55,13 +55,13 @@ describe('project settings API', () => {
     vi.stubGlobal('fetch', fetchMock);
 
     await expect(updateProject('project-1', {
-      allow_payload_environment: true,
+      default_environment_id: 'env-staging',
     })).resolves.toEqual(project);
 
     expect(fetchMock).toHaveBeenCalledWith('/api/v1/projects/project-1', expect.objectContaining({
       method: 'PATCH',
       credentials: 'include',
-      body: JSON.stringify({ allow_payload_environment: true }),
+      body: JSON.stringify({ default_environment_id: 'env-staging' }),
     }));
   });
 
@@ -73,7 +73,7 @@ describe('project settings API', () => {
         github_repo: null,
         friction_autonomy: 'ask_first' as const,
         pr_posture: 'verified_only' as const,
-        allow_payload_environment: false,
+        default_environment_id: 'env-2',
         created_at: '2026-07-19T00:00:00Z',
       },
       environment: {
@@ -149,5 +149,11 @@ describe('environment-filtered API reads', () => {
     }));
 
     await expect(listEnvironments('project-1')).resolves.toEqual(response);
+    await expect(listEnvironments('project-1', 'incidents')).resolves.toEqual(response);
+    const fetchMock = vi.mocked(fetch);
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      '/api/v1/projects/project-1/environments',
+      '/api/v1/projects/project-1/environments?used_by=incidents',
+    ]);
   });
 });

@@ -56,13 +56,7 @@ func TestPayloadEnvironmentAndSessionPrecedenceThroughHTTPAndPostgres(t *testing
 		cleanupTenantHandler(t, pool, org.ID)
 	})
 	project, _ := q.CreateProject(ctx, org.ID, "p1", nil)
-	_, _ = q.CreateEnvironment(ctx, project.ID, "production")
-	staging, _ := q.CreateEnvironment(ctx, project.ID, "staging")
 	key, _ := q.CreateProjectKey(ctx, project.ID, db.ScopeIngest, "test", nil, "")
-	allow := true
-	if _, err := q.UpdateProject(ctx, org.ID, project.ID, nil, nil, nil, &allow); err != nil {
-		t.Fatal(err)
-	}
 
 	other, _ := q.CreateProject(ctx, org.ID, "p2", nil)
 	otherEnvironment, _ := q.CreateEnvironment(ctx, other.ID, "production")
@@ -74,8 +68,12 @@ func TestPayloadEnvironmentAndSessionPrecedenceThroughHTTPAndPostgres(t *testing
 	if err := pool.QueryRow(ctx, `SELECT environment_id FROM error_events WHERE id = $1`, overriddenEventID).Scan(&storedEnvironmentID); err != nil {
 		t.Fatal(err)
 	}
-	if storedEnvironmentID != staging.ID {
-		t.Fatalf("override environment = %s, want %s", storedEnvironmentID, staging.ID)
+	stagingID, err := q.FindEnvironmentIDByName(ctx, project.ID, "staging")
+	if err != nil || stagingID == "" {
+		t.Fatalf("discovered staging = %q, err=%v", stagingID, err)
+	}
+	if storedEnvironmentID != stagingID {
+		t.Fatalf("override environment = %s, want %s", storedEnvironmentID, stagingID)
 	}
 
 	sessionID := "sess_" + uuid.NewString()
@@ -86,8 +84,8 @@ func TestPayloadEnvironmentAndSessionPrecedenceThroughHTTPAndPostgres(t *testing
 	if err := pool.QueryRow(ctx, `SELECT environment_id FROM error_events WHERE id = $1`, sessionEventID).Scan(&storedEnvironmentID); err != nil {
 		t.Fatal(err)
 	}
-	if storedEnvironmentID != staging.ID {
-		t.Fatalf("session event environment = %s, want %s", storedEnvironmentID, staging.ID)
+	if storedEnvironmentID != stagingID {
+		t.Fatalf("session event environment = %s, want %s", storedEnvironmentID, stagingID)
 	}
 
 	if response := postEnvironmentSession(t, router, otherKey.Raw, sessionID, "production"); response.Code != http.StatusConflict {
@@ -98,25 +96,17 @@ func TestPayloadEnvironmentAndSessionPrecedenceThroughHTTPAndPostgres(t *testing
 		t.Fatal(err)
 	}
 	if storedEnvironmentID != otherEnvironment.ID {
-		t.Fatalf("cross-project event environment = %s, want key environment %s", storedEnvironmentID, otherEnvironment.ID)
+		t.Fatalf("cross-project event environment = %s, want project default %s", storedEnvironmentID, otherEnvironment.ID)
 	}
 }
 
-func TestPayloadEnvironmentFallbacksRemainAcceptedAndObservable(t *testing.T) {
+func TestEnvironmentDiscoveryAndFallbacksRemainAcceptedAndObservable(t *testing.T) {
 	deps, pool := testDeps(t)
 	q := deps.Queries
 	ctx := context.Background()
-	orgID, projectID, productionID, rawKey := seedTenant(t, q)
+	orgID, _, productionID, rawKey := seedTenant(t, q)
 	t.Cleanup(func() { cleanupTenantHandler(t, pool, orgID) })
-	staging, err := q.CreateEnvironment(ctx, projectID, "staging")
-	if err != nil {
-		t.Fatal(err)
-	}
 	router := handler.NewRouter(deps)
-	denyPayloadEnvironment := false
-	if _, err := q.UpdateProject(ctx, orgID, projectID, nil, nil, nil, &denyPayloadEnvironment); err != nil {
-		t.Fatal(err)
-	}
 
 	assertProduction := func(environment, message string) {
 		eventID := postEnvironmentEvent(t, router, rawKey, "", environment, message+uuid.NewString())
@@ -128,22 +118,24 @@ func TestPayloadEnvironmentFallbacksRemainAcceptedAndObservable(t *testing.T) {
 			t.Fatalf("fallback for %q stored %s, want %s", environment, got, productionID)
 		}
 	}
-	assertProduction("staging", "disabled-")
-	allowPayloadEnvironment := true
-	if _, err := q.UpdateProject(ctx, orgID, projectID, nil, nil, nil, &allowPayloadEnvironment); err != nil {
+	assertProduction("", "missing-")
+	assertProduction("bad environment", "invalid-")
+	createdEventID := postEnvironmentEvent(t, router, rawKey, "", "staging", "created-"+uuid.NewString())
+	var createdEnvironmentID string
+	if err := pool.QueryRow(ctx, `SELECT environment_id FROM error_events WHERE id = $1`, createdEventID).Scan(&createdEnvironmentID); err != nil {
 		t.Fatal(err)
 	}
-	assertProduction("missing", "unknown-")
-	assertProduction("bad environment", "invalid-")
+	if createdEnvironmentID == productionID {
+		t.Fatal("valid staging label fell back to production")
+	}
 
 	metrics := httptest.NewRecorder()
 	handler.Metrics(metrics, httptest.NewRequest(http.MethodGet, "/metrics", nil))
-	for _, label := range []string{`reason="disabled"`, `reason="unknown_name"`, `reason="invalid_name"`} {
-		if !strings.Contains(metrics.Body.String(), "opslane_ingest_env_override_fallback_total{"+label+"}") {
+	for _, label := range []string{`outcome="default"`, `outcome="invalid_label"`, `outcome="created"`} {
+		if !strings.Contains(metrics.Body.String(), "opslane_ingest_environment_resolution_total{"+label+"}") {
 			t.Errorf("metrics missing %s: %s", label, metrics.Body.String())
 		}
 	}
-	_ = staging
 }
 
 func TestReplayInitRejectsSessionOwnedByAnotherProject(t *testing.T) {

@@ -14,14 +14,14 @@ import (
 func ingestNotificationIssue(t *testing.T, queries *db.Queries, projectID, environmentID, fingerprint, title string, eventTime time.Time) *db.IngestResult {
 	t.Helper()
 	result, err := queries.InsertErrorEventAndGroup(context.Background(), db.IngestParams{
-		ProjectID:     projectID,
-		EnvironmentID: environmentID,
-		ErrorType:     "TypeError",
-		ErrorMessage:  title,
-		StackTraceRaw: "at app.js:1:1",
-		Fingerprint:   fingerprint,
-		Title:         title,
-		EventTime:     eventTime,
+		ProjectID:            projectID,
+		DefaultEnvironmentID: environmentID,
+		ErrorType:            "TypeError",
+		ErrorMessage:         title,
+		StackTraceRaw:        "at app.js:1:1",
+		Fingerprint:          fingerprint,
+		Title:                title,
+		EventTime:            eventTime,
 	})
 	if err != nil {
 		t.Fatalf("InsertErrorEventAndGroup: %v", err)

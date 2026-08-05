@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/opslane/opslane/packages/ingestion/db"
 	"github.com/opslane/opslane/packages/ingestion/notify"
 )
 
@@ -22,20 +23,23 @@ var (
 		mu       sync.Mutex
 		byReason map[string]*atomic.Int64
 	}
-	commitSHADiscardedTotal            atomic.Int64
-	eventsWithDebugImagesTotal         atomic.Int64
-	debugMetaRegistryZeroMatchedTotal  atomic.Int64
-	jobsEnqueuedTotal                  atomic.Int64
-	stacklessEventsTotal               atomic.Int64
-	suppressedResizeObserverTotal      atomic.Int64
-	suppressedScriptErrorTotal         atomic.Int64
-	suppressedExtensionOnlyTotal       atomic.Int64
-	ingestEnvironmentFallbackDisabled  atomic.Int64
-	ingestEnvironmentFallbackUnknown   atomic.Int64
-	ingestEnvironmentFallbackInvalid   atomic.Int64
-	ingestEnvironmentSessionDivergence atomic.Int64
-	ingestSessionCrossProjectConflict  atomic.Int64
-	ingestErrorsTotal                  struct {
+	commitSHADiscardedTotal             atomic.Int64
+	eventsWithDebugImagesTotal          atomic.Int64
+	debugMetaRegistryZeroMatchedTotal   atomic.Int64
+	jobsEnqueuedTotal                   atomic.Int64
+	stacklessEventsTotal                atomic.Int64
+	suppressedResizeObserverTotal       atomic.Int64
+	suppressedScriptErrorTotal          atomic.Int64
+	suppressedExtensionOnlyTotal        atomic.Int64
+	ingestEnvironmentResolutionDefault  atomic.Int64
+	ingestEnvironmentResolutionInvalid  atomic.Int64
+	ingestEnvironmentResolutionExisting atomic.Int64
+	ingestEnvironmentResolutionCreated  atomic.Int64
+	ingestEnvironmentResolutionSession  atomic.Int64
+	projectDefaultInvariantNull         atomic.Int64
+	ingestEnvironmentSessionDivergence  atomic.Int64
+	ingestSessionCrossProjectConflict   atomic.Int64
+	ingestErrorsTotal                   struct {
 		mu     sync.Mutex
 		byType map[string]*atomic.Int64
 	}
@@ -127,15 +131,24 @@ func RecordSuppressed(rule string) {
 	}
 }
 
-// RecordEnvironmentOverrideFallback keeps the label cardinality fixed.
-func RecordEnvironmentOverrideFallback(reason string) {
-	switch reason {
-	case "disabled":
-		ingestEnvironmentFallbackDisabled.Add(1)
-	case "unknown_name":
-		ingestEnvironmentFallbackUnknown.Add(1)
-	case "invalid_name":
-		ingestEnvironmentFallbackInvalid.Add(1)
+func RecordEnvironmentResolution(outcome db.EnvironmentOutcome) {
+	switch outcome {
+	case db.EnvironmentOutcomeDefault:
+		ingestEnvironmentResolutionDefault.Add(1)
+	case db.EnvironmentOutcomeInvalidLabel:
+		ingestEnvironmentResolutionInvalid.Add(1)
+	case db.EnvironmentOutcomeExisting:
+		ingestEnvironmentResolutionExisting.Add(1)
+	case db.EnvironmentOutcomeCreated:
+		ingestEnvironmentResolutionCreated.Add(1)
+	case db.EnvironmentOutcomeSession:
+		ingestEnvironmentResolutionSession.Add(1)
+	}
+}
+
+func RecordProjectDefaultInvariant(reason string) {
+	if reason == "null_default" {
+		projectDefaultInvariantNull.Add(1)
 	}
 }
 
@@ -243,11 +256,17 @@ func Metrics(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "opslane_suppressed_events_total{rule=\"script_error\"} %d\n", suppressedScriptErrorTotal.Load())
 	fmt.Fprintf(w, "opslane_suppressed_events_total{rule=\"extension_only\"} %d\n\n", suppressedExtensionOnlyTotal.Load())
 
-	fmt.Fprintln(w, "# HELP opslane_ingest_env_override_fallback_total Total payload environment overrides that fell back to the key-bound environment")
-	fmt.Fprintln(w, "# TYPE opslane_ingest_env_override_fallback_total counter")
-	fmt.Fprintf(w, "opslane_ingest_env_override_fallback_total{reason=\"disabled\"} %d\n", ingestEnvironmentFallbackDisabled.Load())
-	fmt.Fprintf(w, "opslane_ingest_env_override_fallback_total{reason=\"unknown_name\"} %d\n", ingestEnvironmentFallbackUnknown.Load())
-	fmt.Fprintf(w, "opslane_ingest_env_override_fallback_total{reason=\"invalid_name\"} %d\n\n", ingestEnvironmentFallbackInvalid.Load())
+	fmt.Fprintln(w, "# HELP opslane_ingest_environment_resolution_total Committed telemetry environment resolution outcomes")
+	fmt.Fprintln(w, "# TYPE opslane_ingest_environment_resolution_total counter")
+	fmt.Fprintf(w, "opslane_ingest_environment_resolution_total{outcome=\"default\"} %d\n", ingestEnvironmentResolutionDefault.Load())
+	fmt.Fprintf(w, "opslane_ingest_environment_resolution_total{outcome=\"invalid_label\"} %d\n", ingestEnvironmentResolutionInvalid.Load())
+	fmt.Fprintf(w, "opslane_ingest_environment_resolution_total{outcome=\"existing\"} %d\n", ingestEnvironmentResolutionExisting.Load())
+	fmt.Fprintf(w, "opslane_ingest_environment_resolution_total{outcome=\"created\"} %d\n", ingestEnvironmentResolutionCreated.Load())
+	fmt.Fprintf(w, "opslane_ingest_environment_resolution_total{outcome=\"session_authoritative\"} %d\n\n", ingestEnvironmentResolutionSession.Load())
+
+	fmt.Fprintln(w, "# HELP opslane_project_default_invariant_total Project default compatibility invariant violations")
+	fmt.Fprintln(w, "# TYPE opslane_project_default_invariant_total counter")
+	fmt.Fprintf(w, "opslane_project_default_invariant_total{reason=\"null_default\"} %d\n\n", projectDefaultInvariantNull.Load())
 
 	fmt.Fprintln(w, "# HELP opslane_ingest_env_session_divergence_total Total environment mismatches involving an existing or out-of-order session")
 	fmt.Fprintln(w, "# TYPE opslane_ingest_env_session_divergence_total counter")

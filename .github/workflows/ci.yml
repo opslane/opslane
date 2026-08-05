@@ -422,8 +422,10 @@ jobs:
             ^python SDK live smoke \(Flask fixture → ingestion\) >
             ^python wire adversarial \(hostile non-SDK client\) >
             ^first-class environment ingestion > keeps one group across payload environments
-            ^first-class environment ingestion > resolves opted-in names and falls back invalid overrides
+            ^first-class environment ingestion > uses exact labels, discovers valid names, and falls back invalid labels to the default
+            ^first-class environment ingestion > applies a changed default prospectively
             ^first-class environment ingestion > supports out-of-order events, makes the existing same-project session
+            ^first-class environment ingestion > does not expose manual environment creation
             ^dashboard environment filtering > gates readiness and filters incidents, detail chips, and sessions in real Chromium
             ^first-class projects dashboard > switches safely from a deep link and provisions a usable project key
             ^SDK environment browser contract > sends the configured name through real Chromium

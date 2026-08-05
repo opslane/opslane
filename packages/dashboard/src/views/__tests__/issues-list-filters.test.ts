@@ -316,11 +316,14 @@ describe('IssuesList URL filters', () => {
     wrapper.unmount();
   });
 
-  it('renders the Environment filter only when environment rollups are ready', async () => {
+  it('renders the Environment filter only when two incident environments and rollups are ready', async () => {
     mocks.route.query = { project_id: 'p1' };
     window.history.replaceState({}, '', '/?project_id=p1');
     mocks.listEnvironments.mockResolvedValue({
-      environments: [{ id: 'env-1', name: 'Production' }],
+    environments: [
+      { id: 'env-1', name: 'Production' },
+      { id: 'env-2', name: 'Staging' },
+    ],
       rollup_ready: true,
     });
     mocks.listIncidents.mockResolvedValue([]);
@@ -329,6 +332,7 @@ describe('IssuesList URL filters', () => {
     await flushPromises();
 
     expect(wrapper.find('select[aria-label="Environment"]').exists()).toBe(true);
+    expect(mocks.listEnvironments).toHaveBeenCalledWith('p1', 'incidents');
 
     wrapper.unmount();
   });

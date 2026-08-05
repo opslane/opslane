@@ -129,24 +129,24 @@ func toIncidentJSON(g db.ErrorGroup) incidentJSON {
 
 // projectJSON is the JSON representation of a project for the dashboard API.
 type projectJSON struct {
-	ID                      string  `json:"id"`
-	Name                    string  `json:"name"`
-	GithubRepo              *string `json:"github_repo"`
-	FrictionAutonomy        string  `json:"friction_autonomy"`
-	PrPosture               string  `json:"pr_posture"`
-	AllowPayloadEnvironment bool    `json:"allow_payload_environment"`
-	CreatedAt               string  `json:"created_at"`
+	ID                   string  `json:"id"`
+	Name                 string  `json:"name"`
+	GithubRepo           *string `json:"github_repo"`
+	FrictionAutonomy     string  `json:"friction_autonomy"`
+	PrPosture            string  `json:"pr_posture"`
+	DefaultEnvironmentID *string `json:"default_environment_id"`
+	CreatedAt            string  `json:"created_at"`
 }
 
 func toProjectJSON(p db.Project) projectJSON {
 	return projectJSON{
-		ID:                      p.ID,
-		Name:                    p.Name,
-		GithubRepo:              p.GithubRepo,
-		FrictionAutonomy:        p.FrictionAutonomy,
-		PrPosture:               p.PrPosture,
-		AllowPayloadEnvironment: p.AllowPayloadEnvironment,
-		CreatedAt:               p.CreatedAt.Format(time.RFC3339),
+		ID:                   p.ID,
+		Name:                 p.Name,
+		GithubRepo:           p.GithubRepo,
+		FrictionAutonomy:     p.FrictionAutonomy,
+		PrPosture:            p.PrPosture,
+		DefaultEnvironmentID: p.DefaultEnvironmentID,
+		CreatedAt:            p.CreatedAt.Format(time.RFC3339),
 	}
 }
 
@@ -655,10 +655,10 @@ func (d *Dependencies) UpdateProjectEndpoint(w http.ResponseWriter, r *http.Requ
 
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<16)
 	var req struct {
-		GithubRepo              *string `json:"github_repo"`
-		FrictionAutonomy        *string `json:"friction_autonomy"`
-		PrPosture               *string `json:"pr_posture"`
-		AllowPayloadEnvironment *bool   `json:"allow_payload_environment"`
+		GithubRepo           *string         `json:"github_repo"`
+		FrictionAutonomy     *string         `json:"friction_autonomy"`
+		PrPosture            *string         `json:"pr_posture"`
+		DefaultEnvironmentID json.RawMessage `json:"default_environment_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid request body")
@@ -683,9 +683,26 @@ func (d *Dependencies) UpdateProjectEndpoint(w http.ResponseWriter, r *http.Requ
 			return
 		}
 	}
+	var defaultEnvironmentID *string
+	if req.DefaultEnvironmentID != nil {
+		if string(req.DefaultEnvironmentID) == "null" {
+			writeJSONError(w, http.StatusBadRequest, "default_environment_id must be a UUID string")
+			return
+		}
+		var value string
+		if err := json.Unmarshal(req.DefaultEnvironmentID, &value); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "default_environment_id must be a UUID string")
+			return
+		}
+		if _, err := uuid.Parse(value); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "default_environment_id must be a UUID string")
+			return
+		}
+		defaultEnvironmentID = &value
+	}
 
 	project, err := d.Queries.UpdateProject(
-		r.Context(), orgID, projectID, req.GithubRepo, req.FrictionAutonomy, req.PrPosture, req.AllowPayloadEnvironment,
+		r.Context(), orgID, projectID, req.GithubRepo, req.FrictionAutonomy, req.PrPosture, defaultEnvironmentID,
 	)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "failed to update project")
@@ -725,8 +742,13 @@ func (d *Dependencies) ListEnvironmentsEndpoint(w http.ResponseWriter, r *http.R
 	if !d.verifyProjectAccess(w, r, projectID) {
 		return
 	}
+	usedBy := r.URL.Query().Get("used_by")
+	if usedBy != "" && usedBy != "incidents" && usedBy != "sessions" {
+		writeJSONError(w, http.StatusBadRequest, "used_by must be incidents or sessions")
+		return
+	}
 
-	envs, err := d.Queries.ListEnvironments(r.Context(), projectID)
+	envs, err := d.Queries.ListEnvironments(r.Context(), projectID, usedBy)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "failed to list environments")
 		return
@@ -751,51 +773,6 @@ func (d *Dependencies) ListEnvironmentsEndpoint(w http.ResponseWriter, r *http.R
 	json.NewEncoder(w).Encode(map[string]any{
 		"environments": result,
 		"rollup_ready": rollupReady,
-	})
-}
-
-// CreateEnvironmentEndpoint creates a new environment for a project.
-// POST /api/v1/projects/{projectID}/environments
-func (d *Dependencies) CreateEnvironmentEndpoint(w http.ResponseWriter, r *http.Request) {
-	projectID := chi.URLParam(r, "projectID")
-	if !d.verifyProjectAccess(w, r, projectID) {
-		return
-	}
-
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<16)
-	var req struct {
-		Name string `json:"name"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSONError(w, http.StatusBadRequest, "invalid request body")
-		return
-	}
-	if req.Name == "" {
-		writeJSONError(w, http.StatusBadRequest, "name is required")
-		return
-	}
-	if !environmentNamePattern.MatchString(req.Name) {
-		writeJSONError(w, http.StatusBadRequest, "name must be 1-64 characters using letters, numbers, dot, underscore, or hyphen")
-		return
-	}
-
-	env, err := d.Queries.CreateEnvironment(r.Context(), projectID, req.Name)
-	if err != nil {
-		if strings.Contains(err.Error(), "duplicate key") || strings.Contains(err.Error(), "unique constraint") {
-			writeJSONError(w, http.StatusConflict, "environment with this name already exists")
-			return
-		}
-		writeJSONError(w, http.StatusInternalServerError, "failed to create environment")
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(environmentJSON{
-		ID:        env.ID,
-		ProjectID: env.ProjectID,
-		Name:      env.Name,
-		CreatedAt: env.CreatedAt.Format(time.RFC3339),
 	})
 }
 

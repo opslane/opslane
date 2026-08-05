@@ -24,8 +24,9 @@ var ErrSessionTombstoned = errors.New("session has been deleted")
 var ErrSessionProjectConflict = errors.New("session id belongs to another project")
 
 type SessionRegistration struct {
-	EnvironmentID string
-	Diverged      bool
+	EnvironmentID      string
+	EnvironmentOutcome EnvironmentOutcome
+	Diverged           bool
 }
 
 type SessionSDKIdentity struct {
@@ -34,27 +35,8 @@ type SessionSDKIdentity struct {
 	Release string
 }
 
-// SessionEnvironment returns the environment for a same-project live session.
-// A globally-colliding session id owned by another project is intentionally
-// indistinguishable from an absent session on event ingest.
-func (q *Queries) SessionEnvironment(ctx context.Context, sessionID, projectID string) (string, error) {
-	var environmentID string
-	err := q.pool.QueryRow(ctx,
-		`SELECT environment_id FROM sessions
-		 WHERE id = $1 AND project_id = $2 AND status <> 'deleting'`,
-		sessionID, projectID,
-	).Scan(&environmentID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return "", nil
-	}
-	if err != nil {
-		return "", fmt.Errorf("read session environment: %w", err)
-	}
-	return environmentID, nil
-}
-
 // SessionOwnerProject is used only to classify a globally-colliding client id
-// during registration. Callers must not expose the returned tenant id.
+// during replay initialization. Callers must not expose the returned tenant id.
 func (q *Queries) SessionOwnerProject(ctx context.Context, sessionID string) (string, error) {
 	var projectID string
 	err := q.pool.QueryRow(ctx, `SELECT project_id FROM sessions WHERE id = $1`, sessionID).Scan(&projectID)
@@ -74,7 +56,7 @@ func isUniqueViolation(err error) bool {
 
 // InsertSession registers a client-generated session. It is idempotent so a
 // retried init request neither errors nor resets session progress.
-func (q *Queries) RegisterSession(ctx context.Context, sessionID, projectID, environmentID string, endUserID *string, startedAt time.Time, pageURL string, sdk *SessionSDKIdentity) (*SessionRegistration, error) {
+func (q *Queries) RegisterSession(ctx context.Context, sessionID, projectID, defaultEnvironmentID, environmentLabel string, endUserID *string, startedAt time.Time, pageURL string, sdk *SessionSDKIdentity) (*SessionRegistration, error) {
 	tx, err := q.pool.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("register session: begin: %w", err)
@@ -87,44 +69,69 @@ func (q *Queries) RegisterSession(ctx context.Context, sessionID, projectID, env
 		sdkVersion = &sdk.Version
 		sdkRelease = &sdk.Release
 	}
+	if _, err := tx.Exec(ctx,
+		`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, sessionID); err != nil {
+		return nil, fmt.Errorf("register session: advisory lock: %w", err)
+	}
+
+	var tombstoned bool
+	if err := tx.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM session_tombstones WHERE session_id = $1)`,
+		sessionID,
+	).Scan(&tombstoned); err != nil {
+		return nil, fmt.Errorf("register session: tombstone check: %w", err)
+	}
+	if tombstoned {
+		return nil, ErrSessionTombstoned
+	}
+
+	var storedProjectID, storedEnvironmentID, storedEnvironmentName string
+	err = tx.QueryRow(ctx,
+		`SELECT s.project_id, s.environment_id, e.name
+		 FROM sessions s
+		 JOIN environments e ON e.id = s.environment_id AND e.project_id = s.project_id
+		 WHERE s.id = $1`,
+		sessionID,
+	).Scan(&storedProjectID, &storedEnvironmentID, &storedEnvironmentName)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("register session: read owner: %w", err)
+	}
+	if err == nil && storedProjectID != projectID {
+		return nil, ErrSessionProjectConflict
+	}
+	if err == nil {
+		diverged := false
+		if environmentLabel != "" && environmentNamePattern.MatchString(environmentLabel) {
+			diverged = environmentLabel != storedEnvironmentName
+		} else {
+			diverged = defaultEnvironmentID != storedEnvironmentID
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return nil, fmt.Errorf("register session: commit retry: %w", err)
+		}
+		return &SessionRegistration{
+			EnvironmentID:      storedEnvironmentID,
+			EnvironmentOutcome: EnvironmentOutcomeSession,
+			Diverged:           diverged,
+		}, nil
+	}
+
+	environmentID, environmentOutcome, err := resolveEnvironmentTx(
+		ctx, tx, projectID, defaultEnvironmentID, environmentLabel,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("register session: resolve environment: %w", err)
+	}
 	_, err = tx.Exec(ctx,
 		`INSERT INTO sessions (
 		   id, project_id, environment_id, end_user_id, started_at, page_url,
 		   sdk_name, sdk_version, sdk_release
-		 )
-		 SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9
-		 WHERE NOT EXISTS (SELECT 1 FROM session_tombstones WHERE session_id = $1)
-		 ON CONFLICT (id) DO NOTHING`,
+		 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
 		sessionID, projectID, environmentID, endUserID, startedAt, pageURL,
 		sdkName, sdkVersion, sdkRelease,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert session: %w", err)
-	}
-
-	var storedProjectID, storedEnvironmentID string
-	err = tx.QueryRow(ctx,
-		`SELECT project_id, environment_id FROM sessions WHERE id = $1`,
-		sessionID,
-	).Scan(&storedProjectID, &storedEnvironmentID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		var tombstoned bool
-		if checkErr := tx.QueryRow(ctx,
-			`SELECT EXISTS(SELECT 1 FROM session_tombstones WHERE session_id = $1)`,
-			sessionID,
-		).Scan(&tombstoned); checkErr != nil {
-			return nil, fmt.Errorf("tombstone check: %w", checkErr)
-		}
-		if tombstoned {
-			return nil, ErrSessionTombstoned
-		}
-		return nil, fmt.Errorf("register session: insert produced no session")
-	}
-	if err != nil {
-		return nil, fmt.Errorf("register session: read owner: %w", err)
-	}
-	if storedProjectID != projectID {
-		return nil, ErrSessionProjectConflict
 	}
 
 	var priorEventDivergence bool
@@ -133,7 +140,7 @@ func (q *Queries) RegisterSession(ctx context.Context, sessionID, projectID, env
 		   SELECT 1 FROM error_events
 		   WHERE session_id = $1 AND project_id = $2 AND environment_id <> $3
 		 )`,
-		sessionID, projectID, storedEnvironmentID,
+		sessionID, projectID, environmentID,
 	).Scan(&priorEventDivergence); err != nil {
 		return nil, fmt.Errorf("register session: check event divergence: %w", err)
 	}
@@ -141,14 +148,15 @@ func (q *Queries) RegisterSession(ctx context.Context, sessionID, projectID, env
 		return nil, fmt.Errorf("register session: commit: %w", err)
 	}
 	return &SessionRegistration{
-		EnvironmentID: storedEnvironmentID,
-		Diverged:      storedEnvironmentID != environmentID || priorEventDivergence,
+		EnvironmentID:      environmentID,
+		EnvironmentOutcome: environmentOutcome,
+		Diverged:           priorEventDivergence,
 	}, nil
 }
 
 // InsertSession preserves the existing idempotent API for internal callers.
 func (q *Queries) InsertSession(ctx context.Context, sessionID, projectID, environmentID string, endUserID *string, startedAt time.Time, pageURL string) error {
-	_, err := q.RegisterSession(ctx, sessionID, projectID, environmentID, endUserID, startedAt, pageURL, nil)
+	_, err := q.RegisterSession(ctx, sessionID, projectID, environmentID, "", endUserID, startedAt, pageURL, nil)
 	return err
 }
 

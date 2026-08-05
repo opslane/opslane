@@ -33,13 +33,13 @@ func TestListIncidentsValidatesAndScopesEnvironmentFilter(t *testing.T) {
 	insert := func(environmentID, fingerprint string) string {
 		t.Helper()
 		result, err := deps.Queries.InsertErrorEventAndGroup(ctx, db.IngestParams{
-			ProjectID:     projectID,
-			EnvironmentID: environmentID,
-			ErrorType:     "TypeError",
-			ErrorMessage:  fingerprint,
-			StackTraceRaw: "at app.js:1:1",
-			Fingerprint:   fingerprint,
-			Title:         fingerprint,
+			ProjectID:            projectID,
+			DefaultEnvironmentID: environmentID,
+			ErrorType:            "TypeError",
+			ErrorMessage:         fingerprint,
+			StackTraceRaw:        "at app.js:1:1",
+			Fingerprint:          fingerprint,
+			Title:                fingerprint,
 		})
 		if err != nil {
 			t.Fatalf("InsertErrorEventAndGroup: %v", err)

@@ -29,9 +29,6 @@ CREATE INDEX IF NOT EXISTS idx_error_groups_project_env_last_seen
 CREATE INDEX IF NOT EXISTS idx_sessions_project_env_started
   ON sessions (project_id, environment_id, started_at DESC, id DESC);
 
-ALTER TABLE projects
-  ADD COLUMN IF NOT EXISTS allow_payload_environment BOOLEAN NOT NULL DEFAULT false;
-
 -- Enforce hygiene for new/updated values without rejecting legacy rows during
 -- rollout. Existing installations can validate after inventory/remediation.
 DO $$
@@ -65,4 +62,3 @@ ALTER TABLE projects ADD COLUMN IF NOT EXISTS idempotency_token TEXT;
 CREATE UNIQUE INDEX IF NOT EXISTS uq_projects_org_idem
   ON projects (org_id, idempotency_token)
   WHERE idempotency_token IS NOT NULL;
-ALTER TABLE projects ADD COLUMN IF NOT EXISTS provisioning_key_id UUID;

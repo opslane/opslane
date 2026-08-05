@@ -57,12 +57,12 @@ type ParsedProjectKey struct {
 }
 
 type ProjectKeyLookup struct {
-	KeyID                   string
-	ProjectID               string
-	OrgID                   string
-	Scope                   string
-	AllowedOrigins          []string
-	AllowPayloadEnvironment bool
+	KeyID                string
+	ProjectID            string
+	OrgID                string
+	Scope                string
+	AllowedOrigins       []string
+	DefaultEnvironmentID *string
 }
 
 func prefixForScope(scope string) (string, error) {
@@ -251,13 +251,13 @@ func (q *Queries) LookupProjectKey(ctx context.Context, raw string) (*ProjectKey
 	)
 	err = q.pool.QueryRow(ctx,
 		`SELECT k.project_id, p.org_id, k.scope, k.secret_hash, k.revoked_at,
-		        p.allowed_origins, p.allow_payload_environment
+		        p.allowed_origins, p.default_environment_id
 		 FROM project_api_keys k
 		 JOIN projects p ON p.id = k.project_id
 		 WHERE k.key_id = $1`,
 		parsed.KeyID,
 	).Scan(&out.ProjectID, &out.OrgID, &out.Scope, &storedHash, &revokedAt,
-		&out.AllowedOrigins, &out.AllowPayloadEnvironment)
+		&out.AllowedOrigins, &out.DefaultEnvironmentID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrProjectKeyInvalid
 	}

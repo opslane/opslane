@@ -108,13 +108,13 @@ func TestCrossProjectLookupDeniedWithoutTenantScope(t *testing.T) {
 	}
 
 	_, err = q.InsertErrorEventAndGroup(ctx, db.IngestParams{
-		ProjectID:     proj1.ID,
-		EnvironmentID: env1.ID,
-		ErrorType:     "TypeError",
-		ErrorMessage:  "Cannot read properties of undefined",
-		StackTraceRaw: "at foo.js:1:1",
-		Fingerprint:   "fp-isolation-test",
-		Title:         "TypeError: Cannot read properties of undefined",
+		ProjectID:            proj1.ID,
+		DefaultEnvironmentID: env1.ID,
+		ErrorType:            "TypeError",
+		ErrorMessage:         "Cannot read properties of undefined",
+		StackTraceRaw:        "at foo.js:1:1",
+		Fingerprint:          "fp-isolation-test",
+		Title:                "TypeError: Cannot read properties of undefined",
 	})
 	if err != nil {
 		t.Fatalf("InsertErrorEventAndGroup: %v", err)

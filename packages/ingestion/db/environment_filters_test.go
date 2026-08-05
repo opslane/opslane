@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/opslane/opslane/packages/ingestion/db"
@@ -65,14 +66,14 @@ func TestListErrorGroupsEnvironmentFilterIsKindGatedAndScoped(t *testing.T) {
 		{staging.ID, base.Add(4 * time.Hour)},
 	} {
 		result, err := q.InsertErrorEventAndGroup(ctx, db.IngestParams{
-			ProjectID:     project.ID,
-			EnvironmentID: occurrence.environmentID,
-			ErrorType:     "TypeError",
-			ErrorMessage:  "shared",
-			StackTraceRaw: "at shared.js:1:1",
-			Fingerprint:   "fp-shared-environments",
-			Title:         "TypeError: shared",
-			EventTime:     occurrence.at,
+			ProjectID:            project.ID,
+			DefaultEnvironmentID: occurrence.environmentID,
+			ErrorType:            "TypeError",
+			ErrorMessage:         "shared",
+			StackTraceRaw:        "at shared.js:1:1",
+			Fingerprint:          "fp-shared-environments",
+			Title:                "TypeError: shared",
+			EventTime:            occurrence.at,
 		})
 		if err != nil {
 			t.Fatalf("insert shared occurrence: %v", err)
@@ -80,14 +81,14 @@ func TestListErrorGroupsEnvironmentFilterIsKindGatedAndScoped(t *testing.T) {
 		sharedGroupID = result.GroupID
 	}
 	if _, err := q.InsertErrorEventAndGroup(ctx, db.IngestParams{
-		ProjectID:     project.ID,
-		EnvironmentID: staging.ID,
-		ErrorType:     "TypeError",
-		ErrorMessage:  "staging only",
-		StackTraceRaw: "at staging.js:1:1",
-		Fingerprint:   "fp-staging-only",
-		Title:         "TypeError: staging only",
-		EventTime:     base.Add(6 * time.Hour),
+		ProjectID:            project.ID,
+		DefaultEnvironmentID: staging.ID,
+		ErrorType:            "TypeError",
+		ErrorMessage:         "staging only",
+		StackTraceRaw:        "at staging.js:1:1",
+		Fingerprint:          "fp-staging-only",
+		Title:                "TypeError: staging only",
+		EventTime:            base.Add(6 * time.Hour),
 	}); err != nil {
 		t.Fatalf("insert staging-only error: %v", err)
 	}
@@ -168,17 +169,17 @@ func TestListErrorGroupsCorrelatesIdentityWithEnvironmentAtOccurrenceLevel(t *te
 	insert := func(fingerprint, environmentID, userID, accountID string, at time.Time) string {
 		t.Helper()
 		result, err := q.InsertErrorEventAndGroup(ctx, db.IngestParams{
-			ProjectID:          project.ID,
-			EnvironmentID:      environmentID,
-			ErrorType:          "TypeError",
-			ErrorMessage:       fingerprint,
-			StackTraceRaw:      "at app.js:1:1",
-			Fingerprint:        fingerprint,
-			Title:              fingerprint,
-			EventTime:          at,
-			EndUserID:          userID,
-			EndUserAccountID:   accountID,
-			EndUserAccountName: accountID,
+			ProjectID:            project.ID,
+			DefaultEnvironmentID: environmentID,
+			ErrorType:            "TypeError",
+			ErrorMessage:         fingerprint,
+			StackTraceRaw:        "at app.js:1:1",
+			Fingerprint:          fingerprint,
+			Title:                fingerprint,
+			EventTime:            at,
+			EndUserID:            userID,
+			EndUserAccountID:     accountID,
+			EndUserAccountName:   accountID,
 		})
 		if err != nil {
 			t.Fatalf("insert %s: %v", fingerprint, err)
@@ -288,14 +289,14 @@ func TestListGroupEnvironmentsUsesKindSpecificSources(t *testing.T) {
 		{staging.ID, base.Add(2 * time.Hour)},
 	} {
 		result, err := q.InsertErrorEventAndGroup(ctx, db.IngestParams{
-			ProjectID:     project.ID,
-			EnvironmentID: occurrence.environmentID,
-			ErrorType:     "TypeError",
-			ErrorMessage:  "environment detail",
-			StackTraceRaw: "at app.js:1:1",
-			Fingerprint:   "fp-environment-detail",
-			Title:         "environment detail",
-			EventTime:     occurrence.at,
+			ProjectID:            project.ID,
+			DefaultEnvironmentID: occurrence.environmentID,
+			ErrorType:            "TypeError",
+			ErrorMessage:         "environment detail",
+			StackTraceRaw:        "at app.js:1:1",
+			Fingerprint:          "fp-environment-detail",
+			Title:                "environment detail",
+			EventTime:            occurrence.at,
 		})
 		if err != nil {
 			t.Fatalf("InsertErrorEventAndGroup: %v", err)
@@ -342,5 +343,69 @@ func TestListGroupEnvironmentsUsesKindSpecificSources(t *testing.T) {
 	crossTenant, err := q.ListGroupEnvironments(ctx, otherProject.ID, errorGroupID)
 	if err != nil || len(crossTenant) != 0 {
 		t.Fatalf("cross-tenant ListGroupEnvironments = (%#v, %v), want empty", crossTenant, err)
+	}
+}
+
+func TestListEnvironmentsByObservedSurface(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	q := db.New(pool)
+	org, err := q.CreateOrg(ctx, "environment-observed-surfaces")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, `DELETE FROM sessions WHERE project_id IN (SELECT id FROM projects WHERE org_id = $1)`, org.ID)
+		cleanupTenant(t, pool, org.ID)
+	})
+	project, err := q.CreateProject(ctx, org.ID, "observed", nil)
+	if err != nil || project.DefaultEnvironmentID == nil {
+		t.Fatalf("project = %#v, err=%v", project, err)
+	}
+	production, err := q.CreateEnvironment(ctx, project.ID, "production")
+	if err != nil {
+		t.Fatal(err)
+	}
+	staging, err := q.CreateEnvironment(ctx, project.ID, "staging")
+	if err != nil {
+		t.Fatal(err)
+	}
+	unused, err := q.CreateEnvironment(ctx, project.ID, "unused")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.InsertErrorEventAndGroup(ctx, db.IngestParams{
+		ProjectID: project.ID, DefaultEnvironmentID: production.ID,
+		Fingerprint: "observed-error", ErrorType: "Error", ErrorMessage: "observed", Title: "observed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	insertFrictionGroupForEnvironment(t, pool, project.ID, staging.ID, "observed-friction", time.Now(), time.Now(), 1)
+	observedSessionID := "observed-session-staging-" + uuid.NewString()
+	deletingSessionID := "observed-session-deleting-" + uuid.NewString()
+	if err := q.InsertSession(ctx, observedSessionID, project.ID, staging.ID, nil, time.Now(), ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.InsertSession(ctx, deletingSessionID, project.ID, unused.ID, nil, time.Now(), ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE sessions SET status = 'deleting' WHERE id = $1`, deletingSessionID); err != nil {
+		t.Fatal(err)
+	}
+
+	all, err := q.ListEnvironments(ctx, project.ID, "")
+	if err != nil || len(all) != 3 {
+		t.Fatalf("all = %#v, err=%v", all, err)
+	}
+	incidents, err := q.ListEnvironments(ctx, project.ID, "incidents")
+	if err != nil || len(incidents) != 2 || incidents[0].ID != production.ID || incidents[1].ID != staging.ID {
+		t.Fatalf("incidents = %#v, err=%v", incidents, err)
+	}
+	sessions, err := q.ListEnvironments(ctx, project.ID, "sessions")
+	if err != nil || len(sessions) != 1 || sessions[0].ID != staging.ID {
+		t.Fatalf("sessions = %#v, err=%v", sessions, err)
+	}
+	if _, err := q.ListEnvironments(ctx, project.ID, "unknown"); err == nil {
+		t.Fatal("unknown usedBy succeeded")
 	}
 }

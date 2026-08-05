@@ -8,7 +8,6 @@ import {
   closePool,
   getConfig,
   getPool,
-  seedEnvironment,
   seedTenant,
   type TestTenant,
 } from './helpers.js';
@@ -30,11 +29,6 @@ describe.skipIf(!configured || !playwrightAvailable)('SDK environment browser co
 
   beforeAll(async () => {
     tenant = await seedTenant();
-    stagingEnvironmentId = (await seedEnvironment(tenant.projectId, 'staging')).environmentId;
-    await getPool().query(
-      `UPDATE projects SET allow_payload_environment = true WHERE id = $1`,
-      [tenant.projectId],
-    );
     const vue = (await import('@vitejs/plugin-vue')).default;
     fixture = await startFixture({
       fixtureDir: VUE_FIXTURE,
@@ -63,10 +57,13 @@ describe.skipIf(!configured || !playwrightAvailable)('SDK environment browser co
         window as Window & { __opslaneReplayReady?: boolean }
       ).__opslaneReplayReady === true);
 
-      const session = await getPool().query<{ environment_id: string }>(
-        `SELECT environment_id FROM sessions WHERE project_id = $1 ORDER BY started_at DESC LIMIT 1`,
-        [tenant.projectId],
-      );
+    const session = await getPool().query<{ environment_id: string; name: string }>(
+      `SELECT s.environment_id, e.name FROM sessions s JOIN environments e ON e.id = s.environment_id
+       WHERE s.project_id = $1 ORDER BY s.started_at DESC LIMIT 1`,
+      [tenant.projectId],
+    );
+    stagingEnvironmentId = session.rows[0]?.environment_id ?? '';
+    expect(session.rows[0]?.name).toBe('staging');
       expect(session.rows[0]?.environment_id).toBe(stagingEnvironmentId);
 
       await page.click('[data-testid="nav-usercard"]');

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
-	"log/slog"
 	"net/http"
 	"regexp"
 	"time"
@@ -225,61 +224,36 @@ func (d *Dependencies) ingestErrorEvent(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	resolvedEnvironmentID, fallbackReason, err := d.resolvePayloadEnvironment(
-		r.Context(), projectID, environmentID, payload.Environment,
-	)
-	if err != nil {
-		RecordIngestError("environment_resolution")
-		writeJSONError(w, http.StatusInternalServerError, "failed to process event")
-		return
-	}
-	if fallbackReason != "" {
-		RecordEnvironmentOverrideFallback(fallbackReason)
-		if shouldLogEnvironmentFallback(fallbackReason) {
-			slog.Warn("payload environment override fell back to key environment", "reason", fallbackReason, "project_id", projectID)
-		}
-	}
-	if payload.SessionID != "" {
-		sessionEnvironmentID, lookupErr := d.Queries.SessionEnvironment(r.Context(), payload.SessionID, projectID)
-		if lookupErr != nil {
-			RecordIngestError("session_environment_lookup")
-			writeJSONError(w, http.StatusInternalServerError, "failed to process event")
-			return
-		}
-		if sessionEnvironmentID != "" {
-			if sessionEnvironmentID != resolvedEnvironmentID {
-				RecordEnvironmentSessionDivergence()
-			}
-			resolvedEnvironmentID = sessionEnvironmentID
-		}
-	}
-	environmentID = resolvedEnvironmentID
-
 	result, err := d.Queries.InsertErrorEventAndGroup(r.Context(), db.IngestParams{
-		ProjectID:          projectID,
-		EnvironmentID:      environmentID,
-		EventTime:          resolveEventTime(payload.Timestamp, start),
-		ErrorType:          payload.Error.Type,
-		ErrorMessage:       payload.Error.Message,
-		StackTraceRaw:      payload.Error.Stack,
-		Fingerprint:        fingerprint,
-		Title:              title,
-		Breadcrumbs:        breadcrumbs,
-		Context:            ctx,
-		Release:            payload.Release,
-		DebugMeta:          debugMeta.JSON,
-		CommitSHA:          commitSHA,
-		SessionID:          payload.SessionID,
-		Platform:           payload.Platform,
-		EndUserID:          endUser.ID,
-		EndUserEmail:       endUser.Email,
-		EndUserAccountID:   endUser.AccountID,
-		EndUserAccountName: endUser.AccountName,
+		ProjectID:            projectID,
+		DefaultEnvironmentID: environmentID,
+		EnvironmentLabel:     payload.Environment,
+		EventTime:            resolveEventTime(payload.Timestamp, start),
+		ErrorType:            payload.Error.Type,
+		ErrorMessage:         payload.Error.Message,
+		StackTraceRaw:        payload.Error.Stack,
+		Fingerprint:          fingerprint,
+		Title:                title,
+		Breadcrumbs:          breadcrumbs,
+		Context:              ctx,
+		Release:              payload.Release,
+		DebugMeta:            debugMeta.JSON,
+		CommitSHA:            commitSHA,
+		SessionID:            payload.SessionID,
+		Platform:             payload.Platform,
+		EndUserID:            endUser.ID,
+		EndUserEmail:         endUser.Email,
+		EndUserAccountID:     endUser.AccountID,
+		EndUserAccountName:   endUser.AccountName,
 	})
 	if err != nil {
 		RecordIngestError("db_error")
 		writeJSONError(w, http.StatusInternalServerError, "failed to process event")
 		return
+	}
+	RecordEnvironmentResolution(result.EnvironmentOutcome)
+	if result.EnvironmentDiverged {
+		RecordEnvironmentSessionDivergence()
 	}
 
 	RecordEventIngested(payload.Platform)

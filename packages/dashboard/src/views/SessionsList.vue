@@ -35,9 +35,9 @@ let fetchGeneration = 0;
 
 const {
   environments,
-  rollupReady,
+  filterAvailable,
   selectedEnvironmentId,
-} = useEnvironmentFilter(projectId);
+} = useEnvironmentFilter(projectId, 'sessions');
 
 const environmentOptions = computed(() => [
   { value: '', label: 'All environments' },
@@ -77,7 +77,7 @@ function filters(): SessionFilters {
     return {
       search: search.value.trim() || undefined,
       has_signals: withSignals.value || undefined,
-      environment_id: rollupReady.value ? selectedEnvironmentId.value || undefined : undefined,
+      environment_id: filterAvailable.value ? selectedEnvironmentId.value || undefined : undefined,
       from: isoDate(customFrom.value),
       to: isoDate(customTo.value),
     };
@@ -85,7 +85,7 @@ function filters(): SessionFilters {
   return {
     search: search.value.trim() || undefined,
     has_signals: withSignals.value || undefined,
-    environment_id: rollupReady.value ? selectedEnvironmentId.value || undefined : undefined,
+    environment_id: filterAvailable.value ? selectedEnvironmentId.value || undefined : undefined,
     from: presetStart(datePreset.value),
     to: undefined,
   };
@@ -159,7 +159,7 @@ function clearFilters(): void {
   applyFilters();
 }
 
-watch(rollupReady, (ready) => {
+watch(filterAvailable, (ready) => {
   if (ready && selectedEnvironmentId.value) applyFilters();
 });
 
@@ -209,7 +209,7 @@ onMounted(() => {
         @update:model-value="selectDatePreset"
       />
       <SelectField
-        v-if="rollupReady"
+        v-if="filterAvailable"
         :model-value="selectedEnvironmentId"
         label="Environment"
         :options="environmentOptions"

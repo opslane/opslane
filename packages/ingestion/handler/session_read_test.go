@@ -396,7 +396,7 @@ func TestGetIncident_IncludesSessionPointerBeforeChunksAreReady(t *testing.T) {
 	sessionID := fmt.Sprintf("sess_pointer_%d", time.Now().UnixNano())
 	seedReadableSession(t, deps.Queries, projectID, envID, sessionID, time.Now())
 	result, err := deps.Queries.InsertErrorEventAndGroup(context.Background(), db.IngestParams{
-		ProjectID: projectID, EnvironmentID: envID, Fingerprint: "handler-pointer",
+		ProjectID: projectID, DefaultEnvironmentID: envID, Fingerprint: "handler-pointer",
 		Title: "pointer", ErrorType: "TypeError", ErrorMessage: "boom", StackTraceRaw: "at test", SessionID: sessionID,
 	})
 	if err != nil {

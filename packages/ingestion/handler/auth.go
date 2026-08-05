@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
-	"sync"
 
 	"github.com/opslane/opslane/packages/ingestion/auth"
 	"github.com/opslane/opslane/packages/ingestion/db"
@@ -25,7 +24,6 @@ const (
 	ctxRequestID
 	ctxUserID
 	ctxAllowedOrigins
-	ctxAllowPayloadEnvironment
 	ctxRole
 	ctxKeyScope
 )
@@ -68,18 +66,9 @@ func AllowedOriginsFromCtx(ctx context.Context) []string {
 	return v
 }
 
-// AllowPayloadEnvironmentFromCtx reports whether this project's SDK payloads
-// may select a pre-created project environment by validated name.
-func AllowPayloadEnvironmentFromCtx(ctx context.Context) bool {
-	v, _ := ctx.Value(ctxAllowPayloadEnvironment).(bool)
-	return v
-}
-
 // Dependencies holds shared service dependencies (DB, etc.) for handlers.
 type Dependencies struct {
-	Queries       *db.Queries
-	envResolverMu sync.Mutex
-	envResolver   *environmentResolver
+	Queries *db.Queries
 	// resetSessionStore is a narrow test seam for password-reset session
 	// revocation. Production falls back to Queries.
 	resetSessionStore passwordResetSessionStore

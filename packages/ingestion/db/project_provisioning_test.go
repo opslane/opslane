@@ -22,6 +22,13 @@ func TestProvisionProjectIsIdempotentAndRotatesTheOneTimeKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first ProvisionProject: %v", err)
 	}
+	staging, err := q.CreateEnvironment(ctx, first.Project.ID, "staging")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.UpdateProject(ctx, org.ID, first.Project.ID, nil, nil, nil, &staging.ID); err != nil {
+		t.Fatal(err)
+	}
 	second, err := q.ProvisionProject(ctx, org.ID, "ignored retry name", nil, "attempt-1")
 	if err != nil {
 		t.Fatalf("second ProvisionProject: %v", err)
@@ -32,6 +39,9 @@ func TestProvisionProjectIsIdempotentAndRotatesTheOneTimeKey(t *testing.T) {
 	}
 	if second.Project.Name != "Checkout" || second.Project.GithubRepo == nil || *second.Project.GithubRepo != "acme/checkout" {
 		t.Fatalf("retry overwrote original project fields: %+v", second.Project)
+	}
+	if second.Project.DefaultEnvironmentID == nil || *second.Project.DefaultEnvironmentID != staging.ID {
+		t.Fatalf("retry reset selected default: %+v", second.Project)
 	}
 	if first.APIKey.ID == second.APIKey.ID || first.APIKey.Raw == second.APIKey.Raw {
 		t.Fatalf("retry did not mint a fresh one-time key: first=%+v second=%+v", first.APIKey, second.APIKey)

@@ -43,10 +43,31 @@ not mint or repurpose without a design.
 The pre-S1 per-environment keys, destroyed by migration 029 (v26.8.0).
 Historical only.
 
+**Environment label**:
+The exact, case-sensitive deployment name supplied by an SDK. A valid label is
+1–64 characters using letters, numbers, `.`, `_`, or `-`.
+_Avoid_: "environment override" — project keys do not carry an environment
+
+**Environment**:
+A durable, project-owned identity materialized from the first telemetry carrying
+a valid environment label.
+_Avoid_: "approved environment", "environment allowlist"
+
+**Default environment**:
+The environment used when telemetry omits a label or supplies an invalid one.
+Every project begins with `production` as its default.
+_Avoid_: "key environment", "production fallback"
+
 ## Relationships
 
 - A **Project** has any number of active keys per **Scope**; minting never
   revokes, revocation is always exact-key.
+- A **Project** begins with a `production` **Default environment**. The first
+  telemetry carrying any other valid **Environment label** materializes the
+  corresponding **Environment** in the same transaction as that telemetry.
+- Missing and invalid **Environment labels** use the **Default environment**.
+  Invalid raw values are not stored. Changing the default affects future telemetry
+  only; an existing session keeps the environment selected when it started.
 - A **Source-map key** carries exactly one issuing URL, sealed in at mint
   time; the URL routes uploads, the keyid+secret authenticate them.
 - Reads require a **User session**; writes require a key whose **Scope**

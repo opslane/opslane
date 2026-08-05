@@ -68,10 +68,9 @@ The agent callback requires `code`, `installation_id`, and UUID `state`; definit
 | POST | `/api/v1/onboarding/setup` | First-run setup |
 | GET | `/api/v1/projects` | List projects |
 | POST | `/api/v1/projects` | Create project |
-| PATCH | `/api/v1/projects/{projectID}` | Update project settings, including `friction_autonomy`, `pr_posture`, and the admin-gated `allow_payload_environment` override flag (partial: omitted/null fields are preserved, so `github_repo` can no longer be cleared here) |
+| PATCH | `/api/v1/projects/{projectID}` | Update project settings, including `friction_autonomy`, `pr_posture`, and a same-project `default_environment_id` (the default field must be an explicit UUID string when present) |
 | GET | `/api/v1/projects/{projectID}/fix-stats` | Per-kind fix generation and PR outcome receipts |
-| GET | `/api/v1/projects/{projectID}/environments` | List environments |
-| POST | `/api/v1/projects/{projectID}/environments` | Create environment |
+| GET | `/api/v1/projects/{projectID}/environments` | List all environments, or only surface-observed rows with `used_by=incidents` or `used_by=sessions` |
 | GET | `/api/v1/projects/{projectID}/event-count` | Event count stats |
 | GET | `/api/v1/projects/{projectID}/incidents` | List incidents |
 | GET | `/api/v1/projects/{projectID}/incidents/{incidentID}` | Incident detail |
@@ -107,6 +106,13 @@ The agent callback requires `code`, `installation_id`, and UUID `state`; definit
 | Method | Path | Auth | Purpose |
 | --- | --- | --- | --- |
 | GET | `/internal/v1/projects/{projectID}/sessions/{sessionID}/chunks/{seq}` | `X-Internal-Token` | Worker fetch of one decoded, re-redacted scrubbed chunk |
+
+## Method mismatch
+
+A request whose path is registered but whose method is not returns a JSON `404`, not a `405`.
+The router sets one `MethodNotAllowed` handler, so this holds for every route above; an
+unregistered method is indistinguishable from an unregistered path. Handlers that write
+`405` themselves (password-reset flows) are unaffected.
 
 ## Catch-all
 
