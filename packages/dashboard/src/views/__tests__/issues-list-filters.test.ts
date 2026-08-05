@@ -438,3 +438,73 @@ describe('IssuesList URL filters', () => {
     wrapper.unmount();
   });
 });
+
+describe('IssuesList archived escape hatch', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.listAccounts.mockResolvedValue([]);
+    mocks.listEnvironments.mockResolvedValue({ environments: [], rollup_ready: false });
+    mocks.route.query = {};
+    window.history.replaceState({}, '', '/');
+  });
+
+  it('offers the archived view from an empty filtered feed and keeps the other filters', async () => {
+    mocks.route.query = { project_id: 'p1', platform: 'python' };
+    window.history.replaceState({}, '', '/?project_id=p1&platform=python');
+    mocks.listIncidents.mockResolvedValue([]);
+
+    const wrapper = mountFeed();
+    await flushPromises();
+
+    expect(mocks.listIncidents).toHaveBeenCalledWith('p1', { platform: 'python' });
+
+    await wrapper.get('[data-testid="view-archived"]').trigger('click');
+    await flushPromises();
+
+    // Assert on the request, not the rendered text: the point of the link is
+    // the filter it applies, and it must not discard the platform filter.
+    expect(mocks.listIncidents).toHaveBeenLastCalledWith('p1', {
+      platform: 'python',
+      status: 'archived',
+    });
+
+    // The URL must follow too, or a reload drops the user back to the
+    // default view with no way to tell what happened.
+    expect(mocks.replace).toHaveBeenCalledWith({
+      query: {
+        project_id: 'p1',
+        platform: 'python',
+        status: 'archived',
+      },
+    });
+
+    wrapper.unmount();
+  });
+
+  it('offers the archived view from a wholly empty feed', async () => {
+    mocks.route.query = { project_id: 'p1' };
+    window.history.replaceState({}, '', '/?project_id=p1');
+    mocks.listIncidents.mockResolvedValue([]);
+
+    const wrapper = mountFeed();
+    await flushPromises();
+
+    expect(wrapper.find('[data-testid="view-archived"]').exists()).toBe(true);
+
+    wrapper.unmount();
+  });
+
+  it('does not offer the archived view when already viewing archived', async () => {
+    mocks.route.query = { project_id: 'p1', status: 'archived' };
+    window.history.replaceState({}, '', '/?project_id=p1&status=archived');
+    mocks.listIncidents.mockResolvedValue([]);
+
+    const wrapper = mountFeed();
+    await flushPromises();
+
+    expect(mocks.listIncidents).toHaveBeenCalledWith('p1', { status: 'archived' });
+    expect(wrapper.find('[data-testid="view-archived"]').exists()).toBe(false);
+
+    wrapper.unmount();
+  });
+});
