@@ -193,7 +193,11 @@ that in `IssuesList.vue` would drift.
 
 ## Verification
 
-**Go — `packages/ingestion/db/queries_test.go`:**
+**Go — new file `packages/ingestion/db/archived_visibility_test.go`:**
+
+A focused per-concern file in package `db_test`, following the
+`environment_filters_test.go` precedent, rather than appending to the
+1000-line `queries_test.go`. It reuses that package's existing helpers.
 
 Incident lists:
 
@@ -208,9 +212,10 @@ filter that would otherwise pass every other test:
 
 | case | fixture |
 | --- | --- |
-| error arm | 101 archived `kind='error'` groups with `last_seen` newer than one older live error group, all in the selected environment |
-| friction arm | same shape for `kind='friction'` |
-| no environment filter | same shape against the unfiltered branch |
+| error arm, environment filtered | 101 archived `kind='error'` groups with `last_seen` newer than one older live error group, all in the selected environment |
+| friction arm, environment filtered | same shape for `kind='friction'` |
+| unfiltered branch, error | same shape for `kind='error'` with no environment filter |
+| unfiltered branch, friction | same shape for `kind='friction'` with no environment filter |
 
 In each case the older live group must still be returned.
 
@@ -240,6 +245,11 @@ pnpm --filter @opslane/dashboard build
 pnpm --filter @opslane/dashboard test
 ```
 
-Both dashboard commands are required by `packages/dashboard/AGENTS.md:13`. Go DB
-tests require `DATABASE_URL`; confirm the run reports **zero** skips rather than
-trusting an `ok`.
+Both dashboard commands are required by `packages/dashboard/AGENTS.md:13`.
+
+Go DB tests do **not** require `DATABASE_URL` — `testPool`
+(`testhelper_test.go:17`) falls back to the local dev DSN — so a skip means
+Postgres is unreachable, not that a variable is missing. The storage tests are
+the ones that need environment: they `t.Skip` without the MinIO block. Start
+the services and export that block as a unit, then confirm the run reports
+**zero** skips rather than trusting an `ok`.

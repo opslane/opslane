@@ -4,7 +4,7 @@
 
 **Goal:** Archived incidents disappear from every incident list and account incident count unless the caller explicitly asks for `status=archived`.
 
-**Architecture:** The exclusion lives in SQL inside `packages/ingestion/db/queries.go`, not in the Vue layer, because `ListErrorGroups` caps at `LIMIT 100` and archived rows currently evict live ones from the response. Two shared predicate constants are applied at four query sites: the three `ListErrorGroups` WHERE-clause builders and the two account aggregate queries. The dashboard adds no filtering logic — only an escape-hatch link in its empty states.
+**Architecture:** The exclusion lives in SQL inside `packages/ingestion/db/queries.go`, not in the Vue layer, because `ListErrorGroups` caps at `LIMIT 100` and archived rows currently evict live ones from the response. Two shared predicate constants are applied at five query sites: the three `ListErrorGroups` WHERE-clause builders and the two account aggregate queries. The dashboard adds no filtering logic — only an escape-hatch link in its empty states.
 
 **Tech Stack:** Go 1.24 + pgx (ingestion), Vue 3 + Vitest + `@vue/test-utils` (dashboard), Postgres.
 
@@ -616,6 +616,16 @@ describe('IssuesList archived escape hatch', () => {
       status: 'archived',
     });
 
+    // The URL must follow too, or a reload drops the user back to the
+    // default view with no way to tell what happened.
+    expect(mocks.replace).toHaveBeenCalledWith({
+      query: {
+        project_id: 'p1',
+        platform: 'python',
+        status: 'archived',
+      },
+    });
+
     wrapper.unmount();
   });
 
@@ -689,12 +699,17 @@ Then add this block inside **both** `<EmptyState>` elements — the `v-if="hasAc
           v-if="!viewingArchived"
           type="button"
           data-testid="view-archived"
-          class="mt-3 text-sm text-muted underline underline-offset-4 hover:text-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+          class="mx-auto mt-3 block text-sm text-muted underline underline-offset-4 hover:text-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
           @click="viewArchived"
         >
           Archived issues are hidden — view archived
         </button>
 ```
+
+`block mx-auto` is load-bearing, not decoration. `EmptyState.vue` wraps its
+default slot in a single `text-center` div, and the existing primary action is
+`inline-flex` — a second inline element would sit beside it on the same line.
+`block` forces its own row and `mx-auto` re-centers it.
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
@@ -733,7 +748,9 @@ the URL sync are preserved, and it hides when already viewing archived."
 Run the full repository gate before opening a PR. `DATABASE_URL` alone is not enough for a zero-skip run — the Go storage tests `t.Skip` without the MinIO variables, so export the whole block from `AGENTS.md` as a unit and start the services first:
 
 ```bash
-docker compose up -d postgres minio
+# --wait blocks until both report healthy. Without it the first test can race
+# container startup and t.Skip, which reads as a green run.
+docker compose up -d --wait postgres minio
 
 export INGESTION_PORT=8082
 export OPSLANE_POSTGRES_HOST_PORT=5434
