@@ -4,7 +4,7 @@
 
 **Goal:** Make the worker refuse to start Langfuse tracing on a partial config, log its tracing state at startup, and surface export failures — so a misconfiguration is loud instead of a silent 33-hour blind spot.
 
-**Architecture:** A pure resolver classifies the Langfuse environment into `disabled` / `incomplete` / `enabled` and normalizes the values. The resolved config is then the *only* source of truth: it is passed explicitly to `LangfuseSpanProcessor` and consumed by the trace-URL builder, so nothing re-reads `process.env` behind the validator's back. A throttled, crash-proof diagnostic adapter routes OpenTelemetry's internal errors into the worker's JSON logger.
+**Architecture:** A pure resolver classifies the Langfuse environment into `disabled` / `incomplete` / `enabled` and normalizes the values. The resolved config is then the *only* source of truth: it is passed explicitly to `LangfuseSpanProcessor` and consumed by the trace-URL builder, so nothing re-reads `process.env` behind the validator's back. A throttled, redacting, crash-proof diagnostic adapter routes OpenTelemetry's internal errors into the worker's JSON logger.
 
 **Tech Stack:** TypeScript (ESM, strict), Vitest, `@opentelemetry/api` 1.9.1, `@opentelemetry/sdk-node` 0.220.0, `@langfuse/otel` 5.9.1.
 
@@ -15,8 +15,9 @@
 - Tests are Vitest, colocated in `packages/worker/src/__tests__/`.
 - `logger` (`packages/worker/src/logger.ts`) exposes exactly `info`, `warn`, `error`. **There is no `debug` level.**
 - `logger.log` calls `JSON.stringify` on its fields **unguarded** — never pass a value that may be circular.
-- Tracing must never crash the worker. Every new failure path degrades to a log line and returns normally.
-- Credentials (`LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`) must never appear in a log line, and never as a top-level field on a loggable object.
+- **`String(err)` can throw.** `String(Object.create(null))` raises `TypeError`. Every error-to-string conversion goes through `safeErrorMessage` (Task 0). A raw `String(err)` inside a `catch` re-throws out of the handler and defeats the whole no-crash guarantee.
+- Tracing must never crash the worker, never block startup, and never block shutdown. Every new failure path degrades to a log line and returns.
+- Credentials (`LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`) must never appear in a log line, never as a top-level field on a loggable object, and never inside a diagnostic message forwarded from OTel.
 - `NodeSDK.start()` returns `void` synchronously — it proves local registration only, never delivery.
 - Verification for every task: `pnpm --filter @opslane/worker build && pnpm --filter @opslane/worker test`.
 
@@ -24,10 +25,117 @@
 
 `tracing.ts` is 207 lines today and would roughly double. Split by responsibility so each file has one job and its tests sit beside it:
 
-- **Create `packages/worker/src/tracing-config.ts`** — environment resolution and normalization. Pure, no I/O, no OTel imports. Owns `TracingConfig`, `resolveTracingConfig`, `normalizeBaseUrl`, `describeConfig`.
-- **Create `packages/worker/src/tracing-diag.ts`** — the OTel diagnostic adapter. Owns `DiagThrottle`, `normalizeDiagMessage`, `createDiagLogger`.
-- **Modify `packages/worker/src/tracing.ts`** — SDK lifecycle and span helpers. Consumes the two files above. Keeps `initTracing`, `shutdownTracing`, `withJobTrace`, `traceSpan`, `getActiveTraceId`, `buildLangfuseTraceUrl`, `getToolSpanAttributes`.
+- **Modify `packages/worker/src/logger.ts`** — add `safeErrorMessage`, used by every new catch handler in this plan.
+- **Create `packages/worker/src/tracing-config.ts`** — environment resolution and normalization. Pure, no I/O, no OTel imports.
+- **Create `packages/worker/src/tracing-diag.ts`** — the OTel diagnostic adapter: throttle, redaction, message normalization.
+- **Modify `packages/worker/src/tracing.ts`** — SDK lifecycle and span helpers. Consumes the two files above.
 - **Modify `packages/worker/src/index.ts:288-296`** — `trace_url` failure logging.
+
+---
+
+### Task 0: Crash-proof error stringification
+
+**Files:**
+- Modify: `packages/worker/src/logger.ts`
+- Test: `packages/worker/src/__tests__/logger.test.ts` (create if absent; append if present)
+
+**Interfaces:**
+- Consumes: nothing.
+- Produces: `safeErrorMessage(err: unknown): string`.
+
+Every later task depends on this. It lives in `logger.ts` because it is about producing a loggable string, and both `tracing.ts` and `index.ts` already import from there.
+
+- [ ] **Step 1: Write the failing test**
+
+Create or append to `packages/worker/src/__tests__/logger.test.ts`:
+
+```ts
+import { describe, it, expect } from 'vitest';
+import { safeErrorMessage } from '../logger.js';
+
+describe('safeErrorMessage', () => {
+  it('returns the message of an Error', () => {
+    expect(safeErrorMessage(new Error('boom'))).toBe('boom');
+  });
+
+  it('stringifies ordinary values', () => {
+    expect(safeErrorMessage('plain')).toBe('plain');
+    expect(safeErrorMessage(42)).toBe('42');
+    expect(safeErrorMessage(null)).toBe('null');
+  });
+
+  it('does not throw on a null-prototype object', () => {
+    // String(Object.create(null)) raises TypeError. A raw String(err) inside a
+    // catch would re-throw out of the handler.
+    const hostile = Object.create(null) as unknown;
+    expect(() => safeErrorMessage(hostile)).not.toThrow();
+    expect(safeErrorMessage(hostile)).toBe('unserializable error');
+  });
+
+  it('does not throw when a message getter throws', () => {
+    const hostile = new Error('x');
+    Object.defineProperty(hostile, 'message', {
+      get() {
+        throw new Error('nope');
+      },
+    });
+    expect(() => safeErrorMessage(hostile)).not.toThrow();
+    expect(safeErrorMessage(hostile)).toBe('unserializable error');
+  });
+
+  it('does not throw when toString throws', () => {
+    const hostile = {
+      toString() {
+        throw new Error('nope');
+      },
+    };
+    expect(() => safeErrorMessage(hostile)).not.toThrow();
+  });
+});
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `pnpm --filter @opslane/worker test -- logger`
+Expected: FAIL — `safeErrorMessage` is not exported.
+
+- [ ] **Step 3: Write minimal implementation**
+
+Append to `packages/worker/src/logger.ts`:
+
+```ts
+/**
+ * Convert an unknown thrown value to a loggable string without ever throwing.
+ *
+ * `String(Object.create(null))` raises TypeError, and a `message`/`toString`
+ * getter can throw arbitrarily. A raw conversion inside a catch block would
+ * therefore re-throw out of the handler — which is exactly the crash the
+ * handlers exist to prevent.
+ */
+export function safeErrorMessage(err: unknown): string {
+  try {
+    if (err instanceof Error) {
+      const message = err.message;
+      return typeof message === 'string' ? message : 'unserializable error';
+    }
+    return String(err);
+  } catch {
+    return 'unserializable error';
+  }
+}
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `pnpm --filter @opslane/worker test -- logger`
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add packages/worker/src/logger.ts packages/worker/src/__tests__/logger.test.ts
+git commit -m "feat(worker): add safeErrorMessage for crash-proof error logging"
+```
 
 ---
 
@@ -102,8 +210,9 @@ describe('resolveTracingConfig', () => {
   });
 
   it('returns enabled with a null project id when only the trio is set', () => {
-    const config = resolveTracingConfig({ ...KEYS, LANGFUSE_BASE_URL: 'https://us.cloud.langfuse.com' });
-    expect(config).toEqual({
+    expect(
+      resolveTracingConfig({ ...KEYS, LANGFUSE_BASE_URL: 'https://us.cloud.langfuse.com' }),
+    ).toEqual({
       status: 'enabled',
       baseUrl: 'https://us.cloud.langfuse.com',
       projectId: null,
@@ -112,21 +221,23 @@ describe('resolveTracingConfig', () => {
   });
 
   it('treats a whitespace-only project id as absent', () => {
-    const config = resolveTracingConfig({
-      ...KEYS,
-      LANGFUSE_BASE_URL: 'https://us.cloud.langfuse.com',
-      LANGFUSE_PROJECT_ID: '   ',
-    });
-    expect(config).toMatchObject({ status: 'enabled', projectId: null });
+    expect(
+      resolveTracingConfig({
+        ...KEYS,
+        LANGFUSE_BASE_URL: 'https://us.cloud.langfuse.com',
+        LANGFUSE_PROJECT_ID: '   ',
+      }),
+    ).toMatchObject({ status: 'enabled', projectId: null });
   });
 
   it('returns enabled with both values when all four are set', () => {
-    const config = resolveTracingConfig({
-      ...KEYS,
-      LANGFUSE_BASE_URL: 'https://us.cloud.langfuse.com',
-      LANGFUSE_PROJECT_ID: 'proj-1',
-    });
-    expect(config).toMatchObject({ status: 'enabled', projectId: 'proj-1' });
+    expect(
+      resolveTracingConfig({
+        ...KEYS,
+        LANGFUSE_BASE_URL: 'https://us.cloud.langfuse.com',
+        LANGFUSE_PROJECT_ID: 'proj-1',
+      }),
+    ).toMatchObject({ status: 'enabled', projectId: 'proj-1' });
   });
 });
 
@@ -150,12 +261,13 @@ describe('normalizeBaseUrl', () => {
 
 describe('describeConfig', () => {
   it('never exposes credentials', () => {
-    const config = resolveTracingConfig({
-      ...KEYS,
-      LANGFUSE_BASE_URL: 'https://us.cloud.langfuse.com',
-      LANGFUSE_PROJECT_ID: 'proj-1',
-    });
-    const described = describeConfig(config);
+    const described = describeConfig(
+      resolveTracingConfig({
+        ...KEYS,
+        LANGFUSE_BASE_URL: 'https://us.cloud.langfuse.com',
+        LANGFUSE_PROJECT_ID: 'proj-1',
+      }),
+    );
     expect(described).toEqual({
       status: 'enabled',
       host: 'https://us.cloud.langfuse.com',
@@ -323,8 +435,13 @@ git commit -m "feat(worker): add pure Langfuse tracing config resolver"
 - Test: `packages/worker/src/__tests__/tracing-diag.test.ts`
 
 **Interfaces:**
-- Consumes: `logger` from `./logger.js`.
-- Produces: `class DiagThrottle` with `admit(fingerprint: string, now: number): number | null` and `drain(): { fingerprint: string; suppressed: number }[]`; `normalizeDiagMessage(message: string, args: unknown[]): string`; `createDiagLogger(throttle: DiagThrottle, now?: () => number): DiagLogger`.
+- Consumes: `logger`, `safeErrorMessage` from `./logger.js`.
+- Produces:
+  - `interface DiagThrottleOptions { windowMs?: number; maxEntries?: number; onEvict?: (evicted: { fingerprint: string; suppressed: number }) => void }`
+  - `class DiagThrottle` with `constructor(options?: DiagThrottleOptions)`, `admit(fingerprint: string, now: number): number | null`, `drain(): { fingerprint: string; suppressed: number }[]`
+  - `createRedactor(secrets: readonly string[]): (text: string) => string`
+  - `normalizeDiagMessage(message: unknown, args: unknown[], redact?: (text: string) => string): string`
+  - `createDiagLogger(throttle: DiagThrottle, redact: (text: string) => string, now?: () => number): DiagLogger`
 
 `admit` returns the suppressed count to report (0 on first emission for a fingerprint), or `null` when the line should be dropped.
 
@@ -334,36 +451,38 @@ Create `packages/worker/src/__tests__/tracing-diag.test.ts`:
 
 ```ts
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { DiagThrottle, normalizeDiagMessage, createDiagLogger } from '../tracing-diag.js';
+import {
+  DiagThrottle,
+  normalizeDiagMessage,
+  createDiagLogger,
+  createRedactor,
+} from '../tracing-diag.js';
 import { logger } from '../logger.js';
 
 describe('DiagThrottle', () => {
   it('admits the first occurrence of a fingerprint with no suppressed count', () => {
-    const throttle = new DiagThrottle(60_000, 50);
-    expect(throttle.admit('warn:boom', 1_000)).toBe(0);
+    expect(new DiagThrottle().admit('warn:boom', 1_000)).toBe(0);
   });
 
   it('drops repeats inside the window and reports the count after it', () => {
-    const throttle = new DiagThrottle(60_000, 50);
+    const throttle = new DiagThrottle({ windowMs: 60_000 });
     expect(throttle.admit('warn:boom', 0)).toBe(0);
     expect(throttle.admit('warn:boom', 10_000)).toBeNull();
     expect(throttle.admit('warn:boom', 20_000)).toBeNull();
-    // Window elapsed: emit, reporting the two that were dropped.
     expect(throttle.admit('warn:boom', 60_000)).toBe(2);
-    // Counter resets after reporting.
     expect(throttle.admit('warn:boom', 120_000)).toBe(0);
   });
 
   it('keeps distinct fingerprints independent', () => {
     // A noisy error must not mask a different, more important one.
-    const throttle = new DiagThrottle(60_000, 50);
+    const throttle = new DiagThrottle({ windowMs: 60_000 });
     expect(throttle.admit('warn:noisy', 0)).toBe(0);
     expect(throttle.admit('warn:noisy', 1_000)).toBeNull();
     expect(throttle.admit('error:important', 1_000)).toBe(0);
   });
 
   it('drains outstanding suppressed counts and clears them', () => {
-    const throttle = new DiagThrottle(60_000, 50);
+    const throttle = new DiagThrottle({ windowMs: 60_000 });
     throttle.admit('warn:boom', 0);
     throttle.admit('warn:boom', 1_000);
     throttle.admit('warn:boom', 2_000);
@@ -371,13 +490,52 @@ describe('DiagThrottle', () => {
     expect(throttle.drain()).toEqual([]);
   });
 
-  it('evicts the oldest fingerprint when full so the map cannot grow unbounded', () => {
-    const throttle = new DiagThrottle(60_000, 2);
+  it('reports suppressed counts on eviction instead of losing them', () => {
+    const evicted: { fingerprint: string; suppressed: number }[] = [];
+    const throttle = new DiagThrottle({
+      windowMs: 60_000,
+      maxEntries: 2,
+      onEvict: (e) => evicted.push(e),
+    });
+    throttle.admit('a', 0);
+    throttle.admit('a', 1_000); // suppressed = 1
+    throttle.admit('b', 0);
+    throttle.admit('c', 0); // evicts 'a', which still had a count
+    expect(evicted).toEqual([{ fingerprint: 'a', suppressed: 1 }]);
+    // 'a' was evicted, so it is treated as new rather than throttled.
+    expect(throttle.admit('a', 2_000)).toBe(0);
+  });
+
+  it('does not report an eviction that had nothing suppressed', () => {
+    const evicted: { fingerprint: string; suppressed: number }[] = [];
+    const throttle = new DiagThrottle({ maxEntries: 2, onEvict: (e) => evicted.push(e) });
     throttle.admit('a', 0);
     throttle.admit('b', 0);
     throttle.admit('c', 0);
-    // 'a' was evicted, so it is treated as new rather than throttled.
-    expect(throttle.admit('a', 1_000)).toBe(0);
+    expect(evicted).toEqual([]);
+  });
+});
+
+describe('createRedactor', () => {
+  it('removes literal secrets', () => {
+    const redact = createRedactor(['sk-lf-supersecret', 'pk-lf-publicish']);
+    expect(redact('failed with sk-lf-supersecret')).toBe('failed with [redacted]');
+  });
+
+  it('removes Langfuse-shaped keys it was never told about', () => {
+    const redact = createRedactor([]);
+    expect(redact('key sk-lf-abc123DEF-_x rejected')).toBe('key [redacted] rejected');
+  });
+
+  it('removes bearer tokens and authorization headers', () => {
+    const redact = createRedactor([]);
+    expect(redact('Bearer abc.def-123')).toBe('[redacted]');
+    expect(redact('authorization: Basic cGs6c2s=')).toBe('[redacted]');
+  });
+
+  it('ignores short secrets that would over-redact', () => {
+    const redact = createRedactor(['ab']);
+    expect(redact('a stable abstraction')).toBe('a stable abstraction');
   });
 });
 
@@ -388,10 +546,12 @@ describe('normalizeDiagMessage', () => {
   });
 
   it('appends Error messages but discards all other arguments', () => {
-    expect(normalizeDiagMessage('failed', [new Error('401 Unauthorized')]))
-      .toBe('failed 401 Unauthorized');
-    expect(normalizeDiagMessage('failed', [{ authorization: 'Bearer sk-lf-secret' }]))
-      .toBe('failed');
+    expect(normalizeDiagMessage('failed', [new Error('401 Unauthorized')])).toBe(
+      'failed 401 Unauthorized',
+    );
+    expect(normalizeDiagMessage('failed', [{ authorization: 'Bearer sk-lf-secret' }])).toBe(
+      'failed',
+    );
   });
 
   it('survives a circular argument', () => {
@@ -400,9 +560,28 @@ describe('normalizeDiagMessage', () => {
     expect(() => normalizeDiagMessage('failed', [circular])).not.toThrow();
     expect(normalizeDiagMessage('failed', [circular])).toBe('failed');
   });
+
+  it('survives a hostile message and a throwing Error getter', () => {
+    expect(() => normalizeDiagMessage(Object.create(null), [])).not.toThrow();
+    const hostile = new Error('x');
+    Object.defineProperty(hostile, 'message', {
+      get() {
+        throw new Error('nope');
+      },
+    });
+    expect(() => normalizeDiagMessage('failed', [hostile])).not.toThrow();
+  });
+
+  it('applies the redactor before truncating', () => {
+    const redact = createRedactor(['sk-lf-secret']);
+    expect(normalizeDiagMessage('sent sk-lf-secret upstream', [], redact)).toBe(
+      'sent [redacted] upstream',
+    );
+  });
 });
 
 describe('createDiagLogger', () => {
+  const identity = (s: string): string => s;
   let warnSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
@@ -413,14 +592,14 @@ describe('createDiagLogger', () => {
   });
 
   it('implements every DiagLogger method', () => {
-    const diagLogger = createDiagLogger(new DiagThrottle());
+    const diagLogger = createDiagLogger(new DiagThrottle(), identity);
     for (const method of ['verbose', 'debug', 'info', 'warn', 'error'] as const) {
       expect(typeof diagLogger[method]).toBe('function');
     }
   });
 
   it('drops verbose, debug, and info without logging', () => {
-    const diagLogger = createDiagLogger(new DiagThrottle());
+    const diagLogger = createDiagLogger(new DiagThrottle(), identity);
     diagLogger.verbose('v');
     diagLogger.debug('d');
     diagLogger.info('i');
@@ -428,14 +607,29 @@ describe('createDiagLogger', () => {
   });
 
   it('logs a warning with the otel component tag', () => {
-    const diagLogger = createDiagLogger(new DiagThrottle(), () => 0);
+    const diagLogger = createDiagLogger(new DiagThrottle(), identity, () => 0);
     diagLogger.warn('export failed');
     expect(warnSpy).toHaveBeenCalledWith('otel diag: export failed', { component: 'otel' });
   });
 
+  it('redacts credentials out of diagnostics', () => {
+    const diagLogger = createDiagLogger(
+      new DiagThrottle(),
+      createRedactor(['sk-lf-secret']),
+      () => 0,
+    );
+    diagLogger.error('rejected', new Error('bad key sk-lf-secret'));
+    const [message] = warnSpy.mock.calls[0] ?? [];
+    expect(String(message)).not.toContain('sk-lf-secret');
+  });
+
   it('includes the suppressed count once the window elapses', () => {
     let now = 0;
-    const diagLogger = createDiagLogger(new DiagThrottle(60_000, 50), () => now);
+    const diagLogger = createDiagLogger(
+      new DiagThrottle({ windowMs: 60_000 }),
+      identity,
+      () => now,
+    );
     diagLogger.warn('export failed');
     now = 1_000;
     diagLogger.warn('export failed');
@@ -451,7 +645,7 @@ describe('createDiagLogger', () => {
     warnSpy.mockImplementation(() => {
       throw new Error('logger exploded');
     });
-    const diagLogger = createDiagLogger(new DiagThrottle());
+    const diagLogger = createDiagLogger(new DiagThrottle(), identity);
     expect(() => diagLogger.warn('export failed')).not.toThrow();
   });
 });
@@ -474,19 +668,35 @@ Create `packages/worker/src/tracing-diag.ts`:
  * is installed — that silence is why a misconfigured exporter ran unnoticed for
  * 33 hours in production.
  *
- * Two hazards shape this file. OTel calls each method as
+ * Three hazards shape this file. OTel calls each method as
  * `(message: string, ...args: unknown[])`, while `logger.log` JSON.stringifies
  * its fields unguarded, so forwarding arguments verbatim can throw on a
- * circular value — inside OTel's own call path — or leak authorization headers.
- * Nothing but a bounded string ever leaves this module.
+ * circular value — inside OTel's own call path. Exporter errors routinely quote
+ * request material, so anything forwarded is redacted first. And nothing here
+ * may throw: a diagnostic logger that raises breaks its caller.
  */
 
 import type { DiagLogger } from '@opentelemetry/api';
-import { logger } from './logger.js';
+import { logger, safeErrorMessage } from './logger.js';
 
 const DEFAULT_WINDOW_MS = 60_000;
 const DEFAULT_MAX_FINGERPRINTS = 50;
 const MAX_MESSAGE_LENGTH = 500;
+const MIN_REDACTABLE_SECRET_LENGTH = 8;
+
+/** Shapes that must never survive into a log line. */
+const SECRET_PATTERNS: readonly RegExp[] = [
+  /\b(?:pk|sk)-lf-[A-Za-z0-9_-]+/gi,
+  /\bBearer\s+[A-Za-z0-9._~+/-]+=*/gi,
+  /\bauthorization\b\s*[:=]\s*\S+/gi,
+];
+
+export interface DiagThrottleOptions {
+  windowMs?: number;
+  maxEntries?: number;
+  /** Called when a capped-out entry is dropped while still holding a count. */
+  onEvict?: (evicted: { fingerprint: string; suppressed: number }) => void;
+}
 
 interface ThrottleEntry {
   lastEmittedAt: number;
@@ -499,11 +709,15 @@ interface ThrottleEntry {
  */
 export class DiagThrottle {
   private readonly entries = new Map<string, ThrottleEntry>();
+  private readonly windowMs: number;
+  private readonly maxEntries: number;
+  private readonly onEvict?: (evicted: { fingerprint: string; suppressed: number }) => void;
 
-  constructor(
-    private readonly windowMs: number = DEFAULT_WINDOW_MS,
-    private readonly maxEntries: number = DEFAULT_MAX_FINGERPRINTS,
-  ) {}
+  constructor(options: DiagThrottleOptions = {}) {
+    this.windowMs = options.windowMs ?? DEFAULT_WINDOW_MS;
+    this.maxEntries = options.maxEntries ?? DEFAULT_MAX_FINGERPRINTS;
+    this.onEvict = options.onEvict;
+  }
 
   /** Suppressed count to report, or null when the line should be dropped. */
   admit(fingerprint: string, now: number): number | null {
@@ -523,8 +737,7 @@ export class DiagThrottle {
     return null;
   }
 
-  /** Outstanding counts, cleared as they are returned. Used on shutdown so a
-   *  burst that ends mid-window still reports its total. */
+  /** Outstanding counts, cleared as they are returned. */
   drain(): { fingerprint: string; suppressed: number }[] {
     const out: { fingerprint: string; suppressed: number }[] = [];
     for (const [fingerprint, entry] of this.entries) {
@@ -534,39 +747,77 @@ export class DiagThrottle {
     return out;
   }
 
+  /** Evicting silently would discard a count drain() promised to deliver. */
   private evictIfFull(): void {
     if (this.entries.size < this.maxEntries) return;
     const oldest = this.entries.keys().next();
-    if (!oldest.done) this.entries.delete(oldest.value);
+    if (oldest.done) return;
+    const fingerprint = oldest.value;
+    const entry = this.entries.get(fingerprint);
+    this.entries.delete(fingerprint);
+    if (entry !== undefined && entry.suppressed > 0 && this.onEvict !== undefined) {
+      try {
+        this.onEvict({ fingerprint, suppressed: entry.suppressed });
+      } catch {
+        // Reporting an eviction must not break admission.
+      }
+    }
   }
 }
 
 /**
- * Bounded, whitespace-collapsed string. Only `Error` arguments contribute;
- * every other argument is discarded rather than serialized.
+ * Build a redactor that strips known credential values and credential-shaped
+ * substrings. Literal matching uses split/join so no regex escaping is needed.
  */
-export function normalizeDiagMessage(message: string, args: unknown[]): string {
-  const parts = [String(message)];
+export function createRedactor(secrets: readonly string[]): (text: string) => string {
+  const literals = secrets.filter((s) => s.length >= MIN_REDACTABLE_SECRET_LENGTH);
+  return (text: string): string => {
+    let out = text;
+    for (const literal of literals) out = out.split(literal).join('[redacted]');
+    for (const pattern of SECRET_PATTERNS) out = out.replace(pattern, '[redacted]');
+    return out;
+  };
+}
+
+/**
+ * Bounded, whitespace-collapsed, redacted string. Only `Error` arguments
+ * contribute; every other argument is discarded rather than serialized.
+ * Redaction runs before truncation so a secret cannot survive as a fragment.
+ */
+export function normalizeDiagMessage(
+  message: unknown,
+  args: unknown[],
+  redact: (text: string) => string = (text) => text,
+): string {
+  const parts = [safeErrorMessage(message)];
   for (const arg of args) {
-    if (arg instanceof Error) parts.push(arg.message);
+    if (arg instanceof Error) parts.push(safeErrorMessage(arg));
   }
-  return parts.join(' ').replace(/\s+/g, ' ').trim().slice(0, MAX_MESSAGE_LENGTH);
+  const joined = parts.join(' ').replace(/\s+/g, ' ').trim();
+  let redacted: string;
+  try {
+    redacted = redact(joined);
+  } catch {
+    redacted = '[redaction failed]';
+  }
+  return redacted.slice(0, MAX_MESSAGE_LENGTH);
 }
 
 export function createDiagLogger(
   throttle: DiagThrottle,
+  redact: (text: string) => string,
   now: () => number = Date.now,
 ): DiagLogger {
   const emit =
     (level: 'warn' | 'error') =>
     (message: string, ...args: unknown[]): void => {
       try {
-        const text = normalizeDiagMessage(message, args);
+        const text = normalizeDiagMessage(message, args, redact);
         const suppressed = throttle.admit(`${level}:${text}`, now());
         if (suppressed === null) return;
         const fields: Record<string, unknown> = { component: 'otel' };
         if (suppressed > 0) fields['suppressed'] = suppressed;
-        logger[level](`otel diag: ${text}`, fields);
+        logger.warn(`otel diag: ${text}`, fields);
       } catch {
         // A diagnostic logger must never throw into OTel.
       }
@@ -584,6 +835,8 @@ export function createDiagLogger(
 }
 ```
 
+Note both `warn` and `error` route to `logger.warn`: the worker's `error` level writes to stderr and is reserved for worker-fatal conditions, and a rejected span export is not one.
+
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `pnpm --filter @opslane/worker test -- tracing-diag`
@@ -593,7 +846,7 @@ Expected: PASS, all cases.
 
 ```bash
 git add packages/worker/src/tracing-diag.ts packages/worker/src/__tests__/tracing-diag.test.ts
-git commit -m "feat(worker): add throttled crash-proof OTel diagnostic adapter"
+git commit -m "feat(worker): add throttled redacting OTel diagnostic adapter"
 ```
 
 ---
@@ -601,11 +854,11 @@ git commit -m "feat(worker): add throttled crash-proof OTel diagnostic adapter"
 ### Task 3: Wire the resolved config into the SDK lifecycle
 
 **Files:**
-- Modify: `packages/worker/src/tracing.ts:14` (imports), `:19-59` (`initTracing`), `:61-78` (`shutdownTracing`), `:151-160` (`buildLangfuseTraceUrl`)
-- Test: `packages/worker/src/__tests__/tracing.test.ts` (extend), `packages/worker/src/__tests__/tracing-init.test.ts` (create)
+- Modify: `packages/worker/src/tracing.ts:14` (imports), `:16-59` (state + `initTracing`), `:61-78` (`shutdownTracing`), `:151-160` (`buildLangfuseTraceUrl`)
+- Test: `packages/worker/src/__tests__/tracing-init.test.ts` (create), `packages/worker/src/__tests__/tracing.test.ts` (extend)
 
 **Interfaces:**
-- Consumes: `resolveTracingConfig`, `describeConfig`, `EnabledTracingConfig` from `./tracing-config.js`; `DiagThrottle`, `createDiagLogger` from `./tracing-diag.js`.
+- Consumes: `resolveTracingConfig`, `describeConfig`, `EnabledTracingConfig` from `./tracing-config.js`; `DiagThrottle`, `createDiagLogger`, `createRedactor` from `./tracing-diag.js`; `logger`, `safeErrorMessage` from `./logger.js`.
 - Produces: `initTracing(): Promise<void>` (unchanged signature); `buildLangfuseTraceUrl(traceId: string): string | null` (unchanged signature, now reads module state instead of `process.env`).
 
 - [ ] **Step 1: Write the failing test**
@@ -644,30 +897,31 @@ vi.mock('@arizeai/openinference-instrumentation-anthropic', () => ({
   },
 }));
 
-const COMPLETE_ENV = {
+const LANGFUSE_VARS = [
+  'LANGFUSE_PUBLIC_KEY',
+  'LANGFUSE_SECRET_KEY',
+  'LANGFUSE_BASE_URL',
+  'LANGFUSE_PROJECT_ID',
+] as const;
+
+const COMPLETE_ENV: Record<string, string> = {
   LANGFUSE_PUBLIC_KEY: 'pk-lf-test',
   LANGFUSE_SECRET_KEY: 'sk-lf-test',
   LANGFUSE_BASE_URL: 'https://us.cloud.langfuse.com',
   LANGFUSE_PROJECT_ID: 'proj-1',
 };
 
-async function loadTracing() {
-  vi.resetModules();
-  return await import('../tracing.js');
-}
-
 function setEnv(env: Record<string, string | undefined>): void {
-  for (const key of [
-    'LANGFUSE_PUBLIC_KEY',
-    'LANGFUSE_SECRET_KEY',
-    'LANGFUSE_BASE_URL',
-    'LANGFUSE_PROJECT_ID',
-  ]) {
-    delete process.env[key];
-  }
+  for (const key of LANGFUSE_VARS) delete process.env[key];
   for (const [key, value] of Object.entries(env)) {
     if (value !== undefined) process.env[key] = value;
   }
+}
+
+/** Fresh module registry per test so module-level tracing state cannot leak. */
+async function loadTracing() {
+  vi.resetModules();
+  return await import('../tracing.js');
 }
 
 describe('initTracing', () => {
@@ -689,10 +943,11 @@ describe('initTracing', () => {
     await tracing.initTracing();
 
     expect(startSpy).not.toHaveBeenCalled();
-    expect(warnSpy).toHaveBeenCalledWith(
-      'Langfuse tracing disabled: incomplete config',
-      { status: 'incomplete', missing: ['LANGFUSE_BASE_URL'], invalid: [] },
-    );
+    expect(warnSpy).toHaveBeenCalledWith('Langfuse tracing disabled: incomplete config', {
+      status: 'incomplete',
+      missing: ['LANGFUSE_BASE_URL'],
+      invalid: [],
+    });
   });
 
   it('does not start the SDK when nothing is configured', async () => {
@@ -730,7 +985,7 @@ describe('initTracing', () => {
       ([msg]) => msg === 'Langfuse tracing instrumentation enabled',
     );
     expect(lines).toHaveLength(1);
-    expect(lines[0][1]).toEqual({
+    expect(lines[0]?.[1]).toEqual({
       status: 'enabled',
       host: 'https://us.cloud.langfuse.com',
       has_project_id: true,
@@ -750,6 +1005,14 @@ describe('initTracing', () => {
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('LANGFUSE_PROJECT_ID'));
   });
 
+  it('ignores a second call instead of starting a second SDK', async () => {
+    setEnv(COMPLETE_ENV);
+    const tracing = await loadTracing();
+    await tracing.initTracing();
+    await tracing.initTracing();
+    expect(startSpy).toHaveBeenCalledTimes(1);
+  });
+
   it('swallows a start failure, logs it, and attempts rollback', async () => {
     setEnv(COMPLETE_ENV);
     startSpy.mockImplementationOnce(() => {
@@ -761,13 +1024,61 @@ describe('initTracing', () => {
 
     await expect(tracing.initTracing()).resolves.toBeUndefined();
 
-    expect(warnSpy).toHaveBeenCalledWith(
-      'Langfuse tracing failed to initialize',
-      { error: 'start exploded' },
-    );
+    expect(warnSpy).toHaveBeenCalledWith('Langfuse tracing failed to initialize', {
+      error: 'start exploded',
+    });
     expect(disableSpy).toHaveBeenCalled();
     // Spans degrade to pass-through.
     expect(await tracing.withJobTrace('j', 'e', 'p', async () => 'ok')).toBe('ok');
+  });
+
+  it('does not hang startup when rollback shutdown never settles', async () => {
+    setEnv(COMPLETE_ENV);
+    vi.useFakeTimers();
+    startSpy.mockImplementationOnce(() => {
+      throw new Error('start exploded');
+    });
+    shutdownSpy.mockImplementationOnce(() => new Promise<void>(() => {}));
+    const tracing = await loadTracing();
+
+    const pending = tracing.initTracing();
+    await vi.advanceTimersByTimeAsync(6_000);
+    await expect(pending).resolves.toBeUndefined();
+    vi.useRealTimers();
+  });
+});
+
+describe('shutdownTracing', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    setEnv({});
+  });
+  afterEach(() => {
+    setEnv({});
+    vi.restoreAllMocks();
+  });
+
+  it('drains suppressed diagnostics after the SDK has shut down', async () => {
+    // Failures raised *during* shutdown must still be reported, so the drain
+    // has to run after shutdown, not before it.
+    setEnv(COMPLETE_ENV);
+    const tracing = await loadTracing();
+    const { logger } = await import('../logger.js');
+    await tracing.initTracing();
+
+    const { diag } = await import('@opentelemetry/api');
+    const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    shutdownSpy.mockImplementationOnce(async () => {
+      diag.warn('export failed');
+      diag.warn('export failed');
+    });
+
+    await tracing.shutdownTracing();
+
+    const drained = warnSpy.mock.calls.filter(([msg]) =>
+      String(msg).includes('suppressed diagnostics at shutdown'),
+    );
+    expect(drained).toHaveLength(1);
   });
 });
 
@@ -815,7 +1126,7 @@ Expected: FAIL — `initTracing` still gates on keys only, `processorSpy` receiv
 
 - [ ] **Step 3: Write minimal implementation**
 
-In `packages/worker/src/tracing.ts`, replace the import on line 14 and the `initTracing` / `shutdownTracing` / `buildLangfuseTraceUrl` bodies.
+In `packages/worker/src/tracing.ts`, replace the import on line 14 and the state / `initTracing` / `shutdownTracing` / `buildLangfuseTraceUrl` bodies.
 
 Imports:
 
@@ -829,22 +1140,58 @@ import {
   type Tracer,
   type Span,
 } from '@opentelemetry/api';
-import { logger } from './logger.js';
+import { logger, safeErrorMessage } from './logger.js';
 import {
   resolveTracingConfig,
   describeConfig,
   type EnabledTracingConfig,
 } from './tracing-config.js';
-import { DiagThrottle, createDiagLogger } from './tracing-diag.js';
+import { DiagThrottle, createDiagLogger, createRedactor } from './tracing-diag.js';
 ```
 
-Module state:
+Module state and shared shutdown helper:
 
 ```ts
+const SHUTDOWN_TIMEOUT_MS = 5000;
+
 let sdk: { shutdown(): Promise<void> } | null = null;
 let tracer: Tracer | null = null;
 let activeConfig: EnabledTracingConfig | null = null;
 let diagThrottle: DiagThrottle | null = null;
+let initialized = false;
+
+/**
+ * Shut a NodeSDK down without ever hanging or throwing. Used by both the normal
+ * shutdown path and initialization rollback — an un-timed await in rollback
+ * would leave the worker stuck in startup forever.
+ */
+async function shutdownWithTimeout(target: { shutdown(): Promise<void> }): Promise<void> {
+  try {
+    await Promise.race([
+      target.shutdown(),
+      new Promise<never>((_, reject) => {
+        const timer = setTimeout(
+          () => reject(new Error('Tracing shutdown timeout')),
+          SHUTDOWN_TIMEOUT_MS,
+        );
+        timer.unref(); // Don't block process exit
+      }),
+    ]);
+  } catch (err) {
+    // Swallowing this entirely would recreate the silence this change removes.
+    logger.warn('Langfuse tracing shutdown did not complete cleanly', {
+      error: safeErrorMessage(err),
+    });
+  }
+}
+
+/** Report and clear whatever the throttle is still holding. */
+function drainDiagnostics(): void {
+  if (diagThrottle === null) return;
+  for (const { fingerprint, suppressed } of diagThrottle.drain()) {
+    logger.warn('otel diag: suppressed diagnostics at shutdown', { fingerprint, suppressed });
+  }
+}
 ```
 
 `initTracing`:
@@ -860,6 +1207,14 @@ let diagThrottle: DiagThrottle | null = null;
  * Must be awaited before any `new Anthropic()` call.
  */
 export async function initTracing(): Promise<void> {
+  // Idempotent: a second call would start a second SDK and orphan the first
+  // one's shutdown handle.
+  if (initialized) {
+    logger.warn('initTracing called more than once; ignoring');
+    return;
+  }
+  initialized = true;
+
   const config = resolveTracingConfig(process.env);
 
   if (config.status === 'disabled') {
@@ -887,8 +1242,13 @@ export async function initTracing(): Promise<void> {
         import('@anthropic-ai/sdk'),
       ]);
 
-    diagThrottle = new DiagThrottle();
-    diag.setLogger(createDiagLogger(diagThrottle), DiagLogLevel.WARN);
+    const redact = createRedactor([config.credentials.publicKey, config.credentials.secretKey]);
+    diagThrottle = new DiagThrottle({
+      onEvict: ({ fingerprint, suppressed }) => {
+        logger.warn('otel diag: suppressed diagnostics dropped', { fingerprint, suppressed });
+      },
+    });
+    diag.setLogger(createDiagLogger(diagThrottle, redact), DiagLogLevel.WARN);
 
     const inst = new AnthropicInstrumentation();
     instrumentation = inst;
@@ -926,9 +1286,7 @@ export async function initTracing(): Promise<void> {
     logger.info('Langfuse tracing instrumentation enabled', describeConfig(config));
   } catch (err) {
     await rollbackPartialInit(instrumentation, nodeSdk);
-    logger.warn('Langfuse tracing failed to initialize', {
-      error: err instanceof Error ? err.message : String(err),
-    });
+    logger.warn('Langfuse tracing failed to initialize', { error: safeErrorMessage(err) });
   }
 }
 
@@ -947,11 +1305,8 @@ async function rollbackPartialInit(
   } catch {
     // best effort
   }
-  try {
-    await nodeSdk?.shutdown();
-  } catch {
-    // best effort
-  }
+  if (nodeSdk !== undefined) await shutdownWithTimeout(nodeSdk);
+  drainDiagnostics();
   try {
     diag.disable();
   } catch {
@@ -964,32 +1319,30 @@ async function rollbackPartialInit(
 }
 ```
 
-`shutdownTracing` — drain suppressed counts before the existing shutdown, and clear state after:
+`shutdownTracing` — shut the SDK down first, then drain, then detach the global logger:
 
 ```ts
+/**
+ * Flush pending spans and shut down the OTel SDK. Never throws.
+ */
 export async function shutdownTracing(): Promise<void> {
-  if (diagThrottle !== null) {
-    for (const { fingerprint, suppressed } of diagThrottle.drain()) {
-      logger.warn('otel diag: suppressed diagnostics at shutdown', { fingerprint, suppressed });
-    }
-  }
-  if (!sdk) return;
+  const current = sdk;
+  // Shut down BEFORE draining: the flush itself can produce export failures,
+  // and draining first would discard exactly those counts.
+  if (current !== null) await shutdownWithTimeout(current);
+  drainDiagnostics();
   try {
-    await Promise.race([
-      sdk.shutdown(),
-      new Promise<never>((_, reject) => {
-        const timer = setTimeout(() => reject(new Error('Tracing shutdown timeout')), 5000);
-        timer.unref(); // Don't block process exit
-      }),
-    ]);
+    // Without this the global OTel logger keeps the adapter (and its throttle)
+    // alive through its closure after shutdown.
+    diag.disable();
   } catch {
-    // Best effort — do not block worker shutdown
-  } finally {
-    sdk = null;
-    tracer = null;
-    activeConfig = null;
-    diagThrottle = null;
+    // best effort
   }
+  sdk = null;
+  tracer = null;
+  activeConfig = null;
+  diagThrottle = null;
+  initialized = false;
 }
 ```
 
@@ -1055,14 +1408,49 @@ git commit -m "fix(worker): refuse to start tracing on a partial Langfuse config
 
 **Files:**
 - Modify: `packages/worker/src/index.ts:288-296`
+- Test: `packages/worker/src/__tests__/index.test.ts` (extend)
 
 **Interfaces:**
-- Consumes: `buildLangfuseTraceUrl` from `./tracing.js` (unchanged signature), `logger` from `./logger.js` (already imported).
+- Consumes: `safeErrorMessage` from `./logger.js` (add to the existing `logger` import); `buildLangfuseTraceUrl`, `getActiveTraceId` from `./tracing.js` (unchanged).
 - Produces: nothing.
 
-- [ ] **Step 1: Replace the swallowing catch**
+`index.test.ts` already mocks `../db.js` (with `updateJobTraceUrl`), `../logger.js`, and `../tracing.js`, and imports `processJobInner` directly, so this branch is testable without new harness.
 
-In `processJobInner`, the fire-and-forget update currently discards every failure. Replace:
+- [ ] **Step 1: Write the failing test**
+
+Add to `packages/worker/src/__tests__/index.test.ts`, inside the existing top-level `describe`. Reuse whatever job fixture the neighbouring `processJobInner` tests build (see the calls near lines 373 and 391) rather than inventing a new shape:
+
+```ts
+  it('logs when persisting trace_url rejects instead of swallowing it', async () => {
+    const { getActiveTraceId, buildLangfuseTraceUrl } = await import('../tracing.js');
+    const { updateJobTraceUrl } = await import('../db.js');
+    const { logger } = await import('../logger.js');
+
+    vi.mocked(getActiveTraceId).mockReturnValueOnce('trace-abc');
+    vi.mocked(buildLangfuseTraceUrl).mockReturnValueOnce('https://lf.example/traces/trace-abc');
+    vi.mocked(updateJobTraceUrl).mockRejectedValueOnce(new Error('db down'));
+
+    // Use the same job fixture shape as the neighbouring processJobInner tests.
+    const job = makeJob();
+    await processJobInner(job, new AbortController().signal);
+
+    expect(vi.mocked(logger.warn)).toHaveBeenCalledWith('Failed to persist trace_url', {
+      job_id: job.id,
+      error: 'db down',
+    });
+  });
+```
+
+If the neighbouring tests build their job inline rather than via a helper, inline the same object here instead of calling `makeJob()`.
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `pnpm --filter @opslane/worker test -- index`
+Expected: FAIL — `logger.warn` is never called; the rejection is swallowed by `.catch(() => {})`.
+
+- [ ] **Step 3: Replace the swallowing catch**
+
+In `processJobInner`, update the import to include `safeErrorMessage`, then replace:
 
 ```ts
       updateJobTraceUrl(
@@ -1084,28 +1472,29 @@ with:
       ).catch((err: unknown) => {
         // A false return (rowCount 0) stays ignored: that means the lease moved
         // on, which is routine and already covered by the lease contract.
-        // Only a genuine rejection is worth a line.
+        // Only a genuine rejection is worth a line. safeErrorMessage because a
+        // raw String(err) here would throw a second, unhandled rejection.
         logger.warn('Failed to persist trace_url', {
           job_id: job.id,
-          error: err instanceof Error ? err.message : String(err),
+          error: safeErrorMessage(err),
         });
       });
 ```
 
-- [ ] **Step 2: Build**
+- [ ] **Step 4: Run test to verify it passes**
 
-Run: `pnpm --filter @opslane/worker build`
-Expected: no type errors.
+Run: `pnpm --filter @opslane/worker test -- index`
+Expected: PASS.
 
-- [ ] **Step 3: Run the full worker suite**
+- [ ] **Step 5: Build and run the full worker suite**
 
-Run: `pnpm --filter @opslane/worker test`
-Expected: PASS, with no new failures in `index.test.ts`.
+Run: `pnpm --filter @opslane/worker build && pnpm --filter @opslane/worker test`
+Expected: no type errors, no new failures.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add packages/worker/src/index.ts
+git add packages/worker/src/index.ts packages/worker/src/__tests__/index.test.ts
 git commit -m "fix(worker): log trace_url persistence failures instead of swallowing them"
 ```
 
@@ -1120,18 +1509,20 @@ pnpm --filter @opslane/worker build
 pnpm --filter @opslane/worker test
 ```
 
-- [ ] Confirm no credential can reach a log line:
+- [ ] Confirm credentials only ever flow into the processor, never into a log call:
 
 ```bash
 grep -n "credentials" packages/worker/src/tracing.ts
 ```
 
-Expected: `credentials` appears only where it is passed into `LangfuseSpanProcessor`, never inside a `logger.*` call.
+Expected: `credentials` appears only in the `createRedactor(...)` call and the `LangfuseSpanProcessor` options, never inside a `logger.*` call.
 
-- [ ] Confirm nothing re-reads Langfuse env outside the resolver:
+- [ ] Confirm nothing reads Langfuse env outside the resolver. Match on the actual
+      env access, not the bare name — the deep-links warning string legitimately
+      contains `LANGFUSE_PROJECT_ID`:
 
 ```bash
-grep -rn "LANGFUSE_" packages/worker/src --include=*.ts | grep -v __tests__ | grep -v tracing-config.ts
+grep -rn "process\.env\[.LANGFUSE" packages/worker/src --include=*.ts | grep -v __tests__ | grep -v tracing-config.ts
 ```
 
 Expected: no matches. Every read goes through `resolveTracingConfig`.

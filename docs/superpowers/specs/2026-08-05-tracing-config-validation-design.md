@@ -17,7 +17,8 @@ Four gaps compound:
 
 ## Principles
 
-- **Tracing must never take production down.** It is observability, not a job dependency. Every failure path degrades to a no-op plus a log line, never to a crash — including inside the diagnostic logger itself.
+- **Tracing must never take production down.** It is observability, not a job dependency. Every failure path degrades to a no-op plus a log line, never to a crash — including inside the diagnostic logger itself. It must also never *hang*: any await on SDK shutdown is bounded, in rollback as well as in normal shutdown.
+- **Error stringification is itself a failure path.** `String(Object.create(null))` throws, and a `message`/`toString` getter can throw arbitrarily. Every conversion goes through a `safeErrorMessage` helper; a raw `String(err)` inside a catch re-throws out of the handler and defeats the guarantee above.
 - **Validation must govern what actually runs.** A resolver whose normalized values are not the values the SDK uses is decoration. The config module owns both validation and application.
 - **Fail proportionally.** Losing deep links is not the same as losing all traces, and is not treated the same.
 - **A partial config is an error, not a degraded mode.** Half-configured tracing that cannot deliver is worse than none, because it consumes CPU and network to produce nothing while appearing healthy.
@@ -76,7 +77,8 @@ Without this, a whitespace-only `LANGFUSE_PROJECT_ID` resolves to `null` while t
 Details that matter:
 
 - **`NodeSDK.start()` returns `void` and is synchronous** in the installed `@opentelemetry/sdk-node@0.220.0`. It registers local components; it performs no handshake and proves nothing about delivery. The success log therefore says **`Langfuse tracing instrumentation enabled`**, with `{ host }`, and claims only what is true. Whether spans actually land is knowable only from the asynchronous diagnostics in section 4 — which is the entire reason that section exists.
-- The dynamic imports, `manuallyInstrument`, and `start()` are wrapped in try/catch. On failure: attempt best-effort rollback (`instrumentation.disable?.()` and `nodeSdk.shutdown?.()`, each individually guarded and ignored if they throw), null out `tracer` and `activeConfig`, `logger.warn`, and return normally.
+- `initTracing` is idempotent. A second call would start a second SDK and orphan the first one's shutdown handle, so it logs a warning and returns.
+- The dynamic imports, `manuallyInstrument`, and `start()` are wrapped in try/catch. On failure: attempt best-effort rollback (`instrumentation.disable?.()`, then a **time-bounded** `nodeSdk.shutdown()`, then `diag.disable()`, each individually guarded), null out `tracer` and `activeConfig`, `logger.warn`, and return normally. The bound matters: an unbounded await in rollback leaves the worker stuck in startup forever, which is worse than the bug being fixed. Normal shutdown and rollback share one `shutdownWithTimeout` helper.
 - Rollback is **best effort, not guaranteed**. `manuallyInstrument` patches the Anthropic module prototype before `start()` runs, and `start()` registers global OTel state incrementally, so a mid-initialization throw can leave global state partially mutated. Nulling `tracer` makes our own `withJobTrace`/`traceSpan` pass through, but the spec does not claim a clean no-op, because it cannot be guaranteed. The design goal here is "does not crash and does not silently claim health", not "perfectly unwound".
 - The `disabled` path keeps its zero-overhead behaviour — the heavy OTel and Langfuse packages are still imported only on the `enabled` path.
 
@@ -88,12 +90,13 @@ The adapter must:
 
 - Implement all five methods (`verbose`, `debug`, `info`, `warn`, `error`); the first three are dropped at WARN level.
 - Emit only a normalized, length-bounded message string. Extra `args` are **never** forwarded as objects — at most, `Error` instances contribute their `message` (bounded), and everything else is discarded. No header, URL, or credential material is ever passed through.
-- Never throw. The whole body is wrapped in try/catch with an empty handler; a broken logger must not break the caller.
+- **Redact before emitting.** Exporter errors routinely quote request material, so every forwarded string passes through a redactor built from the resolved credentials plus credential-shaped patterns (`pk-lf-…`/`sk-lf-…`, `Bearer …`, `authorization: …`). Redaction runs *before* truncation, so a secret cannot survive as a fragment. Without this the adapter would be a new way to leak the keys the rest of the design is careful never to log.
+- Never throw. The whole body is wrapped in try/catch with an empty handler; a broken logger must not break the caller. Message and error stringification go through `safeErrorMessage`.
 - Throttle **per fingerprint**, not globally. A single global timestamp would let one noisy error mask a different, more important one for a full minute.
 
 Fingerprint is the level plus the normalized message. Each entry holds a last-emitted timestamp and a suppressed count. Emit when `now - last >= 60_000`, including the suppressed count since the previous emission; otherwise increment. The fingerprint map is capped (50 entries, oldest evicted) so a high-cardinality message cannot leak memory.
 
-Suppressed counts are flushed in `shutdownTracing()`, so a burst that ends before the next window still reports its total rather than disappearing.
+Two places would otherwise lose counts the throttle promised to deliver. Eviction reports a dropped entry through an `onEvict` callback rather than discarding it silently. And `shutdownTracing()` drains **after** `sdk.shutdown()` resolves, not before: the final flush is itself a likely source of export failures, and draining first would discard exactly those. Shutdown then calls `diag.disable()` — clearing the module variable alone leaves the global OTel logger holding the adapter, and its throttle, alive through its closure.
 
 ### 5. `trace_url` persistence
 
@@ -120,9 +123,13 @@ A `false` return (rowCount 0) stays ignored. That means the lease moved on, whic
 - `incomplete` config does not import or start the SDK, and logs the warning with the missing/invalid lists.
 - `enabled` config starts the SDK, constructs `LangfuseSpanProcessor` with the explicit normalized `baseUrl` and credentials, and logs the instrumentation line exactly once.
 - An import or `start()` throw is swallowed, logged at WARN, leaves `tracer` null, and attempts rollback.
-- The diag adapter: survives a circular argument without throwing, drops non-`Error` args, emits at most one line per fingerprint per window with a suppressed count, and keeps distinct fingerprints independent.
+- A rollback whose `shutdown()` never settles still lets `initTracing` resolve, proving startup cannot hang.
+- A second `initTracing()` call does not start a second SDK.
+- `shutdownTracing` drains diagnostics raised *during* the shutdown flush, proving the drain runs after `sdk.shutdown()` rather than before.
+- The diag adapter: survives a circular argument, a null-prototype message, and a throwing `message` getter without throwing; drops non-`Error` args; redacts configured credentials and credential-shaped substrings; emits at most one line per fingerprint per window with a suppressed count; keeps distinct fingerprints independent; and reports an evicted entry's outstanding count instead of dropping it.
+- `safeErrorMessage` returns a placeholder rather than throwing for `Object.create(null)`, a throwing `message` getter, and a throwing `toString`.
 - `buildLangfuseTraceUrl` returns null when no config is active and when `projectId` is null.
-- `trace_url` rejection logs `job_id` and a normalized error.
+- `trace_url` rejection logs `job_id` and a normalized error, exercised through `processJobInner` with the existing `index.test.ts` mocks.
 
 The existing tests in `packages/worker/src/__tests__/tracing.test.ts` only exercise the disabled path, which is why this bug shipped without coverage. They stay, with one fix: line 52 calls the async `initTracing()` without awaiting it, so it currently asserts nothing.
 
