@@ -42,6 +42,7 @@ vi.mock('../db.js', () => ({
 vi.mock('../logger.js', () => ({
   logger: { info: vi.fn(), error: vi.fn(), warn: vi.fn(), debug: vi.fn() },
   setWorkerId: vi.fn(),
+  safeErrorMessage: (err: unknown) => (err instanceof Error ? err.message : String(err)),
 }));
 vi.mock('../repo-clone.js', () => ({
   cloneRepo: vi.fn(),
@@ -399,6 +400,29 @@ describe('processFixJob — preserves writeup on failure (no revert/null)', () =
     expect(call?.[2]).toBe('needs_human');
     expect(call?.[3]?.evidence).toEqual(evidence);
     expect(call?.[3]?.evidence?.checks).toHaveLength(1);
+  });
+
+  it('logs when persisting trace_url rejects instead of swallowing it', async () => {
+    const { getActiveTraceId, buildLangfuseTraceUrl } = await import('../tracing.js');
+    const { updateJobTraceUrl } = await import('../db.js');
+    const { logger } = await import('../logger.js');
+
+    vi.mocked(getActiveTraceId).mockReturnValueOnce('trace-abc');
+    vi.mocked(buildLangfuseTraceUrl).mockReturnValueOnce('https://lf.example/traces/trace-abc');
+    vi.mocked(updateJobTraceUrl).mockRejectedValueOnce(new Error('db down'));
+    mockRunPipeline.mockResolvedValue({
+      status: 'needs_human',
+      reason: { reason_code: 'tests_failed', reason_message: 'failed', remediation: 'review' },
+    });
+
+    // Same job fixture shape as the neighbouring processJobInner tests.
+    const job = fixJob();
+    await processJobInner(job, new AbortController().signal);
+
+    expect(vi.mocked(logger.warn)).toHaveBeenCalledWith('Failed to persist trace_url', {
+      job_id: job.id,
+      error: 'db down',
+    });
   });
 
   it('prefers session-pointer evidence fetched through ingestion', async () => {

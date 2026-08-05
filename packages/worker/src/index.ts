@@ -15,7 +15,7 @@ import {
   getQueueDepth,
 } from './db.js';
 import { buildReason } from './reason-codes.js';
-import { logger, setWorkerId } from './logger.js';
+import { logger, safeErrorMessage, setWorkerId } from './logger.js';
 import { fetchObject, getMinIOConfig } from './minio-client.js';
 import { investigateError } from './investigate.js';
 import { runPipeline } from './pipeline.js';
@@ -292,7 +292,16 @@ export async function processJobInner(job: ClaimedJob, signal: AbortSignal): Pro
         job.workerId,
         job.leaseGeneration,
         traceUrl,
-      ).catch(() => {});
+      ).catch((err: unknown) => {
+        // A false return (rowCount 0) stays ignored: that means the lease moved
+        // on, which is routine and already covered by the lease contract.
+        // Only a genuine rejection is worth a line. safeErrorMessage because a
+        // raw String(err) here would throw a second, unhandled rejection.
+        logger.warn('Failed to persist trace_url', {
+          job_id: job.id,
+          error: safeErrorMessage(err),
+        });
+      });
     }
   }
 

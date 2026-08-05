@@ -8,6 +8,8 @@ describe('tracing', () => {
   beforeEach(() => {
     delete process.env['LANGFUSE_PUBLIC_KEY'];
     delete process.env['LANGFUSE_SECRET_KEY'];
+    delete process.env['LANGFUSE_BASE_URL'];
+    delete process.env['LANGFUSE_PROJECT_ID'];
   });
 
   describe('traceSpan', () => {
@@ -50,9 +52,8 @@ describe('tracing', () => {
   });
 
   describe('initTracing', () => {
-    it('is a no-op when LANGFUSE_PUBLIC_KEY is not set', () => {
-      // Should not throw
-      initTracing();
+    it('is a no-op when no Langfuse env is set', async () => {
+      await expect(initTracing()).resolves.toBeUndefined();
     });
   });
 

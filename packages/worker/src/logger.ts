@@ -51,3 +51,23 @@ export const logger = {
     log('error', message, fields);
   },
 };
+
+/**
+ * Convert an unknown thrown value to a loggable string without ever throwing.
+ *
+ * `String(Object.create(null))` raises TypeError, and a `message`/`toString`
+ * getter can throw arbitrarily. A raw conversion inside a catch block would
+ * therefore re-throw out of the handler — which is exactly the crash the
+ * handlers exist to prevent.
+ */
+export function safeErrorMessage(err: unknown): string {
+  try {
+    if (err instanceof Error) {
+      const message = err.message;
+      return typeof message === 'string' ? message : 'unserializable error';
+    }
+    return String(err);
+  } catch {
+    return 'unserializable error';
+  }
+}
