@@ -311,6 +311,17 @@ var nonRetriableReasonCodes = map[string]struct{}{
 	// make a later investigation actionable.
 }
 
+const (
+	// Ordinary candidates are hidden workflow records (issue #56); the only
+	// visible candidate is an exhausted 'unchecked' adjudication diagnostic.
+	visibleCandidateSQL = "(eg.status <> 'candidate' OR eg.adjudication_status = 'unchecked')"
+
+	// Archived groups are permanently dismissed by the user (see
+	// requeueStatuses); they are excluded from every incident list and every
+	// account incident count unless explicitly requested by status.
+	notArchivedSQL = "eg.status <> 'archived'"
+)
+
 // requeueStatuses defines error group statuses eligible for re-queuing when a new
 // occurrence arrives. Active states (queued, analyzing) are excluded to prevent double-queuing.
 // Note: "archived" is intentionally excluded — archived groups are considered permanently
@@ -780,12 +791,15 @@ func (q *Queries) ListErrorGroups(ctx context.Context, projectID string, filters
 		return strings.Join(predicates, " AND ")
 	}
 
-	// Ordinary candidates are hidden workflow records (issue #56); the only
-	// visible candidate is an exhausted 'unchecked' adjudication diagnostic.
-	visibleCandidate := "(eg.status <> 'candidate' OR eg.adjudication_status = 'unchecked')"
 	var query string
+	// Applied only when the caller passed no status: an explicit status filter
+	// already scopes the query, and appending this would break status=archived.
+	hideArchived := statusArg == 0
 	if environmentArg == 0 {
-		wheres := []string{"eg.project_id = $1", visibleCandidate}
+		wheres := []string{"eg.project_id = $1", visibleCandidateSQL}
+		if hideArchived {
+			wheres = append(wheres, notArchivedSQL)
+		}
 		if statusArg != 0 {
 			wheres = append(wheres, fmt.Sprintf("eg.status = $%d", statusArg))
 		}
@@ -817,13 +831,17 @@ func (q *Queries) ListErrorGroups(ctx context.Context, projectID string, filters
 			fmt.Sprintf("ege.environment_id = $%d", environmentArg),
 			"eg.project_id = $1",
 			"eg.kind = 'error'",
-			visibleCandidate,
+			visibleCandidateSQL,
 		}
 		frictionWheres := []string{
 			"eg.project_id = $1",
 			"eg.kind = 'friction'",
 			fmt.Sprintf("eg.environment_id = $%d", environmentArg),
-			visibleCandidate,
+			visibleCandidateSQL,
+		}
+		if hideArchived {
+			errorWheres = append(errorWheres, notArchivedSQL)
+			frictionWheres = append(frictionWheres, notArchivedSQL)
 		}
 		if statusArg != 0 {
 			statusClause := fmt.Sprintf("eg.status = $%d", statusArg)
@@ -986,13 +1004,21 @@ func (q *Queries) ListAffectedUsers(ctx context.Context, projectID, errorGroupID
 
 // ListAccounts returns aggregated accounts for a project. Tenant-scoped.
 func (q *Queries) ListAccounts(ctx context.Context, projectID string, query *string) ([]Account, error) {
+	// The visibility predicates live in the ON clause, not WHERE: in WHERE they
+	// would demote the LEFT JOIN to an inner join and drop accounts with zero
+	// visible incidents out of the list entirely. Counting eg.id rather than
+	// eau.error_group_id lets filtered-out rows contribute NULL.
 	sql := `SELECT eu.external_account_id,
 	               MAX(eu.account_name) AS account_name,
 	               COUNT(DISTINCT eu.id) AS user_count,
-	               COUNT(DISTINCT eau.error_group_id) AS incident_count,
+	               COUNT(DISTINCT eg.id) AS incident_count,
 	               MAX(eu.last_seen) AS last_seen
 	        FROM end_users eu
 	        LEFT JOIN error_group_affected_users eau ON eau.end_user_id = eu.id
+	        LEFT JOIN error_groups eg ON eg.id = eau.error_group_id
+	             AND eg.project_id = eu.project_id
+	             AND ` + notArchivedSQL + `
+	             AND ` + visibleCandidateSQL + `
 	        WHERE eu.project_id = $1 AND eu.external_account_id IS NOT NULL`
 
 	args := []interface{}{projectID}
@@ -1024,13 +1050,19 @@ func (q *Queries) ListAccounts(ctx context.Context, projectID string, query *str
 func (q *Queries) GetAccountByID(ctx context.Context, projectID, externalAccountID string) (*Account, error) {
 	var a Account
 	err := q.pool.QueryRow(ctx,
+		// Same ON-clause / COUNT(eg.id) shape as ListAccounts; see the comment
+		// there for why the predicates cannot move into WHERE.
 		`SELECT eu.external_account_id,
 		        MAX(eu.account_name) AS account_name,
 		        COUNT(DISTINCT eu.id) AS user_count,
-		        COUNT(DISTINCT eau.error_group_id) AS incident_count,
+		        COUNT(DISTINCT eg.id) AS incident_count,
 		        MAX(eu.last_seen) AS last_seen
 		 FROM end_users eu
 		 LEFT JOIN error_group_affected_users eau ON eau.end_user_id = eu.id
+		 LEFT JOIN error_groups eg ON eg.id = eau.error_group_id
+		      AND eg.project_id = eu.project_id
+		      AND `+notArchivedSQL+`
+		      AND `+visibleCandidateSQL+`
 		 WHERE eu.project_id = $1 AND eu.external_account_id = $2
 		 GROUP BY eu.external_account_id`,
 		projectID, externalAccountID,

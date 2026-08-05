@@ -93,7 +93,13 @@ function reset() {
   selectedEnvironmentId.value = '';
 }
 
-defineExpose({ reset });
+function showArchived() {
+  // The watcher on selectedStatus performs the URL sync and re-emit, so every
+  // other active filter is preserved and only status changes.
+  selectedStatus.value = 'archived';
+}
+
+defineExpose({ reset, showArchived });
 
 watch(
   [selectedAccountId, selectedStatus, selectedPlatform, selectedEnvironmentId, rollupReady],
