@@ -44,15 +44,15 @@ func newRegressionFixture(t *testing.T, name string) regressionFixture {
 func (f regressionFixture) ingest(t *testing.T, fingerprint, release string, eventTime time.Time) *db.IngestResult {
 	t.Helper()
 	result, err := f.q.InsertErrorEventAndGroup(context.Background(), db.IngestParams{
-		ProjectID:     f.projectID,
-		EnvironmentID: f.envID,
-		ErrorType:     "TypeError",
-		ErrorMessage:  "regression test error",
-		StackTraceRaw: "at regression.js:1:1",
-		Fingerprint:   fingerprint,
-		Title:         "TypeError: regression test error",
-		Release:       release,
-		EventTime:     eventTime,
+		ProjectID:            f.projectID,
+		DefaultEnvironmentID: f.envID,
+		ErrorType:            "TypeError",
+		ErrorMessage:         "regression test error",
+		StackTraceRaw:        "at regression.js:1:1",
+		Fingerprint:          fingerprint,
+		Title:                "TypeError: regression test error",
+		Release:              release,
+		EventTime:            eventTime,
 	})
 	if err != nil {
 		t.Fatalf("InsertErrorEventAndGroup(%q, %q): %v", fingerprint, release, err)

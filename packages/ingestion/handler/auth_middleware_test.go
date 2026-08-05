@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/opslane/opslane/packages/ingestion/auth"
@@ -295,10 +296,10 @@ func TestUpdateProjectEndpoint_FrictionAutonomy(t *testing.T) {
 		t.Fatalf("valid autonomy status = %d, want 200: %s", response.Code, response.Body.String())
 	}
 	var project struct {
-		GithubRepo              *string `json:"github_repo"`
-		FrictionAutonomy        string  `json:"friction_autonomy"`
-		PrPosture               string  `json:"pr_posture"`
-		AllowPayloadEnvironment bool    `json:"allow_payload_environment"`
+		GithubRepo           *string `json:"github_repo"`
+		FrictionAutonomy     string  `json:"friction_autonomy"`
+		PrPosture            string  `json:"pr_posture"`
+		DefaultEnvironmentID *string `json:"default_environment_id"`
 	}
 	if err := json.NewDecoder(response.Body).Decode(&project); err != nil {
 		t.Fatalf("decode project response: %v", err)
@@ -327,15 +328,38 @@ func TestUpdateProjectEndpoint_FrictionAutonomy(t *testing.T) {
 		t.Fatalf("github_repo = %v, want org/other", project.GithubRepo)
 	}
 
-	response = patch(`{"allow_payload_environment":true}`)
+	staging, err := q.CreateEnvironment(context.Background(), projectID, "staging")
+	if err != nil {
+		t.Fatal(err)
+	}
+	response = patch(`{"default_environment_id":"` + staging.ID + `"}`)
 	if response.Code != http.StatusOK {
-		t.Fatalf("payload environment PATCH status = %d, want 200: %s", response.Code, response.Body.String())
+		t.Fatalf("default environment PATCH status = %d, want 200: %s", response.Code, response.Body.String())
 	}
 	if err := json.NewDecoder(response.Body).Decode(&project); err != nil {
-		t.Fatalf("decode payload environment response: %v", err)
+		t.Fatalf("decode default environment response: %v", err)
 	}
-	if !project.AllowPayloadEnvironment {
-		t.Fatal("allow_payload_environment = false after true PATCH")
+	if project.DefaultEnvironmentID == nil || *project.DefaultEnvironmentID != staging.ID {
+		t.Fatalf("default_environment_id = %v, want %s", project.DefaultEnvironmentID, staging.ID)
+	}
+	for _, body := range []string{
+		`{"default_environment_id":null}`,
+		`{"default_environment_id":42}`,
+		`{"default_environment_id":"not-a-uuid"}`,
+	} {
+		if response := patch(body); response.Code != http.StatusBadRequest {
+			t.Errorf("PATCH %s = %d, want 400: %s", body, response.Code, response.Body.String())
+		}
+	}
+	if response := patch(`{"default_environment_id":"` + uuid.NewString() + `"}`); response.Code != http.StatusNotFound {
+		t.Errorf("unknown default = %d, want 404: %s", response.Code, response.Body.String())
+	}
+	sibling, err := q.CreateProject(context.Background(), orgID, "default-sibling", nil)
+	if err != nil || sibling.DefaultEnvironmentID == nil {
+		t.Fatalf("sibling = %#v, err=%v", sibling, err)
+	}
+	if response := patch(`{"default_environment_id":"` + *sibling.DefaultEnvironmentID + `"}`); response.Code != http.StatusNotFound {
+		t.Errorf("cross-project default = %d, want 404: %s", response.Code, response.Body.String())
 	}
 }
 
@@ -444,6 +468,7 @@ func cleanupTenantHandler(t *testing.T, pool *pgxpool.Pool, orgID string) {
 		`DELETE FROM error_events WHERE project_id IN (SELECT id FROM projects WHERE org_id = $1)`,
 		`DELETE FROM error_groups WHERE project_id IN (SELECT id FROM projects WHERE org_id = $1)`,
 		`DELETE FROM project_api_keys WHERE project_id IN (SELECT id FROM projects WHERE org_id = $1)`,
+		`UPDATE projects SET default_environment_id = NULL WHERE org_id = $1`,
 		`DELETE FROM environments WHERE project_id IN (SELECT id FROM projects WHERE org_id = $1)`,
 		`DELETE FROM projects WHERE org_id = $1`,
 		`DELETE FROM org_invitations WHERE org_id = $1 OR invited_by IN (SELECT id FROM users WHERE org_id = $1)`,

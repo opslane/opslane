@@ -146,31 +146,7 @@ describe('first-class projects dashboard', () => {
         `&environment_id=${tenant.environmentId}&account_id=stale-account`,
       );
       expect(await page.locator('#settings-project-select').count()).toBe(0);
-
-      const payloadEnvironmentToggle = page.getByRole('switch', {
-        name: 'Allow SDK environment override',
-      });
-      await payloadEnvironmentToggle.waitFor();
-      expect(await payloadEnvironmentToggle.isEnabled()).toBe(true);
-      // New projects allow the SDK environment label by default. Migration 028
-      // flipped this on, so environment is a label the SDK sends rather than
-      // something an admin has to enable first. The toggle therefore starts on,
-      // and turning it OFF is what exercises the PATCH.
-      expect(await payloadEnvironmentToggle.isChecked()).toBe(true);
-      const [toggleResponse] = await Promise.all([
-        page.waitForResponse((response) =>
-          response.request().method() === 'PATCH' &&
-          response.url().endsWith(`/api/v1/projects/${second.project.id}`)),
-        payloadEnvironmentToggle.uncheck({ force: true }),
-      ]);
-      expect(toggleResponse.status()).toBe(200);
-      await expect.poll(async () => {
-        const result = await getPool().query<{ allow_payload_environment: boolean }>(
-          `SELECT allow_payload_environment FROM projects WHERE id = $1`,
-          [second.project.id],
-        );
-        return result.rows[0]?.allow_payload_environment;
-      }).toBe(false);
+      expect(await page.getByText('Allow SDK environment override').count()).toBe(0);
 
       await page.getByRole('button', { name: 'New project' }).click();
       await page.locator('input[name="new-project-name"]').fill('Browser-created project');

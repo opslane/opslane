@@ -36,13 +36,13 @@ func seedGroup(t *testing.T, pool *pgxpool.Pool, q *db.Queries, name string) (or
 	}
 
 	result, err := q.InsertErrorEventAndGroup(ctx, db.IngestParams{
-		ProjectID:     proj.ID,
-		EnvironmentID: env.ID,
-		ErrorType:     "TypeError",
-		ErrorMessage:  "boom",
-		StackTraceRaw: "at app.js:1:1",
-		Fingerprint:   "fp-" + name,
-		Title:         "TypeError: boom",
+		ProjectID:            proj.ID,
+		DefaultEnvironmentID: env.ID,
+		ErrorType:            "TypeError",
+		ErrorMessage:         "boom",
+		StackTraceRaw:        "at app.js:1:1",
+		Fingerprint:          "fp-" + name,
+		Title:                "TypeError: boom",
 	})
 	if err != nil {
 		t.Fatalf("InsertErrorEventAndGroup: %v", err)
@@ -306,14 +306,14 @@ func TestRollupUpsertTracksErrorOccurrencesPerEnvironment(t *testing.T) {
 		{environmentID: envB.ID, at: late.Add(time.Hour)},
 	} {
 		if _, err := q.InsertErrorEventAndGroup(ctx, db.IngestParams{
-			ProjectID:     project.ID,
-			EnvironmentID: event.environmentID,
-			ErrorType:     "TypeError",
-			ErrorMessage:  "rollup",
-			StackTraceRaw: "at app.js:1:1",
-			Fingerprint:   "fp-rollup-upsert",
-			Title:         "TypeError: rollup",
-			EventTime:     event.at,
+			ProjectID:            project.ID,
+			DefaultEnvironmentID: event.environmentID,
+			ErrorType:            "TypeError",
+			ErrorMessage:         "rollup",
+			StackTraceRaw:        "at app.js:1:1",
+			Fingerprint:          "fp-rollup-upsert",
+			Title:                "TypeError: rollup",
+			EventTime:            event.at,
 		}); err != nil {
 			t.Fatalf("InsertErrorEventAndGroup %d: %v", i, err)
 		}
@@ -389,13 +389,13 @@ func TestRollupUpsertRejectsFrictionFingerprintCollision(t *testing.T) {
 	const fingerprint = "fp-error-friction-collision"
 	frictionGroupID := insertIncident(t, q, project.ID, fingerprint, "friction", "insight")
 	_, err = q.InsertErrorEventAndGroup(ctx, db.IngestParams{
-		ProjectID:     project.ID,
-		EnvironmentID: environment.ID,
-		ErrorType:     "TypeError",
-		ErrorMessage:  "kind collision",
-		StackTraceRaw: "at app.js:1:1",
-		Fingerprint:   fingerprint,
-		Title:         "TypeError: kind collision",
+		ProjectID:            project.ID,
+		DefaultEnvironmentID: environment.ID,
+		ErrorType:            "TypeError",
+		ErrorMessage:         "kind collision",
+		StackTraceRaw:        "at app.js:1:1",
+		Fingerprint:          fingerprint,
+		Title:                "TypeError: kind collision",
 	})
 	if err == nil {
 		t.Fatal("InsertErrorEventAndGroup accepted a friction-kind fingerprint collision")

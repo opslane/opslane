@@ -811,13 +811,13 @@ func TestInsertErrorEventAndGroup_EmptyPlatformDefaultsToJavascript(t *testing.T
 	deps, pool := testDeps(t)
 	_, projectID, envID, _ := seedTenant(t, deps.Queries)
 	result, err := deps.Queries.InsertErrorEventAndGroup(context.Background(), db.IngestParams{
-		ProjectID:     projectID,
-		EnvironmentID: envID,
-		ErrorType:     "TypeError",
-		ErrorMessage:  "direct insert",
-		StackTraceRaw: "at fn (/src/app.js:1:1)",
-		Fingerprint:   "direct-default-platform-" + uuid.NewString(),
-		Title:         "TypeError: direct insert",
+		ProjectID:            projectID,
+		DefaultEnvironmentID: envID,
+		ErrorType:            "TypeError",
+		ErrorMessage:         "direct insert",
+		StackTraceRaw:        "at fn (/src/app.js:1:1)",
+		Fingerprint:          "direct-default-platform-" + uuid.NewString(),
+		Title:                "TypeError: direct insert",
 	})
 	if err != nil {
 		t.Fatalf("insert event and group: %v", err)

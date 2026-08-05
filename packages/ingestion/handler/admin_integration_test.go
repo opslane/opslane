@@ -35,13 +35,13 @@ func TestAdminRoutesFailClosedAndAuthMeSignalsAllowlist(t *testing.T) {
 		t.Fatalf("create environment: %v", err)
 	}
 	if _, err := q.InsertErrorEventAndGroup(ctx, db.IngestParams{
-		ProjectID:     project.ID,
-		EnvironmentID: environment.ID,
-		ErrorType:     "TypeError",
-		ErrorMessage:  "admin onboarding contract fixture",
-		StackTraceRaw: "at admin-fixture.ts:1:1",
-		Fingerprint:   "admin-funnel-" + uniq,
-		Title:         "Admin onboarding contract fixture",
+		ProjectID:            project.ID,
+		DefaultEnvironmentID: environment.ID,
+		ErrorType:            "TypeError",
+		ErrorMessage:         "admin onboarding contract fixture",
+		StackTraceRaw:        "at admin-fixture.ts:1:1",
+		Fingerprint:          "admin-funnel-" + uniq,
+		Title:                "Admin onboarding contract fixture",
 	}); err != nil {
 		t.Fatalf("insert event: %v", err)
 	}

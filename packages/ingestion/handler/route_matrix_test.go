@@ -332,6 +332,7 @@ func TestRemovedCredentialRoutesAreNotRegistered(t *testing.T) {
 	for _, route := range []matrixRoute{
 		{method: http.MethodPost, path: "/api/v1/sourcemaps"},
 		{method: http.MethodPost, path: "/api/v1/environments/00000000-0000-0000-0000-000000000000/api-keys"},
+		{method: http.MethodPost, path: "/api/v1/projects/" + env.projectID + "/environments"},
 		{method: http.MethodGet, path: "/api/v1/projects/" + env.projectID + "/api-keys"},
 	} {
 		status, _ := env.call(t, route, matrixPK)

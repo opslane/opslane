@@ -341,7 +341,7 @@ func TestSessionSummaryAndPlayableChunks_AreFailClosedAndScoped(t *testing.T) {
 func ingestForSession(t *testing.T, q *db.Queries, projectID, envID, fingerprint, sessionID string) *db.IngestResult {
 	t.Helper()
 	result, err := q.InsertErrorEventAndGroup(context.Background(), db.IngestParams{
-		ProjectID: projectID, EnvironmentID: envID, Fingerprint: fingerprint,
+		ProjectID: projectID, DefaultEnvironmentID: envID, Fingerprint: fingerprint,
 		Title: "read test", ErrorType: "TypeError", ErrorMessage: "boom",
 		StackTraceRaw: "at test", SessionID: sessionID,
 	})

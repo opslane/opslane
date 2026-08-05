@@ -21,6 +21,11 @@ INSERT INTO environments (id, project_id, name) VALUES
   ('00000000-0000-0000-0000-000000000100', '00000000-0000-0000-0000-000000000010', 'production')
 ON CONFLICT (id) DO NOTHING;
 
+UPDATE projects
+SET default_environment_id = '00000000-0000-0000-0000-000000000100'
+WHERE id = '00000000-0000-0000-0000-000000000010'
+  AND default_environment_id IS NULL;
+
 INSERT INTO project_api_keys
   (id, key_id, project_id, scope, token_prefix, secret_hash, label)
 VALUES
@@ -72,6 +77,11 @@ ON CONFLICT (id) DO NOTHING;
 INSERT INTO environments (id, project_id, name) VALUES
   ('00000000-0000-0000-0000-000000000200', '00000000-0000-0000-0000-000000000020', 'production')
 ON CONFLICT (id) DO NOTHING;
+
+UPDATE projects
+SET default_environment_id = '00000000-0000-0000-0000-000000000200'
+WHERE id = '00000000-0000-0000-0000-000000000020'
+  AND default_environment_id IS NULL;
 
 -- Raw project-2 ingest key:
 -- opslane_pk_ndxw6ytboi3damrrgi3tknzxgq_E2EINGESTSECRETBBBBBBBBBBBBBBBBBBBBBBBBBBBB

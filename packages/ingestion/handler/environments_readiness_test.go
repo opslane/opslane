@@ -55,4 +55,10 @@ func TestListEnvironmentsReportsRollupReadiness(t *testing.T) {
 
 	assertResponse("running", false)
 	assertResponse("complete", true)
+
+	invalid := dashboardRequest(t, router, token,
+		"/api/v1/projects/"+projectID+"/environments?used_by=unknown")
+	if invalid.Code != http.StatusBadRequest {
+		t.Fatalf("invalid used_by = %d, want 400: %s", invalid.Code, invalid.Body.String())
+	}
 }

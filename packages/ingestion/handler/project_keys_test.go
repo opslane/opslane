@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/opslane/opslane/packages/ingestion/db"
 	"github.com/opslane/opslane/packages/ingestion/handler"
 )
@@ -88,5 +89,97 @@ func TestProjectKeyMiddlewareStatuses(t *testing.T) {
 				t.Errorf("code = %q, want %q", body.Code, tc.code)
 			}
 		})
+	}
+}
+
+func TestProjectKeyDefaultEnvironmentAndNullableCompatibility(t *testing.T) {
+	_, q, pool := authTestRouter(t)
+	ctx := context.Background()
+	org, err := q.CreateOrg(ctx, "middleware-defaults-"+uuid.NewString())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { cleanupTenantHandler(t, pool, org.ID) })
+
+	request := func(key string, wantEnvironmentID string) int {
+		t.Helper()
+		deps := &handler.Dependencies{Queries: q}
+		protected := deps.ProjectKey(db.ScopeIngest)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if got := handler.EnvironmentIDFromCtx(r.Context()); got != wantEnvironmentID {
+				t.Errorf("environment context = %s, want %s", got, wantEnvironmentID)
+			}
+			w.WriteHeader(http.StatusNoContent)
+		}))
+		req := httptest.NewRequest(http.MethodPost, "/", nil)
+		req.Header.Set("X-API-Key", key)
+		response := httptest.NewRecorder()
+		protected.ServeHTTP(response, req)
+		return response.Code
+	}
+
+	nonProduction, err := q.CreateProject(ctx, org.ID, "non-production", nil)
+	if err != nil || nonProduction.DefaultEnvironmentID == nil {
+		t.Fatalf("project = %#v, err=%v", nonProduction, err)
+	}
+	staging, err := q.CreateEnvironment(ctx, nonProduction.ID, "staging")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx,
+		`UPDATE projects SET default_environment_id = $2 WHERE id = $1`,
+		nonProduction.ID, staging.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx,
+		`DELETE FROM environments WHERE project_id = $1 AND name = 'production'`,
+		nonProduction.ID); err != nil {
+		t.Fatal(err)
+	}
+	nonProductionKey, err := q.CreateProjectKey(ctx, nonProduction.ID, db.ScopeIngest, "key", nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status := request(nonProductionKey.Raw, staging.ID); status != http.StatusNoContent {
+		t.Fatalf("non-production default status = %d, want 204", status)
+	}
+
+	nullWithProduction, err := q.CreateProject(ctx, org.ID, "nullable", nil)
+	if err != nil || nullWithProduction.DefaultEnvironmentID == nil {
+		t.Fatalf("project = %#v, err=%v", nullWithProduction, err)
+	}
+	productionID := *nullWithProduction.DefaultEnvironmentID
+	if _, err := pool.Exec(ctx,
+		`UPDATE projects SET default_environment_id = NULL WHERE id = $1`,
+		nullWithProduction.ID); err != nil {
+		t.Fatal(err)
+	}
+	nullKey, err := q.CreateProjectKey(ctx, nullWithProduction.ID, db.ScopeIngest, "key", nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status := request(nullKey.Raw, productionID); status != http.StatusNoContent {
+		t.Fatalf("nullable compatibility status = %d, want 204", status)
+	}
+
+	nullWithoutProduction, err := q.CreateProject(ctx, org.ID, "broken-nullable", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx,
+		`UPDATE projects SET default_environment_id = NULL WHERE id = $1`,
+		nullWithoutProduction.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx,
+		`DELETE FROM environments WHERE project_id = $1 AND name = 'production'`,
+		nullWithoutProduction.ID); err != nil {
+		t.Fatal(err)
+	}
+	brokenKey, err := q.CreateProjectKey(ctx, nullWithoutProduction.ID, db.ScopeIngest, "key", nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status := request(brokenKey.Raw, ""); status != http.StatusInternalServerError {
+		t.Fatalf("missing compatibility environment status = %d, want 500", status)
 	}
 }

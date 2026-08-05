@@ -148,7 +148,7 @@ export interface Project {
   github_repo: string | null;
   friction_autonomy: 'ask_first' | 'auto_fix' | 'auto_fix_ux';
   pr_posture: 'verified_only' | 'draft_when_unverified';
-  allow_payload_environment: boolean;
+  default_environment_id: string | null;
   created_at: string;
 }
 
@@ -438,7 +438,7 @@ export function updateProject(
     github_repo?: string;
     friction_autonomy?: Project['friction_autonomy'];
     pr_posture?: Project['pr_posture'];
-    allow_payload_environment?: Project['allow_payload_environment'];
+    default_environment_id?: string;
   }
 ): Promise<Project> {
   return patchJSON<Project>(`/projects/${projectId}`, data);
@@ -448,12 +448,12 @@ export function getFixStats(projectId: string): Promise<Record<'error' | 'fricti
   return fetchJSON<Record<'error' | 'friction', FixStats>>(`/projects/${projectId}/fix-stats`);
 }
 
-export function listEnvironments(projectId: string): Promise<EnvironmentListResponse> {
-  return fetchJSON<EnvironmentListResponse>(`/projects/${projectId}/environments`);
-}
-
-export function createEnvironment(projectId: string, name: string): Promise<Environment> {
-  return postJSON<Environment>(`/projects/${projectId}/environments`, { name });
+export function listEnvironments(
+  projectId: string,
+  usedBy?: 'incidents' | 'sessions',
+): Promise<EnvironmentListResponse> {
+  const query = usedBy ? `?used_by=${usedBy}` : '';
+  return fetchJSON<EnvironmentListResponse>(`/projects/${projectId}/environments${query}`);
 }
 
 export function listNotificationDestinations(

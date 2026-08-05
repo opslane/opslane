@@ -73,6 +73,7 @@ func cleanupCallbackTenant(t *testing.T, pool *pgxpool.Pool, sessionID string, i
 		`DELETE FROM error_groups WHERE project_id IN (SELECT id FROM projects WHERE org_id = $1)`,
 		`DELETE FROM end_users WHERE project_id IN (SELECT id FROM projects WHERE org_id = $1)`,
 		`DELETE FROM project_api_keys WHERE project_id IN (SELECT id FROM projects WHERE org_id = $1)`,
+		`UPDATE projects SET default_environment_id = NULL WHERE org_id = $1`,
 		`DELETE FROM environments WHERE project_id IN (SELECT id FROM projects WHERE org_id = $1)`,
 		`DELETE FROM projects WHERE org_id = $1`,
 		`DELETE FROM org_invitations WHERE org_id = $1 OR invited_by IN (SELECT id FROM users WHERE org_id = $1)`,

@@ -27,6 +27,9 @@ func NewRouterWithPool(deps *Dependencies, pool *pgxpool.Pool) *chi.Mux {
 	r.Use(StructuredLogger(logger))
 	r.Use(middleware.Recoverer)
 	r.Use(corsMiddleware())
+	r.MethodNotAllowed(func(w http.ResponseWriter, _ *http.Request) {
+		writeJSONError(w, http.StatusNotFound, "not found")
+	})
 
 	// Health check — enhanced with DB + MinIO checks if pool is provided
 	if pool != nil {
@@ -122,9 +125,8 @@ func NewRouterWithPool(deps *Dependencies, pool *pgxpool.Pool) *chi.Mux {
 		r.With(deps.AuthenticateUserSession, deps.RequireRoleIfCloud("admin")).Post("/projects", deps.CreateProjectEndpoint)
 		r.With(deps.AuthenticateUserSession, deps.RequireRoleIfCloud("admin")).Patch("/projects/{projectID}", deps.UpdateProjectEndpoint)
 
-		// Environment CRUD
+		// Environment discovery is telemetry-driven; dashboard access is read-only.
 		r.With(deps.AuthenticateUserSession).Get("/projects/{projectID}/environments", deps.ListEnvironmentsEndpoint)
-		r.With(deps.AuthenticateUserSession, deps.RequireRoleIfCloud("admin")).Post("/projects/{projectID}/environments", deps.CreateEnvironmentEndpoint)
 
 		// Stats are user-session reads.
 		r.With(deps.AuthenticateUserSession).Get("/projects/{projectID}/event-count", deps.GetEventCountEndpoint)

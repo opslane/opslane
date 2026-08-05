@@ -25,27 +25,7 @@ CREATE INDEX IF NOT EXISTS idx_project_api_keys_project_active_scope
   ON project_api_keys(project_id, scope)
   WHERE revoked_at IS NULL;
 
-ALTER TABLE projects ALTER COLUMN allow_payload_environment SET DEFAULT true;
-
--- The backfill below must run ONCE, not on every boot. scripts/run-migrations.sh
--- has no ledger and replays every file on every start, and the flag stays
--- operator-settable (PATCH /api/v1/projects/{id}, dashboard Settings toggle).
--- Unguarded, this UPDATE would silently re-enable payload-environment overrides
--- on every restart for any project whose owner deliberately turned them off.
 CREATE TABLE IF NOT EXISTS applied_data_migrations (
   name TEXT PRIMARY KEY,
   applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-
-DO $$
-BEGIN
-  IF NOT EXISTS (
-    SELECT 1 FROM applied_data_migrations
-    WHERE name = '028_allow_payload_environment_backfill'
-  ) THEN
-    UPDATE projects SET allow_payload_environment = true
-      WHERE allow_payload_environment IS DISTINCT FROM true;
-    INSERT INTO applied_data_migrations (name)
-      VALUES ('028_allow_payload_environment_backfill');
-  END IF;
-END $$;

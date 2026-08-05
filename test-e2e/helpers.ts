@@ -203,6 +203,10 @@ export async function seedTenant(
     [projectId, 'production']
   );
   const environmentId = envResult.rows[0]!.id;
+  await db.query(
+    `UPDATE projects SET default_environment_id = $2 WHERE id = $1`,
+    [projectId, environmentId],
+  );
 
   const ingestKey = await seedProjectIngestKey(db, projectId, 'e2e tenant ingest');
   const sourceMapKey = await seedProjectSourceMapKey(db, projectId, 'e2e tenant sourcemap');
@@ -666,6 +670,7 @@ export async function cleanupTenant(orgId: string): Promise<void> {
      )`,
     [orgId]
   );
+  await db.query(`UPDATE projects SET default_environment_id = NULL WHERE org_id = $1`, [orgId]);
   await db.query(
     `DELETE FROM environments WHERE project_id IN (SELECT id FROM projects WHERE org_id = $1)`,
     [orgId]

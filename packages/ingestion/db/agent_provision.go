@@ -247,12 +247,11 @@ func (q *Queries) ProvisionAgentSession(ctx context.Context, in AgentProvisionIn
 			return nil, fmt.Errorf("set project default branch: %w", err)
 		}
 	}
-	if _, err := q.CreateEnvironmentTx(ctx, tx, project.ID, "production"); err != nil {
+	production, err := q.EnsureProjectDefaultEnvironmentTx(ctx, tx, project.ID)
+	if err != nil {
 		return nil, err
 	}
-	if _, err := q.CreateEnvironmentTx(ctx, tx, project.ID, "development"); err != nil {
-		return nil, err
-	}
+	project.DefaultEnvironmentID = &production.ID
 	developmentKey, err := q.CreateProjectKeyTx(
 		ctx, tx, project.ID, ScopeIngest, "agent setup", nil, "",
 	)

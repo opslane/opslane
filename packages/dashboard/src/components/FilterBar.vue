@@ -26,9 +26,10 @@ const rawEndUserId = route.query['end_user_id'];
 const selectedEndUserId = ref(typeof rawEndUserId === 'string' ? rawEndUserId : '');
 const {
   environments,
+  filterAvailable,
   rollupReady,
   selectedEnvironmentId,
-} = useEnvironmentFilter(toRef(props, 'projectId'));
+} = useEnvironmentFilter(toRef(props, 'projectId'), 'incidents');
 
 onMounted(() => {
   // Apply URL-derived filters immediately. Account options are auxiliary and
@@ -182,7 +183,7 @@ watch(
       </select>
     </div>
 
-    <div v-if="rollupReady" class="relative">
+    <div v-if="filterAvailable" class="relative">
       <svg
         aria-hidden="true"
         class="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted"

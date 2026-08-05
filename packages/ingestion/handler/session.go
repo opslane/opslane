@@ -99,27 +99,6 @@ func (d *Dependencies) SessionInit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tombstoned, err := d.Queries.SessionIsTombstoned(r.Context(), req.SessionID)
-	if err != nil {
-		slog.Error("tombstone check failed", "error", err, "session_id", req.SessionID)
-		writeJSONError(w, http.StatusInternalServerError, "failed to register session")
-		return
-	}
-	if tombstoned {
-		writeJSONError(w, http.StatusGone, "session has been deleted")
-		return
-	}
-	ownerProjectID, err := d.Queries.SessionOwnerProject(r.Context(), req.SessionID)
-	if err != nil {
-		slog.Error("session owner check failed", "error", err, "session_id", req.SessionID)
-		writeJSONError(w, http.StatusInternalServerError, "failed to register session")
-		return
-	}
-	if ownerProjectID != "" && ownerProjectID != projectID {
-		RecordSessionCrossProjectConflict()
-		writeJSONError(w, http.StatusConflict, "session_id belongs to another project")
-		return
-	}
 	enabled, err := d.Queries.ProjectRecordingEnabled(r.Context(), projectID)
 	if err != nil {
 		slog.Error("recording flag lookup failed", "error", err, "project_id", projectID)
@@ -130,22 +109,6 @@ func (d *Dependencies) SessionInit(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, sessionInitResponse{Recording: false})
 		return
 	}
-
-	resolvedEnvironmentID, fallbackReason, err := d.resolvePayloadEnvironment(
-		r.Context(), projectID, environmentID, req.Environment,
-	)
-	if err != nil {
-		slog.Error("environment resolution failed", "error", err, "project_id", projectID)
-		writeJSONError(w, http.StatusInternalServerError, "failed to register session")
-		return
-	}
-	if fallbackReason != "" {
-		RecordEnvironmentOverrideFallback(fallbackReason)
-		if shouldLogEnvironmentFallback(fallbackReason) {
-			slog.Warn("session payload environment override fell back to key environment", "reason", fallbackReason, "project_id", projectID)
-		}
-	}
-	environmentID = resolvedEnvironmentID
 
 	startedAt := time.Now()
 	if req.StartedAt != "" {
@@ -171,7 +134,7 @@ func (d *Dependencies) SessionInit(w http.ResponseWriter, r *http.Request) {
 			Name: req.SDK.Name, Version: req.SDK.Version, Release: req.Release,
 		}
 	}
-	registration, err := d.Queries.RegisterSession(r.Context(), req.SessionID, projectID, environmentID,
+	registration, err := d.Queries.RegisterSession(r.Context(), req.SessionID, projectID, environmentID, req.Environment,
 		endUserID, startedAt, masking.RedactURL(req.PageURL), sdkIdentity)
 	if err != nil {
 		if errors.Is(err, db.ErrSessionTombstoned) {
@@ -187,6 +150,7 @@ func (d *Dependencies) SessionInit(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "failed to register session")
 		return
 	}
+	RecordEnvironmentResolution(registration.EnvironmentOutcome)
 	if registration.Diverged {
 		RecordEnvironmentSessionDivergence()
 	}

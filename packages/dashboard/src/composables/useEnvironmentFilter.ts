@@ -1,4 +1,4 @@
-import { onMounted, ref, toValue, watch, type MaybeRef } from 'vue';
+import { computed, onMounted, ref, toValue, watch, type MaybeRef } from 'vue';
 import { useRoute, useRouter, type LocationQuery, type LocationQueryRaw } from 'vue-router';
 
 import { listEnvironments, type Environment } from '../api';
@@ -28,11 +28,16 @@ export function persistEnvironmentId(storage: EnvironmentStorage, environmentId:
   else storage.removeItem(ENVIRONMENT_STORAGE_KEY);
 }
 
-export function useEnvironmentFilter(projectId: MaybeRef<string>) {
+export function useEnvironmentFilter(
+  projectId: MaybeRef<string>,
+  usedBy: 'incidents' | 'sessions',
+) {
   const route = useRoute();
   const router = useRouter();
   const environments = ref<Environment[]>([]);
   const rollupReady = ref(false);
+  const filterAvailable = computed(() => environments.value.length >= 2
+    && (usedBy === 'sessions' || rollupReady.value));
   const loading = ref(false);
   let loadGeneration = 0;
   const selectedEnvironmentId = ref(initialEnvironmentId(
@@ -60,18 +65,19 @@ export function useEnvironmentFilter(projectId: MaybeRef<string>) {
     }
     loading.value = true;
     try {
-      const response = await listEnvironments(id);
+      const response = await listEnvironments(id, usedBy);
       if (generation !== loadGeneration || id !== toValue(projectId)) return;
       environments.value = response.environments;
       rollupReady.value = response.rollup_ready;
-      if (selectedEnvironmentId.value &&
-          !response.environments.some((environment) => environment.id === selectedEnvironmentId.value)) {
+      if (!filterAvailable.value || (selectedEnvironmentId.value &&
+          !response.environments.some((environment) => environment.id === selectedEnvironmentId.value))) {
         clear();
       }
     } catch {
       if (generation !== loadGeneration || id !== toValue(projectId)) return;
       environments.value = [];
       rollupReady.value = false;
+      clear();
     } finally {
       if (generation === loadGeneration) loading.value = false;
     }
@@ -90,6 +96,7 @@ export function useEnvironmentFilter(projectId: MaybeRef<string>) {
   return {
     clear,
     environments,
+    filterAvailable,
     loading,
     loadOptions,
     rollupReady,

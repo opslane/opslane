@@ -7,7 +7,6 @@ import {
   updateProject,
   getFixStats,
   listEnvironments,
-  createEnvironment,
   getGitHubConfig,
   setGitHubConfig,
   deleteGitHubConfig,
@@ -42,7 +41,6 @@ const route = useRoute();
 const router = useRouter();
 const activeTab = ref<SettingsTab>('project');
 const activeRole = ref<AuthMembership['role']>();
-const activeRoleResolved = ref(false);
 const settingsTabs = computed(() => [
   { id: 'project', label: 'Project' },
   { id: 'environments', label: 'Environments' },
@@ -71,10 +69,6 @@ const provisionedProject = ref<ProjectProvisioningResponse | null>(null);
 const provisioningKeyAcknowledged = ref(false);
 const canProvision = computed(() =>
   !activeRole.value || activeRole.value === 'admin' || activeRole.value === 'owner',
-);
-const canManagePayloadEnvironment = computed(() =>
-  activeRoleResolved.value
-    && (!activeRole.value || activeRole.value === 'admin' || activeRole.value === 'owner'),
 );
 
 // Friction autonomy
@@ -108,22 +102,17 @@ const autonomyError = ref('');
 const prPosture = ref<Project['pr_posture']>('verified_only');
 const prPostureSaving = ref(false);
 const prPostureError = ref('');
-const allowPayloadEnvironment = ref(false);
-const payloadEnvironmentSaving = ref(false);
-const payloadEnvironmentError = ref('');
 const fixStats = ref<Record<'error' | 'friction', FixStats> | null>(null);
 let statsRequestToken = 0;
 let autonomySaveToken = 0;
 let prPostureSaveToken = 0;
-let payloadEnvironmentSaveToken = 0;
 let lastLoadedProjectId: string | null = null;
 
 // Environments tab
 const environments = ref<Environment[]>([]);
 const loadingEnvs = ref(false);
-const newEnvName = ref('');
-const creatingEnv = ref(false);
 const envError = ref('');
+const defaultEnvironmentSavingId = ref('');
 
 // GitHub integration
 const githubConfig = ref<GitHubConfig | null>(null);
@@ -137,7 +126,6 @@ const githubError = ref('');
 onMounted(async () => {
   getMe().then((user) => {
     activeRole.value = user.active_role;
-    activeRoleResolved.value = true;
   }).catch(() => {});
   try {
     projects.value = await listProjects();
@@ -161,8 +149,6 @@ watch(selectedProjectId, () => {
   autonomySaving.value = false;
   prPostureSaveToken += 1;
   prPostureSaving.value = false;
-  payloadEnvironmentSaveToken += 1;
-  payloadEnvironmentSaving.value = false;
   void loadAutonomyAndStats();
 }, { immediate: true });
 watch(projects, () => {
@@ -172,7 +158,6 @@ watch(projects, () => {
   // refetching stats, which would flicker the receipts for nothing).
   autonomy.value = selectedProject.value?.friction_autonomy ?? 'ask_first';
   prPosture.value = selectedProject.value?.pr_posture ?? 'verified_only';
-  allowPayloadEnvironment.value = selectedProject.value?.allow_payload_environment ?? false;
   if ((selectedProject.value?.id ?? null) !== lastLoadedProjectId) {
     void loadAutonomyAndStats();
   }
@@ -182,11 +167,9 @@ async function loadAutonomyAndStats(): Promise<void> {
   const token = ++statsRequestToken;
   autonomyError.value = '';
   prPostureError.value = '';
-  payloadEnvironmentError.value = '';
   fixStats.value = null;
   autonomy.value = selectedProject.value?.friction_autonomy ?? 'ask_first';
   prPosture.value = selectedProject.value?.pr_posture ?? 'verified_only';
-  allowPayloadEnvironment.value = selectedProject.value?.allow_payload_environment ?? false;
 
   const id = selectedProjectId.value;
   lastLoadedProjectId = selectedProject.value?.id ?? null;
@@ -292,39 +275,6 @@ function onPRPostureChange(event: Event): void {
   void savePRPosture(checked ? 'draft_when_unverified' : 'verified_only');
 }
 
-async function savePayloadEnvironment(value: boolean): Promise<void> {
-  if (!selectedProject.value || !canManagePayloadEnvironment.value) return;
-
-  const projectId = selectedProject.value.id;
-  const saveToken = ++payloadEnvironmentSaveToken;
-  const previous = allowPayloadEnvironment.value;
-  allowPayloadEnvironment.value = value;
-  payloadEnvironmentSaving.value = true;
-  payloadEnvironmentError.value = '';
-  try {
-    const updated = await updateProject(projectId, { allow_payload_environment: value });
-    projects.value = projects.value.map((project) =>
-      project.id === updated.id ? updated : project,
-    );
-  } catch (err: unknown) {
-    if (saveToken === payloadEnvironmentSaveToken && selectedProjectId.value === projectId) {
-      allowPayloadEnvironment.value = previous;
-      payloadEnvironmentError.value = err instanceof Error
-        ? err.message
-        : 'Failed to save SDK environment override setting';
-    }
-  } finally {
-    if (saveToken === payloadEnvironmentSaveToken) {
-      payloadEnvironmentSaving.value = false;
-    }
-  }
-}
-
-function onPayloadEnvironmentChange(event: Event): void {
-  const checked = event.target instanceof HTMLInputElement && event.target.checked;
-  void savePayloadEnvironment(checked);
-}
-
 async function saveAutonomy(value: Project['friction_autonomy']): Promise<void> {
   if (!selectedProject.value) return;
 
@@ -388,19 +338,23 @@ async function loadEnvironments(pid: string): Promise<void> {
   }
 }
 
-async function handleCreateEnvironment(): Promise<void> {
-  const pid = selectedProjectId.value || localStorage.getItem('opslane_project_id') || '';
-  if (!pid || !newEnvName.value.trim()) return;
-  creatingEnv.value = true;
+function isDefaultEnvironment(environment: Environment): boolean {
+  const configured = selectedProject.value?.default_environment_id;
+  return configured ? environment.id === configured : environment.name === 'production';
+}
+
+async function makeDefaultEnvironment(environment: Environment): Promise<void> {
+  const project = selectedProject.value;
+  if (!project || !canProvision.value || defaultEnvironmentSavingId.value) return;
+  defaultEnvironmentSavingId.value = environment.id;
   envError.value = '';
   try {
-    const env = await createEnvironment(pid, newEnvName.value.trim());
-    environments.value.push(env);
-    newEnvName.value = '';
+    const updated = await updateProject(project.id, { default_environment_id: environment.id });
+    projects.value = projects.value.map((candidate) => candidate.id === updated.id ? updated : candidate);
   } catch (err: unknown) {
-    envError.value = err instanceof Error ? err.message : 'Failed to create environment';
+    envError.value = err instanceof Error ? err.message : 'Failed to change default environment';
   } finally {
-    creatingEnv.value = false;
+    defaultEnvironmentSavingId.value = '';
   }
 }
 
@@ -615,47 +569,6 @@ async function handleDisconnectGithub(): Promise<void> {
         <p v-if="prPostureError" class="text-sm text-danger" v-text="prPostureError"></p>
       </section>
 
-      <!-- SDK-provided environment override -->
-      <section class="mt-8 p-4 bg-surface border border-border rounded-lg space-y-3">
-        <div class="flex items-start justify-between gap-4">
-          <div>
-            <h3 id="payload-environment-heading" class="text-sm font-medium text-text">
-              Allow SDK environment override
-            </h3>
-            <p id="payload-environment-desc" class="mt-1 text-xs text-muted">
-              This relaxes the boundary provided by an environment-bound API key. SDK event
-              and replay payloads may select any existing environment in this project. Enable
-              it only when you trust clients to choose the correct environment.
-            </p>
-          </div>
-          <label class="relative inline-flex shrink-0 items-center" :class="canManagePayloadEnvironment ? 'cursor-pointer' : 'cursor-not-allowed'">
-            <input
-              type="checkbox"
-              class="peer sr-only"
-              role="switch"
-              aria-labelledby="payload-environment-heading"
-              aria-describedby="payload-environment-desc"
-              :checked="allowPayloadEnvironment"
-              :disabled="!selectedProject || !canManagePayloadEnvironment || payloadEnvironmentSaving"
-              @change="onPayloadEnvironmentChange"
-            />
-            <span class="h-6 w-11 rounded-full bg-border-strong transition-colors peer-checked:bg-accent peer-disabled:cursor-not-allowed peer-disabled:opacity-50 after:absolute after:left-0.5 after:top-0.5 after:h-5 after:w-5 after:rounded-full after:bg-white after:shadow-sm after:transition-transform peer-checked:after:translate-x-5"></span>
-          </label>
-        </div>
-        <p v-if="!selectedProject" class="text-xs text-faint">
-          Select one of your projects above to manage SDK environment overrides.
-        </p>
-        <p v-else-if="!canManagePayloadEnvironment" class="text-xs text-faint">
-          Only organization admins can change this setting.
-        </p>
-        <p v-else class="text-xs text-faint">
-          {{ allowPayloadEnvironment
-            ? 'Enabled — SDK payloads may override the key-bound environment.'
-            : 'Disabled (default) — the API key always determines the environment.' }}
-        </p>
-        <p v-if="payloadEnvironmentError" class="text-sm text-danger" v-text="payloadEnvironmentError"></p>
-      </section>
-
       <!-- Friction autonomy (Batch 5, issue #57) -->
       <section class="mt-8 p-4 bg-surface border border-border rounded-lg space-y-3">
         <div>
@@ -713,6 +626,9 @@ async function handleDisconnectGithub(): Promise<void> {
 
     <!-- Environments tab -->
     <div v-if="activeTab === 'environments'" id="settings-environments-panel" role="tabpanel" aria-labelledby="settings-environments-tab" tabindex="0">
+      <p class="mb-4 text-sm text-muted">
+        Valid SDK labels are discovered when their first event or session is stored. Missing or invalid labels use the project default.
+      </p>
       <div v-if="loadingEnvs" class="text-sm text-muted">Loading environments...</div>
 
       <div v-else>
@@ -724,24 +640,21 @@ async function handleDisconnectGithub(): Promise<void> {
           >
             <div>
               <span class="text-sm font-medium text-text" v-text="env.name"></span>
+              <span v-if="isDefaultEnvironment(env)" class="ml-2 rounded-full bg-accent/10 px-2 py-0.5 text-xs font-medium text-accent">Default</span>
               <span class="ml-2 text-xs text-muted">created {{ formatDate(env.created_at) }}</span>
             </div>
+            <Button
+              v-if="!isDefaultEnvironment(env) && canProvision"
+              variant="secondary"
+              size="sm"
+              :disabled="Boolean(defaultEnvironmentSavingId)"
+              @click="makeDefaultEnvironment(env)"
+            >
+              {{ defaultEnvironmentSavingId === env.id ? 'Saving...' : 'Make default' }}
+            </Button>
           </li>
         </ul>
         <div v-else class="text-sm text-muted mb-6">No environments yet.</div>
-
-        <form @submit.prevent="handleCreateEnvironment" class="flex gap-3">
-          <input
-            v-model="newEnvName"
-            type="text"
-            placeholder="Environment name (e.g. staging)"
-            :disabled="creatingEnv"
-            class="flex-1 rounded-md border border-border bg-surface-subtle px-3 py-2 text-sm text-text focus:border-accent focus:ring-1 focus:ring-accent disabled:opacity-50"
-          />
-          <Button variant="primary" type="submit" :disabled="creatingEnv || !newEnvName.trim()">
-            {{ creatingEnv ? 'Creating...' : 'Create environment' }}
-          </Button>
-        </form>
         <div v-if="envError" class="mt-2 text-sm text-danger" v-text="envError"></div>
       </div>
     </div>

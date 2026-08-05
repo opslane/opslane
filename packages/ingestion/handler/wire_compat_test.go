@@ -283,17 +283,12 @@ func TestWireV110EnvironmentResolution(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create staging environment: %v", err)
 	}
-	if _, err := pool.Exec(context.Background(),
-		`UPDATE projects SET allow_payload_environment = true WHERE id = $1`, projectID); err != nil {
-		t.Fatalf("enable payload environment: %v", err)
-	}
-
 	tests := []struct {
 		name              string
 		fixture           string
 		wantEnvironmentID string
 	}{
-		{name: "minimal keeps key environment", fixture: "v1.1.0-minimal.json", wantEnvironmentID: keyEnvironmentID},
+		{name: "minimal uses project default", fixture: "v1.1.0-minimal.json", wantEnvironmentID: keyEnvironmentID},
 		{name: "full resolves staging", fixture: "v1.1.0-full.json", wantEnvironmentID: staging.ID},
 	}
 	for _, test := range tests {

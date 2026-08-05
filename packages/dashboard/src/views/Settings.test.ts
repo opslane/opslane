@@ -5,10 +5,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createMemoryHistory, createRouter } from 'vue-router';
 
 import Settings from './Settings.vue';
-import { getMe, listProjects, updateProject } from '../api';
+import { getMe, listEnvironments, listProjects, updateProject } from '../api';
 
 vi.mock('../api', () => ({
-  createEnvironment: vi.fn(),
   createInvitation: vi.fn(),
   createProject: vi.fn(),
   deleteGitHubConfig: vi.fn(),
@@ -33,15 +32,9 @@ const project = {
   github_repo: null,
   friction_autonomy: 'ask_first' as const,
   pr_posture: 'verified_only' as const,
-  allow_payload_environment: false,
+  default_environment_id: 'env-production',
   created_at: '2026-07-19T00:00:00Z',
 };
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((done) => { resolve = done; });
-  return { promise, resolve };
-}
 
 async function mountSettings(role?: 'owner' | 'admin' | 'member') {
   vi.mocked(getMe).mockResolvedValue({
@@ -53,7 +46,14 @@ async function mountSettings(role?: 'owner' | 'admin' | 'member') {
     active_role: role,
   });
   vi.mocked(listProjects).mockResolvedValue([project]);
-  vi.mocked(updateProject).mockResolvedValue({ ...project, allow_payload_environment: true });
+  vi.mocked(listEnvironments).mockResolvedValue({
+    environments: [
+      { id: 'env-production', project_id: project.id, name: 'production', created_at: project.created_at },
+      { id: 'env-staging', project_id: project.id, name: 'staging', created_at: project.created_at },
+    ],
+    rollup_ready: true,
+  });
+  vi.mocked(updateProject).mockResolvedValue({ ...project, default_environment_id: 'env-staging' });
 
   const router = createRouter({
     history: createMemoryHistory(),
@@ -66,7 +66,7 @@ async function mountSettings(role?: 'owner' | 'admin' | 'member') {
   return wrapper;
 }
 
-describe('payload environment project setting', () => {
+describe('project default environment setting', () => {
   beforeEach(() => {
     localStorage.clear();
     localStorage.setItem('opslane_project_id', project.id);
@@ -78,71 +78,29 @@ describe('payload environment project setting', () => {
     localStorage.clear();
   });
 
-  it('lets an organization admin opt in after showing the key-boundary warning', async () => {
+  it('lets an organization admin change the default without create controls', async () => {
     const wrapper = await mountSettings('admin');
-
-    expect(wrapper.text()).toContain('Allow SDK environment override');
-    expect(wrapper.text()).toContain('environment-bound API key');
-    const toggle = wrapper.get<HTMLInputElement>('input[aria-labelledby="payload-environment-heading"]');
-    expect(toggle.element.disabled).toBe(false);
-
-    await toggle.setValue(true);
+    await wrapper.get('#settings-environments-tab').trigger('click');
     await flushPromises();
-
+    expect(wrapper.text()).toContain('Default');
+    expect(wrapper.text()).not.toContain('Create environment');
+    const makeDefault = wrapper.findAll('button').find((button) => button.text() === 'Make default');
+    expect(makeDefault).toBeDefined();
+    await makeDefault!.trigger('click');
+    await flushPromises();
     expect(updateProject).toHaveBeenCalledWith(project.id, {
-      allow_payload_environment: true,
+      default_environment_id: 'env-staging',
     });
-    expect(toggle.element.checked).toBe(true);
     wrapper.unmount();
   });
 
-  it('shows the project setting read-only to organization members', async () => {
+  it('shows the default without an action to organization members', async () => {
     const wrapper = await mountSettings('member');
-
-    const toggle = wrapper.get<HTMLInputElement>('input[aria-labelledby="payload-environment-heading"]');
-    expect(toggle.element.disabled).toBe(true);
-    expect(wrapper.text()).toContain('Only organization admins can change this setting.');
-
-    await toggle.trigger('change');
+    await wrapper.get('#settings-environments-tab').trigger('click');
+    await flushPromises();
+    expect(wrapper.text()).toContain('Default');
+    expect(wrapper.text()).not.toContain('Make default');
     expect(updateProject).not.toHaveBeenCalled();
-    wrapper.unmount();
-  });
-
-  it('allows the setting in OSS mode where auth/me has no organization role', async () => {
-    const wrapper = await mountSettings();
-
-    const toggle = wrapper.get<HTMLInputElement>('input[aria-labelledby="payload-environment-heading"]');
-    expect(toggle.element.disabled).toBe(false);
-    wrapper.unmount();
-  });
-
-  it('keeps the toggle disabled until the cloud role is known', async () => {
-    const me = deferred<Awaited<ReturnType<typeof getMe>>>();
-    vi.mocked(getMe).mockReturnValue(me.promise);
-    vi.mocked(listProjects).mockResolvedValue([project]);
-
-    const router = createRouter({
-      history: createMemoryHistory(),
-      routes: [{ path: '/settings', component: Settings }],
-    });
-    await router.push('/settings');
-    await router.isReady();
-    const wrapper = mount(Settings, { global: { plugins: [router] } });
-    await flushPromises();
-
-    const toggle = wrapper.get<HTMLInputElement>('input[aria-labelledby="payload-environment-heading"]');
-    expect(toggle.element.disabled).toBe(true);
-
-    me.resolve({
-      id: 'user-1',
-      org_id: 'org-1',
-      email: 'member@example.test',
-      name: 'Member',
-      is_admin: false,
-      active_role: 'member',
-    });
-    await flushPromises();
-    expect(toggle.element.disabled).toBe(true);
     wrapper.unmount();
   });
 });

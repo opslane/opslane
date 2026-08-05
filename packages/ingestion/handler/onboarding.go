@@ -66,13 +66,14 @@ func (d *Dependencies) OnboardingSetup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 2. Create "production" environment
-	env, err := d.Queries.CreateEnvironmentTx(r.Context(), tx, project.ID, "production")
+	// 2. Initialize the project default and production environment.
+	env, err := d.Queries.EnsureProjectDefaultEnvironmentTx(r.Context(), tx, project.ID)
 	if err != nil {
 		slog.Error("onboarding: create environment", "error", err)
 		writeJSONError(w, http.StatusInternalServerError, "failed to create environment")
 		return
 	}
+	project.DefaultEnvironmentID = &env.ID
 
 	// 3. Create API key
 	apiKey, err := d.Queries.CreateProjectKeyTx(

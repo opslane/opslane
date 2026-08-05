@@ -42,13 +42,13 @@ func TestInsertErrorEventAndGroup_UsesClientEventTime(t *testing.T) {
 	eventTime := time.Now().UTC().Add(-90 * time.Second).Truncate(time.Millisecond)
 
 	result, err := q.InsertErrorEventAndGroup(ctx, db.IngestParams{
-		ProjectID:     projID,
-		EnvironmentID: envID,
-		ErrorType:     "TypeError",
-		ErrorMessage:  "boom",
-		Fingerprint:   "fp-client-ts",
-		Title:         "TypeError: boom",
-		EventTime:     eventTime,
+		ProjectID:            projID,
+		DefaultEnvironmentID: envID,
+		ErrorType:            "TypeError",
+		ErrorMessage:         "boom",
+		Fingerprint:          "fp-client-ts",
+		Title:                "TypeError: boom",
+		EventTime:            eventTime,
 	})
 	if err != nil {
 		t.Fatalf("InsertErrorEventAndGroup: %v", err)
@@ -89,11 +89,11 @@ func TestInsertErrorEventAndGroup_ZeroEventTimeFallsBackToServerTime(t *testing.
 
 	before := time.Now().Add(-5 * time.Second)
 	result, err := q.InsertErrorEventAndGroup(ctx, db.IngestParams{
-		ProjectID:     projID,
-		EnvironmentID: envID,
-		ErrorMessage:  "no timestamp",
-		Fingerprint:   "fp-zero-ts",
-		Title:         "no timestamp",
+		ProjectID:            projID,
+		DefaultEnvironmentID: envID,
+		ErrorMessage:         "no timestamp",
+		Fingerprint:          "fp-zero-ts",
+		Title:                "no timestamp",
 		// EventTime deliberately zero
 	})
 	if err != nil {
@@ -126,13 +126,13 @@ func TestInsertErrorEventAndGroup_LastSeenDoesNotRegress(t *testing.T) {
 
 	ingest := func(ts time.Time) *db.IngestResult {
 		res, err := q.InsertErrorEventAndGroup(ctx, db.IngestParams{
-			ProjectID:     projID,
-			EnvironmentID: envID,
-			ErrorMessage:  "boom",
-			Fingerprint:   "fp-order",
-			Title:         "boom",
-			EventTime:     ts,
-			EndUserID:     "user-1",
+			ProjectID:            projID,
+			DefaultEnvironmentID: envID,
+			ErrorMessage:         "boom",
+			Fingerprint:          "fp-order",
+			Title:                "boom",
+			EventTime:            ts,
+			EndUserID:            "user-1",
 		})
 		if err != nil {
 			t.Fatalf("InsertErrorEventAndGroup(%v): %v", ts, err)
