@@ -5,10 +5,13 @@ const shutdownSpy = vi.fn(async () => {});
 const processorSpy = vi.fn();
 const instrumentSpy = vi.fn();
 const disableSpy = vi.fn();
+const sdkConfigSpy = vi.fn();
 
 vi.mock('@opentelemetry/sdk-node', () => ({
   NodeSDK: class {
-    constructor(public readonly config: unknown) {}
+    constructor(config: unknown) {
+      sdkConfigSpy(config);
+    }
     start = startSpy;
     shutdown = shutdownSpy;
   },
@@ -109,6 +112,50 @@ describe('initTracing', () => {
         baseUrl: 'https://us.cloud.langfuse.com',
       }),
     );
+  });
+
+  it('overrides the v5 span filter so our spans are not silently dropped', async () => {
+    // Without shouldExportSpan the Langfuse v5 default filter drops every span
+    // this worker produces — the other half of the original silent failure.
+    setEnv(COMPLETE_ENV);
+    const tracing = await loadTracing();
+    await tracing.initTracing();
+
+    const options = processorSpy.mock.calls[0]?.[0] as {
+      shouldExportSpan?: (span: unknown) => boolean;
+      flushAt?: number;
+    };
+    expect(typeof options.shouldExportSpan).toBe('function');
+    expect(options.shouldExportSpan?.({})).toBe(true);
+    expect(options.flushAt).toBe(50);
+  });
+
+  it('instruments the Anthropic module and registers the instrumentation', async () => {
+    // initTracing must patch the Anthropic prototype; without this the LLM
+    // spans the whole feature exists to capture are never produced.
+    setEnv(COMPLETE_ENV);
+    const tracing = await loadTracing();
+    await tracing.initTracing();
+
+    expect(instrumentSpy).toHaveBeenCalledTimes(1);
+    const sdkOptions = sdkConfigSpy.mock.calls[0]?.[0] as { instrumentations?: unknown[] };
+    expect(sdkOptions.instrumentations).toHaveLength(1);
+  });
+
+  it('keeps credentials out of a failed-initialization log line', async () => {
+    // An SDK exception can quote the key. The catch handler logs outside the
+    // diag adapter, so it needs its own redaction.
+    setEnv({ ...COMPLETE_ENV, LANGFUSE_SECRET_KEY: 'sk-lf-verySecretValue' });
+    startSpy.mockImplementationOnce(() => {
+      throw new Error('rejected key sk-lf-verySecretValue');
+    });
+    const tracing = await loadTracing();
+    const { logger } = await import('../logger.js');
+    const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+
+    await tracing.initTracing();
+
+    expect(JSON.stringify(warnSpy.mock.calls)).not.toContain('sk-lf-verySecretValue');
   });
 
   it('logs the instrumentation line exactly once, after start', async () => {
@@ -214,7 +261,11 @@ describe('shutdownTracing', () => {
     vi.clearAllMocks();
     setEnv({});
   });
-  afterEach(() => {
+  afterEach(async () => {
+    // Same reason as the initTracing block: OTel's diag registration lives on a
+    // globalThis symbol and survives vi.resetModules().
+    const { diag } = await import('@opentelemetry/api');
+    diag.disable();
     setEnv({});
     vi.restoreAllMocks();
   });
@@ -248,7 +299,11 @@ describe('buildLangfuseTraceUrl', () => {
     vi.clearAllMocks();
     setEnv({});
   });
-  afterEach(() => setEnv({}));
+  afterEach(async () => {
+    const { diag } = await import('@opentelemetry/api');
+    diag.disable();
+    setEnv({});
+  });
 
   it('returns null when tracing was never initialized', async () => {
     const tracing = await loadTracing();

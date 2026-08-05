@@ -139,7 +139,18 @@ export async function initTracing(): Promise<void> {
 
   // Built BEFORE the try so the catch below can redact too — an exception from
   // the processor constructor is a credential-bearing string like any other.
-  const redact = createRedactor([config.credentials.publicKey, config.credentials.secretKey]);
+  // The base64 blob is seeded explicitly: Langfuse sends the credential as
+  // `Authorization: Basic base64(publicKey:secretKey)`, which contains neither
+  // plaintext key, so the literal pass alone would never match the form the
+  // credential actually travels in.
+  const basicToken = Buffer.from(
+    `${config.credentials.publicKey}:${config.credentials.secretKey}`,
+  ).toString('base64');
+  const redact = createRedactor([
+    config.credentials.publicKey,
+    config.credentials.secretKey,
+    basicToken,
+  ]);
   redactError = redact;
 
   try {
@@ -157,7 +168,6 @@ export async function initTracing(): Promise<void> {
         safeWarn('otel diag: suppressed diagnostics dropped', { fingerprint, suppressed });
       },
     });
-    diag.setLogger(createDiagLogger(diagThrottle, redact), DiagLogLevel.WARN);
 
     const inst = new AnthropicInstrumentation();
     instrumentation = inst;
@@ -184,6 +194,13 @@ export async function initTracing(): Promise<void> {
       instrumentations: [inst],
     });
     nodeSdk.start();
+
+    // Installed AFTER the NodeSDK: when OTEL_LOG_LEVEL is set, the NodeSDK
+    // *constructor* calls diag.setLogger(new DiagConsoleLogger()) itself
+    // (sdk-node sdk.js:96-98). Installing ours first means an operator who sets
+    // OTEL_LOG_LEVEL to debug this very subsystem silently replaces the
+    // redacting, throttled adapter with a raw console logger.
+    diag.setLogger(createDiagLogger(diagThrottle, redact), DiagLogLevel.WARN);
 
     sdk = nodeSdk;
     tracer = trace.getTracer('opslane-worker');

@@ -83,6 +83,31 @@ describe('createRedactor', () => {
     expect(redact('authorization: Basic cGs6c2s=')).toBe('[redacted]');
   });
 
+  it('redacts the base64 blob Langfuse actually sends', () => {
+    // Langfuse authenticates with `Authorization: Basic base64(pk:sk)`. The
+    // encoded form contains NEITHER plaintext key, so the literal pass cannot
+    // catch it — this is the form the live credential travels in.
+    const token = Buffer.from('pk-lf-public:sk-lf-secret').toString('base64');
+    const redact = createRedactor([]);
+    expect(redact(`Authorization: Basic ${token}`)).not.toContain(token);
+  });
+
+  it('redacts the JSON rendering OTel produces for exceptions', () => {
+    // OTel's default error handler emits diag.error(JSON.stringify(...)), so
+    // the header arrives quoted and a bare `\s*[:=]` never matches it.
+    const token = Buffer.from('pk-lf-public:sk-lf-secret').toString('base64');
+    const redact = createRedactor([]);
+    const rendered = `{"status":401,"headers":{"authorization":"Basic ${token}"}}`;
+    expect(redact(rendered)).not.toContain(token);
+  });
+
+  it('does not let one header swallow the rest of a collapsed message', () => {
+    const redact = createRedactor([]);
+    const out = redact('authorization: abc123 status=401 host=example.com');
+    expect(out).toContain('status=401');
+    expect(out).not.toContain('abc123');
+  });
+
   it('redacts a configured secret regardless of how short it is', () => {
     // No length floor: a floor would exempt exactly the credentials we were
     // handed. Over-redaction is the cheaper failure.

@@ -22,11 +22,19 @@ const MAX_MESSAGE_LENGTH = 500;
 
 /** Shapes that must never survive into a log line. */
 const SECRET_PATTERNS: readonly RegExp[] = [
-  /\b(?:pk|sk)-lf-[A-Za-z0-9_-]+/gi,
+  // Header form first, so it consumes the scheme AND the token as one match.
+  // The optional quotes handle the JSON rendering OTel's default error handler
+  // produces (`"authorization":"Basic ..."`), which a bare `\s*[:=]` misses.
+  // The scheme list is explicit rather than `\w+` so an opaque value like
+  // `authorization: abc123 status=401` cannot swallow the following field.
+  // Bounded rather than `.*` for the same reason.
+  /\bauthorization\b["']?\s*[:=]\s*["']?(?:(?:Basic|Bearer|Digest)\s+)?[^"',}\]\s]+/gi,
+  // Bare occurrences with no header name. Langfuse authenticates with
+  // `Basic base64(publicKey:secretKey)`, so the encoded blob contains NEITHER
+  // plaintext key — the literal pass alone can never catch the live credential.
+  /\bBasic\s+[A-Za-z0-9+/]{8,}={0,2}/gi,
   /\bBearer\s+[A-Za-z0-9._~+/-]+=*/gi,
-  // Consume the rest of the line. A value-only `\S+` stops at the first space
-  // and would leave the credential behind in `authorization: Basic <base64>`.
-  /\bauthorization\b\s*[:=].*/gi,
+  /\b(?:pk|sk)-lf-[A-Za-z0-9_-]+/gi,
 ];
 
 export interface DiagThrottleOptions {
