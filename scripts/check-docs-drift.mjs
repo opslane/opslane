@@ -130,7 +130,12 @@ function goEnvVars() {
 function workerEnvVars() {
   const vars = new Set();
   for (const f of tsFiles('packages/worker/src')) {
-    for (const m of readFileSync(join(root, f), 'utf8').matchAll(/process\.env\[?['"]([A-Z0-9_]+)['"]\]?/g)) vars.add(m[1]);
+    const source = readFileSync(join(root, f), 'utf8');
+    for (const m of source.matchAll(/process\.env\[?['"]([A-Z0-9_]+)['"]\]?/g)) vars.add(m[1]);
+    // Config modules that take the environment as a parameter read their names
+    // through a helper, so the literal never sits next to `process.env`. The
+    // name is still a literal in worker source; follow it.
+    for (const m of source.matchAll(/readVar\([^,]+,\s*['"]([A-Z0-9_]+)['"]\s*\)/g)) vars.add(m[1]);
   }
   vars.delete('VITEST'); // test-runner detection, not configuration
   return vars;
