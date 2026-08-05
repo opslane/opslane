@@ -1004,13 +1004,20 @@ func (q *Queries) ListAffectedUsers(ctx context.Context, projectID, errorGroupID
 
 // ListAccounts returns aggregated accounts for a project. Tenant-scoped.
 func (q *Queries) ListAccounts(ctx context.Context, projectID string, query *string) ([]Account, error) {
+	// The visibility predicates live in the ON clause, not WHERE: in WHERE they
+	// would demote the LEFT JOIN to an inner join and drop accounts with zero
+	// visible incidents out of the list entirely. Counting eg.id rather than
+	// eau.error_group_id lets filtered-out rows contribute NULL.
 	sql := `SELECT eu.external_account_id,
 	               MAX(eu.account_name) AS account_name,
 	               COUNT(DISTINCT eu.id) AS user_count,
-	               COUNT(DISTINCT eau.error_group_id) AS incident_count,
+	               COUNT(DISTINCT eg.id) AS incident_count,
 	               MAX(eu.last_seen) AS last_seen
 	        FROM end_users eu
 	        LEFT JOIN error_group_affected_users eau ON eau.end_user_id = eu.id
+	        LEFT JOIN error_groups eg ON eg.id = eau.error_group_id
+	             AND ` + notArchivedSQL + `
+	             AND ` + visibleCandidateSQL + `
 	        WHERE eu.project_id = $1 AND eu.external_account_id IS NOT NULL`
 
 	args := []interface{}{projectID}
@@ -1042,13 +1049,18 @@ func (q *Queries) ListAccounts(ctx context.Context, projectID string, query *str
 func (q *Queries) GetAccountByID(ctx context.Context, projectID, externalAccountID string) (*Account, error) {
 	var a Account
 	err := q.pool.QueryRow(ctx,
+		// Same ON-clause / COUNT(eg.id) shape as ListAccounts; see the comment
+		// there for why the predicates cannot move into WHERE.
 		`SELECT eu.external_account_id,
 		        MAX(eu.account_name) AS account_name,
 		        COUNT(DISTINCT eu.id) AS user_count,
-		        COUNT(DISTINCT eau.error_group_id) AS incident_count,
+		        COUNT(DISTINCT eg.id) AS incident_count,
 		        MAX(eu.last_seen) AS last_seen
 		 FROM end_users eu
 		 LEFT JOIN error_group_affected_users eau ON eau.end_user_id = eu.id
+		 LEFT JOIN error_groups eg ON eg.id = eau.error_group_id
+		      AND `+notArchivedSQL+`
+		      AND `+visibleCandidateSQL+`
 		 WHERE eu.project_id = $1 AND eu.external_account_id = $2
 		 GROUP BY eu.external_account_id`,
 		projectID, externalAccountID,

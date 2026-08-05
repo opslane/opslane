@@ -212,3 +212,134 @@ func TestListErrorGroupsArchivedFloodDoesNotEvictLiveGroups(t *testing.T) {
 		})
 	}
 }
+
+// linkAccountUser attaches a new end user carrying externalAccountID to the
+// given group, which is how both account aggregates discover incidents.
+func linkAccountUser(
+	t *testing.T,
+	pool *pgxpool.Pool,
+	projectID, groupID, externalUserID, externalAccountID string,
+) {
+	t.Helper()
+	ctx := context.Background()
+	var userID string
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO end_users (project_id, external_user_id, external_account_id, account_name)
+		VALUES ($1, $2, $3, $3)
+		RETURNING id`,
+		projectID, externalUserID, externalAccountID,
+	).Scan(&userID); err != nil {
+		t.Fatalf("insert end user: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO error_group_affected_users (error_group_id, end_user_id)
+		VALUES ($1, $2)`, groupID, userID,
+	); err != nil {
+		t.Fatalf("link affected user: %v", err)
+	}
+}
+
+func accountByID(accounts []db.Account, externalAccountID string) *db.Account {
+	for i := range accounts {
+		if accounts[i].ExternalAccountID == externalAccountID {
+			return &accounts[i]
+		}
+	}
+	return nil
+}
+
+func TestAccountIncidentCountExcludesArchivedAndMatchesTheList(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	q := db.New(pool)
+	_, projID, _, groupID := seedGroup(t, pool, q, "account-archived-count")
+
+	linkAccountUser(t, pool, projID, groupID, "user-archived", "acct-archived")
+	if err := q.ArchiveErrorGroup(ctx, projID, groupID); err != nil {
+		t.Fatalf("ArchiveErrorGroup: %v", err)
+	}
+
+	account, err := q.GetAccountByID(ctx, projID, "acct-archived")
+	if err != nil {
+		t.Fatalf("GetAccountByID: %v", err)
+	}
+	if account == nil {
+		t.Fatal("GetAccountByID returned nil for an account whose only incident is archived")
+	}
+	if account.IncidentCount != 0 {
+		t.Errorf("IncidentCount = %d, want 0 (archived incidents are not visible)", account.IncidentCount)
+	}
+
+	// The count must equal the list rendered beneath it in AccountDetail.vue.
+	// This equality only holds below ListErrorGroups' LIMIT 100; the fixture is
+	// deliberately one incident, so the cap is not in play here.
+	incidents, err := q.ListErrorGroups(ctx, projID, &db.ErrorGroupFilters{AccountID: "acct-archived"})
+	if err != nil {
+		t.Fatalf("ListErrorGroups by account: %v", err)
+	}
+	if len(incidents) != account.IncidentCount {
+		t.Errorf("list length %d does not match IncidentCount %d", len(incidents), account.IncidentCount)
+	}
+
+	// The LEFT JOIN must survive: an account with zero visible incidents is
+	// still an account and must keep appearing in the accounts list.
+	accounts, err := q.ListAccounts(ctx, projID, nil)
+	if err != nil {
+		t.Fatalf("ListAccounts: %v", err)
+	}
+	listed := accountByID(accounts, "acct-archived")
+	if listed == nil {
+		t.Fatal("account with only archived incidents vanished from ListAccounts")
+	}
+	if listed.IncidentCount != 0 {
+		t.Errorf("ListAccounts IncidentCount = %d, want 0", listed.IncidentCount)
+	}
+}
+
+func TestAccountIncidentCountExcludesOrdinaryCandidates(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	q := db.New(pool)
+	_, projID, envID, _ := seedGroup(t, pool, q, "account-candidate-count")
+
+	// adjudication_status stays NULL: its CHECK admits only 'unchecked', and an
+	// 'unchecked' candidate is the one variety that is deliberately visible.
+	var candidateID string
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO error_groups
+		  (project_id, fingerprint, title, first_seen, last_seen, occurrence_count,
+		   status, kind, environment_id)
+		VALUES ($1, 'fp-ordinary-candidate', 'ordinary candidate', now(), now(), 1,
+		        'candidate', 'friction', $2)
+		RETURNING id`, projID, envID,
+	).Scan(&candidateID); err != nil {
+		t.Fatalf("insert candidate group: %v", err)
+	}
+	linkAccountUser(t, pool, projID, candidateID, "user-candidate", "acct-candidate")
+
+	account, err := q.GetAccountByID(ctx, projID, "acct-candidate")
+	if err != nil {
+		t.Fatalf("GetAccountByID: %v", err)
+	}
+	if account == nil {
+		t.Fatal("GetAccountByID returned nil for an account whose only incident is a candidate")
+	}
+	if account.IncidentCount != 0 {
+		t.Errorf("GetAccountByID IncidentCount = %d, want 0 (ordinary candidates are hidden workflow records)", account.IncidentCount)
+	}
+
+	// Assert ListAccounts separately: the two queries are edited independently,
+	// so covering only GetAccountByID would let a missing visibleCandidateSQL
+	// in ListAccounts ship green.
+	accounts, err := q.ListAccounts(ctx, projID, nil)
+	if err != nil {
+		t.Fatalf("ListAccounts: %v", err)
+	}
+	listed := accountByID(accounts, "acct-candidate")
+	if listed == nil {
+		t.Fatal("account with only a candidate incident vanished from ListAccounts")
+	}
+	if listed.IncidentCount != 0 {
+		t.Errorf("ListAccounts IncidentCount = %d, want 0", listed.IncidentCount)
+	}
+}
