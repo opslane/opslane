@@ -311,6 +311,17 @@ var nonRetriableReasonCodes = map[string]struct{}{
 	// make a later investigation actionable.
 }
 
+const (
+	// Ordinary candidates are hidden workflow records (issue #56); the only
+	// visible candidate is an exhausted 'unchecked' adjudication diagnostic.
+	visibleCandidateSQL = "(eg.status <> 'candidate' OR eg.adjudication_status = 'unchecked')"
+
+	// Archived groups are permanently dismissed by the user (see
+	// requeueStatuses); they are excluded from every incident list and every
+	// account incident count unless explicitly requested by status.
+	notArchivedSQL = "eg.status <> 'archived'"
+)
+
 // requeueStatuses defines error group statuses eligible for re-queuing when a new
 // occurrence arrives. Active states (queued, analyzing) are excluded to prevent double-queuing.
 // Note: "archived" is intentionally excluded — archived groups are considered permanently
@@ -780,12 +791,15 @@ func (q *Queries) ListErrorGroups(ctx context.Context, projectID string, filters
 		return strings.Join(predicates, " AND ")
 	}
 
-	// Ordinary candidates are hidden workflow records (issue #56); the only
-	// visible candidate is an exhausted 'unchecked' adjudication diagnostic.
-	visibleCandidate := "(eg.status <> 'candidate' OR eg.adjudication_status = 'unchecked')"
 	var query string
+	// Applied only when the caller passed no status: an explicit status filter
+	// already scopes the query, and appending this would break status=archived.
+	hideArchived := statusArg == 0
 	if environmentArg == 0 {
-		wheres := []string{"eg.project_id = $1", visibleCandidate}
+		wheres := []string{"eg.project_id = $1", visibleCandidateSQL}
+		if hideArchived {
+			wheres = append(wheres, notArchivedSQL)
+		}
 		if statusArg != 0 {
 			wheres = append(wheres, fmt.Sprintf("eg.status = $%d", statusArg))
 		}
@@ -817,13 +831,17 @@ func (q *Queries) ListErrorGroups(ctx context.Context, projectID string, filters
 			fmt.Sprintf("ege.environment_id = $%d", environmentArg),
 			"eg.project_id = $1",
 			"eg.kind = 'error'",
-			visibleCandidate,
+			visibleCandidateSQL,
 		}
 		frictionWheres := []string{
 			"eg.project_id = $1",
 			"eg.kind = 'friction'",
 			fmt.Sprintf("eg.environment_id = $%d", environmentArg),
-			visibleCandidate,
+			visibleCandidateSQL,
+		}
+		if hideArchived {
+			errorWheres = append(errorWheres, notArchivedSQL)
+			frictionWheres = append(frictionWheres, notArchivedSQL)
 		}
 		if statusArg != 0 {
 			statusClause := fmt.Sprintf("eg.status = $%d", statusArg)
