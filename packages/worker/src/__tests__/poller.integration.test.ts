@@ -111,6 +111,7 @@ describeDb('real poller under lease loss', () => {
   beforeAll(() => { pool = new pg.Pool({ connectionString: DATABASE_URL }); });
   afterEach(async () => {
     if (projectId) {
+      await pool.query(`DELETE FROM diagnosis_decisions WHERE project_id=$1`, [projectId]);
       await pool.query(`DELETE FROM error_group_jobs WHERE project_id=$1`, [projectId]);
       await pool.query(`DELETE FROM error_groups WHERE project_id=$1`, [projectId]);
       await pool.query(`DELETE FROM projects WHERE id=$1`, [projectId]);

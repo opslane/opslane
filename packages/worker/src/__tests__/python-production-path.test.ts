@@ -235,6 +235,7 @@ describeDb('Python two-stage production path', () => {
     delete process.env['OPSLANE_PYTHON_PIPELINE'];
     delete process.env['ANTHROPIC_API_KEY'];
     delete process.env['GITHUB_TOKEN'];
+    await pool.query(`DELETE FROM diagnosis_decisions WHERE project_id = $1`, [projectId]);
     await pool.query(`DELETE FROM error_group_jobs WHERE project_id = $1`, [projectId]);
     await pool.query(`DELETE FROM error_events WHERE project_id = $1`, [projectId]);
     await pool.query(`DELETE FROM error_groups WHERE project_id = $1`, [projectId]);

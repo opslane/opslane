@@ -121,6 +121,7 @@ async function cleanup(): Promise<void> {
   );
   await pool.query(`DELETE FROM friction_signals WHERE project_id = $1`, [projectId]);
   await pool.query(`DELETE FROM friction_adjudication_generations WHERE project_id = $1`, [projectId]);
+  await pool.query(`DELETE FROM diagnosis_decisions WHERE project_id = $1`, [projectId]);
   await pool.query(`DELETE FROM error_group_jobs WHERE project_id = $1`, [projectId]);
   await pool.query(
     `DELETE FROM error_group_affected_users WHERE error_group_id IN
