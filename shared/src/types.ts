@@ -372,3 +372,5 @@ export type SetupPrStatus =
   | 'open'
   | 'already_installed'
   | 'failed';
+
+export type { Diagnosis, DiagnosisOutcome, FailingRequest } from './diagnosis.js';
