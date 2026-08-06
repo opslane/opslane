@@ -389,8 +389,11 @@ export function getToolSpanAttributes(
       break;
     case 'patch':
       break;
-    case 'give_up':
-      if (typeof input['reason_code'] === 'string') attrs['tool.reason_code'] = input['reason_code'];
+    case 'submit_diagnosis':
+      if (typeof input['cause_location'] === 'string') attrs['tool.cause_location'] = input['cause_location'];
+      break;
+    case 'report_setup_blocker':
+      if (typeof input['reason_message'] === 'string') attrs['tool.reason_message'] = input['reason_message'];
       break;
   }
 

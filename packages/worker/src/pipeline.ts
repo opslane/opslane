@@ -1,8 +1,9 @@
 import { createHash } from 'node:crypto';
-import type { NeedsHumanReason, ConfidenceLevel, EvidenceRecord } from '@opslane/shared';
+import type { Diagnosis, NeedsHumanReason, ConfidenceLevel, EvidenceRecord } from '@opslane/shared';
 import type { VisualAnalysisOutput } from './harness/types.js';
 import type { Platform } from './platform.js';
 import type { RuntimeInfo } from './runtime-info.js';
+import type { FixSurface } from './fix-surface.js';
 import type { ReplayInput } from './pr.js';
 import { runAgentFix } from './agent-fix.js';
 import { createPR, createGitHubClient } from './pr.js';
@@ -36,6 +37,7 @@ export interface PipelineInput {
   sourceFiles: Array<{ filePath: string; content: string }>;
   visualAnalysis: VisualAnalysisOutput | null;
   repoPath: string;
+  fixSurface?: FixSurface;
   repoUrl: string;
   githubRepo: string;
   defaultBranch: string;
@@ -49,7 +51,7 @@ export interface PipelineInput {
   /** Pre-computed investigation results. When set, agent skips internal triage. */
   investigation?: {
     rootCause: string;
-    suggestedMitigation: string;
+    diagnosis?: Diagnosis | null;
     guidance?: string;
   };
   prPosture?: 'verified_only' | 'draft_when_unverified';
@@ -117,6 +119,7 @@ export async function runPipeline(input: PipelineInput): Promise<PipelineResult>
     githubRepo: input.githubRepo,
     githubToken: input.githubToken,
     repoPath: input.repoPath,
+    fixSurface: input.fixSurface,
     investigation: input.investigation,
     abortSignal: input.abortSignal,
     frictionEvidence: input.frictionEvidence,

@@ -2,12 +2,6 @@ import type { ToolDefinition, AgentState } from './types.js';
 import type { SandboxRuntime } from './sandbox-runtime.js';
 import { TRAVERSAL_EXCLUSIONS } from './traversal-exclusions.js';
 import type { Platform } from '../platform.js';
-import { buildReason, isReasonCodeForPlatform, triageReasonCodes } from '../reason-codes.js';
-
-/** Model output is typed `unknown`; keep only a usable non-blank string. */
-function nonEmptyString(value: unknown): string | undefined {
-  return typeof value === 'string' && value.trim() ? value : undefined;
-}
 
 /** Max characters per tool output to prevent context overflow. */
 const MAX_OUTPUT_CHARS = 12_000;
@@ -169,37 +163,31 @@ export function createToolBridge(
       },
     },
     {
-      name: 'give_up',
-      description: platform === 'python'
-        ? 'Call this when the error cannot be fixed in application code, including third-party site-packages failures, infrastructure failures, incomplete tracebacks, or deliberate synthetic errors.'
-        : 'Call this when the error cannot be fixed by code changes. Examples: infrastructure issues, third-party node_modules errors, or minified traces without source maps.',
+      name: 'submit_diagnosis',
+      description:
+        'Call this when you cannot fix the error in this repository. Report what you found ' +
+        'after reading the code. Do not choose what happens next.',
       inputSchema: {
         type: 'object',
         properties: {
-          reason_code: {
-            type: 'string',
-            enum: [...triageReasonCodes(platform)],
-            description: 'Machine-readable reason code',
-          },
-          reason_message: { type: 'string', description: 'Human-readable explanation of why this cannot be fixed' },
-          remediation: { type: 'string', description: 'What a human should do to resolve this' },
+          one_line_description: { type: 'string', description: 'What caused the error, in under 30 words' },
+          why_chain: { type: 'array', items: { type: 'string' }, description: 'Ordered why-statements, each under 15 words' },
+          reproduction_steps: { type: 'array', items: { type: 'string' }, description: 'Steps that reproduce it, each under 15 words' },
+          cause_location: { type: 'string', description: 'path/to/file.ts:42, or the external system' },
+          change_counterfactual: { type: 'string', description: 'What change here would remove the cause, or why none would' },
+          unknowns: { type: 'array', items: { type: 'string' }, description: 'What you could not establish' },
         },
-        required: ['reason_code', 'reason_message', 'remediation'],
+        required: [
+          'one_line_description',
+          'why_chain',
+          'reproduction_steps',
+          'cause_location',
+          'change_counterfactual',
+        ],
       },
       execute: async (input) => {
         state.gaveUp = true;
-        // Model output is untrusted. Every terminal needs_human must carry a
-        // non-empty reason_code, reason_message, and remediation, so fall back
-        // to the registry rather than writing through whatever the model sent.
-        const code = isReasonCodeForPlatform(input.reason_code, platform)
-          ? input.reason_code
-          : 'triage_unfixable';
-        state.giveUpReason = buildReason(
-          code,
-          nonEmptyString(input.reason_message),
-          nonEmptyString(input.remediation),
-          platform,
-        );
+        state.submittedDiagnosis = input;
         return 'Acknowledged. Ending agent loop.';
       },
     },

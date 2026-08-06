@@ -47,6 +47,7 @@ import { VerificationInfraError } from './harness/errors.js';
 import { processCIWatchJob } from './ci-watch.js';
 import { effectivePlatform, pythonPipelineEnabled } from './platform.js';
 import { parseRuntimeInfo } from './runtime-info.js';
+import { parseDiagnosis } from './diagnosis-schema.js';
 
 /** Injectable seam: unit tests and the e2e gate substitute a deterministic
  * adjudicator; production uses the real Anthropic-backed one. */
@@ -700,7 +701,6 @@ export async function processFrictionInvestigateJob(
         // refuse-by-default stays intact for every other caller (issue #56).
         const fixResult = await updateGroupAndCreateFixJob(job.errorGroupId, job.projectId, {
           rootCause: result.reason,
-          suggestedMitigation: result.remediation,
           confidence: result.confidence,
         }, job, { allowFriction: true });
         if (fixResult.created) {
@@ -713,7 +713,6 @@ export async function processFrictionInvestigateJob(
           // Never drop the investigation: park it for human approval instead.
           await updateGroupInvestigation(job.errorGroupId, job.projectId, 'awaiting_approval', {
             rootCause: result.reason,
-            suggestedMitigation: result.remediation,
             confidence: result.confidence,
           }, job);
           logger.warn('Friction investigation: auto-fix refused by kind gate — parked for approval', {
@@ -724,7 +723,6 @@ export async function processFrictionInvestigateJob(
       } else {
         await updateGroupInvestigation(job.errorGroupId, job.projectId, 'awaiting_approval', {
           rootCause: result.reason,
-          suggestedMitigation: result.remediation,
           confidence: result.confidence,
         }, job);
         logger.info('Friction investigation: awaiting human approval', {
@@ -852,10 +850,11 @@ export async function processFixJob(job: ClaimedJob & { errorGroupId: string }, 
   const investigation = await getGroupInvestigation(job.errorGroupId, job.projectId);
 
   // Parallel fetch for independent data
-  const [replay, sessionPointer, environmentContext] = await Promise.all([
+  const [replay, sessionPointer, environmentContext, fixSurface] = await Promise.all([
     db.getReplayForGroup(job.errorGroupId, job.projectId),
     db.getSessionPointerForGroup(job.errorGroupId, job.projectId),
     db.getEnvironmentNamesForGroup(job.errorGroupId, job.projectId, group.kind),
+    db.loadFixSurface(job.projectId),
   ]);
   const artifacts = replay ? await db.getReplayArtifacts(replay.id, job.projectId) : [];
 
@@ -999,6 +998,7 @@ export async function processFixJob(job: ClaimedJob & { errorGroupId: string }, 
       sourceFiles: [],
       visualAnalysis: visualOutput,
       repoPath: repoDir,
+      fixSurface,
       repoUrl,
       githubRepo: project.github_repo,
       defaultBranch,
@@ -1026,7 +1026,12 @@ export async function processFixJob(job: ClaimedJob & { errorGroupId: string }, 
       } : null,
       investigation: investigation.rootCause ? {
         rootCause: investigation.rootCause,
-        suggestedMitigation: investigation.suggestedMitigation ?? '',
+        diagnosis: (() => {
+          if (!job.payload || typeof job.payload !== 'object' || Array.isArray(job.payload)) return null;
+          const raw = (job.payload as Record<string, unknown>)['diagnosis'];
+          if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+          return parseDiagnosis(raw as Record<string, unknown>);
+        })(),
         guidance: job.guidance ?? undefined,
       } : undefined,
       prPosture: project.pr_posture ?? 'verified_only',

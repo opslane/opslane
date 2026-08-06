@@ -1,5 +1,6 @@
 import type { ConfidenceLevel, NeedsHumanReason } from '@opslane/shared';
 import type { AgentState } from './harness/types.js';
+import type { ToolDefinition } from './harness/types.js';
 import { runAgentLoop } from './harness/agent-loop.js';
 import { createToolBridge } from './harness/tool-bridge.js';
 import { createDefaultMiddleware } from './harness/tool-middleware.js';
@@ -33,7 +34,7 @@ export function buildSetupSystemPrompt(input: SetupPromptInput): string {
     '6. Run the build (npm run build / pnpm build, or npx tsc --noEmit) to verify your change compiles. Fix any errors you introduced.',
     '',
     'Keep the change minimal and mergeable. A human will review and merge this PR.',
-    'If you cannot complete the install with code changes, call the give_up tool with a clear reason.',
+    'If you cannot complete the install with code changes, call report_setup_blocker with a clear reason and remediation.',
   ].join('\n');
 }
 
@@ -98,7 +99,37 @@ export async function runAgentSetup(input: AgentSetupInput): Promise<AgentSetupR
       scopeReviewDone: false,
       toolHistoryEntries: [],
     };
-    const tools = createToolBridge(sandbox, state);
+    const setupBlockerTool: ToolDefinition = {
+      name: 'report_setup_blocker',
+      description: 'Stop the setup attempt and report why a human must complete it.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          reason_message: { type: 'string' },
+          remediation: { type: 'string' },
+        },
+        required: ['reason_message', 'remediation'],
+      },
+      execute: async (toolInput) => {
+        const reasonMessage = typeof toolInput['reason_message'] === 'string'
+          ? toolInput['reason_message'].trim()
+          : '';
+        const remediation = typeof toolInput['remediation'] === 'string'
+          ? toolInput['remediation'].trim()
+          : '';
+        state.gaveUp = true;
+        state.giveUpReason = {
+          reason_code: 'worker_runtime_error',
+          reason_message: reasonMessage || 'The setup agent could not complete the SDK installation',
+          remediation: remediation || 'Install the SDK manually (see docs/install.md)',
+        };
+        return 'Setup blocker recorded.';
+      },
+    };
+    const tools = [
+      ...createToolBridge(sandbox, state).filter((tool) => tool.name !== 'submit_diagnosis'),
+      setupBlockerTool,
+    ];
     const middleware = createDefaultMiddleware(sandbox);
     const systemPrompt = buildSetupSystemPrompt({
       apiKeyEnvVar: input.apiKeyEnvVar,

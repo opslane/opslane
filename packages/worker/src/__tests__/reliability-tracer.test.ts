@@ -81,7 +81,12 @@ describe('deterministic reliability tracer', () => {
       githubToken: 'test-github-token',
       investigation: {
         rootCause: 'A nullable production value is dereferenced without a guard.',
-        suggestedMitigation: 'Use a narrow fallback for the missing value.',
+        diagnosis: {
+          one_line_description: 'The renderer dereferences a nullable production value.',
+          why_chain: ['Production data contains null', 'value is dereferenced', 'Rendering throws'],
+          reproduction_steps: ['Render the fixture with a null value'],
+          cause_location: 'src/value.js:1',
+        },
       },
     });
 

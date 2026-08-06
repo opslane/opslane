@@ -58,7 +58,7 @@ vi.mock('@anthropic-ai/sdk', () => ({
   })),
 }));
 
-import { runAgentFix, triageError } from '../agent-fix.js';
+import { buildSystemPrompt, runAgentFix, triageError } from '../agent-fix.js';
 import type { AgentFixInput } from '../agent-fix.js';
 import type { AgentCompletionResult } from '../harness/types.js';
 import { Sandbox } from 'e2b';
@@ -81,6 +81,36 @@ function makeAgentResult(overrides?: Partial<AgentCompletionResult>): AgentCompl
     ...overrides,
   };
 }
+
+it('never puts a suggested mitigation in the prompt', () => {
+  const prompt = buildSystemPrompt({
+    errorType: 'TypeError', errorMessage: 'x', stackTrace: 'x',
+    investigation: {
+      rootCause: 'Null dereference',
+      suggestedMitigation: 'Increase FETCH_TIMEOUT to 30000',
+    },
+  } as unknown as AgentFixInput);
+  expect(prompt).not.toContain('Suggested mitigation');
+  expect(prompt).not.toContain('30000');
+});
+
+it('passes the why-chain and reproduction steps through', () => {
+  const prompt = buildSystemPrompt({
+    errorType: 'TypeError', errorMessage: 'x', stackTrace: 'x',
+    investigation: {
+      rootCause: 'Null dereference',
+      diagnosis: {
+        one_line_description: 'Null dereference rendering the asset list',
+        why_chain: ['Render runs before fetch resolves', 'assets is null', 'map throws'],
+        reproduction_steps: ['Open the panel on a slow connection'],
+        cause_location: 'src/AssetList.tsx:42',
+      },
+    },
+  } as unknown as AgentFixInput);
+  expect(prompt).toContain('Render runs before fetch resolves');
+  expect(prompt).toContain('Open the panel on a slow connection');
+  expect(prompt).toContain('src/AssetList.tsx:42');
+});
 
 /** Provider-shaped fake: `sandboxId` is what the adapter reads to expose `id`. */
 const mockSandbox = {
@@ -452,10 +482,11 @@ describe('runAgentFix', () => {
     it('attaches evidence when the agent gives up after verification starts', async () => {
       vi.mocked(runAgentLoop).mockImplementation(async (config) => {
         config.externalState!.gaveUp = true;
-        config.externalState!.giveUpReason = {
-          reason_code: 'worker_runtime_error',
-          reason_message: 'Cannot safely patch',
-          remediation: 'Review manually',
+        config.externalState!.submittedDiagnosis = {
+          one_line_description: 'The CDN is unavailable',
+          why_chain: ['Client requests asset', 'CDN does not respond', 'Request times out'],
+          reproduction_steps: ['Load the affected asset'],
+          cause_location: 'https://cdn.example.com/app.js',
         };
         return makeAgentResult();
       });
@@ -663,10 +694,11 @@ describe('runAgentFix', () => {
     vi.mocked(runAgentLoop).mockImplementation(async (config) => {
       if (config.externalState) {
         config.externalState.gaveUp = true;
-        config.externalState.giveUpReason = {
-          reason_code: 'worker_runtime_error',
-          reason_message: 'CDN is down',
-          remediation: 'Check CDN status',
+        config.externalState.submittedDiagnosis = {
+          one_line_description: 'The CDN is unavailable',
+          why_chain: ['Client requests asset', 'CDN does not respond', 'Request times out'],
+          reproduction_steps: ['Load the affected asset'],
+          cause_location: 'https://cdn.example.com/app.js',
         };
       }
       return makeAgentResult({ summary: 'CDN is down', turnCount: 2, toolCallCount: 1, tokenUsage: { input: 500, output: 200, cacheRead: 0, cacheWrite: 0 } });
@@ -674,7 +706,7 @@ describe('runAgentFix', () => {
 
     const result = await runAgentFix(makeInput());
     expect(result.status).toBe('needs_human');
-    expect(result.reason?.reason_code).toBe('worker_runtime_error');
+    expect(result.reason?.reason_code).toBe('unfixable_infra');
     expect(mockSandbox.kill).toHaveBeenCalled();
   });
 
@@ -957,6 +989,14 @@ describe('runAgentFix', () => {
     mockTriageFixable();
     mockInvestigateError.mockResolvedValue({
       fixable: true, confidence: 'high', reason: 'Found null items in App.vue',
+      outcome: 'code_fix',
+      decisionReason: 'The cause is in a tracked application file.',
+      diagnosis: {
+        one_line_description: 'App dereferences null items while rendering.',
+        why_chain: ['items is null', 'App calls items.map', 'Rendering throws'],
+        reproduction_steps: ['Render App before items load'],
+        cause_location: 'src/App.vue:42',
+      },
       filesRead: ['src/App.vue'], findings: 'Null ref',
     });
 
@@ -986,13 +1026,19 @@ describe('runAgentFix', () => {
     mockInvestigateError.mockResolvedValue({
       fixable: false, confidence: 'high',
       reason: 'Error is from browser console, searched codebase and found no matching source',
-      reason_code: 'unfixable_no_app_frames',
-      remediation: 'This error was thrown from the browser console',
+      outcome: 'not_actionable',
+      decisionReason: 'The cause is in the browser runtime, not application code.',
+      diagnosis: {
+        one_line_description: 'A browser extension throws outside application code.',
+        why_chain: ['Extension injects a script', 'Injected script dereferences null', 'Browser reports the error'],
+        reproduction_steps: ['Enable the affected browser extension'],
+        cause_location: 'Browser extension runtime',
+      },
     });
 
     const result = await runAgentFix(makeInput({ repoPath: '/tmp/opslane-repo-test' }));
     expect(result.status).toBe('needs_human');
-    expect(result.reason?.reason_code).toBe('unfixable_no_app_frames');
+    expect(result.reason?.reason_code).toBe('unfixable_infra');
     // Should NOT create a sandbox or run the agent loop
     expect(Sandbox.create).not.toHaveBeenCalled();
     expect(runAgentLoop).not.toHaveBeenCalled();
@@ -1034,7 +1080,12 @@ describe('runAgentFix', () => {
     const result = await runAgentFix(makeInput({
       investigation: {
         rootCause: 'Null check missing in items array',
-        suggestedMitigation: 'Add optional chaining to items.map',
+        diagnosis: {
+          one_line_description: 'ItemList dereferences a nullable items prop.',
+          why_chain: ['items is null', 'ItemList calls items.map', 'Rendering throws'],
+          reproduction_steps: ['Render ItemList without items'],
+          cause_location: 'src/ItemList.vue:42',
+        },
         guidance: 'Focus on the items prop in ItemList.vue',
       },
     }));
@@ -1054,7 +1105,6 @@ describe('runAgentFix', () => {
     await runAgentFix(makeInput({
       investigation: {
         rootCause: 'Null reference in items array',
-        suggestedMitigation: 'Add optional chaining',
         filesRead: ['src/App.vue', 'src/utils/helpers.ts'],
         findings: 'App.vue line 42 accesses items.map without null check',
       },
@@ -1074,7 +1124,12 @@ describe('runAgentFix', () => {
     await runAgentFix(makeInput({
       investigation: {
         rootCause: 'Missing null guard',
-        suggestedMitigation: 'Add nullish coalescing',
+        diagnosis: {
+          one_line_description: 'App dereferences a nullable items value.',
+          why_chain: ['items is null', 'App calls items.map', 'Rendering throws'],
+          reproduction_steps: ['Open the app with an empty response'],
+          cause_location: 'src/App.vue:42',
+        },
         guidance: 'User says: check line 42',
       },
     }));
@@ -1084,7 +1139,9 @@ describe('runAgentFix', () => {
     const systemPrompt = (agentLoopCall[0] as { systemPrompt: string }).systemPrompt;
     expect(systemPrompt).toContain('Prior Investigation');
     expect(systemPrompt).toContain('Missing null guard');
-    expect(systemPrompt).toContain('Add nullish coalescing');
+    expect(systemPrompt).toContain('src/App.vue:42');
+    expect(systemPrompt).toContain('items is null');
+    expect(systemPrompt).toContain('Open the app with an empty response');
     expect(systemPrompt).toContain('User says: check line 42');
     expect(systemPrompt).toContain('untrusted_user_data');
   });
