@@ -946,7 +946,7 @@ export async function runAgentFix(input: AgentFixInput): Promise<AgentFixResult>
           const decision = deriveOutcome(
             declined,
             input.fixSurface ?? { globs: null },
-            (path) => trackedFiles.has(path),
+            (cited) => (trackedFiles.has(cited) ? cited : null),
           );
           const reasonCode: ReasonCode = decision.outcome === 'not_actionable'
             ? (decision.reason.includes('outside the configured fix surface')

@@ -15,8 +15,14 @@ export { executeListFiles, executeReadFile, executeSearch, safePath } from './in
 const INVESTIGATION_MODEL = process.env['INVESTIGATION_MODEL'] ?? 'claude-sonnet-4-6';
 const MAX_TURNS = Number(process.env['INVESTIGATION_MAX_TURNS'] ?? 10);
 const ADJUDICATION_MAX_TURNS = Number(process.env['ADJUDICATION_MAX_TURNS'] ?? 8);
-const DEFAULT_BUDGET_USD = 0.15;
-const DEFAULT_ADJUDICATION_BUDGET_USD = 0.1;
+/**
+ * One budget for the whole investigation, not one per agent. Giving each phase
+ * its own full allowance would let a routine run spend twice the advertised
+ * limit purely because the work was split in two.
+ */
+const DEFAULT_BUDGET_USD = 0.20;
+/** The share the dossier phase may consume before adjudication is starved. */
+const DOSSIER_BUDGET_SHARE = 0.6;
 const MAX_ERROR_MESSAGE = 500;
 const MAX_STACK_TRACE = 3000;
 const MAX_BREADCRUMBS = 4000;
@@ -198,6 +204,7 @@ export async function investigateError(
   surface: FixSurface,
 ): Promise<InvestigationResult> {
   const pricing = MODEL_PRICING[INVESTIGATION_MODEL] ?? DEFAULT_PRICING;
+  const totalBudgetUsd = Number(process.env['INVESTIGATION_BUDGET_USD'] ?? DEFAULT_BUDGET_USD);
   const stackFiles = extractStackTraceFiles(input.stackTrace, input.platform);
   const hints = stackFiles.length > 0
     ? `\n\nFiles named by the stack trace, as a starting point only: ${stackFiles.slice(0, 5).join(', ')}`
@@ -208,7 +215,7 @@ export async function investigateError(
       apiKey,
       model: INVESTIGATION_MODEL,
       maxTurns: MAX_TURNS,
-      budgetUsd: Number(process.env['INVESTIGATION_BUDGET_USD'] ?? DEFAULT_BUDGET_USD),
+      budgetUsd: totalBudgetUsd * DOSSIER_BUDGET_SHARE,
       pricing,
       systemPrompt: dossierSystemPrompt(input),
       firstMessage: `Compile the dossier for this error, then call submit_dossier.${hints}`,
@@ -233,7 +240,10 @@ export async function investigateError(
         apiKey,
         model: INVESTIGATION_MODEL,
         maxTurns: ADJUDICATION_MAX_TURNS,
-        budgetUsd: Number(process.env['ADJUDICATION_BUDGET_USD'] ?? DEFAULT_ADJUDICATION_BUDGET_USD),
+        // Whatever the dossier phase left, never less than a floor: an
+        // adjudication that cannot afford to open a file cannot verify a
+        // citation, and an unverified conclusion is the thing being prevented.
+        budgetUsd: Math.max(totalBudgetUsd - first.costUsd, totalBudgetUsd * 0.15),
         pricing,
         systemPrompt: adjudicationSystemPrompt(input, dossier),
         firstMessage:
@@ -251,7 +261,15 @@ export async function investigateError(
   }
 
   const adjudication = parseAdjudication(second.terminalInput ?? {});
-  const decision = deriveOutcome(adjudication, surface, (path) => resolveInsideRepo(repoPath, path) !== null);
+  const localCandidates = dossier.hypotheses.filter(
+    (hypothesis) => hypothesis.kind === 'local_code' || hypothesis.kind === 'configuration',
+  ).length;
+  const decision = deriveOutcome(
+    adjudication,
+    surface,
+    (cited) => resolveInsideRepo(repoPath, cited),
+    localCandidates,
+  );
 
   // Match the glob against the resolved path, never the cited string: a symlink
   // inside the surface pointing outside it would otherwise authorise the write.
@@ -259,7 +277,7 @@ export async function investigateError(
     ? {
       one_line_description: adjudication.best_supported,
       why_chain: adjudication.why_chain,
-      reproduction_steps: [],
+      reproduction_steps: adjudication.reproduction_steps,
       cause_location: adjudication.cause_location,
     }
     : null;

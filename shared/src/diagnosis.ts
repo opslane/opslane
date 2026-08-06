@@ -65,6 +65,8 @@ export interface Adjudication {
   reasoning: string;
   /** The why-chain of the winning hypothesis, carried through for the fix agent. */
   why_chain: string[];
+  /** Steps reproducing the winning cause. What a human acts on when we open no PR. */
+  reproduction_steps: string[];
 }
 
 /** The artifact handed to the fix agent. Built in code from the adjudication. */

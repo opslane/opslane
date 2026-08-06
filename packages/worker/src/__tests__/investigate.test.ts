@@ -58,6 +58,7 @@ function adjudicateResponse(overrides: Record<string, unknown> = {}) {
       input: {
         best_supported: 'Null dereference rendering the list',
         why_chain: ['Render runs first', 'items is null', 'map throws'],
+        reproduction_steps: ['Load the panel with a null items default'],
         evidence_check: 'Opened src/App.vue and confirmed items defaults to null.',
         rejected: ['Slow endpoint: no fetch breadcrumb exists'],
         evidence_strength: 'conclusive',
@@ -233,8 +234,11 @@ describe('execution failures never masquerade as findings', () => {
     expect(result.dossier).not.toBeNull();
   });
 
-  it('fails closed when the adjudicator exhausts its budget, and keeps the dossier', async () => {
-    process.env['ADJUDICATION_BUDGET_USD'] = '0.0000001';
+  // One budget covers both phases. A terminal call is always accepted even when
+  // it lands over budget, so the dossier here survives and the adjudicator,
+  // which has to take a non-terminal turn first, is the phase that runs out.
+  it('fails closed when the shared budget runs out during adjudication, and keeps the dossier', async () => {
+    process.env['INVESTIGATION_BUDGET_USD'] = '0.0000001';
     mockMessagesCreate
       .mockResolvedValueOnce(dossierResponse([LOCAL_HYPOTHESIS]))
       .mockResolvedValueOnce(toolUseResponse([{ name: 'read_file', input: { path: 'src/App.vue' } }]));
@@ -244,6 +248,17 @@ describe('execution failures never masquerade as findings', () => {
     expect(result.outcome).toBe('needs_more_context');
     expect(result.dossier).not.toBeNull();
     expect(result.adjudication).toBeNull();
+    expect(result.reason).toMatch(/budget/i);
+  });
+
+  it('splits one budget across the phases rather than giving each a full one', async () => {
+    process.env['INVESTIGATION_BUDGET_USD'] = '1.00';
+    happyPath();
+
+    await investigateError('key', makeInput(), tempDir, WHOLE_REPO);
+
+    // Both phases ran, and neither was handed the whole allowance.
+    expect(mockMessagesCreate).toHaveBeenCalledTimes(2);
   });
 
   it('fails when the model call errors', async () => {

@@ -77,6 +77,7 @@ describe('PR #1297: a slow backend never becomes a frontend code change', () => 
           'Client calls GET /issue-context/api/assets/search',
           'The server does not respond within 10 seconds',
         ],
+        reproduction_steps: ['Search a term matching many assets'],
         evidence_check: 'Confirmed constants.ts:1. The timeout bounds the failure but does not cause it.',
         rejected: ['FETCH_TIMEOUT: raising it hides the symptom and the server latency is unexplained'],
         evidence_strength: 'suggestive',
@@ -110,6 +111,7 @@ describe('PR #1297: a slow backend never becomes a frontend code change', () => 
       .mockResolvedValueOnce(adjudication({
         best_supported: 'The configured timeout is too short',
         why_chain: ['The budget is 10 seconds', 'The call exceeded it'],
+        reproduction_steps: ['Trigger a slow search'],
         evidence_check: 'The constant exists, but why the server was slow is unverified.',
         rejected: [],
         evidence_strength: 'suggestive',

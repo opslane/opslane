@@ -93,6 +93,13 @@ export function adjudicateTool(): Anthropic.Tool {
           description:
             'The causal chain for that hypothesis, cause to effect, each entry under 15 words.',
         },
+        reproduction_steps: {
+          type: 'array',
+          items: { type: 'string' },
+          description:
+            'Steps that would reproduce the winning cause, each under 15 words. This is what a ' +
+            'human acts on when we do not open a pull request.',
+        },
         evidence_check: {
           type: 'string',
           description:
@@ -131,6 +138,7 @@ export function adjudicateTool(): Anthropic.Tool {
       required: [
         'best_supported',
         'why_chain',
+        'reproduction_steps',
         'evidence_check',
         'rejected',
         'evidence_strength',
@@ -164,6 +172,7 @@ export function adjudicationFromDecline(raw: Record<string, unknown>): Adjudicat
   return {
     best_supported: clampWords(description, 40),
     why_chain: strings(raw['why_chain']).map((entry) => clampWords(entry, 15)),
+    reproduction_steps: strings(raw['reproduction_steps']).map((entry) => clampWords(entry, 15)),
     evidence_check: unknowns.length > 0 ? `Could not establish: ${unknowns.join('; ')}` : 'No gaps reported.',
     rejected: [],
     evidence_strength: 'suggestive',
@@ -241,6 +250,7 @@ export function parseAdjudication(raw: Record<string, unknown>): Adjudication | 
   return {
     best_supported: clampWords(best, 40),
     why_chain: strings(raw['why_chain']).map((entry) => clampWords(entry, 15)),
+    reproduction_steps: strings(raw['reproduction_steps']).map((entry) => clampWords(entry, 15)),
     evidence_check: typeof raw['evidence_check'] === 'string' ? raw['evidence_check'].trim() : '',
     rejected: strings(raw['rejected']),
     evidence_strength: strength,
