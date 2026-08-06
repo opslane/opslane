@@ -289,6 +289,7 @@ describe('processInvestigateJob diagnosis routing', () => {
       dossier: null,
       adjudication: null,
       decisionReason: 'The cause is outside this codebase: GET /api/assets/search (remote service)',
+      decisionBasis: 'cause_outside_codebase',
       outcome: 'not_actionable',
       diagnosis: {
         one_line_description: 'The search endpoint exceeded its 10 second budget',
@@ -323,7 +324,8 @@ describe('processInvestigateJob diagnosis routing', () => {
       reason: 'The investigation produced no usable diagnosis',
       dossier: null,
       adjudication: null,
-      decisionReason: 'The investigation produced no usable diagnosis',
+      decisionBasis: 'insufficient_evidence',
+        decisionReason: 'The investigation produced no usable diagnosis',
       outcome: 'needs_more_context',
       diagnosis: null,
       filesRead: [],
@@ -356,6 +358,7 @@ describe('processInvestigateJob diagnosis routing', () => {
       dossier: null,
       adjudication: null,
       decisionReason: 'The cause is at src/App.vue:42',
+      decisionBasis: 'in_surface_defect',
       outcome: 'code_fix',
       diagnosis: {
         one_line_description: 'Null dereference rendering the asset list',

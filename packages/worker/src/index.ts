@@ -584,7 +584,9 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
       });
 
     } else if (triage.outcome === 'not_actionable') {
-      const outsideSurface = triage.decisionReason.includes('outside the configured fix surface');
+      // Read the basis, never the prose. Matching substrings of our own
+      // message meant rewording it silently changed the reason code.
+      const outsideSurface = triage.decisionBasis === 'outside_fix_surface';
       const reproductionSteps = triage.diagnosis?.reproduction_steps ?? [];
       await updateGroupInvestigation(job.errorGroupId, job.projectId, 'insight', {
         rootCause: triage.diagnosis?.one_line_description ?? triage.decisionReason,

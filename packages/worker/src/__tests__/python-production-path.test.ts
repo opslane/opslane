@@ -216,7 +216,7 @@ describeDb('Python two-stage production path', () => {
         cause_location: 'cart.py:12',
       },
       outcome: 'code_fix',
-      dossier: null, adjudication: null, decisionReason: 'The cause is at cart.py:12',
+      dossier: null, adjudication: null, decisionBasis: 'in_surface_defect', decisionReason: 'The cause is at cart.py:12',
       filesRead: ['cart.py'],
       findings: 'The traceback resolves to application code in cart.py.',
     });

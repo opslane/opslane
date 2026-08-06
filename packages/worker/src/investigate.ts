@@ -1,5 +1,5 @@
 import type { Adjudication, Diagnosis, DiagnosisOutcome, Dossier } from '@opslane/shared';
-import { deriveOutcome } from './classify.js';
+import { deriveOutcome, type DerivedDecision } from './classify.js';
 import { adjudicateTool, parseAdjudication, parseDossier, submitDossierTool } from './dossier-schema.js';
 import { resolveInsideRepo, type FixSurface } from './fix-surface.js';
 import { extractStackTraceFiles } from './harness/stack-trace-utils.js';
@@ -54,6 +54,8 @@ export interface InvestigationResult extends TriageResult {
   diagnosis: Diagnosis | null;
   outcome: DiagnosisOutcome;
   decisionReason: string;
+  /** Why the outcome was reached, as a value. Callers pick reason codes from it. */
+  decisionBasis: DerivedDecision['basis'];
   /** Files opened by either agent. May contain duplicates. */
   filesRead: string[];
   /** Last model text before the terminal call. Best-effort diagnostic. */
@@ -64,6 +66,19 @@ function truncate(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max)}... [truncated]` : text;
 }
 
+/**
+ * Neutralise fence-closing tags before text goes inside one.
+ *
+ * JSON.stringify escapes quotes and backslashes but not the literal
+ * `</untrusted_data>`, so a crafted error message quoted into a dossier's
+ * supporting evidence would terminate the adjudicator's fence early and the
+ * rest would read as instructions. The adjudicator is the component that
+ * authorises code changes, so this is the boundary that matters.
+ */
+function fenced(text: string, max: number): string {
+  return truncate(text, max).replace(/<\/?untrusted_(data|user_data)>/gi, '[fence]');
+}
+
 function runtimeLabel(value: string): string {
   return value.replace(/[^A-Za-z0-9._+\- ]/g, '').trim().slice(0, 64) || 'unknown';
 }
@@ -72,7 +87,7 @@ function runtimeLabel(value: string): string {
 function evidenceBlock(input: InvestigateInput): string {
   const python = input.platform === 'python';
   const resolved = input.resolvedStackTrace
-    ? `\n\nResolved Stack Trace (source-mapped):\n<untrusted_data>\n${truncate(JSON.stringify(input.resolvedStackTrace), MAX_STACK_TRACE)}\n</untrusted_data>`
+    ? `\n\nResolved Stack Trace (source-mapped):\n<untrusted_data>\n${fenced(JSON.stringify(input.resolvedStackTrace), MAX_STACK_TRACE)}\n</untrusted_data>`
     : '';
   return `## Error
 Type: ${input.errorType}
@@ -85,17 +100,17 @@ ${input.customerRuntime ? `${runtimeLabel(input.customerRuntime.name)} ${runtime
 
 Message:
 <untrusted_data>
-${truncate(input.errorMessage, MAX_ERROR_MESSAGE)}
+${fenced(input.errorMessage, MAX_ERROR_MESSAGE)}
 </untrusted_data>
 
 Stack Trace:
 <untrusted_data>
-${truncate(input.stackTrace, MAX_STACK_TRACE)}
+${fenced(input.stackTrace, MAX_STACK_TRACE)}
 </untrusted_data>${resolved}
 
 Breadcrumbs, every one, with timestamps:
 <untrusted_data>
-${truncate(input.breadcrumbs || '[]', MAX_BREADCRUMBS)}
+${fenced(input.breadcrumbs || '[]', MAX_BREADCRUMBS)}
 </untrusted_data>
 
 ${python
@@ -156,7 +171,7 @@ ${evidenceBlock(input)}
 
 ## Dossier
 <untrusted_data>
-${truncate(JSON.stringify(dossier, null, 1), 12_000)}
+${fenced(JSON.stringify(dossier, null, 1), 12_000)}
 </untrusted_data>`;
 }
 
@@ -186,6 +201,7 @@ function failed(reason: string, filesRead: string[], findings: string): Investig
     diagnosis: null,
     outcome: 'needs_more_context',
     decisionReason: reason,
+    decisionBasis: 'no_adjudication',
     filesRead,
     findings,
   };
@@ -307,6 +323,7 @@ export async function investigateError(
     diagnosis,
     outcome: decision.outcome,
     decisionReason: decision.reason,
+    decisionBasis: decision.basis,
     filesRead,
     findings: second.lastModelText || first.lastModelText,
   };

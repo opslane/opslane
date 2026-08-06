@@ -5,6 +5,21 @@ export interface DerivedDecision {
   outcome: DiagnosisOutcome;
   reason: string;
   /**
+   * Why this outcome, as a value rather than prose. Callers pick reason codes
+   * from this. An earlier version matched substrings of `reason`, so rewording
+   * a message silently changed the reason code written to the incident.
+   */
+  basis:
+    | 'no_adjudication'
+    | 'insufficient_evidence'
+    | 'unplaced_cause'
+    | 'cause_outside_codebase'
+    | 'unrejected_local_candidates'
+    | 'uncitable_local_claim'
+    | 'citation_unresolvable'
+    | 'outside_fix_surface'
+    | 'in_surface_defect';
+  /**
    * Only `high` opens a pull request unattended. It now comes from the
    * adjudicator's judgement of verified evidence, not from counting fields: an
    * earlier version scored `high` for three repeated sentences plus any line
@@ -54,6 +69,7 @@ export function deriveOutcome(
     return {
       outcome: 'needs_more_context',
       reason: 'The investigation produced no adjudicated cause',
+      basis: 'no_adjudication',
       confidence: 'low',
     };
   }
@@ -65,6 +81,7 @@ export function deriveOutcome(
     return {
       outcome: 'needs_more_context',
       reason: `The evidence did not separate the candidates: ${adjudication.reasoning}`,
+      basis: 'insufficient_evidence',
       confidence: 'low',
     };
   }
@@ -77,6 +94,7 @@ export function deriveOutcome(
     return {
       outcome: 'needs_more_context',
       reason: `The adjudication did not place the cause: ${adjudication.reasoning}`,
+      basis: 'unplaced_cause',
       confidence: 'low',
     };
   }
@@ -93,12 +111,14 @@ export function deriveOutcome(
         reason:
           `The adjudication concluded the cause is external without rejecting ` +
           `${localCandidates} local candidate(s) the dossier raised`,
+        basis: 'unrejected_local_candidates',
         confidence: 'low',
       };
     }
     return {
       outcome: 'not_actionable',
       reason: `The cause is outside this codebase: ${adjudication.cause_location || adjudication.best_supported}`,
+      basis: 'cause_outside_codebase',
       confidence: confidenceFor(adjudication.evidence_strength),
     };
   }
@@ -113,6 +133,7 @@ export function deriveOutcome(
       reason:
         `The adjudication claims a ${adjudication.cause_kind} cause but did not cite a checkable ` +
         `file: ${JSON.stringify(adjudication.cause_location)}`,
+      basis: 'uncitable_local_claim',
       confidence: 'low',
     };
   }
@@ -122,6 +143,7 @@ export function deriveOutcome(
     return {
       outcome: 'needs_more_context',
       reason: `The adjudication cites ${location.path}, which does not resolve to a file in the checked-out repository`,
+      basis: 'citation_unresolvable',
       confidence: 'low',
     };
   }
@@ -133,6 +155,7 @@ export function deriveOutcome(
     return {
       outcome: 'not_actionable',
       reason: `The cause is at ${adjudication.cause_location}${via}, which is outside the configured fix surface`,
+      basis: 'outside_fix_surface',
       confidence: confidenceFor(adjudication.evidence_strength),
     };
   }
@@ -140,6 +163,7 @@ export function deriveOutcome(
   return {
     outcome: 'code_fix',
     reason: `The cause is at ${resolved}`,
+    basis: 'in_surface_defect',
     confidence: confidenceFor(adjudication.evidence_strength),
   };
 }
