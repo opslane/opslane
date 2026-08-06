@@ -15,9 +15,9 @@ import { isReasonCode, triageReasonCodes } from './reason-codes.js';
 
 const execFileAsync = promisify(execFile);
 
-const INVESTIGATION_MODEL = 'claude-sonnet-4-6';
-const MAX_TURNS = 10;
-const BUDGET_USD = 0.15;
+const INVESTIGATION_MODEL = process.env['INVESTIGATION_MODEL'] ?? 'claude-sonnet-4-6';
+const MAX_TURNS = Number(process.env['INVESTIGATION_MAX_TURNS'] ?? 10);
+const DEFAULT_BUDGET_USD = 0.15;
 const MAX_FILE_SIZE = 50_000;
 const MAX_SEARCH_RESULTS = 50;
 const MAX_LIST_ENTRIES = 200;
@@ -394,6 +394,7 @@ export async function investigateError(
 ): Promise<InvestigationResult> {
   const client = createAnthropicClient(apiKey);
   const pricing = MODEL_PRICING[INVESTIGATION_MODEL] ?? DEFAULT_PRICING;
+  const budgetUsd = Number(process.env['INVESTIGATION_BUDGET_USD'] ?? DEFAULT_BUDGET_USD);
   const tokenUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
   const filesRead: string[] = [];
   let lastModelText = '';
@@ -463,12 +464,9 @@ export async function investigateError(
       (tokenUsage.cacheWrite / 1_000_000) * pricing.cacheWrite +
       (tokenUsage.cacheRead / 1_000_000) * pricing.cacheRead;
 
-    if (cost > BUDGET_USD) {
-      logger.warn('Investigation budget exceeded, falling through to agent', { cost, budget: BUDGET_USD, turn });
-      return { fixable: true, confidence: 'low', reason: 'Investigation budget exceeded', filesRead, findings: lastModelText };
-    }
-
-    // Process response blocks
+    // Process response blocks BEFORE the budget check. This response is already
+    // paid for; if it carries the classification, discarding it wastes the spend
+    // AND throws away the answer.
     const toolCalls: { id: string; name: string; input: Record<string, unknown> }[] = [];
     for (const block of response.content) {
       if (block.type === 'text') {
@@ -479,12 +477,21 @@ export async function investigateError(
       }
     }
 
+    // Budget check. Fails CLOSED: exhaustion is an execution failure, not a
+    // finding, so it must not hand the fix agent a `fixable: true` it never
+    // earned. Skipped when this response already contains the classification.
+    const hasClassification = toolCalls.some((tc) => tc.name === 'classify_error');
+    if (cost > budgetUsd && !hasClassification) {
+      logger.warn('Investigation budget exceeded', { cost, budget: budgetUsd, turn });
+      return { fixable: false, confidence: 'low', reason: 'Investigation budget exceeded', filesRead, findings: lastModelText };
+    }
+
     messages.push({ role: 'assistant', content: response.content });
 
     // No tool calls = model is done without classifying
     if (toolCalls.length === 0) {
-      logger.warn('Investigation ended without classify_error call, falling through to agent');
-      return { fixable: true, confidence: 'low', reason: 'Investigation did not produce classification', filesRead, findings: lastModelText };
+      logger.warn('Investigation ended without classify_error call');
+      return { fixable: false, confidence: 'low', reason: 'Investigation did not produce classification', filesRead, findings: lastModelText };
     }
 
     // Execute tool calls

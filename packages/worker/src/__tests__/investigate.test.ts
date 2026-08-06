@@ -71,6 +71,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  delete process.env['INVESTIGATION_BUDGET_USD'];
   await rm(tempDir, { recursive: true, force: true });
 });
 
@@ -206,7 +207,33 @@ describe('investigateError', () => {
     expect(toolResult.content).toContain('path traversal blocked');
   });
 
-  it('returns fixable=true with low confidence when budget exceeded', async () => {
+  it('fails closed when the budget is exhausted before any classification', async () => {
+    process.env['INVESTIGATION_BUDGET_USD'] = '0.0000001';
+    mockMessagesCreate.mockResolvedValueOnce(
+      toolUseResponse([{ name: 'read_file', input: { path: 'src/App.vue' } }]),
+    );
+
+    const result = await investigateError('test-key', makeInput(), tempDir);
+
+    expect(result.fixable).toBe(false);
+    expect(result.reason).toBe('Investigation budget exceeded');
+    delete process.env['INVESTIGATION_BUDGET_USD'];
+  });
+
+  it('keeps a classification that arrives in the same response that blows the budget', async () => {
+    process.env['INVESTIGATION_BUDGET_USD'] = '0.0000001';
+    mockMessagesCreate.mockResolvedValueOnce(
+      classifyResponse({ fixable: true, confidence: 'high', reason: 'null deref in App.vue:42' }),
+    );
+
+    const result = await investigateError('test-key', makeInput(), tempDir);
+
+    expect(result.fixable).toBe(true);
+    expect(result.reason).toBe('null deref in App.vue:42');
+    delete process.env['INVESTIGATION_BUDGET_USD'];
+  });
+
+  it('fails closed with low confidence when budget exceeded', async () => {
     // Return a tool call that generates tokens, and make usage huge
     mockMessagesCreate.mockResolvedValue({
       content: [{ type: 'tool_use', id: 'tool-0', name: 'read_file', input: { path: 'src/App.vue' } }],
@@ -219,7 +246,7 @@ describe('investigateError', () => {
     });
 
     const result = await investigateError('test-key', makeInput(), tempDir);
-    expect(result.fixable).toBe(true);
+    expect(result.fixable).toBe(false);
     expect(result.confidence).toBe('low');
     expect(result.reason).toContain('budget');
   });
@@ -252,14 +279,14 @@ describe('investigateError', () => {
     expect(result.reason).toContain('failed');
   });
 
-  it('returns fixable=true with low confidence when model ends without classifying', async () => {
+  it('fails closed with low confidence when model ends without classifying', async () => {
     mockMessagesCreate.mockResolvedValueOnce({
       content: [{ type: 'text', text: 'I need more context but cannot determine fixability' }],
       usage: { input_tokens: 500, output_tokens: 100, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
     });
 
     const result = await investigateError('test-key', makeInput(), tempDir);
-    expect(result.fixable).toBe(true);
+    expect(result.fixable).toBe(false);
     expect(result.confidence).toBe('low');
   });
 
