@@ -25,7 +25,12 @@ export function parseCauseLocation(causeLocation: string): CauseLocation {
   const raw = (causeLocation ?? '').trim().replace(/^[`'"]+|[`'"]+$/g, '');
   if (!raw) return { kind: 'vague' };
 
-  const match = /^\.?\/?([^\s:]+?)(?::(\d+))?$/.exec(raw);
+  // Accept the citation forms models actually produce: `file`, `file:42`,
+  // `file:36-39` (a range) and `file:42:9` (line and column). Only a bare line
+  // number parsed before, so a real run that cited
+  // `lib/core/InterceptorManager.js:36-39` with the correct file had its whole
+  // diagnosis discarded as unciteable.
+  const match = /^\.?\/?([^\s:]+?)(?::(\d+)(?:[-:]\d+)?)?$/.exec(raw);
   const pathCandidate = match?.[1];
   const looksLikePath =
     pathCandidate !== undefined &&

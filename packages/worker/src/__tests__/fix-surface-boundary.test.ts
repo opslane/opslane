@@ -2,7 +2,7 @@ import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { isInsideFixSurface, resolveInsideRepo } from '../fix-surface.js';
+import { isInsideFixSurface, parseCauseLocation, resolveInsideRepo } from '../fix-surface.js';
 
 let repo: string;
 
@@ -88,5 +88,18 @@ describe('isInsideFixSurface boundaries', () => {
   it('treats an empty surface as nothing writable, and null as the whole repository', () => {
     expect(isInsideFixSurface('client/App.tsx', { globs: [] })).toBe(false);
     expect(isInsideFixSurface('server/app.py', { globs: null })).toBe(true);
+  });
+});
+
+describe('citation forms models actually produce', () => {
+  it.each([
+    ['src/App.tsx', 'src/App.tsx', undefined],
+    ['src/App.tsx:42', 'src/App.tsx', 42],
+    ['src/App.tsx:36-39', 'src/App.tsx', 36],
+    ['src/App.tsx:42:9', 'src/App.tsx', 42],
+    ['./src/App.tsx:7', 'src/App.tsx', 7],
+  ])('parses %j as a repository path', (cited, path, line) => {
+    const parsed = parseCauseLocation(cited);
+    expect(parsed).toMatchObject(line === undefined ? { kind: 'repo_path', path } : { kind: 'repo_path', path, line });
   });
 });
