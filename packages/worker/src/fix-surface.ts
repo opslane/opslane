@@ -1,3 +1,6 @@
+import { realpathSync, statSync } from 'node:fs';
+import { join, relative } from 'node:path';
+
 /** Which paths in a clone the worker is allowed to change. */
 export interface FixSurface {
   /** null preserves the pre-existing whole-repository behavior. */
@@ -70,4 +73,32 @@ function globToRegExp(glob: string): RegExp {
 export function isInsideFixSurface(path: string, surface: FixSurface): boolean {
   if (surface.globs === null) return true;
   return surface.globs.some((glob) => globToRegExp(glob).test(path));
+}
+
+/**
+ * Resolve a cited path to its real location inside the clone, or null if it
+ * escapes, is missing, or is not a regular file.
+ *
+ * Glob matching is lexical, so on its own it is bypassable: a symlink at
+ * `client/vendor` pointing to `../server` makes `client/vendor/app.py` match a
+ * `client/**` surface while the bytes being edited live in the backend.
+ * Verification confirmed this authorised a write outside the surface. Callers
+ * must match the glob against the path this returns, never the cited string.
+ */
+export function resolveInsideRepo(repoPath: string, cited: string): string | null {
+  let repoReal: string;
+  let target: string;
+  try {
+    repoReal = realpathSync(repoPath);
+    target = realpathSync(join(repoReal, cited));
+  } catch {
+    return null;
+  }
+  if (target !== repoReal && !target.startsWith(`${repoReal}/`)) return null;
+  try {
+    if (!statSync(target).isFile()) return null;
+  } catch {
+    return null;
+  }
+  return relative(repoReal, target);
 }
