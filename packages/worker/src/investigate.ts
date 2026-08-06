@@ -12,17 +12,21 @@ import type { TriageResult } from './agent-fix.js';
 
 export { executeListFiles, executeReadFile, executeSearch, safePath } from './investigate-tools.js';
 
-const INVESTIGATION_MODEL = process.env['INVESTIGATION_MODEL'] ?? 'claude-sonnet-4-6';
+const INVESTIGATION_MODEL = process.env['INVESTIGATION_MODEL'] ?? 'claude-sonnet-5';
 const MAX_TURNS = Number(process.env['INVESTIGATION_MAX_TURNS'] ?? 10);
 const ADJUDICATION_MAX_TURNS = Number(process.env['ADJUDICATION_MAX_TURNS'] ?? 8);
 /**
- * One budget for the whole investigation, not one per agent. Giving each phase
- * its own full allowance would let a routine run spend twice the advertised
- * limit purely because the work was split in two.
+ * Turns are the budget the agents work against, and the number is stated to
+ * them in the prompt so they can pace themselves. PostHog does the same thing
+ * and it is the one an agent can actually count.
+ *
+ * The dollar figure below is a runaway backstop, not the operating limit. It
+ * was the binding constraint before, calibrated against a four-file fixture,
+ * and it fired on real monorepos: dub and formbricks runs died with "exceeded
+ * its budget" while the agents were still reading files they needed. A cap
+ * that stops correct work is not a safety feature.
  */
-const DEFAULT_BUDGET_USD = 0.20;
-/** The share the dossier phase may consume before adjudication is starved. */
-const DOSSIER_BUDGET_SHARE = 0.6;
+const DEFAULT_SPEND_CEILING_USD = 2.0;
 const MAX_ERROR_MESSAGE = 500;
 const MAX_STACK_TRACE = 3000;
 const MAX_BREADCRUMBS = 4000;
@@ -220,7 +224,7 @@ export async function investigateError(
   surface: FixSurface,
 ): Promise<InvestigationResult> {
   const pricing = MODEL_PRICING[INVESTIGATION_MODEL] ?? DEFAULT_PRICING;
-  const totalBudgetUsd = Number(process.env['INVESTIGATION_BUDGET_USD'] ?? DEFAULT_BUDGET_USD);
+  const spendCeilingUsd = Number(process.env['INVESTIGATION_BUDGET_USD'] ?? DEFAULT_SPEND_CEILING_USD);
   const stackFiles = extractStackTraceFiles(input.stackTrace, input.platform);
   const hints = stackFiles.length > 0
     ? `\n\nFiles named by the stack trace, as a starting point only: ${stackFiles.slice(0, 5).join(', ')}`
@@ -231,10 +235,13 @@ export async function investigateError(
       apiKey,
       model: INVESTIGATION_MODEL,
       maxTurns: MAX_TURNS,
-      budgetUsd: totalBudgetUsd * DOSSIER_BUDGET_SHARE,
+      budgetUsd: spendCeilingUsd,
       pricing,
       systemPrompt: dossierSystemPrompt(input),
-      firstMessage: `Compile the dossier for this error, then call submit_dossier.${hints}`,
+      firstMessage:
+        `Compile the dossier for this error, then call submit_dossier. You have about ` +
+        `${MAX_TURNS} tool calls. Spend them on the files that decide between your ` +
+        `candidates, and submit what the evidence supports rather than running out.${hints}`,
       terminalTool: submitDossierTool(),
       repoPath,
       spanPrefix: 'dossier',
@@ -256,15 +263,13 @@ export async function investigateError(
         apiKey,
         model: INVESTIGATION_MODEL,
         maxTurns: ADJUDICATION_MAX_TURNS,
-        // Whatever the dossier phase left, never less than a floor: an
-        // adjudication that cannot afford to open a file cannot verify a
-        // citation, and an unverified conclusion is the thing being prevented.
-        budgetUsd: Math.max(totalBudgetUsd - first.costUsd, totalBudgetUsd * 0.15),
+        budgetUsd: Math.max(spendCeilingUsd - first.costUsd, spendCeilingUsd * 0.3),
         pricing,
         systemPrompt: adjudicationSystemPrompt(input, dossier),
         firstMessage:
-          'Adjudicate the dossier. Verify the citations before you trust them, and check any claim ' +
-          'about repetition against the timestamps. Then call adjudicate.',
+          `Adjudicate the dossier. Verify the citations before you trust them, and check any ` +
+          `claim about repetition against the timestamps. You have about ${ADJUDICATION_MAX_TURNS} ` +
+          `tool calls: open the files the winning hypothesis rests on first. Then call adjudicate.`,
         terminalTool: adjudicateTool(),
         repoPath,
         spanPrefix: 'adjudicate',
