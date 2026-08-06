@@ -1,0 +1,31 @@
+{
+  "id": "hard-h4-retry-storm",
+  "app": "asset-management-jira",
+  "bug_patch": null,
+  "error_event": {
+    "platform": "javascript",
+    "error": {
+      "type": "FetchError",
+      "message": "Server Error: 429 | GET /api/asset-types",
+      "stack": "FetchError: Server Error: 429 | GET /api/asset-types\n    at handleResponse (client/asset-panel/src/api/fetcher/index.ts:41:11)"
+    },
+    "breadcrumbs": [
+      { "type": "fetch", "timestamp": "2026-08-06T10:00:00.000Z", "category": "fetch", "level": "info", "message": "GET /api/asset-types", "data": { "method": "GET", "url": "/api/asset-types", "status_code": 200 } },
+      { "type": "fetch", "timestamp": "2026-08-06T10:00:00.041Z", "category": "fetch", "level": "info", "message": "GET /api/asset-types", "data": { "method": "GET", "url": "/api/asset-types", "status_code": 200 } },
+      { "type": "fetch", "timestamp": "2026-08-06T10:00:00.083Z", "category": "fetch", "level": "info", "message": "GET /api/asset-types", "data": { "method": "GET", "url": "/api/asset-types", "status_code": 200 } },
+      { "type": "fetch", "timestamp": "2026-08-06T10:00:00.126Z", "category": "fetch", "level": "info", "message": "GET /api/asset-types", "data": { "method": "GET", "url": "/api/asset-types", "status_code": 200 } },
+      { "type": "fetch", "timestamp": "2026-08-06T10:00:00.168Z", "category": "fetch", "level": "info", "message": "GET /api/asset-types", "data": { "method": "GET", "url": "/api/asset-types", "status_code": 200 } },
+      { "type": "fetch", "timestamp": "2026-08-06T10:00:00.211Z", "category": "fetch", "level": "info", "message": "GET /api/asset-types", "data": { "method": "GET", "url": "/api/asset-types", "status_code": 200 } },
+      { "type": "fetch", "timestamp": "2026-08-06T10:00:00.253Z", "category": "fetch", "level": "info", "message": "GET /api/asset-types", "data": { "method": "GET", "url": "/api/asset-types", "status_code": 200 } },
+      { "type": "fetch", "timestamp": "2026-08-06T10:00:00.297Z", "category": "fetch", "level": "info", "message": "GET /api/asset-types", "data": { "method": "GET", "url": "/api/asset-types", "status_code": 200 } },
+      { "type": "fetch", "timestamp": "2026-08-06T10:00:00.339Z", "category": "fetch", "level": "info", "message": "GET /api/asset-types", "data": { "method": "GET", "url": "/api/asset-types", "status_code": 200 } },
+      { "type": "fetch", "timestamp": "2026-08-06T10:00:00.382Z", "category": "fetch", "level": "info", "message": "GET /api/asset-types", "data": { "method": "GET", "url": "/api/asset-types", "status_code": 200 } },
+      { "type": "fetch", "timestamp": "2026-08-06T10:00:00.424Z", "category": "fetch", "level": "error", "message": "GET /api/asset-types", "data": { "method": "GET", "url": "/api/asset-types", "status_code": 429 } },
+      { "type": "fetch", "timestamp": "2026-08-06T10:00:00.467Z", "category": "fetch", "level": "error", "message": "GET /api/asset-types", "data": { "method": "GET", "url": "/api/asset-types", "status_code": 429, "error": "Server Error: 429 | GET /api/asset-types" } }
+    ],
+    "context": { "note": "12 requests in 467ms. No user input could produce this cadence." }
+  },
+  "expected": { "outcome": "fix_pr", "rca_file": "client/asset-panel/src/App.tsx" },
+  "grading": { "fail_to_pass": [], "pass_to_pass": [] },
+  "metadata": { "category": "retry_storm", "difficulty": "hard", "framework": "react" }
+}

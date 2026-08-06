@@ -1,0 +1,20 @@
+{
+  "id": "hard-h2-500-reported",
+  "app": "asset-management-jira",
+  "bug_patch": null,
+  "error_event": {
+    "platform": "javascript",
+    "error": {
+      "type": "FetchError",
+      "message": "Server Error: 500 | GET /api/assets",
+      "stack": "FetchError: Server Error: 500 | GET /api/assets\n    at handleResponse (client/asset-panel/src/api/fetcher/index.ts:41:11)"
+    },
+    "breadcrumbs": [
+      { "type": "fetch", "timestamp": "2026-08-06T10:00:00.000Z", "category": "fetch", "level": "error", "message": "GET /api/assets", "data": { "method": "GET", "url": "/api/assets", "status_code": 500 } }
+    ],
+    "context": {}
+  },
+  "expected": { "outcome": "conclusion" },
+  "grading": { "fail_to_pass": [], "pass_to_pass": [] },
+  "metadata": { "category": "external_service", "difficulty": "hard", "framework": "react" }
+}

@@ -1,0 +1,25 @@
+{
+  "id": "hard-h6-null-deref",
+  "app": "asset-management-jira",
+  "bug_patch": null,
+  "error_event": {
+    "platform": "javascript",
+    "error": {
+      "type": "TypeError",
+      "message": "Cannot read properties of undefined (reading 'map')",
+      "stack": "TypeError: Cannot read properties of undefined (reading 'map')\n    at handleAssetTypeChange (client/asset-panel/src/components/AssetDetails/useAssetForm.ts:23:62)"
+    },
+    "breadcrumbs": [],
+    "context": {
+      "resolved_stack_trace": [{
+        "originalFile": "client/asset-panel/src/components/AssetDetails/useAssetForm.ts",
+        "originalLine": 23,
+        "originalColumn": 62,
+        "sourceSnippet": "const fieldValues = newAssetType.fields.map((field) => {"
+      }]
+    }
+  },
+  "expected": { "outcome": "fix_pr", "rca_file": "client/asset-panel/src/components/AssetDetails/useAssetForm.ts" },
+  "grading": { "fail_to_pass": [], "pass_to_pass": [] },
+  "metadata": { "category": "null_dereference", "difficulty": "hard", "framework": "react" }
+}
