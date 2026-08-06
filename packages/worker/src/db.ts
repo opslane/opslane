@@ -2,6 +2,7 @@ import pg from 'pg';
 import type { ErrorGroupStatus, NeedsHumanReason, ConfidenceLevel, JobType, SetupPrStatus, EvidenceRecord, PRPosture } from '@opslane/shared';
 import { reconcileDeadLetteredSessionAnalysis } from './friction/dead-letter.js';
 import type { Platform } from './platform.js';
+import type { FixSurface } from './fix-surface.js';
 
 const { Pool } = pg;
 
@@ -21,6 +22,15 @@ export async function closePool(): Promise<void> {
     await pool.end();
     pool = null;
   }
+}
+
+/** A NULL column means the whole repository, preserving pre-existing behavior. */
+export async function loadFixSurface(projectId: string): Promise<FixSurface> {
+  const { rows } = await getPool().query<{ fix_surface_globs: string[] | null }>(
+    'SELECT fix_surface_globs FROM projects WHERE id = $1',
+    [projectId],
+  );
+  return { globs: rows[0]?.fix_surface_globs ?? null };
 }
 
 export interface ClaimedJob {
