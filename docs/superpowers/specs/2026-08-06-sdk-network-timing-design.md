@@ -146,8 +146,12 @@ So two milestones are recorded, and only one of them is comparable:
   listener firing at `readyState === 2` (`HEADERS_RECEIVED`). Absent when the
   request terminated before any headers arrived.
 - **`duration_ms` — start to terminal event.** For fetch, promise settle. For XHR,
-  `loadend`. Transport-dependent by construction, which is why `transport` is on
-  the wire.
+  the first of `load`/`timeout`/`abort`/`error`. Transport-dependent by
+  construction, which is why `transport` is on the wire.
+
+Both elapsed values are clamped in the SDK to the same 600000 ms ceiling ingestion
+enforces, so the SDK never emits a value the server will drop. A stored 600000
+therefore means "at least ten minutes", not "exactly ten minutes".
 
 `ttfb_ms` absent on a `timeout` means no headers ever arrived. `ttfb_ms` present on
 a `timeout` means the server responded and the body stalled. That distinction is the
@@ -197,9 +201,15 @@ distinguish:
 | `error` | `network_error` | omitted |
 
 `loadend` fires after every one of those, so finalization is guarded to **run at
-most once per request**; the first terminal event wins and `loadend` is used only to
-close out a record that somehow has none. A synchronous throw from `send()` removes
-the in-flight record entirely and rethrows unchanged.
+most once per request**; the first terminal event wins. A `loadend` listener is
+still registered as a fallback classifying `network_error`, so a request reaching
+`loadend` with no terminal event is recorded rather than leaking as permanently
+in-flight; in the normal case it is a no-op. A synchronous throw from `send()`
+removes the in-flight record entirely and rethrows unchanged.
+
+A successful non-HTTP XHR (`file://`, some extension schemes) reports `status 0`,
+which falls outside the storable range, so `status` is omitted rather than sent and
+discarded.
 
 `in_flight` is not produced by either matrix. It is assigned at snapshot time to
 records that have not finalized, with `duration_ms` set to elapsed-so-far. Without
@@ -229,13 +239,22 @@ If more than 20 requests are concurrently active, step 1 consumes the whole
 allowance and no completions are included. That is the correct trade for this
 feature, and the resulting snapshot is still ordered longest-running first.
 
-The active registry is bounded by the same cap on insert, evicting the *newest*
-active record when full, so a burst of short requests cannot displace a long-running
-one. Entries are removed from the registry on finalization.
+The active registry is bounded by the same cap, and at capacity it **refuses the
+new request** rather than evicting an existing one. Evicting the newest and then
+inserting an even newer record would keep the arrival that just displaced its
+predecessor — the exact inversion of the policy. Refusing keeps the oldest 20,
+which are the long-running requests being diagnosed. Entries are removed from the
+registry on finalization.
 
 `buildPayload` (`core.ts:65`) takes a snapshot; neither collection is cleared
 afterwards, so a second error in the same session still carries preceding request
 history.
+
+Request handles are never reissued, including across `clearNetworkTimings()`.
+`unpatchFetch`/`unpatchXHR` cannot cancel a request that is already awaiting
+(`network.ts:70`) or detach listeners already registered, so a callback from before
+`destroy()` can fire after re-init. Were handles to restart at zero, that stale
+callback would finalize an unrelated new request holding the reused handle.
 
 `destroy()` (`index.ts:53`) clears both collections via a `safeCall`, alongside the
 existing `clearBreadcrumbs`. Without it, request history survives across
@@ -274,7 +293,9 @@ Sanitization in `handler/error_event.go` mirrors `sanitizeDebugMeta`
 - non-object entries are dropped;
 - at most 20 entries retained, in first-seen order;
 - `transport` must be `fetch` or `xhr`;
-- `method` must be 1–16 bytes of `A-Z` after upper-casing;
+- `method` must match `^[A-Z0-9._-]{1,16}$` after upper-casing — punctuation is
+  permitted because real methods carry it and because a 16-byte SDK truncation can
+  clip one mid-token;
 - `url` must be 1–2048 bytes and free of control characters;
 - `started_at_ms`, `duration_ms`, and `ttfb_ms` must be finite and non-negative,
   with elapsed values at most 600000 (ten minutes), above which the entry is
