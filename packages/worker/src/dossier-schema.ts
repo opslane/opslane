@@ -127,11 +127,14 @@ export function adjudicateTool(): Anthropic.Tool {
             'repository. external_system or data_or_input mean the cause is not code we hold. ' +
             'unknown means the evidence did not place it.',
         },
-        cause_location: {
-          type: 'string',
+        cause_locations: {
+          type: 'array',
+          items: { type: 'string' },
           description:
+            'Every place the cause lives, most important first. Each entry is a bare ' +
             'path/to/file.ts:42 when cause_kind is local_code or configuration, otherwise the ' +
-            'system or input responsible. Empty if the evidence does not place it.',
+            'system or input responsible. One entry per location, no prose inside an entry. ' +
+            'Empty only when the evidence does not place the cause at all.',
         },
         reasoning: { type: 'string', description: 'Under 40 words.' },
       },
@@ -143,7 +146,7 @@ export function adjudicateTool(): Anthropic.Tool {
         'rejected',
         'evidence_strength',
         'cause_kind',
-        'cause_location',
+        'cause_locations',
         'reasoning',
       ],
     },
@@ -177,7 +180,7 @@ export function adjudicationFromDecline(raw: Record<string, unknown>): Adjudicat
     rejected: [],
     evidence_strength: 'suggestive',
     cause_kind: isKind(raw['cause_kind']) ? raw['cause_kind'] : 'unknown',
-    cause_location: location,
+    cause_locations: parseLocations(raw['cause_locations'] ?? raw['cause_location']),
     reasoning: clampWords(counterfactual || description, 40),
   };
 }
@@ -257,7 +260,38 @@ export function parseAdjudication(raw: Record<string, unknown>): Adjudication | 
     // An unrecognised kind falls back to `unknown`, which routes to a failure.
     // Defaulting to a code kind would let a malformed response reach a fix.
     cause_kind: isKind(raw['cause_kind']) ? raw['cause_kind'] : 'unknown',
-    cause_location: typeof raw['cause_location'] === 'string' ? raw['cause_location'].trim() : '',
+    cause_locations: parseLocations(raw['cause_locations'] ?? raw['cause_location']),
     reasoning: typeof raw['reasoning'] === 'string' ? clampWords(raw['reasoning'], 40) : '',
   };
+}
+
+/**
+ * Pull every citation out of whatever the model sent.
+ *
+ * This field has now discarded three correct answers: prose with no
+ * recognisable path, a line range, and a string naming two files where the
+ * second was the one the real fix changed. Each time the reply was right and
+ * the parser was too narrow, so this reads leniently and lets the routing
+ * decide, rather than demanding one exact shape.
+ */
+export function parseLocations(value: unknown): string[] {
+  const raw = Array.isArray(value) ? value : typeof value === 'string' ? [value] : [];
+  const out: string[] = [];
+  for (const entry of raw) {
+    if (typeof entry !== 'string') continue;
+    const trimmed = entry.trim();
+    if (!trimmed) continue;
+    // Keep the entry exactly as written first: an external cause like
+    // "GET /issue-context/api/assets/search (remote service)" must survive
+    // intact, and extracting a path out of it would mangle the URL.
+    out.push(trimmed);
+    // Then add any path-shaped tokens it contains, so a citation wrapped in
+    // prose still yields something the surface check can resolve. This is what
+    // recovers dub #4015, where the reply named two files in one string and the
+    // second was the one the real fix changed.
+    for (const path of trimmed.match(/[\w.@+-]+(?:\/[\w.@+-]+)+(?::\d+(?:[-:]\d+)?)?/g) ?? []) {
+      if (path !== trimmed) out.push(path);
+    }
+  }
+  return [...new Set(out)];
 }

@@ -166,10 +166,10 @@ Decide which hypothesis the evidence actually supports, and how strong that evid
 Rules:
 - Check the citations. You can read the repository. When a hypothesis cites a file and line, open it and confirm it says what the dossier claims. Name anything that does not check out.
 - Check every claim about repetition, retries or bursts against the actual timestamps in the breadcrumbs. If the timing does not support the claim, reject it and say so.
-- A hypothesis that is plausible but unsupported by the evidence in front of you is not suggestive, it is insufficient.
+- "insufficient" means the evidence cannot separate your candidates: two or more are equally supported and you cannot rank them. It does not mean you are less than certain. If one hypothesis is better supported than the rest, name it and rate the evidence "suggestive". Refusing to choose when you can choose sends a human a list instead of an answer.
 - Distinguish the cause from a code smell. Code that handles a failure badly is not the reason the failure occurred.
 - Rate the evidence honestly. Reserve "conclusive" for a conclusion whose every premise you verified from evidence you read. If a decisive premise rests on runtime state you cannot observe, such as a query plan, index, table size, deployed configuration or backend load, the most you may answer is "suggestive".
-- Report where the cause lives. Do not decide whether we are allowed to change it.
+- Report every place the cause lives. A fix often touches more than one file; list each one you would expect to change, most important first. Do not decide whether we are allowed to change them.
 
 ${evidenceBlock(input)}
 
@@ -299,7 +299,7 @@ export async function investigateError(
       one_line_description: adjudication.best_supported,
       why_chain: adjudication.why_chain,
       reproduction_steps: adjudication.reproduction_steps,
-      cause_location: adjudication.cause_location,
+      cause_location: adjudication.cause_locations.join(', '),
     }
     : null;
 
@@ -307,7 +307,7 @@ export async function investigateError(
     'investigation.outcome': decision.outcome,
     'investigation.confidence': decision.confidence,
     'investigation.strength': adjudication?.evidence_strength ?? 'none',
-    'investigation.cause_location': adjudication?.cause_location ?? '',
+    'investigation.cause_location': adjudication?.cause_locations.join(', ') ?? '',
     'investigation.hypotheses': dossier.hypotheses.length,
     'investigation.files_read': filesRead.join(','),
     'investigation.cost_usd': Number((first.costUsd + second.costUsd).toFixed(4)),
@@ -315,7 +315,7 @@ export async function investigateError(
 
   if (decision.outcome === 'code_fix' && surface.globs === null) {
     logger.warn('Fix authorised with no fix surface configured: the whole repository is writable', {
-      cause_location: adjudication?.cause_location,
+      cause_location: adjudication?.cause_locations.join(', '),
     });
   }
 

@@ -15,7 +15,7 @@ function adjudication(overrides: Partial<Adjudication> = {}): Adjudication {
     rejected: ['Slow endpoint: the breadcrumb shows a 200 in 40ms'],
     evidence_strength: 'conclusive',
     cause_kind: 'local_code',
-    cause_location: 'client/asset-panel/src/AssetList.tsx:42',
+    cause_locations: ['client/asset-panel/src/AssetList.tsx:42'],
     reasoning: 'The cited line dereferences assets without a null guard.',
     ...overrides,
   };
@@ -28,7 +28,7 @@ describe('deriveOutcome routing', () => {
 
   it('routes a recognised external cause to not_actionable', () => {
     const result = deriveOutcome(
-      adjudication({ cause_kind: 'external_system', cause_location: 'GET /issue-context/api/assets/search (remote service)' }),
+      adjudication({ cause_kind: 'external_system', cause_locations: ['GET /issue-context/api/assets/search (remote service)'] }),
       FRONTEND,
       resolvesToItself,
     );
@@ -37,7 +37,7 @@ describe('deriveOutcome routing', () => {
 
   it('routes a real defect outside the surface to not_actionable', () => {
     const result = deriveOutcome(
-      adjudication({ cause_location: 'server/app/routes/api/resources/asset.py:79' }),
+      adjudication({ cause_locations: ['server/app/routes/api/resources/asset.py:79'] }),
       FRONTEND,
       resolvesToItself,
     );
@@ -51,12 +51,12 @@ describe('deriveOutcome routing', () => {
 
   it('routes an uncheckable citation to needs_more_context, never a conclusion', () => {
     const result = deriveOutcome(
-      adjudication({ cause_location: 'client/asset-panel/src/Ghost.tsx:9' }),
+      adjudication({ cause_locations: ['client/asset-panel/src/Ghost.tsx:9'] }),
       FRONTEND,
       () => null,
     );
     expect(result.outcome).toBe('needs_more_context');
-    expect(result.reason).toMatch(/does not resolve/);
+    expect(result.reason).toMatch(/none of which resolve/);
   });
 
   it.each([
@@ -67,7 +67,7 @@ describe('deriveOutcome routing', () => {
     'client/asset-panel/src',
   ])('routes an unciteable local claim %j to needs_more_context', (location) => {
     const result = deriveOutcome(
-      adjudication({ cause_kind: 'local_code', cause_location: location }),
+      adjudication({ cause_kind: 'local_code', cause_locations: [location] }),
       FRONTEND,
       resolvesToItself,
     );
@@ -105,7 +105,7 @@ describe('evidence strength gates what the pipeline may do', () => {
     ['suggestive', 'medium'],
   ])('carries %s through to an external conclusion as %s confidence', (strength, expected) => {
     const result = deriveOutcome(
-      adjudication({ evidence_strength: strength, cause_kind: 'external_system', cause_location: 'https://cdn.example.com/app.js' }),
+      adjudication({ evidence_strength: strength, cause_kind: 'external_system', cause_locations: ['https://cdn.example.com/app.js'] }),
       FRONTEND,
       resolvesToItself,
     );
@@ -127,15 +127,15 @@ describe('routing invariants', () => {
   });
 
   it('moving the defect does change where it lands', () => {
-    const inside = adjudication({ cause_location: 'client/asset-panel/src/AssetList.tsx:42' });
-    const outside = adjudication({ cause_location: 'server/app/routes/api/resources/asset.py:79' });
+    const inside = adjudication({ cause_locations: ['client/asset-panel/src/AssetList.tsx:42'] });
+    const outside = adjudication({ cause_locations: ['server/app/routes/api/resources/asset.py:79'] });
     expect(deriveOutcome(inside, FRONTEND, resolvesToItself).outcome)
       .not.toBe(deriveOutcome(outside, FRONTEND, resolvesToItself).outcome);
   });
 
   it('an unconfigured surface keeps the pre-existing whole-repository behaviour', () => {
     const result = deriveOutcome(
-      adjudication({ cause_location: 'server/app/routes/api/resources/asset.py:79' }),
+      adjudication({ cause_locations: ['server/app/routes/api/resources/asset.py:79'] }),
       { globs: null },
       resolvesToItself,
     );
@@ -158,7 +158,7 @@ describe('the cause kind is read as a typed value, not matched from prose', () =
   // and no hostname, so prose matching called it vague and lost the answer.
   it('reaches a conclusion for an external cause described in plain words', () => {
     const result = deriveOutcome(
-      { ...base, cause_kind: 'external_system', cause_location: 'upstream API gateway / reverse proxy (not present in repository)' },
+      { ...base, cause_kind: 'external_system', cause_locations: ['upstream API gateway / reverse proxy (not present in repository)'] },
       FRONTEND,
       resolvesToItself,
     );
@@ -167,7 +167,7 @@ describe('the cause kind is read as a typed value, not matched from prose', () =
 
   it('reaches a conclusion for a data cause with no location at all', () => {
     const result = deriveOutcome(
-      { ...base, cause_kind: 'data_or_input', cause_location: '' },
+      { ...base, cause_kind: 'data_or_input', cause_locations: [''] },
       FRONTEND,
       resolvesToItself,
     );
@@ -176,7 +176,7 @@ describe('the cause kind is read as a typed value, not matched from prose', () =
 
   it('fails when the kind is unknown however confident the prose sounds', () => {
     const result = deriveOutcome(
-      { ...base, cause_kind: 'unknown', cause_location: 'client/asset-panel/src/AssetList.tsx:42' },
+      { ...base, cause_kind: 'unknown', cause_locations: ['client/asset-panel/src/AssetList.tsx:42'] },
       FRONTEND,
       resolvesToItself,
     );
@@ -185,7 +185,7 @@ describe('the cause kind is read as a typed value, not matched from prose', () =
 
   it('still requires a resolvable file when the kind claims local code', () => {
     const result = deriveOutcome(
-      { ...base, cause_kind: 'local_code', cause_location: 'the fetcher module' },
+      { ...base, cause_kind: 'local_code', cause_locations: ['the fetcher module'] },
       FRONTEND,
       resolvesToItself,
     );
@@ -204,17 +204,17 @@ describe('the fix surface is checked against the resolved path', () => {
   // inside the surface still authorised a write outside it.
   it('refuses a citation that resolves outside the surface through a symlink', () => {
     const result = deriveOutcome(
-      adjudication({ cause_kind: 'local_code', cause_location: `${cited}:1` }),
+      adjudication({ cause_kind: 'local_code', cause_locations: [`${cited}:1`] }),
       FRONTEND,
       resolvesThroughSymlink,
     );
     expect(result.outcome).toBe('not_actionable');
-    expect(result.reason).toContain('resolves to server/app/asset.py');
+    expect(result.reason).toContain('server/app/asset.py');
   });
 
   it('reports the resolved path, not the cited one, when it does authorise a fix', () => {
     const result = deriveOutcome(
-      adjudication({ cause_location: 'client/link.tsx:3' }),
+      adjudication({ cause_locations: ['client/link.tsx:3'] }),
       FRONTEND,
       () => 'client/real/Component.tsx',
     );
@@ -226,7 +226,7 @@ describe('the fix surface is checked against the resolved path', () => {
 describe('an external conclusion has to be reached against the local candidates', () => {
   const external = adjudication({
     cause_kind: 'external_system',
-    cause_location: 'upstream gateway',
+    cause_locations: ['upstream gateway'],
     rejected: [],
   });
 

@@ -99,6 +99,8 @@ export function deriveOutcome(
     };
   }
 
+  const firstLocation = adjudication.cause_locations[0] ?? '';
+
   if (adjudication.cause_kind === 'external_system' || adjudication.cause_kind === 'data_or_input') {
     // A conclusion cannot be verified from the repository: we cannot prove a
     // remote service was slow. What we can require is that it was reached
@@ -117,44 +119,51 @@ export function deriveOutcome(
     }
     return {
       outcome: 'not_actionable',
-      reason: `The cause is outside this codebase: ${adjudication.cause_location || adjudication.best_supported}`,
+      reason: `The cause is outside this codebase: ${firstLocation || adjudication.best_supported}`,
       basis: 'cause_outside_codebase',
       confidence: confidenceFor(adjudication.evidence_strength),
     };
   }
 
-  // local_code and configuration claim a defect we hold, so the citation has to
-  // resolve to a real file inside the surface before it authorises anything.
-  const location = parseCauseLocation(adjudication.cause_location);
+  // local_code and configuration claim a defect we hold, so at least one
+  // citation has to resolve to a real file inside the surface before this
+  // authorises anything. Every citation is considered: a fix that touches two
+  // files, one of them ours, is still a fix we can attempt.
+  const cited = adjudication.cause_locations
+    .map((entry) => parseCauseLocation(entry))
+    .flatMap((parsed) => (parsed.kind === 'repo_path' ? [parsed.path] : []));
 
-  if (location.kind !== 'repo_path') {
+  if (cited.length === 0) {
     return {
       outcome: 'needs_more_context',
       reason:
-        `The adjudication claims a ${adjudication.cause_kind} cause but did not cite a checkable ` +
-        `file: ${JSON.stringify(adjudication.cause_location)}`,
+        `The adjudication claims a ${adjudication.cause_kind} cause but cited no checkable ` +
+        `file: ${JSON.stringify(adjudication.cause_locations)}`,
       basis: 'uncitable_local_claim',
       confidence: 'low',
     };
   }
 
-  const resolved = resolvePath(location.path);
-  if (resolved === null) {
+  const resolved = cited.map((path) => ({ path, real: resolvePath(path) }));
+  const existing = resolved.filter((entry): entry is { path: string; real: string } => entry.real !== null);
+
+  if (existing.length === 0) {
     return {
       outcome: 'needs_more_context',
-      reason: `The adjudication cites ${location.path}, which does not resolve to a file in the checked-out repository`,
+      reason: `The adjudication cites ${cited.join(', ')}, none of which resolve to a file in the checked-out repository`,
       basis: 'citation_unresolvable',
       confidence: 'low',
     };
   }
 
-  // Match the glob against the RESOLVED path. Matching the cited string is what
-  // let a symlink inside the surface authorise a write outside it.
-  if (!isInsideFixSurface(resolved, surface)) {
-    const via = resolved === location.path ? '' : ` (resolves to ${resolved})`;
+  // Match globs against RESOLVED paths. Matching the cited string is what let a
+  // symlink inside the surface authorise a write outside it.
+  const inSurface = existing.filter((entry) => isInsideFixSurface(entry.real, surface));
+
+  if (inSurface.length === 0) {
     return {
       outcome: 'not_actionable',
-      reason: `The cause is at ${adjudication.cause_location}${via}, which is outside the configured fix surface`,
+      reason: `The cause is at ${existing.map((entry) => entry.real).join(', ')}, outside the configured fix surface`,
       basis: 'outside_fix_surface',
       confidence: confidenceFor(adjudication.evidence_strength),
     };
@@ -162,7 +171,7 @@ export function deriveOutcome(
 
   return {
     outcome: 'code_fix',
-    reason: `The cause is at ${resolved}`,
+    reason: `The cause is at ${inSurface.map((entry) => entry.real).join(', ')}`,
     basis: 'in_surface_defect',
     confidence: confidenceFor(adjudication.evidence_strength),
   };

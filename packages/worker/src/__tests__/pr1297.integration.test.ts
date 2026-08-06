@@ -82,7 +82,7 @@ describe('PR #1297: a slow backend never becomes a frontend code change', () => 
         rejected: ['FETCH_TIMEOUT: raising it hides the symptom and the server latency is unexplained'],
         evidence_strength: 'suggestive',
         cause_kind: 'external_system',
-        cause_location: 'GET /issue-context/api/assets/search (remote service)',
+        cause_locations: ['GET /issue-context/api/assets/search (remote service)'],
         reasoning: 'The server never responded; the client timeout only bounds the wait.',
       }));
 
@@ -116,7 +116,7 @@ describe('PR #1297: a slow backend never becomes a frontend code change', () => 
         rejected: [],
         evidence_strength: 'suggestive',
         cause_kind: 'configuration',
-        cause_location: 'packages/worker/src/investigate.ts:1',
+        cause_locations: ['packages/worker/src/investigate.ts:1'],
         reasoning: 'Cannot establish that the timeout, rather than the server, is the cause.',
       }));
 

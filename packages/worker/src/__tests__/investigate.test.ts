@@ -63,7 +63,7 @@ function adjudicateResponse(overrides: Record<string, unknown> = {}) {
         rejected: ['Slow endpoint: no fetch breadcrumb exists'],
         evidence_strength: 'conclusive',
         cause_kind: 'local_code',
-        cause_location: 'src/App.vue:42',
+        cause_locations: ['src/App.vue:42'],
         reasoning: 'The cited line maps over a null default.',
         ...overrides,
       },
@@ -184,7 +184,7 @@ describe('neither agent names an outcome', () => {
   });
 
   it('routes an external cause to a conclusion the model never named', async () => {
-    happyPath({ cause_kind: 'external_system', cause_location: 'GET /api/assets/search (remote service)' });
+    happyPath({ cause_kind: 'external_system', cause_locations: ['GET /api/assets/search (remote service)'] });
 
     const result = await investigateError('key', makeInput(), tempDir, WHOLE_REPO);
 
@@ -202,7 +202,7 @@ describe('neither agent names an outcome', () => {
   });
 
   it('refuses a citation that does not exist in the clone', async () => {
-    happyPath({ cause_location: 'src/Ghost.vue:9' });
+    happyPath({ cause_locations: ['src/Ghost.vue:9'] });
 
     const result = await investigateError('key', makeInput(), tempDir, WHOLE_REPO);
 

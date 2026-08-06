@@ -1,21 +1,19 @@
 [
  {
-  "base_sha": "d5c6cf4ad51c40d9781b922893f418b2d47e46da",
+  "base_sha": "053de00df2d35da9b3d336217429caa3c2ff7d56",
   "ground_truth": [
-   "packages/ui/primitives/signature-pad/signature-render.tsx"
+   "apps/web/ui/modals/link-builder/index.tsx"
   ],
-  "issue": 2945,
-  "issue_body": "### Issue Description\n\nOn `/settings/profile` page there is an option to save typed signature.\n\nSignature font is not always loaded property. When user load `/settings/profile` page as first, font is not loaded property. This problem does not occur when this page is loaded as, for example, second page in session. Signature window probably doesn't wait for UI font and use backup font.\n\n\n\n\n\n### Steps to Reproduce\n\n1. Save typed signature on your profile\n2. Open `/settings/profile` page as first page in session (on new window type manually [https://app.documenso.com/settings/profile](https://app.documenso.com/settings/profile))\n3. Look on typed signature font\n\nThis problem does not occur when you open other page (ex. [https://app.documenso.com/settings/document](https://app.documenso.com/settings/document) and then go to profile page by UI interface.\n\n### Expected Behavior\n\n<img width=\"1011\" height=\"496\" alt=\"Image\" src=\"https://github.com/user-attachments/assets/d036eee4-bff3-4af2-95a5-915039158d96\" />\n\n### Current Behavior\n\n<img width=\"982\" height=\"455\" alt=\"Image\" src=\"https://github.com/user-attachments/assets/88314a04-b0f3-4afa-a198-95109982b484\" />\n\n### Screenshots (optional)\n\n_No response_\n\n### Operating System [e.g., Windows 10]\n\nWindows 11\n\n### Browser [e.g., Chrome, Firefox]\n\nChrome 148\n\n### Version [e.g., 2.0.1]\n\nv2.11.0\n\n### Please check the boxes that apply to this issue report.\n\n- [x] I have searched the existing issues to make sure this is not a duplicate.\n- [x] I have provided steps to reproduce the issue.\n- [x] I have included relevant environment information.\n- [x] I have included any relevant screenshots.\n- [x] I understand that this is a voluntary contribution and that there is no guarantee of resolution.\n- [ ] I want to work on creating a PR for this issue if approved",
-  "issue_title": "Typed signature is not always loaded property",
-  "pr": 2963,
-  "pr_title": "fix: load typed signature font on profile page",
-  "repo": "documenso/documenso",
+  "issue": 4015,
+  "issue_body": "## Description\n\nWhen a user signs up and lands on the onboarding success page, clicking **\"Create a short link\"** in the **\"Create your first Dub short link\"** section results in the API call being made with an undefined workspace ID\n\n```http\nPOST /api/links?workspaceId=undefined\n```\n\n## Root Cause\n\nIn `apps/web/ui/modals/link-builder/index.tsx`, the `useLinkBuilder` hook captures `workspace` inside a `useCallback`, but `workspace` is missing from the dependency array:\n\n```tsx\nconst workspace = useWorkspace();\n\nconst LinkBuilderCallback = useCallback(() => {\n  return (\n    <LinkBuilder\n      ...\n      workspace={workspace}\n      ...\n    />\n  );\n}, [showLinkBuilder]); // workspace missing\n```\n\nOn the onboarding success page, the component mounts before `useWorkspace()` has finished fetching data from:\n\n```text\n/api/workspaces/[slug]\n```\n\nThe `useCallback` captures `workspace` when its `id` is still `undefined`. When SWR later resolves with the actual workspace data, `showLinkBuilder` has not changed, so the callback is never recreated and continues using the stale workspace reference.\n\nAs a result, when the modal opens and the user submits the form, `workspace.id` remains `undefined`.\n\nThis race condition is specific to the onboarding flow because the user reaches the page before the workspace SWR cache is populated. In normal navigation flows, the workspace is typically already loaded.\n\nThe stale workspace is passed into `LinkBuilderProvider` and later consumed in `use-link-builder-submit.tsx` (line 53):\n\n```tsx\nurl: `/api/links?workspaceId=${workspace.id}`,\n```\n\nWhich becomes:\n\n```http\nPOST /api/links?workspaceId=undefined\n```\n\n## Steps to Reproduce\n\n1. Sign up for a new account.\n2. Complete onboarding and land on the success page.\n3. Click **\"Create a short link\"** in the **\"Create your first Dub short link\"** section.\n4. Enter a destination URL.\n5. Click **Create**.\n\n## Expected Behavior\n\nThe link is created successfully using the correct workspace ID.\n\n## Actual Behavior\n\nThe API request is sent with an undefined workspace ID:\n\n```http\nPOST /api/links?workspaceId=undefined\n```\n\nThe request fails and the short link is not created.\n\n## Proposed Fix\n\nAdd `workspace` to the `useCallback` dependency array in `apps/web/ui/modals/link-builder/index.tsx`:\n\n```tsx\nconst LinkBuilderCallback = useCallback(() => {\n  return (\n    <LinkBuilder\n      showLinkBuilder={showLinkBuilder}\n      setShowLinkBuilder={setShowLinkBuilder}\n      props={props}\n      duplicateProps={duplicateProps}\n      homepageDemo={homepageDemo}\n      workspace={workspace}\n      modal={true}\n    />\n  );\n}, [showLinkBuilder, workspace]);\n```\n\n### Why This Fix Works\n\nIncluding `workspace` in the dependency array ensures the callback is recreated whenever the workspace data changes.\n\nThis guarantees that `LinkBuilderProvider` receives the latest workspace object, including a valid `workspace.id`, preventing stale closures and eliminating the onboarding race condition.",
+  "issue_title": "Unable to create first short link from onboarding success page",
+  "pr": 4016,
+  "pr_title": "Fix stale workspace in link builder modal",
+  "repo": "dubinc/dub",
   "cited": "",
   "hit": false,
   "outcome": "needs_more_context",
-  "strength": "insufficient",
-  "hypotheses": 3,
-  "why": [],
-  "reasoning": ""
+  "hypotheses": 0,
+  "why": []
  }
 ]

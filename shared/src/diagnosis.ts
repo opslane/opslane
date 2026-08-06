@@ -59,8 +59,12 @@ export interface Adjudication {
    * phrased "upstream API gateway / reverse proxy (not present in repository)".
    */
   cause_kind: HypothesisKind;
-  /** A repository file and line, or the external system. Empty if unplaced. */
-  cause_location: string;
+  /**
+   * Every place the cause lives, most important first. A list because real
+   * fixes touch more than one file, and because a single string kept
+   * discarding correct answers that named two.
+   */
+  cause_locations: string[];
   /** Under 40 words. */
   reasoning: string;
   /** The why-chain of the winning hypothesis, carried through for the fix agent. */

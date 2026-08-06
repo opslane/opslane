@@ -41,15 +41,18 @@ for (const c of only) {
     await new Promise((res) => setTimeout(res, 20000 * (attempt + 1)));
   }
 
-  const cited = (r.adjudication?.cause_location ?? '').split(':')[0].replace(/^\.?\//,'');
-  const hit = c.ground_truth.some(f => f === cited || f.endsWith('/'+cited) || cited.endsWith('/'+f));
+  // cause_locations is a list: a fix often touches more than one file, so score
+  // a hit if ANY citation names a file the real fix changed.
+  const citations = (r.adjudication?.cause_locations ?? []).map(x => x.split(':')[0].replace(/^\.?\//,''));
+  const cited = citations.join(' | ');
+  const hit = citations.some(cit => cit && c.ground_truth.some(f => f === cit || f.endsWith('/'+cit) || cit.endsWith('/'+f)));
   results.push({ ...c, cited, hit, outcome: r.outcome, strength: r.adjudication?.evidence_strength,
                  hypotheses: r.dossier?.hypotheses?.length ?? 0, why: r.adjudication?.why_chain ?? [],
                  reasoning: r.adjudication?.reasoning });
   console.log(`\n${'='.repeat(76)}\n${c.repo}#${c.issue}  ${hit?'HIT ':'MISS'}  ${r.outcome}/${r.adjudication?.evidence_strength??'-'}`);
   console.log(`  issue    : ${c.issue_title.slice(0,72)}`);
   console.log(`  truth    : ${c.ground_truth.join(', ')}`);
-  console.log(`  we said  : ${r.adjudication?.cause_location ?? '(none)'}`);
+  console.log(`  we said  : ${cited || '(none)'}`);
   console.log(`  candidates: ${results.at(-1).hypotheses}  | reason: ${r.reason ?? r.decisionReason ?? '-'}`);
   (r.adjudication?.why_chain ?? []).slice(0,4).forEach((w,i)=>console.log(`    ${i+1}. ${w}`));
 }
