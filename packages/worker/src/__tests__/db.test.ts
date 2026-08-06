@@ -19,6 +19,7 @@ import {
   recordDeliveryPushed,
   finalizeDelivery,
   getQueueDepth,
+  recordDiagnosisDecision,
 } from '../db.js';
 
 const DATABASE_URL = process.env['DATABASE_URL'];
@@ -98,6 +99,7 @@ async function cleanupTestData(): Promise<void> {
   // Delete in reverse FK order
   await testPool.query(`DELETE FROM friction_signals WHERE project_id = $1`, [testProjectId]);
   await testPool.query(`DELETE FROM friction_adjudication_generations WHERE project_id = $1`, [testProjectId]);
+  await testPool.query(`DELETE FROM diagnosis_decisions WHERE project_id = $1`, [testProjectId]);
   await testPool.query(`DELETE FROM error_group_jobs WHERE project_id = $1`, [testProjectId]);
   await testPool.query(`DELETE FROM error_events WHERE project_id = $1`, [testProjectId]);
   await testPool.query(`DELETE FROM error_groups WHERE project_id = $1`, [testProjectId]);
@@ -164,9 +166,93 @@ describeDb('db.ts integration tests', () => {
     // Clean only jobs and error groups between tests, keep tenant
     await testPool.query(`DELETE FROM friction_signals WHERE project_id = $1`, [testProjectId]);
     await testPool.query(`DELETE FROM friction_adjudication_generations WHERE project_id = $1`, [testProjectId]);
+    await testPool.query(`DELETE FROM diagnosis_decisions WHERE project_id = $1`, [testProjectId]);
     await testPool.query(`DELETE FROM error_group_jobs WHERE project_id = $1`, [testProjectId]);
     await testPool.query(`DELETE FROM error_events WHERE project_id = $1`, [testProjectId]);
     await testPool.query(`DELETE FROM error_groups WHERE project_id = $1`, [testProjectId]);
+  });
+
+  describe('diagnosis decisions', () => {
+    const baseDecision = {
+      diagnosis: null,
+      model: 'claude-sonnet-4-6',
+      promptVersion: 'diagnosis-v1',
+    };
+
+    it('records every decision for separate jobs without overwriting earlier conclusions', async () => {
+      const { errorGroupId, jobId: firstJobId } = await seedErrorGroupAndJob();
+      const secondJob = await testPool.query<{ id: string }>(
+        `INSERT INTO error_group_jobs (error_group_id, project_id, job_type)
+         VALUES ($1, $2, 'investigate') RETURNING id`,
+        [errorGroupId, testProjectId],
+      );
+
+      await recordDiagnosisDecision(errorGroupId, testProjectId, {
+        ...baseDecision,
+        jobId: firstJobId,
+        outcome: 'not_actionable',
+        decisionReason: 'The cause is outside this codebase',
+        causeLocation: 'GET /api/assets/search (remote service)',
+      });
+      await recordDiagnosisDecision(errorGroupId, testProjectId, {
+        ...baseDecision,
+        jobId: secondJob.rows[0]!.id,
+        outcome: 'code_fix',
+        decisionReason: 'The cause is at src/App.vue:42',
+        causeLocation: 'src/App.vue:42',
+      });
+
+      const { rows } = await testPool.query<{ outcome: string }>(
+        `SELECT outcome FROM diagnosis_decisions
+         WHERE error_group_id = $1 ORDER BY decided_at, id`,
+        [errorGroupId],
+      );
+      expect(rows.map((row) => row.outcome)).toEqual(['not_actionable', 'code_fix']);
+    });
+
+    it('is idempotent when the same job is retried', async () => {
+      const { errorGroupId, jobId } = await seedErrorGroupAndJob();
+      const decision = {
+        ...baseDecision,
+        jobId,
+        outcome: 'code_fix' as const,
+        decisionReason: 'The cause is at src/App.vue:42',
+        causeLocation: 'src/App.vue:42',
+      };
+
+      await recordDiagnosisDecision(errorGroupId, testProjectId, decision);
+      await recordDiagnosisDecision(errorGroupId, testProjectId, decision);
+
+      const { rows } = await testPool.query<{ n: number }>(
+        'SELECT count(*)::int AS n FROM diagnosis_decisions WHERE job_id = $1',
+        [jobId],
+      );
+      expect(rows[0]!.n).toBe(1);
+    });
+
+    it('stores the status transition and its decision together', async () => {
+      const { errorGroupId, jobId } = await seedErrorGroupAndJob();
+      await updateGroupInvestigation(errorGroupId, testProjectId, 'insight', {
+        rootCause: 'The remote search endpoint timed out',
+        confidence: 'medium',
+        decision: {
+          ...baseDecision,
+          jobId,
+          outcome: 'not_actionable',
+          decisionReason: 'The cause is outside this codebase',
+          causeLocation: 'GET /api/assets/search (remote service)',
+        },
+      });
+
+      const { rows } = await testPool.query<{ status: string; outcome: string }>(
+        `SELECT eg.status, dd.outcome
+         FROM error_groups eg
+         JOIN diagnosis_decisions dd ON dd.error_group_id = eg.id
+         WHERE eg.id = $1 AND dd.job_id = $2`,
+        [errorGroupId, jobId],
+      );
+      expect(rows[0]).toEqual({ status: 'insight', outcome: 'not_actionable' });
+    });
   });
 
   describe('draft delivery lifecycle', () => {

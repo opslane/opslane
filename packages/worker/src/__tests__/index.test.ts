@@ -303,6 +303,12 @@ describe('processInvestigateJob diagnosis routing', () => {
     expect(db.updateGroupInvestigation).toHaveBeenCalledWith(
       'grp-1', 'proj-1', 'insight', expect.objectContaining({
         rootCause: 'The search endpoint exceeded its 10 second budget',
+        decision: expect.objectContaining({
+          jobId: 'job-1',
+          outcome: 'not_actionable',
+          causeLocation: 'GET /api/assets/search (remote service)',
+          promptVersion: 'diagnosis-v1',
+        }),
       }), makeJob(),
     );
     expect(db.updateGroupAndCreateFixJob).not.toHaveBeenCalled();
@@ -329,6 +335,11 @@ describe('processInvestigateJob diagnosis routing', () => {
           reason_message: 'The investigation produced no usable diagnosis',
           remediation: expect.any(String),
         },
+        decision: expect.objectContaining({
+          jobId: 'job-1',
+          outcome: 'needs_more_context',
+          diagnosis: null,
+        }),
       }), makeJob(),
     );
   });
@@ -357,6 +368,11 @@ describe('processInvestigateJob diagnosis routing', () => {
     expect(fields).toMatchObject({
       rootCause: 'Null dereference rendering the asset list',
       diagnosis: expect.objectContaining({ cause_location: 'src/App.vue:42' }),
+      decision: expect.objectContaining({
+        jobId: 'job-1',
+        outcome: 'code_fix',
+        causeLocation: 'src/App.vue:42',
+      }),
     });
     expect(fields).not.toHaveProperty('suggestedMitigation');
   });

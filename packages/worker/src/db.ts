@@ -1,5 +1,5 @@
 import pg from 'pg';
-import type { Diagnosis, ErrorGroupStatus, NeedsHumanReason, ConfidenceLevel, JobType, SetupPrStatus, EvidenceRecord, PRPosture } from '@opslane/shared';
+import type { Diagnosis, DiagnosisOutcome, ErrorGroupStatus, NeedsHumanReason, ConfidenceLevel, JobType, SetupPrStatus, EvidenceRecord, PRPosture } from '@opslane/shared';
 import { reconcileDeadLetteredSessionAnalysis } from './friction/dead-letter.js';
 import type { Platform } from './platform.js';
 import type { FixSurface } from './fix-surface.js';
@@ -31,6 +31,50 @@ export async function loadFixSurface(projectId: string): Promise<FixSurface> {
     [projectId],
   );
   return { globs: rows[0]?.fix_surface_globs ?? null };
+}
+
+export interface DecisionRow {
+  outcome: DiagnosisOutcome;
+  decisionReason: string;
+  causeLocation?: string | null;
+  diagnosis: Diagnosis | null;
+  model: string;
+  promptVersion: string;
+  jobId?: string | null;
+}
+
+async function insertDiagnosisDecision(
+  queryable: Pick<pg.Pool, 'query'> | Pick<pg.PoolClient, 'query'>,
+  errorGroupId: string,
+  projectId: string,
+  row: DecisionRow,
+): Promise<void> {
+  await queryable.query(
+    `INSERT INTO diagnosis_decisions
+       (error_group_id, project_id, job_id, outcome, decision_reason, cause_location, diagnosis, model, prompt_version)
+     VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9)
+     ON CONFLICT (job_id) WHERE job_id IS NOT NULL DO NOTHING`,
+    [
+      errorGroupId,
+      projectId,
+      row.jobId ?? null,
+      row.outcome,
+      row.decisionReason,
+      row.causeLocation ?? null,
+      row.diagnosis === null ? null : JSON.stringify(row.diagnosis),
+      row.model,
+      row.promptVersion,
+    ],
+  );
+}
+
+/** Append a diagnosis decision. A retried job is idempotent, never overwritten. */
+export async function recordDiagnosisDecision(
+  errorGroupId: string,
+  projectId: string,
+  row: DecisionRow,
+): Promise<void> {
+  await insertDiagnosisDecision(getPool(), errorGroupId, projectId, row);
 }
 
 export interface ClaimedJob {
@@ -1454,6 +1498,7 @@ export async function updateGroupInvestigation(
     suggestedMitigation?: string;
     confidence?: ConfidenceLevel;
     reason?: NeedsHumanReason;
+    decision?: DecisionRow;
   },
   lease?: JobLease,
 ): Promise<void> {
@@ -1480,9 +1525,12 @@ export async function updateGroupInvestigation(
          FOR UPDATE
        )`
     : '';
-  const result = await db.query(
-    `${ownedCte}
-     UPDATE error_groups
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await client.query(
+      `${ownedCte}
+       UPDATE error_groups
      SET status = $3::error_group_status,
          root_cause = $4,
          suggested_mitigation = $5,
@@ -1503,22 +1551,32 @@ export async function updateGroupInvestigation(
          updated_at = now()
      WHERE id = $1 AND project_id = $2
        ${lease ? 'AND EXISTS (SELECT 1 FROM owned)' : ''}
-     RETURNING id`,
-    [
-      errorGroupId,
-      projectId,
-      status,
-      fields.rootCause ?? null,
-      fields.suggestedMitigation ?? null,
-      fields.confidence ?? null,
-      reason?.reason_code ?? null,
-      reason?.reason_message ?? null,
-      reason?.remediation ?? null,
-      ...(lease ? [lease.id, lease.workerId, lease.leaseGeneration] : []),
-    ]
-  );
-  if (lease && (result.rowCount ?? 0) === 0) {
-    throw new LeaseLostError(lease.id);
+       RETURNING id`,
+      [
+        errorGroupId,
+        projectId,
+        status,
+        fields.rootCause ?? null,
+        fields.suggestedMitigation ?? null,
+        fields.confidence ?? null,
+        reason?.reason_code ?? null,
+        reason?.reason_message ?? null,
+        reason?.remediation ?? null,
+        ...(lease ? [lease.id, lease.workerId, lease.leaseGeneration] : []),
+      ],
+    );
+    if (lease && (result.rowCount ?? 0) === 0) {
+      throw new LeaseLostError(lease.id);
+    }
+    if ((result.rowCount ?? 0) > 0 && fields.decision) {
+      await insertDiagnosisDecision(client, errorGroupId, projectId, fields.decision);
+    }
+    await client.query('COMMIT');
+  } catch (err: unknown) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
   }
 }
 
@@ -1546,6 +1604,7 @@ export async function updateGroupAndCreateFixJob(
     diagnosis?: Diagnosis | null;
     confidence?: ConfidenceLevel;
     platform?: Platform;
+    decision?: DecisionRow;
   },
   lease: JobLease,
   opts?: { allowFriction?: boolean },
@@ -1626,6 +1685,9 @@ export async function updateGroupAndCreateFixJob(
          WHERE id = $1 AND project_id = $2`,
         [errorGroupId, projectId],
       );
+      if (fields.decision) {
+        await insertDiagnosisDecision(client, errorGroupId, projectId, fields.decision);
+      }
       await client.query('COMMIT');
       return { created: true, fixJobId: existingFix.rows[0].id };
     }
@@ -1662,6 +1724,9 @@ export async function updateGroupAndCreateFixJob(
         fields.diagnosis === undefined ? null : JSON.stringify({ diagnosis: fields.diagnosis }),
       ]
     );
+    if (fields.decision) {
+      await insertDiagnosisDecision(client, errorGroupId, projectId, fields.decision);
+    }
     await client.query('COMMIT');
     return { created: true, fixJobId: result.rows[0]!.id };
   } catch (err) {

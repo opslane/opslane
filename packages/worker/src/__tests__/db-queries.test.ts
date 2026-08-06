@@ -60,7 +60,10 @@ describe('group lifecycle timestamp queries', () => {
   });
 
   it('stamps needs-human investigation results without clearing lifecycle timestamps', async () => {
-    mockQuery.mockResolvedValueOnce({ rowCount: 1, rows: [{ id: 'g1' }] });
+    mockQuery
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ rowCount: 1, rows: [{ id: 'g1' }] })
+      .mockResolvedValueOnce({});
 
     await updateGroupInvestigation('g1', 'p1', 'needs_human', {
       rootCause: 'External dependency failed',
@@ -71,14 +74,14 @@ describe('group lifecycle timestamp queries', () => {
       },
     });
 
-    const query = String(mockQuery.mock.calls[0]?.[0]);
+    const query = String(mockQuery.mock.calls[1]?.[0]);
     expect(query).toContain("WHEN $3::error_group_status = 'pr_created'");
       expect(query).toContain("AND status IS DISTINCT FROM 'pr_created' THEN now()");
     expect(query).toContain('ELSE pr_created_at');
     expect(query).toContain("WHEN $3::error_group_status = 'needs_human'");
       expect(query).toContain("AND status IS DISTINCT FROM 'needs_human' THEN now()");
     expect(query).toContain('ELSE needs_human_at');
-    expect(mockQuery.mock.calls[0]?.[1]?.[2]).toBe('needs_human');
+    expect(mockQuery.mock.calls[1]?.[1]?.[2]).toBe('needs_human');
   });
 
   it('persists candidate_diff and verification_evidence on needs_human', async () => {

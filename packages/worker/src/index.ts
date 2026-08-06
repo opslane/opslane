@@ -557,6 +557,15 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
     });
 
     const durationMs = Date.now() - jobStart;
+    const decision = {
+      outcome: triage.outcome,
+      decisionReason: triage.decisionReason,
+      causeLocation: triage.diagnosis?.cause_location ?? null,
+      diagnosis: triage.diagnosis,
+      model: process.env['INVESTIGATION_MODEL'] ?? 'claude-sonnet-4-6',
+      promptVersion: 'diagnosis-v1',
+      jobId: job.id,
+    };
 
     if (triage.outcome === 'needs_more_context') {
       await updateGroupInvestigation(job.errorGroupId, job.projectId, 'needs_human', {
@@ -567,6 +576,7 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
           reason_message: triage.decisionReason,
           remediation: 'Review the error manually; the investigation could not establish a cause.',
         },
+        decision,
       }, job);
       jobsFailed++;
       logger.warn('Investigation: needs_human (no usable diagnosis)', {
@@ -586,6 +596,7 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
             ? `Reproduce with: ${reproductionSteps.join('; ')}`
             : 'Investigate the named system; no reproduction steps were established.',
         },
+        decision,
       }, job);
       jobsProcessed++;
       logger.info('Investigation: conclusion', { job_id: job.id, duration_ms: durationMs });
@@ -596,6 +607,7 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
         diagnosis: triage.diagnosis,
         confidence: triage.confidence,
         platform,
+        decision,
       }, job);
       if (fixResult.created) {
         jobsProcessed++;
@@ -608,6 +620,7 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
         await updateGroupInvestigation(job.errorGroupId, job.projectId, 'investigated', {
           rootCause: triage.diagnosis?.one_line_description ?? triage.decisionReason,
           confidence: triage.confidence,
+          decision,
         }, job);
         jobsProcessed++;
         logger.warn('Investigation: automatic fix refused by kind gate', {
@@ -618,6 +631,7 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
       await updateGroupInvestigation(job.errorGroupId, job.projectId, 'investigated', {
         rootCause: triage.diagnosis?.one_line_description ?? triage.decisionReason,
         confidence: triage.confidence,
+        decision,
       }, job);
       jobsProcessed++;
       logger.info('Investigation: investigated (awaiting user)', {
