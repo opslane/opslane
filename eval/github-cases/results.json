@@ -1,20 +1,21 @@
 [
  {
-  "base_sha": "abb5f8ad24a14ad2dd41e20693d653a9f82ae236",
+  "base_sha": "d5c6cf4ad51c40d9781b922893f418b2d47e46da",
   "ground_truth": [
-   "packages/surveys/src/lib/offline-storage.ts",
-   "packages/surveys/src/lib/response-queue.ts"
+   "packages/ui/primitives/signature-pad/signature-render.tsx"
   ],
-  "issue": 8029,
-  "issue_body": "## Problem\n\n`packages/surveys/src/lib/response-queue.ts` has three async calls dispatched as fire-and-forget without `.catch()` handlers. Each fails silently if IndexedDB rejects (quota exceeded, private-browsing quirks, transaction aborted, schema mismatch). Severity differs by site.\n\n### Site 1 — line 120, `addPendingResponse` (highest severity)\n\n```ts\nif (this.config.persistOffline && this.config.surveyId) {\n  void addPendingResponse({...}).then((dbId) => {\n    if (dbId > 0) this.pendingDbIds.set(responseUpdate, dbId);\n    this.processQueue();\n  });\n}\n```\n\nIf `addPendingResponse` rejects: the `.then` callback never runs, `processQueue()` is never called, the response sits in the in-memory queue with no path forward, and the rejection leaks as unhandled. **The user sees no error but their response never gets sent.** This defeats the whole point of `persistOffline`.\n\n### Site 2 — line 164, `syncPersistedResponses`\n\n```ts\nif (pendingCount > 1) {\n  void this.syncPersistedResponses();\n  return { success: false };\n}\n```\n\nIf sync throws: silent. The next `processQueue` call will re-attempt sync, so data isn't permanently lost — but every intermittent sync failure is invisible to telemetry, making debugging impossible.\n\n### Site 3 — line 177, `removePendingResponse`\n\n```ts\nif (result.success) {\n  const dbId = this.pendingDbIds.get(responseUpdate);\n  if (dbId !== undefined) {\n    void removePendingResponse(dbId);\n    this.pendingDbIds.delete(responseUpdate);   // ← runs synchronously, unconditionally\n  }\n  ...\n}\n```\n\n`this.pendingDbIds.delete(...)` runs synchronously. If the DB delete fails: in-memory state says \"done,\" IndexedDB still has the row, next sync re-reads it and re-POSTs the same response. Depending on server-side dedup, either creates duplicates or leaves stale rows that fail to clear on every sync.\n\n## Severity ranking\n\n<!-- linear:table-colwidths:200,200,200 -->\n| Site | Failure mode | Severity |\n| -- | -- | -- |\n| 1 | Silent response loss when persistOffline on | High |\n| 3 | Duplicate POSTs or stale-row buildup | Medium |\n| 2 | Lost telemetry on sync failures | Low |\n\n## Fix the issue proposes vs. what's actually needed\n\nAdding `.catch()` is necessary but not sufficient.\n\n**Site 1** needs a `.catch()` that ALSO calls `processQueue()` — otherwise IndexedDB failure silently disables the entire submission path. Treat `persistOffline` as best-effort:\n\n```ts\nvoid addPendingResponse({...}).then((dbId) => {\n  if (dbId > 0) this.pendingDbIds.set(responseUpdate, dbId);\n  this.processQueue();\n}).catch((err) => {\n  logger.error({ err, surveyId: this.config.surveyId }, \"Failed to persist pending response to IndexedDB\");\n  this.processQueue();   // ← fall through so the response isn't deadlocked\n});\n```\n\n**Site 3** should defer `this.pendingDbIds.delete(responseUpdate)` until *after* the DB delete resolves, so in-memory and persistent state stay consistent. Otherwise just adding `.catch()` still leaves the duplicate-submission risk.\n\n**Site 2** is fine with a plain `.catch(err => logger.error(...))`.\n\n## External fix branch\n\n[https://github.com/mirzasaikatahmmed/formbricks/tree/fix/surveys-validation-indexeddb-styles-test](<https://github.com/mirzasaikatahmmed/formbricks/tree/fix/surveys-validation-indexeddb-styles-test>)",
-  "issue_title": "[Bug] Fire-and-forget IndexedDB calls in ResponseQueue can silently lose responses",
-  "pr": 8363,
-  "pr_title": "fix: harden response queue IndexedDB handling",
-  "repo": "formbricks/formbricks",
+  "issue": 2945,
+  "issue_body": "### Issue Description\n\nOn `/settings/profile` page there is an option to save typed signature.\n\nSignature font is not always loaded property. When user load `/settings/profile` page as first, font is not loaded property. This problem does not occur when this page is loaded as, for example, second page in session. Signature window probably doesn't wait for UI font and use backup font.\n\n\n\n\n\n### Steps to Reproduce\n\n1. Save typed signature on your profile\n2. Open `/settings/profile` page as first page in session (on new window type manually [https://app.documenso.com/settings/profile](https://app.documenso.com/settings/profile))\n3. Look on typed signature font\n\nThis problem does not occur when you open other page (ex. [https://app.documenso.com/settings/document](https://app.documenso.com/settings/document) and then go to profile page by UI interface.\n\n### Expected Behavior\n\n<img width=\"1011\" height=\"496\" alt=\"Image\" src=\"https://github.com/user-attachments/assets/d036eee4-bff3-4af2-95a5-915039158d96\" />\n\n### Current Behavior\n\n<img width=\"982\" height=\"455\" alt=\"Image\" src=\"https://github.com/user-attachments/assets/88314a04-b0f3-4afa-a198-95109982b484\" />\n\n### Screenshots (optional)\n\n_No response_\n\n### Operating System [e.g., Windows 10]\n\nWindows 11\n\n### Browser [e.g., Chrome, Firefox]\n\nChrome 148\n\n### Version [e.g., 2.0.1]\n\nv2.11.0\n\n### Please check the boxes that apply to this issue report.\n\n- [x] I have searched the existing issues to make sure this is not a duplicate.\n- [x] I have provided steps to reproduce the issue.\n- [x] I have included relevant environment information.\n- [x] I have included any relevant screenshots.\n- [x] I understand that this is a voluntary contribution and that there is no guarantee of resolution.\n- [ ] I want to work on creating a PR for this issue if approved",
+  "issue_title": "Typed signature is not always loaded property",
+  "pr": 2963,
+  "pr_title": "fix: load typed signature font on profile page",
+  "repo": "documenso/documenso",
   "cited": "",
   "hit": false,
   "outcome": "needs_more_context",
-  "hypotheses": 0,
-  "why": []
+  "strength": "insufficient",
+  "hypotheses": 3,
+  "why": [],
+  "reasoning": ""
  }
 ]

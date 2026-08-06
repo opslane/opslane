@@ -1,10 +1,15 @@
 // Baseline: the same cases through the Claude Agent SDK's own harness.
 // It brings its own tools, loop and context management; we supply only the
 // bug report and the repo at the pre-fix commit, and ask for one CAUSE line.
-// Resolve the SDK from the workspace rather than a hardcoded store path.
-const { query } = await import('@anthropic-ai/claude-agent-sdk');
-import { readFileSync, existsSync, mkdirSync } from 'node:fs';
+// The SDK is a transitive dependency, so it has no top-level entry to resolve
+// by name. Find it in the pnpm store instead.
 import { execSync } from 'node:child_process';
+const SDK_PATH = execSync(
+  "find " + new URL('../../node_modules/.pnpm', import.meta.url).pathname +
+  " -name sdk.mjs -path '*claude-agent-sdk*' | head -1", { encoding: 'utf8' }).trim();
+if (!SDK_PATH) throw new Error('claude-agent-sdk not found in the workspace');
+const { query } = await import(SDK_PATH);
+import { readFileSync, existsSync, mkdirSync } from 'node:fs';
 
 const HERE = new URL('.', import.meta.url).pathname;
 const CASE_FILE = process.env.CASES ?? 'cases-apps.jsonl';
