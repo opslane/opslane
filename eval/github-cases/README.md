@@ -46,3 +46,20 @@ reading rather than a number.
 `ANSWERED` is reported separately on purpose. A run that never reached
 adjudication is a harness or rate-limit problem, not a wrong answer, and folding
 the two together makes the agent look worse than it is.
+
+## Comparing against the Claude Agent SDK
+
+`run-sdk.mjs` puts the same cases through the Claude Agent SDK, which brings its
+own tools, loop and context management. It gets the bug report and the repo at
+the same commit, and is asked for one `CAUSE:` line.
+
+Read the difference carefully rather than as a scoreboard. Our pipeline
+deliberately refuses to answer when the evidence does not separate its
+candidates, so some of its misses are that refusal working. The SDK always
+answers. Hit rate therefore measures willingness to commit as much as it
+measures diagnosis quality, and the two harnesses are not tuned to the same
+point on that trade.
+
+Turn budgets are not matched by default (the SDK gets 30, ours 10 plus 8). Raise
+ours with `INVESTIGATION_MAX_TURNS` and `ADJUDICATION_MAX_TURNS` if you want a
+controlled comparison.
