@@ -76,7 +76,7 @@ Expected: PASS
 Create `packages/sdk/src/__tests__/network-timing.test.ts`:
 
 ```ts
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   clearNetworkTimings,
   discardTiming,
@@ -123,12 +123,23 @@ describe('network timing store', () => {
     expect(entry.url).not.toContain('secret');
 
     clearNetworkTimings();
-    const long = startTiming('xhr', 'PROPFIND-VERY-LONG-METHOD', `https://api.test/${'a'.repeat(4000)}`);
+    const long = startTiming('xhr', 'propfind-very-long-method', `https://api.test/${'a'.repeat(4000)}`);
     finalizeTiming(long, 'ok', 200);
 
     const [big] = snapshotNetworkTimings();
     expect(big.url.length).toBe(2048);
-    expect(big.method.length).toBe(16);
+    expect(big.method).toBe('PROPFIND-VERY-LO');
+  });
+
+  // Ingestion measures the URL in UTF-8 bytes. A UTF-16 `.length` cap would
+  // emit a value the SDK considers legal and the Go sanitizer drops.
+  it('truncates the url by utf-8 bytes, not utf-16 units', () => {
+    const handle = startTiming('fetch', 'GET', `https://api.test/${'é'.repeat(2000)}`);
+    finalizeTiming(handle, 'ok', 200);
+
+    const [entry] = snapshotNetworkTimings();
+    expect(new TextEncoder().encode(entry.url).length).toBeLessThanOrEqual(2048);
+    expect(entry.url).not.toMatch(/�$/);
   });
 
   // The regression the two-collection design exists to prevent: a single FIFO
@@ -147,13 +158,77 @@ describe('network timing store', () => {
     expect(slow).toBeGreaterThanOrEqual(0);
   });
 
-  it('fills the snapshot with actives longest-running first when over the cap', () => {
-    for (let i = 0; i < 25; i += 1) startTiming('fetch', 'GET', `https://api.test/active-${i}`);
+  // Locks the retention policy end to end: the OLDEST 20 are kept and the
+  // arrivals that came after them are refused, not the reverse.
+  it('refuses new requests at capacity and keeps the oldest twenty', () => {
+    const handles = [];
+    for (let i = 0; i < 25; i += 1) handles.push(startTiming('fetch', 'GET', `https://api.test/active-${i}`));
+
+    expect(handles[19]).not.toBe(-1);
+    expect(handles[20]).toBe(-1);
+    expect(handles[24]).toBe(-1);
 
     const snapshot = snapshotNetworkTimings();
     expect(snapshot).toHaveLength(20);
     expect(snapshot.every((e) => e.outcome === 'in_flight')).toBe(true);
     expect(snapshot[0].url).toBe('https://api.test/active-0');
+    expect(snapshot[19].url).toBe('https://api.test/active-19');
+    expect(snapshot.some((e) => e.url === 'https://api.test/active-20')).toBe(false);
+  });
+
+  it('no-ops on the untracked handle', () => {
+    for (let i = 0; i < 20; i += 1) startTiming('fetch', 'GET', `https://api.test/a-${i}`);
+    const untracked = startTiming('fetch', 'GET', 'https://api.test/refused');
+    expect(untracked).toBe(-1);
+
+    markHeaders(untracked);
+    finalizeTiming(untracked, 'ok', 200);
+    discardTiming(untracked);
+
+    const snapshot = snapshotNetworkTimings();
+    expect(snapshot).toHaveLength(20);
+    expect(snapshot.some((e) => e.url === 'https://api.test/refused')).toBe(false);
+  });
+
+  it('snapshots in-flight elapsed time from the monotonic clock', () => {
+    const nowSpy = vi.spyOn(performance, 'now');
+    nowSpy.mockReturnValue(1000);
+    startTiming('fetch', 'POST', 'https://api.test/slow');
+    nowSpy.mockReturnValue(11002);
+
+    const [entry] = snapshotNetworkTimings();
+    expect(entry.outcome).toBe('in_flight');
+    expect(entry.duration_ms).toBe(10002);
+    nowSpy.mockRestore();
+  });
+
+  // Ingestion drops entries above 600000, so the SDK must clamp rather than
+  // emit a value that will be discarded server-side.
+  it('clamps elapsed values at the ingestion ceiling', () => {
+    const nowSpy = vi.spyOn(performance, 'now');
+    nowSpy.mockReturnValue(0);
+    const handle = startTiming('fetch', 'GET', 'https://api.test/forever');
+    nowSpy.mockReturnValue(900000);
+    finalizeTiming(handle, 'timeout');
+
+    expect(snapshotNetworkTimings()[0].duration_ms).toBe(600000);
+    nowSpy.mockRestore();
+  });
+
+  // unpatchFetch cannot cancel an awaiting request, so a callback from before
+  // destroy() can fire after re-init. Handles must never be reissued.
+  it('does not reuse handles after clearing', () => {
+    const stale = startTiming('fetch', 'GET', 'https://api.test/old');
+    clearNetworkTimings();
+    const fresh = startTiming('fetch', 'GET', 'https://api.test/new');
+    expect(fresh).not.toBe(stale);
+
+    finalizeTiming(stale, 'ok', 200); // the stale callback fires late
+
+    const snapshot = snapshotNetworkTimings();
+    expect(snapshot).toHaveLength(1);
+    expect(snapshot[0].url).toBe('https://api.test/new');
+    expect(snapshot[0].outcome).toBe('in_flight');
   });
 
   it('finalizes at most once', () => {
@@ -200,6 +275,13 @@ import { scrubUrl } from './scrub';
 const MAX_ENTRIES = 20;
 const MAX_URL_BYTES = 2048;
 const MAX_METHOD_BYTES = 16;
+const MAX_ELAPSED_MS = 600000;
+
+/** Returned by startTiming when the active registry is full. All other exports no-op on it. */
+const UNTRACKED = -1;
+
+const encoder = typeof TextEncoder !== 'undefined' ? new TextEncoder() : null;
+const decoder = typeof TextDecoder !== 'undefined' ? new TextDecoder('utf-8') : null;
 
 export type Transport = NetworkTiming['transport'];
 export type Outcome = NetworkTiming['outcome'];
@@ -228,36 +310,39 @@ function mark(): number {
     : Date.now();
 }
 
-function cap(value: string, max: number): string {
-  return value.length > max ? value.slice(0, max) : value;
+/**
+ * Truncate to at most `maxBytes` UTF-8 bytes. Ingestion measures bytes; a
+ * UTF-16 `.length` cap would let a Unicode URL pass here and be dropped there.
+ */
+function capBytes(value: string, maxBytes: number): string {
+  if (!encoder || !decoder) return value.length > maxBytes ? value.slice(0, maxBytes) : value;
+  const bytes = encoder.encode(value);
+  if (bytes.length <= maxBytes) return value;
+  // A cut mid-sequence decodes to U+FFFD; strip it so no stored URL ends in a
+  // replacement character.
+  return decoder.decode(bytes.subarray(0, maxBytes)).replace(/�+$/, '');
 }
 
+/** Clamped, not just floored: ingestion drops entries above MAX_ELAPSED_MS. */
 function elapsed(from: number, to: number): number {
-  return Math.max(0, Math.round(to - from));
+  return Math.min(MAX_ELAPSED_MS, Math.max(0, Math.round(to - from)));
 }
 
 export function startTiming(transport: Transport, method: string, url: string): number {
+  // At capacity, refuse the NEW request rather than evicting an existing one.
+  // Evicting the newest-and-then-inserting an even newer record would keep the
+  // arrival that just displaced its predecessor, defeating the whole point:
+  // the registry must retain the OLDEST requests, which are the long-running
+  // ones being diagnosed.
+  if (active.size >= MAX_ENTRIES) return UNTRACKED;
+
   const handle = nextHandle;
   nextHandle += 1;
 
-  // Evict the NEWEST active record when full, so a burst of short requests
-  // cannot displace a long-running one.
-  if (active.size >= MAX_ENTRIES) {
-    let newestKey = -1;
-    let newestMark = -Infinity;
-    for (const [key, record] of active) {
-      if (record.startMark > newestMark) {
-        newestMark = record.startMark;
-        newestKey = key;
-      }
-    }
-    if (newestKey >= 0) active.delete(newestKey);
-  }
-
   active.set(handle, {
     transport,
-    method: cap(method, MAX_METHOD_BYTES),
-    url: cap(scrubUrl(url), MAX_URL_BYTES),
+    method: capBytes(method.toUpperCase(), MAX_METHOD_BYTES),
+    url: capBytes(scrubUrl(url), MAX_URL_BYTES),
     startedAtMs: Date.now(),
     startMark: mark(),
   });
@@ -327,14 +412,18 @@ export function snapshotNetworkTimings(): NetworkTiming[] {
 export function clearNetworkTimings(): void {
   active = new Map();
   completed = [];
-  nextHandle = 0;
+  // nextHandle is deliberately NOT reset. `unpatchFetch`/`unpatchXHR` cannot
+  // cancel a request that is already awaiting (network.ts:70) or detach
+  // listeners already registered, so a callback from before destroy() can fire
+  // after re-init. If handles restarted at zero, that stale callback would
+  // finalize an unrelated new request that had been issued the same handle.
 }
 ```
 
 - [ ] **Step 6: Run tests to verify they pass**
 
 Run: `pnpm --filter @opslane/sdk test -- network-timing`
-Expected: PASS (9 tests)
+Expected: PASS (14 tests)
 
 - [ ] **Step 7: Commit**
 
@@ -418,6 +507,9 @@ describe('fetch timing capture', () => {
     expect(entry).not.toHaveProperty('ttfb_ms');
   });
 
+  // isSdkEndpoint is a raw prefix match (network.ts:16), so this asserts only
+  // that the SDK's own traffic is excluded. It does not characterise the
+  // helper's prefix behaviour, which is pre-existing and out of scope here.
   it('does not time the SDK\'s own endpoint', async () => {
     vi.stubGlobal('fetch', async () => ({ status: 200, ok: true, type: 'basic' }) as Response);
     patchFetch();
@@ -489,10 +581,41 @@ In the `catch (error: unknown)` branch, immediately after the existing `emitTele
 Run: `pnpm --filter @opslane/sdk test -- network`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Add real-browser capture coverage**
+
+The spec requires a real-browser test that executes rather than skips. Append to `packages/sdk/src/__tests__/browser-contract.test.ts`, inside the existing describe that already holds `page`/`vitePort` (`browser-contract.test.ts:136`), following its established `page.goto` / `page.click` / `waitForTimeout` shape:
+
+```ts
+  it('captures fetch timing on the event, including a request that never responds', async () => {
+    receivedEvents = [];
+
+    await page.goto(`http://localhost:${vitePort}`);
+    // The fixture route issues a fetch to a route the mock server never
+    // answers, aborted by AbortSignal.timeout, then throws.
+    await page.click('[data-testid="nav-usercard"]');
+    await page.click('[data-testid="edit-profile-btn"]');
+    await page.waitForTimeout(2000);
+
+    const event = receivedEvents[0] as Record<string, unknown>;
+    const timings = event.network_timings as Array<Record<string, unknown>> | undefined;
+    expect(timings).toBeInstanceOf(Array);
+    expect(timings?.length).toBeGreaterThanOrEqual(1);
+    expect(timings?.[0]).toHaveProperty('transport', 'fetch');
+    expect(typeof timings?.[0].duration_ms).toBe('number');
+  }, 15_000);
+```
+
+If the existing fixture app issues no fetch on that route, add a hanging-fetch trigger to `test-fixtures/vue-app` rather than weakening the assertion — an event with no `network_timings` must fail this test, not pass it vacuously.
+
+- [ ] **Step 6: Confirm the browser test executed rather than skipped**
+
+Run: `pnpm --filter @opslane/sdk test -- browser-contract --reporter=verbose`
+Expected: the new test reports as **passed**, not skipped. A skip means Playwright browsers are unavailable (`browser-contract.test.ts:8-16`); install them rather than accepting the skip.
+
+- [ ] **Step 7: Commit**
 
 ```bash
-git add packages/sdk/src/network.ts packages/sdk/src/__tests__/network.test.ts
+git add packages/sdk/src/network.ts packages/sdk/src/__tests__/network.test.ts packages/sdk/src/__tests__/browser-contract.test.ts
 git commit -m "feat(sdk): time fetch requests, classifying opaque responses as ok"
 ```
 
@@ -585,6 +708,44 @@ describe('xhr timing capture', () => {
     drive('timeout', 0, false);
     expect(snapshotNetworkTimings()).toHaveLength(1);
   });
+
+  it('falls back to network_error when loadend fires with no terminal event', () => {
+    const xhr = new (globalThis.XMLHttpRequest as unknown as typeof FakeXHR)();
+    xhr.open('GET', 'https://app.example.com/api/items');
+    xhr.send();
+    xhr.emit('loadend');
+
+    const snapshot = snapshotNetworkTimings();
+    expect(snapshot).toHaveLength(1);
+    expect(snapshot[0].outcome).toBe('network_error');
+  });
+
+  // A successful file:// or extension-scheme XHR reports status 0, which
+  // ingestion rejects as out of range.
+  it('omits status 0 on load', () => {
+    drive('load', 0, false);
+
+    const [entry] = snapshotNetworkTimings();
+    expect(entry.outcome).toBe('ok');
+    expect(entry).not.toHaveProperty('status');
+  });
+
+  it('discards the record and rethrows when send() throws synchronously', () => {
+    class ThrowingXHR extends FakeXHR {
+      send(): void {
+        throw new Error('InvalidStateError');
+      }
+    }
+    vi.stubGlobal('XMLHttpRequest', ThrowingXHR);
+    unpatchXHR();
+    patchXHR();
+
+    const xhr = new (globalThis.XMLHttpRequest as unknown as typeof ThrowingXHR)();
+    xhr.open('GET', 'https://app.example.com/api/items');
+    expect(() => xhr.send()).toThrow('InvalidStateError');
+
+    expect(snapshotNetworkTimings()).toHaveLength(0);
+  });
 });
 ```
 
@@ -626,10 +787,21 @@ Inside `XMLHttpRequest.prototype.send`, replace the existing `try { ... }` telem
             // SDK must never throw
           }
         };
-        this.addEventListener('load', () => finalize(this.status >= 400 ? 'http_error' : 'ok', true), { once: true });
+        this.addEventListener('load', () => {
+          // A successful non-HTTP XHR (file://, some extension schemes) reports
+          // status 0, which ingestion rejects as outside 100-599. Omit it
+          // rather than emitting an entry that will be discarded server-side.
+          const storable = this.status >= 100 && this.status <= 599;
+          finalize(this.status >= 400 ? 'http_error' : 'ok', storable);
+        }, { once: true });
         this.addEventListener('timeout', () => finalize('timeout', false), { once: true });
         this.addEventListener('abort', () => finalize('abort', false), { once: true });
         this.addEventListener('error', () => finalize('network_error', false), { once: true });
+        // Fallback only. loadend follows every terminal event above and
+        // finalizeTiming is idempotent, so this is a no-op in the normal case.
+        // It exists so a request that somehow reaches loadend with no terminal
+        // event is still recorded instead of leaking as permanently in-flight.
+        this.addEventListener('loadend', () => finalize('network_error', false), { once: true });
 ```
 
 Import the `Outcome` type alongside the functions:
@@ -680,11 +852,20 @@ git commit -m "feat(sdk): time XHR requests with an explicit terminal-event matr
 
 - [ ] **Step 1: Write the failing tests**
 
-Append to `packages/sdk/src/__tests__/core.test.ts`:
+Append to `packages/sdk/src/__tests__/core.test.ts`. `buildPayload` calls `getConfig()` (`core.ts:71`), which throws when no config is loaded, so this block needs its own `loadConfig` — do not rely on another describe's setup. Add these to the file's existing import block if absent:
+
+```ts
+import { loadConfig } from '../config';
+import { TEST_PK } from './test-keys';
+import { clearNetworkTimings, finalizeTiming, startTiming } from '../network-timing';
+```
 
 ```ts
 describe('network timings on the payload', () => {
-  beforeEach(() => clearNetworkTimings());
+  beforeEach(() => {
+    clearNetworkTimings();
+    loadConfig({ apiKey: TEST_PK, endpoint: 'https://api.test', errorThrottleMs: 0 });
+  });
 
   it('omits the field entirely when nothing was captured', () => {
     const payload = buildPayload('TypeError', 'boom', '', {
@@ -703,8 +884,25 @@ describe('network timings on the payload', () => {
     expect(payload.network_timings).toHaveLength(1);
     expect(payload.network_timings?.[0].outcome).toBe('timeout');
   });
+
+  // Request history must not survive reinitialization: it could carry requests
+  // captured under one project configuration into an event sent under another.
+  it('carries no history across destroy() and re-init()', () => {
+    const handle = startTiming('fetch', 'GET', 'https://app.example.com/api/before');
+    finalizeTiming(handle, 'ok', 200);
+
+    destroy();
+    init({ apiKey: TEST_PK, endpoint: 'https://api.test', errorThrottleMs: 0 });
+
+    const payload = buildPayload('TypeError', 'boom', '', {
+      type: 'error', timestamp: new Date().toISOString(), category: 'exception', message: 'boom',
+    });
+    expect(payload).not.toHaveProperty('network_timings');
+  });
 });
 ```
+
+The re-init test needs `import { destroy, init } from '../index';` in the same import block.
 
 - [ ] **Step 2: Run tests to verify they fail**
 
@@ -781,11 +979,11 @@ git commit -m "feat(sdk): attach network timings to the error payload and clear 
 - Modify: `packages/sdk/package.json:3`
 - Create: `test-fixtures/wire/events/v4.1.0-minimal.json`
 - Create: `test-fixtures/wire/events/v4.1.0-full.json`
-- Modify: `packages/sdk/src/__tests__/wire-shape.test.ts:20,33-56,120-176`
+- Modify: `packages/sdk/src/__tests__/wire-shape.test.ts:21,34-56,121-176`
 
 **Interfaces:**
 - Consumes: Task 4's payload attachment
-- Produces: frozen fixtures replayed by `wire_compat_test.go` in Task 7
+- Produces: frozen fixtures replayed by `wire_compat_test.go` in Task 9
 
 `WIRE_FIXTURE_VERSION` currently reads `3.0.0` against a `4.0.0` package. `docs/contracts/events.md:17` requires a pair for every released SDK version, so that gap is pre-existing repository debt — add the `4.1.0` pair this change introduces and do not backfill `4.0.0`.
 
@@ -843,7 +1041,7 @@ Then in `v4.1.0-full.json`: change `"sdk_version"` to `"4.1.0"`, and add a top-l
 
 In `packages/sdk/src/__tests__/wire-shape.test.ts`:
 
-Change line 20 to:
+Change line 21 to:
 
 ```ts
 const WIRE_FIXTURE_VERSION = '4.1.0';
@@ -914,7 +1112,7 @@ Ingestion accepts payloads from arbitrary and older clients, so shape validation
 
 - [ ] **Step 1: Write the failing test**
 
-Append to `packages/ingestion/masking/masking_test.go`:
+Append to `packages/ingestion/masking/masking_test.go`. That file is `package masking_test` (an external test package), so every call must be qualified `masking.` and the file must already import `strings` — add it if absent.
 
 ```go
 func TestRedactRequestURL(t *testing.T) {
@@ -926,12 +1124,13 @@ func TestRedactRequestURL(t *testing.T) {
 		{"drops the whole query string", "https://api.example.com/v1/search?q=hi&token=abc", "https://api.example.com/v1/search"},
 		{"drops userinfo", "https://user:pw@api.example.com/v1/search", "https://api.example.com/v1/search"},
 		{"drops a token-bearing fragment", "https://api.example.com/cb#access_token=abc", "https://api.example.com/cb"},
+		{"drops a prefixed token fragment", "https://api.example.com/cb#oauth_access_token=abc", "https://api.example.com/cb"},
 		{"keeps a route fragment", "https://app.example.com/x#/dashboard", "https://app.example.com/x#/dashboard"},
 		{"leaves a clean URL alone", "https://api.example.com/v1/items", "https://api.example.com/v1/items"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := RedactRequestURL(tc.in); got != tc.want {
+			if got := masking.RedactRequestURL(tc.in); got != tc.want {
 				t.Fatalf("RedactRequestURL(%q) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
@@ -940,7 +1139,7 @@ func TestRedactRequestURL(t *testing.T) {
 
 func TestRedactRequestURLUnparseable(t *testing.T) {
 	// Falls back to RedactURL rather than returning the raw value.
-	got := RedactRequestURL("://not a url?token=abc")
+	got := masking.RedactRequestURL("://not a url?token=abc")
 	if strings.Contains(got, "abc") {
 		t.Fatalf("RedactRequestURL leaked a token: %q", got)
 	}
@@ -958,7 +1157,11 @@ In `packages/ingestion/masking/masking.go`, add `"net/url"` to the import block,
 
 ```go
 // tokenFragmentRe matches fragments carrying an OAuth-style credential.
-var tokenFragmentRe = regexp.MustCompile(`(?i)\b(access_token|id_token|refresh_token|token|code)=`)
+// Deliberately NO \b prefix: `_` is a word character, so `\baccess_token`
+// would not match `#oauth_access_token=...`. The SDK's TOKEN_HASH
+// (scrub.ts:3) has no boundary either, and server-side redaction must never
+// be weaker than the client's.
+var tokenFragmentRe = regexp.MustCompile(`(?i)(access_token|id_token|refresh_token|token|code)=`)
 
 // RedactRequestURL strips userinfo, the entire query string, and token-bearing
 // fragments from a single request URL. It is deliberately stricter than
@@ -997,7 +1200,7 @@ git commit -m "feat(ingestion): add strict request-URL redaction"
 ### Task 7: Ingestion sanitizer
 
 **Files:**
-- Modify: `packages/ingestion/handler/error_event.go:90-145`
+- Modify: `packages/ingestion/handler/error_event.go:90-145` (payload struct and call site) and near `:304` (the sanitizer, beside `sanitizeDebugMeta`)
 - Modify: `packages/ingestion/handler/metrics.go`
 - Test: `packages/ingestion/handler/error_event_test.go`
 
@@ -1007,7 +1210,21 @@ git commit -m "feat(ingestion): add strict request-URL redaction"
 
 - [ ] **Step 1: Write the failing tests**
 
-Append to `packages/ingestion/handler/error_event_test.go`:
+`error_event_test.go` is `package handler_test` (external), so it cannot reach the unexported `sanitizeNetworkTimings`. Create a new **internal** test file instead — Go permits `handler` and `handler_test` packages side by side in one directory.
+
+Create `packages/ingestion/handler/network_timings_internal_test.go`:
+
+```go
+package handler
+
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+)
+```
+
+then append:
 
 ```go
 func TestSanitizeNetworkTimings(t *testing.T) {
@@ -1026,6 +1243,9 @@ func TestSanitizeNetworkTimings(t *testing.T) {
 		{"duration over cap", `[{"transport":"fetch","method":"GET","url":"https://a.test/x","started_at_ms":1,"duration_ms":600001,"outcome":"ok"}]`, `[]`},
 		{"control chars in url", "[{\"transport\":\"fetch\",\"method\":\"GET\",\"url\":\"https://a.test/\\u0000\",\"started_at_ms\":1,\"duration_ms\":2,\"outcome\":\"ok\"}]", `[]`},
 		{"status out of range", `[{"transport":"fetch","method":"GET","url":"https://a.test/x","started_at_ms":1,"duration_ms":2,"outcome":"ok","status":0}]`, `[]`},
+		{"missing duration", `[{"transport":"fetch","method":"GET","url":"https://a.test/x","started_at_ms":1,"outcome":"ok"}]`, `[]`},
+		{"null started_at", `[{"transport":"fetch","method":"GET","url":"https://a.test/x","started_at_ms":null,"duration_ms":2,"outcome":"ok"}]`, `[]`},
+		{"hyphenated method the SDK can emit is accepted", `[{"transport":"xhr","method":"PROPFIND-VERY-LO","url":"https://a.test/x","started_at_ms":1,"duration_ms":2,"outcome":"ok"}]`, `[{"transport":"xhr","method":"PROPFIND-VERY-LO","url":"https://a.test/x","started_at_ms":1,"duration_ms":2,"outcome":"ok"}]`},
 		{
 			"valid entry is retained and its query stripped",
 			`[{"transport":"fetch","method":"get","url":"https://a.test/x?token=abc","started_at_ms":1,"duration_ms":2,"outcome":"timeout"}]`,
@@ -1066,7 +1286,7 @@ Expected: FAIL — undefined: sanitizeNetworkTimings
 
 - [ ] **Step 3: Implement the sanitizer**
 
-In `packages/ingestion/handler/error_event.go`, add the import for the masking package if absent, then add near `sanitizeDebugMeta`:
+In `packages/ingestion/handler/error_event.go`, confirm `bytes`, `encoding/json`, `regexp`, and `strings` are imported and add the `masking` package import if absent, then add near `sanitizeDebugMeta` (`:304`):
 
 ```go
 const (
@@ -1076,7 +1296,10 @@ const (
 )
 
 var (
-	reTimingMethod    = regexp.MustCompile(`^[A-Z]{1,16}$`)
+	// Applied after ToUpper. Permits the punctuation real methods and
+	// SDK-truncated methods carry (e.g. a clipped `PROPFIND-VERY-LO`); a
+	// letters-only rule would reject values the SDK legitimately emits.
+	reTimingMethod    = regexp.MustCompile(`^[A-Z0-9._-]{1,16}$`)
 	validTransports   = map[string]struct{}{"fetch": {}, "xhr": {}}
 	validTimingOutcome = map[string]struct{}{
 		"ok": {}, "http_error": {}, "timeout": {},
@@ -1088,8 +1311,10 @@ type validatedNetworkTiming struct {
 	Transport   string `json:"transport"`
 	Method      string `json:"method"`
 	URL         string `json:"url"`
-	StartedAtMs int64  `json:"started_at_ms"`
-	DurationMs  int64  `json:"duration_ms"`
+	// Pointers because both are REQUIRED: a plain int64 makes an absent or
+	// null field decode to 0, which then passes the non-negative check.
+	StartedAtMs *int64 `json:"started_at_ms"`
+	DurationMs  *int64 `json:"duration_ms"`
 	TTFBMs      *int64 `json:"ttfb_ms,omitempty"`
 	Outcome     string `json:"outcome"`
 	Status      *int   `json:"status,omitempty"`
@@ -1157,13 +1382,13 @@ func sanitizeNetworkTimings(raw json.RawMessage) string {
 			RecordNetworkTimingDiscard("bad_outcome")
 			continue
 		}
-		// An epoch value, so only checked for non-negativity — the elapsed cap
-		// does not apply to it.
-		if candidate.StartedAtMs < 0 {
+		// An epoch value, so only checked for presence and non-negativity —
+		// the elapsed cap does not apply to it.
+		if candidate.StartedAtMs == nil || *candidate.StartedAtMs < 0 {
 			RecordNetworkTimingDiscard("bad_started_at")
 			continue
 		}
-		if !validElapsed(candidate.DurationMs) {
+		if candidate.DurationMs == nil || !validElapsed(*candidate.DurationMs) {
 			RecordNetworkTimingDiscard("bad_duration")
 			continue
 		}
@@ -1286,38 +1511,60 @@ In `error_event.go`, add to the `IngestParams` literal after `DebugMeta:`:
 
 - [ ] **Step 4: Write the failing round-trip test**
 
-Append to `packages/ingestion/db/queries_test.go`, following the file's existing DB-test setup helpers:
+Append to `packages/ingestion/db/queries_test.go`. That file is `package db_test`, so types are qualified `db.` and the private `q.pool` is unreachable — query through the `pool` returned by `testPool`. This mirrors `error_group_ingestion_test.go:13-46` exactly; `DefaultEnvironmentID` is required, and omitting it fails environment resolution (`environments.go:46`).
 
 ```go
 func TestInsertErrorEventStoresNetworkTimings(t *testing.T) {
-	q, projectID := setupTestProject(t)
-	timings := `[{"transport":"fetch","method":"POST","url":"https://api.test/search","started_at_ms":1,"duration_ms":10002,"outcome":"timeout"}]`
+	pool := testPool(t)
+	ctx := context.Background()
+	q := db.New(pool)
 
-	result, err := q.InsertErrorEventAndGroup(context.Background(), IngestParams{
-		ProjectID:      projectID,
-		ErrorType:      "TimeoutError",
-		ErrorMessage:   "signal timed out",
-		Fingerprint:    "fp-timing",
-		Title:          "TimeoutError: signal timed out",
-		NetworkTimings: timings,
+	org, err := q.CreateOrg(ctx, "test-network-timings")
+	if err != nil {
+		t.Fatalf("CreateOrg: %v", err)
+	}
+	t.Cleanup(func() { cleanupTenant(t, pool, org.ID) })
+
+	proj, err := q.CreateProject(ctx, org.ID, "proj-network-timings", ptrStr("org/repo"))
+	if err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+	env, err := q.CreateEnvironment(ctx, proj.ID, "production")
+	if err != nil {
+		t.Fatalf("CreateEnvironment: %v", err)
+	}
+
+	timings := `[{"transport":"fetch","method":"POST","url":"https://api.test/search","started_at_ms":1,"duration_ms":10002,"outcome":"timeout"}]`
+	result, err := q.InsertErrorEventAndGroup(ctx, db.IngestParams{
+		ProjectID:            proj.ID,
+		DefaultEnvironmentID: env.ID,
+		ErrorType:            "TimeoutError",
+		ErrorMessage:         "signal timed out",
+		Fingerprint:          "fp-network-timings",
+		Title:                "TimeoutError: signal timed out",
+		NetworkTimings:       timings,
 	})
 	if err != nil {
-		t.Fatalf("insert: %v", err)
+		t.Fatalf("InsertErrorEventAndGroup: %v", err)
 	}
 
 	var stored string
-	if err := q.pool.QueryRow(context.Background(),
+	if err := pool.QueryRow(ctx,
 		`SELECT network_timings::text FROM error_events WHERE id = $1`, result.EventID,
 	).Scan(&stored); err != nil {
 		t.Fatalf("select: %v", err)
 	}
-	if !strings.Contains(stored, `"outcome": "timeout"`) && !strings.Contains(stored, `"outcome":"timeout"`) {
-		t.Fatalf("stored timings missing outcome: %s", stored)
+	var decoded []map[string]any
+	if err := json.Unmarshal([]byte(stored), &decoded); err != nil {
+		t.Fatalf("unmarshal stored timings: %v", err)
+	}
+	if len(decoded) != 1 || decoded[0]["outcome"] != "timeout" {
+		t.Fatalf("stored timings unexpected: %s", stored)
 	}
 }
 ```
 
-Adapt `setupTestProject` to whatever the file's existing helper is named — do not introduce a second one.
+Decoding rather than substring-matching the JSON avoids a false pass on `jsonb`'s whitespace normalization.
 
 - [ ] **Step 5: Apply migrations and run the tests**
 
@@ -1346,12 +1593,41 @@ git commit -m "feat(ingestion): store network timings on error events"
 **Interfaces:**
 - Consumes: fixtures from Task 5, sanitizer from Task 7, column from Task 8
 
-- [ ] **Step 1: Run the existing wire-compat suite against the new fixtures**
+- [ ] **Step 1: Extend the wire-compat suite to actually cover the new field**
 
-Run: `cd packages/ingestion && go test ./handler/ -run WireCompat -v`
-Expected: PASS, including the two new `v4.1.0` files. The suite discovers fixtures from the directory, so no test change should be needed — if it hardcodes a version list, add `4.1.0` to it.
+The suite is `TestWireFixtures_AcceptedAndStored` (`wire_compat_test.go:154`) — there is no test matching `-run WireCompat`. More importantly its `wireFixture` struct (`wire_compat_test.go:22`) and its round-trip query (`wire_compat_test.go:172`) both omit `network_timings`, so the handler could discard the field entirely and the suite would still pass.
 
-- [ ] **Step 2: Document the field**
+Add to the `wireFixture` struct:
+
+```go
+	NetworkTimings json.RawMessage `json:"network_timings"`
+```
+
+Add `network_timings::text` to the round-trip `SELECT` and scan it into a new `networkTimingsText` variable alongside `debugMetaText`. Then assert the round trip, treating an omitted fixture field as the stored default:
+
+```go
+			wantTimings := "[]"
+			if len(fixture.NetworkTimings) > 0 {
+				wantTimings = string(fixture.NetworkTimings)
+			}
+			var gotTimings, expectTimings []map[string]any
+			if err := json.Unmarshal([]byte(networkTimingsText), &gotTimings); err != nil {
+				t.Fatalf("stored network_timings is not an array: %v", err)
+			}
+			if err := json.Unmarshal([]byte(wantTimings), &expectTimings); err != nil {
+				t.Fatalf("fixture network_timings is not an array: %v", err)
+			}
+			if len(gotTimings) != len(expectTimings) {
+				t.Errorf("network_timings round trip: got %d entries, want %d", len(gotTimings), len(expectTimings))
+			}
+```
+
+- [ ] **Step 2: Run the suite under its real name**
+
+Run: `cd packages/ingestion && go test ./handler/ -run TestWireFixtures -v`
+Expected: PASS across every fixture including the two new `v4.1.0` files, with the new assertion executing rather than being skipped.
+
+- [ ] **Step 3: Document the field**
 
 Append a section to `docs/contracts/events.md`, after the existing "Build provenance and debug images" section:
 
@@ -1384,7 +1660,7 @@ first-seen order. URLs are redacted server-side — userinfo, the full query str
 and token-bearing fragments are stripped regardless of what the client sent.
 ```
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
 git add docs/contracts/events.md packages/ingestion/handler/wire_compat_test.go
@@ -1428,8 +1704,8 @@ Setting a port without its URL is the silent failure mode: Go DB tests fall back
 
 - [ ] **Step 3: Confirm Go tests run with zero skips**
 
-Run: `cd packages/ingestion && go test ./... 2>&1 | grep -c SKIP`
-Expected: `0`. A storage misconfiguration reports `ok` while roughly 30 tests never run.
+Run: `cd packages/ingestion && go test ./... -v 2>&1 | grep -c -- "--- SKIP"`
+Expected: `0`. The `-v` is load-bearing: without it `go test` suppresses per-test skip lines, so the grep prints `0` while DB tests are calling `t.Skip` (`db/testhelper_test.go:21`). A storage misconfiguration otherwise reports `ok` while roughly 30 tests never run.
 
 - [ ] **Step 4: Bring the stack up and apply migrations**
 
@@ -1441,10 +1717,14 @@ psql "$DATABASE_URL" -f scripts/seed-e2e.sql
 
 - [ ] **Step 5: Post an event carrying timings and assert it stored**
 
+The route reads `X-API-Key` (`handler/project_keys.go:18`), and `project_api_keys` stores only key IDs and hashes — the raw key is not recoverable by query. Use the seeded raw key, which `scripts/seed-e2e.sql:7` records in a comment:
+
 ```bash
+export OPSLANE_TEST_KEY='opslane_pk_mzxw6ytboi3damrrgi3tknzxgq_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopq'
+
 curl -sS -X POST "$INGESTION_URL/api/v1/events" \
   -H 'Content-Type: application/json' \
-  -H "X-Opslane-Key: $(psql "$DATABASE_URL" -tAc "SELECT public_key FROM project_api_keys LIMIT 1")" \
+  -H "X-API-Key: $OPSLANE_TEST_KEY" \
   -d '{
     "timestamp": "2026-08-06T00:00:00.000Z",
     "error": {"type":"TimeoutError","message":"signal timed out","stack":""},
@@ -1463,11 +1743,9 @@ psql "$DATABASE_URL" -c \
 
 Expected: both entries stored; the first has `"outcome": "timeout"` with no `ttfb_ms` key; **neither URL contains `token=leak`**, proving server-side redaction ran independently of the SDK.
 
-- [ ] **Step 6: Confirm the auth header name**
+If this returns 401, the seed did not run or the seeded key rotated — re-run `scripts/seed-e2e.sql` and re-read the raw key from its header comment. Do not disable auth to get a green smoke.
 
-If the `curl` returns 401, read the key header name from `packages/ingestion/handler/routes.go` and correct the command rather than disabling auth.
-
-- [ ] **Step 7: Commit any fixes and open the PR**
+- [ ] **Step 6: Commit any fixes and open the PR**
 
 The PR description must state that this changes no diagnosis behavior and that the column is read by nothing until the worker slice lands, or it will be misread as a fix for the timeout-diagnosis problem.
 
@@ -1479,4 +1757,16 @@ The PR description must state that this changes no diagnosis behavior and that t
 
 **Not covered by any task, by design:** the spec's "what this does not deliver" items — worker consumption, backend correlation, fetch body-phase timing, aggregates.
 
-**Type consistency.** `snapshotNetworkTimings`, `startTiming`, `markHeaders`, `finalizeTiming`, `discardTiming`, `clearNetworkTimings` are named identically in Tasks 1–5. `NetworkTiming` field names match between `shared/src/types.ts` (Task 1), the fixtures (Task 5), and `validatedNetworkTiming`'s JSON tags (Task 7). The cap of 20 appears in Task 1 (`MAX_ENTRIES`) and Task 7 (`maxNetworkTimings`) and must stay equal.
+**Type consistency.** `snapshotNetworkTimings`, `startTiming`, `markHeaders`, `finalizeTiming`, `discardTiming`, `clearNetworkTimings` are named identically in Tasks 1–5. `NetworkTiming` field names match between `shared/src/types.ts` (Task 1), the fixtures (Task 5), and `validatedNetworkTiming`'s JSON tags (Task 7).
+
+**SDK and ingestion limits must agree**, or the SDK emits entries ingestion silently drops. Every pair:
+
+| Limit | SDK (Task 1) | Ingestion (Task 7) |
+| --- | --- | --- |
+| Entry count | `MAX_ENTRIES = 20` | `maxNetworkTimings = 20` |
+| URL length | `capBytes(..., 2048)`, UTF-8 bytes | `len(value) > 2048`, UTF-8 bytes |
+| Method | `toUpperCase()` then 16 bytes | `ToUpper` then `^[A-Z0-9._-]{1,16}$` |
+| Elapsed | clamped to `MAX_ELAPSED_MS = 600000` | dropped above `600000` |
+| Status | omitted unless 100–599 | rejected outside 100–599 |
+
+**Go test packages.** `error_event_test.go`, `queries_test.go`, and `masking_test.go` are all external (`*_test` packages). Task 7's sanitizer tests therefore go in a new internal file; Tasks 6 and 8 qualify every call and type with its package name.
