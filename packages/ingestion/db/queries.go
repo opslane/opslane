@@ -1864,8 +1864,11 @@ func (q *Queries) ResolveErrorGroup(ctx context.Context, projectID, groupID stri
 func (q *Queries) ArchiveErrorGroup(ctx context.Context, projectID, groupID string) error {
 	ct, err := q.pool.Exec(ctx,
 		`UPDATE error_groups
-		 SET status = 'archived', archived_at = now(), updated_at = now()
-		 WHERE id = $1 AND project_id = $2`,
+		 SET status_before_archive = status,
+		     status = 'archived',
+		     archived_at = now(),
+		     updated_at = now()
+		 WHERE id = $1 AND project_id = $2 AND status <> 'archived'`,
 		groupID, projectID,
 	)
 	if err != nil {
@@ -1877,14 +1880,18 @@ func (q *Queries) ArchiveErrorGroup(ctx context.Context, projectID, groupID stri
 	return nil
 }
 
-// UnarchiveErrorGroup transitions an archived incident to a conservative,
-// kind-safe state. Tenant-scoped.
+// UnarchiveErrorGroup restores the pre-archive state. Rows archived before the
+// saved-status column existed fall back to the previous kind-safe behavior.
 func (q *Queries) UnarchiveErrorGroup(ctx context.Context, projectID, groupID string) error {
 	ct, err := q.pool.Exec(ctx,
 		`UPDATE error_groups
-		 SET status = CASE WHEN kind = 'friction' THEN 'insight'::error_group_status
-		                   ELSE 'investigated'::error_group_status END,
-		     archived_at = NULL, updated_at = now()
+		 SET status = COALESCE(
+		       status_before_archive,
+		       CASE WHEN kind = 'friction' THEN 'insight'::error_group_status
+		            ELSE 'investigated'::error_group_status END),
+		     status_before_archive = NULL,
+		     archived_at = NULL,
+		     updated_at = now()
 		 WHERE id = $1 AND project_id = $2 AND status = 'archived'`,
 		groupID, projectID,
 	)

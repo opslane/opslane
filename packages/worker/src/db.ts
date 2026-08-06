@@ -1,5 +1,5 @@
 import pg from 'pg';
-import type { ErrorGroupStatus, NeedsHumanReason, ConfidenceLevel, JobType, SetupPrStatus, EvidenceRecord, PRPosture } from '@opslane/shared';
+import type { Diagnosis, ErrorGroupStatus, NeedsHumanReason, ConfidenceLevel, JobType, SetupPrStatus, EvidenceRecord, PRPosture } from '@opslane/shared';
 import { reconcileDeadLetteredSessionAnalysis } from './friction/dead-letter.js';
 import type { Platform } from './platform.js';
 import type { FixSurface } from './fix-surface.js';
@@ -1543,6 +1543,7 @@ export async function updateGroupAndCreateFixJob(
   fields: {
     rootCause?: string;
     suggestedMitigation?: string;
+    diagnosis?: Diagnosis | null;
     confidence?: ConfidenceLevel;
     platform?: Platform;
   },
@@ -1609,9 +1610,15 @@ export async function updateGroupAndCreateFixJob(
     ) {
       await client.query(
         `UPDATE error_group_jobs
-         SET platform = COALESCE(platform, $2), updated_at = now()
+         SET platform = COALESCE(platform, $2),
+             payload = COALESCE(payload, $3::jsonb),
+             updated_at = now()
          WHERE id = $1`,
-        [existingFix.rows[0].id, fields.platform ?? 'javascript'],
+        [
+          existingFix.rows[0].id,
+          fields.platform ?? 'javascript',
+          fields.diagnosis === undefined ? null : JSON.stringify({ diagnosis: fields.diagnosis }),
+        ],
       );
       await client.query(
         `UPDATE error_groups
@@ -1645,10 +1652,15 @@ export async function updateGroupAndCreateFixJob(
       );
     }
     const result = await client.query<{ id: string }>(
-      `INSERT INTO error_group_jobs (error_group_id, project_id, job_type, triggered_by, platform)
-       VALUES ($1, $2, 'fix', 'auto', $3)
+      `INSERT INTO error_group_jobs (error_group_id, project_id, job_type, triggered_by, platform, payload)
+       VALUES ($1, $2, 'fix', 'auto', $3, $4::jsonb)
        RETURNING id`,
-      [errorGroupId, projectId, fields.platform ?? 'javascript']
+      [
+        errorGroupId,
+        projectId,
+        fields.platform ?? 'javascript',
+        fields.diagnosis === undefined ? null : JSON.stringify({ diagnosis: fields.diagnosis }),
+      ]
     );
     await client.query('COMMIT');
     return { created: true, fixJobId: result.rows[0]!.id };

@@ -557,27 +557,42 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
 
     const durationMs = Date.now() - jobStart;
 
-    // Route based on investigation result
-    if (!triage.fixable && triage.confidence === 'high') {
-      // Definitely unfixable → needs_human with investigation results
+    if (triage.outcome === 'needs_more_context') {
       await updateGroupInvestigation(job.errorGroupId, job.projectId, 'needs_human', {
-        rootCause: triage.reason,
+        rootCause: triage.decisionReason,
         confidence: triage.confidence,
         reason: {
-          reason_code: triage.reason_code ?? 'triage_unfixable',
-          reason_message: triage.reason ?? 'Error classified as unfixable by investigation',
-          remediation: triage.remediation ?? 'Review the error manually',
+          reason_code: 'insufficient_context',
+          reason_message: triage.decisionReason,
+          remediation: 'Review the error manually; the investigation could not establish a cause.',
         },
       }, job);
       jobsFailed++;
-      logger.warn('Investigation: needs_human (unfixable)', {
+      logger.warn('Investigation: needs_human (no usable diagnosis)', {
         job_id: job.id, duration_ms: durationMs,
       });
-    } else if (triage.fixable && triage.confidence === 'high') {
-      // High confidence fixable → auto-trigger fix (atomic transaction)
+
+    } else if (triage.outcome === 'not_actionable') {
+      const outsideSurface = triage.decisionReason.includes('outside the configured fix surface');
+      const reproductionSteps = triage.diagnosis?.reproduction_steps ?? [];
+      await updateGroupInvestigation(job.errorGroupId, job.projectId, 'insight', {
+        rootCause: triage.diagnosis?.one_line_description ?? triage.decisionReason,
+        confidence: triage.confidence,
+        reason: {
+          reason_code: outsideSurface ? 'triage_unfixable' : 'unfixable_infra',
+          reason_message: triage.decisionReason,
+          remediation: reproductionSteps.length > 0
+            ? `Reproduce with: ${reproductionSteps.join('; ')}`
+            : 'Investigate the named system; no reproduction steps were established.',
+        },
+      }, job);
+      jobsProcessed++;
+      logger.info('Investigation: conclusion', { job_id: job.id, duration_ms: durationMs });
+
+    } else if (triage.confidence === 'high') {
       const fixResult = await updateGroupAndCreateFixJob(job.errorGroupId, job.projectId, {
-        rootCause: triage.reason,
-        suggestedMitigation: triage.remediation,
+        rootCause: triage.diagnosis?.one_line_description ?? triage.decisionReason,
+        diagnosis: triage.diagnosis,
         confidence: triage.confidence,
         platform,
       }, job);
@@ -590,8 +605,7 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
         // Defense-in-depth refusal (kind gate): park the result for a human
         // instead of silently dropping the investigation.
         await updateGroupInvestigation(job.errorGroupId, job.projectId, 'investigated', {
-          rootCause: triage.reason,
-          suggestedMitigation: triage.remediation,
+          rootCause: triage.diagnosis?.one_line_description ?? triage.decisionReason,
           confidence: triage.confidence,
         }, job);
         jobsProcessed++;
@@ -600,10 +614,8 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
         });
       }
     } else {
-      // Medium/low confidence → investigated, wait for user
       await updateGroupInvestigation(job.errorGroupId, job.projectId, 'investigated', {
-        rootCause: triage.reason,
-        suggestedMitigation: triage.remediation,
+        rootCause: triage.diagnosis?.one_line_description ?? triage.decisionReason,
         confidence: triage.confidence,
       }, job);
       jobsProcessed++;

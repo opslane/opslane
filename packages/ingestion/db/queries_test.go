@@ -876,8 +876,8 @@ func TestProcessPRWebhook_ErrorCloseRevertsToInvestigated(t *testing.T) {
 	if err != nil || result.GroupID != groupID {
 		t.Fatalf("ProcessPRWebhook = (%+v, %v), want group %s", result, err, groupID)
 	}
-	if got := groupStatus(t, pool, groupID); got != "investigated" {
-		t.Fatalf("group status = %q, want investigated", got)
+	if got := groupStatus(t, pool, groupID); got != "resolved" {
+		t.Fatalf("group status = %q, want resolved", got)
 	}
 
 	var prURL *string
@@ -1007,13 +1007,79 @@ func TestResolveArchiveUnarchiveLifecycle(t *testing.T) {
 	if err := q.UnarchiveErrorGroup(ctx, projID, groupID); err != nil {
 		t.Fatalf("UnarchiveErrorGroup: %v", err)
 	}
-	if got := groupStatus(t, pool, groupID); got != "investigated" {
-		t.Fatalf("group status = %q, want investigated", got)
+	if got := groupStatus(t, pool, groupID); got != "resolved" {
+		t.Fatalf("group status = %q, want resolved", got)
 	}
 
 	// Unarchiving a non-archived group fails.
 	if err := q.UnarchiveErrorGroup(ctx, projID, groupID); err == nil {
 		t.Fatal("expected UnarchiveErrorGroup on non-archived group to fail")
+	}
+}
+
+func TestUnarchiveRestoresErrorInsight(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	q := db.New(pool)
+	_, projectID, _, groupID := seedGroup(t, pool, q, "unarchive-insight")
+
+	if _, err := pool.Exec(ctx, `UPDATE error_groups SET status = 'insight' WHERE id = $1`, groupID); err != nil {
+		t.Fatalf("set insight: %v", err)
+	}
+	if err := q.ArchiveErrorGroup(ctx, projectID, groupID); err != nil {
+		t.Fatalf("ArchiveErrorGroup: %v", err)
+	}
+	if err := q.UnarchiveErrorGroup(ctx, projectID, groupID); err != nil {
+		t.Fatalf("UnarchiveErrorGroup: %v", err)
+	}
+	if got := groupStatus(t, pool, groupID); got != "insight" {
+		t.Fatalf("group status = %q, want insight", got)
+	}
+}
+
+func TestUnarchiveLegacyErrorFallsBackToInvestigated(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	q := db.New(pool)
+	_, projectID, _, groupID := seedGroup(t, pool, q, "unarchive-legacy")
+
+	if _, err := pool.Exec(ctx,
+		`UPDATE error_groups
+		 SET status = 'archived', status_before_archive = NULL, archived_at = now()
+		 WHERE id = $1`, groupID,
+	); err != nil {
+		t.Fatalf("seed legacy archive: %v", err)
+	}
+	if err := q.UnarchiveErrorGroup(ctx, projectID, groupID); err != nil {
+		t.Fatalf("UnarchiveErrorGroup: %v", err)
+	}
+	if got := groupStatus(t, pool, groupID); got != "investigated" {
+		t.Fatalf("group status = %q, want investigated", got)
+	}
+}
+
+func TestArchiveTwiceDoesNotOverwriteSavedStatus(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	q := db.New(pool)
+	_, projectID, _, groupID := seedGroup(t, pool, q, "archive-twice")
+
+	if _, err := pool.Exec(ctx, `UPDATE error_groups SET status = 'insight' WHERE id = $1`, groupID); err != nil {
+		t.Fatalf("set insight: %v", err)
+	}
+	if err := q.ArchiveErrorGroup(ctx, projectID, groupID); err != nil {
+		t.Fatalf("first ArchiveErrorGroup: %v", err)
+	}
+	_ = q.ArchiveErrorGroup(ctx, projectID, groupID)
+
+	var saved string
+	if err := pool.QueryRow(ctx,
+		`SELECT status_before_archive::text FROM error_groups WHERE id = $1`, groupID,
+	).Scan(&saved); err != nil {
+		t.Fatalf("query saved status: %v", err)
+	}
+	if saved != "insight" {
+		t.Fatalf("status_before_archive = %q, want insight", saved)
 	}
 }
 
