@@ -876,8 +876,8 @@ func TestProcessPRWebhook_ErrorCloseRevertsToInvestigated(t *testing.T) {
 	if err != nil || result.GroupID != groupID {
 		t.Fatalf("ProcessPRWebhook = (%+v, %v), want group %s", result, err, groupID)
 	}
-	if got := groupStatus(t, pool, groupID); got != "resolved" {
-		t.Fatalf("group status = %q, want resolved", got)
+	if got := groupStatus(t, pool, groupID); got != "investigated" {
+		t.Fatalf("group status = %q, want investigated", got)
 	}
 
 	var prURL *string
