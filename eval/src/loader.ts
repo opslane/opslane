@@ -1,14 +1,11 @@
 import { readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
 import type { EvalCase } from './types.js';
+import { validateCase } from './validate.js';
 
 export async function loadCase(caseDir: string): Promise<EvalCase> {
   const raw = await readFile(path.join(caseDir, 'case.json'), 'utf-8');
-  const parsed: EvalCase = JSON.parse(raw);
-  if (!parsed.id || !parsed.app || !parsed.error_event) {
-    throw new Error(`Invalid case.json in ${caseDir}: missing required fields`);
-  }
-  return parsed;
+  return validateCase(JSON.parse(raw), caseDir);
 }
 
 /** Load gold patch content by convention (gold.patch file in case dir). Returns null if absent. */

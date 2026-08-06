@@ -35,7 +35,7 @@ export interface EvalCase {
   error_event: EvalErrorEvent;
 
   expected: {
-    outcome: 'fix_pr' | 'needs_human';
+    outcome: 'fix_pr' | 'needs_human' | 'conclusion';
     rca_file?: string;
     reason_code?: ReasonCode;
   };
