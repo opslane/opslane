@@ -252,6 +252,15 @@ export async function investigateError(
   }
   const dossier = parseDossier(first.terminalInput ?? {});
   if (!dossier) {
+    // Log what was actually submitted. This failure means every hypothesis was
+    // dropped for want of a statement or supporting evidence, and without the
+    // payload there is no way to tell a model that answered badly from a schema
+    // the model could not satisfy. Runs were flapping between this and a good
+    // answer with nothing recorded to distinguish them.
+    logger.warn('Dossier held no supported hypothesis', {
+      submitted: JSON.stringify(first.terminalInput ?? {}).slice(0, 2000),
+      filesRead: first.filesRead.length,
+    });
     return failed('The dossier contained no supported hypothesis', first.filesRead, first.lastModelText);
   }
 

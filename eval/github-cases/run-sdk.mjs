@@ -49,7 +49,19 @@ CAUSE: <path/to/file.ts:line>`;
   let text = '', turns = 0, cost = 0;
   const t0 = Date.now();
   try {
-    for await (const msg of query({ prompt, options: { cwd: dir, permissionMode: 'bypassPermissions', maxTurns: 30 } })) {
+    // READONLY=1 matches our harness's tool set so the comparison isolates the
+    // loop rather than measuring what unrestricted bash buys. Note that
+    // allowedTools does NOT constrain bypassPermissions -- that mode approves
+    // every tool regardless -- so the restricted arm must not use it.
+    const limits = process.env['READONLY'] === '1'
+      ? {
+          permissionMode: 'dontAsk',
+          allowedTools: ['Read', 'Glob', 'Grep'],
+          disallowedTools: ['Bash', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'WebFetch', 'WebSearch', 'Task'],
+        }
+      : { permissionMode: 'bypassPermissions' };
+    const maxTurns = Number(process.env['SDK_MAX_TURNS'] ?? 30);
+    for await (const msg of query({ prompt, options: { cwd: dir, maxTurns, ...limits } })) {
       if (msg.type === 'assistant') { turns++; for (const b of msg.message.content) if (b.type === 'text') text += b.text; }
       if (msg.type === 'result') { cost = msg.total_cost_usd ?? 0; if (msg.result) text += '\n' + msg.result; }
     }
