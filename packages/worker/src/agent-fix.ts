@@ -580,7 +580,7 @@ export async function runAgentFix(input: AgentFixInput): Promise<AgentFixResult>
       // Stage 2: If repo clone available, run deeper Sonnet investigation
       if (input.repoPath) {
         const investigation = await traceSpan('investigate', {}, () =>
-          investigateError(apiKey, triageInput, input.repoPath!),
+          investigateError(apiKey, triageInput, input.repoPath!, { globs: null }),
         );
 
         logger.info('Investigation result', {

@@ -531,7 +531,7 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
   }
 
   try {
-    const replay = await db.getReplayForGroup(job.errorGroupId, job.projectId);
+    const surface = await db.loadFixSurface(job.projectId);
 
     checkAbort(signal);
 
@@ -545,7 +545,7 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
       stackTrace: event?.stack_trace_raw ?? '',
       resolvedStackTrace: resolvedStack ?? framesFromEnvelope(event?.stack_trace_resolved) ?? null,
       breadcrumbs: event?.breadcrumbs ?? '[]',
-    }, repoDir);
+    }, repoDir, surface);
     checkAbort(signal);
 
     logger.info('Investigation result', {

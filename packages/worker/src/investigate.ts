@@ -1,8 +1,10 @@
 import type Anthropic from '@anthropic-ai/sdk';
+import type { Diagnosis, DiagnosisOutcome } from '@opslane/shared';
 import { createAnthropicClient } from './anthropic-client.js';
 import { execFile } from 'node:child_process';
+import { statSync } from 'node:fs';
 import { readFile, readdir, stat } from 'node:fs/promises';
-import { resolve, relative, normalize } from 'node:path';
+import { join, normalize, relative, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { extractStackTraceFiles } from './harness/stack-trace-utils.js';
 import type { Platform } from './platform.js';
@@ -11,7 +13,9 @@ import { logger } from './logger.js';
 import { traceSpan } from './tracing.js';
 import type { TriageResult } from './agent-fix.js';
 import { grepExclusionArgs, isExcludedTraversalDirectory } from './harness/traversal-exclusions.js';
-import { isReasonCode, triageReasonCodes } from './reason-codes.js';
+import { deriveOutcome } from './classify.js';
+import { parseDiagnosis, submitDiagnosisTool } from './diagnosis-schema.js';
+import type { FixSurface } from './fix-surface.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -173,42 +177,7 @@ export async function executeListFiles(
   }
 }
 
-function classifyTool(platform: Platform): Anthropic.Tool {
-  return {
-  name: 'classify_error',
-  description: 'Submit your investigation classification. Call this when you have enough evidence.',
-  input_schema: {
-    type: 'object' as const,
-    properties: {
-      fixable: {
-        type: 'boolean',
-        description: 'true if this error has a root cause in application source code that can be fixed',
-      },
-      confidence: {
-        type: 'string',
-        enum: ['high', 'medium', 'low'],
-        description: 'How confident you are in the classification based on codebase evidence found',
-      },
-      reason: {
-        type: 'string',
-        description: 'Brief explanation citing specific files/code found (or not found) during investigation',
-      },
-      reason_code: {
-        type: 'string',
-        enum: [...triageReasonCodes(platform)],
-        description: 'Machine-readable reason code when fixable is false',
-      },
-      remediation: {
-        type: 'string',
-        description: 'What the human should do if not fixable',
-      },
-    },
-    required: ['fixable', 'confidence', 'reason'],
-  },
-  };
-}
-
-function toolsFor(platform: Platform): Anthropic.Tool[] {
+function toolsFor(): Anthropic.Tool[] {
   return [
   {
     name: 'read_file',
@@ -259,7 +228,7 @@ function toolsFor(platform: Platform): Anthropic.Tool[] {
       },
     },
   },
-    classifyTool(platform),
+    submitDiagnosisTool(),
   ];
 }
 
@@ -281,29 +250,17 @@ function buildInvestigationPrompt(
     ? `\n\nResolved Stack Trace (source-mapped):\n<untrusted_data>\n${truncate(JSON.stringify(input.resolvedStackTrace), MAX_STACK_TRACE)}\n</untrusted_data>`
     : '';
 
-  return `You are investigating a production ${python ? 'Python error from a CPython traceback' : 'JavaScript/browser error'} to determine if it can be fixed with code changes.
+  return `You are investigating a production ${python ? 'Python error from a CPython traceback' : 'JavaScript/browser error'}.
 
-You have read-only access to the repository via tools. Use them to investigate before classifying.
+You have read-only access to the repository via tools.
 
-## Investigation Strategy
-1. Start by reading the files mentioned in the stack trace (hints provided below if available)
-2. Search for the error message or pattern in the codebase
-3. Check if the error originates from application code or third-party/infrastructure
-4. Call classify_error with your finding AND the evidence from your investigation
+## Your Task
+Find the ROOT CAUSE of this error. Do not propose fixes, only identify why the error is happening.
 
-## Classification Rules
-Set fixable to FALSE (with evidence) if:
-- You searched the codebase and the error pattern exists ONLY in third-party code (${python ? 'site-packages or virtualenv paths' : 'node_modules-like paths'})
-- The error message is a deliberate test throw (e.g. "test error", "testing 123", "Opslane test")
-- The error is purely infrastructure/network (CORS, DNS, timeout, 502, 503) with no application code involvement
-- The stack trace files don't exist in the repository AND no related code can be found
-
-Set fixable to TRUE if:
-- You found application source files related to the error
-- The error type suggests a code bug AND you can see relevant application code
-- The stack trace references files that exist in the repository
-
-When in doubt, classify as fixable with medium/low confidence — we'd rather investigate than miss a real bug.
+- Use your tools to read the relevant code.
+- Ask "why" repeatedly until you reach the true cause, not just the symptom.
+- Reading is not fixing. Open code anywhere in the repository that helps you explain what happened.
+- Report where the cause lives. Do not decide whether we are able to fix it.
 
 ${python
     ? 'IMPORTANT: Follow the traceback newest-first and use exact repository paths. Python runs do not use browser source maps.'
@@ -375,9 +332,12 @@ export interface InvestigateInput {
 }
 
 export interface InvestigationResult extends TriageResult {
+  diagnosis: Diagnosis | null;
+  outcome: DiagnosisOutcome;
+  decisionReason: string;
   /** Files explicitly opened via read_file tool (not search hits). May contain duplicates if re-read. */
   filesRead: string[];
-  /** Last model text block before classification — best-effort diagnostic, not comprehensive. */
+  /** Last model text block before diagnosis — best-effort diagnostic, not comprehensive. */
   findings: string;
 }
 
@@ -385,12 +345,13 @@ export interface InvestigationResult extends TriageResult {
  * Codebase-aware investigation: multi-turn Sonnet loop with read-only filesystem
  * tools against the local repo clone. Replaces blind triage for production pipeline.
  *
- * Falls through to agent (fixable: true, confidence: low) on any failure.
+ * Execution failures produce needs_more_context; only a derived code_fix is fixable.
  */
 export async function investigateError(
   apiKey: string,
   input: InvestigateInput,
   repoPath: string,
+  surface: FixSurface,
 ): Promise<InvestigationResult> {
   const client = createAnthropicClient(apiKey);
   const pricing = MODEL_PRICING[INVESTIGATION_MODEL] ?? DEFAULT_PRICING;
@@ -400,9 +361,7 @@ export async function investigateError(
   let lastModelText = '';
 
   const systemPrompt = buildInvestigationPrompt(input);
-  const platform = input.platform ?? 'javascript';
-  const tools = toolsFor(platform);
-  const allowedReasonCodes = triageReasonCodes(platform);
+  const tools = toolsFor();
   const systemMessages: Anthropic.TextBlockParam[] = [{
     type: 'text',
     text: systemPrompt,
@@ -416,7 +375,7 @@ export async function investigateError(
     : '';
 
   const messages: Anthropic.MessageParam[] = [
-    { role: 'user', content: `Investigate this error and classify it using the classify_error tool.${fileHints}` },
+    { role: 'user', content: `Investigate this error and submit your diagnosis using submit_diagnosis.${fileHints}` },
   ];
 
   for (let turn = 0; turn < MAX_TURNS; turn++) {
@@ -429,7 +388,7 @@ export async function investigateError(
       if (lastMsg.role === 'user' && Array.isArray(lastMsg.content)) {
         lastMsg.content.push({
           type: 'text' as const,
-          text: `You have ${remaining} turn(s) remaining. You MUST call classify_error now with your best assessment based on evidence gathered so far. Do not read more files.`,
+          text: `You have ${remaining} turn(s) remaining. You MUST call submit_diagnosis now with the best diagnosis supported by the evidence gathered so far. Do not read more files.`,
         });
       }
     }
@@ -442,14 +401,23 @@ export async function investigateError(
         system: systemMessages,
         messages,
         tools,
-        ...(turn === MAX_TURNS - 1 ? { tool_choice: { type: 'tool' as const, name: 'classify_error' } } : {}),
+        ...(turn === MAX_TURNS - 1 ? { tool_choice: { type: 'tool' as const, name: 'submit_diagnosis' } } : {}),
       });
     } catch (err: unknown) {
-      logger.warn('Investigation API call failed, falling through to agent', {
+      logger.warn('Investigation API call failed', {
         error: err instanceof Error ? err.message : String(err),
         turn,
       });
-      return { fixable: true, confidence: 'low', reason: 'Investigation API call failed', filesRead, findings: lastModelText };
+      return {
+        fixable: false,
+        confidence: 'low',
+        reason: 'Investigation API call failed',
+        diagnosis: null,
+        outcome: 'needs_more_context',
+        decisionReason: 'Investigation API call failed',
+        filesRead,
+        findings: lastModelText,
+      };
     }
 
     tokenUsage.input += response.usage.input_tokens;
@@ -465,7 +433,7 @@ export async function investigateError(
       (tokenUsage.cacheRead / 1_000_000) * pricing.cacheRead;
 
     // Process response blocks BEFORE the budget check. This response is already
-    // paid for; if it carries the classification, discarding it wastes the spend
+    // paid for; if it carries the diagnosis, discarding it wastes the spend
     // AND throws away the answer.
     const toolCalls: { id: string; name: string; input: Record<string, unknown> }[] = [];
     for (const block of response.content) {
@@ -479,41 +447,59 @@ export async function investigateError(
 
     // Budget check. Fails CLOSED: exhaustion is an execution failure, not a
     // finding, so it must not hand the fix agent a `fixable: true` it never
-    // earned. Skipped when this response already contains the classification.
-    const hasClassification = toolCalls.some((tc) => tc.name === 'classify_error');
-    if (cost > budgetUsd && !hasClassification) {
+    // earned. Skipped when this response already contains the diagnosis.
+    const hasDiagnosis = toolCalls.some((toolCall) => toolCall.name === 'submit_diagnosis');
+    if (cost > budgetUsd && !hasDiagnosis) {
       logger.warn('Investigation budget exceeded', { cost, budget: budgetUsd, turn });
-      return { fixable: false, confidence: 'low', reason: 'Investigation budget exceeded', filesRead, findings: lastModelText };
+      return {
+        fixable: false,
+        confidence: 'low',
+        reason: 'Investigation budget exceeded',
+        diagnosis: null,
+        outcome: 'needs_more_context',
+        decisionReason: 'Investigation budget exceeded',
+        filesRead,
+        findings: lastModelText,
+      };
     }
 
     messages.push({ role: 'assistant', content: response.content });
 
-    // No tool calls = model is done without classifying
+    // No tool calls means the model ended without a usable diagnosis.
     if (toolCalls.length === 0) {
-      logger.warn('Investigation ended without classify_error call');
-      return { fixable: false, confidence: 'low', reason: 'Investigation did not produce classification', filesRead, findings: lastModelText };
+      logger.warn('Investigation ended without submit_diagnosis call');
+      return {
+        fixable: false,
+        confidence: 'low',
+        reason: 'Investigation did not produce a diagnosis',
+        diagnosis: null,
+        outcome: 'needs_more_context',
+        decisionReason: 'Investigation did not produce a diagnosis',
+        filesRead,
+        findings: lastModelText,
+      };
     }
 
     // Execute tool calls
     const toolResults: Anthropic.ToolResultBlockParam[] = [];
     for (const tc of toolCalls) {
-      // classify_error is terminal — parse result and return
-      if (tc.name === 'classify_error') {
-        const raw = tc.input;
-        const validConfidences = ['high', 'medium', 'low'] as const;
-        const rawConfidence = raw['confidence'] as string;
-        const rawReasonCode = raw['reason_code'] as string | undefined;
-
+      if (tc.name === 'submit_diagnosis') {
+        const diagnosis = parseDiagnosis(tc.input);
+        const fileExists = (path: string): boolean => {
+          try {
+            return statSync(join(repoPath, path)).isFile();
+          } catch {
+            return false;
+          }
+        };
+        const decision = deriveOutcome(diagnosis, surface, fileExists);
         return {
-          fixable: raw['fixable'] === true,
-          confidence: validConfidences.includes(rawConfidence as typeof validConfidences[number])
-            ? rawConfidence as TriageResult['confidence']
-            : 'low',
-          reason: typeof raw['reason'] === 'string' ? raw['reason'] : undefined,
-          reason_code: isReasonCode(rawReasonCode) && allowedReasonCodes.includes(rawReasonCode)
-            ? rawReasonCode
-            : undefined,
-          remediation: typeof raw['remediation'] === 'string' ? raw['remediation'] : undefined,
+          fixable: decision.outcome === 'code_fix',
+          confidence: decision.confidence,
+          reason: decision.reason,
+          diagnosis,
+          outcome: decision.outcome,
+          decisionReason: decision.reason,
           filesRead,
           findings: lastModelText,
         };
@@ -546,6 +532,15 @@ export async function investigateError(
   }
 
   // Max turns exhausted
-  logger.warn('Investigation reached max turns, falling through to agent', { maxTurns: MAX_TURNS });
-  return { fixable: true, confidence: 'low', reason: 'Investigation reached maximum turns', filesRead, findings: lastModelText };
+  logger.warn('Investigation reached maximum turns', { maxTurns: MAX_TURNS });
+  return {
+    fixable: false,
+    confidence: 'low',
+    reason: 'Investigation did not produce a diagnosis',
+    diagnosis: null,
+    outcome: 'needs_more_context',
+    decisionReason: 'Investigation did not produce a diagnosis',
+    filesRead,
+    findings: lastModelText,
+  };
 }

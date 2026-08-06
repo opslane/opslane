@@ -28,12 +28,26 @@ function makeInput(overrides?: Partial<InvestigateInput>): InvestigateInput {
   };
 }
 
-/** Helper: create a classify_error tool_use response */
+/** Translate older test setup into the diagnosis terminal tool. */
 function classifyResponse(input: Record<string, unknown>, extraBlocks: Anthropic.ContentBlock[] = []) {
+  const localCause = input['fixable'] === true;
+  const highEvidence = input['confidence'] === 'high';
   return {
     content: [
       ...extraBlocks,
-      { type: 'tool_use', id: 'cls-1', name: 'classify_error', input },
+      {
+        type: 'tool_use',
+        id: 'dg-1',
+        name: 'submit_diagnosis',
+        input: {
+          one_line_description: typeof input['reason'] === 'string' ? input['reason'] : 'Production error diagnosed',
+          why_chain: highEvidence
+            ? ['Production event enters the application', 'Relevant code executes', 'The reported error is raised']
+            : ['Relevant code produces the error'],
+          reproduction_steps: ['Repeat the reported production action'],
+          cause_location: localCause ? 'src/App.vue:42' : 'GET /external/system (remote service)',
+        },
+      },
     ],
     usage: { input_tokens: 500, output_tokens: 100, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
   };
@@ -49,6 +63,13 @@ function toolUseResponse(calls: Array<{ name: string; input: Record<string, unkn
       input: c.input,
     })),
     usage: { input_tokens: 300, output_tokens: 100, cache_read_input_tokens: 200, cache_creation_input_tokens: 0 },
+  };
+}
+
+function diagnosisResponse(input: Record<string, unknown>) {
+  return {
+    content: [{ type: 'tool_use', id: 'dg-1', name: 'submit_diagnosis', input }],
+    usage: { input_tokens: 500, output_tokens: 100, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
   };
 }
 
@@ -98,12 +119,12 @@ describe('safePath', () => {
 });
 
 describe('investigateError', () => {
-  it('returns classification when model calls classify_error immediately', async () => {
+  it('returns a derived decision when the model submits a diagnosis immediately', async () => {
     mockMessagesCreate.mockResolvedValueOnce(
       classifyResponse({ fixable: true, confidence: 'high', reason: 'Found App.vue with null items' }),
     );
 
-    const result = await investigateError('test-key', makeInput(), tempDir);
+    const result = await investigateError('test-key', makeInput(), tempDir, { globs: null });
     expect(result.fixable).toBe(true);
     expect(result.confidence).toBe('high');
     expect(result.reason).toContain('App.vue');
@@ -120,7 +141,7 @@ describe('investigateError', () => {
         classifyResponse({ fixable: true, confidence: 'high', reason: 'Found null items in App.vue' }),
       );
 
-    const result = await investigateError('test-key', makeInput(), tempDir);
+    const result = await investigateError('test-key', makeInput(), tempDir, { globs: null });
     expect(result.fixable).toBe(true);
     expect(result.confidence).toBe('high');
 
@@ -147,7 +168,7 @@ describe('investigateError', () => {
         classifyResponse({ fixable: true, confidence: 'high', reason: 'Found items.map in App.vue' }),
       );
 
-    const result = await investigateError('test-key', makeInput(), tempDir);
+    const result = await investigateError('test-key', makeInput(), tempDir, { globs: null });
     expect(result.fixable).toBe(true);
 
     // Verify search results were returned
@@ -170,7 +191,7 @@ describe('investigateError', () => {
         classifyResponse({ fixable: true, confidence: 'medium', reason: 'Found source files' }),
       );
 
-    const result = await investigateError('test-key', makeInput(), tempDir);
+    const result = await investigateError('test-key', makeInput(), tempDir, { globs: null });
     expect(result.fixable).toBe(true);
 
     const secondCall = mockMessagesCreate.mock.calls[1];
@@ -193,7 +214,7 @@ describe('investigateError', () => {
         classifyResponse({ fixable: true, confidence: 'low', reason: 'Could not read files' }),
       );
 
-    const result = await investigateError('test-key', makeInput(), tempDir);
+    const result = await investigateError('test-key', makeInput(), tempDir, { globs: null });
     expect(result.fixable).toBe(true);
 
     // Verify the error was returned
@@ -213,23 +234,23 @@ describe('investigateError', () => {
       toolUseResponse([{ name: 'read_file', input: { path: 'src/App.vue' } }]),
     );
 
-    const result = await investigateError('test-key', makeInput(), tempDir);
+    const result = await investigateError('test-key', makeInput(), tempDir, { globs: null });
 
     expect(result.fixable).toBe(false);
     expect(result.reason).toBe('Investigation budget exceeded');
     delete process.env['INVESTIGATION_BUDGET_USD'];
   });
 
-  it('keeps a classification that arrives in the same response that blows the budget', async () => {
+  it('keeps a diagnosis that arrives in the same response that blows the budget', async () => {
     process.env['INVESTIGATION_BUDGET_USD'] = '0.0000001';
     mockMessagesCreate.mockResolvedValueOnce(
       classifyResponse({ fixable: true, confidence: 'high', reason: 'null deref in App.vue:42' }),
     );
 
-    const result = await investigateError('test-key', makeInput(), tempDir);
+    const result = await investigateError('test-key', makeInput(), tempDir, { globs: null });
 
     expect(result.fixable).toBe(true);
-    expect(result.reason).toBe('null deref in App.vue:42');
+    expect(result.reason).toContain('src/App.vue:42');
     delete process.env['INVESTIGATION_BUDGET_USD'];
   });
 
@@ -245,13 +266,13 @@ describe('investigateError', () => {
       },
     });
 
-    const result = await investigateError('test-key', makeInput(), tempDir);
+    const result = await investigateError('test-key', makeInput(), tempDir, { globs: null });
     expect(result.fixable).toBe(false);
     expect(result.confidence).toBe('low');
     expect(result.reason).toContain('budget');
   });
 
-  it('forces classification even when model would exhaust turns', async () => {
+  it('forces diagnosis submission even when model would exhaust turns', async () => {
     // 9 turns of read_file, then forced classify on turn 10 (MAX_TURNS-1)
     for (let i = 0; i < 9; i++) {
       mockMessagesCreate.mockResolvedValueOnce(
@@ -263,19 +284,20 @@ describe('investigateError', () => {
       classifyResponse({ fixable: true, confidence: 'low', reason: 'Could not determine root cause' }),
     );
 
-    const result = await investigateError('test-key', makeInput(), tempDir);
+    const result = await investigateError('test-key', makeInput(), tempDir, { globs: null });
     expect(result.fixable).toBe(true);
-    expect(result.confidence).toBe('low');
+    expect(result.confidence).toBe('medium');
     // Should NOT return "Investigation reached maximum turns" anymore
     expect(result.reason).not.toContain('maximum turns');
   });
 
-  it('returns fixable=true with low confidence when API call fails', async () => {
+  it('returns needs_more_context with low confidence when the API call fails', async () => {
     mockMessagesCreate.mockRejectedValue(new Error('API rate limited'));
 
-    const result = await investigateError('test-key', makeInput(), tempDir);
-    expect(result.fixable).toBe(true);
+    const result = await investigateError('test-key', makeInput(), tempDir, { globs: null });
+    expect(result.fixable).toBe(false);
     expect(result.confidence).toBe('low');
+    expect(result.outcome).toBe('needs_more_context');
     expect(result.reason).toContain('failed');
   });
 
@@ -285,21 +307,21 @@ describe('investigateError', () => {
       usage: { input_tokens: 500, output_tokens: 100, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
     });
 
-    const result = await investigateError('test-key', makeInput(), tempDir);
+    const result = await investigateError('test-key', makeInput(), tempDir, { globs: null });
     expect(result.fixable).toBe(false);
     expect(result.confidence).toBe('low');
   });
 
-  it('normalizes invalid confidence to low', async () => {
+  it('derives confidence instead of accepting a model confidence field', async () => {
     mockMessagesCreate.mockResolvedValueOnce(
       classifyResponse({ fixable: false, confidence: 'very_high', reason: 'Test error' }),
     );
 
-    const result = await investigateError('test-key', makeInput(), tempDir);
-    expect(result.confidence).toBe('low');
+    const result = await investigateError('test-key', makeInput(), tempDir, { globs: null });
+    expect(result.confidence).toBe('medium');
   });
 
-  it('returns unfixable classification with valid reason_code', async () => {
+  it('does not accept reason codes or remediation from the model', async () => {
     mockMessagesCreate.mockResolvedValueOnce(
       classifyResponse({
         fixable: false,
@@ -310,10 +332,11 @@ describe('investigateError', () => {
       }),
     );
 
-    const result = await investigateError('test-key', makeInput(), tempDir);
+    const result = await investigateError('test-key', makeInput(), tempDir, { globs: null });
     expect(result.fixable).toBe(false);
-    expect(result.reason_code).toBe('unfixable_no_app_frames');
-    expect(result.remediation).toContain('browser console');
+    expect(result.outcome).toBe('not_actionable');
+    expect(result.reason_code).toBeUndefined();
+    expect(result.remediation).toBeUndefined();
   });
 
   it('includes stack trace file hints in the first user message', async () => {
@@ -323,7 +346,7 @@ describe('investigateError', () => {
 
     await investigateError('test-key', makeInput({
       stackTrace: 'TypeError: null\n    at src/components/Header.vue:10:5\n    at src/App.vue:42:10',
-    }), tempDir);
+    }), tempDir, { globs: null });
 
     const firstCall = mockMessagesCreate.mock.calls[0];
     const firstMsg = firstCall[0].messages[0].content;
@@ -341,7 +364,7 @@ describe('investigateError', () => {
         classifyResponse({ fixable: false, confidence: 'high', reason: 'File not found', reason_code: 'unfixable_no_app_frames', remediation: 'Check' }),
       );
 
-    await investigateError('test-key', makeInput(), tempDir);
+    await investigateError('test-key', makeInput(), tempDir, { globs: null });
 
     const secondCall = mockMessagesCreate.mock.calls[1];
     const messages = secondCall[0].messages;
@@ -362,7 +385,7 @@ describe('investigateError', () => {
         classifyResponse({ fixable: false, confidence: 'high', reason: 'Pattern not found', reason_code: 'unfixable_no_app_frames', remediation: 'Manual review' }),
       );
 
-    await investigateError('test-key', makeInput(), tempDir);
+    await investigateError('test-key', makeInput(), tempDir, { globs: null });
 
     const secondCall = mockMessagesCreate.mock.calls[1];
     const messages = secondCall[0].messages;
@@ -383,7 +406,7 @@ describe('investigateError', () => {
         classifyResponse({ fixable: true, confidence: 'medium', reason: 'Source found' }),
       );
 
-    await investigateError('test-key', makeInput(), tempDir);
+    await investigateError('test-key', makeInput(), tempDir, { globs: null });
 
     const secondCall = mockMessagesCreate.mock.calls[1];
     const messages = secondCall[0].messages;
@@ -407,14 +430,17 @@ describe('investigateError', () => {
       .mockResolvedValueOnce({
         content: [
           { type: 'text', text: 'Found null reference in App.vue line 42' },
-          { type: 'tool_use', id: 'cls-1', name: 'classify_error', input: {
-            fixable: true, confidence: 'high', reason: 'Null ref in App.vue',
+          { type: 'tool_use', id: 'dg-1', name: 'submit_diagnosis', input: {
+            one_line_description: 'Null reference in App.vue',
+            why_chain: ['Production event enters the app', 'Render reads a null value', 'The property access throws'],
+            reproduction_steps: ['Open the affected view'],
+            cause_location: 'src/App.vue:42',
           }},
         ],
         usage: { input_tokens: 500, output_tokens: 100, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
       });
 
-    const result = await investigateError('test-key', makeInput(), tempDir);
+    const result = await investigateError('test-key', makeInput(), tempDir, { globs: null });
     expect(result.filesRead).toContain('src/App.vue');
     expect(result.findings).toContain('Found null reference');
   });
@@ -430,7 +456,7 @@ describe('investigateError', () => {
       classifyResponse({ fixable: true, confidence: 'medium', reason: 'Classified under pressure' }),
     );
 
-    const result = await investigateError('test-key', makeInput(), tempDir);
+    const result = await investigateError('test-key', makeInput(), tempDir, { globs: null });
     expect(result.fixable).toBe(true);
 
     // On the 9th API call (turn index 8), a user message should contain budget pressure
@@ -446,24 +472,24 @@ describe('investigateError', () => {
     expect(hasWarning).toBe(true);
   });
 
-  it('forces tool_choice=classify_error on the final turn', async () => {
+  it('forces tool_choice=submit_diagnosis on the final turn', async () => {
     // Respond with read_file for all turns - on the last one, tool_choice should force classify
     for (let i = 0; i < 9; i++) {
       mockMessagesCreate.mockResolvedValueOnce(
         toolUseResponse([{ name: 'read_file', input: { path: 'src/App.vue' } }]),
       );
     }
-    // Final turn: model is forced to call classify_error
+    // Final turn: model is forced to call submit_diagnosis
     mockMessagesCreate.mockResolvedValueOnce(
       classifyResponse({ fixable: true, confidence: 'low', reason: 'Forced classification' }),
     );
 
-    const result = await investigateError('test-key', makeInput(), tempDir);
-    expect(result.reason).toContain('Forced classification');
+    const result = await investigateError('test-key', makeInput(), tempDir, { globs: null });
+    expect(result.outcome).toBe('code_fix');
 
-    // The last API call should have tool_choice forcing classify_error
+    // The last API call should have tool_choice forcing submit_diagnosis
     const lastCall = mockMessagesCreate.mock.calls[9];
-    expect(lastCall[0].tool_choice).toEqual({ type: 'tool', name: 'classify_error' });
+    expect(lastCall[0].tool_choice).toEqual({ type: 'tool', name: 'submit_diagnosis' });
   });
 
   it('multi-turn investigation with read then search then classify', async () => {
@@ -481,9 +507,63 @@ describe('investigateError', () => {
         classifyResponse({ fixable: true, confidence: 'high', reason: 'items is null in App.vue, needs default value' }),
       );
 
-    const result = await investigateError('test-key', makeInput(), tempDir);
+    const result = await investigateError('test-key', makeInput(), tempDir, { globs: null });
     expect(result.fixable).toBe(true);
     expect(result.confidence).toBe('high');
     expect(mockMessagesCreate).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe('investigateError with submit_diagnosis', () => {
+  it('answers not_actionable when the cause is a remote service', async () => {
+    mockMessagesCreate.mockResolvedValueOnce(diagnosisResponse({
+      one_line_description: 'The search endpoint exceeded its 10 second budget',
+      why_chain: ['User types a query', 'Client calls /api/assets/search', 'No response within 10s'],
+      reproduction_steps: ['Search for a term with many matches'],
+      cause_location: 'GET /issue-context/api/assets/search (remote service)',
+    }));
+
+    const result = await investigateError('test-key', makeInput({
+      errorType: 'TimeoutError',
+      errorMessage: 'signal timed out',
+    }), tempDir, { globs: null });
+
+    expect(result.outcome).toBe('not_actionable');
+    expect(result.fixable).toBe(false);
+    expect(result.diagnosis?.why_chain).toHaveLength(3);
+  });
+
+  it('answers needs_more_context when the tool submits nothing usable', async () => {
+    mockMessagesCreate.mockResolvedValueOnce(diagnosisResponse({ one_line_description: 'not sure' }));
+
+    const result = await investigateError('test-key', makeInput(), tempDir, { globs: null });
+
+    expect(result.outcome).toBe('needs_more_context');
+    expect(result.diagnosis).toBeNull();
+  });
+
+  it('answers code_fix when the cited file exists in the clone', async () => {
+    mockMessagesCreate.mockResolvedValueOnce(diagnosisResponse({
+      one_line_description: 'Null dereference when assets have not loaded',
+      why_chain: ['Render runs before fetch resolves', 'assets is null', 'map throws'],
+      reproduction_steps: ['Open the panel on a slow connection'],
+      cause_location: 'src/App.vue:42',
+    }));
+
+    const result = await investigateError('test-key', makeInput(), tempDir, { globs: null });
+
+    expect(result.outcome).toBe('code_fix');
+    expect(result.fixable).toBe(true);
+  });
+
+  it('answers needs_more_context on budget exhaustion, never a conclusion', async () => {
+    process.env['INVESTIGATION_BUDGET_USD'] = '0.0000001';
+    mockMessagesCreate.mockResolvedValueOnce(
+      toolUseResponse([{ name: 'read_file', input: { path: 'src/App.vue' } }]),
+    );
+
+    const result = await investigateError('test-key', makeInput(), tempDir, { globs: null });
+
+    expect(result.outcome).toBe('needs_more_context');
   });
 });

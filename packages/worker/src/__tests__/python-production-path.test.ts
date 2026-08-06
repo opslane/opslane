@@ -209,7 +209,14 @@ describeDb('Python two-stage production path', () => {
       fixable: true,
       confidence: 'high',
       reason: 'cart.py adds a nullable price without a guard',
-      remediation: 'Treat a missing price as zero before calculating the total',
+      diagnosis: {
+        one_line_description: 'cart.py adds a nullable price without a guard',
+        why_chain: ['Cart total reads a nullable price', 'The price is None', 'Arithmetic raises TypeError'],
+        reproduction_steps: ['Add an item whose price is missing'],
+        cause_location: 'cart.py:12',
+      },
+      outcome: 'code_fix',
+      decisionReason: 'The cause is at cart.py:12',
       filesRead: ['cart.py'],
       findings: 'The traceback resolves to application code in cart.py.',
     });
