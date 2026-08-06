@@ -67,6 +67,9 @@ Ingestion reads **only** the `REPLAY_STORE_*` names; `MINIO_*` names appear in i
 | `INGESTION_BASE_URL` | for session replay evidence | Base URL used to fetch decoded, re-redacted session chunks from ingestion |
 | `INTERNAL_READ_TOKEN` | for session replay evidence | Shared secret sent to ingestion as `X-Internal-Token` |
 | `ANTHROPIC_API_KEY` | for investigation | Claude API access; missing → `missing_llm_key` outcomes |
+| `INVESTIGATION_MODEL` | no (`claude-sonnet-4-6`) | Anthropic model used by the codebase-aware diagnosis pass. Unknown model names use the default pricing estimate for budget enforcement. |
+| `INVESTIGATION_MAX_TURNS` | no (10) | Maximum tool-use turns allowed for one diagnosis pass. |
+| `INVESTIGATION_BUDGET_USD` | no (0.15) | Estimated per-diagnosis model-spend ceiling in USD. Exceeding it fails closed as `needs_more_context`; it never becomes a conclusion. |
 | `E2B_API_KEY` | for verification | Sandbox where fixes are tested |
 | `GITHUB_TOKEN` | one of the two GitHub modes | PAT for clone + PR |
 | `GITHUB_APP_ID` / `GITHUB_APP_PRIVATE_KEY` | the other mode | GitHub App installation tokens |
