@@ -18,6 +18,8 @@ Spec: `docs/superpowers/specs/2026-08-06-sdk-network-timing-design.md`
 - Caps, identical in the SDK and in ingestion: 20 entries, `url` 2048 bytes, `method` 16 bytes, elapsed values 600000 ms.
 - Use `unknown` plus narrowing instead of `any`. Keep Vitest tests colocated in `__tests__`.
 - This PR changes no diagnosis behavior. The `network_timings` column is written by ingestion and read by nothing.
+- **`pnpm --filter @opslane/sdk test -- <name>` does not filter.** pnpm forwards the `--`, vitest sees it as a separator, and the whole suite runs. Every focused command below uses `pnpm --filter @opslane/sdk exec vitest run <path>` instead.
+- **`src/__tests__/debug-id-browser.test.ts` already fails on a clean checkout** at the base commit, unrelated to this work. Do not treat it as a regression and do not fix it here; compare against that baseline when reading full-suite output.
 
 ---
 
@@ -260,7 +262,7 @@ describe('network timing store', () => {
 
 - [ ] **Step 4: Run tests to verify they fail**
 
-Run: `pnpm --filter @opslane/sdk test -- network-timing`
+Run: `pnpm --filter @opslane/sdk exec vitest run src/__tests__/network-timing.test.ts`
 Expected: FAIL — cannot resolve `../network-timing`
 
 - [ ] **Step 5: Implement the store**
@@ -279,6 +281,9 @@ const MAX_ELAPSED_MS = 600000;
 
 /** Returned by startTiming when the active registry is full. All other exports no-op on it. */
 const UNTRACKED = -1;
+
+/** RFC 7230 token, the same set ingestion accepts. Kept in sync deliberately. */
+const TOKEN = /^[A-Z0-9!#$%&'*+.^_`|~-]{1,16}$/;
 
 const encoder = typeof TextEncoder !== 'undefined' ? new TextEncoder() : null;
 const decoder = typeof TextDecoder !== 'undefined' ? new TextDecoder('utf-8') : null;
@@ -315,7 +320,9 @@ function mark(): number {
  * UTF-16 `.length` cap would let a Unicode URL pass here and be dropped there.
  */
 function capBytes(value: string, maxBytes: number): string {
-  if (!encoder || !decoder) return value.length > maxBytes ? value.slice(0, maxBytes) : value;
+  // Without TextEncoder, one UTF-16 unit can reach 3 UTF-8 bytes, so divide
+  // rather than slicing at maxBytes and overshooting the server's limit.
+  if (!encoder || !decoder) return value.slice(0, Math.floor(maxBytes / 3));
   const bytes = encoder.encode(value);
   if (bytes.length <= maxBytes) return value;
   // A cut mid-sequence decodes to U+FFFD; strip it so no stored URL ends in a
@@ -329,6 +336,14 @@ function elapsed(from: number, to: number): number {
 }
 
 export function startTiming(transport: Transport, method: string, url: string): number {
+  // `scrubUrl` returns '' for a query-only relative URL such as fetch('?q=1')
+  // (scrub.ts:16). Ingestion drops a zero-length url, so never record one.
+  const scrubbed = capBytes(scrubUrl(url), MAX_URL_BYTES);
+  if (!scrubbed) return UNTRACKED;
+
+  const safeMethod = capBytes(method.toUpperCase(), MAX_METHOD_BYTES);
+  if (!TOKEN.test(safeMethod)) return UNTRACKED;
+
   // At capacity, refuse the NEW request rather than evicting an existing one.
   // Evicting the newest-and-then-inserting an even newer record would keep the
   // arrival that just displaced its predecessor, defeating the whole point:
@@ -341,8 +356,8 @@ export function startTiming(transport: Transport, method: string, url: string): 
 
   active.set(handle, {
     transport,
-    method: capBytes(method.toUpperCase(), MAX_METHOD_BYTES),
-    url: capBytes(scrubUrl(url), MAX_URL_BYTES),
+    method: safeMethod,
+    url: scrubbed,
     startedAtMs: Date.now(),
     startMark: mark(),
   });
@@ -422,7 +437,7 @@ export function clearNetworkTimings(): void {
 
 - [ ] **Step 6: Run tests to verify they pass**
 
-Run: `pnpm --filter @opslane/sdk test -- network-timing`
+Run: `pnpm --filter @opslane/sdk exec vitest run src/__tests__/network-timing.test.ts`
 Expected: PASS (14 tests)
 
 - [ ] **Step 7: Commit**
@@ -522,7 +537,7 @@ describe('fetch timing capture', () => {
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `pnpm --filter @opslane/sdk test -- network`
+Run: `pnpm --filter @opslane/sdk exec vitest run src/__tests__/network.test.ts`
 Expected: FAIL — `snapshotNetworkTimings()` returns `[]`
 
 - [ ] **Step 3: Wire timing into `patchFetch`**
@@ -566,7 +581,15 @@ In the `catch (error: unknown)` branch, immediately after the existing `emitTele
 
 ```ts
       try {
-        const name = error instanceof Error ? error.name : '';
+        // Read `name` structurally rather than via `instanceof Error`. Real
+        // browsers reject AbortSignal.timeout with a DOMException that does
+        // inherit from Error, but polyfilled or cross-realm rejection reasons
+        // need not, and misclassifying a timeout as network_error would lose
+        // the single field this feature exists to record.
+        const name =
+          typeof error === 'object' && error !== null && typeof (error as { name?: unknown }).name === 'string'
+            ? (error as { name: string }).name
+            : '';
         finalizeTiming(
           timingHandle,
           name === 'TimeoutError' ? 'timeout' : name === 'AbortError' ? 'abort' : 'network_error',
@@ -578,44 +601,106 @@ In the `catch (error: unknown)` branch, immediately after the existing `emitTele
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `pnpm --filter @opslane/sdk test -- network`
+Run: `pnpm --filter @opslane/sdk exec vitest run src/__tests__/network.test.ts`
 Expected: PASS
 
-- [ ] **Step 5: Add real-browser capture coverage**
+- [ ] **Step 5: Give the fixture app a request that never answers**
 
-The spec requires a real-browser test that executes rather than skips. Append to `packages/sdk/src/__tests__/browser-contract.test.ts`, inside the existing describe that already holds `page`/`vitePort` (`browser-contract.test.ts:136`), following its established `page.goto` / `page.click` / `waitForTimeout` shape:
+The spec requires real-browser capture, and nothing in the repo can currently produce it: `UserCard.vue` issues no fetch, and the contract test's mock server answers *every* request with 202 (`browser-contract.test.ts:62-78`). Both sides need a hanging path.
+
+In `test-fixtures/vue-app/src/components/FetchUser.vue`, add to the `<script setup>` block:
 
 ```ts
-  it('captures fetch timing on the event, including a request that never responds', async () => {
+async function loadSlow() {
+  // Points at a server that accepts the connection and never responds, so
+  // AbortSignal.timeout is the only thing that ends this request.
+  const url = import.meta.env['VITE_OPSLANE_HANG_URL'] ?? 'http://localhost:1/hang';
+  await fetch(url, { signal: AbortSignal.timeout(1000) });
+}
+```
+
+and to its `<template>`, beside the existing load button:
+
+```html
+    <button data-testid="load-slow-btn" @click="loadSlow">Load Slow</button>
+```
+
+The URL must not start with the SDK's configured endpoint, or `isSdkEndpoint` (`network.ts:16`) excludes it from timing and the test silently measures nothing.
+
+- [ ] **Step 6: Serve that hanging endpoint from the contract test**
+
+In `packages/sdk/src/__tests__/browser-contract.test.ts`, alongside the existing `mockServer`, add a second server whose handler never responds, and pass its URL to the fixture through the same define mechanism that already injects `endpoint` (`browser-contract.test.ts:107`):
+
+```ts
+let hangServer: http.Server;
+let hangPort: number;
+```
+
+In the same `beforeAll` that starts `mockServer`:
+
+```ts
+    hangServer = http.createServer(() => {
+      // Deliberately never responds: the socket stays open until the client
+      // aborts. Do not call res.end().
+    });
+    await new Promise<void>(r => hangServer.listen(0, () => {
+      hangPort = (hangServer.address() as { port: number }).port;
+      r();
+    }));
+```
+
+Add `'import.meta.env.VITE_OPSLANE_HANG_URL': JSON.stringify(\`http://localhost:${hangPort}/hang\`)` to the existing define object, and close it in `afterAll` beside the other teardown:
+
+```ts
+    await new Promise<void>(r => hangServer?.close(() => r()));
+```
+
+`hangServer.close()` waits for open connections, so also call `hangServer.closeAllConnections()` first — the aborted request's socket may still be open and would hang the suite's teardown.
+
+- [ ] **Step 7: Write the real-browser timing test**
+
+Append inside the describe that already holds `page` and `vitePort`:
+
+```ts
+  it('captures a timed-out fetch with its duration in a real browser', async () => {
     receivedEvents = [];
 
     await page.goto(`http://localhost:${vitePort}`);
-    // The fixture route issues a fetch to a route the mock server never
-    // answers, aborted by AbortSignal.timeout, then throws.
-    await page.click('[data-testid="nav-usercard"]');
-    await page.click('[data-testid="edit-profile-btn"]');
-    await page.waitForTimeout(2000);
+    await page.click('[data-testid="nav-fetch"]');
+    await page.click('[data-testid="load-slow-btn"]');
+    // 1s AbortSignal.timeout, then the SDK flush interval.
+    await page.waitForTimeout(4000);
 
-    const event = receivedEvents[0] as Record<string, unknown>;
-    const timings = event.network_timings as Array<Record<string, unknown>> | undefined;
-    expect(timings).toBeInstanceOf(Array);
-    expect(timings?.length).toBeGreaterThanOrEqual(1);
-    expect(timings?.[0]).toHaveProperty('transport', 'fetch');
-    expect(typeof timings?.[0].duration_ms).toBe('number');
-  }, 15_000);
+    expect(receivedEvents.length).toBeGreaterThanOrEqual(1);
+    const event = receivedEvents.find(
+      (e) => Array.isArray((e as Record<string, unknown>).network_timings),
+    ) as Record<string, unknown> | undefined;
+    expect(event).toBeDefined();
+
+    const timings = event!.network_timings as Array<Record<string, unknown>>;
+    const hung = timings.find((t) => String(t.url).includes('/hang'));
+    expect(hung).toBeDefined();
+    expect(hung!.transport).toBe('fetch');
+    expect(hung!.outcome).toBe('timeout');
+    // Aborted before any headers arrived, which is the PR #1297 shape.
+    expect(hung).not.toHaveProperty('ttfb_ms');
+    expect(hung!.duration_ms as number).toBeGreaterThanOrEqual(900);
+  }, 20_000);
 ```
 
-If the existing fixture app issues no fetch on that route, add a hanging-fetch trigger to `test-fixtures/vue-app` rather than weakening the assertion — an event with no `network_timings` must fail this test, not pass it vacuously.
+An event without `network_timings` must fail this test, not pass it — hence the explicit `toBeDefined()` rather than optional chaining on the lookup.
 
-- [ ] **Step 6: Confirm the browser test executed rather than skipped**
+- [ ] **Step 8: Confirm the browser test executed rather than skipped**
 
-Run: `pnpm --filter @opslane/sdk test -- browser-contract --reporter=verbose`
+Run: `pnpm --filter @opslane/sdk exec vitest run src/__tests__/browser-contract.test.ts --reporter=verbose`
 Expected: the new test reports as **passed**, not skipped. A skip means Playwright browsers are unavailable (`browser-contract.test.ts:8-16`); install them rather than accepting the skip.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
-git add packages/sdk/src/network.ts packages/sdk/src/__tests__/network.test.ts packages/sdk/src/__tests__/browser-contract.test.ts
+git add packages/sdk/src/network.ts packages/sdk/src/__tests__/network.test.ts \
+        packages/sdk/src/__tests__/browser-contract.test.ts \
+        test-fixtures/vue-app/src/components/FetchUser.vue
 git commit -m "feat(sdk): time fetch requests, classifying opaque responses as ok"
 ```
 
@@ -751,7 +836,7 @@ describe('xhr timing capture', () => {
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `pnpm --filter @opslane/sdk test -- network`
+Run: `pnpm --filter @opslane/sdk exec vitest run src/__tests__/network.test.ts`
 Expected: FAIL — snapshot is empty
 
 - [ ] **Step 3: Extend the XHR patch**
@@ -762,6 +847,7 @@ Add a field to the existing `XHRWithOpslane` interface:
 
 ```ts
   _opslaneTimingHandle?: number;
+  _opslaneTimingBound?: boolean;
 ```
 
 Inside `XMLHttpRequest.prototype.send`, replace the existing `try { ... }` telemetry block's tail so that after `this.addEventListener('loadend', ...)` for telemetry, the timing listeners are registered:
@@ -770,11 +856,19 @@ Inside `XMLHttpRequest.prototype.send`, replace the existing `try { ... }` telem
         const timingHandle = startTiming('xhr', this._opslaneMethod || 'GET', url);
         this._opslaneTimingHandle = timingHandle;
 
+        // An XHR object can be reused: open()/send() may run many times on one
+        // instance. `once: true` removes only the listener that actually
+        // fired, so re-registering per send would accumulate the other four
+        // every time. Register once per instance and read the handle off
+        // `this` inside the callbacks.
+        if (!this._opslaneTimingBound) {
+          this._opslaneTimingBound = true;
+
         this.addEventListener('readystatechange', () => {
           // 2 === HEADERS_RECEIVED. This is the cross-transport comparable
           // milestone: fetch resolves here, XHR's loadend does not.
-          if (this.readyState === 2) {
-            try { markHeaders(timingHandle); } catch { /* SDK must never throw */ }
+          if (this.readyState === 2 && this._opslaneTimingHandle !== undefined) {
+            try { markHeaders(this._opslaneTimingHandle); } catch { /* SDK must never throw */ }
           }
         });
 
@@ -782,7 +876,9 @@ Inside `XMLHttpRequest.prototype.send`, replace the existing `try { ... }` telem
         // of them and cannot distinguish them. finalizeTiming is idempotent.
         const finalize = (outcome: Outcome, withStatus: boolean): void => {
           try {
-            finalizeTiming(timingHandle, outcome, withStatus ? this.status : undefined);
+            const handle = this._opslaneTimingHandle;
+            if (handle === undefined) return;
+            finalizeTiming(handle, outcome, withStatus ? this.status : undefined);
           } catch {
             // SDK must never throw
           }
@@ -802,6 +898,7 @@ Inside `XMLHttpRequest.prototype.send`, replace the existing `try { ... }` telem
         // It exists so a request that somehow reaches loadend with no terminal
         // event is still recorded instead of leaking as permanently in-flight.
         this.addEventListener('loadend', () => finalize('network_error', false), { once: true });
+        }
 ```
 
 Import the `Outcome` type alongside the functions:
@@ -827,7 +924,7 @@ Replace the final `return origSend.apply(this, args);` so a synchronous throw re
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `pnpm --filter @opslane/sdk test -- network`
+Run: `pnpm --filter @opslane/sdk exec vitest run src/__tests__/network.test.ts`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
@@ -885,28 +982,60 @@ describe('network timings on the payload', () => {
     expect(payload.network_timings?.[0].outcome).toBe('timeout');
   });
 
+});
+```
+
+- [ ] **Step 3a: Test teardown in its own file**
+
+This cannot live in `core.test.ts`: that file mocks `../transport` (`core.test.ts:9`), and `destroy()` returns immediately unless `init()` ran first (`index.ts:54`), so a `destroy()` call after a bare `loadConfig` would clear nothing and the test would pass vacuously.
+
+Create `packages/sdk/src/__tests__/network-timing-teardown.test.ts`:
+
+```ts
+// @vitest-environment jsdom
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { destroy, init } from '../index';
+import { buildPayload } from '../core';
+import { clearNetworkTimings, finalizeTiming, snapshotNetworkTimings, startTiming } from '../network-timing';
+import { TEST_PK } from './test-keys';
+
+vi.mock('../transport', () => ({
+  enqueueEvent: vi.fn(),
+  flushEvents: vi.fn(),
+  startTransport: vi.fn(),
+  stopTransport: vi.fn(),
+}));
+
+describe('network timing teardown', () => {
+  beforeEach(() => clearNetworkTimings());
+
   // Request history must not survive reinitialization: it could carry requests
   // captured under one project configuration into an event sent under another.
   it('carries no history across destroy() and re-init()', () => {
+    init({ apiKey: TEST_PK, endpoint: 'https://api.test', errorThrottleMs: 0 });
     const handle = startTiming('fetch', 'GET', 'https://app.example.com/api/before');
     finalizeTiming(handle, 'ok', 200);
+    expect(snapshotNetworkTimings()).toHaveLength(1);
 
     destroy();
-    init({ apiKey: TEST_PK, endpoint: 'https://api.test', errorThrottleMs: 0 });
+    expect(snapshotNetworkTimings()).toHaveLength(0);
 
+    init({ apiKey: TEST_PK, endpoint: 'https://api.test', errorThrottleMs: 0 });
     const payload = buildPayload('TypeError', 'boom', '', {
       type: 'error', timestamp: new Date().toISOString(), category: 'exception', message: 'boom',
     });
     expect(payload).not.toHaveProperty('network_timings');
+    destroy();
   });
 });
 ```
 
-The re-init test needs `import { destroy, init } from '../index';` in the same import block.
+Run: `pnpm --filter @opslane/sdk exec vitest run src/__tests__/network-timing-teardown.test.ts`
+Expected: FAIL before Step 4's `destroy()` wiring, PASS after.
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `pnpm --filter @opslane/sdk test -- core`
+Run: `pnpm --filter @opslane/sdk exec vitest run src/__tests__/core.test.ts`
 Expected: FAIL — `network_timings` is undefined in the second test
 
 - [ ] **Step 3: Attach the snapshot in `buildPayload`**
@@ -1081,7 +1210,7 @@ In the `'full payload matches the frozen fixture'` test, directly before the `co
 
 - [ ] **Step 5: Run the wire-shape test**
 
-Run: `pnpm --filter @opslane/sdk build && pnpm --filter @opslane/sdk test -- wire-shape`
+Run: `pnpm --filter @opslane/sdk build && pnpm --filter @opslane/sdk exec vitest run src/__tests__/wire-shape.test.ts`
 Expected: PASS. The build is required because `sdk_version` is injected at build time.
 
 - [ ] **Step 6: Verify no frozen fixture was modified**
@@ -1286,7 +1415,7 @@ Expected: FAIL — undefined: sanitizeNetworkTimings
 
 - [ ] **Step 3: Implement the sanitizer**
 
-In `packages/ingestion/handler/error_event.go`, confirm `bytes`, `encoding/json`, `regexp`, and `strings` are imported and add the `masking` package import if absent, then add near `sanitizeDebugMeta` (`:304`):
+In `packages/ingestion/handler/error_event.go`, confirm `bytes`, `encoding/json`, `math`, and `strings` are imported and add the `masking` package import if absent, then add near `sanitizeDebugMeta` (`:304`):
 
 ```go
 const (
@@ -1296,10 +1425,11 @@ const (
 )
 
 var (
-	// Applied after ToUpper. Permits the punctuation real methods and
-	// SDK-truncated methods carry (e.g. a clipped `PROPFIND-VERY-LO`); a
-	// letters-only rule would reject values the SDK legitimately emits.
-	reTimingMethod    = regexp.MustCompile(`^[A-Z0-9._-]{1,16}$`)
+	// RFC 7230 token, upper-cased. Must stay identical to the SDK's TOKEN
+	// regex: any narrower rule here silently drops entries the SDK emits.
+	// Written as a byte set rather than a regexp because a Go raw string
+	// literal cannot contain the backtick the token grammar allows.
+	timingMethodBytes = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!#$%&'*+.^_`|~-"
 	validTransports   = map[string]struct{}{"fetch": {}, "xhr": {}}
 	validTimingOutcome = map[string]struct{}{
 		"ok": {}, "http_error": {}, "timeout": {},
@@ -1311,13 +1441,28 @@ type validatedNetworkTiming struct {
 	Transport   string `json:"transport"`
 	Method      string `json:"method"`
 	URL         string `json:"url"`
-	// Pointers because both are REQUIRED: a plain int64 makes an absent or
+	// Pointers because both are REQUIRED: a plain numeric makes an absent or
 	// null field decode to 0, which then passes the non-negative check.
-	StartedAtMs *int64 `json:"started_at_ms"`
-	DurationMs  *int64 `json:"duration_ms"`
-	TTFBMs      *int64 `json:"ttfb_ms,omitempty"`
+	// float64, not int64, so a client sending 10.0 or 1e3 — legal JSON numbers
+	// the wire contract does not forbid — is accepted rather than rejected as
+	// malformed. Values are rounded on the way out.
+	StartedAtMs *float64 `json:"started_at_ms"`
+	DurationMs  *float64 `json:"duration_ms"`
+	TTFBMs      *float64 `json:"ttfb_ms,omitempty"`
 	Outcome     string `json:"outcome"`
 	Status      *int   `json:"status,omitempty"`
+}
+
+func validTimingMethod(value string) bool {
+	if len(value) == 0 || len(value) > 16 {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		if !strings.ContainsRune(timingMethodBytes, rune(value[i])) {
+			return false
+		}
+	}
+	return true
 }
 
 func validTimingURL(value string) bool {
@@ -1327,8 +1472,8 @@ func validTimingURL(value string) bool {
 	return strings.IndexFunc(value, func(r rune) bool { return r < 0x20 || r == 0x7f }) < 0
 }
 
-func validElapsed(value int64) bool {
-	return value >= 0 && value <= maxTimingElapsedMs
+func validElapsed(value float64) bool {
+	return !math.IsNaN(value) && !math.IsInf(value, 0) && value >= 0 && value <= maxTimingElapsedMs
 }
 
 // sanitizeNetworkTimings validates advisory request timing. Like debug_meta,
@@ -1370,7 +1515,7 @@ func sanitizeNetworkTimings(raw json.RawMessage) string {
 			continue
 		}
 		candidate.Method = strings.ToUpper(candidate.Method)
-		if !reTimingMethod.MatchString(candidate.Method) {
+		if !validTimingMethod(candidate.Method) {
 			RecordNetworkTimingDiscard("bad_method")
 			continue
 		}
@@ -1405,6 +1550,14 @@ func sanitizeNetworkTimings(raw json.RawMessage) string {
 		if !validTimingURL(candidate.URL) {
 			RecordNetworkTimingDiscard("bad_url")
 			continue
+		}
+
+		// Normalize to whole milliseconds so stored rows are uniform whatever
+		// numeric form the client sent.
+		*candidate.StartedAtMs = math.Round(*candidate.StartedAtMs)
+		*candidate.DurationMs = math.Round(*candidate.DurationMs)
+		if candidate.TTFBMs != nil {
+			*candidate.TTFBMs = math.Round(*candidate.TTFBMs)
 		}
 		retained = append(retained, candidate)
 	}
@@ -1511,7 +1664,7 @@ In `error_event.go`, add to the `IngestParams` literal after `DebugMeta:`:
 
 - [ ] **Step 4: Write the failing round-trip test**
 
-Append to `packages/ingestion/db/queries_test.go`. That file is `package db_test`, so types are qualified `db.` and the private `q.pool` is unreachable — query through the `pool` returned by `testPool`. This mirrors `error_group_ingestion_test.go:13-46` exactly; `DefaultEnvironmentID` is required, and omitting it fails environment resolution (`environments.go:46`).
+Append to `packages/ingestion/db/queries_test.go`. That file is `package db_test`, so types are qualified `db.` and the private `q.pool` is unreachable — query through the `pool` returned by `testPool`. Add `encoding/json` to its import block; the file does not currently import it (`queries_test.go:3-12`). This mirrors `error_group_ingestion_test.go:13-46` exactly; `DefaultEnvironmentID` is required, and omitting it fails environment resolution (`environments.go:46`).
 
 ```go
 func TestInsertErrorEventStoresNetworkTimings(t *testing.T) {
@@ -1566,14 +1719,17 @@ func TestInsertErrorEventStoresNetworkTimings(t *testing.T) {
 
 Decoding rather than substring-matching the JSON avoids a false pass on `jsonb`'s whitespace normalization.
 
-- [ ] **Step 5: Apply migrations and run the tests**
+- [ ] **Step 5: Actually apply the migration, then run the tests**
+
+`testPool` only opens a connection (`db/testhelper_test.go:13`); it runs no migrations, so without this the new column does not exist and the test fails on a missing relation.
 
 ```bash
 export DATABASE_URL="postgres://opslane:opslane_dev@localhost:${OPSLANE_POSTGRES_HOST_PORT:-5434}/opslane?sslmode=disable"
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f packages/ingestion/db/migrations/033_event_network_timings.sql
 cd packages/ingestion && go test ./db/ -run NetworkTimings -v
 ```
 
-Expected: PASS, and **not** `SKIP`. A skip means `DATABASE_URL` is unset and the test never ran.
+Expected: PASS, and **not** `SKIP`. A skip means `DATABASE_URL` is unset or Postgres is unreachable, and the test never ran.
 
 - [ ] **Step 6: Commit**
 
@@ -1603,23 +1759,14 @@ Add to the `wireFixture` struct:
 	NetworkTimings json.RawMessage `json:"network_timings"`
 ```
 
-Add `network_timings::text` to the round-trip `SELECT` and scan it into a new `networkTimingsText` variable alongside `debugMetaText`. Then assert the round trip, treating an omitted fixture field as the stored default:
+Add `network_timings::text` to the round-trip `SELECT` and scan it into a new `networkTimingsText` variable alongside `debugMetaText`. Then assert the round trip with the file's existing comparator (`wire_compat_test.go:133`), which ignores JSONB key order and whitespace — a length check would pass on same-cardinality field corruption:
 
 ```go
-			wantTimings := "[]"
-			if len(fixture.NetworkTimings) > 0 {
-				wantTimings = string(fixture.NetworkTimings)
+			wantTimings := fixture.NetworkTimings
+			if len(wantTimings) == 0 {
+				wantTimings = json.RawMessage(`[]`)
 			}
-			var gotTimings, expectTimings []map[string]any
-			if err := json.Unmarshal([]byte(networkTimingsText), &gotTimings); err != nil {
-				t.Fatalf("stored network_timings is not an array: %v", err)
-			}
-			if err := json.Unmarshal([]byte(wantTimings), &expectTimings); err != nil {
-				t.Fatalf("fixture network_timings is not an array: %v", err)
-			}
-			if len(gotTimings) != len(expectTimings) {
-				t.Errorf("network_timings round trip: got %d entries, want %d", len(gotTimings), len(expectTimings))
-			}
+			semanticJSONEqual(t, "network_timings", networkTimingsText, wantTimings)
 ```
 
 - [ ] **Step 2: Run the suite under its real name**
@@ -1702,18 +1849,20 @@ export REPLAY_STORE_ACCESS_KEY=minio REPLAY_STORE_SECRET_KEY=minio12345 REPLAY_S
 
 Setting a port without its URL is the silent failure mode: Go DB tests fall back to the hardcoded `localhost:5434` DSN and skip instead of failing.
 
-- [ ] **Step 3: Confirm Go tests run with zero skips**
-
-Run: `cd packages/ingestion && go test ./... -v 2>&1 | grep -c -- "--- SKIP"`
-Expected: `0`. The `-v` is load-bearing: without it `go test` suppresses per-test skip lines, so the grep prints `0` while DB tests are calling `t.Skip` (`db/testhelper_test.go:21`). A storage misconfiguration otherwise reports `ok` while roughly 30 tests never run.
-
-- [ ] **Step 4: Bring the stack up and apply migrations**
+- [ ] **Step 3: Bring the stack up and apply migrations**
 
 ```bash
 docker compose up -d postgres minio
 docker compose build ingestion && docker compose up -d ingestion
 psql "$DATABASE_URL" -f scripts/seed-e2e.sql
 ```
+
+- [ ] **Step 4: Confirm Go tests run with zero skips**
+
+This runs **after** the stack is up, deliberately: with Postgres down every DB test skips, and a skip check run first would be measuring the wrong thing.
+
+Run: `cd packages/ingestion && go test ./... -v 2>&1 | grep -c -- "--- SKIP"`
+Expected: `0`. The `-v` is load-bearing: without it `go test` suppresses per-test skip lines, so the grep prints `0` while DB tests are calling `t.Skip` (`db/testhelper_test.go:21`). A storage misconfiguration otherwise reports `ok` while roughly 30 tests never run.
 
 - [ ] **Step 5: Post an event carrying timings and assert it stored**
 
@@ -1722,7 +1871,7 @@ The route reads `X-API-Key` (`handler/project_keys.go:18`), and `project_api_key
 ```bash
 export OPSLANE_TEST_KEY='opslane_pk_mzxw6ytboi3damrrgi3tknzxgq_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopq'
 
-curl -sS -X POST "$INGESTION_URL/api/v1/events" \
+EVENT=$(curl -sS --fail-with-body -X POST "$INGESTION_URL/api/v1/events" \
   -H 'Content-Type: application/json' \
   -H "X-API-Key: $OPSLANE_TEST_KEY" \
   -d '{
@@ -1735,11 +1884,16 @@ curl -sS -X POST "$INGESTION_URL/api/v1/events" \
       {"transport":"fetch","method":"POST","url":"https://api.example.com/v1/assets/search?token=leak","started_at_ms":1784160000000,"duration_ms":10002,"outcome":"timeout"},
       {"transport":"fetch","method":"GET","url":"https://api.example.com/v1/user","started_at_ms":1784160000100,"duration_ms":184,"ttfb_ms":170,"outcome":"ok","status":200}
     ]
-  }'
+  }') || { echo "ingest failed: $EVENT"; exit 1; }
 
+# Assert against THIS event, not whatever happens to be newest — a stale row
+# from an earlier run would otherwise produce a green smoke.
+EVENT_ID=$(printf '%s' "$EVENT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["event_id"])')
 psql "$DATABASE_URL" -c \
-  "SELECT jsonb_pretty(network_timings) FROM error_events ORDER BY created_at DESC LIMIT 1;"
+  "SELECT jsonb_pretty(network_timings) FROM error_events WHERE id = '$EVENT_ID';"
 ```
+
+If `event_id` is not the field name in the 202 body, read the response key from `handler/error_event.go` rather than falling back to `ORDER BY created_at`.
 
 Expected: both entries stored; the first has `"outcome": "timeout"` with no `ttfb_ms` key; **neither URL contains `token=leak`**, proving server-side redaction ran independently of the SDK.
 
@@ -1765,8 +1919,11 @@ The PR description must state that this changes no diagnosis behavior and that t
 | --- | --- | --- |
 | Entry count | `MAX_ENTRIES = 20` | `maxNetworkTimings = 20` |
 | URL length | `capBytes(..., 2048)`, UTF-8 bytes | `len(value) > 2048`, UTF-8 bytes |
-| Method | `toUpperCase()` then 16 bytes | `ToUpper` then `^[A-Z0-9._-]{1,16}$` |
+| Method | `toUpperCase()`, 16 bytes, then the `TOKEN` regex | `ToUpper` then `validTimingMethod`, same RFC 7230 token set |
+| Empty URL | not recorded (`scrubUrl` can return `''`) | rejected as `bad_url` |
 | Elapsed | clamped to `MAX_ELAPSED_MS = 600000` | dropped above `600000` |
 | Status | omitted unless 100–599 | rejected outside 100–599 |
+
+**Numeric decoding.** The Go sanitizer decodes timing numbers as `*float64`: pointers so a missing or null required field is detected rather than defaulting to 0, and floats so a legal JSON number such as `10.0` or `1e3` is accepted rather than rejected as malformed. Values are rounded to whole milliseconds before storage.
 
 **Go test packages.** `error_event_test.go`, `queries_test.go`, and `masking_test.go` are all external (`*_test` packages). Task 7's sanitizer tests therefore go in a new internal file; Tasks 6 and 8 qualify every call and type with its package name.
