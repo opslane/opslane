@@ -103,6 +103,9 @@ importers:
       '@opslane/shared':
         specifier: workspace:*
         version: link:../shared
+      '@opslane/worker':
+        specifier: workspace:*
+        version: link:../packages/worker
     devDependencies:
       tsx:
         specifier: ^4.23.1
