@@ -286,6 +286,8 @@ describe('processInvestigateJob diagnosis routing', () => {
       fixable: false,
       confidence: 'medium',
       reason: 'The cause is outside this codebase: GET /api/assets/search (remote service)',
+      dossier: null,
+      adjudication: null,
       decisionReason: 'The cause is outside this codebase: GET /api/assets/search (remote service)',
       outcome: 'not_actionable',
       diagnosis: {
@@ -319,6 +321,8 @@ describe('processInvestigateJob diagnosis routing', () => {
       fixable: false,
       confidence: 'low',
       reason: 'The investigation produced no usable diagnosis',
+      dossier: null,
+      adjudication: null,
       decisionReason: 'The investigation produced no usable diagnosis',
       outcome: 'needs_more_context',
       diagnosis: null,
@@ -349,6 +353,8 @@ describe('processInvestigateJob diagnosis routing', () => {
       fixable: true,
       confidence: 'high',
       reason: 'The cause is at src/App.vue:42',
+      dossier: null,
+      adjudication: null,
       decisionReason: 'The cause is at src/App.vue:42',
       outcome: 'code_fix',
       diagnosis: {

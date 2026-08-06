@@ -173,6 +173,13 @@ export function createToolBridge(
           one_line_description: { type: 'string', description: 'What caused the error, in under 30 words' },
           why_chain: { type: 'array', items: { type: 'string' }, description: 'Ordered why-statements, each under 15 words' },
           reproduction_steps: { type: 'array', items: { type: 'string' }, description: 'Steps that reproduce it, each under 15 words' },
+          cause_kind: {
+            type: 'string',
+            enum: ['local_code', 'external_system', 'data_or_input', 'configuration', 'unknown'],
+            description:
+              'Where the cause lives. external_system or data_or_input mean it is not code we hold, ' +
+              'which makes this a conclusion rather than a failure.',
+          },
           cause_location: { type: 'string', description: 'path/to/file.ts:42, or the external system' },
           change_counterfactual: { type: 'string', description: 'What change here would remove the cause, or why none would' },
           unknowns: { type: 'array', items: { type: 'string' }, description: 'What you could not establish' },
@@ -181,6 +188,7 @@ export function createToolBridge(
           'one_line_description',
           'why_chain',
           'reproduction_steps',
+          'cause_kind',
           'cause_location',
           'change_counterfactual',
         ],

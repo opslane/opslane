@@ -16,7 +16,14 @@ import type { Platform } from './platform.js';
 import type { RuntimeInfo } from './runtime-info.js';
 import { buildReason, triageReasonCodes } from './reason-codes.js';
 import { deriveOutcome } from './classify.js';
-import { parseDiagnosis } from './diagnosis-schema.js';
+import { adjudicationFromDecline } from './dossier-schema.js';
+
+/** Narrow an unknown array field to non-empty strings. */
+function strings(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+    : [];
+}
 import type { FixSurface } from './fix-surface.js';
 import type { AgentCompletionResult, VisualAnalysisOutput, SourceFile, AgentState } from './harness/types.js';
 import { scrubSecrets } from './harness/redact.js';
@@ -935,9 +942,9 @@ export async function runAgentFix(input: AgentFixInput): Promise<AgentFixResult>
         if (sandbox.unavailable) raiseSandboxGone('agent-loop');
 
         if (agentState.gaveUp) {
-          const diagnosis = parseDiagnosis(agentState.submittedDiagnosis ?? {});
+          const declined = adjudicationFromDecline(agentState.submittedDiagnosis ?? {});
           const decision = deriveOutcome(
-            diagnosis,
+            declined,
             input.fixSurface ?? { globs: null },
             (path) => trackedFiles.has(path),
           );
@@ -946,7 +953,7 @@ export async function runAgentFix(input: AgentFixInput): Promise<AgentFixResult>
                 ? 'triage_unfixable'
                 : 'unfixable_infra')
             : 'insufficient_context';
-          const reproductionSteps = diagnosis?.reproduction_steps ?? [];
+          const reproductionSteps = strings(agentState.submittedDiagnosis?.['reproduction_steps']);
           agentState.giveUpReason = buildReason(
             reasonCode,
             decision.reason,

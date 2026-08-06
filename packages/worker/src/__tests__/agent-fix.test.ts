@@ -486,6 +486,7 @@ describe('runAgentFix', () => {
           one_line_description: 'The CDN is unavailable',
           why_chain: ['Client requests asset', 'CDN does not respond', 'Request times out'],
           reproduction_steps: ['Load the affected asset'],
+          cause_kind: 'external_system',
           cause_location: 'https://cdn.example.com/app.js',
         };
         return makeAgentResult();
@@ -698,6 +699,7 @@ describe('runAgentFix', () => {
           one_line_description: 'The CDN is unavailable',
           why_chain: ['Client requests asset', 'CDN does not respond', 'Request times out'],
           reproduction_steps: ['Load the affected asset'],
+          cause_kind: 'external_system',
           cause_location: 'https://cdn.example.com/app.js',
         };
       }

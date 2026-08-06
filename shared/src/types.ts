@@ -373,4 +373,13 @@ export type SetupPrStatus =
   | 'already_installed'
   | 'failed';
 
-export type { Diagnosis, DiagnosisOutcome, FailingRequest } from './diagnosis.js';
+export type {
+  Adjudication,
+  Diagnosis,
+  DiagnosisOutcome,
+  Dossier,
+  EvidenceStrength,
+  FailingRequest,
+  Hypothesis,
+  HypothesisKind,
+} from './diagnosis.js';
