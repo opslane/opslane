@@ -84,3 +84,35 @@ Ingestion sanitizes it before storage:
 
 An invalid `commit_sha` is discarded independently of otherwise valid debug
 images. Unknown fields remain tolerated under the append-only event contract.
+
+## Network timings
+
+Browser SDK 4.1.0 adds the optional top-level `network_timings` array. Each entry
+describes one observed browser request:
+
+- `transport` — `fetch` or `xhr`
+- `method` — a 1–16-byte uppercase HTTP token
+- `url` — 1–2048 bytes, no control characters
+- `started_at_ms` — epoch milliseconds
+- `duration_ms` — start to terminal event, 0–600000
+- `ttfb_ms` — optional; time to response headers, 0–600000
+- `outcome` — `ok`, `http_error`, `timeout`, `abort`, `network_error`, or `in_flight`
+- `status` — optional integer, 100–599
+
+The corresponding frozen fixtures are `v4.1.0-minimal.json` (field omitted) and
+`v4.1.0-full.json` (field populated). Older payloads remain valid.
+
+`duration_ms` is transport-dependent: `fetch` resolves when response headers
+arrive, while XHR `loadend` fires after the transfer completes. `ttfb_ms` is the
+comparable field across both. A fetch entry never reflects response-body time.
+
+The array is not chronological. The browser SDK emits still-running requests
+first, oldest start first, each with `outcome: "in_flight"`; the remaining slots
+hold settled requests, most recently settled first. Sort on `started_at_ms` if a
+consumer needs time order.
+
+Timing data is advisory and must never make event ingestion fail. Ingestion
+sanitizes it before storage: a non-array container becomes `[]`; entries failing
+any constraint above are dropped individually; at most 20 entries are retained in
+first-seen order. URLs are redacted server-side — userinfo, the full query string,
+and token-bearing fragments are stripped regardless of what the client sent.

@@ -23,6 +23,10 @@ var (
 		mu       sync.Mutex
 		byReason map[string]*atomic.Int64
 	}
+	networkTimingsDiscardedTotal struct {
+		mu       sync.Mutex
+		byReason map[string]*atomic.Int64
+	}
 	commitSHADiscardedTotal             atomic.Int64
 	eventsWithDebugImagesTotal          atomic.Int64
 	debugMetaRegistryZeroMatchedTotal   atomic.Int64
@@ -63,6 +67,7 @@ func init() {
 		"python":     {},
 	}
 	debugMetaDiscardedTotal.byReason = make(map[string]*atomic.Int64)
+	networkTimingsDiscardedTotal.byReason = make(map[string]*atomic.Int64)
 	ingestDuration.buckets = []float64{0.01, 0.05, 0.1, 0.25, 0.5, 1.0}
 	ingestDuration.counts = make([]atomic.Int64, len(ingestDuration.buckets))
 }
@@ -94,6 +99,24 @@ func RecordDebugMetaDiscard(reason string) {
 		debugMetaDiscardedTotal.byReason[reason] = counter
 	}
 	debugMetaDiscardedTotal.mu.Unlock()
+	counter.Add(1)
+}
+
+func RecordNetworkTimingDiscard(reason string) {
+	switch reason {
+	case "malformed_container", "non_object_entry", "bad_transport", "bad_method",
+		"bad_url", "bad_outcome", "bad_started_at", "bad_duration", "bad_ttfb",
+		"bad_status", "over_limit":
+	default:
+		return
+	}
+	networkTimingsDiscardedTotal.mu.Lock()
+	counter, ok := networkTimingsDiscardedTotal.byReason[reason]
+	if !ok {
+		counter = &atomic.Int64{}
+		networkTimingsDiscardedTotal.byReason[reason] = counter
+	}
+	networkTimingsDiscardedTotal.mu.Unlock()
 	counter.Add(1)
 }
 
@@ -226,6 +249,20 @@ func Metrics(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "opslane_debug_meta_images_discarded_total{reason=%q} %d\n", reason, count)
 	}
 	debugMetaDiscardedTotal.mu.Unlock()
+	fmt.Fprintln(w)
+
+	fmt.Fprintln(w, "# HELP opslane_network_timings_discarded_total Network timing entries discarded during validation")
+	fmt.Fprintln(w, "# TYPE opslane_network_timings_discarded_total counter")
+	networkTimingsDiscardedTotal.mu.Lock()
+	timingReasons := []string{"malformed_container", "non_object_entry", "bad_transport", "bad_method", "bad_url", "bad_outcome", "bad_started_at", "bad_duration", "bad_ttfb", "bad_status", "over_limit"}
+	for _, reason := range timingReasons {
+		count := int64(0)
+		if counter := networkTimingsDiscardedTotal.byReason[reason]; counter != nil {
+			count = counter.Load()
+		}
+		fmt.Fprintf(w, "opslane_network_timings_discarded_total{reason=%q} %d\n", reason, count)
+	}
+	networkTimingsDiscardedTotal.mu.Unlock()
 	fmt.Fprintln(w)
 
 	fmt.Fprintln(w, "# HELP opslane_commit_sha_discarded_total Invalid optional commit SHA fields discarded")

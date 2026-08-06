@@ -36,6 +36,8 @@ interface ViteDevServer {
 
 let mockServer: http.Server;
 let mockPort: number;
+let hangServer: http.Server;
+let hangPort: number;
 let receivedEvents: unknown[];
 let viteServer: ViteDevServer;
 let vitePort: number;
@@ -82,6 +84,14 @@ describe.skipIf(!playwrightAvailable)('SDK browser contract', () => {
       r();
     }));
 
+    hangServer = http.createServer(() => {
+      // Deliberately never respond; AbortSignal.timeout ends the request.
+    });
+    await new Promise<void>(r => hangServer.listen(0, () => {
+      hangPort = (hangServer.address() as { port: number }).port;
+      r();
+    }));
+
     // 2. Start Vite dev server for fixture app
     const { createServer } = await import('vite');
     const vue = (await import('@vitejs/plugin-vue')).default;
@@ -94,6 +104,9 @@ describe.skipIf(!playwrightAvailable)('SDK browser contract', () => {
         },
       },
       server: { port: 0 },
+      define: {
+        'import.meta.env.VITE_OPSLANE_HANG_URL': JSON.stringify(`http://localhost:${hangPort}/hang`),
+      },
       plugins: [
         vue(),
         {
@@ -130,6 +143,8 @@ describe.skipIf(!playwrightAvailable)('SDK browser contract', () => {
     await page?.close();
     await browser?.close();
     await viteServer?.close();
+    hangServer?.closeAllConnections();
+    await new Promise<void>(r => hangServer?.close(() => r()));
     await new Promise<void>(r => mockServer?.close(() => r()));
   });
 
@@ -166,4 +181,27 @@ describe.skipIf(!playwrightAvailable)('SDK browser contract', () => {
     const event = receivedEvents[0] as Record<string, unknown>;
     expect((event.error as Record<string, unknown>).message).toContain('Sync failed');
   }, 15_000);
+
+  it('captures a timed-out fetch with its duration in a real browser', async () => {
+    receivedEvents = [];
+
+    await page.goto(`http://localhost:${vitePort}`);
+    await page.click('[data-testid="nav-fetch"]');
+    await page.click('[data-testid="load-slow-btn"]');
+    await page.waitForTimeout(4000);
+
+    expect(receivedEvents.length).toBeGreaterThanOrEqual(1);
+    const event = receivedEvents.find(
+      (entry) => Array.isArray((entry as Record<string, unknown>).network_timings),
+    ) as Record<string, unknown> | undefined;
+    expect(event).toBeDefined();
+
+    const timings = event!.network_timings as Array<Record<string, unknown>>;
+    const hung = timings.find((timing) => String(timing.url).includes('/hang'));
+    expect(hung).toBeDefined();
+    expect(hung!.transport).toBe('fetch');
+    expect(hung!.outcome).toBe('timeout');
+    expect(hung).not.toHaveProperty('ttfb_ms');
+    expect(hung!.duration_ms as number).toBeGreaterThanOrEqual(900);
+  }, 20_000);
 });

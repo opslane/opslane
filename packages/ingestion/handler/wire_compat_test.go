@@ -26,17 +26,18 @@ type wireFixture struct {
 		Message string `json:"message"`
 		Stack   string `json:"stack"`
 	} `json:"error"`
-	Breadcrumbs json.RawMessage `json:"breadcrumbs"`
-	Context     json.RawMessage `json:"context"`
-	Platform    string          `json:"platform"`
-	Runtime     json.RawMessage `json:"runtime"`
-	SDKVersion  string          `json:"sdk_version"`
-	Release     string          `json:"release"`
-	DebugMeta   json.RawMessage `json:"debug_meta"`
-	CommitSHA   string          `json:"commit_sha"`
-	SessionID   string          `json:"session_id"`
-	Environment string          `json:"environment"`
-	ContextUser *struct {
+	Breadcrumbs    json.RawMessage `json:"breadcrumbs"`
+	Context        json.RawMessage `json:"context"`
+	Platform       string          `json:"platform"`
+	Runtime        json.RawMessage `json:"runtime"`
+	SDKVersion     string          `json:"sdk_version"`
+	Release        string          `json:"release"`
+	DebugMeta      json.RawMessage `json:"debug_meta"`
+	NetworkTimings json.RawMessage `json:"network_timings"`
+	CommitSHA      string          `json:"commit_sha"`
+	SessionID      string          `json:"session_id"`
+	Environment    string          `json:"environment"`
+	ContextUser    *struct {
 		ID          string `json:"id"`
 		Email       string `json:"email"`
 		AccountID   string `json:"account_id"`
@@ -172,18 +173,19 @@ func TestWireFixtures_AcceptedAndStored(t *testing.T) {
 			var (
 				timestamp                                                         time.Time
 				errorType, errorMessage, stack, release, sessionID, eventPlatform string
-				breadcrumbsText, contextText, debugMetaText, commitSHA, groupID   string
+				breadcrumbsText, contextText, debugMetaText, networkTimingsText   string
+				commitSHA, groupID                                                string
 				endUserID                                                         *string
 			)
 			if err := pool.QueryRow(context.Background(), `
 				SELECT "timestamp", error_type, error_message, stack_trace_raw,
 				       COALESCE(release,''), COALESCE(session_id,''),
-				       breadcrumbs::text, context::text, debug_meta::text,
+				       breadcrumbs::text, context::text, debug_meta::text, network_timings::text,
 				       COALESCE(commit_sha, ''),
 				       error_group_id::text, end_user_id::text, platform
 				FROM error_events WHERE id = $1`, eventID).
 				Scan(&timestamp, &errorType, &errorMessage, &stack, &release, &sessionID,
-					&breadcrumbsText, &contextText, &debugMetaText, &commitSHA,
+					&breadcrumbsText, &contextText, &debugMetaText, &networkTimingsText, &commitSHA,
 					&groupID, &endUserID, &eventPlatform); err != nil {
 				t.Fatalf("query stored event: %v", err)
 			}
@@ -224,6 +226,11 @@ func TestWireFixtures_AcceptedAndStored(t *testing.T) {
 				expectedDebugMeta = json.RawMessage(`{"images":[]}`)
 			}
 			semanticJSONEqual(t, "debug_meta", debugMetaText, expectedDebugMeta)
+			wantTimings := fixture.NetworkTimings
+			if len(wantTimings) == 0 {
+				wantTimings = json.RawMessage(`[]`)
+			}
+			semanticJSONEqual(t, "network_timings", networkTimingsText, wantTimings)
 			if commitSHA != fixture.CommitSHA {
 				t.Errorf("commit_sha = %q, want %q", commitSHA, fixture.CommitSHA)
 			}

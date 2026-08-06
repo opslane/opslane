@@ -5,6 +5,7 @@ import { enqueueEvent } from './transport';
 import { getSessionId, getSessionProgress, setSessionUser, type SessionProgress } from './session.js';
 import { SDK_VERSION } from './version';
 import { COMMIT_SHA_GLOBAL } from './build/registry-contract.js';
+import { snapshotNetworkTimings } from './network-timing';
 
 declare const __OPSLANE_COMMIT_SHA__: string;
 
@@ -81,7 +82,7 @@ export function buildPayload(
     context.user = buildUserContext(currentUser);
   }
 
-  return {
+  const payload: ErrorEventPayload = {
     timestamp: new Date().toISOString(),
     error: {
       type: errorType,
@@ -96,6 +97,11 @@ export function buildPayload(
     session_id: getSessionId() || undefined,
     environment: config.environment || undefined,
   };
+
+  const timings = snapshotNetworkTimings();
+  if (timings.length > 0) payload.network_timings = timings;
+
+  return payload;
 }
 
 function readCommitSha(): string | undefined {

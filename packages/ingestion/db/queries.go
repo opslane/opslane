@@ -420,6 +420,7 @@ type IngestParams struct {
 	Context              string // JSON, defaults to "{}"
 	Release              string // source map lookup
 	DebugMeta            string // JSON, defaults to {"images":[]}
+	NetworkTimings       string // JSON array, defaults to "[]"
 	CommitSHA            string // optional lowercase Git object ID
 	SessionID            string // links error event to replay
 	Platform             string // javascript | python | future wire token; empty defaults to javascript
@@ -461,6 +462,9 @@ func (q *Queries) InsertErrorEventAndGroup(ctx context.Context, p IngestParams) 
 	}
 	if p.DebugMeta == "" {
 		p.DebugMeta = `{"images":[]}`
+	}
+	if p.NetworkTimings == "" {
+		p.NetworkTimings = "[]"
 	}
 	if p.Platform == "" {
 		p.Platform = "javascript"
@@ -516,10 +520,10 @@ func (q *Queries) InsertErrorEventAndGroup(ctx context.Context, p IngestParams) 
 	// 1. Insert error event
 	var eventID string
 	err = tx.QueryRow(ctx,
-		`INSERT INTO error_events (project_id, environment_id, timestamp, error_type, error_message, stack_trace_raw, breadcrumbs, context, release, session_id, platform, debug_meta, commit_sha)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9, $10, $11, $12::jsonb, $13)
+		`INSERT INTO error_events (project_id, environment_id, timestamp, error_type, error_message, stack_trace_raw, breadcrumbs, context, release, session_id, platform, debug_meta, commit_sha, network_timings)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9, $10, $11, $12::jsonb, $13, $14::jsonb)
 		 RETURNING id`,
-		p.ProjectID, environmentID, eventTime, p.ErrorType, p.ErrorMessage, p.StackTraceRaw, p.Breadcrumbs, p.Context, nilIfEmpty(p.Release), nilIfEmpty(p.SessionID), p.Platform, p.DebugMeta, nilIfEmpty(p.CommitSHA),
+		p.ProjectID, environmentID, eventTime, p.ErrorType, p.ErrorMessage, p.StackTraceRaw, p.Breadcrumbs, p.Context, nilIfEmpty(p.Release), nilIfEmpty(p.SessionID), p.Platform, p.DebugMeta, nilIfEmpty(p.CommitSHA), p.NetworkTimings,
 	).Scan(&eventID)
 	if err != nil {
 		return nil, fmt.Errorf("insert error event: %w", err)
