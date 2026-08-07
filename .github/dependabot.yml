@@ -10,20 +10,6 @@ updates:
         update-types:
           - minor
           - patch
-  # eval/apps/* are npm projects with their own package-lock.json and are not
-  # pnpm workspace members, so the root updater above never sees them.
-  - package-ecosystem: npm
-    directories:
-      - '/eval/apps/react-app'
-      - '/eval/apps/vue-app'
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
-    groups:
-      eval-apps-minor-and-patch:
-        update-types:
-          - minor
-          - patch
   - package-ecosystem: gomod
     directory: '/packages/ingestion'
     schedule:

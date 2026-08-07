@@ -1,5 +1,0 @@
-{
-  "comment": "Frozen 2026-08-06. Prompts are tuned against `tuning` only. Results on `holdout` are read once per candidate change and never tuned against. With three application repositories this split is weak evidence of generalisation; treat it as a guard against overfitting, not proof of it. Every repository in cases.jsonl and cases-apps.jsonl must appear in exactly one list: splitFor throws on an unlisted repository by design, so an unassigned one fails the run rather than being silently scored.",
-  "tuning": ["dubinc/dub", "formbricks/formbricks", "axios/axios", "date-fns/date-fns"],
-  "holdout": ["documenso/documenso", "vuejs/core"]
-}

@@ -13,9 +13,9 @@ Opslane is an AI-powered production error-resolution engine. It ingests browser 
 | `packages/sdk` | Browser TypeScript SDK, React/Vue integrations, Vite source maps |
 | `shared` | Runtime-free shared TypeScript contracts |
 | `cli` | Node 22, Commander, Inquirer, Chalk |
-| `eval`, `test-e2e`, `test-fixtures` | Evaluations, end-to-end contracts, and browser fixtures |
+| `test-e2e`, `test-fixtures` | End-to-end contracts and browser fixtures |
 
-Server, worker, agent-core, dashboard, CLI, eval, and test code is AGPL-3.0-only. The browser and Python SDKs and shared types are MIT licensed.
+Server, worker, agent-core, dashboard, CLI, and test code is AGPL-3.0-only. The browser and Python SDKs and shared types are MIT licensed.
 
 ## Verification
 

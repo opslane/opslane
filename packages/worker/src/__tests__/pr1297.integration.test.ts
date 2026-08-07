@@ -9,13 +9,20 @@ vi.mock('@anthropic-ai/sdk', () => ({
 
 import { investigateError } from '../investigate.js';
 
-// Vitest runs with cwd at packages/worker, and __dirname does not exist under
-// ESM, so anchor to the repository root through import.meta.url.
+// These two cases are the regression controls for PR #1297: a request timeout
+// that must never route to a code fix, and a rate limit that must not either.
+// They used to be read out of the eval workspace, which has moved to a private
+// repository — so they live beside the test that depends on them rather than
+// making this suite depend on a directory that is no longer here.
+const FIXTURES = fileURLToPath(new URL('./fixtures', import.meta.url));
+// The repository the investigation reads while resolving citations. Vitest runs
+// with cwd at packages/worker and __dirname does not exist under ESM, so this
+// anchors through import.meta.url.
 const REPO_ROOT = fileURLToPath(new URL('../../../..', import.meta.url));
 const USAGE = { input_tokens: 900, output_tokens: 200, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
 
 function fixture(name: string): Record<string, any> {
-  return JSON.parse(readFileSync(`${REPO_ROOT}/eval/cases/${name}/case.json`, 'utf8'));
+  return JSON.parse(readFileSync(`${FIXTURES}/${name}.json`, 'utf8'));
 }
 
 function inputFrom(f: Record<string, any>) {
