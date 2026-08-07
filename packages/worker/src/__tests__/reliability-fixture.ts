@@ -183,16 +183,39 @@ export async function startProviderRecorders(options: ProviderTwinOptions = {}):
           remediation: 'Guard the missing value with a narrow fallback.',
         },
       }], 'tool_use');
-    } else if (names.includes('classify_error')) {
+    } else if (names.includes('submit_diagnosis') && !names.includes('edit')) {
+      // The investigation's terminal tool, which replaced classify_error when
+      // the two-agent split was retired. Without a branch here the request fell
+      // through to the prose reply below, the loop nudged once, gave up, and the
+      // whole pipeline terminated needs_human — which is what this lane caught.
+      //
+      // The `edit` exclusion is load-bearing, and it is a real hazard rather
+      // than a quirk of this twin: the FIX agent declares a decline tool that is
+      // also called submit_diagnosis (harness/tool-bridge.ts) with an
+      // incompatible schema. Matching on the name alone answered the fix agent
+      // with an investigation-shaped diagnosis, which it read as "the agent gave
+      // up" — needs_human, at the last step of the pipeline. Only the
+      // investigation lacks `edit`, so that is what tells the two apart.
       message = anthropicMessage(body, [{
         type: 'tool_use',
-        id: 'tool_classify',
-        name: 'classify_error',
+        id: 'tool_diagnose',
+        name: 'submit_diagnosis',
         input: {
-          fixable: true,
-          confidence: 'high',
-          reason: 'A nullable production value is dereferenced without a guard.',
-          remediation: 'Use a narrow fallback for the missing value.',
+          best_supported: 'A nullable production value is dereferenced without a guard.',
+          evidence_check: 'Read src/value.js and the failing test.',
+          candidates_considered: [
+            { statement: 'The value renderer dereferences a nullable input', kind: 'local_code' },
+            { statement: 'The upstream service returned an unexpected payload', kind: 'external_system' },
+          ],
+          rejected: ['The upstream service returned an unexpected payload — the crash reproduces offline.'],
+          evidence_strength: 'conclusive',
+          cause_kind: 'local_code',
+          // Must resolve inside the fixture clone, or routing scores it
+          // citation_unresolvable and parks the incident.
+          cause_locations: [{ path: 'src/value.js', line: 1, note: 'Dereferenced before any guard.' }],
+          reasoning: 'The stack names src/value.js, and the value is read before it is checked.',
+          why_chain: ['Production data contains null', 'value is dereferenced', 'Rendering throws'],
+          reproduction_steps: ['Render the fixture with a null value'],
         },
       }], 'tool_use');
     } else if (names.includes('score_diff')) {

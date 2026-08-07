@@ -255,7 +255,7 @@ describe('event-to-pr reliability system tracer', () => {
     expect(await scanReliabilityInvariants(db)).toEqual([]);
 
     expect(providers.anthropicJournal).toHaveLength(6);
-    expect(toolNames(providers.anthropicJournal[0]!.body)).toContain('classify_error');
+    expect(toolNames(providers.anthropicJournal[0]!.body)).toContain('submit_diagnosis');
     expect(toolNames(providers.anthropicJournal[4]!.body)).toEqual(['score_diff']);
     // Durable delivery reconciles before it creates: the pipeline looks for an
     // existing open PR on the stable branch, probes the branch head (absent →
