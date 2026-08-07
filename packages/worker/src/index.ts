@@ -565,6 +565,10 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
       model: process.env['INVESTIGATION_MODEL'] ?? 'claude-sonnet-4-6',
       promptVersion: 'diagnosis-v1',
       jobId: job.id,
+      // Persisted because the fix job loads this row to decide whether it may
+      // run at all, and outcome alone cannot answer that.
+      basis: triage.decisionBasis,
+      confidence: triage.confidence,
     };
 
     if (triage.outcome === 'needs_more_context') {

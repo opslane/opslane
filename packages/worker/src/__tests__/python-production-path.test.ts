@@ -235,7 +235,14 @@ describeDb('Python two-stage production path', () => {
     delete process.env['OPSLANE_PYTHON_PIPELINE'];
     delete process.env['ANTHROPIC_API_KEY'];
     delete process.env['GITHUB_TOKEN'];
-    await pool.query(`DELETE FROM diagnosis_decisions WHERE project_id = $1`, [projectId]);
+    // diagnosis_decisions is insert-only by trigger (migration 034), so the
+    // reset has to disable it. Test setup only; production has no such route.
+    await pool.query('ALTER TABLE diagnosis_decisions DISABLE TRIGGER diagnosis_decisions_immutable_row');
+    try {
+      await pool.query(`DELETE FROM diagnosis_decisions WHERE project_id = $1`, [projectId]);
+    } finally {
+      await pool.query('ALTER TABLE diagnosis_decisions ENABLE TRIGGER diagnosis_decisions_immutable_row');
+    }
     await pool.query(`DELETE FROM error_group_jobs WHERE project_id = $1`, [projectId]);
     await pool.query(`DELETE FROM error_events WHERE project_id = $1`, [projectId]);
     await pool.query(`DELETE FROM error_groups WHERE project_id = $1`, [projectId]);

@@ -20,6 +20,7 @@ import {
   finalizeDelivery,
   getQueueDepth,
   recordDiagnosisDecision,
+  loadDiagnosisDecision,
 } from '../db.js';
 
 const DATABASE_URL = process.env['DATABASE_URL'];
@@ -95,11 +96,26 @@ async function seedPendingJob(options: {
   return jobId;
 }
 
+/**
+ * diagnosis_decisions is insert-only by trigger (migration 034), so a test
+ * database cannot be reset without disabling that trigger for the statement.
+ * Disabling it here, loudly and in test setup only, is the point: production
+ * has no way to do this.
+ */
+async function purgeDiagnosisDecisions(projectId: string): Promise<void> {
+  await testPool.query('ALTER TABLE diagnosis_decisions DISABLE TRIGGER diagnosis_decisions_immutable_row');
+  try {
+    await testPool.query('DELETE FROM diagnosis_decisions WHERE project_id = $1', [projectId]);
+  } finally {
+    await testPool.query('ALTER TABLE diagnosis_decisions ENABLE TRIGGER diagnosis_decisions_immutable_row');
+  }
+}
+
 async function cleanupTestData(): Promise<void> {
   // Delete in reverse FK order
   await testPool.query(`DELETE FROM friction_signals WHERE project_id = $1`, [testProjectId]);
   await testPool.query(`DELETE FROM friction_adjudication_generations WHERE project_id = $1`, [testProjectId]);
-  await testPool.query(`DELETE FROM diagnosis_decisions WHERE project_id = $1`, [testProjectId]);
+  await purgeDiagnosisDecisions(testProjectId);
   await testPool.query(`DELETE FROM error_group_jobs WHERE project_id = $1`, [testProjectId]);
   await testPool.query(`DELETE FROM error_events WHERE project_id = $1`, [testProjectId]);
   await testPool.query(`DELETE FROM error_groups WHERE project_id = $1`, [testProjectId]);
@@ -166,7 +182,7 @@ describeDb('db.ts integration tests', () => {
     // Clean only jobs and error groups between tests, keep tenant
     await testPool.query(`DELETE FROM friction_signals WHERE project_id = $1`, [testProjectId]);
     await testPool.query(`DELETE FROM friction_adjudication_generations WHERE project_id = $1`, [testProjectId]);
-    await testPool.query(`DELETE FROM diagnosis_decisions WHERE project_id = $1`, [testProjectId]);
+    await purgeDiagnosisDecisions(testProjectId);
     await testPool.query(`DELETE FROM error_group_jobs WHERE project_id = $1`, [testProjectId]);
     await testPool.query(`DELETE FROM error_events WHERE project_id = $1`, [testProjectId]);
     await testPool.query(`DELETE FROM error_groups WHERE project_id = $1`, [testProjectId]);
@@ -177,7 +193,69 @@ describeDb('db.ts integration tests', () => {
       diagnosis: null,
       model: 'claude-sonnet-4-6',
       promptVersion: 'diagnosis-v1',
+      basis: 'in_surface_defect' as const,
+      confidence: 'high' as const,
     };
+
+    describe('loadDiagnosisDecision', () => {
+      it('returns the most recent decision for the group', async () => {
+        const { errorGroupId } = await seedErrorGroupAndJob();
+        await recordDiagnosisDecision(errorGroupId, testProjectId, {
+          ...baseDecision,
+          outcome: 'not_actionable',
+          decisionReason: 'external',
+          basis: 'cause_outside_codebase',
+          confidence: 'high',
+        });
+
+        expect(await loadDiagnosisDecision(errorGroupId, testProjectId)).toMatchObject({
+          outcome: 'not_actionable', basis: 'cause_outside_codebase', confidence: 'high',
+        });
+      });
+
+      it('returns the newest of several decisions for the same group', async () => {
+        const { errorGroupId } = await seedErrorGroupAndJob();
+        await recordDiagnosisDecision(errorGroupId, testProjectId, {
+          ...baseDecision, outcome: 'needs_more_context', decisionReason: 'first',
+          basis: 'insufficient_evidence', confidence: 'low',
+        });
+        await recordDiagnosisDecision(errorGroupId, testProjectId, {
+          ...baseDecision, outcome: 'code_fix', decisionReason: 'second',
+          basis: 'in_surface_defect', confidence: 'high',
+        });
+
+        expect(await loadDiagnosisDecision(errorGroupId, testProjectId)).toMatchObject({
+          outcome: 'code_fix', basis: 'in_surface_defect', confidence: 'high',
+        });
+      });
+
+      it('returns null when the group has no decision', async () => {
+        const { errorGroupId } = await seedErrorGroupAndJob();
+        expect(await loadDiagnosisDecision(errorGroupId, testProjectId)).toBeNull();
+      });
+
+      it('scopes by project', async () => {
+        const { errorGroupId } = await seedErrorGroupAndJob();
+        await recordDiagnosisDecision(errorGroupId, testProjectId, {
+          ...baseDecision, outcome: 'code_fix', decisionReason: 'r',
+          basis: 'in_surface_defect', confidence: 'high',
+        });
+
+        const other = await testPool.query<{ id: string }>(
+          `INSERT INTO orgs (name) VALUES ('other-org') RETURNING id`,
+        );
+        const otherProject = await testPool.query<{ id: string }>(
+          `INSERT INTO projects (org_id, name, github_repo, default_branch)
+           VALUES ($1, 'other-project', 'octocat/other', 'main') RETURNING id`,
+          [other.rows[0]!.id],
+        );
+
+        expect(await loadDiagnosisDecision(errorGroupId, otherProject.rows[0]!.id)).toBeNull();
+
+        await testPool.query(`DELETE FROM projects WHERE id = $1`, [otherProject.rows[0]!.id]);
+        await testPool.query(`DELETE FROM orgs WHERE id = $1`, [other.rows[0]!.id]);
+      });
+    });
 
     it('records every decision for separate jobs without overwriting earlier conclusions', async () => {
       const { errorGroupId, jobId: firstJobId } = await seedErrorGroupAndJob();

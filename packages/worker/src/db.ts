@@ -3,6 +3,7 @@ import type { Diagnosis, DiagnosisOutcome, ErrorGroupStatus, NeedsHumanReason, C
 import { reconcileDeadLetteredSessionAnalysis } from './friction/dead-letter.js';
 import type { Platform } from './platform.js';
 import type { FixSurface } from './fix-surface.js';
+import type { DerivedDecision } from './classify.js';
 
 const { Pool } = pg;
 
@@ -41,6 +42,20 @@ export interface DecisionRow {
   model: string;
   promptVersion: string;
   jobId?: string | null;
+  /**
+   * Why the outcome was reached, and how strong the evidence was. Both are
+   * required: the fix job reads this row to decide whether it may run, and a
+   * decision that cannot answer that is not a decision it can act on.
+   */
+  basis: DerivedDecision['basis'];
+  confidence: ConfidenceLevel;
+}
+
+/** What a fix job needs from a persisted decision to know whether it may run. */
+export interface PersistedDecision {
+  outcome: DiagnosisOutcome;
+  basis: DerivedDecision['basis'];
+  confidence: ConfidenceLevel;
 }
 
 async function insertDiagnosisDecision(
@@ -51,8 +66,9 @@ async function insertDiagnosisDecision(
 ): Promise<void> {
   await queryable.query(
     `INSERT INTO diagnosis_decisions
-       (error_group_id, project_id, job_id, outcome, decision_reason, cause_location, diagnosis, model, prompt_version)
-     VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9)
+       (error_group_id, project_id, job_id, outcome, decision_reason, cause_location, diagnosis,
+        model, prompt_version, basis, confidence)
+     VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11)
      ON CONFLICT (job_id) WHERE job_id IS NOT NULL DO NOTHING`,
     [
       errorGroupId,
@@ -64,8 +80,46 @@ async function insertDiagnosisDecision(
       row.diagnosis === null ? null : JSON.stringify(row.diagnosis),
       row.model,
       row.promptVersion,
+      row.basis,
+      row.confidence,
     ],
   );
+}
+
+/**
+ * The most recent decision for a group, or null.
+ *
+ * Fix jobs read this rather than trusting an in-memory value, so a requeued or
+ * retried job is tied to the immutable decision it was created from. Scoped by
+ * project as well as group, per the worker's contract that database operations
+ * are scoped to the project.
+ *
+ * A row missing `basis` or `confidence` predates migration 035 and cannot
+ * answer whether a fix is authorised, so it reads as no decision at all.
+ */
+export async function loadDiagnosisDecision(
+  errorGroupId: string,
+  projectId: string,
+): Promise<PersistedDecision | null> {
+  const { rows } = await getPool().query<{
+    outcome: DiagnosisOutcome;
+    basis: string | null;
+    confidence: string | null;
+  }>(
+    `SELECT outcome, basis, confidence
+     FROM diagnosis_decisions
+     WHERE error_group_id = $1 AND project_id = $2
+     ORDER BY decided_at DESC, id DESC
+     LIMIT 1`,
+    [errorGroupId, projectId],
+  );
+  const row = rows[0];
+  if (!row || !row.basis || !row.confidence) return null;
+  return {
+    outcome: row.outcome,
+    basis: row.basis as DerivedDecision['basis'],
+    confidence: row.confidence as ConfidenceLevel,
+  };
 }
 
 /** Append a diagnosis decision. A retried job is idempotent, never overwritten. */

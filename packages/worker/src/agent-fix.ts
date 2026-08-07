@@ -14,9 +14,10 @@ import { trace } from '@opentelemetry/api';
 import type { CheckOutcome, ConfidenceLevel, Diagnosis, EvidenceRecord, NeedsHumanReason, ReasonCode } from '@opslane/shared';
 import type { Platform } from './platform.js';
 import type { RuntimeInfo } from './runtime-info.js';
-import { buildReason, triageReasonCodes } from './reason-codes.js';
+import { buildReason } from './reason-codes.js';
 import { deriveOutcome } from './classify.js';
 import { adjudicationFromDecline } from './diagnose-schema.js';
+import { loadDiagnosisDecision, type PersistedDecision } from './db.js';
 
 /** Narrow an unknown array field to non-empty strings. */
 function strings(value: unknown): string[] {
@@ -168,7 +169,6 @@ const MODEL_CASCADE: ModelTier[] = [
   { model: 'claude-sonnet-4-6',         maxTurns: 30, budgetUsd: 0.75 },
 ];
 
-const TRIAGE_MODEL = 'claude-haiku-4-5-20251001';
 const FIX_NARRATIVE_MODEL = 'claude-haiku-4-5-20251001';
 
 const FIX_NARRATIVE_TOOL: Anthropic.Tool = {
@@ -198,142 +198,32 @@ const FIX_NARRATIVE_TOOL: Anthropic.Tool = {
   },
 };
 
+/**
+ * What the investigation reports about fixability. Named for the triage pass it
+ * replaced. `reason_code` and `remediation` were dropped with triageError,
+ * which was their only producer; incident reason codes are now derived from the
+ * routing basis instead of taken from a model.
+ */
 export interface TriageResult {
   fixable: boolean;
   confidence: 'high' | 'medium' | 'low';
   reason?: string;
-  reason_code?: ReasonCode;
-  remediation?: string;
-}
-
-function triageTool(platform: Platform): Anthropic.Tool {
-  return {
-  name: 'classify_error',
-  description: 'Submit your triage classification of the error.',
-  input_schema: {
-    type: 'object' as const,
-    properties: {
-      fixable: {
-        type: 'boolean',
-        description: 'true if this error likely has a root cause in application source code that can be fixed with code changes',
-      },
-      confidence: {
-        type: 'string',
-        enum: ['high', 'medium', 'low'],
-        description: 'How confident you are in the classification',
-      },
-      reason: {
-        type: 'string',
-        description: 'Brief explanation of why the error is or is not fixable',
-      },
-      reason_code: {
-        type: 'string',
-        enum: [...triageReasonCodes(platform)],
-        description: 'Machine-readable reason code when fixable is false',
-      },
-      remediation: {
-        type: 'string',
-        description: 'What the human should do if not fixable',
-      },
-    },
-    required: ['fixable', 'confidence', 'reason'],
-  },
-  };
 }
 
 /**
- * Cheap pre-agent triage: classify whether the error is likely fixable with code changes.
- * Uses a single Haiku call (~$0.002) to avoid spinning up an expensive E2B sandbox
- * for errors that clearly cannot be fixed (console throws, test errors, infra issues).
+ * The persisted routing basis, mapped to the incident's reason code.
+ *
+ * `basis` is our internal routing vocabulary; `ReasonCode` is the reader-facing
+ * contract the dashboard renders. They are deliberately not the same list, so
+ * the basis is carried in reason_message rather than leaked into the code.
  */
-export async function triageError(
-  apiKey: string,
-  input: Pick<AgentFixInput, 'errorType' | 'title' | 'errorMessage' | 'stackTrace' | 'resolvedStackTrace' | 'breadcrumbs' | 'platform' | 'customerRuntime'>,
-): Promise<TriageResult> {
-  const client = createAnthropicClient(apiKey);
-  const platform = input.platform ?? 'javascript';
-  const python = platform === 'python';
-
-  // If source maps resolved the stack trace, include it so triage can see real file paths
-  // even when the raw trace is all <anonymous> or minified.
-  const resolvedSection = input.resolvedStackTrace
-    ? `\n\nResolved Stack Trace (source-mapped):\n<untrusted_data>\n${truncate(JSON.stringify(input.resolvedStackTrace), MAX_STACK_TRACE)}\n</untrusted_data>`
-    : '';
-
-  const prompt = `You are triaging a production ${python ? 'Python error and CPython traceback' : 'JavaScript/browser error'} to decide if it can be fixed with code changes to the application's source code.
-
-Analyze the error and classify it using the classify_error tool.
-
-Set fixable to FALSE if ANY of these apply:
-- ${python ? 'The traceback has no application .py frames' : 'Stack trace only contains <anonymous>, eval, or browser-internal frames AND no resolved/source-mapped stack trace is available with application file references'}
-- Error message indicates a deliberate test throw (e.g., "test error", "testing 123", "Opslane test")
-- Error originates entirely from third-party code with no application source file frames
-- Error is an infrastructure/network issue (CORS, DNS, timeout, 502, 503)
-${python ? '- The traceback originates entirely from site-packages or a virtual environment' : '- Stack trace is completely minified with no resolvable file paths (only webpack:///chunk hashes, no original filenames) AND no resolved stack trace is provided'}
-
-${python ? 'IMPORTANT: Use the final traceback segment and exact application file paths.' : 'IMPORTANT: If a "Resolved Stack Trace" section is present below, use it to determine fixability — it contains source-mapped file paths that may reveal application frames not visible in the raw stack trace.'}
-
-Set fixable to TRUE if:
-- Stack trace (raw or resolved) contains references to application source files (${python ? 'e.g., app/routes.py or services/cart.py' : 'e.g., src/components/Foo.vue:42, app/utils.ts:10'})
-- The error type and message suggest a code bug (null reference, type error, undefined property) AND there are application frames to investigate
-
-When in doubt (mixed signals), set fixable to true with medium/low confidence — we'd rather investigate than miss a real bug.
-
-## Error Details
-Type: ${input.errorType}
-Title: ${input.title}
-
-Message:
-<untrusted_data>
-${truncate(input.errorMessage, MAX_ERROR_MESSAGE)}
-</untrusted_data>
-
-Stack Trace:
-<untrusted_data>
-${truncate(input.stackTrace, MAX_STACK_TRACE)}
-</untrusted_data>${resolvedSection}
-
-Breadcrumbs:
-<untrusted_data>
-${truncate(input.breadcrumbs ?? '[]', 1000)}
-</untrusted_data>
-
-Customer runtime:
-<untrusted_data>
-${input.customerRuntime ? `${escapeUntrustedLabel(input.customerRuntime.name)} ${escapeUntrustedLabel(input.customerRuntime.version)}` : 'unknown'}
-</untrusted_data>`;
-
-  const allowedReasonCodes = triageReasonCodes(platform);
-
-  const response = await client.messages.create({
-    model: TRIAGE_MODEL,
-    max_tokens: 512,
-    messages: [{ role: 'user', content: prompt }],
-    tools: [triageTool(platform)],
-    tool_choice: { type: 'tool', name: 'classify_error' },
-  });
-
-  const toolUse = response.content.find(b => b.type === 'tool_use');
-  if (!toolUse || toolUse.type !== 'tool_use') {
-    // If triage fails, assume fixable to avoid false negatives
-    logger.warn('Triage returned no tool_use block, assuming fixable');
-    return { fixable: true, confidence: 'low', reason: 'Triage call did not return classification' };
+function reasonCodeForDecision(decision: PersistedDecision | null): ReasonCode {
+  if (!decision) return 'insufficient_context';
+  if (decision.outcome === 'not_actionable') {
+    return decision.basis === 'primary_outside_fix_surface' ? 'triage_unfixable' : 'unfixable_infra';
   }
-
-  const raw = toolUse.input as Record<string, unknown>;
-  const validConfidences = ['high', 'medium', 'low'] as const;
-  const rawConfidence = raw.confidence as string;
-  const rawReasonCode = raw.reason_code as string | undefined;
-
-  return {
-    fixable: raw.fixable === true,
-    confidence: validConfidences.includes(rawConfidence as typeof validConfidences[number]) ? rawConfidence as TriageResult['confidence'] : 'low',
-    reason: typeof raw.reason === 'string' ? raw.reason : undefined,
-    reason_code: typeof rawReasonCode === 'string' && allowedReasonCodes.includes(rawReasonCode as ReasonCode)
-      ? rawReasonCode as ReasonCode
-      : undefined,
-    remediation: typeof raw.remediation === 'string' ? raw.remediation : undefined,
-  };
+  if (decision.outcome === 'code_fix') return 'low_confidence_fix';
+  return 'insufficient_context';
 }
 
 async function generateFixNarrative(
@@ -404,6 +294,7 @@ ${truncate(diff, 4000)}
     fallbackInput,
   );
 }
+
 
 export function buildSystemPrompt(
   input: AgentFixInput,
@@ -562,8 +453,42 @@ export async function runAgentFix(input: AgentFixInput): Promise<AgentFixResult>
     };
   }
 
-  // Skip triage when investigation context is already provided (fix jobs from Guide the Agent flow).
+  // Skip the decision gate when investigation context is already provided (fix
+  // jobs from the Guide the Agent flow, which a human authorised directly).
   if (!input.investigation) {
+    // The investigation already decided this and persisted it. Re-deciding here
+    // by error shape both duplicated the decision and reintroduced the
+    // classification this pipeline replaced. Loading the row rather than
+    // trusting an in-memory value also ties a retried or requeued job to the
+    // immutable decision it was created from.
+    //
+    // Deliberately OUTSIDE the try below: this is an authorization gate, so a
+    // database failure must fail the job, never fall through to the agent.
+    const decision = await traceSpan('load-diagnosis-decision', {}, () =>
+      loadDiagnosisDecision(input.errorGroupId, input.projectId));
+
+    // Confidence is checked as well as outcome. Checking the outcome alone
+    // would let a medium-confidence code_fix reach the sandbox, which the
+    // three-way routing in index.ts explicitly parks for a human.
+    if (!decision || decision.outcome !== 'code_fix' || decision.confidence !== 'high') {
+      logger.info('Fix job refused by the persisted decision', {
+        error_group_id: input.errorGroupId,
+        outcome: decision?.outcome ?? 'none',
+        basis: decision?.basis ?? 'none',
+        confidence: decision?.confidence ?? 'none',
+      });
+      return {
+        status: 'needs_human',
+        reason: {
+          reason_code: reasonCodeForDecision(decision),
+          reason_message: decision
+            ? `The investigation routed this to ${decision.outcome} at ${decision.confidence} confidence (${decision.basis})`
+            : 'No diagnosis decision was persisted for this error group',
+          remediation: 'Review the diagnosis decision for this error group',
+        },
+      };
+    }
+
     try {
       const triageInput = {
         platform,
@@ -575,29 +500,6 @@ export async function runAgentFix(input: AgentFixInput): Promise<AgentFixResult>
         resolvedStackTrace: input.resolvedStackTrace,
         breadcrumbs: input.breadcrumbs,
       };
-
-      // Stage 1: Always run cheap Haiku triage first ($0.002)
-      const quickTriage = await traceSpan('triage', {}, () =>
-        triageError(apiKey, triageInput),
-      );
-
-      logger.info('Quick triage result', {
-        fixable: quickTriage.fixable,
-        confidence: quickTriage.confidence,
-        reason: quickTriage.reason,
-      });
-
-      // High-confidence unfixable → short-circuit before investigation
-      if (!quickTriage.fixable && quickTriage.confidence === 'high') {
-        return {
-          status: 'needs_human',
-          reason: {
-            reason_code: quickTriage.reason_code ?? 'triage_unfixable',
-            reason_message: quickTriage.reason ?? 'Error classified as unfixable by triage',
-            remediation: quickTriage.remediation ?? 'Review the error manually',
-          },
-        };
-      }
 
       // Stage 2: If repo clone available, run deeper Sonnet investigation
       if (input.repoPath) {
@@ -614,11 +516,11 @@ export async function runAgentFix(input: AgentFixInput): Promise<AgentFixResult>
         });
 
         if (investigation.outcome !== 'code_fix') {
-          const reasonCode: ReasonCode = investigation.outcome === 'not_actionable'
-            ? (investigation.decisionReason.includes('outside the configured fix surface')
-                ? 'triage_unfixable'
-                : 'unfixable_infra')
-            : 'insufficient_context';
+          const reasonCode = reasonCodeForDecision({
+            outcome: investigation.outcome,
+            basis: investigation.decisionBasis,
+            confidence: investigation.confidence,
+          });
           const reproductionSteps = investigation.diagnosis?.reproduction_steps ?? [];
           return {
             status: 'needs_human',
@@ -647,8 +549,9 @@ export async function runAgentFix(input: AgentFixInput): Promise<AgentFixResult>
         }
       }
     } catch (triageErr: unknown) {
-      // Triage/investigation failure is non-fatal — proceed to the full agent pipeline
-      logger.warn('Triage/investigation failed, proceeding to agent', {
+      // An investigation failure is non-fatal — the decision gate above already
+      // authorised this job, and the investigation only enriches its context.
+      logger.warn('Investigation failed, proceeding to agent', {
         error: triageErr instanceof Error ? triageErr.message : String(triageErr),
       });
     }

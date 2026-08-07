@@ -42,6 +42,13 @@ vi.mock('../harness/test-runner.js', async (importOriginal) => {
   };
 });
 
+// The fix job's authorization gate reads the persisted decision, so the db
+// module is the seam. Default: an authorised, high-confidence code_fix.
+const { mockLoadDiagnosisDecision } = vi.hoisted(() => ({ mockLoadDiagnosisDecision: vi.fn() }));
+vi.mock('../db.js', () => ({
+  loadDiagnosisDecision: mockLoadDiagnosisDecision,
+}));
+
 // Mock the investigation module (vi.hoisted ensures the fn exists before vi.mock factory runs)
 const { mockInvestigateError } = vi.hoisted(() => ({
   mockInvestigateError: vi.fn(),
@@ -58,7 +65,7 @@ vi.mock('@anthropic-ai/sdk', () => ({
   })),
 }));
 
-import { buildSystemPrompt, runAgentFix, triageError } from '../agent-fix.js';
+import { buildSystemPrompt, runAgentFix } from '../agent-fix.js';
 import type { AgentFixInput } from '../agent-fix.js';
 import type { AgentCompletionResult } from '../harness/types.js';
 import { Sandbox } from 'e2b';
@@ -202,34 +209,10 @@ function passingSandboxFake() {
   };
 }
 
-/** Helper: mock triage to return fixable (default for most tests) */
-function mockTriageFixable() {
-  mockMessagesCreate.mockResolvedValue({
-    content: [{
-      type: 'tool_use',
-      id: 'triage-1',
-      name: 'classify_error',
-      input: { fixable: true, confidence: 'medium', reason: 'Has application frames' },
-    }],
-  });
-}
-
-/** Helper: mock triage to return unfixable with high confidence */
-function mockTriageUnfixable(overrides?: Partial<{ fixable: boolean; confidence: string; reason: string; reason_code: string | undefined; remediation: string }>) {
-  mockMessagesCreate.mockResolvedValue({
-    content: [{
-      type: 'tool_use',
-      id: 'triage-1',
-      name: 'classify_error',
-      input: {
-        fixable: false,
-        confidence: 'high',
-        reason: 'Stack trace only contains anonymous frames',
-        reason_code: 'unfixable_no_app_frames',
-        remediation: 'This error was thrown from the browser console, not application code',
-        ...overrides,
-      },
-    }],
+/** The persisted decision that authorises a fix job to run. */
+function authorisedDecision() {
+  mockLoadDiagnosisDecision.mockResolvedValue({
+    outcome: 'code_fix', basis: 'in_surface_defect', confidence: 'high',
   });
 }
 
@@ -239,8 +222,8 @@ beforeEach(() => {
   vi.mocked(Sandbox.create).mockResolvedValue(mockSandbox as unknown as import('e2b').Sandbox);
   mockSandbox.commands.run.mockImplementation(defaultCommandsRun);
   mockSandbox.kill.mockResolvedValue(undefined);
-  // Default: triage says fixable (so existing tests pass through)
-  mockTriageFixable();
+  // Default: the investigation authorised this fix job.
+  authorisedDecision();
   // Default: judge passes quality
   vi.mocked(judgeDiff).mockResolvedValue({
     scope: 2, correctness: 2, preservation: 2, total: 6,
@@ -258,110 +241,86 @@ beforeEach(() => {
   });
 });
 
-describe('triageError', () => {
-  it('returns fixable=true for errors with application frames', async () => {
-    mockMessagesCreate.mockResolvedValue({
-      content: [{
-        type: 'tool_use',
-        id: 'triage-1',
-        name: 'classify_error',
-        input: { fixable: true, confidence: 'high', reason: 'Stack trace references src/components/App.vue' },
-      }],
+/**
+ * The fix job no longer re-decides by error shape. triageError classified on
+ * "infrastructure/network issue (CORS, DNS, timeout, 502, 503)", which is
+ * exactly what the diagnosis-first pipeline replaced, and it ran after the
+ * investigation had already routed and persisted a decision.
+ */
+describe('fix jobs read the persisted decision instead of re-triaging', () => {
+  it('short-circuits when the persisted decision was not code_fix', async () => {
+    mockLoadDiagnosisDecision.mockResolvedValue({
+      outcome: 'not_actionable', basis: 'cause_outside_codebase', confidence: 'high',
     });
 
-    const result = await triageError('test-key', {
-      errorType: 'TypeError',
-      title: 'Cannot read property of null',
-      errorMessage: "Cannot read properties of null (reading 'map')",
-      stackTrace: 'TypeError: Cannot read properties of null\n    at App.vue:42:10\n    at renderList (vue.js:1234)',
-      resolvedStackTrace: null,
-      breadcrumbs: '[]',
-    });
+    const result = await runAgentFix(makeInput());
 
-    expect(result.fixable).toBe(true);
-    expect(result.confidence).toBe('high');
+    expect(result.status).toBe('needs_human');
+    expect(result.reason?.reason_code).toBe('unfixable_infra');
+    expect(result.reason?.reason_message).toContain('cause_outside_codebase');
+    expect(result.reason?.remediation).toBeTruthy();
+    // No sandbox is provisioned on this path.
+    expect(createE2BSandbox).not.toHaveBeenCalled();
   });
 
-  it('returns fixable=false for anonymous-only stack traces', async () => {
-    mockTriageUnfixable();
-
-    const result = await triageError('test-key', {
-      errorType: 'Error',
-      title: 'Opslane test error new 2',
-      errorMessage: 'Opslane test error new 2',
-      stackTrace: 'Error: Opslane test error new 2\n    at <anonymous>:1:26',
-      resolvedStackTrace: null,
-      breadcrumbs: '[]',
+  it('maps an out-of-surface conclusion to its own reason code', async () => {
+    mockLoadDiagnosisDecision.mockResolvedValue({
+      outcome: 'not_actionable', basis: 'primary_outside_fix_surface', confidence: 'high',
     });
 
-    expect(result.fixable).toBe(false);
-    expect(result.confidence).toBe('high');
-    expect(result.reason_code).toBe('unfixable_no_app_frames');
+    const result = await runAgentFix(makeInput());
+
+    expect(result.reason?.reason_code).toBe('triage_unfixable');
   });
 
-  it('returns fixable=true with low confidence when API returns no tool_use', async () => {
-    mockMessagesCreate.mockResolvedValue({ content: [{ type: 'text', text: 'I cannot classify this' }] });
-
-    const result = await triageError('test-key', {
-      errorType: 'Error',
-      title: 'Some error',
-      errorMessage: 'Something went wrong',
-      stackTrace: 'Error: Something went wrong',
-      resolvedStackTrace: null,
-      breadcrumbs: '[]',
+  it('short-circuits on a code_fix decision that is not high confidence', async () => {
+    mockLoadDiagnosisDecision.mockResolvedValue({
+      outcome: 'code_fix', basis: 'in_surface_defect', confidence: 'medium',
     });
 
-    // Should default to fixable to avoid false negatives
-    expect(result.fixable).toBe(true);
-    expect(result.confidence).toBe('low');
+    const result = await runAgentFix(makeInput());
+
+    expect(result.status).toBe('needs_human');
+    expect(result.reason?.reason_code).toBe('low_confidence_fix');
+    expect(createE2BSandbox).not.toHaveBeenCalled();
   });
 
-  it('normalizes invalid confidence values to low', async () => {
-    mockMessagesCreate.mockResolvedValue({
-      content: [{
-        type: 'tool_use',
-        id: 'triage-1',
-        name: 'classify_error',
-        input: { fixable: false, confidence: 'very_high', reason: 'Test error' },
-      }],
-    });
+  it('fails closed when no decision was persisted', async () => {
+    mockLoadDiagnosisDecision.mockResolvedValue(null);
 
-    const result = await triageError('test-key', {
-      errorType: 'Error',
-      title: 'Test',
-      errorMessage: 'Test',
-      stackTrace: 'Error',
-      resolvedStackTrace: null,
-      breadcrumbs: '[]',
-    });
+    const result = await runAgentFix(makeInput());
 
-    expect(result.confidence).toBe('low');
+    expect(result.status).toBe('needs_human');
+    expect(result.reason?.reason_code).toBe('insufficient_context');
+    expect(result.reason?.reason_message).toContain('No diagnosis decision');
+    expect(createE2BSandbox).not.toHaveBeenCalled();
   });
 
-  it('includes resolvedStackTrace in prompt when available', async () => {
-    mockMessagesCreate.mockResolvedValue({
-      content: [{
-        type: 'tool_use',
-        id: 'triage-1',
-        name: 'classify_error',
-        input: { fixable: true, confidence: 'high', reason: 'Resolved stack trace shows App.vue:42' },
-      }],
-    });
+  // The gate is authorization, so a database failure must not fall through to
+  // the agent the way an investigation failure legitimately does.
+  it('does not fall through to the agent when the decision cannot be loaded', async () => {
+    mockLoadDiagnosisDecision.mockRejectedValue(new Error('connection terminated'));
 
-    await triageError('test-key', {
-      errorType: 'TypeError',
-      title: 'Cannot read property of null',
-      errorMessage: 'Cannot read properties of null',
-      stackTrace: 'TypeError: Cannot read properties of null\n    at <anonymous>:1:26',
-      resolvedStackTrace: [{ file: 'src/App.vue', line: 42, column: 10 }],
-      breadcrumbs: '[]',
-    });
+    await expect(runAgentFix(makeInput())).rejects.toThrow('connection terminated');
+    expect(createE2BSandbox).not.toHaveBeenCalled();
+  });
 
-    // Verify the prompt sent to the API includes the resolved stack trace
-    const apiCall = mockMessagesCreate.mock.calls[0];
-    const prompt = apiCall[0].messages[0].content as string;
-    expect(prompt).toContain('Resolved Stack Trace');
-    expect(prompt).toContain('App.vue');
+  it('provisions a sandbox for a high-confidence code_fix', async () => {
+    authorisedDecision();
+    vi.mocked(runAgentLoop).mockResolvedValue(makeAgentResult());
+
+    await runAgentFix(makeInput());
+
+    expect(createE2BSandbox).toHaveBeenCalled();
+  });
+
+  it('does not consult the decision when a human already provided the investigation', async () => {
+    vi.mocked(runAgentLoop).mockResolvedValue(makeAgentResult());
+
+    await runAgentFix(makeInput({ investigation: { rootCause: 'A human said so' } }));
+
+    expect(mockLoadDiagnosisDecision).not.toHaveBeenCalled();
+    expect(createE2BSandbox).toHaveBeenCalled();
   });
 });
 
@@ -523,14 +482,6 @@ describe('runAgentFix', () => {
       .mockResolvedValueOnce({
         content: [{
           type: 'tool_use',
-          id: 'triage-1',
-          name: 'classify_error',
-          input: { fixable: true, confidence: 'medium', reason: 'Has application frames' },
-        }],
-      })
-      .mockResolvedValueOnce({
-        content: [{
-          type: 'tool_use',
           id: 'narrative-1',
           name: 'submit_fix_narrative',
           input: {
@@ -557,14 +508,6 @@ describe('runAgentFix', () => {
 
   it('falls back deterministically when any narrative field is invalid', async () => {
     mockMessagesCreate
-      .mockResolvedValueOnce({
-        content: [{
-          type: 'tool_use',
-          id: 'triage-1',
-          name: 'classify_error',
-          input: { fixable: true, confidence: 'medium', reason: 'Has application frames' },
-        }],
-      })
       .mockResolvedValueOnce({
         content: [{
           type: 'tool_use',
@@ -880,70 +823,6 @@ describe('runAgentFix', () => {
     });
   });
 
-  it('short-circuits with needs_human when triage says unfixable with high confidence', async () => {
-    mockTriageUnfixable();
-
-    const result = await runAgentFix(makeInput({
-      title: 'Opslane test error new 2',
-      errorMessage: 'Opslane test error new 2',
-      stackTrace: 'Error: Opslane test error new 2\n    at <anonymous>:1:26',
-    }));
-
-    expect(result.status).toBe('needs_human');
-    expect(result.reason?.reason_code).toBe('unfixable_no_app_frames');
-    expect(result.reason?.reason_message).toContain('anonymous');
-    // Should NOT create a sandbox or run the agent loop
-    expect(Sandbox.create).not.toHaveBeenCalled();
-    expect(runAgentLoop).not.toHaveBeenCalled();
-  });
-
-  it('proceeds to agent when triage says unfixable with medium confidence', async () => {
-    mockMessagesCreate.mockResolvedValue({
-      content: [{
-        type: 'tool_use',
-        id: 'triage-1',
-        name: 'classify_error',
-        input: { fixable: false, confidence: 'medium', reason: 'Might be a console error' },
-      }],
-    });
-
-    mockSandboxWithPassingTests();
-    vi.mocked(runAgentLoop).mockResolvedValue(makeAgentResult({ testsRan: true }));
-
-    const result = await runAgentFix(makeInput());
-    // Should proceed despite unfixable classification (confidence not high)
-    expect(Sandbox.create).toHaveBeenCalled();
-    expect(runAgentLoop).toHaveBeenCalled();
-    expect(result.status).toBe('fix_ready');
-  });
-
-  it('proceeds to agent when triage API call fails', async () => {
-    mockMessagesCreate.mockRejectedValue(new Error('Anthropic API rate limited'));
-
-    mockSandboxWithPassingTests();
-    vi.mocked(runAgentLoop).mockResolvedValue(makeAgentResult({ testsRan: true }));
-
-    const result = await runAgentFix(makeInput());
-    // Triage failure should not block the agent pipeline
-    expect(Sandbox.create).toHaveBeenCalled();
-    expect(runAgentLoop).toHaveBeenCalled();
-    expect(result.status).toBe('fix_ready');
-  });
-
-  it('uses triage_unfixable fallback when triage returns no reason_code', async () => {
-    mockTriageUnfixable({ reason_code: undefined });
-
-    const result = await runAgentFix(makeInput({
-      title: 'Some unfixable error',
-      errorMessage: 'Some unfixable error',
-      stackTrace: 'Error\n    at <anonymous>:1:1',
-    }));
-
-    expect(result.status).toBe('needs_human');
-    expect(result.reason?.reason_code).toBe('triage_unfixable');
-    expect(Sandbox.create).not.toHaveBeenCalled();
-  });
-
   it('passes structured tool history between cascade tiers', async () => {
     // Haiku fails → Sonnet succeeds. Sonnet should receive structured context from Haiku.
     vi.mocked(runAgentLoop)
@@ -987,8 +866,7 @@ describe('runAgentFix', () => {
     expect(sonnetUserMsg).toContain('Do NOT repeat searches');
   });
 
-  it('runs both Haiku triage and investigation when repoPath is provided', async () => {
-    mockTriageFixable();
+  it('runs the investigation for context once the decision authorises the job', async () => {
     mockInvestigateError.mockResolvedValue({
       fixable: true, confidence: 'high', reason: 'Found null items in App.vue',
       outcome: 'code_fix',
@@ -1007,21 +885,8 @@ describe('runAgentFix', () => {
 
     const result = await runAgentFix(makeInput({ repoPath: '/tmp/opslane-repo-test' }));
     expect(result.status).toBe('fix_ready');
-    // Both should have been called: Haiku triage first, then investigation
-    expect(mockMessagesCreate).toHaveBeenCalled(); // Haiku triage
-    expect(mockInvestigateError).toHaveBeenCalled(); // Sonnet investigation
-  });
-
-  it('short-circuits at Haiku triage before investigation when clearly unfixable', async () => {
-    mockTriageUnfixable({ reason_code: 'unfixable_infra' });
-
-    const result = await runAgentFix(makeInput({ repoPath: '/tmp/opslane-repo-test' }));
-
-    expect(result.status).toBe('needs_human');
-    expect(result.reason?.reason_code).toBe('unfixable_infra');
-    // Investigation should NOT have been called
-    expect(mockInvestigateError).not.toHaveBeenCalled();
-    expect(Sandbox.create).not.toHaveBeenCalled();
+    expect(mockLoadDiagnosisDecision).toHaveBeenCalledWith('eg-1', 'proj-1');
+    expect(mockInvestigateError).toHaveBeenCalled();
   });
 
   it('short-circuits via investigation when unfixable with high confidence', async () => {
@@ -1046,18 +911,13 @@ describe('runAgentFix', () => {
     expect(runAgentLoop).not.toHaveBeenCalled();
   });
 
-  it('falls back to blind triage when repoPath is not provided', async () => {
-    mockTriageFixable();
-
+  it('runs no investigation when repoPath is not provided, and still proceeds', async () => {
     mockSandboxWithPassingTests();
     vi.mocked(runAgentLoop).mockResolvedValue(makeAgentResult({ testsRan: true }));
 
     const result = await runAgentFix(makeInput()); // no repoPath
     expect(result.status).toBe('fix_ready');
-    // Investigation should NOT have been called
     expect(mockInvestigateError).not.toHaveBeenCalled();
-    // Blind triage (Anthropic SDK) should have been called
-    expect(mockMessagesCreate).toHaveBeenCalled();
   });
 
   it('proceeds to agent when investigation fails with exception', async () => {
@@ -1073,7 +933,7 @@ describe('runAgentFix', () => {
     expect(result.status).toBe('fix_ready');
   });
 
-  it('skips triage when investigation context is provided', async () => {
+  it('skips the decision gate when investigation context is provided', async () => {
     mockSandboxWithPassingTests();
     vi.mocked(runAgentLoop).mockResolvedValue({
       ...makeAgentResult({ summary: 'Fixed with guidance', testsRan: true }),
