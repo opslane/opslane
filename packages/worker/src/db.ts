@@ -2,7 +2,6 @@ import pg from 'pg';
 import type { Diagnosis, DiagnosisOutcome, ErrorGroupStatus, NeedsHumanReason, ConfidenceLevel, JobType, SetupPrStatus, EvidenceRecord, PRPosture } from '@opslane/shared';
 import { reconcileDeadLetteredSessionAnalysis } from './friction/dead-letter.js';
 import type { Platform } from './platform.js';
-import type { FixSurface } from './fix-surface.js';
 import type { DerivedDecision } from './classify.js';
 
 const { Pool } = pg;
@@ -23,15 +22,6 @@ export async function closePool(): Promise<void> {
     await pool.end();
     pool = null;
   }
-}
-
-/** A NULL column means the whole repository, preserving pre-existing behavior. */
-export async function loadFixSurface(projectId: string): Promise<FixSurface> {
-  const { rows } = await getPool().query<{ fix_surface_globs: string[] | null }>(
-    'SELECT fix_surface_globs FROM projects WHERE id = $1',
-    [projectId],
-  );
-  return { globs: rows[0]?.fix_surface_globs ?? null };
 }
 
 export interface DecisionRow {
@@ -58,6 +48,15 @@ export interface PersistedDecision {
   confidence: ConfidenceLevel;
 }
 
+/**
+ * Append one decision. Deliberately not idempotent per job: a requeued job keeps
+ * its id (requeueStaleJobs updates in place), so the `ON CONFLICT (job_id) DO
+ * NOTHING` this used to carry silently discarded every retry's conclusion, and
+ * left the fix gate reading a superseded one. See migration 037.
+ *
+ * Always called inside the transaction that writes the status it accompanies, so
+ * a partial replay cannot commit a decision without its status.
+ */
 async function insertDiagnosisDecision(
   queryable: Pick<pg.Pool, 'query'> | Pick<pg.PoolClient, 'query'>,
   errorGroupId: string,
@@ -68,8 +67,7 @@ async function insertDiagnosisDecision(
     `INSERT INTO diagnosis_decisions
        (error_group_id, project_id, job_id, outcome, decision_reason, cause_location, diagnosis,
         model, prompt_version, basis, confidence)
-     VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11)
-     ON CONFLICT (job_id) WHERE job_id IS NOT NULL DO NOTHING`,
+     VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11)`,
     [
       errorGroupId,
       projectId,

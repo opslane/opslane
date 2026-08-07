@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import { purgeDiagnosisDecisions } from '../../__tests__/purge-diagnosis-decisions.js';
 import pg from 'pg';
 import { getPool, closePool } from '../../db.js';
 import {
@@ -136,7 +137,7 @@ async function cleanup(): Promise<void> {
   await pool.query(`DELETE FROM friction_adjudication_generations WHERE project_id = $1`, [projectId]);
   await pool.query(`UPDATE error_groups SET representative_signal_id = NULL WHERE project_id = $1`, [projectId]);
   await pool.query(`DELETE FROM friction_signals WHERE project_id = $1`, [projectId]);
-  await pool.query(`DELETE FROM diagnosis_decisions WHERE project_id = $1`, [projectId]);
+  await purgeDiagnosisDecisions(pool, projectId);
   await pool.query(`DELETE FROM error_group_jobs WHERE project_id = $1`, [projectId]);
   await pool.query(`DELETE FROM error_events WHERE project_id = $1`, [projectId]);
   await pool.query(

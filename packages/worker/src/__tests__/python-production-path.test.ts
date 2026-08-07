@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { purgeDiagnosisDecisions } from './purge-diagnosis-decisions.js';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import pg from 'pg';
 
@@ -16,7 +17,10 @@ vi.mock('../repo-clone.js', () => ({
   validateDiffPaths: vi.fn(),
 }));
 
-vi.mock('../investigate.js', () => ({ investigateError: vi.fn() }));
+vi.mock('../investigate.js', () => ({
+  investigateError: vi.fn(),
+  INVESTIGATION_MODEL: 'claude-sonnet-5',
+}));
 vi.mock('../agent-fix.js', () => ({ runAgentFix: vi.fn() }));
 vi.mock('../pr.js', () => ({ createPR: vi.fn(), createGitHubClient: vi.fn() }));
 vi.mock('../minio-client.js', () => ({ fetchObject: vi.fn(), getMinIOConfig: vi.fn(() => null) }));
@@ -216,9 +220,11 @@ describeDb('Python two-stage production path', () => {
         cause_location: 'cart.py:12',
       },
       outcome: 'code_fix',
-      adjudication: null, costUsd: 0.12, decisionBasis: 'in_surface_defect', decisionReason: 'The cause is at cart.py:12',
+      adjudication: null, costUsd: 0.12, decisionBasis: 'local_defect', decisionReason: 'The cause is at cart.py:12',
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       filesRead: ['cart.py'],
       findings: 'The traceback resolves to application code in cart.py.',
+      stop: 'terminal',
     });
     vi.mocked(runAgentFix).mockResolvedValue({
       status: 'needs_human',
@@ -235,14 +241,7 @@ describeDb('Python two-stage production path', () => {
     delete process.env['OPSLANE_PYTHON_PIPELINE'];
     delete process.env['ANTHROPIC_API_KEY'];
     delete process.env['GITHUB_TOKEN'];
-    // diagnosis_decisions is insert-only by trigger (migration 034), so the
-    // reset has to disable it. Test setup only; production has no such route.
-    await pool.query('ALTER TABLE diagnosis_decisions DISABLE TRIGGER diagnosis_decisions_immutable_row');
-    try {
-      await pool.query(`DELETE FROM diagnosis_decisions WHERE project_id = $1`, [projectId]);
-    } finally {
-      await pool.query('ALTER TABLE diagnosis_decisions ENABLE TRIGGER diagnosis_decisions_immutable_row');
-    }
+    await purgeDiagnosisDecisions(pool, projectId);
     await pool.query(`DELETE FROM error_group_jobs WHERE project_id = $1`, [projectId]);
     await pool.query(`DELETE FROM error_events WHERE project_id = $1`, [projectId]);
     await pool.query(`DELETE FROM error_groups WHERE project_id = $1`, [projectId]);

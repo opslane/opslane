@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import { purgeDiagnosisDecisions } from './purge-diagnosis-decisions.js';
 import pg from 'pg';
 import {
   claimJob,
@@ -96,26 +97,11 @@ async function seedPendingJob(options: {
   return jobId;
 }
 
-/**
- * diagnosis_decisions is insert-only by trigger (migration 034), so a test
- * database cannot be reset without disabling that trigger for the statement.
- * Disabling it here, loudly and in test setup only, is the point: production
- * has no way to do this.
- */
-async function purgeDiagnosisDecisions(projectId: string): Promise<void> {
-  await testPool.query('ALTER TABLE diagnosis_decisions DISABLE TRIGGER diagnosis_decisions_immutable_row');
-  try {
-    await testPool.query('DELETE FROM diagnosis_decisions WHERE project_id = $1', [projectId]);
-  } finally {
-    await testPool.query('ALTER TABLE diagnosis_decisions ENABLE TRIGGER diagnosis_decisions_immutable_row');
-  }
-}
-
 async function cleanupTestData(): Promise<void> {
   // Delete in reverse FK order
   await testPool.query(`DELETE FROM friction_signals WHERE project_id = $1`, [testProjectId]);
   await testPool.query(`DELETE FROM friction_adjudication_generations WHERE project_id = $1`, [testProjectId]);
-  await purgeDiagnosisDecisions(testProjectId);
+  await purgeDiagnosisDecisions(testPool, testProjectId);
   await testPool.query(`DELETE FROM error_group_jobs WHERE project_id = $1`, [testProjectId]);
   await testPool.query(`DELETE FROM error_events WHERE project_id = $1`, [testProjectId]);
   await testPool.query(`DELETE FROM error_groups WHERE project_id = $1`, [testProjectId]);
@@ -182,7 +168,7 @@ describeDb('db.ts integration tests', () => {
     // Clean only jobs and error groups between tests, keep tenant
     await testPool.query(`DELETE FROM friction_signals WHERE project_id = $1`, [testProjectId]);
     await testPool.query(`DELETE FROM friction_adjudication_generations WHERE project_id = $1`, [testProjectId]);
-    await purgeDiagnosisDecisions(testProjectId);
+    await purgeDiagnosisDecisions(testPool, testProjectId);
     await testPool.query(`DELETE FROM error_group_jobs WHERE project_id = $1`, [testProjectId]);
     await testPool.query(`DELETE FROM error_events WHERE project_id = $1`, [testProjectId]);
     await testPool.query(`DELETE FROM error_groups WHERE project_id = $1`, [testProjectId]);
@@ -193,7 +179,7 @@ describeDb('db.ts integration tests', () => {
       diagnosis: null,
       model: 'claude-sonnet-4-6',
       promptVersion: 'diagnosis-v1',
-      basis: 'in_surface_defect' as const,
+      basis: 'local_defect' as const,
       confidence: 'high' as const,
     };
 
@@ -213,6 +199,32 @@ describeDb('db.ts integration tests', () => {
         });
       });
 
+      // requeueStaleJobs updates error_group_jobs in place, so a retried job keeps
+      // its id. A partial unique index on job_id plus ON CONFLICT DO NOTHING
+      // therefore dropped every retry's conclusion: attempt 1 concluded
+      // not_actionable, attempt 2 concluded code_fix, and the fix gate went on
+      // reading attempt 1 forever — with migration 034 leaving no way to correct
+      // it. See migration 037.
+      it('records each attempt of a retried job, not just the first', async () => {
+        const { errorGroupId, jobId } = await seedErrorGroupAndJob();
+        await recordDiagnosisDecision(errorGroupId, testProjectId, {
+          ...baseDecision, jobId, outcome: 'not_actionable', decisionReason: 'attempt 1',
+          basis: 'cause_outside_codebase', confidence: 'high',
+        });
+        await recordDiagnosisDecision(errorGroupId, testProjectId, {
+          ...baseDecision, jobId, outcome: 'code_fix', decisionReason: 'attempt 2 after requeue',
+          basis: 'local_defect', confidence: 'high',
+        });
+
+        const { rows } = await testPool.query<{ n: string }>(
+          'SELECT count(*)::text AS n FROM diagnosis_decisions WHERE job_id = $1', [jobId],
+        );
+        expect(rows[0]?.n).toBe('2');
+        expect(await loadDiagnosisDecision(errorGroupId, testProjectId)).toMatchObject({
+          outcome: 'code_fix', basis: 'local_defect', confidence: 'high',
+        });
+      });
+
       it('returns the newest of several decisions for the same group', async () => {
         const { errorGroupId } = await seedErrorGroupAndJob();
         await recordDiagnosisDecision(errorGroupId, testProjectId, {
@@ -221,11 +233,11 @@ describeDb('db.ts integration tests', () => {
         });
         await recordDiagnosisDecision(errorGroupId, testProjectId, {
           ...baseDecision, outcome: 'code_fix', decisionReason: 'second',
-          basis: 'in_surface_defect', confidence: 'high',
+          basis: 'local_defect', confidence: 'high',
         });
 
         expect(await loadDiagnosisDecision(errorGroupId, testProjectId)).toMatchObject({
-          outcome: 'code_fix', basis: 'in_surface_defect', confidence: 'high',
+          outcome: 'code_fix', basis: 'local_defect', confidence: 'high',
         });
       });
 
@@ -238,7 +250,7 @@ describeDb('db.ts integration tests', () => {
         const { errorGroupId } = await seedErrorGroupAndJob();
         await recordDiagnosisDecision(errorGroupId, testProjectId, {
           ...baseDecision, outcome: 'code_fix', decisionReason: 'r',
-          basis: 'in_surface_defect', confidence: 'high',
+          basis: 'local_defect', confidence: 'high',
         });
 
         const other = await testPool.query<{ id: string }>(
@@ -288,7 +300,12 @@ describeDb('db.ts integration tests', () => {
       expect(rows.map((row) => row.outcome)).toEqual(['not_actionable', 'code_fix']);
     });
 
-    it('is idempotent when the same job is retried', async () => {
+    // Replaces a test that recorded the SAME decision twice and asserted one row.
+    // Deduplicating on job_id is what broke retries: it only ever exercised the
+    // identical-decision case, so the case that mattered — a retry reaching a
+    // DIFFERENT conclusion, silently discarded — went unnoticed. See migration 037
+    // and 'records each attempt of a retried job, not just the first'.
+    it('appends a row per attempt, and the newest is the one that counts', async () => {
       const { errorGroupId, jobId } = await seedErrorGroupAndJob();
       const decision = {
         ...baseDecision,
@@ -305,7 +322,10 @@ describeDb('db.ts integration tests', () => {
         'SELECT count(*)::int AS n FROM diagnosis_decisions WHERE job_id = $1',
         [jobId],
       );
-      expect(rows[0]!.n).toBe(1);
+      expect(rows[0]!.n).toBe(2);
+      expect(await loadDiagnosisDecision(errorGroupId, testProjectId)).toMatchObject({
+        outcome: 'code_fix', basis: 'local_defect', confidence: 'high',
+      });
     });
 
     it('stores the status transition and its decision together', async () => {
