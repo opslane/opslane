@@ -1,17 +1,25 @@
 # Daily Digest v1 — Design
 
-Status: approved pending user review (rev 2, post-review)
+Status: approved pending user review (rev 3, customer-perspective)
 Date: 2026-08-07
 CEO plan: `~/.gstack/projects/opslane-opslane-oss/ceo-plans/2026-08-07-v1-positioning-gtm.md` (scope #4)
 
 ## Purpose
 
 The digest is Opslane's daily proof-of-work heartbeat for the "error tracker
-you never have to open" positioning: what Opslane did, what it found, and what
-it watched in the last 24 hours, delivered to the customer's channel. It is
-templated end to end — **no LLM calls anywhere in the digest path** — so
-free-tier COGS stays ~0. It is decoupled from the delivery channel: the digest
-is an event in the existing notification outbox; channels are formatters.
+you never have to open" positioning, told **from the customer's perspective**:
+where end users struggled (with named accounts and a replay link), what new
+errors they hit, and what Opslane did about it — delivered so the reader
+ideally never needs to open the dashboard. It is templated end to end — **no
+LLM calls anywhere in the digest path** — so free-tier COGS stays ~0. Any
+prose it shows (root causes, customer-impact sentences) was authored earlier
+by the investigation pipelines, where an LLM already runs, and stored. It is
+decoupled from the delivery channel: the digest is an event in the existing
+notification outbox; channels are formatters.
+
+Section order is customer-first: where customers struggled → new errors
+customers hit → what Opslane did about it → standing backlog → watching line.
+The digest reads as "your customers' day," not "our activity log."
 
 ## Non-goals (v1)
 
@@ -33,8 +41,9 @@ is an event in the existing notification outbox; channels are formatters.
 
 ## Architecture
 
-Everything lives in the ingestion service (Go), except one small worker change
-(stamping `insight_at`). Rationale: the free tier is watching + digest; the
+Everything lives in the ingestion service (Go), except two small worker
+changes (stamping `insight_at`; investigations writing `customer_impact`).
+Rationale: the free tier is watching + digest; the
 digest must not depend on worker health, and the notification
 outbox/dispatcher already live in ingestion.
 
@@ -117,7 +126,14 @@ Trailing 24 hours at generation time. No since-last-digest bookkeeping.
    `needs_human_at` (worker `updateGroupStatus` CASE gains one branch).
    Status is mutable; the timestamp is what makes "reached insight in
    window" queryable.
-6. Index `end_users (project_id, last_seen)` to support the watching line's
+6. `error_groups.customer_impact TEXT` — one customer-perspective sentence
+   ("clicked export and nothing happened"), written by the existing friction
+   and error investigations at investigation time (their output schema gains
+   one field), stored like `root_cause`. This is what lets the digest speak
+   customer language while staying LLM-free at digest time. Verified in
+   prod: insight groups currently store `root_cause = 'placeholder'`, so
+   without this field the friction sections have no usable prose.
+7. Index `end_users (project_id, last_seen)` to support the watching line's
    user count.
 
 Code-side changes with the migration:
@@ -140,31 +156,66 @@ envelope — digest fields live under a `digest` key, never at the top level:
 {
   "version": 1,
   "event_type": "digest.daily",
-  "project": { "id": "…", "name": "acme-web" },
+  "project": { "id": "…", "name": "AMFJ 2" },
   "dashboard_url": "…",
   "digest": {
     "date": "2026-08-07",            // local date in project timezone
     "window": { "from": "…", "to": "…" },
-    "outcomes": {
-      "prs_opened":  [ { "title": "…", "pr_url": "…", "pr_number": 482, "merged": true } ],
-      "needs_human": [ { "title": "…", "reason_message": "…", "url": "…" } ],
+    "insights": [                     // section 1: where customers struggled
+      { "signal_type": "rage_click", "page": "/assets/:id",
+        "impact": "Users repeatedly clicked the asset panel with no response.",  // stored customer_impact; null until written
+        "occurrences": 26, "affected_users": 12,
+        "accounts": ["apptronik.atlassian.net", "randstadgr.atlassian.net", "irembo.atlassian.net"],
+        "accounts_more": 9,
+        "replay_url": "…",            // dashboard /sessions/<representative_session_id>; null when absent
+        "url": "…" }
+    ],
+    "insights_more": 0,
+    "top_new_issues": [               // section 2: new errors customers hit
+      { "title": "RangeError: Invalid time value", "url": "…",
+        "impact": null,
+        "root_cause_excerpt": "The Asset Details page builds a Date directly from an activity timestamp…",
+        "occurrences": 1, "affected_users": 1,
+        "accounts": ["marcomgroup.atlassian.net"], "accounts_more": 0,
+        "replay_url": null }
+    ],
+    "top_new_issues_more": 2,
+    "outcomes": {                     // section 3: what Opslane did about it
+      "prs_opened": [
+        { "title": "…", "pr_url": "…", "pr_number": 1306, "merged": false,
+          "root_cause_excerpt": "Originates in @forge/bridge changeWindowTitle.js…" }
+      ],
+      "needs_human": [
+        { "title": "Error: cancelled", "url": "…",
+          "reason_message": "Investigation couldn't rule out app-side causes…",
+          "accounts": ["cariad-us-sandbox-279.atlassian.net"], "accounts_more": 0 }
+      ],
       "prs_opened_more": 0,           // overflow beyond the 3 listed
       "needs_human_more": 0
     },
-    "needs_human_backlog": 3,         // standing count of groups currently in needs_human
-    "top_new_issues": [
-      { "title": "…", "url": "…", "occurrences": 214, "affected_users": 38 }
-    ],
-    "top_new_issues_more": 4,
-    "insights": [
-      { "signal_type": "rage_click", "page": "/settings/profile",
-        "affected_users": 14, "reason": "…", "remediation": "…", "url": "…" }
-    ],
-    "insights_more": 0,
-    "watching": { "sessions": 1204, "users": 212 }
+    "needs_human_backlog": 121,       // standing count of groups currently in needs_human
+    "watching": { "sessions": 13470, "users": 147 }
   }
 }
 ```
+
+Customer-perspective field sourcing (all verified against prod data):
+
+- `accounts` / `accounts_more`: top 3 distinct `end_users.account_name` via
+  `error_group_affected_users`, plus overflow count. Omit the account
+  fragment when empty (anonymous traffic).
+- `replay_url`: dashboard `/sessions/<representative_session_id>` when the
+  group has one; null otherwise.
+- `impact`: the stored `customer_impact` sentence. **Renderer fallback:**
+  when null, insights render signal type + page + accounts + replay link
+  (necessary today — existing insight groups have no usable prose); error
+  items fall back to `root_cause_excerpt`, then title alone.
+- `root_cause_excerpt`: leading sentence(s) of stored `root_cause`, budgeted
+  by the renderer; null when uninvestigated.
+- **Dedup rule:** a group appearing in `outcomes` (PR opened or newly
+  needs-human in window) is excluded from `top_new_issues` — outcomes wins.
+  (Observed in prod: the same error was both PR'd and first-seen in one
+  window.)
 
 Go side: `EventPayload` gains `Digest *DigestPayload
 `json:"digest,omitempty"`` per its add-only contract; existing issue fields
@@ -174,20 +225,19 @@ registry or abstraction. There is deliberately **no stored `all_quiet`
 flag**: quietness is derived by the renderer from empty sections (a stored
 flag could contradict `needs_human_backlog > 0`).
 
-Section sources (all existing columns plus `insight_at`; queries re-scope the
-admin-overview / `GetFixStats` shapes to one project over the window, all
-project-wide):
+Section sources (existing columns plus `insight_at` and `customer_impact`;
+queries re-scope the admin-overview / `GetFixStats` shapes to one project
+over the window, all project-wide):
 
+- `insights`: `kind='friction'` groups with `insight_at` within window,
+  ranked by `affected_users_count`, top 3.
+- `top_new_issues`: `kind='error'`, `first_seen` within window, minus groups
+  already in `outcomes` (dedup rule), ranked by
+  `affected_users_count * occurrence_count`, top 3. Priority score v1 swaps
+  into this ORDER BY later without changing the payload.
 - `outcomes`: `error_groups.pr_created_at` / `merged_at` / `needs_human_at`
   within window; merged flag via `pr_outcomes`.
 - `needs_human_backlog`: count of groups with current status `needs_human`.
-- `top_new_issues`: `kind='error'`, `first_seen` within window, ranked by
-  `affected_users_count * occurrence_count`, top 3. Priority score v1 swaps
-  into this ORDER BY later without changing the payload.
-- `insights`: `kind='friction'` groups with `insight_at` within window,
-  carrying the friction investigator's stored `reason_message` /
-  `remediation` (LLM prose written earlier by the friction pipeline, not at
-  digest time), top 3.
 - `watching`: `COUNT(*)` sessions started in window
   (`idx_sessions_project_started`); `COUNT(*)` end users with `last_seen` in
   window (new index).
@@ -236,8 +286,13 @@ the concierge demo button.
   already-sent-today, timezone boundary around 09:00, invalid-zone skip,
   no-subscriber, quiet-day payload, backlog count.
 - Payload builder tests against seeded fixtures covering every section, the
-  caps/overflow counts, and `insight_at` windowing.
-- Worker test for the `insight_at` stamping branch (transition vs. re-set).
+  caps/overflow counts, `insight_at` windowing, account attribution
+  (top-3 + overflow, empty/anonymous case), replay-URL presence/absence, and
+  the outcomes-wins dedup rule.
+- Worker tests for the `insight_at` stamping branch (transition vs. re-set)
+  and for `customer_impact` being persisted from investigation output.
+- Renderer fallback tests: null `impact` (signal+page+accounts+replay), null
+  `root_cause_excerpt` (title alone).
 - Slack renderer golden test (payload → Block Kit JSON), including the quiet
   form and per-field truncation budgets.
 - PATCH `event_types` tests: subscribe/unsubscribe round-trip, rejection of
