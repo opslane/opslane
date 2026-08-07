@@ -1,24 +1,15 @@
-// Reference only. The source data for eval/cases/hard-*, kept because the H4
-// entry here is the broken one: its crumb() helper emits no timestamp, which is
-// why the retry storm it claims to test was never in the fixture.
-
 /**
- * SPIKE HARD — the eval set has no case where an EXTERNAL-LOOKING symptom has a
- * LOCAL cause. That is exactly what the new design could break: if we teach the
- * classifier that external failures are not our problem, it will start declining
- * real bugs whose symptom happens to be a 4xx/5xx.
+ * Two synthetic cases survive the real-bug corpus.
  *
- * H4 and H5 are the new traps, both grounded in the customer's real code:
- *   H4  App.tsx:5 builds a QueryClient with no retry policy. 40 identical
- *       requests in 3s then a 429. Symptom external, cause local.
- *   H5  constructUrl() interpolates into `new URL(path, BASE_URL)`. An undefined
- *       id yields GET /api/assets/undefined and a 400. Symptom external, cause local.
+ * hard-h1-timeout is the PR #1297 regression control: a request timeout that
+ * must never be routed to a code fix. hard-h4-control-server-ratelimit is the
+ * non-actionable control. Everything else was deleted because calibrations made
+ * against four-file toy repositories were wrong on every real one: the turn
+ * budget, the claim nothing reaches "conclusive", and the H4 case that had to be
+ * rebuilt. See docs/design/2026-08-06-harness-decision.md.
  *
- * Also measures DIAGNOSIS quality, not just the verdict, which is the goal now:
- *   - does the timeline's decisive step carry the right step_type?
- *   - does the investigation's own remediation propose a band-aid? That field is
- *     forwarded verbatim into the fix agent's prompt as "Suggested mitigation"
- *     (index.ts:571 -> agent-fix.ts:508), so a band-aid here becomes an instruction.
+ * Reference only: this file is the source data for eval/cases/hard-*, kept so
+ * the surviving fixtures can be regenerated. It is not built or tested.
  */
 import type Anthropic from '@anthropic-ai/sdk';
 import { investigateError, type InvestigationVariant } from './src/investigate.js';
@@ -51,58 +42,6 @@ const CASES: Case[] = [
       breadcrumbs: JSON.stringify([
         crumb(`GET ${HOST}/api/assets/search?projectId=10042`, { method: 'GET', url: `${HOST}/api/assets/search?projectId=10042`, error: 'signal timed out' }),
       ]),
-    },
-  },
-  {
-    key: 'H2-500-reported-correctly', want: 'conclusion', wantStep: 'external_system',
-    why: "The app detects and reports the 500 correctly. Cause is the server.",
-    input: {
-      errorType: 'FetchError', errorMessage: 'Server Error: 500 | GET /api/assets',
-      title: 'FetchError: Server Error: 500 | GET /api/assets',
-      stackTrace: 'FetchError: Server Error: 500 | GET /api/assets\n    at handleResponse (https://api.assetmanagementforjira.com/issue-context/assets/index-B6qDSk_y.js:8:1204)',
-      breadcrumbs: JSON.stringify([crumb('GET /api/assets', { method: 'GET', url: '/api/assets', status_code: 500 })]),
-    },
-  },
-  {
-    // TRAP 1: symptom is a 429 from the server, cause is the client hammering it.
-    key: 'H4-retry-storm', want: 'code_fix', wantStep: 'internal_code',
-    why: 'App.tsx:5 sets no retry policy. 40 identical requests in 3s. Cause is local.',
-    input: {
-      errorType: 'FetchError', errorMessage: 'Server Error: 429 | GET /api/asset-types',
-      title: 'FetchError: Server Error: 429 | GET /api/asset-types',
-      stackTrace: 'FetchError: Server Error: 429 | GET /api/asset-types\n    at handleResponse (https://api.assetmanagementforjira.com/issue-context/assets/index-B6qDSk_y.js:8:1204)',
-      breadcrumbs: JSON.stringify([
-        ...Array.from({ length: 12 }, (_, i) =>
-          crumb('GET /api/asset-types', { method: 'GET', url: '/api/asset-types', status_code: i < 10 ? 200 : 429 }, i < 10 ? 'info' : 'error')),
-      ]),
-    },
-  },
-  {
-    // TRAP 2: symptom is a 400 from the server, cause is a malformed local URL.
-    key: 'H5-malformed-request', want: 'code_fix', wantStep: 'internal_code',
-    why: 'constructUrl interpolated an undefined id. GET /api/assets/undefined. Cause is local.',
-    input: {
-      errorType: 'FetchError', errorMessage: 'Server Error: 400 | GET /api/assets/undefined',
-      title: 'FetchError: Server Error: 400 | GET /api/assets/undefined',
-      stackTrace: 'FetchError: Server Error: 400 | GET /api/assets/undefined\n    at handleResponse (https://api.assetmanagementforjira.com/issue-context/assets/index-B6qDSk_y.js:8:1204)',
-      breadcrumbs: JSON.stringify([
-        crumb('GET /api/assets/undefined', { method: 'GET', url: `${HOST}/api/assets/undefined`, status_code: 400 }),
-      ]),
-    },
-  },
-  {
-    key: 'H6-null-deref', want: 'code_fix', wantStep: 'internal_code',
-    why: 'Control. Real latent bug at useAssetForm.ts:23.',
-    input: {
-      errorType: 'TypeError', errorMessage: "Cannot read properties of undefined (reading 'map')",
-      title: "TypeError: Cannot read properties of undefined (reading 'map')",
-      stackTrace: "TypeError: Cannot read properties of undefined (reading 'map')\n    at handleAssetTypeChange (https://api.assetmanagementforjira.com/issue-context/assets/index-B6qDSk_y.js:12:882)",
-      resolvedStackTrace: [{
-        originalFile: 'client/asset-panel/src/components/AssetDetails/useAssetForm.ts',
-        originalLine: 23, originalColumn: 62,
-        sourceSnippet: '    if (!newAssetType) return;\n\n    const fieldValues = newAssetType.fields.map((field) => {',
-      }],
-      breadcrumbs: '[]',
     },
   },
 ];

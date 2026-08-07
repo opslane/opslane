@@ -5,9 +5,12 @@ import path from 'node:path';
 const CASES_DIR = path.resolve(import.meta.dirname, '../../cases');
 
 describe('loadAllCases', () => {
-  it('loads all 26 eval cases', async () => {
+  // 26 app cases plus the two synthetic controls that survived the real-bug
+  // corpus: hard-h1-timeout (the PR #1297 regression control) and
+  // hard-h4-control-server-ratelimit (the non-actionable control).
+  it('loads all 28 eval cases', async () => {
     const cases = await loadAllCases(CASES_DIR);
-    expect(cases).toHaveLength(26);
+    expect(cases).toHaveLength(28);
   });
 
   it('has 15 vue, 8 react, and 3 flask cases', async () => {
