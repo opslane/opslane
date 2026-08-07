@@ -55,7 +55,9 @@ test-e2e/digest-contract.test.ts                             (new: wire-level di
 - Create: `packages/ingestion/db/migrations/038_daily_digest.sql`
 
 **Interfaces:**
-- Produces: `notification_destinations.event_types` accepts `digest.daily` (default + one-shot backfill); `outbound_events.event_type` accepts `digest.daily`; `projects.digest_timezone TEXT NOT NULL DEFAULT 'UTC'`; `one_shot_migrations` marker table.
+- Produces: `notification_destinations.event_types` accepts `digest.daily` (default + one-shot backfill guarded by the existing `applied_data_migrations` marker table); `outbound_events.event_type` accepts `digest.daily`; `projects.digest_timezone TEXT NOT NULL DEFAULT 'UTC'`.
+
+Known accepted edge (rolling deploy): after a new replica applies the backfill marker, an old replica can still create destinations with the old `["issue.created"]` handler default until it drains; those rows miss the digest. Accepted at current scale — the Rollout phase-2 checklist (Task 10) includes one SQL sweep to catch stragglers.
 
 - [ ] **Step 1: Confirm the two constraint names before writing DDL**
 
@@ -89,17 +91,14 @@ ALTER TABLE notification_destinations
 ALTER TABLE notification_destinations
   ALTER COLUMN event_types SET DEFAULT '{issue.created,digest.daily}';
 
-CREATE TABLE IF NOT EXISTS one_shot_migrations (
-  name TEXT PRIMARY KEY,
-  applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
+-- One-shot guard reuses the EXISTING applied_data_migrations marker table
+-- (028_project_api_keys.sql:28) — no new table.
 UPDATE notification_destinations
 SET event_types = event_types || '{digest.daily}'
 WHERE NOT ('digest.daily' = ANY(event_types))
-  AND NOT EXISTS (SELECT 1 FROM one_shot_migrations WHERE name = '038_digest_backfill');
+  AND NOT EXISTS (SELECT 1 FROM applied_data_migrations WHERE name = '038_digest_backfill');
 
-INSERT INTO one_shot_migrations (name) VALUES ('038_digest_backfill')
+INSERT INTO applied_data_migrations (name) VALUES ('038_digest_backfill')
 ON CONFLICT (name) DO NOTHING;
 
 ALTER TABLE outbound_events
@@ -116,17 +115,15 @@ ALTER TABLE projects
 
 ```bash
 bash scripts/check-migration-reapply.sh
-# One-shot proof: unsubscribe a row, re-apply, confirm it stays unsubscribed.
-psql "$DATABASE_URL" <<'SQL'
-BEGIN;
-UPDATE notification_destinations SET event_types='{issue.created}'
-WHERE id = (SELECT id FROM notification_destinations LIMIT 1);
-SQL
-# re-run migrations (boot path), then:
-psql "$DATABASE_URL" -c "SELECT event_types FROM notification_destinations LIMIT 1;"
+# One-shot proof: unsubscribe a SPECIFIC row (autocommit — no BEGIN),
+# re-apply migrations, confirm THAT row stays unsubscribed.
+UNSUB_ID=$(psql "$DATABASE_URL" -tAc "UPDATE notification_destinations SET event_types='{issue.created}'
+WHERE id = (SELECT id FROM notification_destinations LIMIT 1) RETURNING id;")
+bash scripts/run-migrations.sh   # boot-path replay
+psql "$DATABASE_URL" -tAc "SELECT event_types FROM notification_destinations WHERE id='$UNSUB_ID';"
 ```
 
-Expected: reapply passes; the unsubscribed row still shows only `{issue.created}` after replay.
+Expected: reapply passes; the targeted row still shows only `{issue.created}` after replay.
 
 - [ ] **Step 4: Verify the default on a fresh insert**
 
@@ -555,7 +552,7 @@ func New(pool *pgxpool.Pool, dashboardURL string) *Sweeper
 func (s *Sweeper) Build(ctx context.Context, projectID string, now time.Time) (notify.EventPayload, error)
 ```
 
-Semantics (spec rev 4): window `[now-24h, now)`. Lists fetch 4, keep 3, set `*_has_more`. Insights aggregate `friction_signals` (`occurred_at` in window, `retracted_at IS NULL AND superseded_by IS NULL`, `incident_id` groups with current status `insight`), windowed metrics, ranked by windowed affected users desc then group id. Dedup: groups with `pr_created_at`, `needs_human_at`, **or `merged_at`** in window are excluded from `top_new_issues` (NULL-safe predicates per Global Constraints). Accounts ordered by per-account user count desc, then name; top 3 + `accounts_more`; error/needs-human account attribution filters `error_group_affected_users.last_seen >= from` (the table has `first_seen`/`last_seen`/`occurrence_count` — windowed attribution is available and used). Replay: latest in-window signal's session for insights (fallback `representative_session_id`); `representative_session_id` for issues. `merged` flag on an opened PR correlates `pr_outcomes.pr_number = error_groups.pr_number` — not mere existence, which would mark a new PR merged because an older PR on the same group merged. Ranking casts to BIGINT. `Date` = local date in the project's `digest_timezone`.
+Semantics (spec rev 4): window `[now-24h, now)`. Lists fetch 4, keep 3, set `*_has_more`. Insights aggregate `friction_signals` (`occurred_at` in window, `retracted_at IS NULL AND superseded_by IS NULL`, `incident_id` groups with current status `insight`), windowed metrics, ranked by windowed affected users desc then group id. Dedup: groups with `pr_created_at`, `needs_human_at`, **or `merged_at`** in window are excluded from `top_new_issues` (NULL-safe predicates per Global Constraints). Accounts ordered by per-account user count desc, then name; top 3 + `accounts_more`. Error/needs-human account attribution is **lifetime** via `error_group_affected_users` — a deliberate product choice: the rollup's single `last_seen` cannot faithfully reconstruct a window, so we don't pretend it can. Insight replay: the latest in-window signal's session, captured **inside the aggregate** (`(array_agg(fs.session_id ORDER BY fs.occurred_at DESC))[1]`) — the same predicates select the group and the session, so a selected insight always has one; no `representative_session_id` fallback (unreachable by construction — a deliberate simplification of the spec's fallback clause). Issue replay: `representative_session_id`. `merged` flag on an opened PR requires a `pr_outcomes` receipt correlated on `pr_number` (`po.pr_number = g.pr_number AND po.outcome='merged'`) — never mere per-group existence, and `prs_merged` is sourced from `pr_outcomes.occurred_at` in window (the receipt is event-time truth; `error_groups.merged_at` is a mutable stamp). Ranking casts to BIGINT. `Date` = local date in the project's `digest_timezone`. **Quiet form** requires ALL FIVE lists empty: insights, top new issues, PRs opened, PRs merged, needs-human.
 
 - [ ] **Step 1: Write the fixture seeder + first failing test** in `build_test.go`. The digest package needs its own DB gate (the `db` package helpers are package-private):
 
@@ -568,6 +565,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -585,21 +583,45 @@ func testPool(t *testing.T) *pgxpool.Pool {
 	return pool
 }
 
+// digestFixture carries the generated IDs a test needs for assertions.
+// ALL row IDs are generated per call (uuid.NewString / unique session ids) so
+// multiple fixtures can coexist in one test or run in parallel — fixed IDs
+// would collide on the second call.
+type digestFixture struct {
+	OrgID, ProjectID, EnvID string
+	User1, User2            string // end_user UUIDs (acme.example / globex.example)
+	SessIn1, SessIn2        string // sessions started in-window (-3h, -1h)
+	SessOld                 string // session started at now-oldestSessionAge
+}
+
 // seedDigestFixture creates org→project→environment plus one of everything
-// the digest reads. Cleanup mirrors db/testhelper_test.go cleanupTenant:
-// dependency order, with default_environment_id nulled before environments.
-func seedDigestFixture(t *testing.T, pool *pgxpool.Pool, now time.Time) (orgID, projectID string) {
+// the digest reads, with the oldest session at now-30h (the first-digest
+// anchor). Cleanup mirrors db/testhelper_test.go cleanupTenant: dependency
+// order, with default_environment_id nulled before environments.
+func seedDigestFixture(t *testing.T, pool *pgxpool.Pool, now time.Time) digestFixture {
+	return seedDigestFixtureWithSessionAge(t, pool, now, 30*time.Hour)
+}
+
+func seedDigestFixtureWithSessionAge(t *testing.T, pool *pgxpool.Pool, now time.Time, oldestSessionAge time.Duration) digestFixture {
 	t.Helper()
 	ctx := context.Background()
+	f := digestFixture{
+		User1:   uuid.NewString(),
+		User2:   uuid.NewString(),
+		SessIn1: "sess-" + uuid.NewString(),
+		SessIn2: "sess-" + uuid.NewString(),
+		SessOld: "sess-" + uuid.NewString(),
+	}
 	exec := func(sql string, args ...any) {
 		t.Helper()
 		if _, err := pool.Exec(ctx, sql, args...); err != nil {
 			t.Fatalf("seed: %v\n%s", err, sql)
 		}
 	}
-	if err := pool.QueryRow(ctx, `INSERT INTO orgs (name) VALUES ('digest-test') RETURNING id`).Scan(&orgID); err != nil {
+	if err := pool.QueryRow(ctx, `INSERT INTO orgs (name) VALUES ('digest-test') RETURNING id`).Scan(&f.OrgID); err != nil {
 		t.Fatalf("seed org: %v", err)
 	}
+	orgID := f.OrgID
 	t.Cleanup(func() {
 		for _, stmt := range []string{
 			`DELETE FROM outbound_deliveries WHERE destination_id IN (SELECT id FROM notification_destinations WHERE project_id IN (SELECT id FROM projects WHERE org_id = $1))`,
@@ -621,24 +643,27 @@ func seedDigestFixture(t *testing.T, pool *pgxpool.Pool, now time.Time) (orgID, 
 			}
 		}
 	})
-	if err := pool.QueryRow(ctx, `INSERT INTO projects (org_id, name) VALUES ($1,'digest-proj') RETURNING id`, orgID).Scan(&projectID); err != nil {
+	if err := pool.QueryRow(ctx, `INSERT INTO projects (org_id, name) VALUES ($1,'digest-proj') RETURNING id`, orgID).Scan(&f.ProjectID); err != nil {
 		t.Fatalf("seed project: %v", err)
 	}
-	var envID string
-	if err := pool.QueryRow(ctx, `INSERT INTO environments (project_id, name) VALUES ($1,'production') RETURNING id`, projectID).Scan(&envID); err != nil {
+	projectID := f.ProjectID
+	if err := pool.QueryRow(ctx, `INSERT INTO environments (project_id, name) VALUES ($1,'production') RETURNING id`, projectID).Scan(&f.EnvID); err != nil {
 		t.Fatalf("seed env: %v", err)
 	}
+	envID := f.EnvID
 	exec(`UPDATE projects SET default_environment_id=$2 WHERE id=$1`, projectID, envID)
 
-	// End users (external_user_id is NOT NULL) + sessions: 2 in window, 1 outside.
+	// End users (external_user_id is NOT NULL) + sessions: 2 in window, 1 at
+	// now-oldestSessionAge (the anchor).
 	exec(`INSERT INTO end_users (id, project_id, external_user_id, account_name) VALUES
-		('11111111-1111-1111-1111-111111111111',$1,'u1','acme.example'),
-		('22222222-2222-2222-2222-222222222222',$1,'u2','globex.example')`, projectID)
+		($2,$1,'u1-'||$2,'acme.example'),
+		($3,$1,'u2-'||$3,'globex.example')`, projectID, f.User1, f.User2)
 	exec(`INSERT INTO sessions (id, project_id, environment_id, end_user_id, started_at) VALUES
-		('sess-in-1',$1,$2,'11111111-1111-1111-1111-111111111111',$3),
-		('sess-in-2',$1,$2,'22222222-2222-2222-2222-222222222222',$4),
-		('sess-old',$1,$2,'11111111-1111-1111-1111-111111111111',$5)`,
-		projectID, envID, now.Add(-3*time.Hour), now.Add(-1*time.Hour), now.Add(-30*time.Hour))
+		($3,$1,$2,$6,$7),
+		($4,$1,$2,$8,$9),
+		($5,$1,$2,$6,$10)`,
+		projectID, envID, f.SessIn1, f.SessIn2, f.SessOld,
+		f.User1, now.Add(-3*time.Hour), f.User2, now.Add(-1*time.Hour), now.Add(-oldestSessionAge))
 
 	// Friction insight group + windowed signals (one retracted → excluded).
 	var frictionGroupID string
@@ -653,14 +678,18 @@ func seedDigestFixture(t *testing.T, pool *pgxpool.Pool, now time.Time) (orgID, 
 		(session_id, project_id, environment_id, end_user_id, rule_version, signal_type,
 		 fingerprint, page_url_normalized, occurred_at, occurrence_count, incident_id)
 		VALUES
-		('sess-in-1',$1,$2,'11111111-1111-1111-1111-111111111111',1,'rage_click','fp-friction','/x',$4,3,$3),
-		('sess-in-2',$1,$2,'22222222-2222-2222-2222-222222222222',1,'rage_click','fp-friction','/x',$5,2,$3)`,
-		projectID, envID, frictionGroupID, now.Add(-3*time.Hour), now.Add(-1*time.Hour))
+		($4,$1,$2,$6,1,'rage_click','fp-friction','/x',$8,3,$3),
+		($5,$1,$2,$7,1,'rage_click','fp-friction','/x',$9,2,$3)`,
+		projectID, envID, frictionGroupID, f.SessIn1, f.SessIn2, f.User1, f.User2,
+		now.Add(-3*time.Hour), now.Add(-1*time.Hour))
+	// Retracted row uses a DIFFERENT session (SessOld): friction_signals has
+	// UNIQUE (session_id, fingerprint, rule_version), so reusing SessIn1 with
+	// the same fingerprint/rule_version would fail the insert.
 	exec(`INSERT INTO friction_signals
 		(session_id, project_id, environment_id, end_user_id, rule_version, signal_type,
 		 fingerprint, page_url_normalized, occurred_at, occurrence_count, incident_id, retracted_at)
-		VALUES ('sess-in-1',$1,$2,'11111111-1111-1111-1111-111111111111',1,'rage_click','fp-friction','/x',$4,50,$3, now())`,
-		projectID, envID, frictionGroupID, now.Add(-2*time.Hour))
+		VALUES ($4,$1,$2,$5,1,'rage_click','fp-friction','/x',$6,50,$3, now())`,
+		projectID, envID, frictionGroupID, f.SessOld, f.User1, now.Add(-2*time.Hour))
 
 	// New error group in window (uninvestigated), with windowed affected users.
 	var newGroupID string
@@ -672,8 +701,8 @@ func seedDigestFixture(t *testing.T, pool *pgxpool.Pool, now time.Time) (orgID, 
 		t.Fatalf("seed new group: %v", err)
 	}
 	exec(`INSERT INTO error_group_affected_users (error_group_id, end_user_id, first_seen, last_seen) VALUES
-		($1,'11111111-1111-1111-1111-111111111111',$2,$2),
-		($1,'22222222-2222-2222-2222-222222222222',$2,$2)`, newGroupID, now.Add(-5*time.Hour))
+		($1,$3,$2,$2),
+		($1,$4,$2,$2)`, newGroupID, now.Add(-5*time.Hour), f.User1, f.User2)
 
 	// PR opened in window; also first_seen in window → must be deduped out of
 	// top_new_issues. An OLDER merged PR (different pr_number) exists in
@@ -705,16 +734,16 @@ func seedDigestFixture(t *testing.T, pool *pgxpool.Pool, now time.Time) (orgID, 
 		VALUES ($1,$2,'fp-nh-old','Old thing','error','needs_human',$3,$3,1,1,$3,'external_cause','Old.','Review.')`,
 		projectID, envID, now.Add(-10*24*time.Hour))
 
-	return orgID, projectID
+	return f
 }
 
 func TestBuildDigestSections(t *testing.T) {
 	pool := testPool(t)
 	now := time.Now().UTC().Truncate(time.Second)
-	_, projectID := seedDigestFixture(t, pool, now)
+	f := seedDigestFixture(t, pool, now)
 	s := New(pool, "https://dash.example")
 
-	payload, err := s.Build(context.Background(), projectID, now)
+	payload, err := s.Build(context.Background(), f.ProjectID, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -731,8 +760,8 @@ func TestBuildDigestSections(t *testing.T) {
 	if in.Occurrences != 5 || in.AffectedUsers != 2 {
 		t.Errorf("windowed metrics = %d occ / %d users, want 5/2 (retracted excluded, lifetime 999 ignored)", in.Occurrences, in.AffectedUsers)
 	}
-	if in.ReplayURL == nil || *in.ReplayURL != "https://dash.example/sessions/sess-in-2" {
-		t.Errorf("replay should be latest in-window signal session, got %v", in.ReplayURL)
+	if in.ReplayURL == nil || *in.ReplayURL != "https://dash.example/sessions/"+f.SessIn2 {
+		t.Errorf("replay should be latest in-window signal session %s, got %v", f.SessIn2, in.ReplayURL)
 	}
 	if len(in.Accounts) != 2 || in.AccountsMore != 0 {
 		t.Errorf("accounts = %v +%d", in.Accounts, in.AccountsMore)
@@ -838,11 +867,13 @@ func rootCauseExcerpt(rootCause *string) *string {
 -- project + timezone + name
 SELECT name, digest_timezone FROM projects WHERE id = $1;
 
--- insights (windowed, retraction-aware)
+-- insights (windowed, retraction-aware). The replay session comes out of the
+-- SAME aggregate (latest in-window signal), so a selected insight always has
+-- one — no fallback query, no unreachable code path.
 SELECT g.id, g.signal_type, COALESCE(g.page_url_normalized,''),
        SUM(fs.occurrence_count)::bigint,
        COUNT(DISTINCT fs.end_user_id),
-       COALESCE(g.representative_session_id,'')
+       (array_agg(fs.session_id ORDER BY fs.occurred_at DESC))[1] AS replay_session
 FROM friction_signals fs
 JOIN error_groups g ON g.id = fs.incident_id
 WHERE fs.project_id = $1 AND fs.occurred_at >= $2 AND fs.occurred_at < $3
@@ -851,12 +882,6 @@ WHERE fs.project_id = $1 AND fs.occurred_at >= $2 AND fs.occurred_at < $3
 GROUP BY g.id
 ORDER BY COUNT(DISTINCT fs.end_user_id) DESC, g.id
 LIMIT 4;
-
--- per insight: latest in-window session for the replay link
-SELECT fs.session_id FROM friction_signals fs
-WHERE fs.incident_id = $1 AND fs.occurred_at >= $2 AND fs.occurred_at < $3
-  AND fs.retracted_at IS NULL AND fs.superseded_by IS NULL
-ORDER BY fs.occurred_at DESC LIMIT 1;
 
 -- per insight: accounts (windowed attribution)
 SELECT eu.account_name, COUNT(DISTINCT fs.end_user_id) AS cnt, COUNT(*) OVER () AS total
@@ -882,13 +907,16 @@ WHERE g.project_id = $1 AND g.kind = 'error'
 ORDER BY (g.affected_users_count::bigint * g.occurrence_count::bigint) DESC, g.id
 LIMIT 4;
 
--- per issue / per needs-human item: accounts, windowed via the rollup's last_seen
+-- per issue / per needs-human item: accounts. LIFETIME attribution via the
+-- rollup (deliberate product choice — see Semantics; the rollup's single
+-- last_seen cannot faithfully reconstruct a window).
 SELECT eu.account_name, COUNT(*) AS cnt, COUNT(*) OVER () AS total
 FROM error_group_affected_users au JOIN end_users eu ON eu.id = au.end_user_id
-WHERE au.error_group_id = $1 AND au.last_seen >= $2 AND eu.account_name IS NOT NULL
+WHERE au.error_group_id = $1 AND eu.account_name IS NOT NULL
 GROUP BY eu.account_name ORDER BY cnt DESC, eu.account_name LIMIT 3;
 
--- outcomes: PRs opened in window; merged flag correlates the CURRENT pr_number
+-- outcomes: PRs opened in window; merged flag = a pr_outcomes RECEIPT for the
+-- CURRENT pr_number (never per-group existence)
 SELECT g.id, g.title, COALESCE(g.pr_url,''), COALESCE(g.pr_number,0), g.root_cause,
        EXISTS(SELECT 1 FROM pr_outcomes po
               WHERE po.error_group_id = g.id AND po.pr_number = g.pr_number
@@ -897,12 +925,16 @@ FROM error_groups g
 WHERE g.project_id = $1 AND g.pr_created_at >= $2 AND g.pr_created_at < $3
 ORDER BY g.pr_created_at DESC LIMIT 4;
 
--- PRs merged in window but opened before it (NULL-safe opened-before check)
-SELECT g.id, g.title, COALESCE(g.pr_url,''), COALESCE(g.pr_number,0)
-FROM error_groups g
-WHERE g.project_id = $1 AND g.merged_at >= $2 AND g.merged_at < $3
+-- PRs merged in window but opened before it: sourced from pr_outcomes
+-- receipts (event-time truth per spec), not the mutable merged_at stamp.
+-- NULL-safe opened-before check on the group's pr_created_at.
+SELECT g.id, g.title, COALESCE(g.pr_url,''), po.pr_number
+FROM pr_outcomes po
+JOIN error_groups g ON g.id = po.error_group_id
+WHERE po.project_id = $1 AND po.outcome = 'merged'
+  AND po.occurred_at >= $2 AND po.occurred_at < $3
   AND (g.pr_created_at IS NULL OR g.pr_created_at < $2)
-ORDER BY g.merged_at DESC LIMIT 4;
+ORDER BY po.occurred_at DESC LIMIT 4;
 
 -- needs_human in window
 SELECT g.id, g.title, COALESCE(g.reason_message,'')
@@ -927,9 +959,9 @@ Assemble `notify.EventPayload{Version: 1, EventType: "digest.daily", Project: ..
   - Quiet day: seed only org/project/env + sessions → all lists empty, `Watching.Sessions == 2`, backlog 0, `Validate()` passes.
   - Caps and `has_more`: seed 4 in-window new issues → `len(TopNewIssues) == 3`, `TopNewIssuesHasMore == true`.
   - Accounts overflow + anonymous: 4 distinct account names on one insight → 3 returned, `AccountsMore == 1`; signals with NULL `end_user_id`/`account_name` → empty `Accounts`, no error.
-  - Replay fallback: insight whose windowed signals all have empty sessions is impossible (session_id NOT NULL) — instead delete the in-window signals' sessions? No: cover the fallback by an insight group whose signals are in-window but `representative_session_id` is used when the per-insight session query returns no row (e.g., signals retracted after selection); simpler deterministic arrangement: assert `sessionURL("")` returns nil via a unit test, and fallback ordering via a group with signals only at the window edge. Keep it minimal: unit-test `sessionURL` and `rootCauseExcerpt` directly.
-  - Superseded signal excluded: insert a signal with `superseded_by` set → not counted.
-  - `prs_merged`: group with `merged_at` in window, `pr_created_at` 3 days ago → appears in `PRsMerged`, not `PRsOpened`, and is excluded from `top_new_issues` only if its `first_seen` is in window.
+  - Replay: there is no fallback path (the aggregate that selects an insight also yields its replay session — see Semantics). Unit-test `sessionURL` (empty → nil, escaping) and `rootCauseExcerpt` (nil/empty → nil; first sentence; 220-rune bound) directly.
+  - Superseded signal excluded: insert a signal with `superseded_by` set (on its own session id — respect `UNIQUE (session_id, fingerprint, rule_version)`) → not counted.
+  - `prs_merged`: a `pr_outcomes` receipt with `outcome='merged'` and `occurred_at` in window whose group's `pr_created_at` is 3 days old → appears in `PRsMerged`, not `PRsOpened`; a group with a stale `merged_at` stamp but NO receipt in window → absent.
   - Local date: project with `digest_timezone='Pacific/Auckland'` and `now` chosen so UTC date ≠ Auckland date → `Digest.Date` is the Auckland date.
 
 - [ ] **Step 6: Run full package + build.** `go build ./... && go test ./digest/ -v`
@@ -979,7 +1011,8 @@ func TestRunOnceFirstDigestAndIdempotency(t *testing.T) {
 	pool := testPool(t)
 	ctx := context.Background()
 	now := time.Now().UTC().Truncate(time.Second)
-	_, projectID := seedDigestFixture(t, pool, now) // sessions back to now-30h → anchor old enough
+	f := seedDigestFixture(t, pool, now) // sessions back to now-30h → anchor old enough
+	projectID := f.ProjectID
 	seedDestination(t, pool, projectID, []string{"digest.daily"})
 	s := New(pool, "https://dash.example")
 
@@ -1001,25 +1034,115 @@ func TestRunOnceFirstDigestAndIdempotency(t *testing.T) {
 	}
 }
 
+// publish-level replica-conflict path: a competing writer already inserted
+// the dedup key between RunOnce's existence check and publish. publish must
+// report inserted=false, not count it as published.
+func TestPublishReturnsFalseOnDedupConflict(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	f := seedDigestFixture(t, pool, now)
+	seedDestination(t, pool, f.ProjectID, []string{"digest.daily"})
+	s := New(pool, "https://dash.example")
+
+	payload, err := s.Build(ctx, f.ProjectID, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := "digest.daily:" + f.ProjectID + ":" + now.Format("2006-01-02")
+	if _, err := pool.Exec(ctx, `INSERT INTO outbound_events (project_id, event_type, dedup_key, payload)
+		VALUES ($1,'digest.daily',$2,'{}')`, f.ProjectID, key); err != nil {
+		t.Fatal(err)
+	}
+	inserted, err := s.publish(ctx, f.ProjectID, key, payload)
+	if err != nil || inserted {
+		t.Fatalf("publish = %v, %v; want false, nil", inserted, err)
+	}
+}
+
+// publish must not write an event when every subscribed destination vanished
+// between candidate selection and publish (zero-delivery event would suppress
+// the project for the day while delivering nothing).
+func TestPublishSkipsWhenDestinationsVanished(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	f := seedDigestFixture(t, pool, now)
+	destID := seedDestination(t, pool, f.ProjectID, []string{"digest.daily"})
+	s := New(pool, "https://dash.example")
+
+	payload, err := s.Build(ctx, f.ProjectID, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE notification_destinations SET enabled=false WHERE id=$1`, destID); err != nil {
+		t.Fatal(err)
+	}
+	key := "digest.daily:" + f.ProjectID + ":" + now.Format("2006-01-02")
+	inserted, err := s.publish(ctx, f.ProjectID, key, payload)
+	if err != nil || inserted {
+		t.Fatalf("publish = %v, %v; want false, nil", inserted, err)
+	}
+	var events int
+	pool.QueryRow(ctx, `SELECT count(*) FROM outbound_events WHERE project_id=$1`, f.ProjectID).Scan(&events)
+	if events != 0 {
+		t.Fatalf("zero-delivery event was written: %d", events)
+	}
+}
+
+// First-digest boundary: anchor exactly 24h old → due; 1 minute short → not.
+// Zero-session projects anchor on projects.created_at.
+func TestRunOnceFirstDigestBoundaryAndCreatedAtAnchor(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+
+	// (a) sessions exactly 24h old → due.
+	fa := seedDigestFixtureWithSessionAge(t, pool, now, 24*time.Hour)
+	seedDestination(t, pool, fa.ProjectID, []string{"digest.daily"})
+	// (b) sessions 23h59m old → not due.
+	fb := seedDigestFixtureWithSessionAge(t, pool, now, 24*time.Hour-time.Minute)
+	seedDestination(t, pool, fb.ProjectID, []string{"digest.daily"})
+	// (c) NO sessions; projects.created_at 25h ago → due via created_at anchor.
+	fc := seedDigestFixture(t, pool, now)
+	pool.Exec(ctx, `DELETE FROM friction_signals WHERE project_id=$1`, fc.ProjectID)
+	pool.Exec(ctx, `DELETE FROM sessions WHERE project_id=$1`, fc.ProjectID)
+	pool.Exec(ctx, `UPDATE projects SET created_at=$2 WHERE id=$1`, fc.ProjectID, now.Add(-25*time.Hour))
+	seedDestination(t, pool, fc.ProjectID, []string{"digest.daily"})
+
+	s := New(pool, "https://dash.example")
+	n, err := s.RunOnce(ctx, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Fatalf("published %d, want 2 (a and c due; b too fresh)", n)
+	}
+	var count int
+	pool.QueryRow(ctx, `SELECT count(*) FROM outbound_events WHERE project_id=$1`, fb.ProjectID).Scan(&count)
+	if count != 0 {
+		t.Fatalf("b published despite 23h59m anchor")
+	}
+}
+
 func TestRunOnceSkipsIneligibleProjects(t *testing.T) {
 	pool := testPool(t)
 	ctx := context.Background()
 	now := time.Now().UTC().Truncate(time.Second)
 
 	// (a) fresh project: sessions only 1h old → anchor too new → 0.
-	orgA, projA := seedDigestFixtureWithSessionAge(t, pool, now, 1*time.Hour)
-	_ = orgA
-	seedDestination(t, pool, projA, []string{"digest.daily"})
+	fa := seedDigestFixtureWithSessionAge(t, pool, now, 1*time.Hour)
+	seedDestination(t, pool, fa.ProjectID, []string{"digest.daily"})
 
 	// (b) unsubscribed: destination without digest.daily → not a candidate.
-	_, projB := seedDigestFixture(t, pool, now)
-	seedDestination(t, pool, projB, []string{"issue.created"})
+	fb := seedDigestFixture(t, pool, now)
+	seedDestination(t, pool, fb.ProjectID, []string{"issue.created"})
 
 	// (c) invalid zone: skipped and logged, not an error, and must not abort
 	// other projects in the same tick.
-	_, projC := seedDigestFixture(t, pool, now)
-	seedDestination(t, pool, projC, []string{"digest.daily"})
-	pool.Exec(ctx, `UPDATE projects SET digest_timezone='Not/AZone' WHERE id=$1`, projC)
+	fc := seedDigestFixture(t, pool, now)
+	seedDestination(t, pool, fc.ProjectID, []string{"digest.daily"})
+	pool.Exec(ctx, `UPDATE projects SET digest_timezone='Not/AZone' WHERE id=$1`, fc.ProjectID)
 
 	s := New(pool, "https://dash.example")
 	n, err := s.RunOnce(ctx, now)
@@ -1036,7 +1159,8 @@ func TestRunOnceSubsequentWaitsForNineLocal(t *testing.T) {
 	ctx := context.Background()
 	// Fix "now" at 08:00 UTC today so hour comparisons are deterministic (UTC zone).
 	base := time.Now().UTC().Truncate(24 * time.Hour).Add(8 * time.Hour)
-	_, projectID := seedDigestFixture(t, pool, base)
+	f := seedDigestFixture(t, pool, base)
+	projectID := f.ProjectID
 	seedDestination(t, pool, projectID, []string{"digest.daily"})
 	s := New(pool, "https://dash.example")
 
@@ -1057,7 +1181,7 @@ func TestRunOnceSubsequentWaitsForNineLocal(t *testing.T) {
 }
 ```
 
-`seedDigestFixtureWithSessionAge` is `seedDigestFixture` with the session timestamps parameterized — refactor the seeder to take the oldest-session age (default 30h) rather than duplicating it.
+(`seedDigestFixtureWithSessionAge` is defined with the seeder in Task 5's `build_test.go`.)
 
 - [ ] **Step 2: Run to verify failure.** Expected: `RunOnce` undefined.
 
@@ -1172,9 +1296,13 @@ func (s *Sweeper) RunOnce(ctx context.Context, now time.Time) (int, error) {
 	return published, nil
 }
 
-// publish inserts the outbox event and its deliveries in one transaction.
-// Returns false when the dedup key already existed (replica conflict) —
-// expected, not an error.
+// publish inserts the outbox event and its deliveries in ONE statement,
+// mirroring publishIssueCreated's CTE: the event row is only written when a
+// subscribed destination still exists (destinations can be disabled between
+// candidate selection and publish — an event with zero deliveries would
+// suppress the project for the whole day while delivering nothing).
+// Returns false when nothing was inserted: dedup conflict (another replica
+// won) or no remaining subscribed destination. Both expected, not errors.
 func (s *Sweeper) publish(ctx context.Context, projectID, dedupKey string, payload notify.EventPayload) (bool, error) {
 	if err := payload.Validate(); err != nil {
 		return false, err
@@ -1183,32 +1311,31 @@ func (s *Sweeper) publish(ctx context.Context, projectID, dedupKey string, paylo
 	if err != nil {
 		return false, err
 	}
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return false, err
-	}
-	defer tx.Rollback(ctx)
-
 	var eventID string
-	err = tx.QueryRow(ctx, `
-		INSERT INTO outbound_events (project_id, event_type, dedup_key, payload)
-		VALUES ($1, 'digest.daily', $2, $3::jsonb)
-		ON CONFLICT (project_id, dedup_key) DO NOTHING
-		RETURNING id`, projectID, dedupKey, string(body)).Scan(&eventID)
+	err = s.pool.QueryRow(ctx, `
+		WITH destinations AS (
+			SELECT id FROM notification_destinations
+			WHERE project_id = $1 AND enabled AND 'digest.daily' = ANY(event_types)
+		), event AS (
+			INSERT INTO outbound_events (project_id, event_type, dedup_key, payload)
+			SELECT $1, 'digest.daily', $2, $3::jsonb
+			WHERE EXISTS (SELECT 1 FROM destinations)
+			ON CONFLICT (project_id, dedup_key) DO NOTHING
+			RETURNING id
+		), deliveries AS (
+			INSERT INTO outbound_deliveries (event_id, destination_id)
+			SELECT event.id, destinations.id FROM event CROSS JOIN destinations
+			RETURNING 1
+		)
+		SELECT id FROM event`,
+		projectID, dedupKey, string(body)).Scan(&eventID)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return false, nil // dedup conflict: another replica won
+		return false, nil // dedup conflict or destinations vanished — no row written
 	}
 	if err != nil {
 		return false, err
 	}
-	if _, err := tx.Exec(ctx, `
-		INSERT INTO outbound_deliveries (event_id, destination_id)
-		SELECT $1, d.id FROM notification_destinations d
-		WHERE d.project_id = $2 AND d.enabled AND 'digest.daily' = ANY(d.event_types)`,
-		eventID, projectID); err != nil {
-		return false, err
-	}
-	return true, tx.Commit(ctx)
+	return true, nil
 }
 ```
 
@@ -1366,7 +1493,10 @@ func TestFormatSlackDigestQuietDay(t *testing.T) {
 }
 
 func TestFormatSlackDigestBudgetsAndMasking(t *testing.T) {
-	long := strings.Repeat("x", 5000) + " user@example.com *bold* `tick`"
+	// Sensitive/markdown markers FIRST so field truncation cannot remove them
+	// before the masking/neutralization assertions run — markers after 5000
+	// filler chars would make this test pass with no masking at all.
+	long := "user@example.com *bold* _ital_ ~strike~ `tick` " + strings.Repeat("x", 5000)
 	payload := EventPayload{
 		Version: 1, EventType: "digest.daily",
 		Project: ProjectRef{ID: "p1", Name: "p"},
@@ -1384,8 +1514,10 @@ func TestFormatSlackDigestBudgetsAndMasking(t *testing.T) {
 	if strings.Contains(s, "user@example.com") {
 		t.Error("email not masked")
 	}
-	if strings.Contains(s, "`tick`") {
-		t.Error("backticks not stripped")
+	for _, active := range []string{"*bold*", "_ital_", "~strike~", "`tick`"} {
+		if strings.Contains(s, active) {
+			t.Errorf("slack markdown not neutralized: %s", active)
+		}
 	}
 	var decoded map[string]any
 	if err := json.Unmarshal(body, &decoded); err != nil {
@@ -1393,8 +1525,8 @@ func TestFormatSlackDigestBudgetsAndMasking(t *testing.T) {
 	}
 	for _, b := range decoded["blocks"].([]any) {
 		if text, ok := b.(map[string]any)["text"].(map[string]any); ok {
-			if str, ok := text["text"].(string); ok && len([]rune(str)) > 3000 {
-				t.Errorf("section exceeds slack limit: %d runes", len([]rune(str)))
+			if str, ok := text["text"].(string); ok && len([]rune(str)) > 2900 {
+				t.Errorf("section exceeds sectionMax=2900: %d runes", len([]rune(str)))
 			}
 		}
 	}
@@ -1410,7 +1542,7 @@ func TestFormatSlackUnknownEventTypeErrors(t *testing.T) {
 
 - [ ] **Step 2: Run to verify failure.** Digest payloads currently hit the `default:` error branch from Task 2.
 
-- [ ] **Step 3: Implement `slack_digest.go`.** One private helper per section building `[]map[string]any` blocks; `cleanProse(value string, budget int) string` applies `masking.RedactBody` → `masking.RedactURL` → backtick strip → `slackEscape` → rune truncate to budget; a final pass truncates each section text to `sectionMax`. Header: `Daily digest — <project name>`; context sub-line with the date. Backlog line: `<n> older issues still awaiting your review` linking `DashboardURL`. Watching context: `Watched <sessions> sessions across <users> users`. Add `case "digest.daily": return formatSlackDigest(payload)` to `FormatSlack`.
+- [ ] **Step 3: Implement `slack_digest.go`.** One private helper per section building `[]map[string]any` blocks; `cleanProse(value string, budget int) string` applies `masking.RedactBody` → `masking.RedactURL` → **markdown neutralization** (replace each of `` ` ``, `*`, `_`, `~` with `'` — backticks alone are not enough; Slack mrkdwn treats all four as formatting controls) → `slackEscape` → rune truncate to budget; a final pass truncates each section text to `sectionMax` (2900). Header: `Daily digest — <project name>`; context sub-line with the date. Backlog line: `<n> older issues still awaiting your review` linking `DashboardURL`. Watching context: `Watched <sessions> sessions across <users> users`. Quiet form when all five lists are empty (insights, top new issues, PRs opened, PRs merged, needs-human). Add `case "digest.daily": return formatSlackDigest(payload)` to `FormatSlack`.
 
 - [ ] **Step 4: Run until green:** `go test ./notify/ -v`.
 
@@ -1446,13 +1578,21 @@ type DigestBuilder interface {
 
 - [ ] **Step 2: Run to verify failure.**
 
-- [ ] **Step 3: Implement.** Parse the optional JSON body (treat `io.EOF` as empty). The digest branch nil-checks the builder before use:
+- [ ] **Step 3: Implement.** Parse the optional JSON body with the same strictness as the other handlers in this file — size-capped, unknown fields rejected, trailing JSON rejected — treating only a fully empty body as "default". The digest branch nil-checks the builder before use:
 
 ```go
+r.Body = http.MaxBytesReader(w, r.Body, 1<<16)
 var req struct {
 	EventType string `json:"event_type"`
 }
-if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+decoder := json.NewDecoder(r.Body)
+decoder.DisallowUnknownFields()
+if err := decoder.Decode(&req); err != nil {
+	if !errors.Is(err, io.EOF) { // empty body → defaults; anything else → 400
+		writeJSONError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+} else if decoder.More() {
 	writeJSONError(w, http.StatusBadRequest, "invalid request body")
 	return
 }
@@ -1496,8 +1636,8 @@ git commit -m "feat(ingestion): test-send supports digest.daily with real projec
 ### Task 9: Dashboard — event-type toggles, digest preview button, timezone
 
 **Files:**
-- Modify: `packages/dashboard/src/types/api.ts` (destination + project types)
-- Modify: `packages/dashboard/src/api.ts` (`updateNotificationDestination` gains `event_types`; `testNotificationDestination` gains optional `eventType`; project update gains `digest_timezone`)
+- Modify: `packages/dashboard/src/types/api.ts` (destination types; `NotificationTestResult` already exists at line ~74)
+- Modify: `packages/dashboard/src/api.ts` (`updateNotificationDestination` gains `event_types`; `testNotificationDestination` gains optional `eventType`; the `Project` interface at ~line 145 and project update gain `digest_timezone`)
 - Modify: `packages/dashboard/src/components/IntegrationsSettings.vue` (per-destination "New issue alerts" / "Daily digest" checkboxes wired to PATCH; a "Send digest preview" action next to the existing test button, calling test-send with `event_type: "digest.daily"`)
 - Modify: `packages/dashboard/src/views/Settings.vue` (digest timezone text input with a datalist of common zones, PATCH on change)
 - Test: `packages/dashboard/src/api-notifications.test.ts`, `packages/dashboard/src/views/__tests__/settings-integrations.test.ts`
@@ -1510,9 +1650,9 @@ git commit -m "feat(ingestion): test-send supports digest.daily with real projec
 updateNotificationDestination(projectId: string, destId: string,
   patch: { name?: string; webhook_url?: string; enabled?: boolean; event_types?: string[] }): Promise<NotificationDestination>
 testNotificationDestination(projectId: string, destId: string,
-  opts?: { eventType?: 'issue.created' | 'digest.daily' }): Promise<TestSendResult>
+  opts?: { eventType?: 'issue.created' | 'digest.daily' }): Promise<NotificationTestResult>  // existing type in types/api.ts:74 — do NOT invent a new one
 updateProject(projectId: string,
-  patch: { /* existing fields */ digest_timezone?: string }): Promise<Project>
+  patch: { /* existing fields */ digest_timezone?: string }): Promise<Project>               // Project interface lives in api.ts:145, not types/api.ts
 ```
 
 - [ ] **Step 1: Write failing Vitest cases**: `updateNotificationDestination` sends `event_types` in the PATCH body when provided; `testNotificationDestination` sends `{"event_type":"digest.daily"}` when `eventType` passed and an empty body otherwise; IntegrationsSettings renders one checkbox per known event type checked from the destination's `event_types`, toggling calls the API with the new array (the last checked box is disabled so the array is never empty); the digest preview button calls test-send with the digest event type.
@@ -1568,7 +1708,12 @@ Write it fully (real code, not the comment sketch) with the same imports, env ha
 
 - [ ] **Step 2: Run against the worktree stack.** Export the port/URL env block from root `AGENTS.md` as a unit, bring up `postgres`, `minio`, `ingestion` (`docker compose up -d --build`), run migrations, then `pnpm --filter test-e2e test -- digest-contract`. Expected: PASS.
 
-- [ ] **Step 3 (manual, optional but recommended once): sweep smoke.** With the same stack: `export DIGEST_SWEEP_ENABLED=true` and `export NOTIFY_UNSAFE_EXTRA_WEBHOOK_HOSTS=host.docker.internal:9377` (exact `host:port` — the allowlist matches the URL's host **including port**), restart ingestion, create a destination pointed at `http://host.docker.internal:9377/hook` (a `python3 -m http.server`-style POST logger from the scratchpad), seed sessions older than 24h, and confirm within ~6 minutes: one `digest.daily` row in `outbound_events` with today's dedup key and a delivered `outbound_deliveries` row.
+- [ ] **Step 3 (REQUIRED once before merge): live sweep smoke.** The e2e test exercises the synchronous test-send path only; this smoke is the one place candidate selection → dedup → outbox insert → dispatcher claim → webhook delivery runs end to end, and the spec's Testing section requires it. With the same stack:
+  1. `export DIGEST_SWEEP_ENABLED=true` and `export NOTIFY_UNSAFE_EXTRA_WEBHOOK_HOSTS=host.docker.internal:9377` (exact `host:port` — the allowlist matches the URL's host **including port**), restart ingestion.
+  2. Before creating a destination, assert the flag-off deploy left no sweep artifacts: `SELECT count(*) FROM outbound_events WHERE event_type='digest.daily'` → 0.
+  3. Create a destination pointed at `http://host.docker.internal:9377/hook` (a small POST-logging Python server in the scratchpad), seed sessions older than 24h.
+  4. Confirm within ~6 minutes: one `digest.daily` row in `outbound_events` with today's dedup key, a `delivered` `outbound_deliveries` row, and the logger shows Block Kit JSON containing "Daily digest".
+  5. Rollout phase-2 straggler check (also record in the deploy runbook): `SELECT id FROM notification_destinations WHERE NOT ('digest.daily' = ANY(event_types));` — review any rows created during the deploy window and append `digest.daily` where intended.
 
 - [ ] **Step 4: Full repository gate** (root `AGENTS.md`): `pnpm install --frozen-lockfile && pnpm -r build && pnpm test && (cd packages/ingestion && go build ./... && go test ./...) && docker compose config --quiet` — with `DATABASE_URL` exported; confirm **zero** Go test skips.
 
@@ -1585,5 +1730,6 @@ git commit -m "test(e2e): wire-level digest contract — create default, test-se
 
 - Spec coverage: migration (§Schema→T1), envelope (§Payload→T2), subscribe/unsubscribe (§Code-side→T3), timezone (§Schema/§Code-side→T4), Build+sources (§Payload→T5), sweep/due-ness/rollout gate (§Scheduling/§Rollout→T6), renderer (§Rendering→T7), test-send (§API→T8), dashboard toggles + preview (§Code-side/§API→T9), wire contract + gate (§Testing→T10). Two-phase rollout is operational: the env flag defaults off (T6); enabling it in prod is a deploy-time action documented in the spec.
 - The dedup key uses the **local** date; the prior-event existence check and the publish insert use the same key string, so a project can never get two digests on one local day.
-- `error_group_affected_users` **does** carry `first_seen`/`last_seen`/`occurrence_count`; issue/needs-human account attribution therefore filters on `au.last_seen >= from` (windowed) — a deliberate improvement over lifetime attribution, matching the insights sections' windowed semantics.
-- The one-shot backfill marker (`one_shot_migrations`) is new machinery, justified by a real failure mode (boot replay re-subscribing unsubscribed users); it is generic for future data backfills.
+- Issue/needs-human account attribution is **lifetime** via `error_group_affected_users` — a stated product choice, not a schema limitation (the table does carry `first_seen`/`last_seen`/`occurrence_count`, but a single mutable `last_seen` cannot faithfully reconstruct an arbitrary window, so we don't pretend it can).
+- The one-shot backfill reuses the **existing** `applied_data_migrations` marker table (028) — no new schema. The rolling-deploy edge (old replicas creating `issue.created`-only destinations after the marker is set) is accepted and swept by the phase-2 straggler SQL in Task 10.
+- Quiet form is defined over all five lists (insights, top new issues, PRs opened, PRs merged, needs-human), consistently in Semantics, the renderer, and its tests.
