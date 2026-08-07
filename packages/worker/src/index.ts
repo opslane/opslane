@@ -14,10 +14,10 @@ import {
   updateJobTraceUrl,
   getQueueDepth,
 } from './db.js';
-import { buildReason } from './reason-codes.js';
+import { buildReason, reasonCodeForDecision, reproductionRemediation } from './reason-codes.js';
 import { logger, safeErrorMessage, setWorkerId } from './logger.js';
 import { fetchObject, getMinIOConfig } from './minio-client.js';
-import { investigateError } from './investigate.js';
+import { INVESTIGATION_MODEL, investigateError } from './investigate.js';
 import { runPipeline } from './pipeline.js';
 import { createPoller } from './poller.js';
 import { buildRepoUrl, cloneFailureReason, cloneRepo } from './repo-clone.js';
@@ -532,8 +532,6 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
   }
 
   try {
-    const surface = await db.loadFixSurface(job.projectId);
-
     checkAbort(signal);
 
     // Run codebase-aware investigation
@@ -546,7 +544,7 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
       stackTrace: event?.stack_trace_raw ?? '',
       resolvedStackTrace: resolvedStack ?? framesFromEnvelope(event?.stack_trace_resolved) ?? null,
       breadcrumbs: event?.breadcrumbs ?? '[]',
-    }, repoDir, surface);
+    }, repoDir);
     checkAbort(signal);
 
     logger.info('Investigation result', {
@@ -562,7 +560,7 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
       decisionReason: triage.decisionReason,
       causeLocation: triage.diagnosis?.cause_location ?? null,
       diagnosis: triage.diagnosis,
-      model: process.env['INVESTIGATION_MODEL'] ?? 'claude-sonnet-4-6',
+      model: INVESTIGATION_MODEL,
       promptVersion: 'diagnosis-v1',
       jobId: job.id,
       // Persisted because the fix job loads this row to decide whether it may
@@ -570,6 +568,10 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
       basis: triage.decisionBasis,
       confidence: triage.confidence,
     };
+
+    /** Set when the result is held for a human instead of opening a fix job. */
+    let parked = false;
+    let kindGateRefusal: string | null = null;
 
     if (triage.outcome === 'needs_more_context') {
       await updateGroupInvestigation(job.errorGroupId, job.projectId, 'needs_human', {
@@ -588,19 +590,18 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
       });
 
     } else if (triage.outcome === 'not_actionable') {
-      // Read the basis, never the prose. Matching substrings of our own
-      // message meant rewording it silently changed the reason code.
-      const outsideSurface = triage.decisionBasis === 'primary_outside_fix_surface';
-      const reproductionSteps = triage.diagnosis?.reproduction_steps ?? [];
       await updateGroupInvestigation(job.errorGroupId, job.projectId, 'insight', {
         rootCause: triage.diagnosis?.one_line_description ?? triage.decisionReason,
         confidence: triage.confidence,
         reason: {
-          reason_code: outsideSurface ? 'triage_unfixable' : 'unfixable_infra',
+          // Read the outcome, never the prose. Matching substrings of our own
+          // message meant rewording it silently changed the reason code.
+          reason_code: reasonCodeForDecision(decision),
           reason_message: triage.decisionReason,
-          remediation: reproductionSteps.length > 0
-            ? `Reproduce with: ${reproductionSteps.join('; ')}`
-            : 'Investigate the named system; no reproduction steps were established.',
+          remediation: reproductionRemediation(
+            triage.diagnosis?.reproduction_steps ?? [],
+            'Investigate the named system; no reproduction steps were established.',
+          ),
         },
         decision,
       }, job);
@@ -623,26 +624,31 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
       } else {
         // Defense-in-depth refusal (kind gate): park the result for a human
         // instead of silently dropping the investigation.
-        await updateGroupInvestigation(job.errorGroupId, job.projectId, 'investigated', {
-          rootCause: triage.diagnosis?.one_line_description ?? triage.decisionReason,
-          confidence: triage.confidence,
-          decision,
-        }, job);
-        jobsProcessed++;
-        logger.warn('Investigation: automatic fix refused by kind gate', {
-          job_id: job.id, reason: fixResult.reason, duration_ms: durationMs,
-        });
+        parked = true;
+        kindGateRefusal = fixResult.reason ?? 'refused';
       }
     } else {
+      parked = true;
+    }
+
+    // Both parking paths write the same row and differ only in what they log,
+    // so the write happens once and the branch chooses the message.
+    if (parked) {
       await updateGroupInvestigation(job.errorGroupId, job.projectId, 'investigated', {
         rootCause: triage.diagnosis?.one_line_description ?? triage.decisionReason,
         confidence: triage.confidence,
         decision,
       }, job);
       jobsProcessed++;
-      logger.info('Investigation: investigated (awaiting user)', {
-        job_id: job.id, confidence: triage.confidence, duration_ms: durationMs,
-      });
+      if (kindGateRefusal) {
+        logger.warn('Investigation: automatic fix refused by kind gate', {
+          job_id: job.id, reason: kindGateRefusal, duration_ms: durationMs,
+        });
+      } else {
+        logger.info('Investigation: investigated (awaiting user)', {
+          job_id: job.id, confidence: triage.confidence, duration_ms: durationMs,
+        });
+      }
     }
   } finally {
     await cleanup();
@@ -870,11 +876,10 @@ export async function processFixJob(job: ClaimedJob & { errorGroupId: string }, 
   const investigation = await getGroupInvestigation(job.errorGroupId, job.projectId);
 
   // Parallel fetch for independent data
-  const [replay, sessionPointer, environmentContext, fixSurface] = await Promise.all([
+  const [replay, sessionPointer, environmentContext] = await Promise.all([
     db.getReplayForGroup(job.errorGroupId, job.projectId),
     db.getSessionPointerForGroup(job.errorGroupId, job.projectId),
     db.getEnvironmentNamesForGroup(job.errorGroupId, job.projectId, group.kind),
-    db.loadFixSurface(job.projectId),
   ]);
   const artifacts = replay ? await db.getReplayArtifacts(replay.id, job.projectId) : [];
 
@@ -1018,7 +1023,6 @@ export async function processFixJob(job: ClaimedJob & { errorGroupId: string }, 
       sourceFiles: [],
       visualAnalysis: visualOutput,
       repoPath: repoDir,
-      fixSurface,
       repoUrl,
       githubRepo: project.github_repo,
       defaultBranch,
@@ -1026,6 +1030,7 @@ export async function processFixJob(job: ClaimedJob & { errorGroupId: string }, 
       abortSignal: signal,
       assertLeaseOwned: () => db.assertJobLease(job),
       kind: group.kind,
+      triggeredBy: job.triggeredBy,
       frictionEvidence: frictionEvidence
         ? JSON.stringify({
             signals: frictionEvidence.signals,

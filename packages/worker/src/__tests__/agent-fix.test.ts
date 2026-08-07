@@ -212,7 +212,7 @@ function passingSandboxFake() {
 /** The persisted decision that authorises a fix job to run. */
 function authorisedDecision() {
   mockLoadDiagnosisDecision.mockResolvedValue({
-    outcome: 'code_fix', basis: 'in_surface_defect', confidence: 'high',
+    outcome: 'code_fix', basis: 'local_defect', confidence: 'high',
   });
 }
 
@@ -263,19 +263,9 @@ describe('fix jobs read the persisted decision instead of re-triaging', () => {
     expect(createE2BSandbox).not.toHaveBeenCalled();
   });
 
-  it('maps an out-of-surface conclusion to its own reason code', async () => {
-    mockLoadDiagnosisDecision.mockResolvedValue({
-      outcome: 'not_actionable', basis: 'primary_outside_fix_surface', confidence: 'high',
-    });
-
-    const result = await runAgentFix(makeInput());
-
-    expect(result.reason?.reason_code).toBe('triage_unfixable');
-  });
-
   it('short-circuits on a code_fix decision that is not high confidence', async () => {
     mockLoadDiagnosisDecision.mockResolvedValue({
-      outcome: 'code_fix', basis: 'in_surface_defect', confidence: 'medium',
+      outcome: 'code_fix', basis: 'local_defect', confidence: 'medium',
     });
 
     const result = await runAgentFix(makeInput());
@@ -314,10 +304,70 @@ describe('fix jobs read the persisted decision instead of re-triaging', () => {
     expect(createE2BSandbox).toHaveBeenCalled();
   });
 
-  it('does not consult the decision when a human already provided the investigation', async () => {
+  it('does not let guidance text alone authorise an auto-created job', async () => {
+    vi.mocked(runAgentLoop).mockResolvedValue(makeAgentResult());
+    mockLoadDiagnosisDecision.mockResolvedValue(null);
+
+    const result = await runAgentFix(makeInput({
+      triggeredBy: 'auto',
+      investigation: { rootCause: 'Investigation wrote this', guidance: 'do it this way' },
+    }));
+
+    expect(mockLoadDiagnosisDecision).toHaveBeenCalled();
+    expect(result.status).toBe('needs_human');
+    expect(createE2BSandbox).not.toHaveBeenCalled();
+  });
+
+  // Carrying prior diagnosis prose is NOT authorisation. This previously keyed
+  // off `investigation` being present at all, which made the gate dead on the
+  // main path: index.ts populates it from error_groups.root_cause, written in
+  // the same transaction that creates every auto fix job.
+  it('still consults the decision for an auto job carrying investigation context', async () => {
+    vi.mocked(runAgentLoop).mockResolvedValue(makeAgentResult());
+    mockLoadDiagnosisDecision.mockResolvedValue(null);
+
+    const result = await runAgentFix(makeInput({
+      triggeredBy: 'auto',
+      investigation: { rootCause: 'Investigation wrote this' },
+    }));
+
+    expect(mockLoadDiagnosisDecision).toHaveBeenCalled();
+    expect(result.status).toBe('needs_human');
+    expect(createE2BSandbox).not.toHaveBeenCalled();
+  });
+
+  // A person opened the incident and clicked through to a fix. That click IS the
+  // approval, which is the whole point of parking a medium-confidence diagnosis.
+  it('bypasses the decision when a human triggered the job', async () => {
     vi.mocked(runAgentLoop).mockResolvedValue(makeAgentResult());
 
-    await runAgentFix(makeInput({ investigation: { rootCause: 'A human said so' } }));
+    await runAgentFix(makeInput({ triggeredBy: 'human' }));
+
+    expect(mockLoadDiagnosisDecision).not.toHaveBeenCalled();
+    expect(createE2BSandbox).toHaveBeenCalled();
+  });
+
+  // The regression this keys off `triggeredBy` to avoid: guidance is optional in
+  // both the API (nilIfEmpty) and the dashboard (guidance.value || undefined), so
+  // keying on it discarded the approval of every human who clicked without typing.
+  it('authorises a human trigger that carries no typed guidance', async () => {
+    vi.mocked(runAgentLoop).mockResolvedValue(makeAgentResult());
+
+    await runAgentFix(makeInput({
+      triggeredBy: 'human',
+      investigation: { rootCause: 'Parked at medium confidence' },
+    }));
+
+    expect(mockLoadDiagnosisDecision).not.toHaveBeenCalled();
+    expect(createE2BSandbox).toHaveBeenCalled();
+  });
+
+  // Friction has its own authorization ladder and never writes a decision row,
+  // so consulting one refuses every friction fix, approved or not.
+  it('bypasses the decision for a friction fix, which has its own ladder', async () => {
+    vi.mocked(runAgentLoop).mockResolvedValue(makeAgentResult());
+
+    await runAgentFix(makeInput({ kind: 'friction', triggeredBy: 'auto' }));
 
     expect(mockLoadDiagnosisDecision).not.toHaveBeenCalled();
     expect(createE2BSandbox).toHaveBeenCalled();

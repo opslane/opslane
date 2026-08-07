@@ -1,7 +1,22 @@
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+
+// The only stub in this tracer, and it stands in for one Postgres row rather
+// than for behaviour. Every fix job now passes the authorization gate, which
+// reads the decision the investigation persisted; there is no database here, so
+// the row is supplied directly. Its shape is the gate's precondition — anything
+// other than code_fix/high must refuse, which the agent-fix suite covers.
+vi.mock('../db.js', async () => ({
+  ...(await vi.importActual<typeof import('../db.js')>('../db.js')),
+  loadDiagnosisDecision: vi.fn(async () => ({
+    outcome: 'code_fix' as const,
+    basis: 'local_defect',
+    confidence: 'high' as const,
+    reason: 'The cause is at src/value.js',
+  })),
+}));
 
 import { runPipeline } from '../pipeline.js';
 import {

@@ -3,7 +3,6 @@ import type { Diagnosis, NeedsHumanReason, ConfidenceLevel, EvidenceRecord } fro
 import type { VisualAnalysisOutput } from './harness/types.js';
 import type { Platform } from './platform.js';
 import type { RuntimeInfo } from './runtime-info.js';
-import type { FixSurface } from './fix-surface.js';
 import type { ReplayInput } from './pr.js';
 import { runAgentFix } from './agent-fix.js';
 import { createPR, createGitHubClient } from './pr.js';
@@ -37,7 +36,6 @@ export interface PipelineInput {
   sourceFiles: Array<{ filePath: string; content: string }>;
   visualAnalysis: VisualAnalysisOutput | null;
   repoPath: string;
-  fixSurface?: FixSurface;
   repoUrl: string;
   githubRepo: string;
   defaultBranch: string;
@@ -47,6 +45,8 @@ export interface PipelineInput {
   assertLeaseOwned?: () => Promise<void>;
   replay?: ReplayInput | null;
   kind?: 'error' | 'friction';
+  /** Who created the fix job. `human` authorises it past the persisted-decision gate. */
+  triggeredBy?: 'auto' | 'human' | null;
   frictionEvidence?: string;
   /** Pre-computed investigation results. When set, agent skips internal triage. */
   investigation?: {
@@ -119,11 +119,11 @@ export async function runPipeline(input: PipelineInput): Promise<PipelineResult>
     githubRepo: input.githubRepo,
     githubToken: input.githubToken,
     repoPath: input.repoPath,
-    fixSurface: input.fixSurface,
     investigation: input.investigation,
     abortSignal: input.abortSignal,
     frictionEvidence: input.frictionEvidence,
     kind: input.kind,
+    triggeredBy: input.triggeredBy,
     platform: input.platform,
     customerRuntime: input.customerRuntime,
   });

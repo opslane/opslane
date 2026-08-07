@@ -19,7 +19,6 @@ vi.mock('../db.js', () => ({
   updateGroupAndCreateFixJob: vi.fn(),
   getGroupInvestigation: vi.fn(),
   getReplayForGroup: vi.fn(),
-  loadFixSurface: vi.fn(async () => ({ globs: null })),
   getSessionPointerForGroup: vi.fn(),
   getEnvironmentNamesForGroup: vi.fn(async () => ({ names: [], totalCount: 0 })),
   getPlayableChunkMetas: vi.fn(),
@@ -55,7 +54,12 @@ vi.mock('../repo-clone.js', () => ({
   })),
 }));
 vi.mock('../minio-client.js', () => ({ fetchObject: vi.fn(), getMinIOConfig: vi.fn(() => null) }));
-vi.mock('../investigate.js', () => ({ investigateError: vi.fn() }));
+vi.mock('../investigate.js', () => ({
+  investigateError: vi.fn(),
+  // index.ts records this on the immutable decision row, so the mock must carry
+  // it rather than let the module re-derive its own default.
+  INVESTIGATION_MODEL: 'claude-sonnet-5',
+}));
 vi.mock('../pipeline.js', () => ({ runPipeline: vi.fn() }));
 vi.mock('../poller.js', () => ({ createPoller: vi.fn(() => ({ start: vi.fn(), stop: vi.fn() })) }));
 vi.mock('../github-app.js', () => ({ getInstallationToken: vi.fn() }));
@@ -268,8 +272,7 @@ describe('processInvestigateJob diagnosis routing', () => {
       friction_autonomy: 'ask_first',
     });
     vi.mocked(db.getProjectGitHubInstallation).mockResolvedValue(null);
-    vi.mocked(db.loadFixSurface).mockResolvedValue({ globs: null });
-    mockCloneRepo.mockResolvedValue({
+      mockCloneRepo.mockResolvedValue({
       repoDir: '/tmp/repo',
       defaultBranch: 'main',
       cleanup: vi.fn(),
@@ -288,6 +291,7 @@ describe('processInvestigateJob diagnosis routing', () => {
       reason: 'The cause is outside this codebase: GET /api/assets/search (remote service)',
       adjudication: null,
       costUsd: 0.12,
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       decisionReason: 'The cause is outside this codebase: GET /api/assets/search (remote service)',
       decisionBasis: 'cause_outside_codebase',
       outcome: 'not_actionable',
@@ -299,6 +303,7 @@ describe('processInvestigateJob diagnosis routing', () => {
       },
       filesRead: [],
       findings: '',
+      stop: 'terminal',
     });
 
     await processInvestigateJob(makeJob(), new AbortController().signal);
@@ -324,12 +329,14 @@ describe('processInvestigateJob diagnosis routing', () => {
       reason: 'The investigation produced no usable diagnosis',
       adjudication: null,
       costUsd: 0.12,
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       decisionBasis: 'insufficient_evidence',
         decisionReason: 'The investigation produced no usable diagnosis',
       outcome: 'needs_more_context',
       diagnosis: null,
       filesRead: [],
       findings: '',
+      stop: 'terminal',
     });
 
     await processInvestigateJob(makeJob(), new AbortController().signal);
@@ -357,8 +364,9 @@ describe('processInvestigateJob diagnosis routing', () => {
       reason: 'The cause is at src/App.vue:42',
       adjudication: null,
       costUsd: 0.12,
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       decisionReason: 'The cause is at src/App.vue:42',
-      decisionBasis: 'in_surface_defect',
+      decisionBasis: 'local_defect',
       outcome: 'code_fix',
       diagnosis: {
         one_line_description: 'Null dereference rendering the asset list',
@@ -368,6 +376,7 @@ describe('processInvestigateJob diagnosis routing', () => {
       },
       filesRead: [],
       findings: '',
+      stop: 'terminal',
     });
     vi.mocked(db.updateGroupAndCreateFixJob).mockResolvedValue({ created: true, fixJobId: 'fix-1' });
 
@@ -384,6 +393,43 @@ describe('processInvestigateJob diagnosis routing', () => {
       }),
     });
     expect(fields).not.toHaveProperty('suggestedMitigation');
+  });
+
+  // The confidence half of the gate that decides whether a PR opens unattended.
+  // Outcome was covered three ways (not_actionable, needs_more_context,
+  // code_fix/high) and confidence not at all, so deleting `=== 'high'` from
+  // index.ts would have opened unattended fixes on suggestive evidence with the
+  // suite still green. Parking this for a human IS the medium-confidence design.
+  it('parks a code_fix that is not high confidence instead of opening a fix job', async () => {
+    mockInvestigateError.mockResolvedValue({
+      fixable: true,
+      confidence: 'medium',
+      reason: 'The cause is at src/App.vue:42',
+      adjudication: null,
+      costUsd: 0.12,
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      decisionReason: 'The cause is at src/App.vue:42',
+      decisionBasis: 'local_defect',
+      outcome: 'code_fix',
+      diagnosis: {
+        one_line_description: 'Null dereference rendering the asset list',
+        why_chain: ['Render runs before fetch resolves'],
+        reproduction_steps: ['Open the panel on a slow connection'],
+        cause_location: 'src/App.vue:42',
+      },
+      filesRead: [],
+      findings: '',
+      stop: 'terminal',
+    });
+
+    await processInvestigateJob(makeJob(), new AbortController().signal);
+
+    expect(db.updateGroupAndCreateFixJob).not.toHaveBeenCalled();
+    expect(db.updateGroupInvestigation).toHaveBeenCalledWith(
+      'grp-1', 'proj-1', 'investigated',
+      expect.objectContaining({ confidence: 'medium' }),
+      makeJob(),
+    );
   });
 });
 

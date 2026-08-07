@@ -11,23 +11,16 @@ import { investigateError } from './investigate.js';
 import { logger } from './logger.js';
 import { traceSpan } from './tracing.js';
 import { trace } from '@opentelemetry/api';
-import type { CheckOutcome, ConfidenceLevel, Diagnosis, EvidenceRecord, NeedsHumanReason, ReasonCode } from '@opslane/shared';
+import type { CheckOutcome, ConfidenceLevel, Diagnosis, EvidenceRecord, NeedsHumanReason } from '@opslane/shared';
 import type { Platform } from './platform.js';
 import type { RuntimeInfo } from './runtime-info.js';
-import { buildReason } from './reason-codes.js';
+import { buildReason, reasonCodeForDecision, reproductionRemediation } from './reason-codes.js';
 import { deriveOutcome } from './classify.js';
-import { adjudicationFromDecline } from './diagnose-schema.js';
-import { loadDiagnosisDecision, type PersistedDecision } from './db.js';
-
-/** Narrow an unknown array field to non-empty strings. */
-function strings(value: unknown): string[] {
-  return Array.isArray(value)
-    ? value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
-    : [];
-}
-import type { FixSurface } from './fix-surface.js';
+import { adjudicationFromDecline, strings } from './diagnose-schema.js';
+import { loadDiagnosisDecision } from './db.js';
 import type { AgentCompletionResult, VisualAnalysisOutput, SourceFile, AgentState } from './harness/types.js';
 import { scrubSecrets } from './harness/redact.js';
+import { escapeUntrustedLabel, fenced } from './prompt-fence.js';
 import { cloneFailureReason, CloneResolutionError } from './repo-clone.js';
 import { createEvidenceRecorder, type EvidenceRecorder } from './harness/evidence.js';
 import { VerificationInfraError } from './harness/errors.js';
@@ -98,12 +91,16 @@ export interface AgentFixInput {
   model?: string;
   frictionEvidence?: string;
   kind?: 'error' | 'friction';
+  /**
+   * Who created this job. `human` means a person clicked through the incident
+   * and approved a fix, which is authorization in its own right — see the gate
+   * in runAgentFix.
+   */
+  triggeredBy?: 'auto' | 'human' | null;
   /** Shell commands to run after clone+install, before agent starts (e.g. apply bug patch for eval). */
   setupCommands?: string[];
   /** Local repo clone path. When set, investigation uses codebase-aware classification instead of blind triage. */
   repoPath?: string;
-  /** The paths this project authorizes the agent to change. */
-  fixSurface?: FixSurface;
   /** Pre-computed investigation results. When set, skip internal triage. */
   investigation?: {
     rootCause: string;
@@ -138,16 +135,6 @@ const SANDBOX_REPO_PATH = '/home/user/repo';
 
 function truncate(s: string, max: number): string {
   return s.length > max ? s.slice(0, max) + '... [truncated]' : s;
-}
-
-function escapeUntrustedLabel(value: string): string {
-  return value
-    .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, 80)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
 }
 
 function shellEscape(s: string): string {
@@ -210,22 +197,6 @@ export interface TriageResult {
   reason?: string;
 }
 
-/**
- * The persisted routing basis, mapped to the incident's reason code.
- *
- * `basis` is our internal routing vocabulary; `ReasonCode` is the reader-facing
- * contract the dashboard renders. They are deliberately not the same list, so
- * the basis is carried in reason_message rather than leaked into the code.
- */
-function reasonCodeForDecision(decision: PersistedDecision | null): ReasonCode {
-  if (!decision) return 'insufficient_context';
-  if (decision.outcome === 'not_actionable') {
-    return decision.basis === 'primary_outside_fix_surface' ? 'triage_unfixable' : 'unfixable_infra';
-  }
-  if (decision.outcome === 'code_fix') return 'low_confidence_fix';
-  return 'insufficient_context';
-}
-
 async function generateFixNarrative(
   apiKey: string,
   input: AgentFixInput,
@@ -260,22 +231,22 @@ Use the details below. Do not include raw stack traces, file dumps, markdown hea
 Error type: ${input.errorType}
 Error message:
 <untrusted_data>
-${truncate(input.errorMessage, MAX_ERROR_MESSAGE)}
+${fenced(input.errorMessage, MAX_ERROR_MESSAGE)}
 </untrusted_data>
 
 Root cause / fix agent summary:
 <untrusted_data>
-${truncate(rootCause, 1000)}
+${fenced(rootCause, 1000)}
 </untrusted_data>
 
 Visual analysis:
 <untrusted_data>
-${truncate(visualAnalysis, 1000)}
+${fenced(visualAnalysis, 1000)}
 </untrusted_data>
 
 Diff:
 <untrusted_data>
-${truncate(diff, 4000)}
+${fenced(diff, 4000)}
 </untrusted_data>`;
 
   const response = await client.messages.create({
@@ -347,12 +318,12 @@ Title: ${input.title}
 
 Message:
 <untrusted_user_data>
-${truncate(input.errorMessage, MAX_ERROR_MESSAGE)}
+${fenced(input.errorMessage, MAX_ERROR_MESSAGE)}
 </untrusted_user_data>`);
 
   sections.push(`## Stack Trace
 <untrusted_user_data>
-${truncate(input.stackTrace, MAX_STACK_TRACE)}
+${fenced(input.stackTrace, MAX_STACK_TRACE)}
 </untrusted_user_data>`);
 
   const availableEnvironmentNames = (input.environmentNames ?? [])
@@ -383,11 +354,11 @@ ${truncate(input.stackTrace, MAX_STACK_TRACE)}
   }
 
   if (input.breadcrumbs && input.breadcrumbs !== '[]') {
-    sections.push(`## Breadcrumbs\n<untrusted_user_data>\n${input.breadcrumbs}\n</untrusted_user_data>`);
+    sections.push(`## Breadcrumbs\n<untrusted_user_data>\n${fenced(input.breadcrumbs, 4000)}\n</untrusted_user_data>`);
   }
 
   if (input.context && input.context !== '{}') {
-    sections.push(`## Context\n<untrusted_user_data>\n${input.context}\n</untrusted_user_data>`);
+    sections.push(`## Context\n<untrusted_user_data>\n${fenced(input.context, 4000)}\n</untrusted_user_data>`);
   }
 
   if (input.visualAnalysis) {
@@ -453,9 +424,35 @@ export async function runAgentFix(input: AgentFixInput): Promise<AgentFixResult>
     };
   }
 
-  // Skip the decision gate when investigation context is already provided (fix
-  // jobs from the Guide the Agent flow, which a human authorised directly).
-  if (!input.investigation) {
+  // Who may skip the persisted-decision gate, and why.
+  //
+  // `human`: a person opened the incident and clicked through to a fix. That IS
+  // the approval the gate exists to collect, so requiring a second one from the
+  // database would refuse the very flow medium confidence parks an incident FOR.
+  // Keyed on who created the job, not on the optional guidance text: `guidance`
+  // is `job.guidance ?? undefined` (index.ts), and the dashboard sends
+  // `guidance.value || undefined`, so a human who clicks the button without
+  // typing anything sends null and would have had their approval discarded.
+  //
+  // `friction`: the friction ladder is a separate authorization path with its
+  // own kind gate and autonomy setting (index.ts), and it never writes a
+  // diagnosis_decisions row — its investigate job calls updateGroupAndCreateFixJob
+  // with no `decision`. Consulting a row that is never written refuses every
+  // friction fix, including ones a human approved.
+  //
+  // What is NOT authorization: carrying prior diagnosis prose. The gate used to
+  // key on `input.investigation` being present, which made it dead on the main
+  // path — index.ts sets `investigation` from `error_groups.root_cause`, written
+  // in the same transaction that creates every auto fix job.
+  const humanAuthorised = input.triggeredBy === 'human';
+  const frictionLadder = input.kind === 'friction';
+  if (humanAuthorised || frictionLadder) {
+    logger.info('Skipping the persisted-decision gate', {
+      error_group_id: input.errorGroupId,
+      authorised_by: humanAuthorised ? 'human_trigger' : 'friction_ladder',
+      has_guidance: Boolean(input.investigation?.guidance),
+    });
+  } else {
     // The investigation already decided this and persisted it. Re-deciding here
     // by error shape both duplicated the decision and reintroduced the
     // classification this pipeline replaced. Loading the row rather than
@@ -488,7 +485,19 @@ export async function runAgentFix(input: AgentFixInput): Promise<AgentFixResult>
         },
       };
     }
+  }
 
+  // Enrichment, not authorization. These were one branch, and collapsing them
+  // meant fixing the dead gate silently re-ran the investigation on jobs that
+  // already carried its output — the tracer caught it by re-investigating a
+  // fixture whose diagnosis was already in hand. The question here is only
+  // "do we already have context", and it has nothing to do with who authorised
+  // the job.
+  //
+  // Unreachable when humanAuthorised: `guidance` lives inside `investigation`,
+  // so a human-authorised job always has context and can never be refused below
+  // by a check the human already overrode.
+  if (!input.investigation && input.repoPath) {
     try {
       const triageInput = {
         platform,
@@ -501,65 +510,57 @@ export async function runAgentFix(input: AgentFixInput): Promise<AgentFixResult>
         breadcrumbs: input.breadcrumbs,
       };
 
-      // Stage 2: If repo clone available, run deeper Sonnet investigation
-      if (input.repoPath) {
-        const investigation = await traceSpan('investigate', {}, () =>
-          investigateError(apiKey, triageInput, input.repoPath!, input.fixSurface ?? { globs: null }),
-        );
+      const investigation = await traceSpan('investigate', {}, () =>
+      investigateError(apiKey, triageInput, input.repoPath!),
+      );
 
-        logger.info('Investigation result', {
-          fixable: investigation.fixable,
+      logger.info('Investigation result', {
+        fixable: investigation.fixable,
+        confidence: investigation.confidence,
+        reason: investigation.reason,
+        filesRead: investigation.filesRead?.length ?? 0,
+        method: 'investigation',
+      });
+
+      if (investigation.outcome !== 'code_fix') {
+        const reasonCode = reasonCodeForDecision({
+          outcome: investigation.outcome,
+          basis: investigation.decisionBasis,
           confidence: investigation.confidence,
-          reason: investigation.reason,
-          filesRead: investigation.filesRead?.length ?? 0,
-          method: 'investigation',
         });
-
-        if (investigation.outcome !== 'code_fix') {
-          const reasonCode = reasonCodeForDecision({
-            outcome: investigation.outcome,
-            basis: investigation.decisionBasis,
-            confidence: investigation.confidence,
-          });
-          const reproductionSteps = investigation.diagnosis?.reproduction_steps ?? [];
-          return {
-            status: 'needs_human',
-            reason: buildReason(
-              reasonCode,
-              investigation.decisionReason,
-              reproductionSteps.length > 0
-                ? `Reproduce with: ${reproductionSteps.join('; ')}`
-                : 'Review the named cause manually.',
-              platform,
+        return {
+          status: 'needs_human',
+          reason: buildReason(
+            reasonCode,
+            investigation.decisionReason,
+            reproductionRemediation(
+              investigation.diagnosis?.reproduction_steps ?? [],
+              'Review the named cause manually.',
             ),
-          };
-        }
+            platform,
+          ),
+        };
+      }
 
-        // Forward investigation context to fix agent (mutates input — consumed only by buildSystemPrompt below).
-        // Note: fallback reasons (e.g. "Investigation API call failed") are intentionally forwarded —
-        // even failed investigations provide signal that helps the fix agent avoid repeating work.
-        const hasUsefulContext = investigation.reason || investigation.findings || (investigation.filesRead && investigation.filesRead.length > 0);
-        if (hasUsefulContext) {
-          input.investigation = {
-            rootCause: investigation.diagnosis?.one_line_description ?? investigation.decisionReason,
-            diagnosis: investigation.diagnosis,
-            filesRead: investigation.filesRead,
-            findings: investigation.findings,
-          };
-        }
+      // Forward investigation context to fix agent (mutates input — consumed only by buildSystemPrompt below).
+      // Note: fallback reasons (e.g. "Investigation API call failed") are intentionally forwarded —
+      // even failed investigations provide signal that helps the fix agent avoid repeating work.
+      const hasUsefulContext = investigation.reason || investigation.findings || (investigation.filesRead && investigation.filesRead.length > 0);
+      if (hasUsefulContext) {
+        input.investigation = {
+          rootCause: investigation.diagnosis?.one_line_description ?? investigation.decisionReason,
+          diagnosis: investigation.diagnosis,
+          filesRead: investigation.filesRead,
+          findings: investigation.findings,
+        };
       }
     } catch (triageErr: unknown) {
-      // An investigation failure is non-fatal — the decision gate above already
+      // An investigation failure is non-fatal — the gate above already
       // authorised this job, and the investigation only enriches its context.
       logger.warn('Investigation failed, proceeding to agent', {
         error: triageErr instanceof Error ? triageErr.message : String(triageErr),
       });
     }
-  } else {
-    logger.info('Skipping triage — investigation context provided', {
-      root_cause: input.investigation.rootCause.slice(0, 200),
-      has_guidance: !!input.investigation.guidance,
-    });
   }
 
   let sandbox: SandboxRuntime | null = null;
@@ -711,7 +712,7 @@ export async function runAgentFix(input: AgentFixInput): Promise<AgentFixResult>
           budgetUsd: input.budgetUsd ?? t.budgetUsd,
         }));
 
-        const tools = createToolBridge(sandbox, agentState, platform, input.fixSurface ?? { globs: null });
+    const tools = createToolBridge(sandbox, agentState, platform);
     const middleware = createDefaultMiddleware(sandbox);
     const systemPrompt = buildSystemPrompt(input, preloadedFiles);
 
@@ -846,27 +847,19 @@ export async function runAgentFix(input: AgentFixInput): Promise<AgentFixResult>
 
         if (agentState.gaveUp) {
           const declined = adjudicationFromDecline(agentState.submittedDiagnosis ?? {});
+          // Citation existence is still checked, against the tracked-file set
+          // rather than the worker's disk: the clone lives in the sandbox.
           const decision = deriveOutcome(
             declined,
-            input.fixSurface ?? { globs: null },
             (cited) => (trackedFiles.has(cited) ? cited : null),
-            // This path only classifies a decline the agent already made; it
-            // authorises nothing, so an unconfigured surface must not turn the
-            // decline into needs_more_context and lose the agent's account.
-            { allowUnrestrictedSurface: true },
           );
-          const reasonCode: ReasonCode = decision.outcome === 'not_actionable'
-            ? (decision.reason.includes('outside the configured fix surface')
-                ? 'triage_unfixable'
-                : 'unfixable_infra')
-            : 'insufficient_context';
-          const reproductionSteps = strings(agentState.submittedDiagnosis?.['reproduction_steps']);
           agentState.giveUpReason = buildReason(
-            reasonCode,
+            reasonCodeForDecision(decision),
             decision.reason,
-            reproductionSteps.length > 0
-              ? `Reproduce with: ${reproductionSteps.join('; ')}`
-              : 'Investigate the named cause manually.',
+            reproductionRemediation(
+              strings(agentState.submittedDiagnosis?.['reproduction_steps']),
+              'Investigate the named cause manually.',
+            ),
             platform,
           );
         }
