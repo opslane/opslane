@@ -5,6 +5,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Breadcrumb } from '@opslane/shared';
 import { clearBreadcrumbs } from '../breadcrumbs';
+import { clearNetworkTimings, finalizeTiming, startTiming } from '../network-timing';
 import { loadConfig } from '../config';
 import { buildPayload, clearUser, setUser } from '../core';
 import { resetSessionId } from '../session';
@@ -18,7 +19,7 @@ import {
 
 const here = dirname(fileURLToPath(import.meta.url));
 const fixtureDir = join(here, '../../../../test-fixtures/wire/events');
-const WIRE_FIXTURE_VERSION = '3.0.0';
+const WIRE_FIXTURE_VERSION = '4.1.0';
 
 function loadFixture(kind: 'minimal' | 'full'): unknown {
   return JSON.parse(
@@ -53,6 +54,14 @@ function normalize(input: unknown): unknown {
       if (breadcrumb && typeof breadcrumb.timestamp === 'string') breadcrumb.timestamp = SENTINEL;
     }
   }
+  if (Array.isArray(value.network_timings)) {
+    for (const timing of value.network_timings as Array<Record<string, unknown>>) {
+      if (!timing) continue;
+      if (typeof timing.started_at_ms === 'number') timing.started_at_ms = SENTINEL;
+      if (typeof timing.duration_ms === 'number') timing.duration_ms = SENTINEL;
+      if (typeof timing.ttfb_ms === 'number') timing.ttfb_ms = SENTINEL;
+    }
+  }
   return value;
 }
 
@@ -78,6 +87,7 @@ describe('SDK emits the frozen wire shape', () => {
     _resetQueue();
     _resetThrottle();
     clearBreadcrumbs();
+    clearNetworkTimings();
     clearUser();
     delete (globalThis as Record<string, unknown>)[REGISTRY_GLOBAL];
     delete (globalThis as Record<string, unknown>)[COMMIT_SHA_GLOBAL];
@@ -168,6 +178,9 @@ describe('SDK emits the frozen wire shape', () => {
       category: 'navigation',
       message: 'https://app.example.com/dashboard',
     };
+
+    const timingHandle = startTiming('fetch', 'POST', 'https://api.example.com/v1/assets/search');
+    finalizeTiming(timingHandle, 'timeout');
 
     const wire = await captureWire(buildPayload('TypeError', FIXTURE_MESSAGE, FIXTURE_STACK, breadcrumb));
     expect(normalize(wire)).toEqual(normalize(loadFixture('full')));

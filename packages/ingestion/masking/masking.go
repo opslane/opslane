@@ -3,6 +3,7 @@ package masking
 import (
 	"bytes"
 	"encoding/json"
+	"net/url"
 	"regexp"
 	"strings"
 )
@@ -101,6 +102,31 @@ func RedactURL(s string) string {
 	out := urlCredRe.ReplaceAllString(s, `${1}[REDACTED]@`)
 	out = urlSecretQueryRe.ReplaceAllString(out, `${1}[REDACTED]`)
 	return out
+}
+
+// tokenFragmentRe matches fragments carrying an OAuth-style credential.
+var tokenFragmentRe = regexp.MustCompile(`(?i)(access_token|id_token|refresh_token|token|code)=`)
+
+// RedactRequestURL strips userinfo, the entire query string, and token-bearing
+// fragments from a single request URL. It is deliberately stricter than
+// RedactURL because ingestion cannot assume the client already scrubbed it.
+func RedactRequestURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		// Fail closed for malformed URLs too: retain only the portion before
+		// query/fragment delimiters, then apply the broad credential scrubber.
+		if index := strings.IndexAny(raw, "?#"); index >= 0 {
+			raw = raw[:index]
+		}
+		return RedactURL(raw)
+	}
+	u.User = nil
+	u.RawQuery = ""
+	u.ForceQuery = false
+	if u.Fragment != "" && tokenFragmentRe.MatchString(u.Fragment) {
+		u.Fragment = ""
+	}
+	return u.String()
 }
 
 var sensitiveContextKeys = map[string]struct{}{

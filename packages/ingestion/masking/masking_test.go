@@ -219,6 +219,38 @@ func TestRedactURL(t *testing.T) {
 	}
 }
 
+func TestRedactRequestURL(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"drops the whole query string", "https://api.example.com/v1/search?q=hi&token=abc", "https://api.example.com/v1/search"},
+		{"drops userinfo", "https://user:pw@api.example.com/v1/search", "https://api.example.com/v1/search"},
+		{"drops a token-bearing fragment", "https://api.example.com/cb#access_token=abc", "https://api.example.com/cb"},
+		{"drops a prefixed token fragment", "https://api.example.com/cb#oauth_access_token=abc", "https://api.example.com/cb"},
+		{"keeps a route fragment", "https://app.example.com/x#/dashboard", "https://app.example.com/x#/dashboard"},
+		{"leaves a clean URL alone", "https://api.example.com/v1/items", "https://api.example.com/v1/items"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := masking.RedactRequestURL(tc.in); got != tc.want {
+				t.Fatalf("RedactRequestURL(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRedactRequestURLUnparseable(t *testing.T) {
+	got := masking.RedactRequestURL("://not a url?token=abc")
+	if strings.Contains(got, "abc") {
+		t.Fatalf("RedactRequestURL leaked a token: %q", got)
+	}
+	if got := masking.RedactRequestURL("https://a.test/%zz?email=user@example.com"); strings.Contains(got, "user@example.com") {
+		t.Fatalf("RedactRequestURL leaked a malformed URL query: %q", got)
+	}
+}
+
 func TestRedactContext(t *testing.T) {
 	in := []byte(`{"user":{"id":"u1","email":"a@b.com"},"auth":{"Authorization":"Bearer ghp_tok123"},"note":"key sk_live_zzz here","url":"https://u:p@h/x","n":7}`)
 	out := masking.RedactContext(in)

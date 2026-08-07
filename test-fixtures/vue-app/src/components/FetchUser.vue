@@ -14,6 +14,11 @@ async function loadUser() {
   userName.value = data.name;
   loading.value = false;
 }
+
+async function loadSlow() {
+  const url = import.meta.env['VITE_OPSLANE_HANG_URL'] ?? 'http://localhost:1/hang';
+  await fetch(url, { signal: AbortSignal.timeout(1000) });
+}
 </script>
 
 <template>
@@ -24,6 +29,7 @@ async function loadUser() {
       placeholder="Enter user ID"
     />
     <button data-testid="load-user-btn" @click="loadUser">Load User</button>
+    <button data-testid="load-slow-btn" @click="loadSlow">Load Slow</button>
     <p v-if="loading">Loading...</p>
     <p v-else-if="userName" data-testid="fetched-name">{{ userName }}</p>
   </div>

@@ -8,6 +8,7 @@ import { clearBreadcrumbs } from './breadcrumbs';
 import { registerSession, resetSessionRegistrations, startReplayCapture, stopReplayCapture } from './replay';
 import { ensureSessionID } from './session.js';
 import { installInteractionTelemetry, uninstallInteractionTelemetry } from './telemetry';
+import { clearNetworkTimings } from './network-timing';
 
 export { opslaneVuePlugin } from './vue';
 export type { SdkInitOptions } from './config';
@@ -64,6 +65,7 @@ export function destroy(): void {
   safeCall(stopReplayCapture);
   safeCall(resetSessionRegistrations);
   safeCall(clearBreadcrumbs);
+  safeCall(clearNetworkTimings);
   safeCall(() => onIdentityChange(null));
   safeCall(clearUser);
   safeCall(resetConfig);

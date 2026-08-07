@@ -25,6 +25,21 @@ func TestRecordStacklessAccepted_AppearsInMetrics(t *testing.T) {
 	}
 }
 
+func TestRecordNetworkTimingDiscard_AppearsInMetrics(t *testing.T) {
+	RecordNetworkTimingDiscard("bad_url")
+	RecordNetworkTimingDiscard("unbounded_label")
+
+	w := httptest.NewRecorder()
+	Metrics(w, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body := w.Body.String()
+	if !strings.Contains(body, `opslane_network_timings_discarded_total{reason="bad_url"}`) {
+		t.Fatalf("network timing discard metric missing:\n%s", body)
+	}
+	if strings.Contains(body, `reason="unbounded_label"`) {
+		t.Fatalf("unexpected unbounded reason label:\n%s", body)
+	}
+}
+
 func TestRecordSuppressed_AppearsInMetrics(t *testing.T) {
 	before := suppressedResizeObserverTotal.Load()
 	RecordSuppressed("resize_observer")

@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"math"
 	"net/http"
 	"regexp"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -95,16 +97,17 @@ func (d *Dependencies) ingestErrorEvent(w http.ResponseWriter, r *http.Request, 
 			Message string `json:"message"`
 			Stack   string `json:"stack"`
 		} `json:"error"`
-		Breadcrumbs json.RawMessage `json:"breadcrumbs"`
-		Context     json.RawMessage `json:"context"`
-		Platform    string          `json:"platform"`
-		Runtime     json.RawMessage `json:"runtime"`
-		SDKVersion  string          `json:"sdk_version"`
-		Release     string          `json:"release"`
-		DebugMeta   json.RawMessage `json:"debug_meta"`
-		CommitSHA   json.RawMessage `json:"commit_sha"`
-		SessionID   string          `json:"session_id"`
-		Environment string          `json:"environment"`
+		Breadcrumbs    json.RawMessage `json:"breadcrumbs"`
+		Context        json.RawMessage `json:"context"`
+		Platform       string          `json:"platform"`
+		Runtime        json.RawMessage `json:"runtime"`
+		SDKVersion     string          `json:"sdk_version"`
+		Release        string          `json:"release"`
+		DebugMeta      json.RawMessage `json:"debug_meta"`
+		NetworkTimings json.RawMessage `json:"network_timings"`
+		CommitSHA      json.RawMessage `json:"commit_sha"`
+		SessionID      string          `json:"session_id"`
+		Environment    string          `json:"environment"`
 	}
 
 	if err := json.Unmarshal(body, &payload); err != nil {
@@ -131,6 +134,7 @@ func (d *Dependencies) ingestErrorEvent(w http.ResponseWriter, r *http.Request, 
 		payload.Platform = "javascript"
 	}
 	debugMeta := sanitizeDebugMeta(payload.DebugMeta)
+	networkTimings := sanitizeNetworkTimings(payload.NetworkTimings)
 	commitSHA := sanitizeCommitSHA(payload.CommitSHA)
 
 	// Default breadcrumbs/context
@@ -238,6 +242,7 @@ func (d *Dependencies) ingestErrorEvent(w http.ResponseWriter, r *http.Request, 
 		Context:              ctx,
 		Release:              payload.Release,
 		DebugMeta:            debugMeta.JSON,
+		NetworkTimings:       networkTimings,
 		CommitSHA:            commitSHA,
 		SessionID:            payload.SessionID,
 		Platform:             payload.Platform,
@@ -397,6 +402,142 @@ func sanitizeDebugMeta(raw json.RawMessage) debugMetaValidation {
 	}
 	result.ImageCount = len(retained)
 	return result
+}
+
+const (
+	maxNetworkTimings  = 20
+	maxTimingURLBytes  = 2048
+	maxTimingElapsedMs = 600000
+)
+
+var (
+	timingMethodBytes  = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!#$%&'*+.^_`|~-"
+	validTransports    = map[string]struct{}{"fetch": {}, "xhr": {}}
+	validTimingOutcome = map[string]struct{}{
+		"ok": {}, "http_error": {}, "timeout": {},
+		"abort": {}, "network_error": {}, "in_flight": {},
+	}
+)
+
+type validatedNetworkTiming struct {
+	Transport   string   `json:"transport"`
+	Method      string   `json:"method"`
+	URL         string   `json:"url"`
+	StartedAtMs *float64 `json:"started_at_ms"`
+	DurationMs  *float64 `json:"duration_ms"`
+	TTFBMs      *float64 `json:"ttfb_ms,omitempty"`
+	Outcome     string   `json:"outcome"`
+	Status      *int     `json:"status,omitempty"`
+}
+
+func validTimingMethod(value string) bool {
+	if len(value) == 0 || len(value) > 16 {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		if !strings.ContainsRune(timingMethodBytes, rune(value[i])) {
+			return false
+		}
+	}
+	return true
+}
+
+func validTimingURL(value string) bool {
+	if len(value) == 0 || len(value) > maxTimingURLBytes {
+		return false
+	}
+	return strings.IndexFunc(value, func(r rune) bool { return r < 0x20 || r == 0x7f }) < 0
+}
+
+func validElapsed(value float64) bool {
+	return !math.IsNaN(value) && !math.IsInf(value, 0) && value >= 0 && value <= maxTimingElapsedMs
+}
+
+// sanitizeNetworkTimings validates advisory timing data independently of the
+// SDK. Invalid entries are dropped rather than causing event ingestion to fail.
+func sanitizeNetworkTimings(raw json.RawMessage) string {
+	const empty = `[]`
+	if len(raw) == 0 {
+		return empty
+	}
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || trimmed[0] != '[' {
+		RecordNetworkTimingDiscard("malformed_container")
+		return empty
+	}
+
+	var entries []json.RawMessage
+	if err := json.Unmarshal(trimmed, &entries); err != nil || entries == nil {
+		RecordNetworkTimingDiscard("malformed_container")
+		return empty
+	}
+
+	retained := make([]validatedNetworkTiming, 0, min(len(entries), maxNetworkTimings))
+	for _, entry := range entries {
+		if len(retained) == maxNetworkTimings {
+			RecordNetworkTimingDiscard("over_limit")
+			continue
+		}
+
+		var candidate validatedNetworkTiming
+		trimmedEntry := bytes.TrimSpace(entry)
+		if len(trimmedEntry) == 0 || trimmedEntry[0] != '{' || json.Unmarshal(trimmedEntry, &candidate) != nil {
+			RecordNetworkTimingDiscard("non_object_entry")
+			continue
+		}
+		if _, ok := validTransports[candidate.Transport]; !ok {
+			RecordNetworkTimingDiscard("bad_transport")
+			continue
+		}
+		candidate.Method = strings.ToUpper(candidate.Method)
+		if !validTimingMethod(candidate.Method) {
+			RecordNetworkTimingDiscard("bad_method")
+			continue
+		}
+		if !validTimingURL(candidate.URL) {
+			RecordNetworkTimingDiscard("bad_url")
+			continue
+		}
+		if _, ok := validTimingOutcome[candidate.Outcome]; !ok {
+			RecordNetworkTimingDiscard("bad_outcome")
+			continue
+		}
+		if candidate.StartedAtMs == nil || *candidate.StartedAtMs < 0 || math.IsInf(*candidate.StartedAtMs, 0) || math.IsNaN(*candidate.StartedAtMs) {
+			RecordNetworkTimingDiscard("bad_started_at")
+			continue
+		}
+		if candidate.DurationMs == nil || !validElapsed(*candidate.DurationMs) {
+			RecordNetworkTimingDiscard("bad_duration")
+			continue
+		}
+		if candidate.TTFBMs != nil && !validElapsed(*candidate.TTFBMs) {
+			RecordNetworkTimingDiscard("bad_ttfb")
+			continue
+		}
+		if candidate.Status != nil && (*candidate.Status < 100 || *candidate.Status > 599) {
+			RecordNetworkTimingDiscard("bad_status")
+			continue
+		}
+
+		candidate.URL = masking.RedactRequestURL(candidate.URL)
+		if !validTimingURL(candidate.URL) {
+			RecordNetworkTimingDiscard("bad_url")
+			continue
+		}
+
+		*candidate.StartedAtMs = math.Round(*candidate.StartedAtMs)
+		*candidate.DurationMs = math.Round(*candidate.DurationMs)
+		if candidate.TTFBMs != nil {
+			*candidate.TTFBMs = math.Round(*candidate.TTFBMs)
+		}
+		retained = append(retained, candidate)
+	}
+
+	encoded, err := json.Marshal(retained)
+	if err != nil {
+		return empty
+	}
+	return string(encoded)
 }
 
 func validCodeFile(value string) bool {

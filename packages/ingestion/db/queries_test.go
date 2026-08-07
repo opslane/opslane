@@ -2,6 +2,7 @@ package db_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sort"
 	"strings"
@@ -13,6 +14,55 @@ import (
 
 	"github.com/opslane/opslane/packages/ingestion/db"
 )
+
+func TestInsertErrorEventStoresNetworkTimings(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	q := db.New(pool)
+
+	org, err := q.CreateOrg(ctx, "test-network-timings")
+	if err != nil {
+		t.Fatalf("CreateOrg: %v", err)
+	}
+	t.Cleanup(func() { cleanupTenant(t, pool, org.ID) })
+
+	proj, err := q.CreateProject(ctx, org.ID, "proj-network-timings", ptrStr("org/repo"))
+	if err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+	env, err := q.CreateEnvironment(ctx, proj.ID, "production")
+	if err != nil {
+		t.Fatalf("CreateEnvironment: %v", err)
+	}
+
+	timings := `[{"transport":"fetch","method":"POST","url":"https://api.test/search","started_at_ms":1,"duration_ms":10002,"outcome":"timeout"}]`
+	result, err := q.InsertErrorEventAndGroup(ctx, db.IngestParams{
+		ProjectID:            proj.ID,
+		DefaultEnvironmentID: env.ID,
+		ErrorType:            "TimeoutError",
+		ErrorMessage:         "signal timed out",
+		Fingerprint:          "fp-network-timings",
+		Title:                "TimeoutError: signal timed out",
+		NetworkTimings:       timings,
+	})
+	if err != nil {
+		t.Fatalf("InsertErrorEventAndGroup: %v", err)
+	}
+
+	var stored string
+	if err := pool.QueryRow(ctx,
+		`SELECT network_timings::text FROM error_events WHERE id = $1`, result.EventID,
+	).Scan(&stored); err != nil {
+		t.Fatalf("select: %v", err)
+	}
+	var decoded []map[string]any
+	if err := json.Unmarshal([]byte(stored), &decoded); err != nil {
+		t.Fatalf("unmarshal stored timings: %v", err)
+	}
+	if len(decoded) != 1 || decoded[0]["outcome"] != "timeout" {
+		t.Fatalf("stored timings unexpected: %s", stored)
+	}
+}
 
 // seedGroup creates an org/project/environment hierarchy plus one ingested
 // error group and returns the pieces tests need.

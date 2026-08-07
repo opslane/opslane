@@ -79,6 +79,7 @@ export interface ErrorEventPayload {
   release?: string;      // source map lookup
   commit_sha?: string;   // build provenance
   debug_meta?: DebugMeta;
+  network_timings?: NetworkTiming[];  // observed request timing; omitted when empty
   session_id?: string;   // links error event to replay
   environment?: string;  // project-scoped environment name override
 }
@@ -101,6 +102,26 @@ export type BreadcrumbType =
   | 'navigation'
   | 'http'
   | 'log';
+
+/**
+ * One observed browser request, attached to an error event.
+ *
+ * `ttfb_ms` is the cross-transport comparable field: fetch resolves at
+ * response headers while XHR `loadend` fires after the transfer completes,
+ * so `duration_ms` means different things per transport and `transport`
+ * records which. `ttfb_ms` absent on a `timeout` means no headers ever
+ * arrived; present means the server responded and the body stalled.
+ */
+export interface NetworkTiming {
+  transport: 'fetch' | 'xhr';
+  method: string;
+  url: string;
+  started_at_ms: number;
+  duration_ms: number;
+  ttfb_ms?: number;
+  outcome: 'ok' | 'http_error' | 'timeout' | 'abort' | 'network_error' | 'in_flight';
+  status?: number;
+}
 
 // === Error group statuses ===
 

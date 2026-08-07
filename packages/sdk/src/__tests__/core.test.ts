@@ -5,6 +5,7 @@ import { addBreadcrumb, clearBreadcrumbs, getBreadcrumbs } from '../breadcrumbs'
 import * as transport from '../transport';
 import { TEST_PK } from './test-keys';
 import { COMMIT_SHA_GLOBAL } from '../build/registry-contract';
+import { clearNetworkTimings, finalizeTiming, startTiming } from '../network-timing';
 
 vi.mock('../transport', () => ({
   enqueueEvent: vi.fn(),
@@ -14,6 +15,7 @@ describe('Core Error Capture', () => {
   beforeEach(() => {
     resetConfig();
     clearBreadcrumbs();
+    clearNetworkTimings();
     loadConfig({
       endpoint: 'https://ingest.example.com',
       apiKey: TEST_PK,
@@ -24,6 +26,7 @@ describe('Core Error Capture', () => {
     uninstallGlobalHandlers();
     resetConfig();
     clearBreadcrumbs();
+    clearNetworkTimings();
     vi.restoreAllMocks();
     delete (globalThis as Record<string, unknown>)[COMMIT_SHA_GLOBAL];
   });
@@ -303,5 +306,30 @@ describe('Core Error Capture', () => {
       type: 'error', timestamp: new Date().toISOString(), category: 'exception', message: 'x', level: 'error',
     });
     expect(payload.release).toBe('sha-abc123');
+  });
+});
+
+describe('network timings on the payload', () => {
+  beforeEach(() => {
+    clearNetworkTimings();
+    loadConfig({ apiKey: TEST_PK, endpoint: 'https://api.test', errorThrottleMs: 0 });
+  });
+
+  it('omits the field entirely when nothing was captured', () => {
+    const payload = buildPayload('TypeError', 'boom', '', {
+      type: 'error', timestamp: new Date().toISOString(), category: 'exception', message: 'boom',
+    });
+    expect(payload).not.toHaveProperty('network_timings');
+  });
+
+  it('attaches captured timings', () => {
+    const handle = startTiming('fetch', 'GET', 'https://app.example.com/api/items');
+    finalizeTiming(handle, 'timeout');
+
+    const payload = buildPayload('TypeError', 'boom', '', {
+      type: 'error', timestamp: new Date().toISOString(), category: 'exception', message: 'boom',
+    });
+    expect(payload.network_timings).toHaveLength(1);
+    expect(payload.network_timings?.[0].outcome).toBe('timeout');
   });
 });

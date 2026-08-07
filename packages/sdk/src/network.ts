@@ -1,6 +1,13 @@
 import type { Breadcrumb } from '@opslane/shared';
 import { addBreadcrumb } from './breadcrumbs';
 import { getConfig } from './config';
+import {
+  discardTiming,
+  finalizeTiming,
+  markHeaders,
+  startTiming,
+  type Outcome,
+} from './network-timing';
 import { currentClickId, emitTelemetry, nextRequestId } from './telemetry';
 
 // -- Fetch interceptor --
@@ -66,8 +73,31 @@ export function patchFetch(): void {
       at: Date.now(),
     });
 
+    let timingHandle = -1;
+    try {
+      timingHandle = startTiming('fetch', method, url);
+    } catch {
+      // SDK must never throw
+    }
+
     try {
       const response = await orig.call(globalThis, input, init);
+
+      try {
+        markHeaders(timingHandle);
+        if (response.type === 'opaque' || response.type === 'opaqueredirect') {
+          finalizeTiming(timingHandle, 'ok');
+        } else {
+          const storableStatus = response.status >= 100 && response.status <= 599;
+          finalizeTiming(
+            timingHandle,
+            response.status >= 400 ? 'http_error' : 'ok',
+            storableStatus ? response.status : undefined,
+          );
+        }
+      } catch {
+        // SDK must never throw
+      }
 
       emitTelemetry({ kind: 'request_end', requestId, status: response.status, at: Date.now() });
 
@@ -92,6 +122,18 @@ export function patchFetch(): void {
       return response;
     } catch (error: unknown) {
       emitTelemetry({ kind: 'request_end', requestId, status: 0, at: Date.now() });
+      try {
+        const name =
+          typeof error === 'object' && error !== null && typeof (error as { name?: unknown }).name === 'string'
+            ? (error as { name: string }).name
+            : '';
+        finalizeTiming(
+          timingHandle,
+          name === 'TimeoutError' ? 'timeout' : name === 'AbortError' ? 'abort' : 'network_error',
+        );
+      } catch {
+        // SDK must never throw
+      }
       try {
         const crumb: Breadcrumb = {
           type: 'fetch',
@@ -130,6 +172,8 @@ interface XHRWithOpslane extends XMLHttpRequest {
   _opslaneMethod?: string;
   _opslaneUrl?: string;
   _opslaneRequestId?: string;
+  _opslaneTimingHandle?: number;
+  _opslaneTimingBound?: boolean;
 }
 
 export function patchXHR(): void {
@@ -182,6 +226,7 @@ export function patchXHR(): void {
     this: XHRWithOpslane,
     ...args: Parameters<XMLHttpRequest['send']>
   ): void {
+    const previousTimingHandle = this._opslaneTimingHandle;
     try {
       const url = this._opslaneUrl || '';
       if (url && !isSdkEndpoint(url)) {
@@ -198,11 +243,58 @@ export function patchXHR(): void {
         this.addEventListener('loadend', () => {
           emitTelemetry({ kind: 'request_end', requestId, status: this.status, at: Date.now() });
         }, { once: true });
+
+        const timingHandle = startTiming('xhr', this._opslaneMethod || 'GET', url);
+        this._opslaneTimingHandle = timingHandle;
+
+        // Bind persistent listeners once. XHR instances may be reused, and
+        // each callback reads the current request handle from the instance.
+        if (!this._opslaneTimingBound) {
+          this._opslaneTimingBound = true;
+
+          this.addEventListener('readystatechange', () => {
+            if (this.readyState === 2 && this._opslaneTimingHandle !== undefined) {
+              try {
+                markHeaders(this._opslaneTimingHandle);
+              } catch {
+                // SDK must never throw
+              }
+            }
+          });
+
+          const finalize = (outcome: Outcome, withStatus: boolean): void => {
+            try {
+              const handle = this._opslaneTimingHandle;
+              if (handle === undefined) return;
+              finalizeTiming(handle, outcome, withStatus ? this.status : undefined);
+            } catch {
+              // SDK must never throw
+            }
+          };
+          this.addEventListener('load', () => {
+            const storable = this.status >= 100 && this.status <= 599;
+            finalize(this.status >= 400 ? 'http_error' : 'ok', storable);
+          });
+          this.addEventListener('timeout', () => finalize('timeout', false));
+          this.addEventListener('abort', () => finalize('abort', false));
+          this.addEventListener('error', () => finalize('network_error', false));
+          this.addEventListener('loadend', () => finalize('network_error', false));
+        }
       }
     } catch {
       // SDK must never throw.
     }
-    return origSend.apply(this, args);
+    try {
+      return origSend.apply(this, args);
+    } catch (error) {
+      try {
+        if (this._opslaneTimingHandle !== undefined) discardTiming(this._opslaneTimingHandle);
+        this._opslaneTimingHandle = previousTimingHandle;
+      } catch {
+        // SDK must never throw
+      }
+      throw error;
+    }
   };
 }
 
