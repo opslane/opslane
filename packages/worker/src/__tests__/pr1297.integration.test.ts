@@ -67,22 +67,20 @@ describe('PR #1297: a slow backend never becomes a frontend code change', () => 
         ],
         evidence_strength: 'suggestive',
         cause_kind: 'external_system',
-        cause_locations: ['GET /issue-context/api/assets/search (remote service)'],
+        cause_locations: [{ path: 'GET /issue-context/api/assets/search', note: 'remote service' }],
         reasoning: 'The server never responded; the client timeout only bounds the wait.',
       }));
 
-    const result = await investigateError('key', inputFrom(fixture('hard-h1-timeout')), REPO_ROOT, {
-      globs: ['client/**'],
-    });
+    const result = await investigateError('key', inputFrom(fixture('hard-h1-timeout')), REPO_ROOT);
 
     expect(result.outcome).toBe('not_actionable');
     expect(result.fixable).toBe(false);
     expect(result.decisionReason).toContain('/issue-context/api/assets/search');
   });
 
-  // The specific regression: constants.ts is a real file inside the frontend
-  // surface, so naming it used to be sufficient to open a PR. Suggestive
-  // evidence must now park for a human rather than act.
+  // The specific regression: constants.ts is a real file, so naming it used to
+  // be sufficient to open a PR. Suggestive evidence must now park for a human
+  // rather than act.
   it('does not open an unattended fix when the evidence is only suggestive', async () => {
     mockMessagesCreate
       .mockResolvedValueOnce(diagnosis({
@@ -96,13 +94,11 @@ describe('PR #1297: a slow backend never becomes a frontend code change', () => 
         rejected: [],
         evidence_strength: 'suggestive',
         cause_kind: 'configuration',
-        cause_locations: ['packages/worker/src/investigate.ts:1'],
+        cause_locations: [{ path: 'packages/worker/src/investigate.ts', line: 1 }],
         reasoning: 'Cannot establish that the timeout, rather than the server, is the cause.',
       }));
 
-    const result = await investigateError('key', inputFrom(fixture('hard-h1-timeout')), REPO_ROOT, {
-      globs: ['packages/**'],
-    });
+    const result = await investigateError('key', inputFrom(fixture('hard-h1-timeout')), REPO_ROOT);
 
     expect(result.outcome).toBe('code_fix');
     expect(result.confidence).toBe('medium');

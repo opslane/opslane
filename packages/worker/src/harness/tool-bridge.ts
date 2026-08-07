@@ -1,8 +1,8 @@
 import type { ToolDefinition, AgentState } from './types.js';
 import type { SandboxRuntime } from './sandbox-runtime.js';
-import { TRAVERSAL_EXCLUSIONS } from './traversal-exclusions.js';
+import { grepExclusionArgs } from './traversal-exclusions.js';
 import type { Platform } from '../platform.js';
-import { assertWritableSandboxPath, diffTargets, FixSurfaceViolation, type FixSurface } from '../fix-surface.js';
+import { assertWritableSandboxPath, diffTargets, WriteOutsideRepoError } from '../repo-paths.js';
 
 /** Where the repository is checked out inside the fix sandbox. */
 const SANDBOX_REPO_PATH = '/home/user/repo';
@@ -24,23 +24,32 @@ function cap(output: string, limit = MAX_OUTPUT_CHARS): string {
 }
 
 /**
- * `surface` is the authorization boundary for the three tools that write.
- *
- * It defaults to the whole repository so the setup agent, which is not scoped
- * to a project's fix surface, keeps its pre-existing behavior. The fix job
- * passes the project's real surface.
+ * The three tools that write are gated on the repository clone: a write must
+ * land inside it.
  *
  * `bash` is deliberately NOT gated. It can write anywhere and no tool-level
- * check covers it; its containment is the E2B sandbox, not the fix surface.
+ * check covers it; its containment is the E2B sandbox, not this gate.
  */
 export function createToolBridge(
   sandbox: SandboxRuntime,
   state: AgentState,
   platform: Platform = 'javascript',
-  surface: FixSurface = { globs: null },
 ): ToolDefinition[] {
   /** Authorize a path immediately before writing it, and write through what this returns. */
-  const gate = (cited: string): string => assertWritableSandboxPath(SANDBOX_REPO_PATH, cited, surface);
+  const gate = (cited: string): string => assertWritableSandboxPath(SANDBOX_REPO_PATH, cited);
+
+  /**
+   * Run the gate and hand a refusal back to the model as text. A refusal is an
+   * answer the agent can act on; anything else is a real fault and must throw.
+   */
+  const gated = async (run: () => Promise<string>): Promise<string> => {
+    try {
+      return await run();
+    } catch (error: unknown) {
+      if (error instanceof WriteOutsideRepoError) return error.message;
+      throw error;
+    }
+  };
 
   return [
     {
@@ -66,18 +75,12 @@ export function createToolBridge(
         },
         required: ['path', 'content'],
       },
-      execute: async (input) => {
-        let target: string;
-        try {
-          // Write through the resolved path, not the string the model supplied.
-          target = gate(input.path as string);
-        } catch (error: unknown) {
-          if (error instanceof FixSurfaceViolation) return error.message;
-          throw error;
-        }
+      execute: async (input) => gated(async () => {
+        // Write through the resolved path, not the string the model supplied.
+        const target = gate(input.path as string);
         await sandbox.files.write(target, input.content as string);
         return `Written to ${target}`;
-      },
+      }),
     },
     {
       name: 'edit',
@@ -91,14 +94,8 @@ export function createToolBridge(
         },
         required: ['path', 'old_string', 'new_string'],
       },
-      execute: async (input) => {
-        let path: string;
-        try {
-          path = gate(input.path as string);
-        } catch (error: unknown) {
-          if (error instanceof FixSurfaceViolation) return error.message;
-          throw error;
-        }
+      execute: async (input) => gated(async () => {
+        const path = gate(input.path as string);
         const oldStr = input.old_string as string;
         const newStr = input.new_string as string;
         const content = await sandbox.files.read(path);
@@ -108,7 +105,7 @@ export function createToolBridge(
         const updated = content.replace(oldStr, () => newStr);
         await sandbox.files.write(path, updated);
         return `Applied edit to ${path}`;
-      },
+      }),
     },
     {
       name: 'bash',
@@ -169,9 +166,7 @@ export function createToolBridge(
         const pattern = input.pattern as string;
         const path = (input.path as string) || '.';
         const include = input.include ? `--include=${shellEscape(input.include as string)}` : '';
-        const exclusions = TRAVERSAL_EXCLUSIONS
-          .map((entry) => `--exclude-dir=${shellEscape(entry)}`)
-          .join(' ');
+        const exclusions = grepExclusionArgs().map(shellEscape).join(' ');
         const cmd = `grep -rn ${exclusions} ${include} ${shellEscape(pattern)} ${shellEscape(path)} 2>/dev/null | head -100`;
         const result = await sandbox.commands.run(cmd, { timeoutMs: 30_000 });
         return cap(result.stdout || 'No matches found.');
@@ -185,27 +180,26 @@ export function createToolBridge(
         properties: { diff: { type: 'string', description: 'The unified diff to apply' } },
         required: ['diff'],
       },
-      execute: async (input) => {
+      execute: async (input) => gated(async () => {
         const diff = input.diff as string;
         // A patch names its own targets, so the gate reads them out of the diff
-        // headers. An unparseable diff is refused rather than applied blind:
-        // `patch -p1` would otherwise write wherever the headers pointed.
+        // headers. `diffTargets` returns them as `patch -p1` will write them,
+        // with the one leading component already stripped, so what is authorized
+        // is what lands. An unparseable diff, or one whose headers are not in the
+        // `a/`+`b/` form that makes the strip unambiguous, is refused rather than
+        // applied blind: `patch -p1` would otherwise write wherever they pointed.
         const targets = diffTargets(diff);
         if (targets.length === 0) {
-          return 'Refusing to apply a patch whose target files could not be read from its headers.';
+          return 'Refusing to apply a patch whose target files could not be read from its headers. ' +
+            'Use a unified diff with the standard a/ and b/ path prefixes (as `git diff` produces).';
         }
-        try {
-          for (const target of targets) gate(target);
-        } catch (error: unknown) {
-          if (error instanceof FixSurfaceViolation) return error.message;
-          throw error;
-        }
+        for (const target of targets) gate(target);
         const patchFile = `/tmp/agent-${Date.now()}-${Math.random().toString(36).slice(2)}.patch`;
         await sandbox.files.write(patchFile, diff);
         const result = await sandbox.commands.run(`cd /home/user/repo && patch -p1 < ${patchFile}`, { timeoutMs: 30_000 });
         if (result.exitCode === 0) return `Patch applied successfully.\n${result.stdout}`;
         return `Patch failed (exit ${result.exitCode}):\n${result.stderr}\n${result.stdout}`;
-      },
+      }),
     },
     {
       name: 'submit_diagnosis',

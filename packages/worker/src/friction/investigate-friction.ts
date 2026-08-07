@@ -1,6 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { createAnthropicClient } from '../anthropic-client.js';
-import { executeListFiles, executeReadFile, executeSearch } from '../investigate.js';
+import { executeListFiles, executeReadFile, executeSearch } from '../investigate-tools.js';
 import { logger } from '../logger.js';
 import type { ErrorGroupData } from '../db.js';
 import type { FrictionEvidence } from './friction-evidence.js';

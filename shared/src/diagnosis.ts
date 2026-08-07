@@ -1,7 +1,6 @@
 /**
  * Where a candidate cause lives. `local_code` does not mean fixable: the code
- * that observes a failure is rarely the code that caused it, and the fix
- * surface decides what we may change.
+ * that observes a failure is rarely the code that caused it.
  */
 export type HypothesisKind =
   | 'local_code'
@@ -10,40 +9,30 @@ export type HypothesisKind =
   | 'configuration'
   | 'unknown';
 
-/** One candidate cause, with the evidence for and against it. */
-export interface Hypothesis {
-  /** Under 25 words. */
-  statement: string;
-  kind: HypothesisKind;
-  /** A repository file and line when the cause is code, otherwise the system responsible. */
-  location: string;
-  /**
-   * Each entry quotes observed evidence: a breadcrumb field and value, a span
-   * between timestamps, a stack frame, or a file and line actually opened.
-   */
-  supports: string[];
-  /** Evidence arguing against this hypothesis. Written only after looking for it. */
-  contradicts: string[];
-  /** The observation that would confirm or kill this candidate. */
-  would_be_settled_by: string;
-}
-
-/**
- * What the first agent produces. Every cause the evidence is consistent with,
- * with no choice made between them. Choosing is the adjudicator's job.
- */
-export interface Dossier {
-  hypotheses: Hypothesis[];
-}
-
 /**
  * How well the evidence supports the winning hypothesis. This gates what the
- * pipeline is allowed to do, so it is judged by a second agent against evidence
- * it verified itself rather than counted from field lengths.
+ * pipeline is allowed to do, so it is judged against evidence the investigation
+ * verified itself rather than counted from field lengths.
  */
 export type EvidenceStrength = 'conclusive' | 'suggestive' | 'insufficient';
 
-/** What the second agent produces after checking the dossier's citations. */
+/**
+ * One place a cause lives.
+ *
+ * `path` is repository-relative and carries no decoration: no line suffix, no
+ * parenthetical, no prose. Anything the model wants to say about the location
+ * goes in `note`, which routing ignores.
+ */
+export interface CauseLocation {
+  /** Repository-relative path, e.g. "packages/ui/src/nav/nav-mobile.tsx". */
+  path: string;
+  /** 1-based line, when the model can name one. */
+  line?: number;
+  /** Why this location matters. Never parsed. */
+  note?: string;
+}
+
+/** What the investigation submits after checking its own citations. */
 export interface Adjudication {
   /** The statement of the hypothesis the evidence best supports. */
   best_supported: string;
@@ -54,8 +43,7 @@ export interface Adjudication {
    *
    * Routing needs this to check that an "external system" conclusion was
    * reached *against* the local candidates rather than instead of them. The
-   * two-agent version counted local hypotheses in the dossier; with one agent
-   * the submission is the only record that the alternatives were considered.
+   * submission is the only record that the alternatives were considered.
    */
   candidates_considered: Array<{ statement: string; kind: HypothesisKind }>;
   /** Other hypotheses with the specific evidence that rules each one out. */
@@ -72,8 +60,14 @@ export interface Adjudication {
    * Every place the cause lives, most important first. A list because real
    * fixes touch more than one file, and because a single string kept
    * discarding correct answers that named two.
+   *
+   * Structured, not free text. Four separate correct answers were thrown away
+   * by regexing a path back out of a string the model was free to decorate:
+   * prose with no recognisable path, a line range, two files in one string, and
+   * a trailing parenthetical. `note` exists because the model keeps appending
+   * an explanation, and it needed somewhere to put it that is not the path.
    */
-  cause_locations: string[];
+  cause_locations: CauseLocation[];
   /** Under 40 words. */
   reasoning: string;
   /** The why-chain of the winning hypothesis, carried through for the fix agent. */
@@ -92,16 +86,6 @@ export interface Diagnosis {
   reproduction_steps: string[];
   /** A repository file and line, or a description of the external system. */
   cause_location: string;
-  /** Extracted in code from breadcrumbs, never written by the model. */
-  failing_request?: FailingRequest | null;
-}
-
-export interface FailingRequest {
-  method: string;
-  url: string;
-  status?: number;
-  /** How many matching requests were seen after collapsing repeats. */
-  count: number;
 }
 
 export type DiagnosisOutcome = 'code_fix' | 'not_actionable' | 'needs_more_context';

@@ -1,4 +1,31 @@
 import type { ReasonCode, NeedsHumanReason } from '@opslane/shared';
+import type { PersistedDecision } from './db.js';
+
+/**
+ * The persisted routing basis, mapped to the incident's reason code.
+ *
+ * `basis` is our internal routing vocabulary; `ReasonCode` is the reader-facing
+ * contract the dashboard renders. They are deliberately not the same list, so
+ * the basis is carried in reason_message rather than leaked into the code.
+ *
+ * Read the outcome, never the prose. Two call sites used to re-derive this by
+ * hand and one matched a substring of our own message, so rewording a message
+ * silently changed the reason code written to the incident.
+ */
+export function reasonCodeForDecision(decision: PersistedDecision | null): ReasonCode {
+  if (!decision) return 'insufficient_context';
+  if (decision.outcome === 'not_actionable') return 'unfixable_infra';
+  if (decision.outcome === 'code_fix') return 'low_confidence_fix';
+  return 'insufficient_context';
+}
+
+/**
+ * The remediation a human acts on when we open no PR: the reproduction the
+ * investigation established, or the caller's fallback when it established none.
+ */
+export function reproductionRemediation(steps: string[], fallback: string): string {
+  return steps.length > 0 ? `Reproduce with: ${steps.join('; ')}` : fallback;
+}
 
 /**
  * Default, human-actionable remediation for every reason code.
@@ -63,42 +90,6 @@ export const DEFAULT_REMEDIATION: Record<ReasonCode, string> = {
   unfixable_no_sourcemap:
     'Upload source maps for this release so the minified stack trace resolves to original source, then retry.',
 };
-
-export function isReasonCode(value: unknown): value is ReasonCode {
-  return typeof value === 'string' && Object.prototype.hasOwnProperty.call(DEFAULT_REMEDIATION, value);
-}
-
-/** Reason codes whose remediation only makes sense for a browser bundle. */
-const JAVASCRIPT_ONLY_REASON_CODES: readonly ReasonCode[] = [
-  'sourcemap_unresolved',
-  'unfixable_no_sourcemap',
-];
-
-/**
- * Reject a reason code the platform can never act on. Without this a Python
- * incident can terminate telling the customer to upload source maps.
- */
-export function isReasonCodeForPlatform(
-  value: unknown,
-  platform: 'javascript' | 'python',
-): value is ReasonCode {
-  if (!isReasonCode(value)) return false;
-  return platform !== 'python' || !JAVASCRIPT_ONLY_REASON_CODES.includes(value);
-}
-
-/** Codes the triage tool may return. Single source of truth for both agents. */
-export const COMMON_TRIAGE_REASON_CODES = [
-  'unfixable_no_app_frames',
-  'unfixable_test_error',
-  'unfixable_third_party',
-  'unfixable_infra',
-] as const satisfies readonly ReasonCode[];
-
-export function triageReasonCodes(platform: 'javascript' | 'python'): readonly ReasonCode[] {
-  return platform === 'python'
-    ? COMMON_TRIAGE_REASON_CODES
-    : [...COMMON_TRIAGE_REASON_CODES, 'unfixable_no_sourcemap'];
-}
 
 /**
  * Build a NeedsHumanReason, defaulting the message and/or remediation from the

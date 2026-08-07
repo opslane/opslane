@@ -2,9 +2,6 @@ import type { Adjudication, EvidenceStrength } from '@opslane/shared';
 import { describe, expect, it } from 'vitest';
 import { deriveOutcome } from '../classify.js';
 
-const FRONTEND = { globs: ['client/**'] };
-/** The escape hatch is on in these tests unless a case is specifically about it. */
-const POLICY = { allowUnrestrictedSurface: true };
 /** Identity resolver: every cited path resolves to itself. */
 const resolvesToItself = (cited: string): string | null => cited;
 
@@ -21,48 +18,33 @@ function adjudication(overrides: Partial<Adjudication> = {}): Adjudication {
     ],
     evidence_strength: 'conclusive',
     cause_kind: 'local_code',
-    cause_locations: ['client/asset-panel/src/AssetList.tsx:42'],
+    cause_locations: [{ path: 'client/asset-panel/src/AssetList.tsx', line: 42 }],
     reasoning: 'The cited line dereferences assets without a null guard.',
     ...overrides,
   };
 }
 
 describe('deriveOutcome routing', () => {
-  it('routes a verified defect inside the surface to code_fix', () => {
-    expect(deriveOutcome(adjudication(), FRONTEND, resolvesToItself, POLICY).outcome).toBe('code_fix');
+  it('routes a verified local defect to code_fix', () => {
+    expect(deriveOutcome(adjudication(), resolvesToItself).outcome).toBe('code_fix');
   });
 
   it('routes a recognised external cause to not_actionable', () => {
     const result = deriveOutcome(
-      adjudication({ cause_kind: 'external_system', cause_locations: ['GET /issue-context/api/assets/search (remote service)'] }),
-      FRONTEND,
+      adjudication({ cause_kind: 'external_system', cause_locations: [{ path: 'GET /issue-context/api/assets/search', note: 'remote service' }] }),
       resolvesToItself,
-      POLICY,
     );
     expect(result.outcome).toBe('not_actionable');
-  });
-
-  it('routes a real defect outside the surface to not_actionable', () => {
-    const result = deriveOutcome(
-      adjudication({ cause_locations: ['server/app/routes/api/resources/asset.py:79'] }),
-      FRONTEND,
-      resolvesToItself,
-      POLICY,
-    );
-    expect(result.outcome).toBe('not_actionable');
-    expect(result.reason).toMatch(/outside the configured fix surface/);
   });
 
   it('routes a missing adjudication to needs_more_context', () => {
-    expect(deriveOutcome(null, FRONTEND, resolvesToItself, POLICY).outcome).toBe('needs_more_context');
+    expect(deriveOutcome(null, resolvesToItself).outcome).toBe('needs_more_context');
   });
 
   it('routes an uncheckable citation to needs_more_context, never a conclusion', () => {
     const result = deriveOutcome(
-      adjudication({ cause_locations: ['client/asset-panel/src/Ghost.tsx:9'] }),
-      FRONTEND,
+      adjudication({ cause_locations: [{ path: 'client/asset-panel/src/Ghost.tsx', line: 9 }] }),
       () => null,
-      POLICY,
     );
     expect(result.outcome).toBe('needs_more_context');
     expect(result.reason).toMatch(/does not resolve to a file/);
@@ -74,28 +56,51 @@ describe('deriveOutcome routing', () => {
     'could not locate the cause',
     'somewhere in the API layer',
     'client/asset-panel/src',
-  ])('routes an unciteable local claim %j to needs_more_context', (location) => {
+  ])('routes a local claim whose path %j is not a file to needs_more_context', (path) => {
+    // Locations arrive structured now, so there is no "unparseable" citation to
+    // reject up front: whatever the model puts in `path` is checked against the
+    // filesystem. Prose in that field fails here, which is the stronger check —
+    // it cannot be satisfied by a string that merely looks path-shaped.
+    // The resolver answers honestly rather than returning null for everything:
+    // a real path routes to code_fix, so the table values above are what make
+    // this fail. With a blanket `() => null` the rows asserted nothing.
+    const real = 'client/asset-panel/src/AssetList.tsx';
+    const honest = (cited: string): string | null => (cited === real ? cited : null);
+
     const result = deriveOutcome(
-      adjudication({ cause_kind: 'local_code', cause_locations: [location] }),
-      FRONTEND,
-      resolvesToItself,
-      POLICY,
+      adjudication({ cause_kind: 'local_code', cause_locations: [{ path }] }),
+      honest,
     );
     expect(result.outcome).toBe('needs_more_context');
+    expect(result.basis).toBe('citation_unresolvable');
+
+    // Same resolver, a path that does exist: proves the resolver is not just
+    // rejecting everything.
+    expect(deriveOutcome(adjudication({ cause_locations: [{ path: real }] }), honest).outcome)
+      .toBe('code_fix');
+  });
+
+  it('routes a local claim with no location at all to needs_more_context', () => {
+    const result = deriveOutcome(
+      adjudication({ cause_kind: 'local_code', cause_locations: [] }),
+      resolvesToItself,
+    );
+    expect(result.outcome).toBe('needs_more_context');
+    expect(result.basis).toBe('uncitable_local_claim');
   });
 });
 
 describe('evidence strength gates what the pipeline may do', () => {
   it('only conclusive evidence opens a pull request unattended', () => {
-    const conclusive = deriveOutcome(adjudication({ evidence_strength: 'conclusive' }), FRONTEND, resolvesToItself, POLICY);
-    const suggestive = deriveOutcome(adjudication({ evidence_strength: 'suggestive' }), FRONTEND, resolvesToItself, POLICY);
+    const conclusive = deriveOutcome(adjudication({ evidence_strength: 'conclusive' }), resolvesToItself);
+    const suggestive = deriveOutcome(adjudication({ evidence_strength: 'suggestive' }), resolvesToItself);
     expect(conclusive.confidence).toBe('high');
     expect(suggestive.confidence).toBe('medium');
     expect(suggestive.outcome).toBe('code_fix');
   });
 
   it('insufficient evidence fails even when the location looks perfect', () => {
-    const result = deriveOutcome(adjudication({ evidence_strength: 'insufficient' }), FRONTEND, resolvesToItself, POLICY);
+    const result = deriveOutcome(adjudication({ evidence_strength: 'insufficient' }), resolvesToItself);
     expect(result.outcome).toBe('needs_more_context');
     expect(result.confidence).toBe('low');
   });
@@ -107,7 +112,7 @@ describe('evidence strength gates what the pipeline may do', () => {
       evidence_strength: 'suggestive',
       why_chain: ['it broke', 'it broke', 'it broke', 'it broke', 'it broke'],
     });
-    expect(deriveOutcome(padded, FRONTEND, resolvesToItself, POLICY).confidence).toBe('medium');
+    expect(deriveOutcome(padded, resolvesToItself).confidence).toBe('medium');
   });
 
   it.each<[EvidenceStrength, string]>([
@@ -115,10 +120,8 @@ describe('evidence strength gates what the pipeline may do', () => {
     ['suggestive', 'medium'],
   ])('carries %s through to an external conclusion as %s confidence', (strength, expected) => {
     const result = deriveOutcome(
-      adjudication({ evidence_strength: strength, cause_kind: 'external_system', cause_locations: ['https://cdn.example.com/app.js'] }),
-      FRONTEND,
+      adjudication({ evidence_strength: strength, cause_kind: 'external_system', cause_locations: [{ path: 'https://cdn.example.com/app.js' }] }),
       resolvesToItself,
-      POLICY,
     );
     expect(result.outcome).toBe('not_actionable');
     expect(result.confidence).toBe(expected);
@@ -133,26 +136,10 @@ describe('routing invariants', () => {
       why_chain: ['Render happens first', 'The collection is null', 'Calling map on null throws'],
       reasoning: 'Same defect, different words.',
     });
-    expect(deriveOutcome(b, FRONTEND, resolvesToItself, POLICY).outcome)
-      .toBe(deriveOutcome(a, FRONTEND, resolvesToItself, POLICY).outcome);
+    expect(deriveOutcome(b, resolvesToItself).outcome)
+      .toBe(deriveOutcome(a, resolvesToItself).outcome);
   });
 
-  it('moving the defect does change where it lands', () => {
-    const inside = adjudication({ cause_locations: ['client/asset-panel/src/AssetList.tsx:42'] });
-    const outside = adjudication({ cause_locations: ['server/app/routes/api/resources/asset.py:79'] });
-    expect(deriveOutcome(inside, FRONTEND, resolvesToItself, POLICY).outcome)
-      .not.toBe(deriveOutcome(outside, FRONTEND, resolvesToItself, POLICY).outcome);
-  });
-
-  it('an unconfigured surface keeps the pre-existing whole-repository behaviour', () => {
-    const result = deriveOutcome(
-      adjudication({ cause_locations: ['server/app/routes/api/resources/asset.py:79'] }),
-      { globs: null },
-      resolvesToItself,
-      POLICY,
-    );
-    expect(result.outcome).toBe('code_fix');
-  });
 });
 
 describe('the cause kind is read as a typed value, not matched from prose', () => {
@@ -171,71 +158,42 @@ describe('the cause kind is read as a typed value, not matched from prose', () =
   // and no hostname, so prose matching called it vague and lost the answer.
   it('reaches a conclusion for an external cause described in plain words', () => {
     const result = deriveOutcome(
-      { ...base, cause_kind: 'external_system', cause_locations: ['upstream API gateway / reverse proxy (not present in repository)'] },
-      FRONTEND,
+      { ...base, cause_kind: 'external_system', cause_locations: [{ path: 'upstream API gateway / reverse proxy', note: 'not present in repository' }] },
       resolvesToItself,
-      POLICY,
     );
     expect(result.outcome).toBe('not_actionable');
   });
 
   it('reaches a conclusion for a data cause with no location at all', () => {
     const result = deriveOutcome(
-      { ...base, cause_kind: 'data_or_input', cause_locations: [''] },
-      FRONTEND,
+      { ...base, cause_kind: 'data_or_input', cause_locations: [{ path: '' }] },
       resolvesToItself,
-      POLICY,
     );
     expect(result.outcome).toBe('not_actionable');
   });
 
   it('fails when the kind is unknown however confident the prose sounds', () => {
     const result = deriveOutcome(
-      { ...base, cause_kind: 'unknown', cause_locations: ['client/asset-panel/src/AssetList.tsx:42'] },
-      FRONTEND,
+      { ...base, cause_kind: 'unknown', cause_locations: [{ path: 'client/asset-panel/src/AssetList.tsx', line: 42 }] },
       resolvesToItself,
-      POLICY,
     );
     expect(result.outcome).toBe('needs_more_context');
   });
 
   it('still requires a resolvable file when the kind claims local code', () => {
     const result = deriveOutcome(
-      { ...base, cause_kind: 'local_code', cause_locations: ['the fetcher module'] },
-      FRONTEND,
-      resolvesToItself,
-      POLICY,
+      { ...base, cause_kind: 'local_code', cause_locations: [{ path: 'the fetcher module' }] },
+      () => null,
     );
     expect(result.outcome).toBe('needs_more_context');
   });
 });
 
-describe('the fix surface is checked against the resolved path', () => {
-  const cited = 'client/vendor/app/asset.py';
-  const resolvesThroughSymlink = (path: string): string | null =>
-    path === cited ? 'server/app/asset.py' : path;
-
-  // The composition bug: resolveInsideRepo existed and was called, but only for
-  // its truthiness, and the glob was then matched against the string the model
-  // supplied. Each function was tested alone and both passed while a symlink
-  // inside the surface still authorised a write outside it.
-  it('refuses a citation that resolves outside the surface through a symlink', () => {
+describe('routing reports the resolved path, not the cited one', () => {
+  it('names where the citation actually landed', () => {
     const result = deriveOutcome(
-      adjudication({ cause_kind: 'local_code', cause_locations: [`${cited}:1`] }),
-      FRONTEND,
-      resolvesThroughSymlink,
-      POLICY,
-    );
-    expect(result.outcome).toBe('not_actionable');
-    expect(result.reason).toContain('server/app/asset.py');
-  });
-
-  it('reports the resolved path, not the cited one, when it does authorise a fix', () => {
-    const result = deriveOutcome(
-      adjudication({ cause_locations: ['client/link.tsx:3'] }),
-      FRONTEND,
+      adjudication({ cause_locations: [{ path: 'client/link.tsx', line: 3 }] }),
       () => 'client/real/Component.tsx',
-      POLICY,
     );
     expect(result.outcome).toBe('code_fix');
     expect(result.reason).toContain('client/real/Component.tsx');
@@ -245,7 +203,7 @@ describe('the fix surface is checked against the resolved path', () => {
 describe('an external conclusion has to be reached against the local candidates', () => {
   const external = adjudication({
     cause_kind: 'external_system',
-    cause_locations: ['upstream gateway'],
+    cause_locations: [{ path: 'upstream gateway' }],
     candidates_considered: [
       { statement: 'QueryClient retries without a policy', kind: 'local_code' },
       { statement: 'A stale cache key', kind: 'configuration' },
@@ -254,7 +212,7 @@ describe('an external conclusion has to be reached against the local candidates'
   });
 
   it('refuses to conclude external while leaving a local candidate unaddressed', () => {
-    const result = deriveOutcome(external, FRONTEND, resolvesToItself, POLICY);
+    const result = deriveOutcome(external, resolvesToItself);
     expect(result.outcome).toBe('needs_more_context');
     expect(result.reason).toMatch(/without rejecting/);
     expect(result.reason).toContain('QueryClient retries without a policy');
@@ -269,9 +227,7 @@ describe('an external conclusion has to be reached against the local candidates'
           'A stale cache key: the key is derived per request',
         ],
       },
-      FRONTEND,
       resolvesToItself,
-      POLICY,
     );
     expect(result.outcome).toBe('not_actionable');
   });
@@ -279,9 +235,7 @@ describe('an external conclusion has to be reached against the local candidates'
   it('does not demand rejections that were never raised', () => {
     const result = deriveOutcome(
       { ...external, candidates_considered: [] },
-      FRONTEND,
       resolvesToItself,
-      POLICY,
     );
     expect(result.outcome).toBe('not_actionable');
   });
@@ -300,36 +254,41 @@ const localBase = {
 };
 
 describe('the first citation is the claim', () => {
-  it('refuses when the first citation is outside the surface, even if a later one is inside', () => {
+  it('acts on the first citation, not a later one that also resolves', () => {
     const d = deriveOutcome(
-      { ...localBase, cause_locations: ['server/app.py', 'client/App.tsx'] },
-      { globs: ['client/**'] }, (c) => c, POLICY,
-    );
-
-    expect(d.outcome).toBe('not_actionable');
-    expect(d.basis).toBe('primary_outside_fix_surface');
-  });
-
-  it('authorizes when the first citation is inside the surface', () => {
-    const d = deriveOutcome(
-      { ...localBase, cause_locations: ['client/App.tsx', 'server/app.py'] },
-      { globs: ['client/**'] }, (c) => c, POLICY,
+      { ...localBase, cause_locations: [{ path: 'client/App.tsx' }, { path: 'server/app.py' }] },
+      (c) => c,
     );
 
     expect(d.outcome).toBe('code_fix');
-    expect(d.basis).toBe('in_surface_defect');
+    expect(d.basis).toBe('local_defect');
+    expect(d.reason).toContain('client/App.tsx');
   });
 
   // A vague or external first entry must not fall through to a later citation:
   // that is the "any citation authorises" hole wearing a different shape.
-  it('does not skip past an unparseable first citation to authorize a later one', () => {
+  // The hole this closes: a first citation that fails must not be rescued by a
+  // later one that happens to resolve. Scanning the list is how a diagnosis
+  // whose real cause was elsewhere got authorised by an incidental mention.
+  it('does not skip past a failing first citation to authorize a later one', () => {
     const d = deriveOutcome(
-      { ...localBase, cause_locations: ['somewhere in the render path', 'client/App.tsx'] },
-      { globs: ['client/**'] }, (c) => c, POLICY,
+      { ...localBase, cause_locations: [{ path: 'nope/missing.tsx' }, { path: 'client/App.tsx' }] },
+      (c) => (c === 'client/App.tsx' ? c : null),
     );
 
     expect(d.outcome).toBe('needs_more_context');
-    expect(d.basis).toBe('uncitable_local_claim');
+    expect(d.basis).toBe('citation_unresolvable');
+  });
+
+  // The first citation is checked against the filesystem, not taken on trust.
+  it('refuses when the first citation resolves to nothing', () => {
+    const d = deriveOutcome(
+      { ...localBase, cause_locations: [{ path: 'client/Ghost.tsx' }, { path: 'client/App.tsx' }] },
+      () => null,
+    );
+
+    expect(d.outcome).toBe('needs_more_context');
+    expect(d.basis).toBe('citation_unresolvable');
   });
 });
 
@@ -339,7 +298,7 @@ describe('external conclusions must reject every local candidate', () => {
     evidence_check: 'checked breadcrumb timings',
     evidence_strength: 'suggestive' as const,
     cause_kind: 'external_system' as const,
-    cause_locations: ['GET /api/search (remote service)'],
+    cause_locations: [{ path: 'GET /api/search', note: 'remote service' }],
     reasoning: 'r',
     why_chain: [],
     reproduction_steps: [],
@@ -353,7 +312,7 @@ describe('external conclusions must reject every local candidate', () => {
         { statement: 'Gateway timeout', kind: 'external_system' },
       ],
       rejected: ['A client retry loop: the counter does reset, verified in src/retry.ts'],
-    }, { globs: null }, () => null, POLICY);
+    }, () => null);
 
     expect(d.outcome).toBe('not_actionable');
     expect(d.basis).toBe('cause_outside_codebase');
@@ -369,7 +328,7 @@ describe('external conclusions must reject every local candidate', () => {
         { statement: 'A stale cache key', kind: 'configuration' },
       ],
       rejected: ['A client retry loop: the counter does reset'],
-    }, { globs: null }, () => null, POLICY);
+    }, () => null);
 
     expect(d.outcome).toBe('needs_more_context');
     expect(d.basis).toBe('unrejected_local_candidates');
@@ -381,20 +340,8 @@ describe('external conclusions must reject every local candidate', () => {
       ...external,
       candidates_considered: [{ statement: 'Gateway timeout', kind: 'external_system' }],
       rejected: [],
-    }, { globs: null }, () => null, POLICY);
+    }, () => null);
 
     expect(d.outcome).toBe('not_actionable');
-  });
-});
-
-describe('unconfigured fix surface', () => {
-  it('refuses a fix when no surface is configured and policy does not allow it', () => {
-    const d = deriveOutcome(
-      { ...localBase, cause_locations: ['client/App.tsx'] },
-      { globs: null }, (c) => c, { allowUnrestrictedSurface: false },
-    );
-
-    expect(d.outcome).toBe('needs_more_context');
-    expect(d.basis).toBe('no_fix_surface_configured');
   });
 });

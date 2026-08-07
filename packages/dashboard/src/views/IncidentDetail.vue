@@ -529,18 +529,27 @@ onMounted(async () => {
           </div>
         </div>
 
-        <!-- Insight card (friction, no code cause — terminal, never a PR; design v4-4) -->
+        <!-- Insight card (no code cause — terminal, never a PR; design v4-4).
+             Errors reach this status too, not just friction: an investigation
+             that places the cause outside this codebase routes here, so the
+             copy has to branch on kind rather than assume friction. -->
         <div
           v-if="incident.status === 'insight'"
           class="p-4 bg-insight/10 border border-insight/20 border-l-2 border-l-insight rounded-lg space-y-3"
         >
           <p class="text-sm font-medium text-insight">Insight — no code cause</p>
-          <p class="text-xs text-muted">
+          <p v-if="incident.kind === 'friction'" class="text-xs text-muted">
             Opslane investigated this friction and found no code change that would fix it.
             No PR will be created; use the findings below to guide a product or UX change.
           </p>
+          <p v-else class="text-xs text-muted">
+            Opslane traced this error to a cause outside the code it can change.
+            No PR will be created; use the cause and remediation below to act on it where it lives.
+          </p>
           <div v-if="incident.root_cause">
-            <p class="text-xs font-medium text-insight uppercase tracking-wide">What users hit</p>
+            <p class="text-xs font-medium text-insight uppercase tracking-wide">
+              {{ incident.kind === 'friction' ? 'What users hit' : 'Cause' }}
+            </p>
             <pre
               class="mt-1 text-sm bg-surface border border-border p-3 rounded overflow-x-auto whitespace-pre-wrap text-text"
               v-text="incident.root_cause"

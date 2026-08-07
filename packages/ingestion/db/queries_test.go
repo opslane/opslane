@@ -1071,7 +1071,12 @@ func TestArchiveTwiceDoesNotOverwriteSavedStatus(t *testing.T) {
 	if err := q.ArchiveErrorGroup(ctx, projectID, groupID); err != nil {
 		t.Fatalf("first ArchiveErrorGroup: %v", err)
 	}
-	_ = q.ArchiveErrorGroup(ctx, projectID, groupID)
+	// Archiving twice must succeed, not 409. The handler maps any error here to
+	// "incident not found", so a double-click or a stale list would report the
+	// incident as missing while it sits archived.
+	if err := q.ArchiveErrorGroup(ctx, projectID, groupID); err != nil {
+		t.Fatalf("second ArchiveErrorGroup must be idempotent, got: %v", err)
+	}
 
 	var saved string
 	if err := pool.QueryRow(ctx,
@@ -1081,6 +1086,12 @@ func TestArchiveTwiceDoesNotOverwriteSavedStatus(t *testing.T) {
 	}
 	if saved != "insight" {
 		t.Fatalf("status_before_archive = %q, want insight", saved)
+	}
+
+	// Idempotent must not mean "always succeeds": a group that does not exist,
+	// or belongs to another tenant, still has to fail.
+	if err := q.ArchiveErrorGroup(ctx, projectID, "00000000-0000-0000-0000-000000000000"); err == nil {
+		t.Fatal("expected ArchiveErrorGroup on an unknown group to fail")
 	}
 }
 

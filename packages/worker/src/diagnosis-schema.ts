@@ -1,4 +1,5 @@
 import type { Diagnosis } from '@opslane/shared';
+import { strings } from './diagnose-schema.js';
 
 /**
  * Reconstitutes a persisted Diagnosis when a fix job is claimed.
@@ -15,15 +16,10 @@ export function parseDiagnosis(raw: Record<string, unknown>): Diagnosis | null {
   const location = typeof raw['cause_location'] === 'string' ? raw['cause_location'].trim() : '';
   if (!description || !location) return null;
 
-  const list = (value: unknown): string[] =>
-    Array.isArray(value)
-      ? value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
-      : [];
-
   return {
     one_line_description: description,
-    why_chain: list(raw['why_chain']),
-    reproduction_steps: list(raw['reproduction_steps']),
+    why_chain: strings(raw['why_chain']),
+    reproduction_steps: strings(raw['reproduction_steps']),
     cause_location: location,
   };
 }

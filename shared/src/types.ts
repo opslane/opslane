@@ -375,11 +375,9 @@ export type SetupPrStatus =
 
 export type {
   Adjudication,
+  CauseLocation,
   Diagnosis,
   DiagnosisOutcome,
-  Dossier,
   EvidenceStrength,
-  FailingRequest,
-  Hypothesis,
   HypothesisKind,
 } from './diagnosis.js';

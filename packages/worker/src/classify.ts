@@ -1,13 +1,14 @@
 import type { Adjudication, DiagnosisOutcome } from '@opslane/shared';
-import { isInsideFixSurface, parseCauseLocation, type FixSurface } from './fix-surface.js';
 
 export interface DerivedDecision {
   outcome: DiagnosisOutcome;
   reason: string;
   /**
-   * Why this outcome, as a value rather than prose. Callers pick reason codes
-   * from this. An earlier version matched substrings of `reason`, so rewording
-   * a message silently changed the reason code written to the incident.
+   * Why this outcome, as a value rather than prose. An earlier version matched
+   * substrings of `reason`, so rewording a message silently changed the reason
+   * code written to the incident.
+   *
+   * This is a forensic label, not a routing input: callers branch on `outcome`.
    */
   basis:
     | 'no_adjudication'
@@ -17,14 +18,12 @@ export interface DerivedDecision {
     | 'unrejected_local_candidates'
     | 'uncitable_local_claim'
     | 'citation_unresolvable'
-    | 'no_fix_surface_configured'
-    | 'primary_outside_fix_surface'
-    | 'in_surface_defect';
+    | 'local_defect';
   /**
-   * Only `high` opens a pull request unattended. It now comes from the
-   * adjudicator's judgement of verified evidence, not from counting fields: an
-   * earlier version scored `high` for three repeated sentences plus any line
-   * number, which made the gate cosmetic.
+   * Only `high` opens a pull request unattended. It comes from the model's
+   * judgement of verified evidence, not from counting fields: an earlier version
+   * scored `high` for three repeated sentences plus any line number, which made
+   * the gate cosmetic.
    */
   confidence: 'high' | 'medium' | 'low';
 }
@@ -40,36 +39,31 @@ function confidenceFor(strength: Adjudication['evidence_strength']): 'high' | 'm
   return 'low';
 }
 
-/** Routing policy, passed in so this function stays pure and testable. */
-export interface RoutingPolicy {
-  /**
-   * Whether a project with no configured fix surface may still be fixed. A null
-   * glob list makes the whole repository writable, so this defaults to false at
-   * the call site and exists as an explicit escape hatch, not an accident.
-   */
-  allowUnrestrictedSurface: boolean;
-}
-
 /**
- * Derive routing from the adjudicated cause and the configured fix surface.
- * Pure: same inputs, same answer, no model and no I/O. `fileExists` is injected
- * so the citation check stays testable, and it must resolve symlinks before
- * answering, or a link inside the surface authorises writes outside it.
+ * Decide whether the diagnosis is good enough to act on, and where the cause is.
+ * Pure: same inputs, same answer, no model and no I/O.
+ *
+ * This deliberately does NOT decide what the fix agent may write. That is
+ * enforced at the point of mutation, because a check here would be a second,
+ * weaker copy of the same boundary made minutes earlier.
+ *
+ * The gate that actually runs is `assertWritableSandboxPath`, called from
+ * harness/tool-bridge.ts. It normalises lexically, which stops `..` traversal
+ * out of the clone but cannot follow a symlink — a link inside the clone
+ * pointing outside it still authorises the write, and containment for that case
+ * is the sandbox itself. Naming it here rather than the realpath-based
+ * `assertWritable` matters: that one is symlink-safe but has no caller, so
+ * pointing a reader at it described a guarantee the shipped path does not make.
  */
 export function deriveOutcome(
   adjudication: Adjudication | null,
-  surface: FixSurface,
   /**
    * Resolves a cited path to its canonical repository-relative path, or null if
-   * it does not exist, is not a regular file, or escapes the clone.
-   *
-   * It returns the path rather than a boolean on purpose. An earlier version
-   * used it only for existence and then matched the glob against the string the
-   * model supplied, which left the symlink hole open: `client/vendor/app.py`
-   * resolved to `server/app.py` and still matched a `client/**` surface.
+   * it does not exist, is not a regular file, or escapes the clone. A citation
+   * that resolves to nothing is an evidence defect: the model named a file that
+   * is not there.
    */
   resolvePath: (cited: string) => string | null,
-  policy: RoutingPolicy,
 ): DerivedDecision {
   if (!adjudication) {
     return {
@@ -110,8 +104,8 @@ export function deriveOutcome(
     // we can require is that the conclusion was reached against the local
     // alternatives rather than instead of them.
     //
-    // The previous version only checked `rejected` was non-empty, so rejecting
-    // one irrelevant candidate satisfied it. Check each local candidate by name.
+    // An earlier version only checked `rejected` was non-empty, so rejecting one
+    // irrelevant candidate satisfied it. Check each local candidate by name.
     const locals = adjudication.candidates_considered.filter(
       (candidate) => candidate.kind === 'local_code' || candidate.kind === 'configuration',
     );
@@ -130,35 +124,25 @@ export function deriveOutcome(
     }
     return {
       outcome: 'not_actionable',
-      reason: `The cause is outside this codebase: ${adjudication.cause_locations[0] ?? adjudication.best_supported}`,
+      reason: `The cause is outside this codebase: ${adjudication.cause_locations[0]?.path ?? adjudication.best_supported}`,
       basis: 'cause_outside_codebase',
       confidence: confidenceFor(adjudication.evidence_strength),
     };
   }
 
-  // A project with no configured surface makes the whole repository writable.
-  // That was previously a log line standing next to an authorised fix.
-  if (surface.globs === null && !policy.allowUnrestrictedSurface) {
+  // The FIRST citation is the claim. Do not search the list for one that happens
+  // to resolve: "any citation counts" was a real hole, and scanning past a bad
+  // first entry reopens it in a different shape.
+  //
+  // `path` arrives structured and undecorated — the model puts explanations in
+  // `note`. Regexing a path back out of free text discarded four correct
+  // answers before the schema changed.
+  const primary = adjudication.cause_locations[0];
+
+  if (!primary) {
     return {
       outcome: 'needs_more_context',
-      reason: 'No fix surface is configured for this project, so no path is authorised for writing',
-      basis: 'no_fix_surface_configured',
-      confidence: 'low',
-    };
-  }
-
-  // The FIRST citation is the claim. Do not search the list for one that
-  // happens to parse or happens to land in-surface: "any citation authorises"
-  // is the hole this replaces, and scanning past an unparseable first entry
-  // reopens it in a different shape.
-  const primary = parseCauseLocation(adjudication.cause_locations[0] ?? '');
-
-  if (primary.kind !== 'repo_path') {
-    return {
-      outcome: 'needs_more_context',
-      reason:
-        `The investigation claims a ${adjudication.cause_kind} cause but its first citation ` +
-        `is not a checkable file: ${JSON.stringify(adjudication.cause_locations[0] ?? null)}`,
+      reason: `The investigation claims a ${adjudication.cause_kind} cause but cited no location`,
       basis: 'uncitable_local_claim',
       confidence: 'low',
     };
@@ -174,21 +158,10 @@ export function deriveOutcome(
     };
   }
 
-  // Match the glob against the RESOLVED path, never the cited string: a symlink
-  // inside the surface pointing outside it would otherwise authorise the write.
-  if (!isInsideFixSurface(resolved, surface)) {
-    return {
-      outcome: 'not_actionable',
-      reason: `The primary cause is at ${resolved}, outside the configured fix surface`,
-      basis: 'primary_outside_fix_surface',
-      confidence: confidenceFor(adjudication.evidence_strength),
-    };
-  }
-
   return {
     outcome: 'code_fix',
     reason: `The cause is at ${resolved}`,
-    basis: 'in_surface_defect',
+    basis: 'local_defect',
     confidence: confidenceFor(adjudication.evidence_strength),
   };
 }
