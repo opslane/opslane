@@ -31,7 +31,18 @@
 **Interfaces:**
 - Produces: table `session_analysis` (columns exactly as below — worker Task 3 upserts into it, ingestion Task 8/10 read it); column `friction_signals.occurred_ats JSONB` (worker Task 4/5 write it, Task 7 reads it).
 
-- [ ] **Step 1: Write the migration**
+- [ ] **Step 1: Write the failing DB test FIRST** (the migration does not exist yet, so the relation-missing failure is real)
+
+The test content is in Step 2 below — write it now, before the migration file exists.
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+```bash
+cd packages/ingestion && DATABASE_URL="$DATABASE_URL" go test ./db -run TestSessionAnalysisUpsertRoundTrip -v
+```
+Expected: FAIL — relation `session_analysis` does not exist.
+
+- [ ] **Step 3: Write the migration**
 
 ```sql
 -- 038_session_analysis.sql
@@ -66,11 +77,24 @@ CREATE INDEX IF NOT EXISTS idx_session_analysis_rollup
 
 -- Per-occurrence timestamps (epoch ms array) so adjudication evidence
 -- windows can center on each occurrence instead of the fold-min.
+-- Semantics: one entry per PERSISTED occurrence unit — one per dead-click
+-- occurrence, one per rage-click CLUSTER (the detector fires once per
+-- cluster). Length tracks occurrence_count, not raw click count.
 ALTER TABLE friction_signals
   ADD COLUMN IF NOT EXISTS occurred_ats JSONB;
+
+-- Durable per-project daily adjudication budget. A unit is reserved
+-- atomically BEFORE every outbound model call (including shadow calls and
+-- calls that subsequently fail), so concurrent jobs cannot overspend.
+CREATE TABLE IF NOT EXISTS adjudication_call_budget (
+  project_id UUID NOT NULL,
+  day        DATE NOT NULL,
+  calls      INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (project_id, day)
+);
 ```
 
-- [ ] **Step 2: Write the failing DB test**
+- [ ] **Step 1 (content): The DB test**
 
 Follow the existing db-test pattern in `packages/ingestion/db` (tests skip without `DATABASE_URL`; look at a neighboring `*_test.go` for the `testQueries(t)` helper the package uses and reuse it).
 
@@ -114,37 +138,30 @@ func TestSessionAnalysisUpsertRoundTrip(t *testing.T) {
 		t.Fatalf("got coverage=%q clicks=%d", coverage, clicks)
 	}
 
-	// CHECK constraint enforces the closed enums.
+	// CHECK constraint enforces the closed enums. Use a SECOND session so a
+	// primary-key violation cannot masquerade as the CHECK failure, and
+	// assert the specific Postgres error code (23514 = check_violation).
+	seedProjectAndSession(t, q, "sa-proj", "sa-sess-2")
 	_, err = q.pool.Exec(ctx, `
 		INSERT INTO session_analysis
 		  (session_id, project_id, session_started_at, coverage, activity_class, rule_version)
 		VALUES ($1, $2, now(), 'bogus', 'active', 2)`,
-		"sa-sess-1", testProjectID)
-	if err == nil {
-		t.Fatal("expected CHECK violation for coverage='bogus'")
+		"sa-sess-2", testProjectID)
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != "23514" {
+		t.Fatalf("expected check_violation (23514) for coverage='bogus', got %v", err)
 	}
 }
 ```
 
-If the package has no `seedProjectAndSession` helper, inline the two inserts (project row + minimal `sessions` row) the way the existing sessions tests do.
+If the package has no `seedProjectAndSession` helper, inline the two inserts (project row + minimal `sessions` row) the way the existing sessions tests do. Imports: `errors` and `github.com/jackc/pgx/v5/pgconn`.
 
-- [ ] **Step 3: Run test to verify it fails**
-
-```bash
-cd packages/ingestion && DATABASE_URL="$DATABASE_URL" go test ./db -run TestSessionAnalysisUpsertRoundTrip -v
-```
-Expected: FAIL — relation `session_analysis` does not exist (migration file exists but confirm the boot migration runner picks up `038_*`; it globs the migrations dir).
-
-- [ ] **Step 4: Verify the migration applies and the test passes**
+- [ ] **Step 4: Run the test to verify it passes**
 
 ```bash
 cd packages/ingestion && DATABASE_URL="$DATABASE_URL" go test ./db -run TestSessionAnalysisUpsertRoundTrip -v
 ```
-Expected: PASS (the test harness runs migrations). Also run the migration twice against the same database to prove idempotence:
-
-```bash
-DATABASE_URL="$DATABASE_URL" go test ./db -run TestMigrations -v   # existing migration-idempotence suite if present; otherwise re-run the round-trip test
-```
+Expected: PASS (the test harness runs migrations; confirm the runner picks up `038_*` — it globs the migrations dir). Run it twice against the same database to prove idempotence (the second run re-applies every migration).
 
 - [ ] **Step 5: Commit**
 
@@ -159,10 +176,12 @@ git commit -m "feat(db): session_analysis facts table and per-occurrence signal 
 
 **Files:**
 - Create: `packages/worker/src/friction/facts.ts`
+- Modify: `packages/worker/src/friction/fingerprint.ts` (add `normalizeEntryPath`)
 - Test: `packages/worker/src/friction/__tests__/facts.test.ts`
 
 **Interfaces:**
-- Consumes: `SessionChunkEnvelope` from `@opslane/shared`; `extractTelemetryEvents`, `asRawEvent`-style narrowing conventions from `analyzer.ts` (import `extractTelemetryEvents` — do not duplicate it).
+- Consumes: `SessionChunkEnvelope` from `@opslane/shared`; `extractTelemetryEvents` from `analyzer.ts` (import it — do not duplicate it).
+- **`normalizeEntryPath(href: string): string | null`** — NEW export from `fingerprint.ts`, returns the normalized **pathname only** (no origin): strips query/hash, drops `_ctx_*` segments, templates numeric/uuid/hex segments to `:id`. This is deliberately separate from `normalizePageUrl`, which returns `origin+path` and is a fingerprint identity — Task 4 touches that one.
 - Produces (Task 3 depends on these exact names):
 
 ```ts
@@ -191,6 +210,7 @@ export function classifyActivity(facts: SessionFacts, coverage: Coverage): Activ
 // packages/worker/src/friction/__tests__/facts.test.ts
 import { describe, expect, it } from 'vitest';
 import { extractSessionFacts, classifyActivity } from '../facts.js';
+import { normalizeEntryPath } from '../fingerprint.js';
 import type { SessionChunkEnvelope } from '@opslane/shared';
 
 const T0 = 1_754_000_000_000;
@@ -247,13 +267,31 @@ describe('extractSessionFacts', () => {
     expect(facts.failedWriteCount).toBe(1);
   });
 
-  it('extracts normalized entry path from the first page event', () => {
+  it('extracts normalized entry path (pathname only) from the EARLIEST page event', () => {
+    // chunks deliberately out of order: the later page appears first in the array
     const facts = extractSessionFacts([envelope([
-      page(T0, 'https://app.example.com/assets/12345/edit?tab=1#x'),
       page(T0 + 1000, 'https://app.example.com/other'),
+      page(T0, 'https://app.example.com/assets/12345/edit?tab=1#x'),
     ])]);
-    expect(facts.entryPath).toBe('/assets/:id/edit');
+    expect(facts.entryPath).toBe('/assets/:id/edit');   // no origin, earliest by timestamp
     expect(facts.pageEventCount).toBe(2);
+  });
+
+  it('normalizeEntryPath strips _ctx blobs and templates uuid segments', () => {
+    expect(normalizeEntryPath('https://x.test/a1b2c3d4-1111-2222-3333-444455556666/global-page/_ctx_H4sIAAAA/'))
+      .toBe('/:id/global-page');
+    expect(normalizeEntryPath('not a url')).toBeNull();
+  });
+
+  it('treats only 500-599 as 5xx', () => {
+    const facts = extractSessionFacts([envelope([
+      page(T0, 'https://app.example.com/x'),
+      telemetry(T0 + 1000, { kind: 'request_start', requestId: 'q1', clickId: null, method: 'GET', url: '/api/a' }),
+      telemetry(T0 + 1100, { kind: 'request_end', requestId: 'q1', status: 599 }),
+      telemetry(T0 + 2000, { kind: 'request_start', requestId: 'q2', clickId: null, method: 'GET', url: '/api/b' }),
+      telemetry(T0 + 2100, { kind: 'request_end', requestId: 'q2', status: 600 }),  // nonstandard: not counted
+    ])]);
+    expect(facts.failedRequest5xxCount).toBe(1);
   });
 
   it('returns null entry path and zero counts for no chunks', () => {
@@ -294,13 +332,37 @@ pnpm --filter @opslane/worker test -- facts
 ```
 Expected: FAIL — `../facts.js` not found.
 
-- [ ] **Step 3: Implement `facts.ts`**
+- [ ] **Step 3: Implement `normalizeEntryPath` in `fingerprint.ts`, then `facts.ts`**
+
+Add to `fingerprint.ts` (alongside `normalizePageUrl`, which is NOT modified in this task):
+
+```ts
+/** Normalized pathname only (no origin) for session entry attribution:
+ * strips query/hash, drops Forge `_ctx_*` blob segments, templates numeric
+ * and uuid/hex-like segments to `:id`. Returns null for unparseable input. */
+export function normalizeEntryPath(href: string): string | null {
+  try {
+    const url = new URL(href);
+    const path = url.pathname
+      .split('/')
+      .filter((segment) => !segment.startsWith('_ctx_'))
+      .map((segment) =>
+        /^\d+$/.test(segment) || /^[0-9a-f-]{8,}$/i.test(segment) ? ':id' : segment,
+      )
+      .join('/');
+    const trimmed = path.length > 1 && path.endsWith('/') ? path.slice(0, -1) : path;
+    return trimmed === '' ? '/' : trimmed;
+  } catch {
+    return null;
+  }
+}
+```
 
 ```ts
 // packages/worker/src/friction/facts.ts
 import type { SessionChunkEnvelope } from '@opslane/shared';
 import { extractTelemetryEvents } from './analyzer.js';
-import { normalizePageUrl } from './fingerprint.js';
+import { normalizeEntryPath } from './fingerprint.js';
 
 export type Coverage = 'complete' | 'partial' | 'no_replay';
 export type ActivityClass = 'active' | 'light_touch' | 'zero_interaction' | 'idle_tab' | 'unknown';
@@ -353,9 +415,12 @@ export function extractSessionFacts(chunks: SessionChunkEnvelope[]): SessionFact
   };
 
   // Page origins define same-origin; collected first so late requests
-  // to an origin the user navigated to still count.
+  // to an origin the user navigated to still count. Entry page is the
+  // page event with the EARLIEST timestamp, not first in array order —
+  // chunks can arrive out of chronological order.
   const pageOrigins = new Set<string>();
-  let firstPageHref: string | null = null;
+  let entryPageHref: string | null = null;
+  let entryPageTs = Number.POSITIVE_INFINITY;
   for (const chunk of chunks) {
     if (!Array.isArray(chunk.events)) continue;
     for (const value of chunk.events) {
@@ -370,14 +435,14 @@ export function extractSessionFacts(chunks: SessionChunkEnvelope[]): SessionFact
         facts.pageEventCount += 1;
         const origin = originOf(data['href']);
         if (origin) pageOrigins.add(origin);
-        if (firstPageHref === null) firstPageHref = data['href'];
+        if (ts < entryPageTs) { entryPageTs = ts; entryPageHref = data['href']; }
       }
       if (value['type'] === 3 && isRecord(data) && data['source'] === 5) {
         facts.inputEventCount += 1;
       }
     }
   }
-  if (firstPageHref !== null) facts.entryPath = normalizePageUrl(firstPageHref);
+  if (entryPageHref !== null) facts.entryPath = normalizeEntryPath(entryPageHref);
 
   const sameOrigin = (url: string): boolean => {
     const origin = originOf(url);
@@ -400,7 +465,7 @@ export function extractSessionFacts(chunks: SessionChunkEnvelope[]): SessionFact
       if (!sameOrigin(start.url)) continue;
       const isWrite = WRITE_METHODS.has(start.method);
       if (status >= 200 && status < 300 && isWrite) facts.successfulWriteCount += 1;
-      if (status >= 400) {
+      if (status >= 400 && status < 600) {
         if (isWrite) facts.failedWriteCount += 1;
         if (status < 500) facts.failedRequest4xxCount += 1;
         else facts.failedRequest5xxCount += 1;
@@ -424,8 +489,6 @@ export function classifyActivity(facts: SessionFacts, coverage: Coverage): Activ
 }
 ```
 
-Note: `normalizePageUrl` gains `_ctx` and uuid handling in Task 4; the entry-path test above passes with today's numeric templating.
-
 - [ ] **Step 4: Run tests to verify they pass**
 
 ```bash
@@ -446,11 +509,15 @@ git commit -m "feat(worker): pure session fact extraction with same-origin reque
 
 **Files:**
 - Modify: `packages/worker/src/db.ts` (near `getSessionForAnalysis`, `db.ts:1853`)
+- Modify: `packages/worker/src/friction/chunk-reader.ts` (opt-in unreadable-chunk reporting)
+- Modify: `packages/worker/src/friction/facts.ts` (add `deriveCoverage`)
 - Modify: `packages/worker/src/index.ts:776-826` (`processSessionAnalysisJob`)
-- Test: `packages/worker/src/__tests__/session-analysis-facts.integration.test.ts` (colocated with the existing integration suites; DB-gated like them)
+- Test: extend `packages/worker/src/friction/__tests__/facts.test.ts` (deriveCoverage) and `packages/worker/src/friction/__tests__/chunk-reader.test.ts` (skipUnreadable); create `packages/worker/src/__tests__/session-analysis-facts.integration.test.ts` (DB-gated)
 
 **Interfaces:**
-- Consumes: `extractSessionFacts`, `classifyActivity`, `Coverage` (Task 2); `readChunksBounded` (`chunk-reader.ts:21`) returning `{ envelopes, truncated }`; `getScrubbedChunksForSession` (`db.ts:1830`).
+- Consumes: `extractSessionFacts`, `classifyActivity`, `Coverage` (Task 2); `getScrubbedChunksForSession` (`db.ts:1830`).
+- `readChunksBounded(chunks, opts?: { skipUnreadable?: boolean })` — with the flag, a chunk that fails to gunzip/parse/validate is SKIPPED and counted in a new `unreadableCount` result field instead of throwing `ChunkReadError`. The result also gains `envelopeSeqs: number[]`, aligned with `envelopes` (`envelopeSeqs[i]` is the source chunk seq of `envelopes[i]`) so callers can map surviving envelopes back to chunks when some were skipped — Task 7's window loader depends on this. Default behavior (no flag) is byte-identical to today (`unreadableCount: 0`, `envelopeSeqs` fully populated) — the friction-evidence path and every existing caller keep their throw semantics. Systemic failures (MinIO unconfigured) still throw regardless of the flag.
+- `deriveCoverage(input: { scrubbedChunkCount: number; envelopeCount: number; truncated: boolean; unreadableCount: number }): Coverage` — pure, exported from `facts.ts`: zero readable envelopes → `'no_replay'` (regardless of how many chunk rows exist); at least one envelope plus truncation or unreadable chunks → `'partial'`; otherwise `'complete'`.
 - Produces:
 
 ```ts
@@ -515,15 +582,63 @@ export async function upsertSessionAnalysis(row: SessionAnalysisUpsert): Promise
 
 `getSessionAnalysis` is a straight SELECT of the same columns mapped back to the camelCase shape (used by Task 9 investigation context and this task's test).
 
-- [ ] **Step 3: Wire fact extraction into `processSessionAnalysisJob`**
+- [ ] **Step 3: Implement `deriveCoverage` + the `skipUnreadable` reader option, with failing tests first**
 
-In `index.ts`, after `const read = await readChunksBounded(chunks);` (`index.ts:786`) and before `writeFrictionSignals`, insert:
+Tests (extend `facts.test.ts` and `chunk-reader.test.ts`):
+
+```ts
+describe('deriveCoverage', () => {
+  it('is no_replay when nothing readable exists, even if chunk rows exist', () => {
+    expect(deriveCoverage({ scrubbedChunkCount: 0, envelopeCount: 0, truncated: false, unreadableCount: 0 })).toBe('no_replay');
+    expect(deriveCoverage({ scrubbedChunkCount: 3, envelopeCount: 0, truncated: false, unreadableCount: 3 })).toBe('no_replay');
+    expect(deriveCoverage({ scrubbedChunkCount: 5, envelopeCount: 0, truncated: true, unreadableCount: 0 })).toBe('no_replay');
+  });
+  it('is partial when something was read but evidence is incomplete', () => {
+    expect(deriveCoverage({ scrubbedChunkCount: 5, envelopeCount: 3, truncated: true, unreadableCount: 0 })).toBe('partial');
+    expect(deriveCoverage({ scrubbedChunkCount: 5, envelopeCount: 4, truncated: false, unreadableCount: 1 })).toBe('partial');
+  });
+  it('is complete when everything was read', () => {
+    expect(deriveCoverage({ scrubbedChunkCount: 5, envelopeCount: 5, truncated: false, unreadableCount: 0 })).toBe('complete');
+  });
+});
+
+// chunk-reader.test.ts — reuse the suite's existing fixture helpers
+it('skipUnreadable counts a corrupt chunk instead of throwing, without changing default behavior', async () => {
+  const chunks = [validChunkRef(), corruptChunkRef(), validChunkRef()];
+  await expect(readChunksBounded(chunks)).rejects.toThrow(ChunkReadError);          // default unchanged
+  const read = await readChunksBounded(chunks, { skipUnreadable: true });
+  expect(read.envelopes).toHaveLength(2);
+  expect(read.unreadableCount).toBe(1);
+});
+```
+
+Implementation: in `chunk-reader.ts`, wrap the per-chunk decode/validate section in a try/catch active only when `opts?.skipUnreadable` is set; on catch, increment `unreadableCount` and `continue`. The MinIO-unconfigured guard (`chunk-reader.ts:24`) stays OUTSIDE the flag — it throws either way. `unreadableCount` is `0` in the default-path result so the return type change is additive.
+
+`deriveCoverage` in `facts.ts`:
+
+```ts
+export function deriveCoverage(input: {
+  scrubbedChunkCount: number; envelopeCount: number;
+  truncated: boolean; unreadableCount: number;
+}): Coverage {
+  if (input.envelopeCount === 0) return 'no_replay';
+  if (input.truncated || input.unreadableCount > 0) return 'partial';
+  return 'complete';
+}
+```
+
+- [ ] **Step 4: Wire fact extraction into `processSessionAnalysisJob` — AFTER the lease assertion**
+
+In `index.ts`, change the read call to `const read = await readChunksBounded(chunks, { skipUnreadable: true });` (`index.ts:786`). Then insert the facts write **after `await db.assertJobLease(job);` (`index.ts:789`) and before `writeFrictionSignals`** — a stale worker must discover it lost the lease before touching `session_analysis`:
 
 ```ts
     const facts = extractSessionFacts(read.envelopes);
-    const scrubbedCount = chunks.length;
-    const coverage: Coverage =
-      scrubbedCount === 0 ? 'no_replay' : read.truncated ? 'partial' : 'complete';
+    const coverage = deriveCoverage({
+      scrubbedChunkCount: chunks.length,
+      envelopeCount: read.envelopes.length,
+      truncated: read.truncated,
+      unreadableCount: read.unreadableCount,
+    });
     await db.upsertSessionAnalysis({
       sessionId: session.id,
       projectId: session.project_id,
@@ -544,11 +659,13 @@ In `index.ts`, after `const read = await readChunksBounded(chunks);` (`index.ts:
     });
 ```
 
-with imports `import { extractSessionFacts, classifyActivity, type Coverage } from './friction/facts.js';`. The analyzer is the sole writer including empty sessions: `chunks.length === 0` yields a `no_replay` row with `activity_class='unknown'`. Nothing else in the job changes — error paths, lease assertions, and status transitions stay byte-identical.
+with imports `import { extractSessionFacts, classifyActivity, deriveCoverage } from './friction/facts.js';`. The analyzer is the sole writer including empty sessions: zero chunks yields a `no_replay` row with `activity_class='unknown'`. Nothing else in the job changes — error paths, remaining lease assertions, and status transitions stay byte-identical.
 
-- [ ] **Step 4: Write the failing integration test**
+**Honest test-scope note:** coverage logic is pinned by the pure `deriveCoverage` unit tests and the reader-flag test above; the DB test below pins upsert semantics. Full job-level behavior (analysis job → row) is asserted in the Task 13 live smoke — this repo has no in-process job-harness test utility, and inventing one is out of this plan's scope.
 
-Model it on the existing `promotion-db.integration.test.ts` setup (pool from `DATABASE_URL`, `describe.skipIf(!process.env.DATABASE_URL)`). Three cases: (a) session with zero chunks → row has `coverage='no_replay'`, `activity_class='unknown'`; (b) normal envelopes → `complete` + counts match a hand-built expectation; (c) calling `upsertSessionAnalysis` twice with different counts leaves one row with the second counts and `session_started_at` unchanged.
+- [ ] **Step 5: Write the failing DB integration test**
+
+Model it on the existing `promotion-db.integration.test.ts` setup (pool from `DATABASE_URL`, `describe.skipIf(!process.env.DATABASE_URL)`). Cases: (a) calling `upsertSessionAnalysis` twice with different counts leaves one row with the second counts and `session_started_at` unchanged; (b) a `no_replay`/`unknown` row round-trips.
 
 ```ts
 // packages/worker/src/__tests__/session-analysis-facts.integration.test.ts
@@ -582,15 +699,15 @@ describe.skipIf(!hasDb)('session_analysis upsert', () => {
 });
 ```
 
-- [ ] **Step 5: Run tests, then build**
+- [ ] **Step 6: Run tests, then build**
 
 ```bash
-DATABASE_URL="$DATABASE_URL" pnpm --filter @opslane/worker test -- session-analysis-facts
+DATABASE_URL="$DATABASE_URL" pnpm --filter @opslane/worker test -- "session-analysis-facts|facts|chunk-reader"
 pnpm --filter @opslane/worker build
 ```
-Expected: PASS (and the suite is *skipped*, not failed, without `DATABASE_URL` — verify by unsetting it once).
+Expected: PASS (and the DB suite is *skipped*, not failed, without `DATABASE_URL` — verify by unsetting it once).
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 git add packages/worker/src/db.ts packages/worker/src/index.ts packages/worker/src/__tests__/session-analysis-facts.integration.test.ts
@@ -607,7 +724,7 @@ git commit -m "feat(worker): analyzer writes typed session_analysis facts row wi
 - Test: extend `packages/worker/src/friction/__tests__/analyzer.test.ts` and `__tests__/fingerprint.test.ts` (or create the latter if absent)
 
 **Interfaces:**
-- Produces: `DetectedSignal` gains `occurredAts: number[]` (all occurrence timestamps, ascending; `occurredAt` stays the minimum for compatibility). `RULE_VERSION = 2`. `normalizePageUrl` additionally strips `_ctx_*` path segments and templates uuid segments to `:id`. Tasks 5 and 7 depend on `occurredAts`.
+- Produces: `DetectedSignal` gains `occurredAts: number[]` — **one entry per persisted occurrence unit** (one per dead-click occurrence; one per rage-click CLUSTER, because the detector fires once per cluster on its last click). Length tracks `occurrenceCount`, NOT raw click count: a 4-click rage cluster yields `occurredAts.length === 1`. Ascending; `occurredAt` stays the minimum for compatibility. `RULE_VERSION = 2`. `normalizePageUrl` additionally strips `_ctx_*` path segments (uuid-ish segments are already templated by the existing `[0-9a-f-]{8,}` rule — do not re-add). Tasks 5 and 7 depend on `occurredAts`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -645,7 +762,7 @@ it('no longer produces form_abandon', () => {
   expect(signals.filter((s) => s.signalType === 'form_abandon')).toHaveLength(0);
 });
 
-it('records every occurrence timestamp on a folded signal', () => {
+it('records one timestamp per persisted occurrence unit on a folded signal', () => {
   // two unanswered dead clicks on the same selector+page, 60s apart
   const signals = analyzeSession([envelopeWithTwoDeadClicks(60_000)]);
   expect(signals).toHaveLength(1);
@@ -653,9 +770,17 @@ it('records every occurrence timestamp on a folded signal', () => {
   expect(signals[0]?.occurredAt).toBe(Math.min(...(signals[0]?.occurredAts ?? [])));
 });
 
-it('normalizePageUrl strips _ctx blobs and templates uuids', () => {
-  expect(normalizePageUrl('https://x.test/a1b2c3d4-1111-2222-3333-444455556666/global-page/_ctx_H4sIAAAA/'))
-    .toBe('/:id/global-page');
+it('records ONE timestamp for a rage cluster regardless of its click count', () => {
+  // 4 unanswered pointer clicks < 1s apart on one selector → one rage signal
+  const signals = analyzeSession([envelopeWithRageCluster(4)]);
+  expect(signals).toHaveLength(1);
+  expect(signals[0]?.signalType).toBe('rage_click');
+  expect(signals[0]?.occurredAts).toHaveLength(1);
+});
+
+it('normalizePageUrl strips _ctx blobs (origin retained — it is a fingerprint identity)', () => {
+  expect(normalizePageUrl('https://x.test/foo/_ctx_H4sIAAAA/bar'))
+    .toBe('https://x.test/foo/bar');
 });
 ```
 
@@ -687,7 +812,7 @@ const SYNTHETIC_ANCHOR_WINDOW_MS = 50;
 
 In `fingerprint.ts`:
 
-7. `normalizePageUrl`: when splitting path segments, drop any segment starting with `_ctx_`, and template segments matching `/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i` to `:id` (alongside the existing numeric/hex templating). Trailing empty segment handling stays as-is.
+7. `normalizePageUrl`: in the existing segment `.map(...)` chain, add `.filter((segment) => !segment.startsWith('_ctx_'))` before the map. Uuid-ish segments are already covered by the existing `/^[0-9a-f-]{8,}$/i` rule — do NOT add a second uuid regex. The `${url.origin}${path}` return shape is unchanged (it is a fingerprint identity; `normalizeEntryPath` from Task 2 is the path-only variant).
 8. `frictionFingerprint`: before hashing, canonicalize react-select indexed ids: `selector.replace(/#react-select-(\d+)-[\w-]+/g, '#react-select-$1')`.
 
 - [ ] **Step 4: Run the full worker test suite**
@@ -728,22 +853,29 @@ git commit -m "feat!(worker): detector suppressions, per-occurrence timestamps, 
 ```ts
 it('supersedes prior-version signals on re-analysis', async () => {
   const session = seededSessionRow();
-  const v1Signal = { ...deadClickSignal, ruleVersion: 1 };
-  await writeFrictionSignals(session, [v1Signal], 1);
-  // Same fingerprint at v2 supersedes; a v1-only fingerprint is retracted.
+  // v1 writes TWO fingerprints: one that persists into v2, one that v2 no longer produces.
+  const v1Kept = { ...deadClickSignal, ruleVersion: 1 };
+  const v1Only = { ...deadClickSignal, fingerprint: 'v1-only-fp', elementSelector: '.gone', ruleVersion: 1 };
+  await writeFrictionSignals(session, [v1Kept, v1Only], 1);
+
   const v2Signal = { ...deadClickSignal, ruleVersion: 2, occurredAts: [deadClickSignal.occurredAt] };
   await writeFrictionSignals(session, [v2Signal], 2);
 
   const { rows } = await getPool().query(
-    `SELECT rule_version, superseded_by, retracted_at, occurred_ats
-     FROM friction_signals WHERE session_id = $1 ORDER BY rule_version`,
+    `SELECT fingerprint, rule_version, superseded_by, retracted_at, occurred_ats
+     FROM friction_signals WHERE session_id = $1 ORDER BY rule_version, fingerprint`,
     [session.id]);
-  expect(rows).toHaveLength(2);
-  expect(rows[0].superseded_by).not.toBeNull();            // v1 row points at v2 row
-  expect(rows[1].superseded_by).toBeNull();
-  expect(rows[1].occurred_ats).toEqual([deadClickSignal.occurredAt]);
+  expect(rows).toHaveLength(3);
+  const v1KeptRow = rows.find((r) => r.rule_version === 1 && r.fingerprint === deadClickSignal.fingerprint);
+  const v1OnlyRow = rows.find((r) => r.fingerprint === 'v1-only-fp');
+  const v2Row = rows.find((r) => r.rule_version === 2);
+  expect(v1KeptRow?.superseded_by).not.toBeNull();     // same fingerprint → points at v2 row
+  expect(v1OnlyRow?.superseded_by).toBeNull();
+  expect(v1OnlyRow?.retracted_at).not.toBeNull();      // no successor → retracted
+  expect(v2Row?.superseded_by).toBeNull();
+  expect(v2Row?.occurred_ats).toEqual([deadClickSignal.occurredAt]);
 
-  // Active-row invariant: exactly one active row per fingerprint.
+  // Active-row invariant: exactly one active row for the whole session.
   const { rows: active } = await getPool().query(
     `SELECT count(*) AS n FROM friction_signals
      WHERE session_id = $1 AND retracted_at IS NULL AND superseded_by IS NULL`,
@@ -865,6 +997,15 @@ describe('buildEvidenceWindows', () => {
     expect([...w].sort((a, b) => a.t - b.t)).toEqual(w);
   });
 
+  it('never orphans a request pair when trimming', () => {
+    // noisyEnvelope: every request_start has a matching request_end
+    const windows = buildEvidenceWindows([noisyEnvelope()], [T0]);
+    const w = windows[0] ?? [];
+    const startIds = new Set(w.filter((e) => e.kind === 'request_start').map((e) => e.requestId));
+    const endIds = new Set(w.filter((e) => e.kind === 'request_end').map((e) => e.requestId));
+    expect([...startIds].sort()).toEqual([...endIds].sort());   // pairs retained or dropped atomically
+  });
+
   it('returns an empty window when no events fall in range', () => {
     expect(buildEvidenceWindows([bigEnvelope()], [T0 + 10 * 60_000])).toEqual([[]]);
   });
@@ -928,11 +1069,27 @@ export function buildEvidenceWindows(
   return occurredAts.map((at) => {
     const inSpan = all.filter((e) => Math.abs(e.t - at) <= EVIDENCE_WINDOW_MS);
     const priority = inSpan.filter((e) => e.kind === 'click' || e.kind === 'form_submit');
-    const rest = inSpan
-      .filter((e) => e.kind !== 'click' && e.kind !== 'form_submit')
-      .sort((a, b) => Math.abs(a.t - at) - Math.abs(b.t - at))
-      .slice(0, Math.max(0, EVIDENCE_WINDOW_MAX_EVENTS - priority.length));
-    return [...priority, ...rest].sort((a, b) => a.t - b.t);
+    // Trim request events as PAIRS keyed by requestId, so a kept end always
+    // has its start (spec: "request start/end pairs"). Unpaired events
+    // (start or end alone in the span) travel as one-element units.
+    const rest = inSpan.filter((e) => e.kind !== 'click' && e.kind !== 'form_submit');
+    const units = new Map<string, WindowEvent[]>();
+    for (const e of rest) {
+      const key = e.requestId ? `req:${e.requestId}` : `solo:${e.t}:${e.kind}`;
+      const unit = units.get(key) ?? [];
+      unit.push(e);
+      units.set(key, unit);
+    }
+    const unitDistance = (unit: WindowEvent[]): number =>
+      Math.min(...unit.map((e) => Math.abs(e.t - at)));
+    const kept: WindowEvent[] = [];
+    let budget = Math.max(0, EVIDENCE_WINDOW_MAX_EVENTS - priority.length);
+    for (const unit of [...units.values()].sort((a, b) => unitDistance(a) - unitDistance(b))) {
+      if (unit.length > budget) continue;
+      kept.push(...unit);
+      budget -= unit.length;
+    }
+    return [...priority, ...kept].sort((a, b) => a.t - b.t);
   });
 }
 ```
@@ -966,8 +1123,8 @@ In `adjudicator.ts`:
 2. `buildAdjudicationPrompt`: add `evidence_windows: input.evidenceWindows ?? null` into the fenced JSON blob; when windows are present, extend the instruction lines with: `'Each evidence window is the real event timeline (±15s) around one flagged click.'`, `'Judge from the events only. If the window lacks enough evidence to decide, return'`, `'{"accepted": false, "uncertain": true, "reason": ...} — do not guess.'` and require the reason to cite window events by time.
 3. `AdjudicationVerdict` gains `uncertain?: boolean`; `parseVerdict` narrows it (`typeof obj['uncertain'] === 'boolean' || obj['uncertain'] === undefined`) and throws on `accepted && uncertain`.
 4. `export const ADJUDICATION_PROMPT_VERSION_WINDOWS = 2;` and `createAnthropicAdjudicator(apiKey: string, mode: EvidenceWindowMode = 'off')` reports `promptVersion: mode === 'on' ? ADJUDICATION_PROMPT_VERSION_WINDOWS : ADJUDICATION_PROMPT_VERSION` — window-input verdicts open new generations, selector-only verdicts stay on v1, exactly the existing prompt-version discipline.
-
-Update `setFrictionAdjudicatorFactory` call sites (`index.ts:54-56`) so the factory receives the mode (Task 7 defines the env var).
+5. **Change the factory TYPE, not just the default factory.** The injectable seam is `setFrictionAdjudicatorFactory` (`index.ts:54-56`) with a one-arg `(apiKey) => Adjudicator` type. Change the type to `(apiKey: string, mode: EvidenceWindowMode) => Adjudicator`, update the default factory to `createAnthropicAdjudicator`, and update every call site and test stub (grep `frictionAdjudicatorFactory` and `setFrictionAdjudicatorFactory` across `src/` and `__tests__/`). Task 7's caller passes the mode — if this type change is skipped, `'on'` mode silently constructs an `'off'` adjudicator and persists window verdicts under prompt version 1, corrupting generation identity.
+6. Add a prompt-version test: `expect(createAnthropicAdjudicator('k', 'on').promptVersion).toBe(2)` and `.toBe(1)` for `'off'` and `'shadow'` (shadow's deciding call is selector-only v1; the shadow window call is log-only and never persisted).
 
 - [ ] **Step 5: Run tests and build**
 
@@ -1000,15 +1157,18 @@ git commit -m "feat(worker): condensed evidence windows as adjudicator input (pr
 - Produces:
 
 ```ts
-// db.ts
+// db.ts — the return type is whatever row type getScrubbedChunksForSession
+// already returns (open db.ts and use the SAME exported type name — do not
+// invent a new one; readChunksBounded consumes it unchanged)
 export async function getScrubbedChunksInRange(
   sessionId: string, projectId: string, fromMs: number, toMs: number,
-): Promise<SessionChunkRef[]>;   // same row shape getScrubbedChunksForSession returns,
-                                 // filtered by first_event_ms <= toMs AND last_event_ms >= fromMs
-// promotion-db.ts
-export async function countAdjudicatedSignalsToday(
-  client: PoolClient, projectId: string,
-): Promise<number>;
+): Promise<Awaited<ReturnType<typeof getScrubbedChunksForSession>>>;
+// promotion-db.ts — atomic budget reservation against adjudication_call_budget
+// (Task 1 migration). Reserve BEFORE every outbound model call, including
+// shadow calls and calls that later fail. Returns false when the cap is spent.
+export async function tryReserveAdjudicationCall(
+  client: PoolClient, projectId: string, dailyCap: number,
+): Promise<boolean>;
 // promotion.ts — signature change
 export interface AdjudicationRuntime {
   windowMode: 'off' | 'shadow' | 'on';
@@ -1023,49 +1183,73 @@ export async function processFrictionOutcomes(
 - [ ] **Step 1: Write the failing tests**
 
 ```ts
-it('leaves signals pending when the daily cap is exhausted', async () => {
-  // seed cap-many already-adjudicated signals today for the project, then one pending signal
+it('reserves budget atomically and leaves signals pending when spent', async () => {
+  // Exhaust the budget: 3 reservations at cap 3 succeed, the 4th fails.
+  const client = await getPool().connect();
+  try {
+    expect(await tryReserveAdjudicationCall(client, projectId, 3)).toBe(true);
+    expect(await tryReserveAdjudicationCall(client, projectId, 3)).toBe(true);
+    expect(await tryReserveAdjudicationCall(client, projectId, 3)).toBe(true);
+    expect(await tryReserveAdjudicationCall(client, projectId, 3)).toBe(false);
+  } finally {
+    client.release();
+  }
+  // With the budget spent, a pending fold-path signal stays pending.
   await processFrictionOutcomes(session, jobId, stubAdjudicator, { windowMode: 'off', dailyCap: 3, loadWindows: async () => [] });
   const { rows } = await getPool().query(
     `SELECT adjudication_status FROM friction_signals WHERE id = $1`, [pendingId]);
   expect(rows[0].adjudication_status).toBe('pending');   // untouched, next day's budget
 });
 
-it('stores an uncertain verdict as rejected with uncertain reason prefix', async () => {
+it('reserves a unit even when the model call fails', async () => {
+  const throwingAdjudicator = { ...stubAdjudicator, adjudicate: async () => { throw new Error('model down'); } };
+  await expect(processFrictionOutcomes(session, jobId, throwingAdjudicator, runtimeOff)).rejects.toThrow();
+  const { rows } = await getPool().query(
+    `SELECT calls FROM adjudication_call_budget WHERE project_id = $1 AND day = CURRENT_DATE`, [projectId]);
+  expect(Number(rows[0].calls)).toBeGreaterThanOrEqual(1);   // failed call still spent budget
+});
+
+it('stores an uncertain verdict as rejected with adjudication_reason exactly "uncertain"', async () => {
+  // Spec contract: adjudication_reason = 'uncertain', nothing more. The model's
+  // explanatory text goes to the log line only.
   const uncertainAdjudicator = { ...stubAdjudicator, adjudicate: async () => ({ accepted: false, uncertain: true, reason: 'window ends too soon' }) };
   await processFrictionOutcomes(session, jobId, uncertainAdjudicator, runtimeOff);
   const { rows } = await getPool().query(
     `SELECT adjudication_status, adjudication_reason FROM friction_signals WHERE id = $1`, [foldSignalId]);
   expect(rows[0].adjudication_status).toBe('rejected');
-  expect(rows[0].adjudication_reason).toBe('uncertain: window ends too soon');
+  expect(rows[0].adjudication_reason).toBe('uncertain');
 });
 ```
 
 - [ ] **Step 2: Implement**
 
-1. `db.ts` — `getScrubbedChunksInRange`: copy `getScrubbedChunksForSession`'s query and add `AND c.first_event_ms IS NOT NULL AND c.last_event_ms IS NOT NULL AND c.first_event_ms <= $4 AND c.last_event_ms >= $3` with `fromMs`/`toMs` params.
-2. `promotion-db.ts`:
+1. `db.ts` — `getScrubbedChunksInRange`: copy `getScrubbedChunksForSession`'s query and add `AND c.first_event_ms IS NOT NULL AND c.last_event_ms IS NOT NULL AND c.first_event_ms <= $4 AND c.last_event_ms >= $3` with `fromMs`/`toMs` params. Return the same exported row type `getScrubbedChunksForSession` uses (check `db.ts` for its name — do not invent one).
+2. `promotion-db.ts` — atomic reservation against the Task 1 budget table:
 
 ```ts
-/** Proxy for model calls today. Counts adjudicated signals, which OVERCOUNTS
- * bucket calls (one call claims many signals) — conservative: stops early,
- * never late. Documented in the spec's cost-guards section. */
-export async function countAdjudicatedSignalsToday(
-  client: PoolClient, projectId: string,
-): Promise<number> {
-  const { rows } = await client.query<{ n: string }>(
-    `SELECT count(*) AS n FROM friction_signals
-     WHERE project_id = $1 AND adjudicated_at >= date_trunc('day', now())`,
-    [projectId],
+/** Atomically reserve one model call from today's per-project budget.
+ * Called BEFORE every outbound call — including shadow calls and calls that
+ * subsequently fail — so concurrent jobs cannot overspend and failures are
+ * still counted as spend. Returns false when the cap is exhausted. */
+export async function tryReserveAdjudicationCall(
+  client: PoolClient, projectId: string, dailyCap: number,
+): Promise<boolean> {
+  const { rowCount } = await client.query(
+    `INSERT INTO adjudication_call_budget (project_id, day, calls)
+     VALUES ($1, CURRENT_DATE, 1)
+     ON CONFLICT (project_id, day)
+     DO UPDATE SET calls = adjudication_call_budget.calls + 1
+     WHERE adjudication_call_budget.calls < $2`,
+    [projectId, dailyCap],
   );
-  return Number(rows[0]?.n ?? 0);
+  return (rowCount ?? 0) > 0;
 }
 ```
 
 3. `promotion.ts`:
    - `PendingSignalRow` gains `occurred_ats: number[] | null` (add `occurred_ats` to the SELECT at `promotion.ts:53`).
-   - At loop top: `const used = await withClient((c) => countAdjudicatedSignalsToday(c, signal.project_id)); if (used >= runtime.dailyCap) { logger.warn('Adjudication daily cap reached; signals stay pending', { project_id: signal.project_id, job_id: jobId, cap: runtime.dailyCap }); break; }`
-   - Before each `adjudicator.adjudicate(...)` call (fold at `promotion.ts:81` and bucket at `promotion.ts:171`): when `runtime.windowMode !== 'off'`, `const windows = await runtime.loadWindows(signal);`. Mode `'on'`: pass `evidenceWindows: windows` in the input. Mode `'shadow'`: adjudicate with the selector-only input as today, then fire the window call and log both verdicts without acting on the window one:
+   - Budget checks live ONLY on paths that actually call the model — inheritance (`promotion.ts:125-137`), the anonymous skip, and below-threshold candidates proceed without touching the budget. Immediately before EACH `adjudicator.adjudicate(...)` call (fold at `promotion.ts:81`, bucket at `promotion.ts:171`, and each shadow call): `const reserved = await withClient((c) => tryReserveAdjudicationCall(c, signal.project_id, runtime.dailyCap)); if (!reserved) { logger.warn('Adjudication daily cap reached; signal stays pending', { project_id: signal.project_id, signal_id: signal.id, job_id: jobId, cap: runtime.dailyCap }); continue; }` (for the bucket path, release the claimed generation the way the existing failure path does before `continue`; for a shadow call, an unreserved shadow is simply skipped without affecting the deciding call).
+   - Before each deciding `adjudicator.adjudicate(...)` call: when `runtime.windowMode !== 'off'`, `const windows = await runtime.loadWindows(signal);`. Mode `'on'`: pass `evidenceWindows: windows` in the input. Mode `'shadow'`: adjudicate with the selector-only input as today, then (budget permitting) fire the window call and log both verdicts without acting on the window one:
 
 ```ts
       if (runtime.windowMode === 'shadow') {
@@ -1082,27 +1266,37 @@ export async function countAdjudicatedSignalsToday(
       }
 ```
 
-   - Verdict mapping before `applyFoldOutcome`/`applyBucketOutcome`: `const stored = verdict.uncertain === true ? { accepted: false, reason: `uncertain: ${verdict.reason}` } : verdict;` and pass `stored`. (`applyFoldOutcome`/`applyBucketOutcome` signatures are unchanged — they already persist `accepted`/`reason` into status/`adjudication_reason`.)
+   - Verdict mapping before `applyFoldOutcome`/`applyBucketOutcome`: `const stored = verdict.uncertain === true ? { accepted: false, reason: 'uncertain' } : verdict;` and pass `stored` — the spec contract is `adjudication_reason = 'uncertain'` EXACTLY; the model's explanatory text goes into the log line only (`logger.info('...', { uncertain_detail: verdict.reason })`). (`applyFoldOutcome`/`applyBucketOutcome` signatures are unchanged — they already persist `accepted`/`reason` into status/`adjudication_reason`.)
 4. `index.ts`:
    - Env knobs read once at startup: `const evidenceWindowMode = (process.env['ADJUDICATION_EVIDENCE_WINDOWS'] ?? 'off') as EvidenceWindowMode;` (validate against the three values, warn+`'off'` otherwise) and `const adjudicationDailyCap = Number(process.env['ADJUDICATION_DAILY_CAP'] ?? 500);`.
-   - Build the runtime in `processSessionAnalysisJob` and pass it:
+   - The factory now takes the mode (Task 6 item 5): `frictionAdjudicatorFactory(adjudicationKey, evidenceWindowMode)`.
+   - `loadWindows` reads chunks **per occurrence** — a single min..max range through the 20 MiB session budget can truncate before later occurrences, silently emptying their windows. Cache chunk reads by `seq` so overlapping occurrence ranges don't re-fetch:
 
 ```ts
-      await processFrictionOutcomes(session, job.id, frictionAdjudicatorFactory(adjudicationKey), {
+      await processFrictionOutcomes(session, job.id, frictionAdjudicatorFactory(adjudicationKey, evidenceWindowMode), {
         windowMode: evidenceWindowMode,
         dailyCap: adjudicationDailyCap,
         loadWindows: async (s) => {
           const ats = s.occurred_ats ?? [];
           if (ats.length === 0) return [];
-          const from = Math.min(...ats) - EVIDENCE_WINDOW_MS;
-          const to = Math.max(...ats) + EVIDENCE_WINDOW_MS;
-          const rangeChunks = await db.getScrubbedChunksInRange(s.session_id, s.project_id, from, to);
-          const { envelopes } = await readChunksBounded(rangeChunks);
-          return buildEvidenceWindows(envelopes, ats);
+          const envelopesBySeq = new Map<number, SessionChunkEnvelope>();
+          for (const at of ats) {
+            const rangeChunks = await db.getScrubbedChunksInRange(
+              s.session_id, s.project_id, at - EVIDENCE_WINDOW_MS, at + EVIDENCE_WINDOW_MS);
+            const unseen = rangeChunks.filter((c) => !envelopesBySeq.has(c.seq));
+            if (unseen.length === 0) continue;
+            const read = await readChunksBounded(unseen, { skipUnreadable: true });
+            read.envelopes.forEach((env, i) => {
+              const seq = read.envelopeSeqs[i];
+              if (seq !== undefined) envelopesBySeq.set(seq, env);
+            });
+          }
+          return buildEvidenceWindows([...envelopesBySeq.values()], ats);
         },
       });
 ```
 
+     (`envelopeSeqs` is the alignment array Task 3 added to the reader result — with `skipUnreadable`, `envelopes` can be shorter than the input chunk list.)
    - Update every other `processFrictionOutcomes` caller/test stub to the four-arg signature (grep for it).
 
 - [ ] **Step 3: Run tests**
@@ -1137,7 +1331,7 @@ git commit -m "feat(worker): evidence-window adjudication behind off/shadow/on f
 
 - [ ] **Step 1: Write the failing handler test**
 
-In `session_read_test.go`, extend the existing list test: seed a `session_analysis` row (`coverage='complete'`, `activity_class='active'`, `failed_request_4xx_count=2`, `successful_write_count=1`) plus one `pending` friction signal for the session; assert the JSON response contains `"coverage":"complete"`, `"activity_class":"active"`, `"failed_request_count":2`, `"successful_write_count":1`, `"unverified_signal_count":1`. Also assert a session with no analysis row yields `"coverage":null` (pending analysis is distinct from `no_replay`).
+In `session_read_test.go`, extend the existing list test: seed a `session_analysis` row (`coverage='complete'`, `activity_class='active'`, `failed_request_4xx_count=2`, `successful_write_count=1`) plus BOTH one `accepted` and one `pending` friction signal for the session; assert the JSON response contains `"coverage":"complete"`, `"activity_class":"active"`, `"failed_request_count":2`, `"successful_write_count":1`, and `"unverified_signal_count":1` **alongside the accepted count** (pending must not hide behind accepted). Also assert a session with no analysis row yields `"coverage":null` (pending analysis is distinct from `no_replay`).
 
 - [ ] **Step 2: Run to verify failure**
 
@@ -1166,7 +1360,8 @@ cd packages/ingestion && DATABASE_URL="$DATABASE_URL" go test ./handler -run Tes
 2. `SessionSummary` struct: add `Coverage *string`, `ActivityClass *string`, `FailedRequestCount int`, `SuccessfulWriteCount int`, `UnverifiedSignalCount int` (nullable pointers for the two enums because the analysis row may not exist yet); extend every scan site (list + single-session getter at `sessions_read.go:60-64`) — use `COALESCE(sa.failed_request_4xx_count + sa.failed_request_5xx_count, 0)` in SQL so the ints scan clean.
 3. `handler/session_read.go`: add the five JSON fields (snake_case, following the existing response struct pattern at `session_read.go:42-44`).
 4. `packages/dashboard/src/api.ts`: extend the `SessionSummary` type with `coverage: string | null; activity_class: string | null; failed_request_count: number; successful_write_count: number; unverified_signal_count: number;`.
-5. `SessionLedgerRow.vue`: render (a) an activity-class chip when `activity_class` is non-null (plain text chip, reuse the badge styling in the component), (b) a muted `no replay` chip when `coverage === 'no_replay'` and a `partial` chip when `'partial'`, (c) a `⚠ n failed requests` chip when `failed_request_count > 0`, (d) an `unverified` chip when `unverified_signal_count > 0` **and** the existing accepted counts are all zero (keyless deployments: detected-but-unadjudicated becomes visible instead of silently hidden).
+5. `SessionLedgerRow.vue`: render (a) an activity-class chip when `activity_class` is non-null (plain text chip, reuse the badge styling in the component), (b) a muted `no replay` chip when `coverage === 'no_replay'` and a `partial` chip when `'partial'`, (c) a `⚠ n failed requests` chip when `failed_request_count > 0`, (d) an `unverified` chip **whenever `unverified_signal_count > 0`** — a session with one accepted and one pending signal shows both the accepted badge and the unverified chip; hiding pending behind accepted re-creates the invisibility this feature removes.
+6. If `SessionFilters` has a has-signals style filter (check `sessions_read.go` for the filter struct), extend its predicate to include `f.pending > 0` alongside accepted counts — otherwise keyless deployments' unverified-only sessions vanish under that filter. Add a handler test case for it (keyless: pending-only session appears under the filter).
 
 - [ ] **Step 4: Run tests and build**
 
@@ -1193,17 +1388,31 @@ git commit -m "feat: surface session analysis facts and unverified signals in se
 
 **Interfaces:**
 - Consumes: `getSessionAnalysis` (Task 3).
-- Produces: `formatSessionContext(row): string` exported from `packages/worker/src/friction/facts.ts` — one fenced line like `Session context: active session entering at /getting-started; 6 same-origin failed requests; 2 successful writes; coverage complete.`
+- Produces, exported from `packages/worker/src/friction/facts.ts`:
+
+```ts
+export interface SessionContextInput {
+  coverage: Coverage;
+  activityClass: ActivityClass;
+  entryPath: string | null;
+  failedRequest4xxCount: number;
+  failedRequest5xxCount: number;
+  successfulWriteCount: number;
+}
+export function formatSessionContext(row: SessionContextInput): string;
+```
+
+One fenced line like `Session context: active session entering at /getting-started; 6 same-origin failed requests; 2 successful writes; coverage complete.` The dedicated input interface (not `SessionAnalysisUpsert` + a cast) keeps the test type-checked — an `as never` fixture would keep compiling after incompatible row changes.
 
 - [ ] **Step 1: Write the failing test**
 
 ```ts
 it('formats session context for prompts, omitting zero counts', () => {
-  expect(formatSessionContext({
+  const input: SessionContextInput = {
     coverage: 'complete', activityClass: 'active', entryPath: '/getting-started',
     failedRequest4xxCount: 6, failedRequest5xxCount: 0, successfulWriteCount: 2,
-    // remaining SessionAnalysisUpsert fields at zero/null
-  } as never)).toBe(
+  };
+  expect(formatSessionContext(input)).toBe(
     'Session context: active session entering at /getting-started; 6 same-origin failed requests; 2 successful writes; coverage complete.',
   );
 });
@@ -1257,7 +1466,7 @@ func (q *Queries) SessionAnalysisDailyRollup(ctx context.Context, projectID stri
 
 - [ ] **Step 1: Write the failing test**
 
-Seed three `session_analysis` rows for one project across two `session_started_at` days (one `no_replay`, one `complete/active` with writes, one `complete/idle_tab` with a 4xx). Assert the rollup for day 1 counts only day-1 sessions, buckets by coverage and activity class, sums `successful_write_count`, and counts sessions with `(failed_request_4xx_count + failed_request_5xx_count) > 0`. Assert a rollup for a day with no rows returns zeros, not an error.
+Seed four `session_analysis` rows for one project across two `session_started_at` days: one `no_replay`, one `complete/active` with writes, one `complete/idle_tab` with a 4xx, and one **`partial` row with nonzero `successful_write_count` and `failed_request_4xx_count`** (prefix-derived counts). Assert the rollup for day 1: counts only day-1 sessions; buckets by coverage; buckets activity classes; sums writes and counts failure sessions **over `coverage = 'complete'` rows only** — the partial row's counts must NOT leak into behavioral metrics (they are prefix facts, not whole-session facts). Assert a rollup for a day with no rows returns zeros, not an error.
 
 - [ ] **Step 2: Implement**
 
@@ -1273,8 +1482,9 @@ func (q *Queries) SessionAnalysisDailyRollup(ctx context.Context, projectID stri
 		       count(*) FILTER (WHERE activity_class = 'light_touch'),
 		       count(*) FILTER (WHERE activity_class = 'zero_interaction'),
 		       count(*) FILTER (WHERE activity_class = 'idle_tab'),
-		       COALESCE(sum(successful_write_count), 0),
-		       count(*) FILTER (WHERE failed_request_4xx_count + failed_request_5xx_count > 0)
+		       COALESCE(sum(successful_write_count) FILTER (WHERE coverage = 'complete'), 0),
+		       count(*) FILTER (WHERE coverage = 'complete'
+		                          AND failed_request_4xx_count + failed_request_5xx_count > 0)
 		  FROM session_analysis
 		 WHERE project_id = $1
 		   AND session_started_at >= $2::date
@@ -1309,7 +1519,7 @@ git commit -m "feat(db): daily session-analysis rollup keyed to session_started_
 
 - [ ] **Step 1: Write the failing enqueue-query test**
 
-Test the core query as a `Queries` method `EnqueueAnalysisBackfillBatch(ctx, batchSize) (int, error)`: seed one `analyzed` session with an old-rule-version `session_analysis` row absent, one already-current session (has `session_analysis` at current rule version — pass the version as a param), one with a pending `session_analysis` job. Assert only the first gets a new job row.
+Test the core query as a `Queries` method `EnqueueAnalysisBackfillBatch(ctx, ruleVersion, batch int) (int, error)`: seed one `analyzed` session missing a current-version `session_analysis` row, one already-current session, one with a pending `session_analysis` job, and one **older than 30 days** (`started_at = now() - interval '40 days'`). Assert only the first gets a new job row — the 30-day retention window bounds the backfill (spec: backfill re-analyzes retained sessions only).
 
 - [ ] **Step 2: Implement the query and the command**
 
@@ -1321,6 +1531,7 @@ func (q *Queries) EnqueueAnalysisBackfillBatch(ctx context.Context, ruleVersion,
 		SELECT s.project_id, s.id, 'session_analysis', 'pending'
 		  FROM sessions s
 		 WHERE s.status IN ('closed', 'analyzed', 'analysis_failed')
+		   AND s.started_at >= now() - interval '30 days'
 		   AND NOT EXISTS (SELECT 1 FROM session_analysis sa
 		                    WHERE sa.session_id = s.id AND sa.rule_version >= $1)
 		   AND NOT EXISTS (SELECT 1 FROM error_group_jobs j
@@ -1392,7 +1603,7 @@ Export the port triple + URL block from root AGENTS.md (pick free ports), `docke
 
 1. Register a session (`POST /api/v1/sessions/init`) and upload 3 gzipped chunks containing: a page event, 4 clicks with `cursor: 'pointer'` on one selector (unanswered), one same-origin `POST` with a 201 end, one cross-origin 400 end. No error event.
 2. Wait for scrub + idle-close (set `SESSION_IDLE_CLOSE_MINUTES=1` and `RETENTION_SWEEP_INTERVAL_SECONDS=30` on the stack) and for the worker to process the analysis job.
-3. Assert in Postgres: the `session_analysis` row has `coverage='complete'`, `activity_class='active'`, `successful_write_count=1`, `failed_request_4xx_count=0` (cross-origin excluded); `friction_signals` has one active `rage_click` at `rule_version=2` with a 4-element `occurred_ats`.
+3. Assert in Postgres: the `session_analysis` row has `coverage='complete'`, `activity_class='active'`, `successful_write_count=1`, `failed_request_4xx_count=0` (cross-origin excluded); `friction_signals` has one active `rage_click` at `rule_version=2` with `occurrence_count=1` and a **1-element** `occurred_ats` (one entry per cluster — the 4 clicks form one rage cluster, per the Task 4 contract).
 4. Keyless assertion: with the worker's `ANTHROPIC_API_KEY` unset, `GET /api/v1/projects/{pid}/sessions` shows the session with `unverified_signal_count > 0`.
 5. Backfill assertion: run `go run ./cmd/backfill-session-analysis -rule-version 2 -batch 10 -sleep 1s -dry-run` against the stack DB and confirm it reports zero candidates (the session is already analyzed at v2).
 
