@@ -16,7 +16,7 @@ import type { Platform } from './platform.js';
 import type { RuntimeInfo } from './runtime-info.js';
 import { buildReason, triageReasonCodes } from './reason-codes.js';
 import { deriveOutcome } from './classify.js';
-import { adjudicationFromDecline } from './dossier-schema.js';
+import { adjudicationFromDecline } from './diagnose-schema.js';
 
 /** Narrow an unknown array field to non-empty strings. */
 function strings(value: unknown): string[] {

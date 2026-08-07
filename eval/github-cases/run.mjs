@@ -47,13 +47,13 @@ for (const c of only) {
   const cited = citations.join(' | ');
   const hit = citations.some(cit => cit && c.ground_truth.some(f => f === cit || f.endsWith('/'+cit) || cit.endsWith('/'+f)));
   results.push({ ...c, cited, hit, outcome: r.outcome, strength: r.adjudication?.evidence_strength,
-                 hypotheses: r.dossier?.hypotheses?.length ?? 0, why: r.adjudication?.why_chain ?? [],
+                 candidates: r.adjudication?.candidates_considered?.length ?? 0, why: r.adjudication?.why_chain ?? [],
                  reasoning: r.adjudication?.reasoning });
   console.log(`\n${'='.repeat(76)}\n${c.repo}#${c.issue}  ${hit?'HIT ':'MISS'}  ${r.outcome}/${r.adjudication?.evidence_strength??'-'}`);
   console.log(`  issue    : ${c.issue_title.slice(0,72)}`);
   console.log(`  truth    : ${c.ground_truth.join(', ')}`);
   console.log(`  we said  : ${cited || '(none)'}`);
-  console.log(`  candidates: ${results.at(-1).hypotheses}  | reason: ${r.reason ?? r.decisionReason ?? '-'}`);
+  console.log(`  candidates: ${results.at(-1).candidates}  | reason: ${r.reason ?? r.decisionReason ?? '-'}`);
   (r.adjudication?.why_chain ?? []).slice(0,4).forEach((w,i)=>console.log(`    ${i+1}. ${w}`));
 }
 const hits = results.filter(r=>r.hit).length;

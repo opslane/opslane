@@ -29,12 +29,8 @@ function inputFrom(f: Record<string, any>) {
   };
 }
 
-function dossier(hypotheses: Array<Record<string, unknown>>) {
-  return { content: [{ type: 'tool_use', id: 'd', name: 'submit_dossier', input: { hypotheses } }], usage: USAGE };
-}
-
-function adjudication(input: Record<string, unknown>) {
-  return { content: [{ type: 'tool_use', id: 'a', name: 'adjudicate', input }], usage: USAGE };
+function diagnosis(input: Record<string, unknown>) {
+  return { content: [{ type: 'tool_use', id: 'a', name: 'submit_diagnosis', input }], usage: USAGE };
 }
 
 beforeEach(() => mockMessagesCreate.mockReset());
@@ -52,25 +48,7 @@ beforeEach(() => mockMessagesCreate.mockReset());
 describe('PR #1297: a slow backend never becomes a frontend code change', () => {
   it('routes a backend cause to a conclusion when the surface is the frontend', async () => {
     mockMessagesCreate
-      .mockResolvedValueOnce(dossier([
-        {
-          statement: 'The search endpoint exceeds the 10 second client budget',
-          kind: 'external_system',
-          location: 'GET /issue-context/api/assets/search (remote service)',
-          supports: ['Breadcrumb error "signal timed out" on GET /issue-context/api/assets/search'],
-          contradicts: ['none found'],
-          would_be_settled_by: 'Server-side latency for that endpoint',
-        },
-        {
-          statement: 'FETCH_TIMEOUT of 10000ms is too short for this endpoint',
-          kind: 'configuration',
-          location: 'client/asset-panel/src/api/fetcher/constants.ts:1',
-          supports: ['constants.ts:1 sets FETCH_TIMEOUT to 10000'],
-          contradicts: ['10s is a generous budget for a search call'],
-          would_be_settled_by: 'Whether the endpoint ever responds under 10s',
-        },
-      ]))
-      .mockResolvedValueOnce(adjudication({
+      .mockResolvedValueOnce(diagnosis({
         best_supported: 'The search endpoint did not respond within the 10 second budget',
         why_chain: [
           'User types a query in the asset panel',
@@ -79,7 +57,14 @@ describe('PR #1297: a slow backend never becomes a frontend code change', () => 
         ],
         reproduction_steps: ['Search a term matching many assets'],
         evidence_check: 'Confirmed constants.ts:1. The timeout bounds the failure but does not cause it.',
-        rejected: ['FETCH_TIMEOUT: raising it hides the symptom and the server latency is unexplained'],
+        candidates_considered: [
+          { statement: 'The search endpoint exceeds the 10 second client budget', kind: 'external_system' },
+          { statement: 'FETCH_TIMEOUT of 10000ms is too short for this endpoint', kind: 'configuration' },
+        ],
+        rejected: [
+          'FETCH_TIMEOUT of 10000ms is too short for this endpoint: raising it hides the symptom ' +
+          'and the server latency is unexplained',
+        ],
         evidence_strength: 'suggestive',
         cause_kind: 'external_system',
         cause_locations: ['GET /issue-context/api/assets/search (remote service)'],
@@ -100,19 +85,14 @@ describe('PR #1297: a slow backend never becomes a frontend code change', () => 
   // evidence must now park for a human rather than act.
   it('does not open an unattended fix when the evidence is only suggestive', async () => {
     mockMessagesCreate
-      .mockResolvedValueOnce(dossier([{
-        statement: 'FETCH_TIMEOUT of 10000ms is too short',
-        kind: 'configuration',
-        location: 'packages/worker/src/investigate.ts:1',
-        supports: ['investigate.ts:1 exists in the checkout'],
-        contradicts: ['The server latency is unexplained'],
-        would_be_settled_by: 'Server-side timings',
-      }]))
-      .mockResolvedValueOnce(adjudication({
+      .mockResolvedValueOnce(diagnosis({
         best_supported: 'The configured timeout is too short',
         why_chain: ['The budget is 10 seconds', 'The call exceeded it'],
         reproduction_steps: ['Trigger a slow search'],
         evidence_check: 'The constant exists, but why the server was slow is unverified.',
+        candidates_considered: [
+          { statement: 'FETCH_TIMEOUT of 10000ms is too short', kind: 'configuration' },
+        ],
         rejected: [],
         evidence_strength: 'suggestive',
         cause_kind: 'configuration',

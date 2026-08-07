@@ -49,6 +49,15 @@ export interface Adjudication {
   best_supported: string;
   /** Which cited evidence was verified, and anything that did not check out. */
   evidence_check: string;
+  /**
+   * Every cause the investigation weighed, including the winner.
+   *
+   * Routing needs this to check that an "external system" conclusion was
+   * reached *against* the local candidates rather than instead of them. The
+   * two-agent version counted local hypotheses in the dossier; with one agent
+   * the submission is the only record that the alternatives were considered.
+   */
+  candidates_considered: Array<{ statement: string; kind: HypothesisKind }>;
   /** Other hypotheses with the specific evidence that rules each one out. */
   rejected: string[];
   evidence_strength: EvidenceStrength;
