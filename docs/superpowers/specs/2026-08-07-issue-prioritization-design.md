@@ -48,10 +48,33 @@ impact    = reach_7d + 2 × reach_24h
   `install_id`, so its "users" are customer orgs. That is acceptable and
   not corrected for.
 
-**context** — "does it hurt somewhere that matters?"
+**context** — "who is standing on the page when it breaks?"
 
-Route-tier weight from the route map (below): revenue ×3, core ×1.5,
-standard ×1, internal ×0.5. Unmapped URL or no repo connected: ×1.
+Route weight from the route map (below), assigned by precedence, each with
+a plain-language reason shown wherever the tag appears:
+
+1. **Customer-facing ×3** — someone outside the team is on this page:
+   end customers, counterparties, the public. Detected from code facts,
+   not business inference: unauthenticated/token routes (`/sign/:token`),
+   public-domain middleware allowlists, portal/embed module declarations
+   (AMFJ's manifest declares its panel renders on the JSM customer
+   portal). Reason string: "your customers see this page."
+2. **Heavily used ×1.5 — v1.1, not v1.** The old "core workflow" tier,
+   resurrected as a measurement: pages with top share of observed session
+   visits (replay navigation data; recording is always-on). Needs a
+   page→distinct-sessions rollup that does not exist yet, so v1 reserves
+   the slot and does not ship it. Reason string: "most of your users'
+   sessions touch this page."
+3. **Admin & settings ×0.5** — `requiresAdmin` flags, `/settings/*`,
+   `/admin/*`. Reason string: "internal config page."
+4. **Everything else ×1.**
+
+Unmapped URL or no repo connected: ×1. Weights are fixed and identical
+for every project in v1; humans edit a route's tier, never the numbers.
+An earlier draft used business tiers (revenue/core/standard); rejected
+because "revenue" required business-model inference the spikes never
+tested and read as jargon on the dashboard — audience is a code fact and
+self-explanatory.
 
 **cap** — "can anyone act on it through Opslane?"
 
@@ -150,8 +173,8 @@ it. The per-surface missing-identify flag is the runtime backstop.
 ## Testing
 
 - Score job: seeded-fixture SQL tests asserting order (spiking beats
-  steady; revenue-path beats admin; capped sinks; session-fallback groups
-  rank and carry the flag).
+  steady; customer-facing beats admin; capped sinks; session-fallback
+  groups rank and carry the flag).
 - Normalization: unit tests for the four rules against real observed URL
   shapes (AMFJ fixtures: api-host, `#!`, Forge CDN, numeric ids).
 - Route-map job: run against `test-fixtures/vue-app`'s router; assert sane
@@ -166,13 +189,18 @@ it. The per-surface missing-identify flag is the runtime backstop.
   ResizeObserver legacy ghost (→ cleanup) and the portal-panel zero-score
   blind spot (→ session fallback + flag).
 - Route-map job executed for real on AMFJ (`conelike/asset-management-jira`):
-  produced a correct, code-grounded map (portal panel = revenue,
-  confirmed as JSM requester-facing via manifest + descriptor), plus the
-  normalization rules above.
+  produced a correct, code-grounded map (portal panel = customer-facing,
+  confirmed via the manifest's JSM portal-panel declaration + Connect
+  descriptor), plus the normalization rules above.
 
 ## Deferred (improve over time)
 
-Spike-vs-baseline detection; deploy-correlation ("expected during
+**First increment (v1.1): the heavily-used ×1.5 boost** — build the
+page→distinct-sessions rollup from replay navigation data and activate
+the reserved context slot. This replaces LLM judgment of "core workflow"
+with observed usage and is the piece competitors structurally lack.
+
+Then: spike-vs-baseline detection; deploy-correlation ("expected during
 deploys"); rage-click score boost; important-routes config UI;
 reason-code split into human-actionable vs nobody-can-act; route-map
 refresh on release changes; Stripe/revenue weighting (plan #15);
