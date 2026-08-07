@@ -517,7 +517,7 @@ git commit -m "feat(worker): pure session fact extraction with same-origin reque
 **Interfaces:**
 - Consumes: `extractSessionFacts`, `classifyActivity`, `Coverage` (Task 2); `getScrubbedChunksForSession` (`db.ts:1830`).
 - `readChunksBounded(chunks, opts?: { skipUnreadable?: boolean })` — with the flag, a chunk that fails to gunzip/parse/validate is SKIPPED and counted in a new `unreadableCount` result field instead of throwing `ChunkReadError`. The result also gains `envelopeSeqs: number[]`, aligned with `envelopes` (`envelopeSeqs[i]` is the source chunk seq of `envelopes[i]`) so callers can map surviving envelopes back to chunks when some were skipped — Task 7's window loader depends on this. Default behavior (no flag) is byte-identical to today (`unreadableCount: 0`, `envelopeSeqs` fully populated) — the friction-evidence path and every existing caller keep their throw semantics. Systemic failures (MinIO unconfigured) still throw regardless of the flag.
-- `deriveCoverage(input: { scrubbedChunkCount: number; envelopeCount: number; truncated: boolean; unreadableCount: number }): Coverage` — pure, exported from `facts.ts`: zero readable envelopes → `'no_replay'` (regardless of how many chunk rows exist); at least one envelope plus truncation or unreadable chunks → `'partial'`; otherwise `'complete'`.
+- `deriveCoverage(input: { totalChunkCount: number; envelopeCount: number; truncated: boolean }): Coverage` — pure, exported from `facts.ts`. `totalChunkCount` is `sessions.chunk_count` — every COMMITTED chunk, not just scrubbed ones — so unscrubbed, scrub-failed, unreadable, and skipped chunks all surface as `envelopeCount < totalChunkCount`. Rules: zero readable envelopes → `'no_replay'`; `envelopeCount < totalChunkCount` or `truncated` → `'partial'`; otherwise `'complete'`. (A session with one readable and one unscrubbed chunk is `partial`, not `complete`.)
 - Produces:
 
 ```ts
@@ -544,7 +544,7 @@ export async function getSessionAnalysis(sessionId: string, projectId: string): 
 
 - [ ] **Step 1: Extend `getSessionForAnalysis` to select `started_at`**
 
-In `db.ts:1859`, change the SELECT to `SELECT id, project_id, environment_id, end_user_id, status, started_at::text AS started_at` and add `started_at: string` to `SessionRow` (`db.ts:1845`). Fix any compile fallout (`SessionRow` is imported by `persist.ts` and `promotion.ts`; they ignore the new field).
+In `db.ts:1859`, change the SELECT to `SELECT id, project_id, environment_id, end_user_id, status, started_at::text AS started_at, chunk_count` and add `started_at: string; chunk_count: number` to `SessionRow` (`db.ts:1845`). `chunk_count` is the committed-chunk total that coverage derivation compares against. Fix any compile fallout (`SessionRow` is imported by `persist.ts` and `promotion.ts`; they ignore the new fields).
 
 - [ ] **Step 2: Implement `upsertSessionAnalysis` and `getSessionAnalysis` in `db.ts`**
 
@@ -589,16 +589,17 @@ Tests (extend `facts.test.ts` and `chunk-reader.test.ts`):
 ```ts
 describe('deriveCoverage', () => {
   it('is no_replay when nothing readable exists, even if chunk rows exist', () => {
-    expect(deriveCoverage({ scrubbedChunkCount: 0, envelopeCount: 0, truncated: false, unreadableCount: 0 })).toBe('no_replay');
-    expect(deriveCoverage({ scrubbedChunkCount: 3, envelopeCount: 0, truncated: false, unreadableCount: 3 })).toBe('no_replay');
-    expect(deriveCoverage({ scrubbedChunkCount: 5, envelopeCount: 0, truncated: true, unreadableCount: 0 })).toBe('no_replay');
+    expect(deriveCoverage({ totalChunkCount: 0, envelopeCount: 0, truncated: false })).toBe('no_replay');
+    expect(deriveCoverage({ totalChunkCount: 3, envelopeCount: 0, truncated: false })).toBe('no_replay');
+    expect(deriveCoverage({ totalChunkCount: 5, envelopeCount: 0, truncated: true })).toBe('no_replay');
   });
   it('is partial when something was read but evidence is incomplete', () => {
-    expect(deriveCoverage({ scrubbedChunkCount: 5, envelopeCount: 3, truncated: true, unreadableCount: 0 })).toBe('partial');
-    expect(deriveCoverage({ scrubbedChunkCount: 5, envelopeCount: 4, truncated: false, unreadableCount: 1 })).toBe('partial');
+    expect(deriveCoverage({ totalChunkCount: 5, envelopeCount: 3, truncated: true })).toBe('partial');
+    // one readable + one unscrubbed (or scrub-failed, or unreadable) chunk: NOT complete
+    expect(deriveCoverage({ totalChunkCount: 2, envelopeCount: 1, truncated: false })).toBe('partial');
   });
-  it('is complete when everything was read', () => {
-    expect(deriveCoverage({ scrubbedChunkCount: 5, envelopeCount: 5, truncated: false, unreadableCount: 0 })).toBe('complete');
+  it('is complete only when every committed chunk was read', () => {
+    expect(deriveCoverage({ totalChunkCount: 5, envelopeCount: 5, truncated: false })).toBe('complete');
   });
 });
 
@@ -612,17 +613,18 @@ it('skipUnreadable counts a corrupt chunk instead of throwing, without changing 
 });
 ```
 
-Implementation: in `chunk-reader.ts`, wrap the per-chunk decode/validate section in a try/catch active only when `opts?.skipUnreadable` is set; on catch, increment `unreadableCount` and `continue`. The MinIO-unconfigured guard (`chunk-reader.ts:24`) stays OUTSIDE the flag — it throws either way. `unreadableCount` is `0` in the default-path result so the return type change is additive.
+Implementation: in `chunk-reader.ts`, the skippable boundary covers **every chunk-local failure**: the compressed-size policy check, unknown/oversized size, the object fetch (an object missing from storage after scrub is unreadable — a deleted object never comes back, so treating it as transient would wedge the session), gunzip, gunzip-over-cap, JSON parse, and envelope validation. Wrap that whole per-chunk section in a try/catch active only when `opts?.skipUnreadable` is set; on catch, increment `unreadableCount` and `continue`. ONLY the systemic MinIO-unconfigured guard (`chunk-reader.ts:24`) stays outside the flag — it throws either way, because it fails every chunk identically and retrying the job is correct. `unreadableCount: 0` and fully-populated `envelopeSeqs` in the default-path result keep the return type change additive. Add a test case per skippable failure class (oversized chunk, missing object, corrupt gzip) asserting skip-and-count under the flag and throw without it.
 
 `deriveCoverage` in `facts.ts`:
 
 ```ts
 export function deriveCoverage(input: {
-  scrubbedChunkCount: number; envelopeCount: number;
-  truncated: boolean; unreadableCount: number;
+  totalChunkCount: number;   // sessions.chunk_count — every committed chunk
+  envelopeCount: number;     // chunks actually read into envelopes
+  truncated: boolean;
 }): Coverage {
   if (input.envelopeCount === 0) return 'no_replay';
-  if (input.truncated || input.unreadableCount > 0) return 'partial';
+  if (input.truncated || input.envelopeCount < input.totalChunkCount) return 'partial';
   return 'complete';
 }
 ```
@@ -634,10 +636,9 @@ In `index.ts`, change the read call to `const read = await readChunksBounded(chu
 ```ts
     const facts = extractSessionFacts(read.envelopes);
     const coverage = deriveCoverage({
-      scrubbedChunkCount: chunks.length,
+      totalChunkCount: session.chunk_count,
       envelopeCount: read.envelopes.length,
       truncated: read.truncated,
-      unreadableCount: read.unreadableCount,
     });
     await db.upsertSessionAnalysis({
       sessionId: session.id,
@@ -710,7 +711,10 @@ Expected: PASS (and the DB suite is *skipped*, not failed, without `DATABASE_URL
 - [ ] **Step 7: Commit**
 
 ```bash
-git add packages/worker/src/db.ts packages/worker/src/index.ts packages/worker/src/__tests__/session-analysis-facts.integration.test.ts
+git add packages/worker/src/db.ts packages/worker/src/index.ts \
+  packages/worker/src/friction/chunk-reader.ts packages/worker/src/friction/facts.ts \
+  packages/worker/src/friction/__tests__/chunk-reader.test.ts packages/worker/src/friction/__tests__/facts.test.ts \
+  packages/worker/src/__tests__/session-analysis-facts.integration.test.ts
 git commit -m "feat(worker): analyzer writes typed session_analysis facts row with coverage tri-state"
 ```
 
@@ -737,11 +741,25 @@ it('suppresses rage clicks on text-cursor targets (focus/select-all clicking)', 
   expect(signals).toHaveLength(0);
 });
 
+it('clusters only pointer clicks in a mixed pointer/text burst', () => {
+  // 2 pointer clicks + 2 interleaved text-cursor clicks on one selector, < 1s apart, unanswered:
+  // text clicks are filtered pre-clustering, so this is a 2-click cluster → dead clicks, not rage
+  const signals = analyzeSession([envelopeWithMixedCursorBurst()]);
+  expect(signals.every((s) => s.signalType === 'dead_click')).toBe(true);
+});
+
 it('suppresses a dead click answered by an option-select within 5s', () => {
   // click on '.field-container' (cursor: pointer, unanswered within 1s),
   // then a click on '#react-select-9-option-0' 3s later
   const signals = analyzeSession([envelopeWithAnsweredPicker()]);
   expect(signals).toHaveLength(0);
+});
+
+it('does NOT apply the option-select suppression to rage clusters', () => {
+  // 3 pointer clicks < 1s apart, unanswered within 1s, option-select 3s after the last:
+  // still a rage_click — slow-answered rage is the adjudicator's call, not the detector's
+  const signals = analyzeSession([envelopeWithRageThenOption()]);
+  expect(signals.map((s) => s.signalType)).toEqual(['rage_click']);
 });
 
 it('suppresses synthetic download-anchor clicks (body > a within 50ms of a real click)', () => {
@@ -805,8 +823,8 @@ const SYNTHETIC_ANCHOR_WINDOW_MS = 50;
 
 1. `DetectedSignal` gains `occurredAts: number[]`; `makeSignal` sets `occurredAts: [occurredAt]`; `foldSignal` merges with `current.occurredAts.push(signal.occurredAt); current.occurredAts.sort((a, b) => a - b);`.
 2. Collect option-select click times once: `const optionClickTimes = telemetry.filter((t) => t.event.kind === 'click' && isOptionSelector(t.event.selector)).map((t) => t.event.at).sort((a, b) => a - b);` with `const isOptionSelector = (s: string): boolean => /#react-select-.*-option-/.test(s) || /\[role=["']?option/.test(s) || /\brole=option\b/.test(s);` — and exclude option-selector clicks themselves from dead/rage candidacy.
-3. Extend `answered` (`analyzer.ts:231`) with a third clause: `hasTimestampInWindow(optionClickTimes, click.at, click.at + OPTION_ANSWER_WINDOW_MS)`.
-4. Rage-click clusters: skip when `cluster[0]?.cursor === 'text'` (the dead-click branch already requires `cursor === 'pointer'`).
+3. **Filter text-cursor clicks out BEFORE clustering** — in the `clicksBySelector` collection loop, skip clicks with `event.cursor === 'text'` entirely. They are focus/select-all gestures and must count toward neither rage clusters nor dead-click candidates; filtering pre-clustering means a mixed pointer/text burst clusters only its pointer clicks (a first-click check would mis-handle mixed clusters in both directions).
+4. **Two answer predicates, not one.** Keep `answered` (`analyzer.ts:231`) EXACTLY as it is — the 1s mutation/request window — and keep using it for rage clusters. Add a dead-click-only predicate `deadClickAnswered(click) = answered(click) || hasTimestampInWindow(optionClickTimes, click.at, click.at + OPTION_ANSWER_WINDOW_MS)` used only in the dead-click branch. The option-select suppression is a dead-click rule (spec: "a dead-click candidate answered by an option-select"); folding it into the shared predicate would silently suppress rage clusters that a picker eventually answered, which is exactly the sluggish-UI signal the adjudicator should see.
 5. Synthetic anchors: build `const allClickTimes = telemetry.filter((t) => t.event.kind === 'click').map((t) => t.event.at).sort((a, b) => a - b);` and skip any click whose `selector === 'body > a'` when another click exists within `SYNTHETIC_ANCHOR_WINDOW_MS` before it.
 6. Delete the `form_abandon` block (`analyzer.ts:270-287`) and the two now-unused constants `FORM_MIN_FIELDS`, `FORM_MIN_ENGAGED_MS`. Keep the `form_submit` telemetry collection (Task 2's facts and the `answered` predicate do not use it, but `extractTelemetryEvents` still validates it).
 
@@ -992,9 +1010,18 @@ describe('buildEvidenceWindows', () => {
     const windows = buildEvidenceWindows([noisyEnvelope()], [T0]);
     const w = windows[0] ?? [];
     expect(w.length).toBeLessThanOrEqual(EVIDENCE_WINDOW_MAX_EVENTS);
-    expect(w.filter((e) => e.kind === 'click')).toHaveLength(3);   // never trimmed
+    expect(w.filter((e) => e.kind === 'click')).toHaveLength(3);   // within the priority budget → all kept
     // trimmed remainder is the nearest-to-center requests, in chronological order
     expect([...w].sort((a, b) => a.t - b.t)).toEqual(w);
+  });
+
+  it('enforces the 40-event cap even when clicks alone exceed it', () => {
+    // envelope with 60 clicks inside one window: total stays <= 40 and the
+    // click nearest the occurrence is always retained
+    const windows = buildEvidenceWindows([clickStormEnvelope(60)], [T0]);
+    const w = windows[0] ?? [];
+    expect(w.length).toBeLessThanOrEqual(EVIDENCE_WINDOW_MAX_EVENTS);
+    expect(w.some((e) => e.kind === 'click' && e.t === T0)).toBe(true);
   });
 
   it('never orphans a request pair when trimming', () => {
@@ -1068,7 +1095,18 @@ export function buildEvidenceWindows(
 
   return occurredAts.map((at) => {
     const inSpan = all.filter((e) => Math.abs(e.t - at) <= EVIDENCE_WINDOW_MS);
-    const priority = inSpan.filter((e) => e.kind === 'click' || e.kind === 'form_submit');
+    // Priority events (clicks/submits) are themselves BOUNDED: telemetry is
+    // browser-controlled, so an uncapped "always keep clicks" rule lets a
+    // hostile or pathological session inflate prompts without limit. Keep the
+    // nearest PRIORITY_BUDGET clicks/submits to the occurrence (the flagged
+    // click is at distance ~0 and always survives), then fill the remainder
+    // with request/page units.
+    const PRIORITY_BUDGET = 24;
+    const priority = inSpan
+      .filter((e) => e.kind === 'click' || e.kind === 'form_submit')
+      .sort((a, b) => Math.abs(a.t - at) - Math.abs(b.t - at))
+      .slice(0, PRIORITY_BUDGET)
+      .sort((a, b) => a.t - b.t);
     // Trim request events as PAIRS keyed by requestId, so a kept end always
     // has its start (spec: "request start/end pairs"). Unpaired events
     // (start or end alone in the span) travel as one-element units.
@@ -1169,6 +1207,12 @@ export async function getScrubbedChunksInRange(
 export async function tryReserveAdjudicationCall(
   client: PoolClient, projectId: string, dailyCap: number,
 ): Promise<boolean>;
+// db.ts — schedules the budget-exhaustion revisit: inserts a fresh
+// session_analysis job with available_at at the next budget day, guarded by
+// the NOT EXISTS pending/claimed idempotence clause (db/sessions.go:376-393).
+export async function enqueueSessionAnalysisForBudgetRetry(
+  sessionId: string, projectId: string,
+): Promise<void>;
 // promotion.ts — signature change
 export interface AdjudicationRuntime {
   windowMode: 'off' | 'shadow' | 'on';
@@ -1194,11 +1238,23 @@ it('reserves budget atomically and leaves signals pending when spent', async () 
   } finally {
     client.release();
   }
-  // With the budget spent, a pending fold-path signal stays pending.
+  // With the budget spent, a pending fold-path signal stays pending AND a
+  // revisit job is scheduled for the next budget day.
   await processFrictionOutcomes(session, jobId, stubAdjudicator, { windowMode: 'off', dailyCap: 3, loadWindows: async () => [] });
   const { rows } = await getPool().query(
     `SELECT adjudication_status FROM friction_signals WHERE id = $1`, [pendingId]);
-  expect(rows[0].adjudication_status).toBe('pending');   // untouched, next day's budget
+  expect(rows[0].adjudication_status).toBe('pending');
+  const { rows: jobs } = await getPool().query(
+    `SELECT available_at FROM error_group_jobs
+     WHERE session_id = $1 AND job_type = 'session_analysis' AND status = 'pending'`, [session.id]);
+  expect(jobs).toHaveLength(1);
+  expect(new Date(jobs[0].available_at).getTime()).toBeGreaterThan(Date.now());
+  // Simulate the day rollover: clear the budget and re-run — now it adjudicates.
+  await getPool().query(`DELETE FROM adjudication_call_budget WHERE project_id = $1`, [projectId]);
+  await processFrictionOutcomes(session, 'job-2', stubAdjudicator, { windowMode: 'off', dailyCap: 3, loadWindows: async () => [] });
+  const { rows: after } = await getPool().query(
+    `SELECT adjudication_status FROM friction_signals WHERE id = $1`, [pendingId]);
+  expect(after[0].adjudication_status).not.toBe('pending');
 });
 
 it('reserves a unit even when the model call fails', async () => {
@@ -1248,7 +1304,8 @@ export async function tryReserveAdjudicationCall(
 
 3. `promotion.ts`:
    - `PendingSignalRow` gains `occurred_ats: number[] | null` (add `occurred_ats` to the SELECT at `promotion.ts:53`).
-   - Budget checks live ONLY on paths that actually call the model — inheritance (`promotion.ts:125-137`), the anonymous skip, and below-threshold candidates proceed without touching the budget. Immediately before EACH `adjudicator.adjudicate(...)` call (fold at `promotion.ts:81`, bucket at `promotion.ts:171`, and each shadow call): `const reserved = await withClient((c) => tryReserveAdjudicationCall(c, signal.project_id, runtime.dailyCap)); if (!reserved) { logger.warn('Adjudication daily cap reached; signal stays pending', { project_id: signal.project_id, signal_id: signal.id, job_id: jobId, cap: runtime.dailyCap }); continue; }` (for the bucket path, release the claimed generation the way the existing failure path does before `continue`; for a shadow call, an unreserved shadow is simply skipped without affecting the deciding call).
+   - Budget checks live ONLY on paths that actually call the model — inheritance (`promotion.ts:125-137`), the anonymous skip, and below-threshold candidates proceed without touching the budget. **Reservation ORDER matters: reserve BEFORE claiming anything.** Fold path: reserve, and only then `claimSignalsForAdjudication` (`promotion.ts:80`). Bucket path: reserve, and only then `claimGeneration` (`promotion.ts:160`) — reserving after the claim would leak an `adjudicating` generation on exhaustion, wedging the partial unique index (`uq_friction_generation_inflight`) with no release path in the current source. Shadow calls reserve separately; an unreserved shadow is skipped without affecting the deciding call.
+   - **Exhaustion must schedule a revisit — pending signals have no other producer.** On the first failed reservation for a deciding call: `await db.enqueueSessionAnalysisForBudgetRetry(session.id, session.project_id); logger.warn('Adjudication daily cap reached; re-enqueued for next budget day', { project_id: signal.project_id, job_id: jobId, cap: runtime.dailyCap }); break;` — break the signal loop (every later signal would fail the same reservation) and let the job complete normally. The helper (add in `db.ts`) inserts a fresh `session_analysis` job with `available_at = date_trunc('day', now()) + interval '1 day'`, mirroring the `error_group_jobs` insert columns from `CloseIdleSessions` (`db/sessions.go:599-616`) and guarded by the same `NOT EXISTS (… status IN ('pending','claimed'))` idempotence clause the late-chunk path uses (`db/sessions.go:376-393`) — re-running the whole analysis job is safe by construction (facts upsert is idempotent, signal writes are upserts, adjudication resumes from `pending`). Test: exhaust the budget, run `processFrictionOutcomes`, assert the signal stays `pending` AND a `session_analysis` job row exists for the session with `available_at > now()`; then delete the budget row (simulating the day rollover) and assert a second `processFrictionOutcomes` run adjudicates it.
    - Before each deciding `adjudicator.adjudicate(...)` call: when `runtime.windowMode !== 'off'`, `const windows = await runtime.loadWindows(signal);`. Mode `'on'`: pass `evidenceWindows: windows` in the input. Mode `'shadow'`: adjudicate with the selector-only input as today, then (budget permitting) fire the window call and log both verdicts without acting on the window one:
 
 ```ts
@@ -1466,7 +1523,7 @@ func (q *Queries) SessionAnalysisDailyRollup(ctx context.Context, projectID stri
 
 - [ ] **Step 1: Write the failing test**
 
-Seed four `session_analysis` rows for one project across two `session_started_at` days: one `no_replay`, one `complete/active` with writes, one `complete/idle_tab` with a 4xx, and one **`partial` row with nonzero `successful_write_count` and `failed_request_4xx_count`** (prefix-derived counts). Assert the rollup for day 1: counts only day-1 sessions; buckets by coverage; buckets activity classes; sums writes and counts failure sessions **over `coverage = 'complete'` rows only** — the partial row's counts must NOT leak into behavioral metrics (they are prefix facts, not whole-session facts). Assert a rollup for a day with no rows returns zeros, not an error.
+Seed four `session_analysis` rows for one project across two `session_started_at` days: one `no_replay`, one `complete/active` with writes, one `complete/idle_tab` with a 4xx, and one **adversarial `partial` row with `activity_class='active'` and nonzero `successful_write_count` and `failed_request_4xx_count`** (the analyzer writes `unknown` for non-complete coverage, but the SQL must enforce the contract even against a buggy writer). Assert the rollup for day 1: counts only day-1 sessions; buckets by coverage; buckets activity classes, sums writes, and counts failure sessions **over `coverage = 'complete'` rows only** — none of the partial row's activity class, writes, or failures may leak into behavioral metrics (they are prefix facts, not whole-session facts). Assert a rollup for a day with no rows returns zeros, not an error.
 
 - [ ] **Step 2: Implement**
 
@@ -1478,10 +1535,10 @@ func (q *Queries) SessionAnalysisDailyRollup(ctx context.Context, projectID stri
 		SELECT count(*),
 		       count(*) FILTER (WHERE coverage = 'no_replay'),
 		       count(*) FILTER (WHERE coverage = 'partial'),
-		       count(*) FILTER (WHERE activity_class = 'active'),
-		       count(*) FILTER (WHERE activity_class = 'light_touch'),
-		       count(*) FILTER (WHERE activity_class = 'zero_interaction'),
-		       count(*) FILTER (WHERE activity_class = 'idle_tab'),
+		       count(*) FILTER (WHERE coverage = 'complete' AND activity_class = 'active'),
+		       count(*) FILTER (WHERE coverage = 'complete' AND activity_class = 'light_touch'),
+		       count(*) FILTER (WHERE coverage = 'complete' AND activity_class = 'zero_interaction'),
+		       count(*) FILTER (WHERE coverage = 'complete' AND activity_class = 'idle_tab'),
 		       COALESCE(sum(successful_write_count) FILTER (WHERE coverage = 'complete'), 0),
 		       count(*) FILTER (WHERE coverage = 'complete'
 		                          AND failed_request_4xx_count + failed_request_5xx_count > 0)
@@ -1546,7 +1603,7 @@ func (q *Queries) EnqueueAnalysisBackfillBatch(ctx context.Context, ruleVersion,
 }
 ```
 
-Copy the exact `error_group_jobs` insert column list from the `CloseIdleSessions` CTE (`db/sessions.go:599-616`) — if that insert carries more columns (e.g. `available_at`, platform), mirror them. `main.go` is a flag-parsing loop: connect via `DATABASE_URL`, each tick call `EnqueueAnalysisBackfillBatch(ctx, currentRuleVersion, *batch)` (rule version passed as a `-rule-version` flag; document that it must match the worker's `RULE_VERSION`), log the count, sleep `-sleep`, exit when a tick enqueues zero. `-dry-run` runs the SELECT without the INSERT (wrap with `WITH candidates AS (...) SELECT count(*)`).
+Copy the exact `error_group_jobs` insert column list from the `CloseIdleSessions` CTE (`db/sessions.go:599-616`) — if that insert carries more columns (e.g. `available_at`, platform), mirror them. `main.go` is a flag-parsing loop: connect via `DATABASE_URL`, each tick call `EnqueueAnalysisBackfillBatch(ctx, currentRuleVersion, *batch)` (rule version passed as a `-rule-version` flag; document that it must match the worker's `RULE_VERSION`), log the count, sleep `-sleep`, exit when a tick enqueues zero. `-dry-run` runs the candidate count ONCE (`WITH candidates AS (...) SELECT count(*)`), prints it, and exits immediately — a dry-run loop would never terminate, since nothing it does changes the candidate count.
 
 - [ ] **Step 3: Run tests and build**
 
