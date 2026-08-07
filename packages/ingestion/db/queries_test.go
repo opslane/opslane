@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/opslane/opslane/packages/ingestion/db"
@@ -1118,4 +1119,87 @@ func TestLookupProjectKeyResolvesTenantAndHonorsRevocation(t *testing.T) {
 	if _, err := q.LookupProjectKey(ctx, key.Raw); !errors.Is(err, db.ErrProjectKeyInvalid) {
 		t.Fatal("expected revoked key lookup to fail")
 	}
+}
+
+// diagnosisDecisionsDB builds a disposable database with every migration
+// applied. The immutability trigger blocks the DELETE that cleanupTenant would
+// run against a retained database, so this test cannot share one.
+func diagnosisDecisionsDB(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+	admin := testPool(t)
+	psql := findPsql(t)
+	pool, dsn := disposableDB(t, admin)
+	for _, file := range migrationFiles(t) {
+		if err := applyMigration(t, psql, dsn, file); err != nil {
+			t.Fatalf("apply %s: %v", file, err)
+		}
+	}
+	return pool
+}
+
+// seedDiagnosisDecision inserts one decision and returns its id.
+func seedDiagnosisDecision(t *testing.T, pool *pgxpool.Pool) string {
+	t.Helper()
+	ctx := context.Background()
+
+	var orgID, projectID, groupID, decisionID string
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO orgs (name) VALUES ('immutability-org') RETURNING id`).Scan(&orgID); err != nil {
+		t.Fatalf("insert org: %v", err)
+	}
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO projects (org_id, name, github_repo, default_branch)
+		 VALUES ($1, 'immutability-proj', 'org/immutability', 'main') RETURNING id`,
+		orgID).Scan(&projectID); err != nil {
+		t.Fatalf("insert project: %v", err)
+	}
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO error_groups (project_id, fingerprint, title, first_seen, last_seen, status)
+		 VALUES ($1, 'fp-immutability', 'TypeError: boom', now(), now(), 'queued') RETURNING id`,
+		projectID).Scan(&groupID); err != nil {
+		t.Fatalf("insert error group: %v", err)
+	}
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO diagnosis_decisions
+		   (error_group_id, project_id, outcome, decision_reason, model, prompt_version)
+		 VALUES ($1, $2, 'code_fix', 'The cause is at src/App.vue:42', 'claude-sonnet-5', 'diagnosis-v1')
+		 RETURNING id`,
+		groupID, projectID).Scan(&decisionID); err != nil {
+		t.Fatalf("insert diagnosis decision: %v", err)
+	}
+	return decisionID
+}
+
+// A decision records what was decided and why, at a moment. The table was
+// documented as immutable with nothing enforcing it.
+func TestDiagnosisDecisionsAreImmutable(t *testing.T) {
+	pool := diagnosisDecisionsDB(t)
+	ctx := context.Background()
+	id := seedDiagnosisDecision(t, pool)
+
+	for _, tc := range []struct {
+		name string
+		sql  string
+	}{
+		{"update", `UPDATE diagnosis_decisions SET outcome = 'not_actionable' WHERE id = $1`},
+		{"delete", `DELETE FROM diagnosis_decisions WHERE id = $1`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := pool.Exec(ctx, tc.sql, id)
+			if err == nil {
+				t.Fatalf("expected %s to be rejected, but it succeeded", tc.name)
+			}
+			var pgErr *pgconn.PgError
+			if !errors.As(err, &pgErr) || pgErr.Code != "2F004" {
+				t.Fatalf("expected SQLSTATE 2F004, got %v", err)
+			}
+		})
+	}
+
+	// TRUNCATE bypasses row triggers entirely, so it needs its own statement trigger.
+	t.Run("truncate", func(t *testing.T) {
+		if _, err := pool.Exec(ctx, `TRUNCATE diagnosis_decisions`); err == nil {
+			t.Fatal("expected TRUNCATE to be rejected, but it succeeded")
+		}
+	})
 }
