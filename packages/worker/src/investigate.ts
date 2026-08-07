@@ -1,367 +1,51 @@
-import type Anthropic from '@anthropic-ai/sdk';
-import { createAnthropicClient } from './anthropic-client.js';
-import { execFile } from 'node:child_process';
-import { readFile, readdir, stat } from 'node:fs/promises';
-import { resolve, relative, normalize } from 'node:path';
-import { promisify } from 'node:util';
+import type { Adjudication, Diagnosis, DiagnosisOutcome } from '@opslane/shared';
+import { deriveOutcome, type DerivedDecision } from './classify.js';
+import { parseAdjudication, submitDiagnosisTool } from './diagnose-schema.js';
+import { resolveInsideRepo } from './repo-paths.js';
 import { extractStackTraceFiles } from './harness/stack-trace-utils.js';
-import type { Platform } from './platform.js';
-import type { RuntimeInfo } from './runtime-info.js';
 import { logger } from './logger.js';
+import { fenced } from './prompt-fence.js';
+import type { Platform } from './platform.js';
+import { runReadOnlyAgent, type ReadOnlyStop, type TokenUsage } from './readonly-agent.js';
+import type { RuntimeInfo } from './runtime-info.js';
 import { traceSpan } from './tracing.js';
 import type { TriageResult } from './agent-fix.js';
-import { grepExclusionArgs, isExcludedTraversalDirectory } from './harness/traversal-exclusions.js';
-import { isReasonCode, triageReasonCodes } from './reason-codes.js';
 
-const execFileAsync = promisify(execFile);
-
-const INVESTIGATION_MODEL = 'claude-sonnet-4-6';
-const MAX_TURNS = 10;
-const BUDGET_USD = 0.15;
-const MAX_FILE_SIZE = 50_000;
-const MAX_SEARCH_RESULTS = 50;
-const MAX_LIST_ENTRIES = 200;
+/**
+ * The model the investigation actually runs on.
+ *
+ * Exported because the decision row records which model produced the decision,
+ * and that row is immutable. index.ts previously re-derived it with its own
+ * default, so an unset INVESTIGATION_MODEL wrote a permanent claim that a
+ * different model ran than the one that did.
+ */
+export const INVESTIGATION_MODEL = process.env['INVESTIGATION_MODEL'] ?? 'claude-sonnet-5';
+const MAX_TURNS = Number(process.env['INVESTIGATION_MAX_TURNS'] ?? 10);
+/**
+ * Turns are the budget the agent works against, and the number is stated to it
+ * in the prompt so it can pace itself. PostHog does the same thing and it is
+ * the one an agent can actually count.
+ *
+ * The dollar figure below is a runaway backstop, not the operating limit. It
+ * was the binding constraint before, calibrated against a four-file fixture,
+ * and it fired on real monorepos: dub and formbricks runs died with "exceeded
+ * its budget" while the agents were still reading files they needed. A cap
+ * that stops correct work is not a safety feature.
+ */
+const DEFAULT_SPEND_CEILING_USD = 2.0;
 const MAX_ERROR_MESSAGE = 500;
 const MAX_STACK_TRACE = 3000;
+const MAX_BREADCRUMBS = 4000;
 
 const MODEL_PRICING: Record<string, { input: number; output: number; cacheWrite: number; cacheRead: number }> = {
   'claude-sonnet-4-6': { input: 3, output: 15, cacheWrite: 3.75, cacheRead: 0.30 },
+  // Sonnet 5's introductory rate, $2/$10, runs through 2026-08-31. List is
+  // $3/$15. Every eval cost figure is computed from this table, so the list
+  // price overstated what the runs actually cost by half.
+  'claude-sonnet-5': { input: 2, output: 10, cacheWrite: 2.50, cacheRead: 0.20 },
+  'claude-haiku-4-5-20251001': { input: 1, output: 5, cacheWrite: 1.25, cacheRead: 0.10 },
 };
 const DEFAULT_PRICING = { input: 3, output: 15, cacheWrite: 3.75, cacheRead: 0.30 };
-
-/** Validate and resolve a path, blocking traversal outside repoPath. */
-export function safePath(repoPath: string, requested: string): string | null {
-  const resolved = resolve(repoPath, requested);
-  const normalizedRepo = normalize(repoPath);
-  if (!resolved.startsWith(normalizedRepo + '/') && resolved !== normalizedRepo) {
-    return null;
-  }
-  return resolved;
-}
-
-function truncate(s: string, max: number): string {
-  return s.length > max ? s.slice(0, max) + '... [truncated]' : s;
-}
-
-function runtimeLabel(value: string): string {
-  return value.replace(/[^A-Za-z0-9._+\- ]/g, '').trim().slice(0, 64) || 'unknown';
-}
-
-function addLineNumbers(content: string): string {
-  return content
-    .split('\n')
-    .map((line, i) => `${(i + 1).toString().padStart(4)} | ${line}`)
-    .join('\n');
-}
-
-/** read_file tool: read a source file from the repo with line numbers. */
-export async function executeReadFile(
-  repoPath: string,
-  input: Record<string, unknown>,
-): Promise<string> {
-  const filePath = input['path'] as string | undefined;
-  if (!filePath) return 'Error: "path" parameter is required';
-
-  const resolved = safePath(repoPath, filePath);
-  if (!resolved) return 'Error: path traversal blocked — path must be within the repository';
-
-  try {
-    const content = await readFile(resolved, 'utf-8');
-    if (content.length > MAX_FILE_SIZE) {
-      return addLineNumbers(content.slice(0, MAX_FILE_SIZE)) + '\n... [truncated at 50KB]';
-    }
-    return addLineNumbers(content);
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    if (msg.includes('ENOENT')) return `Error: file not found: ${filePath}`;
-    return `Error: reading file failed: ${msg}`;
-  }
-}
-
-/** search tool: grep for patterns in the repo, excluding node_modules/.git/dist. */
-export async function executeSearch(
-  repoPath: string,
-  input: Record<string, unknown>,
-): Promise<string> {
-  const pattern = input['pattern'] as string | undefined;
-  if (!pattern) return 'Error: "pattern" parameter is required';
-
-  const include = input['include'] as string | undefined;
-
-  // Build --include flags. Brace expansion (*.{ts,vue}) doesn't work with execFile (no shell),
-  // so we pass multiple --include arguments when using the default extensions.
-  const defaultExtensions = ['*.ts', '*.tsx', '*.js', '*.jsx', '*.vue', '*.svelte', '*.json', '*.go', '*.py'];
-  const includeArgs = include
-    ? ['--include', include]
-    : defaultExtensions.flatMap(ext => ['--include', ext]);
-
-  const args = [
-    '-r', '-n', ...includeArgs,
-    ...grepExclusionArgs(),
-    '-m', '5', // max 5 matches per file
-  ];
-
-  args.push('--', pattern, '.');
-
-  try {
-    const { stdout } = await execFileAsync('grep', args, {
-      cwd: repoPath,
-      maxBuffer: 512 * 1024,
-      timeout: 10_000,
-    });
-
-    const lines = stdout.split('\n').filter(Boolean);
-    if (lines.length > MAX_SEARCH_RESULTS) {
-      return lines.slice(0, MAX_SEARCH_RESULTS).join('\n') + `\n... [${lines.length - MAX_SEARCH_RESULTS} more results]`;
-    }
-    if (lines.length === 0) return 'No matches found.';
-    return lines.join('\n');
-  } catch (err: unknown) {
-    // grep exits 1 when no matches found — that's not an error
-    if (err && typeof err === 'object' && 'code' in err && (err as { code: number }).code === 1) {
-      return 'No matches found.';
-    }
-    const msg = err instanceof Error ? err.message : String(err);
-    return `Error searching: ${msg}`;
-  }
-}
-
-/** list_files tool: list directory entries in the repo. */
-export async function executeListFiles(
-  repoPath: string,
-  input: Record<string, unknown>,
-): Promise<string> {
-  const dirPath = (input['path'] as string | undefined) ?? '.';
-  const recursive = input['recursive'] === true;
-
-  const resolved = safePath(repoPath, dirPath);
-  if (!resolved) return 'Error: path traversal blocked — path must be within the repository';
-
-  try {
-    const entries = await readdir(resolved, { withFileTypes: true });
-    const results: string[] = [];
-
-    for (const entry of entries) {
-      if (isExcludedTraversalDirectory(entry.name)) continue;
-      if (results.length >= MAX_LIST_ENTRIES) {
-        results.push(`... [truncated at ${MAX_LIST_ENTRIES} entries]`);
-        break;
-      }
-      const suffix = entry.isDirectory() ? '/' : '';
-      results.push(`${dirPath === '.' ? '' : dirPath + '/'}${entry.name}${suffix}`);
-
-      if (recursive && entry.isDirectory() && results.length < MAX_LIST_ENTRIES) {
-        try {
-          const subEntries = await readdir(resolve(resolved, entry.name), { withFileTypes: true });
-          for (const sub of subEntries) {
-            if (isExcludedTraversalDirectory(sub.name)) continue;
-            if (results.length >= MAX_LIST_ENTRIES) break;
-            const subSuffix = sub.isDirectory() ? '/' : '';
-            results.push(`${dirPath === '.' ? '' : dirPath + '/'}${entry.name}/${sub.name}${subSuffix}`);
-          }
-        } catch { /* skip unreadable subdirs */ }
-      }
-    }
-
-    if (results.length === 0) return 'Empty directory.';
-    return results.join('\n');
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    if (msg.includes('ENOENT')) return `Error: directory not found: ${dirPath}`;
-    if (msg.includes('ENOTDIR')) return `Error: not a directory: ${dirPath}`;
-    return `Error listing directory: ${msg}`;
-  }
-}
-
-function classifyTool(platform: Platform): Anthropic.Tool {
-  return {
-  name: 'classify_error',
-  description: 'Submit your investigation classification. Call this when you have enough evidence.',
-  input_schema: {
-    type: 'object' as const,
-    properties: {
-      fixable: {
-        type: 'boolean',
-        description: 'true if this error has a root cause in application source code that can be fixed',
-      },
-      confidence: {
-        type: 'string',
-        enum: ['high', 'medium', 'low'],
-        description: 'How confident you are in the classification based on codebase evidence found',
-      },
-      reason: {
-        type: 'string',
-        description: 'Brief explanation citing specific files/code found (or not found) during investigation',
-      },
-      reason_code: {
-        type: 'string',
-        enum: [...triageReasonCodes(platform)],
-        description: 'Machine-readable reason code when fixable is false',
-      },
-      remediation: {
-        type: 'string',
-        description: 'What the human should do if not fixable',
-      },
-    },
-    required: ['fixable', 'confidence', 'reason'],
-  },
-  };
-}
-
-function toolsFor(platform: Platform): Anthropic.Tool[] {
-  return [
-  {
-    name: 'read_file',
-    description: 'Read a source file from the repository. Returns content with line numbers.',
-    input_schema: {
-      type: 'object' as const,
-      properties: {
-        path: {
-          type: 'string',
-          description: 'Relative path from repository root (e.g. "src/App.vue")',
-        },
-      },
-      required: ['path'],
-    },
-  },
-  {
-    name: 'search',
-    description: 'Search for a pattern in the repository using grep. Returns matching lines with file paths and line numbers.',
-    input_schema: {
-      type: 'object' as const,
-      properties: {
-        pattern: {
-          type: 'string',
-          description: 'The search pattern (basic regex)',
-        },
-        include: {
-          type: 'string',
-          description: 'File glob pattern to limit search (e.g. "*.vue", "*.ts"). Defaults to common source extensions.',
-        },
-      },
-      required: ['pattern'],
-    },
-  },
-  {
-    name: 'list_files',
-    description: 'List files and directories in the repository.',
-    input_schema: {
-      type: 'object' as const,
-      properties: {
-        path: {
-          type: 'string',
-          description: 'Relative directory path from repository root. Defaults to root (".").',
-        },
-        recursive: {
-          type: 'boolean',
-          description: 'If true, include one level of subdirectory contents. Defaults to false.',
-        },
-      },
-    },
-  },
-    classifyTool(platform),
-  ];
-}
-
-function buildInvestigationPrompt(
-  input: {
-    errorType: string;
-    title: string;
-    errorMessage: string;
-    stackTrace: string;
-    resolvedStackTrace: unknown;
-    breadcrumbs: string;
-    platform?: Platform;
-    customerRuntime?: RuntimeInfo | null;
-  },
-): string {
-  const platform = input.platform ?? 'javascript';
-  const python = platform === 'python';
-  const resolvedSection = input.resolvedStackTrace
-    ? `\n\nResolved Stack Trace (source-mapped):\n<untrusted_data>\n${truncate(JSON.stringify(input.resolvedStackTrace), MAX_STACK_TRACE)}\n</untrusted_data>`
-    : '';
-
-  return `You are investigating a production ${python ? 'Python error from a CPython traceback' : 'JavaScript/browser error'} to determine if it can be fixed with code changes.
-
-You have read-only access to the repository via tools. Use them to investigate before classifying.
-
-## Investigation Strategy
-1. Start by reading the files mentioned in the stack trace (hints provided below if available)
-2. Search for the error message or pattern in the codebase
-3. Check if the error originates from application code or third-party/infrastructure
-4. Call classify_error with your finding AND the evidence from your investigation
-
-## Classification Rules
-Set fixable to FALSE (with evidence) if:
-- You searched the codebase and the error pattern exists ONLY in third-party code (${python ? 'site-packages or virtualenv paths' : 'node_modules-like paths'})
-- The error message is a deliberate test throw (e.g. "test error", "testing 123", "Opslane test")
-- The error is purely infrastructure/network (CORS, DNS, timeout, 502, 503) with no application code involvement
-- The stack trace files don't exist in the repository AND no related code can be found
-
-Set fixable to TRUE if:
-- You found application source files related to the error
-- The error type suggests a code bug AND you can see relevant application code
-- The stack trace references files that exist in the repository
-
-When in doubt, classify as fixable with medium/low confidence — we'd rather investigate than miss a real bug.
-
-${python
-    ? 'IMPORTANT: Follow the traceback newest-first and use exact repository paths. Python runs do not use browser source maps.'
-    : 'IMPORTANT: If a "Resolved Stack Trace" section is present, use it — it contains source-mapped paths.'}
-
-Customer runtime (untrusted metadata):
-<untrusted_data>
-${input.customerRuntime ? `${runtimeLabel(input.customerRuntime.name)} ${runtimeLabel(input.customerRuntime.version)}` : 'unknown'}
-</untrusted_data>
-
-## Error Details
-Type: ${input.errorType}
-Title: ${input.title}
-
-Message:
-<untrusted_data>
-${truncate(input.errorMessage, MAX_ERROR_MESSAGE)}
-</untrusted_data>
-
-Stack Trace:
-<untrusted_data>
-${truncate(input.stackTrace, MAX_STACK_TRACE)}
-</untrusted_data>${resolvedSection}
-
-Breadcrumbs:
-<untrusted_data>
-${truncate(input.breadcrumbs ?? '[]', 1000)}
-</untrusted_data>`;
-}
-
-/** Mark the last user message block with cache_control for prompt caching. */
-function markLastUserMessageForCaching(messages: Anthropic.MessageParam[]): void {
-  for (const msg of messages) {
-    if (msg.role !== 'user' || typeof msg.content === 'string') continue;
-    if (!Array.isArray(msg.content)) continue;
-    for (const block of msg.content) {
-      if ('cache_control' in block) {
-        delete (block as unknown as Record<string, unknown>)['cache_control'];
-      }
-    }
-  }
-
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const msg = messages[i];
-    if (msg.role !== 'user') continue;
-    if (typeof msg.content === 'string') {
-      msg.content = [{
-        type: 'text' as const,
-        text: msg.content,
-        cache_control: { type: 'ephemeral' as const },
-      }];
-    } else if (Array.isArray(msg.content) && msg.content.length > 0) {
-      const lastBlock = msg.content[msg.content.length - 1];
-      (lastBlock as unknown as Record<string, unknown>)['cache_control'] = { type: 'ephemeral' };
-    }
-    break;
-  }
-}
 
 export interface InvestigateInput {
   platform?: Platform;
@@ -375,170 +59,262 @@ export interface InvestigateInput {
 }
 
 export interface InvestigationResult extends TriageResult {
-  /** Files explicitly opened via read_file tool (not search hits). May contain duplicates if re-read. */
+  /** What the investigation submitted. Null when it submitted nothing usable. */
+  adjudication: Adjudication | null;
+  /** Built in code from the submitted winner, for the fix agent and the incident. */
+  diagnosis: Diagnosis | null;
+  outcome: DiagnosisOutcome;
+  decisionReason: string;
+  /** Why the outcome was reached, as a value. Callers pick reason codes from it. */
+  decisionBasis: DerivedDecision['basis'];
+  /** Files the agent opened. May contain duplicates. */
   filesRead: string[];
-  /** Last model text block before classification — best-effort diagnostic, not comprehensive. */
+  /** Last model text before the terminal call. Best-effort diagnostic. */
   findings: string;
+  /**
+   * Model spend for this investigation, including a run that failed before
+   * submitting. Carried on every return path: dropping it on failure would
+   * undercount exactly the runs the eval most needs to price.
+   */
+  costUsd: number;
+  /**
+   * Token counts for the run, cache reads and writes separated. Carried so the
+   * cache-hit rate is observable: `costUsd` alone cannot say whether prompt
+   * caching is working.
+   */
+  usage: TokenUsage;
+  /**
+   * How the agent loop ended. `terminal` is the only one that produced an
+   * answer; the rest are execution failures.
+   *
+   * Exposed because the caller cannot otherwise tell a rate limit from a
+   * refusal: the loop catches transport errors and returns `api_error`, which
+   * this function converts to `needs_more_context`. The eval runners retried
+   * only on a thrown exception, so a 429 was scored as the agent declining to
+   * answer, and the retry policy that is supposed to match the arms never fired
+   * on ours.
+   */
+  stop: ReadOnlyStop;
+}
+
+function truncate(text: string, max: number): string {
+  return text.length > max ? `${text.slice(0, max)}... [truncated]` : text;
+}
+
+function runtimeLabel(value: string): string {
+  return value.replace(/[^A-Za-z0-9._+\- ]/g, '').trim().slice(0, 64) || 'unknown';
+}
+
+/** The error, its stack and its breadcrumbs, fenced. */
+function evidenceBlock(input: InvestigateInput): string {
+  const python = input.platform === 'python';
+  const resolved = input.resolvedStackTrace
+    ? `\n\nResolved Stack Trace (source-mapped):\n<untrusted_data>\n${fenced(JSON.stringify(input.resolvedStackTrace), MAX_STACK_TRACE)}\n</untrusted_data>`
+    : '';
+  return `## Error
+Type: ${input.errorType}
+Title: ${input.title}
+
+Customer runtime (untrusted metadata):
+<untrusted_data>
+${input.customerRuntime ? `${runtimeLabel(input.customerRuntime.name)} ${runtimeLabel(input.customerRuntime.version)}` : 'unknown'}
+</untrusted_data>
+
+Message:
+<untrusted_data>
+${fenced(input.errorMessage, MAX_ERROR_MESSAGE)}
+</untrusted_data>
+
+Stack Trace:
+<untrusted_data>
+${fenced(input.stackTrace, MAX_STACK_TRACE)}
+</untrusted_data>${resolved}
+
+Breadcrumbs, every one, with timestamps:
+<untrusted_data>
+${fenced(input.breadcrumbs || '[]', MAX_BREADCRUMBS)}
+</untrusted_data>
+
+${python
+    ? 'Follow the traceback newest-first and use exact repository paths. Python runs do not use browser source maps.'
+    : 'If a Resolved Stack Trace is present, prefer it: it carries source-mapped paths.'}`;
 }
 
 /**
- * Codebase-aware investigation: multi-turn Sonnet loop with read-only filesystem
- * tools against the local repo clone. Replaces blind triage for production pipeline.
+ * The one investigation prompt.
  *
- * Falls through to agent (fixable: true, confidence: low) on any failure.
+ * It carries both jobs the two-agent split used to divide: enumerate the
+ * candidate causes, then settle between them from evidence actually read. The
+ * instruction that does the work is "enumerate, then settle", not the second
+ * model pass. Allowed a single unenumerated answer, the model reliably names
+ * the nearest suspicious line of local code and stops looking: on the PR #1297
+ * timeout it blamed the timeout constant, and on a server-side rate limit it
+ * blamed an unconfigured QueryClient.
+ */
+function investigationSystemPrompt(input: InvestigateInput): string {
+  return `You are diagnosing a production error in a codebase you can read.
+
+Find the cause. The code that observes a failure is rarely the code that caused it.
+
+Enumerate the causes that could produce this error, then settle between them from
+evidence you actually read. Rules:
+
+- Check every claim about repetition, retries or bursts against the actual timestamps in the breadcrumbs. If the timing does not support the claim, reject it and say so.
+- "insufficient" means the evidence cannot separate your candidates: two or more are equally supported and you cannot rank them. It does not mean you are less than certain. If one is better supported than the rest, name it and rate the evidence "suggestive". Refusing to choose when you can choose sends a human a list instead of an answer.
+- Distinguish the cause from a code smell. Code that handles a failure badly is not the reason the failure occurred.
+- Rate the evidence honestly. Reserve "conclusive" for a conclusion whose every premise you verified from evidence you read. If a decisive premise rests on runtime state you cannot observe, such as a query plan, index, table size, deployed configuration or backend load, the most you may answer is "suggestive".
+- List every cause you weighed in candidates_considered, including the one you chose.
+- If you conclude the cause is outside this codebase, reject every local candidate by name in "rejected". A conclusion reached instead of the local candidates rather than against them will not be acted on.
+- In cause_locations, the FIRST entry is your claim and the only one we act on. Put the file you are most confident about first. path is the bare repository path with no line numbers and no parentheses; put line numbers in the line field and any explanation in the note field. Extra entries do not improve your answer.
+
+${evidenceBlock(input)}`;
+}
+
+/** Every non-terminal exit is an execution failure, never a finding. */
+function stopReason(stop: ReadOnlyStop, stage: string): string {
+  switch (stop) {
+    case 'budget':
+      return `${stage} exceeded its budget`;
+    case 'api_error':
+      return `${stage} could not reach the model`;
+    case 'no_tool_call':
+      return `${stage} ended without submitting`;
+    case 'turns_exhausted':
+      return `${stage} ran out of turns`;
+    case 'truncated':
+      return `${stage} hit the output token ceiling mid-answer`;
+    default:
+      return `${stage} did not complete`;
+  }
+}
+
+const NO_USAGE: TokenUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+
+function failed(
+  reason: string,
+  filesRead: string[],
+  findings: string,
+  stop: ReadOnlyStop,
+): InvestigationResult {
+  return {
+    fixable: false,
+    confidence: 'low',
+    reason,
+    adjudication: null,
+    diagnosis: null,
+    outcome: 'needs_more_context',
+    decisionReason: reason,
+    decisionBasis: 'no_adjudication',
+    filesRead,
+    findings,
+    costUsd: 0,
+    usage: NO_USAGE,
+    stop,
+  };
+}
+
+/**
+ * One agent over one repository clone: enumerate the candidate causes and
+ * submit the one the evidence supports. Routing is derived in code from the
+ * submitted location and the evidence strength, so the agent never names an
+ * outcome.
  */
 export async function investigateError(
   apiKey: string,
   input: InvestigateInput,
   repoPath: string,
 ): Promise<InvestigationResult> {
-  const client = createAnthropicClient(apiKey);
   const pricing = MODEL_PRICING[INVESTIGATION_MODEL] ?? DEFAULT_PRICING;
-  const tokenUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
-  const filesRead: string[] = [];
-  let lastModelText = '';
-
-  const systemPrompt = buildInvestigationPrompt(input);
-  const platform = input.platform ?? 'javascript';
-  const tools = toolsFor(platform);
-  const allowedReasonCodes = triageReasonCodes(platform);
-  const systemMessages: Anthropic.TextBlockParam[] = [{
-    type: 'text',
-    text: systemPrompt,
-    cache_control: { type: 'ephemeral' },
-  }];
-
-  // Seed with file hints from stack trace to guide first tool call
+  const spendCeilingUsd = Number(process.env['INVESTIGATION_BUDGET_USD'] ?? DEFAULT_SPEND_CEILING_USD);
   const stackFiles = extractStackTraceFiles(input.stackTrace, input.platform);
-  const fileHints = stackFiles.length > 0
-    ? `\n\nFiles from the stack trace to start with: ${stackFiles.slice(0, 5).join(', ')}`
+  const hints = stackFiles.length > 0
+    ? `\n\nFiles named by the stack trace, as a starting point only: ${stackFiles.slice(0, 5).join(', ')}`
     : '';
 
-  const messages: Anthropic.MessageParam[] = [
-    { role: 'user', content: `Investigate this error and classify it using the classify_error tool.${fileHints}` },
-  ];
+  const run = await traceSpan('investigation.diagnose', { 'investigation.stage': 'diagnose' }, () =>
+    runReadOnlyAgent({
+      apiKey,
+      model: INVESTIGATION_MODEL,
+      maxTurns: MAX_TURNS,
+      budgetUsd: spendCeilingUsd,
+      pricing,
+      systemPrompt: investigationSystemPrompt(input),
+      firstMessage:
+        `Diagnose this error, then call submit_diagnosis. You have about ${MAX_TURNS} tool ` +
+        `calls. Spend them on the files that decide between your candidates, and submit what ` +
+        `the evidence supports rather than running out.${hints}`,
+      terminalTool: submitDiagnosisTool(),
+      repoPath,
+    }));
 
-  for (let turn = 0; turn < MAX_TURNS; turn++) {
-    markLastUserMessageForCaching(messages);
+  const filesRead = run.filesRead;
+  const costUsd = Number(run.costUsd.toFixed(4));
 
-    // Turn-budget pressure: warn on penultimate turns, force on final turn
-    const remaining = MAX_TURNS - turn;
-    if (remaining <= 2 && turn > 0) {
-      const lastMsg = messages[messages.length - 1];
-      if (lastMsg.role === 'user' && Array.isArray(lastMsg.content)) {
-        lastMsg.content.push({
-          type: 'text' as const,
-          text: `You have ${remaining} turn(s) remaining. You MUST call classify_error now with your best assessment based on evidence gathered so far. Do not read more files.`,
-        });
-      }
-    }
-
-    let response: Anthropic.Message;
-    try {
-      response = await client.messages.create({
-        model: INVESTIGATION_MODEL,
-        max_tokens: 4096,
-        system: systemMessages,
-        messages,
-        tools,
-        ...(turn === MAX_TURNS - 1 ? { tool_choice: { type: 'tool' as const, name: 'classify_error' } } : {}),
-      });
-    } catch (err: unknown) {
-      logger.warn('Investigation API call failed, falling through to agent', {
-        error: err instanceof Error ? err.message : String(err),
-        turn,
-      });
-      return { fixable: true, confidence: 'low', reason: 'Investigation API call failed', filesRead, findings: lastModelText };
-    }
-
-    tokenUsage.input += response.usage.input_tokens;
-    tokenUsage.output += response.usage.output_tokens;
-    tokenUsage.cacheRead += response.usage.cache_read_input_tokens ?? 0;
-    tokenUsage.cacheWrite += response.usage.cache_creation_input_tokens ?? 0;
-
-    // Budget check
-    const cost =
-      (tokenUsage.input / 1_000_000) * pricing.input +
-      (tokenUsage.output / 1_000_000) * pricing.output +
-      (tokenUsage.cacheWrite / 1_000_000) * pricing.cacheWrite +
-      (tokenUsage.cacheRead / 1_000_000) * pricing.cacheRead;
-
-    if (cost > BUDGET_USD) {
-      logger.warn('Investigation budget exceeded, falling through to agent', { cost, budget: BUDGET_USD, turn });
-      return { fixable: true, confidence: 'low', reason: 'Investigation budget exceeded', filesRead, findings: lastModelText };
-    }
-
-    // Process response blocks
-    const toolCalls: { id: string; name: string; input: Record<string, unknown> }[] = [];
-    for (const block of response.content) {
-      if (block.type === 'text') {
-        lastModelText = block.text;
-      }
-      if (block.type === 'tool_use') {
-        toolCalls.push({ id: block.id, name: block.name, input: block.input as Record<string, unknown> });
-      }
-    }
-
-    messages.push({ role: 'assistant', content: response.content });
-
-    // No tool calls = model is done without classifying
-    if (toolCalls.length === 0) {
-      logger.warn('Investigation ended without classify_error call, falling through to agent');
-      return { fixable: true, confidence: 'low', reason: 'Investigation did not produce classification', filesRead, findings: lastModelText };
-    }
-
-    // Execute tool calls
-    const toolResults: Anthropic.ToolResultBlockParam[] = [];
-    for (const tc of toolCalls) {
-      // classify_error is terminal — parse result and return
-      if (tc.name === 'classify_error') {
-        const raw = tc.input;
-        const validConfidences = ['high', 'medium', 'low'] as const;
-        const rawConfidence = raw['confidence'] as string;
-        const rawReasonCode = raw['reason_code'] as string | undefined;
-
-        return {
-          fixable: raw['fixable'] === true,
-          confidence: validConfidences.includes(rawConfidence as typeof validConfidences[number])
-            ? rawConfidence as TriageResult['confidence']
-            : 'low',
-          reason: typeof raw['reason'] === 'string' ? raw['reason'] : undefined,
-          reason_code: isReasonCode(rawReasonCode) && allowedReasonCodes.includes(rawReasonCode)
-            ? rawReasonCode
-            : undefined,
-          remediation: typeof raw['remediation'] === 'string' ? raw['remediation'] : undefined,
-          filesRead,
-          findings: lastModelText,
-        };
-      }
-
-      // Execute read-only tools
-      let output: string;
-      switch (tc.name) {
-        case 'read_file': {
-          const filePath = tc.input['path'] as string | undefined;
-          output = await executeReadFile(repoPath, tc.input);
-          if (filePath && !output.startsWith('Error:')) filesRead.push(filePath);
-          break;
-        }
-        case 'search':
-          output = await executeSearch(repoPath, tc.input);
-          break;
-        case 'list_files':
-          output = await executeListFiles(repoPath, tc.input);
-          break;
-        default:
-          output = `Error: Unknown tool "${tc.name}"`;
-          break;
-      }
-
-      toolResults.push({ type: 'tool_result', tool_use_id: tc.id, content: output });
-    }
-
-    messages.push({ role: 'user', content: toolResults });
+  if (run.stop !== 'terminal') {
+    // Cost is carried on EVERY return path. Dropping it here would undercount
+    // exactly the failed and retried runs the eval most needs to price.
+    return {
+      ...failed(stopReason(run.stop, 'Investigation'), filesRead, run.lastModelText, run.stop),
+      costUsd,
+      usage: run.usage,
+    };
   }
 
-  // Max turns exhausted
-  logger.warn('Investigation reached max turns, falling through to agent', { maxTurns: MAX_TURNS });
-  return { fixable: true, confidence: 'low', reason: 'Investigation reached maximum turns', filesRead, findings: lastModelText };
+  const adjudication = parseAdjudication(run.terminalInput ?? {});
+  if (!adjudication) {
+    // Log the payload. Without it there is no way to tell a model that answered
+    // badly from a schema the model could not satisfy.
+    logger.warn('Investigation submitted no usable diagnosis', {
+      submitted: JSON.stringify(run.terminalInput ?? {}).slice(0, 2000),
+      filesRead: filesRead.length,
+    });
+  }
+
+  const decision = deriveOutcome(adjudication, (cited) => resolveInsideRepo(repoPath, cited));
+
+  const diagnosis: Diagnosis | null = adjudication
+    ? {
+      one_line_description: adjudication.best_supported,
+      why_chain: adjudication.why_chain,
+      reproduction_steps: adjudication.reproduction_steps,
+      cause_location: adjudication.cause_locations.map((l) => l.path).join(', '),
+    }
+    : null;
+
+  await traceSpan('investigation.decision', {
+    'investigation.outcome': decision.outcome,
+    'investigation.confidence': decision.confidence,
+    'investigation.strength': adjudication?.evidence_strength ?? 'none',
+    'investigation.cause_location': adjudication?.cause_locations.map((l) => l.path).join(', ') ?? '',
+    'investigation.files_read': filesRead.join(','),
+    'investigation.cost_usd': costUsd,
+    'investigation.stop': run.stop,
+    // The cache figures, not just the dollar total. A cost number cannot answer
+    // whether prompt caching is working — these were computed on every run and
+    // then dropped, so the one measurement that would catch a broken cache
+    // prefix was invisible. Reads well below input after the first turn means
+    // the prefix is being rewritten rather than hit.
+    'investigation.input_tokens': run.usage.input,
+    'investigation.output_tokens': run.usage.output,
+    'investigation.cache_read_tokens': run.usage.cacheRead,
+    'investigation.cache_write_tokens': run.usage.cacheWrite,
+  }, async () => undefined);
+
+  return {
+    fixable: decision.outcome === 'code_fix',
+    confidence: decision.confidence,
+    reason: decision.reason,
+    adjudication,
+    diagnosis,
+    outcome: decision.outcome,
+    decisionReason: decision.reason,
+    decisionBasis: decision.basis,
+    filesRead,
+    // Prefer the model's prose, but fall back to the structured reasoning: a
+    // terminal tool call may carry no accompanying text at all.
+    findings: run.lastModelText || adjudication?.reasoning || '',
+    costUsd,
+    usage: run.usage,
+    stop: run.stop,
+  };
 }

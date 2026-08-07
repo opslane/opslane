@@ -4,5 +4,4 @@ packages:
   - 'cli'
   - 'test-e2e'
   - 'test-fixtures/*'
-  - 'eval'
   - 'docs-site'

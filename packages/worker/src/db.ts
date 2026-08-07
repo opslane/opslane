@@ -1,7 +1,8 @@
 import pg from 'pg';
-import type { ErrorGroupStatus, NeedsHumanReason, ConfidenceLevel, JobType, SetupPrStatus, EvidenceRecord, PRPosture } from '@opslane/shared';
+import type { Diagnosis, DiagnosisOutcome, ErrorGroupStatus, NeedsHumanReason, ConfidenceLevel, JobType, SetupPrStatus, EvidenceRecord, PRPosture } from '@opslane/shared';
 import { reconcileDeadLetteredSessionAnalysis } from './friction/dead-letter.js';
 import type { Platform } from './platform.js';
+import type { DerivedDecision } from './classify.js';
 
 const { Pool } = pg;
 
@@ -21,6 +22,111 @@ export async function closePool(): Promise<void> {
     await pool.end();
     pool = null;
   }
+}
+
+export interface DecisionRow {
+  outcome: DiagnosisOutcome;
+  decisionReason: string;
+  causeLocation?: string | null;
+  diagnosis: Diagnosis | null;
+  model: string;
+  promptVersion: string;
+  jobId?: string | null;
+  /**
+   * Why the outcome was reached, and how strong the evidence was. Both are
+   * required: the fix job reads this row to decide whether it may run, and a
+   * decision that cannot answer that is not a decision it can act on.
+   */
+  basis: DerivedDecision['basis'];
+  confidence: ConfidenceLevel;
+}
+
+/** What a fix job needs from a persisted decision to know whether it may run. */
+export interface PersistedDecision {
+  outcome: DiagnosisOutcome;
+  basis: DerivedDecision['basis'];
+  confidence: ConfidenceLevel;
+}
+
+/**
+ * Append one decision. Deliberately not idempotent per job: a requeued job keeps
+ * its id (requeueStaleJobs updates in place), so the `ON CONFLICT (job_id) DO
+ * NOTHING` this used to carry silently discarded every retry's conclusion, and
+ * left the fix gate reading a superseded one. See migration 037.
+ *
+ * Always called inside the transaction that writes the status it accompanies, so
+ * a partial replay cannot commit a decision without its status.
+ */
+async function insertDiagnosisDecision(
+  queryable: Pick<pg.Pool, 'query'> | Pick<pg.PoolClient, 'query'>,
+  errorGroupId: string,
+  projectId: string,
+  row: DecisionRow,
+): Promise<void> {
+  await queryable.query(
+    `INSERT INTO diagnosis_decisions
+       (error_group_id, project_id, job_id, outcome, decision_reason, cause_location, diagnosis,
+        model, prompt_version, basis, confidence)
+     VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11)`,
+    [
+      errorGroupId,
+      projectId,
+      row.jobId ?? null,
+      row.outcome,
+      row.decisionReason,
+      row.causeLocation ?? null,
+      row.diagnosis === null ? null : JSON.stringify(row.diagnosis),
+      row.model,
+      row.promptVersion,
+      row.basis,
+      row.confidence,
+    ],
+  );
+}
+
+/**
+ * The most recent decision for a group, or null.
+ *
+ * Fix jobs read this rather than trusting an in-memory value, so a requeued or
+ * retried job is tied to the immutable decision it was created from. Scoped by
+ * project as well as group, per the worker's contract that database operations
+ * are scoped to the project.
+ *
+ * A row missing `basis` or `confidence` predates migration 035 and cannot
+ * answer whether a fix is authorised, so it reads as no decision at all.
+ */
+export async function loadDiagnosisDecision(
+  errorGroupId: string,
+  projectId: string,
+): Promise<PersistedDecision | null> {
+  const { rows } = await getPool().query<{
+    outcome: DiagnosisOutcome;
+    basis: string | null;
+    confidence: string | null;
+  }>(
+    `SELECT outcome, basis, confidence
+     FROM diagnosis_decisions
+     WHERE error_group_id = $1 AND project_id = $2
+     ORDER BY decided_at DESC, id DESC
+     LIMIT 1`,
+    [errorGroupId, projectId],
+  );
+  const row = rows[0];
+  if (!row || !row.basis || !row.confidence) return null;
+  return {
+    outcome: row.outcome,
+    basis: row.basis as DerivedDecision['basis'],
+    confidence: row.confidence as ConfidenceLevel,
+  };
+}
+
+/** Append a diagnosis decision. A retried job is idempotent, never overwritten. */
+export async function recordDiagnosisDecision(
+  errorGroupId: string,
+  projectId: string,
+  row: DecisionRow,
+): Promise<void> {
+  await insertDiagnosisDecision(getPool(), errorGroupId, projectId, row);
 }
 
 export interface ClaimedJob {
@@ -1444,6 +1550,7 @@ export async function updateGroupInvestigation(
     suggestedMitigation?: string;
     confidence?: ConfidenceLevel;
     reason?: NeedsHumanReason;
+    decision?: DecisionRow;
   },
   lease?: JobLease,
 ): Promise<void> {
@@ -1470,9 +1577,12 @@ export async function updateGroupInvestigation(
          FOR UPDATE
        )`
     : '';
-  const result = await db.query(
-    `${ownedCte}
-     UPDATE error_groups
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await client.query(
+      `${ownedCte}
+       UPDATE error_groups
      SET status = $3::error_group_status,
          root_cause = $4,
          suggested_mitigation = $5,
@@ -1493,22 +1603,32 @@ export async function updateGroupInvestigation(
          updated_at = now()
      WHERE id = $1 AND project_id = $2
        ${lease ? 'AND EXISTS (SELECT 1 FROM owned)' : ''}
-     RETURNING id`,
-    [
-      errorGroupId,
-      projectId,
-      status,
-      fields.rootCause ?? null,
-      fields.suggestedMitigation ?? null,
-      fields.confidence ?? null,
-      reason?.reason_code ?? null,
-      reason?.reason_message ?? null,
-      reason?.remediation ?? null,
-      ...(lease ? [lease.id, lease.workerId, lease.leaseGeneration] : []),
-    ]
-  );
-  if (lease && (result.rowCount ?? 0) === 0) {
-    throw new LeaseLostError(lease.id);
+       RETURNING id`,
+      [
+        errorGroupId,
+        projectId,
+        status,
+        fields.rootCause ?? null,
+        fields.suggestedMitigation ?? null,
+        fields.confidence ?? null,
+        reason?.reason_code ?? null,
+        reason?.reason_message ?? null,
+        reason?.remediation ?? null,
+        ...(lease ? [lease.id, lease.workerId, lease.leaseGeneration] : []),
+      ],
+    );
+    if (lease && (result.rowCount ?? 0) === 0) {
+      throw new LeaseLostError(lease.id);
+    }
+    if ((result.rowCount ?? 0) > 0 && fields.decision) {
+      await insertDiagnosisDecision(client, errorGroupId, projectId, fields.decision);
+    }
+    await client.query('COMMIT');
+  } catch (err: unknown) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
   }
 }
 
@@ -1533,8 +1653,10 @@ export async function updateGroupAndCreateFixJob(
   fields: {
     rootCause?: string;
     suggestedMitigation?: string;
+    diagnosis?: Diagnosis | null;
     confidence?: ConfidenceLevel;
     platform?: Platform;
+    decision?: DecisionRow;
   },
   lease: JobLease,
   opts?: { allowFriction?: boolean },
@@ -1599,9 +1721,15 @@ export async function updateGroupAndCreateFixJob(
     ) {
       await client.query(
         `UPDATE error_group_jobs
-         SET platform = COALESCE(platform, $2), updated_at = now()
+         SET platform = COALESCE(platform, $2),
+             payload = COALESCE(payload, $3::jsonb),
+             updated_at = now()
          WHERE id = $1`,
-        [existingFix.rows[0].id, fields.platform ?? 'javascript'],
+        [
+          existingFix.rows[0].id,
+          fields.platform ?? 'javascript',
+          fields.diagnosis === undefined ? null : JSON.stringify({ diagnosis: fields.diagnosis }),
+        ],
       );
       await client.query(
         `UPDATE error_groups
@@ -1609,6 +1737,9 @@ export async function updateGroupAndCreateFixJob(
          WHERE id = $1 AND project_id = $2`,
         [errorGroupId, projectId],
       );
+      if (fields.decision) {
+        await insertDiagnosisDecision(client, errorGroupId, projectId, fields.decision);
+      }
       await client.query('COMMIT');
       return { created: true, fixJobId: existingFix.rows[0].id };
     }
@@ -1635,11 +1766,19 @@ export async function updateGroupAndCreateFixJob(
       );
     }
     const result = await client.query<{ id: string }>(
-      `INSERT INTO error_group_jobs (error_group_id, project_id, job_type, triggered_by, platform)
-       VALUES ($1, $2, 'fix', 'auto', $3)
+      `INSERT INTO error_group_jobs (error_group_id, project_id, job_type, triggered_by, platform, payload)
+       VALUES ($1, $2, 'fix', 'auto', $3, $4::jsonb)
        RETURNING id`,
-      [errorGroupId, projectId, fields.platform ?? 'javascript']
+      [
+        errorGroupId,
+        projectId,
+        fields.platform ?? 'javascript',
+        fields.diagnosis === undefined ? null : JSON.stringify({ diagnosis: fields.diagnosis }),
+      ]
     );
+    if (fields.decision) {
+      await insertDiagnosisDecision(client, errorGroupId, projectId, fields.decision);
+    }
     await client.query('COMMIT');
     return { created: true, fixJobId: result.rows[0]!.id };
   } catch (err) {

@@ -613,6 +613,22 @@ export async function cleanupTenant(orgId: string): Promise<void> {
     [orgId]
   );
 
+  // Before error_group_jobs and error_groups, which diagnosis_decisions
+  // references with no ON DELETE clause. Migration 034 makes the table
+  // insert-only with a BEFORE DELETE row trigger, so this needs the trigger off
+  // for the statement — and without it the FK blocks the two deletes below while
+  // the trigger blocks the only fix, wedging tenant teardown permanently after
+  // the first e2e run that reaches an investigation.
+  await db.query('ALTER TABLE diagnosis_decisions DISABLE TRIGGER diagnosis_decisions_immutable_row');
+  try {
+    await db.query(
+      `DELETE FROM diagnosis_decisions WHERE project_id IN (SELECT id FROM projects WHERE org_id = $1)`,
+      [orgId]
+    );
+  } finally {
+    await db.query('ALTER TABLE diagnosis_decisions ENABLE TRIGGER diagnosis_decisions_immutable_row');
+  }
+
   await db.query(
     `DELETE FROM error_group_jobs WHERE project_id IN (SELECT id FROM projects WHERE org_id = $1)`,
     [orgId]

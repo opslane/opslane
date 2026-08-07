@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { purgeDiagnosisDecisions } from './purge-diagnosis-decisions.js';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import pg from 'pg';
 
@@ -16,7 +17,10 @@ vi.mock('../repo-clone.js', () => ({
   validateDiffPaths: vi.fn(),
 }));
 
-vi.mock('../investigate.js', () => ({ investigateError: vi.fn() }));
+vi.mock('../investigate.js', () => ({
+  investigateError: vi.fn(),
+  INVESTIGATION_MODEL: 'claude-sonnet-5',
+}));
 vi.mock('../agent-fix.js', () => ({ runAgentFix: vi.fn() }));
 vi.mock('../pr.js', () => ({ createPR: vi.fn(), createGitHubClient: vi.fn() }));
 vi.mock('../minio-client.js', () => ({ fetchObject: vi.fn(), getMinIOConfig: vi.fn(() => null) }));
@@ -209,9 +213,18 @@ describeDb('Python two-stage production path', () => {
       fixable: true,
       confidence: 'high',
       reason: 'cart.py adds a nullable price without a guard',
-      remediation: 'Treat a missing price as zero before calculating the total',
+      diagnosis: {
+        one_line_description: 'cart.py adds a nullable price without a guard',
+        why_chain: ['Cart total reads a nullable price', 'The price is None', 'Arithmetic raises TypeError'],
+        reproduction_steps: ['Add an item whose price is missing'],
+        cause_location: 'cart.py:12',
+      },
+      outcome: 'code_fix',
+      adjudication: null, costUsd: 0.12, decisionBasis: 'local_defect', decisionReason: 'The cause is at cart.py:12',
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       filesRead: ['cart.py'],
       findings: 'The traceback resolves to application code in cart.py.',
+      stop: 'terminal',
     });
     vi.mocked(runAgentFix).mockResolvedValue({
       status: 'needs_human',
@@ -228,6 +241,7 @@ describeDb('Python two-stage production path', () => {
     delete process.env['OPSLANE_PYTHON_PIPELINE'];
     delete process.env['ANTHROPIC_API_KEY'];
     delete process.env['GITHUB_TOKEN'];
+    await purgeDiagnosisDecisions(pool, projectId);
     await pool.query(`DELETE FROM error_group_jobs WHERE project_id = $1`, [projectId]);
     await pool.query(`DELETE FROM error_events WHERE project_id = $1`, [projectId]);
     await pool.query(`DELETE FROM error_groups WHERE project_id = $1`, [projectId]);

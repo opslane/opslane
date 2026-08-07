@@ -107,10 +107,10 @@ describe('tracing', () => {
       expect(attrs['tool.paths']).toBe('a.ts, b.ts');
     });
 
-    it('extracts reason_code for give_up tool', () => {
-      const attrs = getToolSpanAttributes('give_up', { reason_code: 'third_party_bug', reason_message: 'blah', remediation: 'blah' }, 'Acknowledged', false);
-      expect(attrs['tool.name']).toBe('give_up');
-      expect(attrs['tool.reason_code']).toBe('third_party_bug');
+    it('extracts cause location for submit_diagnosis tool', () => {
+      const attrs = getToolSpanAttributes('submit_diagnosis', { cause_location: 'src/App.vue:42' }, 'Acknowledged', false);
+      expect(attrs['tool.name']).toBe('submit_diagnosis');
+      expect(attrs['tool.cause_location']).toBe('src/App.vue:42');
     });
 
     it('only logs output_length for patch tool', () => {

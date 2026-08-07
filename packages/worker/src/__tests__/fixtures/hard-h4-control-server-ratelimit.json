@@ -1,0 +1,24 @@
+{
+  "id": "hard-h4-control-server-ratelimit",
+  "app": "asset-management-jira",
+  "bug_patch": null,
+  "error_event": {
+    "platform": "javascript",
+    "error": {
+      "type": "FetchError",
+      "message": "Server Error: 429 | GET /api/asset-types",
+      "stack": "FetchError: Server Error: 429 | GET /api/asset-types\n    at handleResponse (client/asset-panel/src/api/fetcher/index.ts:41:11)"
+    },
+    "breadcrumbs": [
+      { "type": "fetch", "timestamp": "2026-08-06T10:00:00.000Z", "category": "fetch", "level": "info", "message": "GET /api/asset-types", "data": { "method": "GET", "url": "/api/asset-types", "status_code": 200 } },
+      { "type": "fetch", "timestamp": "2026-08-06T10:02:11.400Z", "category": "fetch", "level": "info", "message": "GET /api/asset-types", "data": { "method": "GET", "url": "/api/asset-types", "status_code": 200 } },
+      { "type": "fetch", "timestamp": "2026-08-06T10:04:52.900Z", "category": "fetch", "level": "info", "message": "GET /api/asset-types", "data": { "method": "GET", "url": "/api/asset-types", "status_code": 200 } },
+      { "type": "fetch", "timestamp": "2026-08-06T10:07:38.100Z", "category": "fetch", "level": "info", "message": "GET /api/asset-types", "data": { "method": "GET", "url": "/api/asset-types", "status_code": 200 } },
+      { "type": "fetch", "timestamp": "2026-08-06T10:11:04.700Z", "category": "fetch", "level": "error", "message": "GET /api/asset-types", "data": { "method": "GET", "url": "/api/asset-types", "status_code": 429, "error": "Server Error: 429 | GET /api/asset-types" } }
+    ],
+    "context": { "note": "5 requests over 11 minutes. Ordinary use; the limit is being applied server-side." }
+  },
+  "expected": { "outcome": "conclusion" },
+  "grading": { "fail_to_pass": [], "pass_to_pass": [] },
+  "metadata": { "category": "external_service", "difficulty": "hard", "framework": "react" }
+}

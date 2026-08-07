@@ -4,6 +4,9 @@
   "license": "AGPL-3.0-only",
   "private": true,
   "type": "module",
+  "exports": {
+    "./dist/*": "./dist/*"
+  },
   "scripts": {
     "build": "tsc",
     "bench:analyzer": "tsx scripts/bench-analyzer.ts",

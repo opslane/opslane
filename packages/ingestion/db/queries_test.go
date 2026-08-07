@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/opslane/opslane/packages/ingestion/db"
@@ -1057,13 +1058,90 @@ func TestResolveArchiveUnarchiveLifecycle(t *testing.T) {
 	if err := q.UnarchiveErrorGroup(ctx, projID, groupID); err != nil {
 		t.Fatalf("UnarchiveErrorGroup: %v", err)
 	}
-	if got := groupStatus(t, pool, groupID); got != "investigated" {
-		t.Fatalf("group status = %q, want investigated", got)
+	if got := groupStatus(t, pool, groupID); got != "resolved" {
+		t.Fatalf("group status = %q, want resolved", got)
 	}
 
 	// Unarchiving a non-archived group fails.
 	if err := q.UnarchiveErrorGroup(ctx, projID, groupID); err == nil {
 		t.Fatal("expected UnarchiveErrorGroup on non-archived group to fail")
+	}
+}
+
+func TestUnarchiveRestoresErrorInsight(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	q := db.New(pool)
+	_, projectID, _, groupID := seedGroup(t, pool, q, "unarchive-insight")
+
+	if _, err := pool.Exec(ctx, `UPDATE error_groups SET status = 'insight' WHERE id = $1`, groupID); err != nil {
+		t.Fatalf("set insight: %v", err)
+	}
+	if err := q.ArchiveErrorGroup(ctx, projectID, groupID); err != nil {
+		t.Fatalf("ArchiveErrorGroup: %v", err)
+	}
+	if err := q.UnarchiveErrorGroup(ctx, projectID, groupID); err != nil {
+		t.Fatalf("UnarchiveErrorGroup: %v", err)
+	}
+	if got := groupStatus(t, pool, groupID); got != "insight" {
+		t.Fatalf("group status = %q, want insight", got)
+	}
+}
+
+func TestUnarchiveLegacyErrorFallsBackToInvestigated(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	q := db.New(pool)
+	_, projectID, _, groupID := seedGroup(t, pool, q, "unarchive-legacy")
+
+	if _, err := pool.Exec(ctx,
+		`UPDATE error_groups
+		 SET status = 'archived', status_before_archive = NULL, archived_at = now()
+		 WHERE id = $1`, groupID,
+	); err != nil {
+		t.Fatalf("seed legacy archive: %v", err)
+	}
+	if err := q.UnarchiveErrorGroup(ctx, projectID, groupID); err != nil {
+		t.Fatalf("UnarchiveErrorGroup: %v", err)
+	}
+	if got := groupStatus(t, pool, groupID); got != "investigated" {
+		t.Fatalf("group status = %q, want investigated", got)
+	}
+}
+
+func TestArchiveTwiceDoesNotOverwriteSavedStatus(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	q := db.New(pool)
+	_, projectID, _, groupID := seedGroup(t, pool, q, "archive-twice")
+
+	if _, err := pool.Exec(ctx, `UPDATE error_groups SET status = 'insight' WHERE id = $1`, groupID); err != nil {
+		t.Fatalf("set insight: %v", err)
+	}
+	if err := q.ArchiveErrorGroup(ctx, projectID, groupID); err != nil {
+		t.Fatalf("first ArchiveErrorGroup: %v", err)
+	}
+	// Archiving twice must succeed, not 409. The handler maps any error here to
+	// "incident not found", so a double-click or a stale list would report the
+	// incident as missing while it sits archived.
+	if err := q.ArchiveErrorGroup(ctx, projectID, groupID); err != nil {
+		t.Fatalf("second ArchiveErrorGroup must be idempotent, got: %v", err)
+	}
+
+	var saved string
+	if err := pool.QueryRow(ctx,
+		`SELECT status_before_archive::text FROM error_groups WHERE id = $1`, groupID,
+	).Scan(&saved); err != nil {
+		t.Fatalf("query saved status: %v", err)
+	}
+	if saved != "insight" {
+		t.Fatalf("status_before_archive = %q, want insight", saved)
+	}
+
+	// Idempotent must not mean "always succeeds": a group that does not exist,
+	// or belongs to another tenant, still has to fail.
+	if err := q.ArchiveErrorGroup(ctx, projectID, "00000000-0000-0000-0000-000000000000"); err == nil {
+		t.Fatal("expected ArchiveErrorGroup on an unknown group to fail")
 	}
 }
 
@@ -1102,4 +1180,87 @@ func TestLookupProjectKeyResolvesTenantAndHonorsRevocation(t *testing.T) {
 	if _, err := q.LookupProjectKey(ctx, key.Raw); !errors.Is(err, db.ErrProjectKeyInvalid) {
 		t.Fatal("expected revoked key lookup to fail")
 	}
+}
+
+// diagnosisDecisionsDB builds a disposable database with every migration
+// applied. The immutability trigger blocks the DELETE that cleanupTenant would
+// run against a retained database, so this test cannot share one.
+func diagnosisDecisionsDB(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+	admin := testPool(t)
+	psql := findPsql(t)
+	pool, dsn := disposableDB(t, admin)
+	for _, file := range migrationFiles(t) {
+		if err := applyMigration(t, psql, dsn, file); err != nil {
+			t.Fatalf("apply %s: %v", file, err)
+		}
+	}
+	return pool
+}
+
+// seedDiagnosisDecision inserts one decision and returns its id.
+func seedDiagnosisDecision(t *testing.T, pool *pgxpool.Pool) string {
+	t.Helper()
+	ctx := context.Background()
+
+	var orgID, projectID, groupID, decisionID string
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO orgs (name) VALUES ('immutability-org') RETURNING id`).Scan(&orgID); err != nil {
+		t.Fatalf("insert org: %v", err)
+	}
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO projects (org_id, name, github_repo, default_branch)
+		 VALUES ($1, 'immutability-proj', 'org/immutability', 'main') RETURNING id`,
+		orgID).Scan(&projectID); err != nil {
+		t.Fatalf("insert project: %v", err)
+	}
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO error_groups (project_id, fingerprint, title, first_seen, last_seen, status)
+		 VALUES ($1, 'fp-immutability', 'TypeError: boom', now(), now(), 'queued') RETURNING id`,
+		projectID).Scan(&groupID); err != nil {
+		t.Fatalf("insert error group: %v", err)
+	}
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO diagnosis_decisions
+		   (error_group_id, project_id, outcome, decision_reason, model, prompt_version)
+		 VALUES ($1, $2, 'code_fix', 'The cause is at src/App.vue:42', 'claude-sonnet-5', 'diagnosis-v1')
+		 RETURNING id`,
+		groupID, projectID).Scan(&decisionID); err != nil {
+		t.Fatalf("insert diagnosis decision: %v", err)
+	}
+	return decisionID
+}
+
+// A decision records what was decided and why, at a moment. The table was
+// documented as immutable with nothing enforcing it.
+func TestDiagnosisDecisionsAreImmutable(t *testing.T) {
+	pool := diagnosisDecisionsDB(t)
+	ctx := context.Background()
+	id := seedDiagnosisDecision(t, pool)
+
+	for _, tc := range []struct {
+		name string
+		sql  string
+	}{
+		{"update", `UPDATE diagnosis_decisions SET outcome = 'not_actionable' WHERE id = $1`},
+		{"delete", `DELETE FROM diagnosis_decisions WHERE id = $1`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := pool.Exec(ctx, tc.sql, id)
+			if err == nil {
+				t.Fatalf("expected %s to be rejected, but it succeeded", tc.name)
+			}
+			var pgErr *pgconn.PgError
+			if !errors.As(err, &pgErr) || pgErr.Code != "2F004" {
+				t.Fatalf("expected SQLSTATE 2F004, got %v", err)
+			}
+		})
+	}
+
+	// TRUNCATE bypasses row triggers entirely, so it needs its own statement trigger.
+	t.Run("truncate", func(t *testing.T) {
+		if _, err := pool.Exec(ctx, `TRUNCATE diagnosis_decisions`); err == nil {
+			t.Fatal("expected TRUNCATE to be rejected, but it succeeded")
+		}
+	})
 }

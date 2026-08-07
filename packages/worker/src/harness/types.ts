@@ -43,6 +43,8 @@ export interface AgentState {
   testsRan: boolean;
   gaveUp: boolean;
   giveUpReason?: { reason_code: string; reason_message: string; remediation: string };
+  /** Raw submit_diagnosis input. The caller derives routing and giveUpReason. */
+  submittedDiagnosis?: Record<string, unknown>;
   tokenUsage: { input: number; output: number; cacheRead: number; cacheWrite: number };
   /** File paths from the stack trace (relative, e.g. 'src/App.vue'). Empty = unknown scope. */
   stackTraceFiles: string[];

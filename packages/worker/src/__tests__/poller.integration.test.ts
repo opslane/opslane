@@ -11,6 +11,7 @@
  * separate commits).
  */
 import crypto from 'node:crypto';
+import { purgeDiagnosisDecisions } from './purge-diagnosis-decisions.js';
 import { describe, it, expect, beforeAll, afterEach, afterAll } from 'vitest';
 import pg from 'pg';
 import { createPoller } from '../poller.js';
@@ -111,6 +112,7 @@ describeDb('real poller under lease loss', () => {
   beforeAll(() => { pool = new pg.Pool({ connectionString: DATABASE_URL }); });
   afterEach(async () => {
     if (projectId) {
+      await purgeDiagnosisDecisions(pool, projectId);
       await pool.query(`DELETE FROM error_group_jobs WHERE project_id=$1`, [projectId]);
       await pool.query(`DELETE FROM error_groups WHERE project_id=$1`, [projectId]);
       await pool.query(`DELETE FROM projects WHERE id=$1`, [projectId]);

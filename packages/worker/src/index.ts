@@ -14,10 +14,10 @@ import {
   updateJobTraceUrl,
   getQueueDepth,
 } from './db.js';
-import { buildReason } from './reason-codes.js';
+import { buildReason, reasonCodeForDecision, reproductionRemediation } from './reason-codes.js';
 import { logger, safeErrorMessage, setWorkerId } from './logger.js';
 import { fetchObject, getMinIOConfig } from './minio-client.js';
-import { investigateError } from './investigate.js';
+import { INVESTIGATION_MODEL, investigateError } from './investigate.js';
 import { runPipeline } from './pipeline.js';
 import { createPoller } from './poller.js';
 import { buildRepoUrl, cloneFailureReason, cloneRepo } from './repo-clone.js';
@@ -47,6 +47,7 @@ import { VerificationInfraError } from './harness/errors.js';
 import { processCIWatchJob } from './ci-watch.js';
 import { effectivePlatform, pythonPipelineEnabled } from './platform.js';
 import { parseRuntimeInfo } from './runtime-info.js';
+import { parseDiagnosis } from './diagnosis-schema.js';
 
 /** Injectable seam: unit tests and the e2e gate substitute a deterministic
  * adjudicator; production uses the real Anthropic-backed one. */
@@ -531,8 +532,6 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
   }
 
   try {
-    const replay = await db.getReplayForGroup(job.errorGroupId, job.projectId);
-
     checkAbort(signal);
 
     // Run codebase-aware investigation
@@ -556,30 +555,66 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
     });
 
     const durationMs = Date.now() - jobStart;
+    const decision = {
+      outcome: triage.outcome,
+      decisionReason: triage.decisionReason,
+      causeLocation: triage.diagnosis?.cause_location ?? null,
+      diagnosis: triage.diagnosis,
+      model: INVESTIGATION_MODEL,
+      promptVersion: 'diagnosis-v1',
+      jobId: job.id,
+      // Persisted because the fix job loads this row to decide whether it may
+      // run at all, and outcome alone cannot answer that.
+      basis: triage.decisionBasis,
+      confidence: triage.confidence,
+    };
 
-    // Route based on investigation result
-    if (!triage.fixable && triage.confidence === 'high') {
-      // Definitely unfixable → needs_human with investigation results
+    /** Set when the result is held for a human instead of opening a fix job. */
+    let parked = false;
+    let kindGateRefusal: string | null = null;
+
+    if (triage.outcome === 'needs_more_context') {
       await updateGroupInvestigation(job.errorGroupId, job.projectId, 'needs_human', {
-        rootCause: triage.reason,
+        rootCause: triage.decisionReason,
         confidence: triage.confidence,
         reason: {
-          reason_code: triage.reason_code ?? 'triage_unfixable',
-          reason_message: triage.reason ?? 'Error classified as unfixable by investigation',
-          remediation: triage.remediation ?? 'Review the error manually',
+          reason_code: 'insufficient_context',
+          reason_message: triage.decisionReason,
+          remediation: 'Review the error manually; the investigation could not establish a cause.',
         },
+        decision,
       }, job);
       jobsFailed++;
-      logger.warn('Investigation: needs_human (unfixable)', {
+      logger.warn('Investigation: needs_human (no usable diagnosis)', {
         job_id: job.id, duration_ms: durationMs,
       });
-    } else if (triage.fixable && triage.confidence === 'high') {
-      // High confidence fixable → auto-trigger fix (atomic transaction)
+
+    } else if (triage.outcome === 'not_actionable') {
+      await updateGroupInvestigation(job.errorGroupId, job.projectId, 'insight', {
+        rootCause: triage.diagnosis?.one_line_description ?? triage.decisionReason,
+        confidence: triage.confidence,
+        reason: {
+          // Read the outcome, never the prose. Matching substrings of our own
+          // message meant rewording it silently changed the reason code.
+          reason_code: reasonCodeForDecision(decision),
+          reason_message: triage.decisionReason,
+          remediation: reproductionRemediation(
+            triage.diagnosis?.reproduction_steps ?? [],
+            'Investigate the named system; no reproduction steps were established.',
+          ),
+        },
+        decision,
+      }, job);
+      jobsProcessed++;
+      logger.info('Investigation: conclusion', { job_id: job.id, duration_ms: durationMs });
+
+    } else if (triage.confidence === 'high') {
       const fixResult = await updateGroupAndCreateFixJob(job.errorGroupId, job.projectId, {
-        rootCause: triage.reason,
-        suggestedMitigation: triage.remediation,
+        rootCause: triage.diagnosis?.one_line_description ?? triage.decisionReason,
+        diagnosis: triage.diagnosis,
         confidence: triage.confidence,
         platform,
+        decision,
       }, job);
       if (fixResult.created) {
         jobsProcessed++;
@@ -589,27 +624,31 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
       } else {
         // Defense-in-depth refusal (kind gate): park the result for a human
         // instead of silently dropping the investigation.
-        await updateGroupInvestigation(job.errorGroupId, job.projectId, 'investigated', {
-          rootCause: triage.reason,
-          suggestedMitigation: triage.remediation,
-          confidence: triage.confidence,
-        }, job);
-        jobsProcessed++;
-        logger.warn('Investigation: automatic fix refused by kind gate', {
-          job_id: job.id, reason: fixResult.reason, duration_ms: durationMs,
-        });
+        parked = true;
+        kindGateRefusal = fixResult.reason ?? 'refused';
       }
     } else {
-      // Medium/low confidence → investigated, wait for user
+      parked = true;
+    }
+
+    // Both parking paths write the same row and differ only in what they log,
+    // so the write happens once and the branch chooses the message.
+    if (parked) {
       await updateGroupInvestigation(job.errorGroupId, job.projectId, 'investigated', {
-        rootCause: triage.reason,
-        suggestedMitigation: triage.remediation,
+        rootCause: triage.diagnosis?.one_line_description ?? triage.decisionReason,
         confidence: triage.confidence,
+        decision,
       }, job);
       jobsProcessed++;
-      logger.info('Investigation: investigated (awaiting user)', {
-        job_id: job.id, confidence: triage.confidence, duration_ms: durationMs,
-      });
+      if (kindGateRefusal) {
+        logger.warn('Investigation: automatic fix refused by kind gate', {
+          job_id: job.id, reason: kindGateRefusal, duration_ms: durationMs,
+        });
+      } else {
+        logger.info('Investigation: investigated (awaiting user)', {
+          job_id: job.id, confidence: triage.confidence, duration_ms: durationMs,
+        });
+      }
     }
   } finally {
     await cleanup();
@@ -688,7 +727,6 @@ export async function processFrictionInvestigateJob(
         // refuse-by-default stays intact for every other caller (issue #56).
         const fixResult = await updateGroupAndCreateFixJob(job.errorGroupId, job.projectId, {
           rootCause: result.reason,
-          suggestedMitigation: result.remediation,
           confidence: result.confidence,
         }, job, { allowFriction: true });
         if (fixResult.created) {
@@ -701,7 +739,6 @@ export async function processFrictionInvestigateJob(
           // Never drop the investigation: park it for human approval instead.
           await updateGroupInvestigation(job.errorGroupId, job.projectId, 'awaiting_approval', {
             rootCause: result.reason,
-            suggestedMitigation: result.remediation,
             confidence: result.confidence,
           }, job);
           logger.warn('Friction investigation: auto-fix refused by kind gate — parked for approval', {
@@ -712,7 +749,6 @@ export async function processFrictionInvestigateJob(
       } else {
         await updateGroupInvestigation(job.errorGroupId, job.projectId, 'awaiting_approval', {
           rootCause: result.reason,
-          suggestedMitigation: result.remediation,
           confidence: result.confidence,
         }, job);
         logger.info('Friction investigation: awaiting human approval', {
@@ -994,6 +1030,7 @@ export async function processFixJob(job: ClaimedJob & { errorGroupId: string }, 
       abortSignal: signal,
       assertLeaseOwned: () => db.assertJobLease(job),
       kind: group.kind,
+      triggeredBy: job.triggeredBy,
       frictionEvidence: frictionEvidence
         ? JSON.stringify({
             signals: frictionEvidence.signals,
@@ -1014,7 +1051,12 @@ export async function processFixJob(job: ClaimedJob & { errorGroupId: string }, 
       } : null,
       investigation: investigation.rootCause ? {
         rootCause: investigation.rootCause,
-        suggestedMitigation: investigation.suggestedMitigation ?? '',
+        diagnosis: (() => {
+          if (!job.payload || typeof job.payload !== 'object' || Array.isArray(job.payload)) return null;
+          const raw = (job.payload as Record<string, unknown>)['diagnosis'];
+          if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+          return parseDiagnosis(raw as Record<string, unknown>);
+        })(),
         guidance: job.guidance ?? undefined,
       } : undefined,
       prPosture: project.pr_posture ?? 'verified_only',

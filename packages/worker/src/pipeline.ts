@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import type { NeedsHumanReason, ConfidenceLevel, EvidenceRecord } from '@opslane/shared';
+import type { Diagnosis, NeedsHumanReason, ConfidenceLevel, EvidenceRecord } from '@opslane/shared';
 import type { VisualAnalysisOutput } from './harness/types.js';
 import type { Platform } from './platform.js';
 import type { RuntimeInfo } from './runtime-info.js';
@@ -45,11 +45,13 @@ export interface PipelineInput {
   assertLeaseOwned?: () => Promise<void>;
   replay?: ReplayInput | null;
   kind?: 'error' | 'friction';
+  /** Who created the fix job. `human` authorises it past the persisted-decision gate. */
+  triggeredBy?: 'auto' | 'human' | null;
   frictionEvidence?: string;
   /** Pre-computed investigation results. When set, agent skips internal triage. */
   investigation?: {
     rootCause: string;
-    suggestedMitigation: string;
+    diagnosis?: Diagnosis | null;
     guidance?: string;
   };
   prPosture?: 'verified_only' | 'draft_when_unverified';
@@ -121,6 +123,7 @@ export async function runPipeline(input: PipelineInput): Promise<PipelineResult>
     abortSignal: input.abortSignal,
     frictionEvidence: input.frictionEvidence,
     kind: input.kind,
+    triggeredBy: input.triggeredBy,
     platform: input.platform,
     customerRuntime: input.customerRuntime,
   });

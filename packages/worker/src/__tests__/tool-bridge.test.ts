@@ -35,11 +35,25 @@ function makeState(): AgentState {
 }
 
 describe('createToolBridge', () => {
-  it('creates 8 tools (read, write, edit, bash, read_many, search, patch, give_up)', () => {
+  it('exposes submit_diagnosis, not give_up', () => {
+    const tools = createToolBridge(makeMockSandbox() as unknown as SandboxRuntime, makeState());
+    const names = tools.map((tool) => tool.name);
+    expect(names).toContain('submit_diagnosis');
+    expect(names).not.toContain('give_up');
+  });
+
+  it('takes no reason_code from the model', () => {
+    const tools = createToolBridge(makeMockSandbox() as unknown as SandboxRuntime, makeState());
+    const tool = tools.find((candidate) => candidate.name === 'submit_diagnosis')!;
+    const properties = tool.inputSchema['properties'] as Record<string, unknown>;
+    expect(properties['reason_code']).toBeUndefined();
+  });
+
+  it('creates the repository tools plus submit_diagnosis', () => {
     const sandbox = makeMockSandbox();
     const tools = createToolBridge(sandbox as unknown as SandboxRuntime, makeState());
     const names = tools.map(t => t.name).sort();
-    expect(names).toEqual(['bash', 'edit', 'give_up', 'patch', 'read', 'read_many', 'search', 'write']);
+    expect(names).toEqual(['bash', 'edit', 'patch', 'read', 'read_many', 'search', 'submit_diagnosis', 'write']);
   });
 
   it('read tool returns file contents from sandbox', async () => {
@@ -100,17 +114,83 @@ describe('createToolBridge', () => {
     expect(result).toContain('not found');
   });
 
-  it('give_up tool sets state.gaveUp and stores reason', async () => {
+  it('submit_diagnosis sets state.gaveUp and stores the raw diagnosis', async () => {
     const sandbox = makeMockSandbox();
     const state = makeState();
     const tools = createToolBridge(sandbox as unknown as SandboxRuntime, state);
-    const giveUpTool = tools.find(t => t.name === 'give_up')!;
-    await giveUpTool.execute({
-      reason_code: 'worker_runtime_error',
-      reason_message: 'CDN is down',
-      remediation: 'Check CDN status',
+    const diagnosisTool = tools.find(t => t.name === 'submit_diagnosis')!;
+    await diagnosisTool.execute({
+      one_line_description: 'The CDN is unavailable',
+      why_chain: ['Client requests asset', 'CDN does not respond', 'Request times out'],
+      reproduction_steps: ['Load the affected asset'],
+      cause_location: 'https://cdn.example.com/app.js',
+      change_counterfactual: 'No repository change makes the CDN respond',
     });
     expect(state.gaveUp).toBe(true);
-    expect(state.giveUpReason?.reason_code).toBe('worker_runtime_error');
+    expect(state.submittedDiagnosis?.['cause_location']).toBe('https://cdn.example.com/app.js');
+    expect(state.giveUpReason).toBeUndefined();
+  });
+});
+
+/**
+ * Repository containment is an authorization boundary and the bridge is where
+ * the write actually happens. `bash` is deliberately not covered: it can write
+ * anywhere and no tool-level check reaches it.
+ */
+describe('mutation tools are gated on the repository clone', () => {
+  const OUTSIDE = '/home/user/repo/../../etc/passwd';
+  const INSIDE = '/home/user/repo/client/src/AssetList.tsx';
+
+  function argsFor(tool: 'write' | 'edit' | 'patch', path: string): Record<string, unknown> {
+    if (tool === 'write') return { path, content: 'changed\n' };
+    if (tool === 'edit') return { path, old_string: 'def get(): pass', new_string: 'def get(): return 1' };
+    const relative = path.replace('/home/user/repo/', '');
+    return { diff: `--- a/${relative}\n+++ b/${relative}\n` };
+  }
+
+  for (const tool of ['write', 'edit', 'patch'] as const) {
+    it(`refuses ${tool} outside the repository, and does not touch the file`, async () => {
+      const sandbox = makeMockSandbox();
+      sandbox.files.read.mockResolvedValue('def get(): pass\n');
+      const tools = createToolBridge(sandbox as unknown as SandboxRuntime, makeState());
+
+      const result = await tools.find((t) => t.name === tool)!.execute(argsFor(tool, OUTSIDE));
+
+      expect(result).toContain('does not resolve inside the repository');
+      expect(sandbox.files.write).not.toHaveBeenCalled();
+      expect(sandbox.commands.run).not.toHaveBeenCalled();
+    });
+
+    it(`allows ${tool} inside the repository`, async () => {
+      const sandbox = makeMockSandbox();
+      sandbox.files.read.mockResolvedValue('def get(): pass\n');
+      sandbox.commands.run.mockResolvedValue({ exitCode: 0, stdout: 'patching file', stderr: '' });
+      const tools = createToolBridge(sandbox as unknown as SandboxRuntime, makeState());
+
+      const result = await tools.find((t) => t.name === tool)!.execute(argsFor(tool, INSIDE));
+
+      expect(result).not.toContain('does not resolve inside the repository');
+    });
+  }
+
+  it('refuses a patch whose targets it cannot read, rather than applying it blind', async () => {
+    const sandbox = makeMockSandbox();
+    const tools = createToolBridge(sandbox as unknown as SandboxRuntime, makeState());
+
+    const result = await tools.find((t) => t.name === 'patch')!.execute({ diff: 'not a diff at all\n' });
+
+    expect(result).toContain('Refusing to apply a patch');
+    expect(sandbox.commands.run).not.toHaveBeenCalled();
+  });
+
+  it('refuses a write that traverses out of the repository', async () => {
+    const sandbox = makeMockSandbox();
+    const tools = createToolBridge(sandbox as unknown as SandboxRuntime, makeState());
+
+    const result = await tools.find((t) => t.name === 'write')!
+      .execute({ path: '/home/user/repo/../../etc/passwd', content: 'x' });
+
+    expect(result).toContain('does not resolve inside the repository');
+    expect(sandbox.files.write).not.toHaveBeenCalled();
   });
 });
