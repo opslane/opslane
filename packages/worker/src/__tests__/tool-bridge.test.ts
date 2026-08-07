@@ -131,3 +131,66 @@ describe('createToolBridge', () => {
     expect(state.giveUpReason).toBeUndefined();
   });
 });
+
+/**
+ * The fix surface is an authorization boundary and the bridge is where the
+ * write actually happens. `bash` is deliberately not covered: it can write
+ * anywhere and no tool-level check reaches it.
+ */
+describe('mutation tools are gated on the fix surface', () => {
+  const SURFACE = { globs: ['client/**'] };
+  const OUTSIDE = '/home/user/repo/server/app/asset.py';
+  const INSIDE = '/home/user/repo/client/src/AssetList.tsx';
+
+  function argsFor(tool: 'write' | 'edit' | 'patch', path: string): Record<string, unknown> {
+    if (tool === 'write') return { path, content: 'changed\n' };
+    if (tool === 'edit') return { path, old_string: 'def get(): pass', new_string: 'def get(): return 1' };
+    return { diff: `--- a/${path.replace('/home/user/repo/', '')}\n+++ b/${path.replace('/home/user/repo/', '')}\n` };
+  }
+
+  for (const tool of ['write', 'edit', 'patch'] as const) {
+    it(`refuses ${tool} outside the surface, and does not touch the file`, async () => {
+      const sandbox = makeMockSandbox();
+      sandbox.files.read.mockResolvedValue('def get(): pass\n');
+      const tools = createToolBridge(sandbox as unknown as SandboxRuntime, makeState(), 'javascript', SURFACE);
+
+      const result = await tools.find((t) => t.name === tool)!.execute(argsFor(tool, OUTSIDE));
+
+      expect(result).toContain('outside the configured fix surface');
+      expect(sandbox.files.write).not.toHaveBeenCalled();
+      expect(sandbox.commands.run).not.toHaveBeenCalled();
+    });
+
+    it(`allows ${tool} inside the surface`, async () => {
+      const sandbox = makeMockSandbox();
+      sandbox.files.read.mockResolvedValue('def get(): pass\n');
+      sandbox.commands.run.mockResolvedValue({ exitCode: 0, stdout: 'patching file', stderr: '' });
+      const tools = createToolBridge(sandbox as unknown as SandboxRuntime, makeState(), 'javascript', SURFACE);
+
+      const result = await tools.find((t) => t.name === tool)!.execute(argsFor(tool, INSIDE));
+
+      expect(result).not.toContain('outside the configured fix surface');
+    });
+  }
+
+  it('refuses a patch whose targets it cannot read, rather than applying it blind', async () => {
+    const sandbox = makeMockSandbox();
+    const tools = createToolBridge(sandbox as unknown as SandboxRuntime, makeState(), 'javascript', SURFACE);
+
+    const result = await tools.find((t) => t.name === 'patch')!.execute({ diff: 'not a diff at all\n' });
+
+    expect(result).toContain('Refusing to apply a patch');
+    expect(sandbox.commands.run).not.toHaveBeenCalled();
+  });
+
+  it('refuses a write that traverses out of the repository', async () => {
+    const sandbox = makeMockSandbox();
+    const tools = createToolBridge(sandbox as unknown as SandboxRuntime, makeState(), 'javascript', { globs: null });
+
+    const result = await tools.find((t) => t.name === 'write')!
+      .execute({ path: '/home/user/repo/../../etc/passwd', content: 'x' });
+
+    expect(result).toContain('does not resolve inside the repository');
+    expect(sandbox.files.write).not.toHaveBeenCalled();
+  });
+});

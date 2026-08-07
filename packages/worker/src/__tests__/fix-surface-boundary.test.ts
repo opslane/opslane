@@ -2,7 +2,7 @@ import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { isInsideFixSurface, parseCauseLocation, resolveInsideRepo } from '../fix-surface.js';
+import { assertWritable, FixSurfaceViolation, isInsideFixSurface, parseCauseLocation, resolveInsideRepo } from '../fix-surface.js';
 
 let repo: string;
 
@@ -101,5 +101,48 @@ describe('citation forms models actually produce', () => {
   ])('parses %j as a repository path', (cited, path, line) => {
     const parsed = parseCauseLocation(cited);
     expect(parsed).toMatchObject(line === undefined ? { kind: 'repo_path', path } : { kind: 'repo_path', path, line });
+  });
+});
+
+describe('assertWritable', () => {
+  it('returns the resolved path for an existing file inside the surface', () => {
+    expect(assertWritable(repo, 'client/src/AssetList.tsx', { globs: ['client/**'] }))
+      .toBe('client/src/AssetList.tsx');
+  });
+
+  it('throws for an existing file outside the surface', () => {
+    expect(() => assertWritable(repo, 'server/app/asset.py', { globs: ['client/**'] }))
+      .toThrow(FixSurfaceViolation);
+  });
+
+  // Fixes create files. Gating only existing files would reject every new test
+  // file the fix agent writes, so a create resolves through its parent.
+  it('allows creating a new file whose parent directory is inside the surface', () => {
+    expect(assertWritable(repo, 'client/src/NewPanel.tsx', { globs: ['client/**'] }))
+      .toBe('client/src/NewPanel.tsx');
+  });
+
+  it('refuses creating a new file whose parent is outside the surface', () => {
+    expect(() => assertWritable(repo, 'server/app/new.py', { globs: ['client/**'] }))
+      .toThrow(FixSurfaceViolation);
+  });
+
+  it('refuses a create whose parent directory does not exist', () => {
+    expect(() => assertWritable(repo, 'client/nope/deep/New.tsx', { globs: ['client/**'] }))
+      .toThrow(FixSurfaceViolation);
+  });
+
+  it('throws when a symlinked directory inside the surface resolves outside it', async () => {
+    await symlink(join(repo, 'server'), join(repo, 'client/vendor'));
+
+    expect(() => assertWritable(repo, 'client/vendor/app/asset.py', { globs: ['client/**'] }))
+      .toThrow(FixSurfaceViolation);
+    // And the create path through the same symlink.
+    expect(() => assertWritable(repo, 'client/vendor/app/new.py', { globs: ['client/**'] }))
+      .toThrow(FixSurfaceViolation);
+  });
+
+  it('throws for a path escaping the repository', () => {
+    expect(() => assertWritable(repo, '../../etc/passwd', { globs: null })).toThrow(FixSurfaceViolation);
   });
 });

@@ -808,7 +808,7 @@ export async function runAgentFix(input: AgentFixInput): Promise<AgentFixResult>
           budgetUsd: input.budgetUsd ?? t.budgetUsd,
         }));
 
-        const tools = createToolBridge(sandbox, agentState, platform);
+        const tools = createToolBridge(sandbox, agentState, platform, input.fixSurface ?? { globs: null });
     const middleware = createDefaultMiddleware(sandbox);
     const systemPrompt = buildSystemPrompt(input, preloadedFiles);
 
