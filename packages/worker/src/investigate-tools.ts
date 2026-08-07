@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { readFile, readdir } from 'node:fs/promises';
+import { open, readdir } from 'node:fs/promises';
 import { normalize, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { grepExclusionArgs, isExcludedTraversalDirectory } from './harness/traversal-exclusions.js';
@@ -18,14 +18,6 @@ export function safePath(repoPath: string, requested: string): string | null {
     return null;
   }
   return resolved;
-}
-
-function truncate(s: string, max: number): string {
-  return s.length > max ? s.slice(0, max) + '... [truncated]' : s;
-}
-
-function runtimeLabel(value: string): string {
-  return value.replace(/[^A-Za-z0-9._+\- ]/g, '').trim().slice(0, 64) || 'unknown';
 }
 
 function addLineNumbers(content: string): string {
@@ -47,11 +39,22 @@ export async function executeReadFile(
   if (!resolved) return 'Error: path traversal blocked — path must be within the repository';
 
   try {
-    const content = await readFile(resolved, 'utf-8');
-    if (content.length > MAX_FILE_SIZE) {
-      return addLineNumbers(content.slice(0, MAX_FILE_SIZE)) + '\n... [truncated at 50KB]';
+    // Read a bounded window rather than the whole file, because the model picks
+    // the path: reading first and slicing to 50KB afterwards decoded a minified
+    // vendor bundle or a lockfile into a JS string in full — potentially
+    // hundreds of megabytes — inside the process that also runs sandbox and PR
+    // work, to produce the same 50KB of output.
+    const handle = await open(resolved, 'r');
+    try {
+      const buffer = Buffer.alloc(MAX_FILE_SIZE + 1);
+      const { bytesRead } = await handle.read(buffer, 0, MAX_FILE_SIZE + 1, 0);
+      const content = buffer.subarray(0, Math.min(bytesRead, MAX_FILE_SIZE)).toString('utf-8');
+      return bytesRead > MAX_FILE_SIZE
+        ? `${addLineNumbers(content)}\n... [truncated at 50KB]`
+        : addLineNumbers(content);
+    } finally {
+      await handle.close();
     }
-    return addLineNumbers(content);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     if (msg.includes('ENOENT')) return `Error: file not found: ${filePath}`;

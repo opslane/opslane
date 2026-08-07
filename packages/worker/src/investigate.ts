@@ -1,18 +1,25 @@
 import type { Adjudication, Diagnosis, DiagnosisOutcome } from '@opslane/shared';
 import { deriveOutcome, type DerivedDecision } from './classify.js';
 import { parseAdjudication, submitDiagnosisTool } from './diagnose-schema.js';
-import { resolveInsideRepo, type FixSurface } from './fix-surface.js';
+import { resolveInsideRepo } from './repo-paths.js';
 import { extractStackTraceFiles } from './harness/stack-trace-utils.js';
 import { logger } from './logger.js';
+import { fenced } from './prompt-fence.js';
 import type { Platform } from './platform.js';
-import { runReadOnlyAgent, type ReadOnlyStop } from './readonly-agent.js';
+import { runReadOnlyAgent, type ReadOnlyStop, type TokenUsage } from './readonly-agent.js';
 import type { RuntimeInfo } from './runtime-info.js';
 import { traceSpan } from './tracing.js';
 import type { TriageResult } from './agent-fix.js';
 
-export { executeListFiles, executeReadFile, executeSearch, safePath } from './investigate-tools.js';
-
-const INVESTIGATION_MODEL = process.env['INVESTIGATION_MODEL'] ?? 'claude-sonnet-5';
+/**
+ * The model the investigation actually runs on.
+ *
+ * Exported because the decision row records which model produced the decision,
+ * and that row is immutable. index.ts previously re-derived it with its own
+ * default, so an unset INVESTIGATION_MODEL wrote a permanent claim that a
+ * different model ran than the one that did.
+ */
+export const INVESTIGATION_MODEL = process.env['INVESTIGATION_MODEL'] ?? 'claude-sonnet-5';
 const MAX_TURNS = Number(process.env['INVESTIGATION_MAX_TURNS'] ?? 10);
 /**
  * Turns are the budget the agent works against, and the number is stated to it
@@ -32,7 +39,10 @@ const MAX_BREADCRUMBS = 4000;
 
 const MODEL_PRICING: Record<string, { input: number; output: number; cacheWrite: number; cacheRead: number }> = {
   'claude-sonnet-4-6': { input: 3, output: 15, cacheWrite: 3.75, cacheRead: 0.30 },
-  'claude-sonnet-5': { input: 3, output: 15, cacheWrite: 3.75, cacheRead: 0.30 },
+  // Sonnet 5's introductory rate, $2/$10, runs through 2026-08-31. List is
+  // $3/$15. Every eval cost figure is computed from this table, so the list
+  // price overstated what the runs actually cost by half.
+  'claude-sonnet-5': { input: 2, output: 10, cacheWrite: 2.50, cacheRead: 0.20 },
   'claude-haiku-4-5-20251001': { input: 1, output: 5, cacheWrite: 1.25, cacheRead: 0.10 },
 };
 const DEFAULT_PRICING = { input: 3, output: 15, cacheWrite: 3.75, cacheRead: 0.30 };
@@ -67,23 +77,28 @@ export interface InvestigationResult extends TriageResult {
    * undercount exactly the runs the eval most needs to price.
    */
   costUsd: number;
+  /**
+   * Token counts for the run, cache reads and writes separated. Carried so the
+   * cache-hit rate is observable: `costUsd` alone cannot say whether prompt
+   * caching is working.
+   */
+  usage: TokenUsage;
+  /**
+   * How the agent loop ended. `terminal` is the only one that produced an
+   * answer; the rest are execution failures.
+   *
+   * Exposed because the caller cannot otherwise tell a rate limit from a
+   * refusal: the loop catches transport errors and returns `api_error`, which
+   * this function converts to `needs_more_context`. The eval runners retried
+   * only on a thrown exception, so a 429 was scored as the agent declining to
+   * answer, and the retry policy that is supposed to match the arms never fired
+   * on ours.
+   */
+  stop: ReadOnlyStop;
 }
 
 function truncate(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max)}... [truncated]` : text;
-}
-
-/**
- * Neutralise fence-closing tags before text goes inside one.
- *
- * JSON.stringify escapes quotes and backslashes but not the literal
- * `</untrusted_data>`, so a crafted error message quoted into the evidence
- * block would terminate the fence early and the rest would read as
- * instructions. This prompt is what authorises code changes downstream, so
- * this is the boundary that matters.
- */
-function fenced(text: string, max: number): string {
-  return truncate(text, max).replace(/<\/?untrusted_(data|user_data)>/gi, '[fence]');
 }
 
 function runtimeLabel(value: string): string {
@@ -150,7 +165,7 @@ evidence you actually read. Rules:
 - Rate the evidence honestly. Reserve "conclusive" for a conclusion whose every premise you verified from evidence you read. If a decisive premise rests on runtime state you cannot observe, such as a query plan, index, table size, deployed configuration or backend load, the most you may answer is "suggestive".
 - List every cause you weighed in candidates_considered, including the one you chose.
 - If you conclude the cause is outside this codebase, reject every local candidate by name in "rejected". A conclusion reached instead of the local candidates rather than against them will not be acted on.
-- In cause_locations, the FIRST entry is your claim and the only one we act on. Put the file you are most confident about first. Extra entries do not improve your answer.
+- In cause_locations, the FIRST entry is your claim and the only one we act on. Put the file you are most confident about first. path is the bare repository path with no line numbers and no parentheses; put line numbers in the line field and any explanation in the note field. Extra entries do not improve your answer.
 
 ${evidenceBlock(input)}`;
 }
@@ -166,12 +181,21 @@ function stopReason(stop: ReadOnlyStop, stage: string): string {
       return `${stage} ended without submitting`;
     case 'turns_exhausted':
       return `${stage} ran out of turns`;
+    case 'truncated':
+      return `${stage} hit the output token ceiling mid-answer`;
     default:
       return `${stage} did not complete`;
   }
 }
 
-function failed(reason: string, filesRead: string[], findings: string): InvestigationResult {
+const NO_USAGE: TokenUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+
+function failed(
+  reason: string,
+  filesRead: string[],
+  findings: string,
+  stop: ReadOnlyStop,
+): InvestigationResult {
   return {
     fixable: false,
     confidence: 'low',
@@ -184,20 +208,21 @@ function failed(reason: string, filesRead: string[], findings: string): Investig
     filesRead,
     findings,
     costUsd: 0,
+    usage: NO_USAGE,
+    stop,
   };
 }
 
 /**
  * One agent over one repository clone: enumerate the candidate causes and
  * submit the one the evidence supports. Routing is derived in code from the
- * submitted location, the evidence strength and the project's fix surface, so
- * the agent never names an outcome.
+ * submitted location and the evidence strength, so the agent never names an
+ * outcome.
  */
 export async function investigateError(
   apiKey: string,
   input: InvestigateInput,
   repoPath: string,
-  surface: FixSurface,
 ): Promise<InvestigationResult> {
   const pricing = MODEL_PRICING[INVESTIGATION_MODEL] ?? DEFAULT_PRICING;
   const spendCeilingUsd = Number(process.env['INVESTIGATION_BUDGET_USD'] ?? DEFAULT_SPEND_CEILING_USD);
@@ -220,7 +245,6 @@ export async function investigateError(
         `the evidence supports rather than running out.${hints}`,
       terminalTool: submitDiagnosisTool(),
       repoPath,
-      spanPrefix: 'diagnose',
     }));
 
   const filesRead = run.filesRead;
@@ -229,7 +253,11 @@ export async function investigateError(
   if (run.stop !== 'terminal') {
     // Cost is carried on EVERY return path. Dropping it here would undercount
     // exactly the failed and retried runs the eval most needs to price.
-    return { ...failed(stopReason(run.stop, 'Investigation'), filesRead, run.lastModelText), costUsd };
+    return {
+      ...failed(stopReason(run.stop, 'Investigation'), filesRead, run.lastModelText, run.stop),
+      costUsd,
+      usage: run.usage,
+    };
   }
 
   const adjudication = parseAdjudication(run.terminalInput ?? {});
@@ -242,16 +270,14 @@ export async function investigateError(
     });
   }
 
-  const decision = deriveOutcome(adjudication, surface, (cited) => resolveInsideRepo(repoPath, cited), {
-    allowUnrestrictedSurface: process.env['ALLOW_UNRESTRICTED_FIX_SURFACE'] === '1',
-  });
+  const decision = deriveOutcome(adjudication, (cited) => resolveInsideRepo(repoPath, cited));
 
   const diagnosis: Diagnosis | null = adjudication
     ? {
       one_line_description: adjudication.best_supported,
       why_chain: adjudication.why_chain,
       reproduction_steps: adjudication.reproduction_steps,
-      cause_location: adjudication.cause_locations.join(', '),
+      cause_location: adjudication.cause_locations.map((l) => l.path).join(', '),
     }
     : null;
 
@@ -259,9 +285,19 @@ export async function investigateError(
     'investigation.outcome': decision.outcome,
     'investigation.confidence': decision.confidence,
     'investigation.strength': adjudication?.evidence_strength ?? 'none',
-    'investigation.cause_location': adjudication?.cause_locations.join(', ') ?? '',
+    'investigation.cause_location': adjudication?.cause_locations.map((l) => l.path).join(', ') ?? '',
     'investigation.files_read': filesRead.join(','),
     'investigation.cost_usd': costUsd,
+    'investigation.stop': run.stop,
+    // The cache figures, not just the dollar total. A cost number cannot answer
+    // whether prompt caching is working — these were computed on every run and
+    // then dropped, so the one measurement that would catch a broken cache
+    // prefix was invisible. Reads well below input after the first turn means
+    // the prefix is being rewritten rather than hit.
+    'investigation.input_tokens': run.usage.input,
+    'investigation.output_tokens': run.usage.output,
+    'investigation.cache_read_tokens': run.usage.cacheRead,
+    'investigation.cache_write_tokens': run.usage.cacheWrite,
   }, async () => undefined);
 
   return {
@@ -278,5 +314,7 @@ export async function investigateError(
     // terminal tool call may carry no accompanying text at all.
     findings: run.lastModelText || adjudication?.reasoning || '',
     costUsd,
+    usage: run.usage,
+    stop: run.stop,
   };
 }
