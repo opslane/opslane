@@ -67,10 +67,9 @@ Ingestion reads **only** the `REPLAY_STORE_*` names; `MINIO_*` names appear in i
 | `INGESTION_BASE_URL` | for session replay evidence | Base URL used to fetch decoded, re-redacted session chunks from ingestion |
 | `INTERNAL_READ_TOKEN` | for session replay evidence | Shared secret sent to ingestion as `X-Internal-Token` |
 | `ANTHROPIC_API_KEY` | for investigation | Claude API access; missing → `missing_llm_key` outcomes |
-| `INVESTIGATION_MODEL` | no (`claude-sonnet-4-6`) | Anthropic model used by the codebase-aware diagnosis pass. Unknown model names use the default pricing estimate for budget enforcement. |
+| `INVESTIGATION_MODEL` | no (`claude-sonnet-5`) | Anthropic model used by the codebase-aware diagnosis pass. Unknown model names use the default pricing estimate for budget enforcement. |
 | `INVESTIGATION_MAX_TURNS` | no (10) | Maximum tool-use turns allowed for one diagnosis pass. |
 | `INVESTIGATION_BUDGET_USD` | no (2.00) | Estimated model-spend ceiling in USD for the investigation. It is a runaway backstop, not the operating budget: turns are what the agent paces itself against. Exceeding it fails closed as `needs_more_context`; it never becomes a conclusion. |
-| `ALLOW_UNRESTRICTED_FIX_SURFACE` | unset | Set to `1` to authorise fixes for projects with no `fix_surface_globs` configured, which makes the entire repository writable. Unset, such projects route to `needs_more_context`. |
 | `E2B_API_KEY` | for verification | Sandbox where fixes are tested |
 | `GITHUB_TOKEN` | one of the two GitHub modes | PAT for clone + PR |
 | `GITHUB_APP_ID` / `GITHUB_APP_PRIVATE_KEY` | the other mode | GitHub App installation tokens |

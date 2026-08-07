@@ -18,6 +18,16 @@ const git = (cwd, ...args) => execFileSync('git', ['-C', cwd, ...args], { encodi
  * a spot check that it held, not a proof of it.
  */
 export function cloneAtBase(repoUrl, baseSha, fixSha, root = DEFAULT_ROOT) {
+  // Both SHAs land in a directory name that is later rmSync'd recursively, and
+  // as positional git arguments. `base_sha: '../../../../'` would delete the
+  // filesystem root; `--upload-pack=...` would be parsed as a git option.
+  // Neither field is validated anywhere upstream, so validate here.
+  for (const [name, value] of [['base_sha', baseSha], ['fix_sha', fixSha]]) {
+    if (!/^[0-9a-f]{40}$/.test(String(value ?? ''))) {
+      throw new Error(`${name} must be a full 40-character hex object id, got ${JSON.stringify(value)}`);
+    }
+  }
+
   const slug = repoUrl.replace(/[^\w.-]+/g, '__');
   const dir = join(root, `${slug}-${baseSha.slice(0, 12)}`);
   const marker = `${dir}.single-commit`;

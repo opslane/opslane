@@ -5,17 +5,25 @@ describe('scoreCase', () => {
   const truth = ['packages/ui/signature-render.tsx'];
 
   it('scores the first citation', () => {
-    expect(scoreCase(['packages/ui/signature-render.tsx', 'other.ts'], truth).hit).toBe(true);
+    expect(scoreCase([{ path: 'packages/ui/signature-render.tsx' }, { path: 'other.ts' }], truth).hit).toBe(true);
   });
 
   // The prompt asks for every file expected to change and the old scorer counted
   // a hit if ANY matched, so padding the list raised the score for free.
   it('does not count a match found only in a trailing citation', () => {
-    expect(scoreCase(['wrong.ts', 'packages/ui/signature-render.tsx'], truth).hit).toBe(false);
+    expect(scoreCase([{ path: 'wrong.ts' }, { path: 'packages/ui/signature-render.tsx' }], truth).hit).toBe(false);
   });
 
-  it('matches on a path suffix and strips a line number', () => {
-    expect(scoreCase(['signature-render.tsx:42'], truth).hit).toBe(true);
+  it('matches on a path suffix', () => {
+    expect(scoreCase([{ path: 'signature-render.tsx', line: 42 }], truth).hit).toBe(true);
+  });
+
+  // The scorer and the router must read the same field. When the scorer split a
+  // decorated string itself, it reported a HIT on a case the router had sent to
+  // needs_more_context, hiding a real regression for a whole run.
+  it('reads the same `path` field the router reads', () => {
+    expect(scoreCase([{ path: 'packages/ui/signature-render.tsx', note: 'anything' }], truth).primary)
+      .toBe('packages/ui/signature-render.tsx');
   });
 
   it('handles no citations', () => {

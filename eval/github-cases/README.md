@@ -26,26 +26,40 @@ something. Ground truth is the file list.
 
 ```bash
 export ANTHROPIC_API_KEY=...
-node run.mjs                       # first 3 cases
+node run.mjs                       # every case in cases.jsonl
 node run.mjs "" 10                 # first 10
 node run.mjs "axios/axios#11070"   # one case
+CASES=cases-apps.jsonl node run.mjs   # a different corpus file
 ```
 
-Repositories are cloned blobless into `/tmp/opslane-gheval-repos` and checked
-out at the pre-fix commit. Results land in `results.json`.
+`run-sdk.mjs` takes the same arguments and the same `CASES` variable, and shares
+its case loading, retry policy and report with `run.mjs` through `harness.mjs`.
+The retry policy lives there and nowhere else: when it was copied per runner the
+two arms drifted and the comparison stopped being matched.
+
+The default is the whole file. A subset run prints `PARTIAL RUN: n of N cases`
+in the report body, so it cannot be mistaken for a corpus result.
+
+Each repository is fetched at **exactly one commit** (`--depth 1` of
+`base_sha`) into `/tmp/opslane-gheval-repos`. The earlier blobless clone fetched
+every ref, which made the merged fix reachable from the working tree; the runner
+now also asserts that `fix_sha` does not resolve and refuses to run if it does.
+Results land in `results.json`.
 
 ## Reading the score
 
-`LOCATED THE FIXED FILE` is the headline, but it is a floor, not a ceiling. A
-miss can still be a good diagnosis: axios #6721 was scored a miss for citing
+`HIT RATE` is the headline, but it is a floor, not a ceiling. It scores the
+**first** citation only: the prompt says the first entry is the claim, so a
+padded list cannot buy a hit. A miss can still be a good diagnosis: axios #6721 was scored a miss for citing
 `lib/adapters/fetch.js:556`, the site that re-throws, when the fix landed in
 `lib/core/AxiosError.js`. That is the failure this whole design targets, naming
 where the error surfaced instead of where it was caused, and it is worth a human
 reading rather than a number.
 
-`ANSWERED` is reported separately on purpose. A run that never reached
-adjudication is a harness or rate-limit problem, not a wrong answer, and folding
-the two together makes the agent look worse than it is.
+The report gives both denominators (`hits/ran` and `hits/answered`) and splits
+`REFUSALS` into `insufficient` and `no adjudication`, on purpose. A run that
+never submitted a diagnosis is a harness or rate-limit problem, not a wrong
+answer, and folding the two together makes the agent look worse than it is.
 
 ## Comparing against the Claude Agent SDK
 
@@ -60,6 +74,10 @@ answers. Hit rate therefore measures willingness to commit as much as it
 measures diagnosis quality, and the two harnesses are not tuned to the same
 point on that trade.
 
-Turn budgets are not matched by default (the SDK gets 30, ours 10 plus 8). Raise
-ours with `INVESTIGATION_MAX_TURNS` and `ADJUDICATION_MAX_TURNS` if you want a
+Retries are matched: both arms get at most 3 attempts per case, retried only on
+a transport or rate-limit failure, and every attempt's cost is counted.
+
+Turn budgets are not matched by default (the SDK gets 30, ours 10 — the
+adjudication pass and its separate budget were retired with the two-agent
+split). Set `INVESTIGATION_MAX_TURNS` and `SDK_MAX_TURNS` if you want a
 controlled comparison.

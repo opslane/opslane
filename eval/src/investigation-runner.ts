@@ -1,5 +1,4 @@
 import type { DiagnosisOutcome } from '@opslane/shared';
-import type { FixSurface } from '@opslane/worker/dist/fix-surface.js';
 import { investigateError } from '@opslane/worker/dist/investigate.js';
 import type { EvalCase } from './types.js';
 
@@ -37,7 +36,6 @@ export interface InvestigationCaseResult {
 export async function runInvestigationCase(
   evalCase: EvalCase,
   repoPath: string,
-  surface: FixSurface,
   trials: number,
 ): Promise<InvestigationCaseResult> {
   const apiKey = process.env['ANTHROPIC_API_KEY'];
@@ -60,7 +58,7 @@ export async function runInvestigationCase(
       stackTrace: evalCase.error_event.error.stack,
       resolvedStackTrace: null,
       breadcrumbs: JSON.stringify(evalCase.error_event.breadcrumbs),
-    }, repoPath, surface);
+    }, repoPath);
     got.push(result.outcome);
     causeLocations.push(result.diagnosis?.cause_location ?? null);
   }

@@ -13,8 +13,12 @@ const SPLIT = JSON.parse(readFileSync(join(HERE, 'holdout.json'), 'utf8'));
  * shipped in the same commit, so lengthening the list raised the expected score
  * without improving diagnosis.
  */
-export function scoreCase(citations, groundTruth) {
-  const primary = (citations[0] ?? '').split(':')[0].replace(/^\.?\//, '') || null;
+export function scoreCase(locations, groundTruth) {
+  // Takes the SAME structured locations routing takes, and reads the same field.
+  // When this split a decorated string itself it scored a HIT on a case routing
+  // sent to needs_more_context, so the eval reported a fix that production
+  // would never have produced.
+  const primary = (locations[0]?.path ?? '').replace(/^\.?\//, '') || null;
   if (!primary) return { hit: false, primary: null };
   const hit = groundTruth.some((f) => f === primary || f.endsWith(`/${primary}`) || primary.endsWith(`/${f}`));
   return { hit, primary };

@@ -24,12 +24,6 @@ async function main(): Promise<void> {
     throw new Error(`--trials must be a positive integer, got ${JSON.stringify(trialsText)}`);
   }
 
-  const surfaceText = option(args, '--surface');
-  const surface = {
-    globs: surfaceText
-      ? surfaceText.split(',').map((glob) => glob.trim()).filter(Boolean)
-      : null,
-  };
   const casesDir = path.join(EVAL_ROOT, 'cases');
   const entries = await readdir(casesDir, { withFileTypes: true });
   const hardCases = entries
@@ -40,7 +34,7 @@ async function main(): Promise<void> {
   console.log('id | expected | passes/trials | cause_location per trial');
   for (const caseName of hardCases) {
     const evalCase = await loadCase(path.join(casesDir, caseName));
-    const result = await runInvestigationCase(evalCase, repoPath, surface, trials);
+    const result = await runInvestigationCase(evalCase, repoPath, trials);
     console.log(
       `${result.id} | ${result.expected} | ${result.passes}/${result.trials} | ` +
       result.causeLocations.map((location) => location ?? '(none)').join(' ; '),
