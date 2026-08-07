@@ -947,6 +947,10 @@ export async function runAgentFix(input: AgentFixInput): Promise<AgentFixResult>
             declined,
             input.fixSurface ?? { globs: null },
             (cited) => (trackedFiles.has(cited) ? cited : null),
+            // This path only classifies a decline the agent already made; it
+            // authorises nothing, so an unconfigured surface must not turn the
+            // decline into needs_more_context and lose the agent's account.
+            { allowUnrestrictedSurface: true },
           );
           const reasonCode: ReasonCode = decision.outcome === 'not_actionable'
             ? (decision.reason.includes('outside the configured fix surface')

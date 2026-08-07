@@ -14,6 +14,11 @@ import { investigateError, safePath } from '../investigate.js';
 import type { InvestigateInput } from '../investigate.js';
 
 let tempDir: string;
+/**
+ * These tests are about routing, not about the unconfigured-surface policy, so
+ * they enable the escape hatch explicitly in beforeEach. The refusal it exists
+ * to produce has its own case at the bottom of this file.
+ */
 const WHOLE_REPO = { globs: null };
 
 function makeInput(overrides?: Partial<InvestigateInput>): InvestigateInput {
@@ -76,6 +81,7 @@ function happyPath(overrides: Record<string, unknown> = {}): void {
 
 beforeEach(async () => {
   vi.clearAllMocks();
+  process.env['ALLOW_UNRESTRICTED_FIX_SURFACE'] = '1';
   tempDir = await mkdtemp(join(tmpdir(), 'investigate-test-'));
   await mkdir(join(tempDir, 'src', 'components'), { recursive: true });
   await writeFile(join(tempDir, 'src', 'App.vue'), '<template><div>{{ items.map(i => i.name) }}</div></template>');
@@ -86,6 +92,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   delete process.env['INVESTIGATION_BUDGET_USD'];
+  delete process.env['ALLOW_UNRESTRICTED_FIX_SURFACE'];
   await rm(tempDir, { recursive: true, force: true });
 });
 
@@ -283,5 +290,17 @@ describe('untrusted text cannot break out of its fence', () => {
     const closes = (prompt.match(/<\/untrusted_data>/g) ?? []).length;
     expect(closes).toBe(opens);
     expect(prompt).toContain('[fence]');
+  });
+});
+
+describe('an unconfigured fix surface fails closed', () => {
+  it('refuses a code fix when nothing authorises a path for writing', async () => {
+    delete process.env['ALLOW_UNRESTRICTED_FIX_SURFACE'];
+    happyPath();
+
+    const result = await investigateError('key', makeInput(), tempDir, { globs: null });
+
+    expect(result.outcome).toBe('needs_more_context');
+    expect(result.decisionBasis).toBe('no_fix_surface_configured');
   });
 });

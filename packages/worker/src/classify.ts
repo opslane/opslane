@@ -17,7 +17,8 @@ export interface DerivedDecision {
     | 'unrejected_local_candidates'
     | 'uncitable_local_claim'
     | 'citation_unresolvable'
-    | 'outside_fix_surface'
+    | 'no_fix_surface_configured'
+    | 'primary_outside_fix_surface'
     | 'in_surface_defect';
   /**
    * Only `high` opens a pull request unattended. It now comes from the
@@ -39,6 +40,16 @@ function confidenceFor(strength: Adjudication['evidence_strength']): 'high' | 'm
   return 'low';
 }
 
+/** Routing policy, passed in so this function stays pure and testable. */
+export interface RoutingPolicy {
+  /**
+   * Whether a project with no configured fix surface may still be fixed. A null
+   * glob list makes the whole repository writable, so this defaults to false at
+   * the call site and exists as an explicit escape hatch, not an accident.
+   */
+  allowUnrestrictedSurface: boolean;
+}
+
 /**
  * Derive routing from the adjudicated cause and the configured fix surface.
  * Pure: same inputs, same answer, no model and no I/O. `fileExists` is injected
@@ -58,12 +69,7 @@ export function deriveOutcome(
    * resolved to `server/app.py` and still matched a `client/**` surface.
    */
   resolvePath: (cited: string) => string | null,
-  /**
-   * How many hypotheses in the dossier claimed a cause in code we hold. Used to
-   * require that an external conclusion was reached against them, not instead
-   * of them.
-   */
-  localCandidates = 0,
+  policy: RoutingPolicy,
 ): DerivedDecision {
   if (!adjudication) {
     return {
@@ -99,79 +105,89 @@ export function deriveOutcome(
     };
   }
 
-  const firstLocation = adjudication.cause_locations[0] ?? '';
-
   if (adjudication.cause_kind === 'external_system' || adjudication.cause_kind === 'data_or_input') {
-    // A conclusion cannot be verified from the repository: we cannot prove a
-    // remote service was slow. What we can require is that it was reached
-    // against the alternatives rather than instead of them. Concluding
-    // "external" while the dossier held a supported local candidate that was
-    // never rejected is how a model escapes the work of reading the code.
-    if (localCandidates > 0 && adjudication.rejected.length === 0) {
+    // We cannot verify from the repository that a remote service was slow. What
+    // we can require is that the conclusion was reached against the local
+    // alternatives rather than instead of them.
+    //
+    // The previous version only checked `rejected` was non-empty, so rejecting
+    // one irrelevant candidate satisfied it. Check each local candidate by name.
+    const locals = adjudication.candidates_considered.filter(
+      (candidate) => candidate.kind === 'local_code' || candidate.kind === 'configuration',
+    );
+    const rejectedText = adjudication.rejected.join('\n').toLowerCase();
+    const unrejected = locals.filter((candidate) => !rejectedText.includes(candidate.statement.toLowerCase()));
+
+    if (unrejected.length > 0) {
       return {
         outcome: 'needs_more_context',
         reason:
-          `The adjudication concluded the cause is external without rejecting ` +
-          `${localCandidates} local candidate(s) the dossier raised`,
+          `The investigation concluded the cause is external without rejecting ` +
+          `${unrejected.map((c) => JSON.stringify(c.statement)).join(', ')}`,
         basis: 'unrejected_local_candidates',
         confidence: 'low',
       };
     }
     return {
       outcome: 'not_actionable',
-      reason: `The cause is outside this codebase: ${firstLocation || adjudication.best_supported}`,
+      reason: `The cause is outside this codebase: ${adjudication.cause_locations[0] ?? adjudication.best_supported}`,
       basis: 'cause_outside_codebase',
       confidence: confidenceFor(adjudication.evidence_strength),
     };
   }
 
-  // local_code and configuration claim a defect we hold, so at least one
-  // citation has to resolve to a real file inside the surface before this
-  // authorises anything. Every citation is considered: a fix that touches two
-  // files, one of them ours, is still a fix we can attempt.
-  const cited = adjudication.cause_locations
-    .map((entry) => parseCauseLocation(entry))
-    .flatMap((parsed) => (parsed.kind === 'repo_path' ? [parsed.path] : []));
+  // A project with no configured surface makes the whole repository writable.
+  // That was previously a log line standing next to an authorised fix.
+  if (surface.globs === null && !policy.allowUnrestrictedSurface) {
+    return {
+      outcome: 'needs_more_context',
+      reason: 'No fix surface is configured for this project, so no path is authorised for writing',
+      basis: 'no_fix_surface_configured',
+      confidence: 'low',
+    };
+  }
 
-  if (cited.length === 0) {
+  // The FIRST citation is the claim. Do not search the list for one that
+  // happens to parse or happens to land in-surface: "any citation authorises"
+  // is the hole this replaces, and scanning past an unparseable first entry
+  // reopens it in a different shape.
+  const primary = parseCauseLocation(adjudication.cause_locations[0] ?? '');
+
+  if (primary.kind !== 'repo_path') {
     return {
       outcome: 'needs_more_context',
       reason:
-        `The adjudication claims a ${adjudication.cause_kind} cause but cited no checkable ` +
-        `file: ${JSON.stringify(adjudication.cause_locations)}`,
+        `The investigation claims a ${adjudication.cause_kind} cause but its first citation ` +
+        `is not a checkable file: ${JSON.stringify(adjudication.cause_locations[0] ?? null)}`,
       basis: 'uncitable_local_claim',
       confidence: 'low',
     };
   }
 
-  const resolved = cited.map((path) => ({ path, real: resolvePath(path) }));
-  const existing = resolved.filter((entry): entry is { path: string; real: string } => entry.real !== null);
-
-  if (existing.length === 0) {
+  const resolved = resolvePath(primary.path);
+  if (resolved === null) {
     return {
       outcome: 'needs_more_context',
-      reason: `The adjudication cites ${cited.join(', ')}, none of which resolve to a file in the checked-out repository`,
+      reason: `The investigation cites ${primary.path}, which does not resolve to a file in the checked-out repository`,
       basis: 'citation_unresolvable',
       confidence: 'low',
     };
   }
 
-  // Match globs against RESOLVED paths. Matching the cited string is what let a
-  // symlink inside the surface authorise a write outside it.
-  const inSurface = existing.filter((entry) => isInsideFixSurface(entry.real, surface));
-
-  if (inSurface.length === 0) {
+  // Match the glob against the RESOLVED path, never the cited string: a symlink
+  // inside the surface pointing outside it would otherwise authorise the write.
+  if (!isInsideFixSurface(resolved, surface)) {
     return {
       outcome: 'not_actionable',
-      reason: `The cause is at ${existing.map((entry) => entry.real).join(', ')}, outside the configured fix surface`,
-      basis: 'outside_fix_surface',
+      reason: `The primary cause is at ${resolved}, outside the configured fix surface`,
+      basis: 'primary_outside_fix_surface',
       confidence: confidenceFor(adjudication.evidence_strength),
     };
   }
 
   return {
     outcome: 'code_fix',
-    reason: `The cause is at ${inSurface.map((entry) => entry.real).join(', ')}`,
+    reason: `The cause is at ${resolved}`,
     basis: 'in_surface_defect',
     confidence: confidenceFor(adjudication.evidence_strength),
   };

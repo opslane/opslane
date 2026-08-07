@@ -242,15 +242,9 @@ export async function investigateError(
     });
   }
 
-  const localCandidates = (adjudication?.candidates_considered ?? []).filter(
-    (candidate) => candidate.kind === 'local_code' || candidate.kind === 'configuration',
-  ).length;
-  const decision = deriveOutcome(
-    adjudication,
-    surface,
-    (cited) => resolveInsideRepo(repoPath, cited),
-    localCandidates,
-  );
+  const decision = deriveOutcome(adjudication, surface, (cited) => resolveInsideRepo(repoPath, cited), {
+    allowUnrestrictedSurface: process.env['ALLOW_UNRESTRICTED_FIX_SURFACE'] === '1',
+  });
 
   const diagnosis: Diagnosis | null = adjudication
     ? {
@@ -269,12 +263,6 @@ export async function investigateError(
     'investigation.files_read': filesRead.join(','),
     'investigation.cost_usd': costUsd,
   }, async () => undefined);
-
-  if (decision.outcome === 'code_fix' && surface.globs === null) {
-    logger.warn('Fix authorised with no fix surface configured: the whole repository is writable', {
-      cause_location: adjudication?.cause_locations.join(', '),
-    });
-  }
 
   return {
     fixable: decision.outcome === 'code_fix',
