@@ -126,15 +126,19 @@ untouched.
 
 ### Score job (Go, in ingestion)
 
-A ticker recomputes all groups per project every 30 minutes in plain SQL
-and writes onto `error_groups`:
+A ticker recomputes all open groups (status not in resolved/merged/
+archived — closed groups keep their last score, which no list surface
+reads) per project every 30 minutes in plain SQL and writes onto
+`error_groups`:
 
 - `priority_score REAL`
 - `priority_scored_at TIMESTAMPTZ` — so the UI can distinguish "not yet
   scored" from "genuinely zero impact"
 - `priority_inputs JSONB` with a fixed shape:
   `{users_7d, anon_sessions_7d, users_24h, anon_sessions_24h, impact,
-  route_pattern, route_tier, route_weight, cap_applied, reason_code}`
+  route_pattern, route_name, route_tier, route_weight, cap_applied,
+  reason_code}` (route_name/route_tier are null until a route map row
+  matches; cap_applied is always a boolean, never null)
 
 All ordering uses `COALESCE(priority_score, 0)` so a group created
 between ticks joins the zero-score cohort (tie-broken by `last_seen`)
@@ -162,20 +166,33 @@ semantics untouched. Normalization:
    history, so those errors attribute to "main app" only.
 4. ID and token templating: numeric/uuid segments → `:id`; long opaque
    segments (hex/base64 runs, JWT-shaped strings) → `:token`. This runs
-   **before storage and before any model call** — the SDK's `scrubUrl`
-   strips query strings and credentials but deliberately keeps path
-   segments, so a raw `/sign/<opaque-token>` path otherwise reaches the
-   database and the route-map job verbatim. Templating here is the
-   privacy boundary, not just display polish.
+   **before the stamp is stored and before any model call** — the SDK's
+   `scrubUrl` strips query strings and credentials but deliberately keeps
+   path segments, so a raw `/sign/<opaque-token>` path otherwise reaches
+   `page_url_normalized` and the route-map job verbatim. Templating here
+   is the privacy boundary for the surfaces this feature adds. (Raw URLs
+   already live inside `error_events.context` under existing retention
+   and scrubbing; changing event storage is out of scope.)
 
 ### Route-map job (worker, LLM)
 
-Runs at repo-connect, then on demand (manual re-run); classifies **observed
-URLs, not the route tree**. Input: the project's distinct normalized URLs
-with error events. For each, the agent reads the code behind the URL
-(router config, manifest/descriptor for embedded apps, the component) and
-writes one row: `pattern, name, purpose, tier` into a new `route_map`
-table. Humans can edit rows; edits win.
+Triggered by the score sweeper's tick: any project with a connected repo
+and stamped patterns that have no `route_map` row gets a classification
+job enqueued (deduped). This covers repo-connect (≤ one tick later),
+repos connected before the feature shipped, and new URLs appearing —
+no handler hook and no manual-rerun mechanism needed in v1. It
+classifies **observed stamped patterns, not the route tree**: the input
+is the project's distinct `page_url_normalized` values, which is exactly
+the set the score consumes — secondary URLs within a group are neither
+scored nor displayed, so classifying them buys nothing in v1. For each
+pattern, the agent reads the code behind it (router config,
+manifest/descriptor for embedded apps, the component) and writes one
+row: `pattern, name, purpose, tier` into a new `route_map` table.
+Patterns the agent cannot ground still get a row (tier `standard`,
+weight-neutral, marked unresolved) so enqueueing converges. Humans can
+edit rows and edits win (`source='human'` is never overwritten); in v1
+"editing" is a concierge-level direct DB update — a settings UI is
+deferred.
 
 Evidence for this shape (spike, 2026-08-07, on documenso/dub/formbricks +
 AMFJ for real): classification accuracy ~90–95% when the job reads the
@@ -207,8 +224,10 @@ part of the repo-connect value story.
   issues) the remediation line.
 - **Digest (plan #4)**: consumes the same stored fields; this design
   guarantees field + wording exist, the digest remains its own scope item.
-- Friction signals (rage/dead clicks sharing a session with the error) are
-  shown as context when present; they do not move the score in v1.
+- Friction signals sharing a session with an error never move the score
+  in v1; displaying them as row context needs a session join the API does
+  not expose today, so that display is deferred with the other
+  improve-over-time items.
 
 ## One-time cleanup (operational runbook, not feature scope)
 
