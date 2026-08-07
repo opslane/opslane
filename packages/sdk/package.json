@@ -56,7 +56,7 @@
     "magic-string": "^1.1.0",
     "react": "^18.3.0",
     "react-dom": "^18.3.0",
-    "typescript": "^5.4.0",
+    "typescript": "^7.0.2",
     "vite": "^6.4.3",
     "vite-plugin-dts": "^4.0.0",
     "vitest": "^3.0.0",
