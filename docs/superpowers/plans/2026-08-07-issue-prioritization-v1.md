@@ -110,6 +110,9 @@ func TestNormalizePageURL(t *testing.T) {
 		{"long word kept", "https://app.example.com/administration", "/administration"},
 		{"hyphenated words kept", "https://app.example.com/settings/field-sync", "/settings/field-sync"},
 		{"mixed alnum token", "https://app.example.com/t/x9k2mQ84hzL0pR7vN3wY", "/t/:token"},
+		{"long alpha-only token", "https://app.example.com/k/qwrtypsdfghjklzxcvbnmqwrtyp", "/k/:token"},
+		{"base64url with hyphen", "https://app.example.com/v/Ab3dEf-gH1jKl_mN0pQr5s", "/v/:token"},
+		{"hyphenated slug kept", "https://app.example.com/getting-started-with-forms", "/getting-started-with-forms"},
 		{"query stripped", "https://app.example.com/assets?x=1", "/assets"},
 		{"root", "https://app.example.com/", "/"},
 		{"garbage", "not a url", "/not-parseable"},
@@ -143,6 +146,7 @@ var (
 	hexSeg     = regexp.MustCompile(`^[0-9a-fA-F]{16,}$`)
 	// Mixed-alphabet opaque run: letters AND digits, no separators, 16+ chars.
 	mixedSeg = regexp.MustCompile(`^(?:[A-Za-z0-9+/=_]*\d[A-Za-z0-9+/=_]*[A-Za-z][A-Za-z0-9+/=_]*|[A-Za-z0-9+/=_]*[A-Za-z][A-Za-z0-9+/=_]*\d[A-Za-z0-9+/=_]*)$`)
+	base64urlSeg = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 )
 
 // NormalizePageURL maps an observed URL (or bare path) to a normalized,
@@ -187,7 +191,11 @@ func NormalizePageURL(raw string) string {
 		case numericSeg.MatchString(s), uuidSeg.MatchString(s):
 			out = append(out, ":id")
 		case jwtSeg.MatchString(s), hexSeg.MatchString(s),
-			len(s) >= 16 && !strings.Contains(s, "-") && mixedSeg.MatchString(s):
+			len(s) >= 16 && !strings.Contains(s, "-") && mixedSeg.MatchString(s),
+			// alpha-only runs longer than any plausible word
+			len(s) >= 25 && !strings.ContainsAny(s, "-_"),
+			// base64url (may contain - and _): 22+ chars, has a digit or mixed case
+			len(s) >= 22 && base64urlSeg.MatchString(s) && (strings.ContainsAny(s, "0123456789") || s != strings.ToLower(s)):
 			out = append(out, ":token")
 		default:
 			out = append(out, s)
@@ -316,10 +324,14 @@ Top-URL stamping — **aggregate after normalization** (in Go, since normalizati
 const rawURLTalliesSQL = `
 SELECT ee.error_group_id, ee.context->>'url' AS url, count(*) AS n, max(ee.created_at) AS latest
 FROM error_events ee
-JOIN error_groups eg ON eg.id = ee.error_group_id
+JOIN error_groups eg ON eg.id = ee.error_group_id AND ee.project_id = eg.project_id
 WHERE eg.kind = 'error' AND eg.status NOT IN ('resolved','merged','archived')
   AND ee.created_at > now() - interval '7 days' AND ee.context->>'url' IS NOT NULL
 GROUP BY ee.error_group_id, ee.context->>'url'`
+// Tenant safety: error_events.error_group_id has no FK; every per-group
+// subquery in this package must ALSO match ee.project_id = eg.project_id
+// (and fs.project_id = eg.project_id for friction). This applies to the
+// anon-session subselects in the score SQLs below — add the predicate there too.
 // 2) In Go: pattern := NormalizePageURL(url); per group, sum n by pattern,
 //    track max(latest) per pattern; winner = highest total, ties by latest,
 //    then lexicographically smallest pattern (deterministic).
@@ -430,7 +442,7 @@ func TestListErrorGroupsEnvBranchPriorityInArms(t *testing.T) {
 
 - Struct + both list SELECTs + list scan + detail SELECT/scan gain the three columns.
 - No-env branch: `ORDER BY COALESCE(eg.priority_score, 0) DESC, eg.last_seen DESC, eg.id DESC LIMIT 100`.
-- Env branch: **each UNION arm** selects the three columns and orders by `COALESCE(priority_score, 0) DESC, last_seen DESC LIMIT 100`; outer query orders by `COALESCE(candidates.priority_score, 0) DESC, candidates.last_seen DESC, candidates.id LIMIT 100`. (An arm's LIMIT is a pre-filter; if it isn't priority-aware, high-priority-but-old rows are cut before the outer sort ever sees them.)
+- Env branch: **each UNION arm** selects the three columns and orders by `COALESCE(priority_score, 0) DESC, last_seen DESC, id DESC LIMIT 100`; outer query orders by `COALESCE(candidates.priority_score, 0) DESC, candidates.last_seen DESC, candidates.id DESC LIMIT 100` — `id DESC` everywhere, matching the no-env branch's deterministic tiebreak. (An arm's LIMIT is a pre-filter; if it isn't priority-aware, high-priority-but-old rows are cut before the outer sort ever sees them.)
 - `incidentJSON` adds:
 
 ```go
@@ -481,6 +493,12 @@ it('labels project-wide reach under an environment filter', () => { /* ' · proj
 it('shows the identify hint for anonymous-only reach', () => {
   // users_7d:0, anon:9, projectHasIdentify:false -> 'No user identification on this page — counting sessions.'
 });
+it('shows the hint for anonymous-majority mixed reach', () => {
+  // users_7d:2, anon:14 (anon > users == "meaningful share") -> hint present
+});
+it('hides the hint for known-majority mixed reach', () => {
+  // users_7d:14, anon:6 -> no hint line
+});
 it('upgrades the hint when the project has identify elsewhere', () => {
   // projectHasIdentify:true -> 'identify() is wired elsewhere in your app but not on this page.'
 });
@@ -502,6 +520,11 @@ it('defaults to priority order with last_seen tiebreak', () => {
 it('labels non-priority sorts as loaded-only', () => {
   // switching to last_seen shows 'Sorting the loaded issues only — the server feed is ordered by priority.'
 });
+it('renders PriorityReason per row with environment and identify props wired', () => {
+  // mount IssuesList with an env filter active + one identified incident;
+  // assert a row contains the reason text AND ' · project-wide', proving the
+  // component is actually rendered by the list with real props (not only unit-tested).
+});
 ```
 
 - [ ] **Step 2: Run to verify failure** — `pnpm --filter @opslane/dashboard test` → FAIL.
@@ -522,6 +545,7 @@ priority: (a, b) => {
 - `projectHasIdentify` computed once per page: `incidents.some(i => (i.priority_inputs?.users_7d ?? 0) > 0)` — loaded-data approximation, no new API.
 - `PriorityReason.vue` copy (exact strings; text interpolation only — error/model text is untrusted per dashboard AGENTS.md):
   - reach line as tested above; both-zero reach with a score of 0 renders `Quiet this week`.
+  - identify hint condition ("meaningful anonymous share"): `anon_sessions_7d > users_7d`. Known-majority mixed reach shows no hint.
   - unscored (`priority_score == null && priority_scored_at == null`): `Not scored yet` (distinguishes new groups from genuinely-zero groups; this is what `priority_scored_at` exists for).
   - route line: `route_name ?? route_pattern` when either exists (bare pattern IS the Increment A display — separability requires it here, not in Task 11).
   - cap: `The agent can't fix this class (ranked down).` + `incident.reason?.remediation` when present.
@@ -649,48 +673,19 @@ WITH windows AS (
 - [ ] **Step 4: Run** — double replay with `MIGRATION_DIR` set + `go test ./priority/` → PASS.
 - [ ] **Step 5: Commit** — `git commit -m "feat(ingestion): route_map table weights priority context"`
 
-### Task 9: Enqueue route-map jobs from the sweeper
+### Task 9: Worker route-map job (job kind, claim lane, dispatch, handler)
+
+Ordering note: this task lands BEFORE any enqueue exists (Task 10). Shipping the
+enqueue first would have workers claim `route_map` jobs with no dispatch branch
+and dead-letter them fleet-wide.
 
 **Files:**
 - Modify: `shared/src/types.ts:359` — `JobType` gains `'route_map'`
-- Modify: `packages/worker/src/db.ts:273-283` — claim `ORDER BY CASE` gains an explicit lowest lane: `WHEN job_type = 'route_map' THEN 4`
-- Modify: `packages/ingestion/priority/sweeper.go` (`RunOnce` final phase)
-- Test: extend sweeper tests; extend the existing claim-order worker test colocated with `db.ts`
-
-**Interfaces:**
-- Produces: pending `error_group_jobs` rows (`job_type='route_map'`, `project_id` set, `error_group_id` NULL), claimed after every other job kind (lane 4 — a fleet-wide route-map rollout must never delay investigations).
-
-- [ ] **Step 1: Failing tests** — sweeper: project with `github_repo='o/r'` + one stamped unmapped pattern → exactly one pending job; second `RunOnce` → still one; project with `github_repo=''` or NULL → none; pattern with a `route_map` row (any source, including `llm-unresolved`) → none. Worker: with a pending `route_map` job and a pending `investigate` job, `claimJob` returns `investigate` first.
-
-- [ ] **Step 2: Implement** — enqueue statement (race-safe via Task 8's partial unique index):
-
-```sql
-INSERT INTO error_group_jobs (project_id, job_type)
-SELECT p.id, 'route_map' FROM projects p
-WHERE p.github_repo IS NOT NULL AND p.github_repo <> ''
-  AND EXISTS (SELECT 1 FROM error_groups eg
-              WHERE eg.project_id = p.id AND eg.page_url_normalized IS NOT NULL
-                AND eg.status NOT IN ('resolved','merged','archived')
-                AND NOT EXISTS (SELECT 1 FROM route_map rm
-                                WHERE rm.project_id = p.id AND rm.pattern = eg.page_url_normalized))
-  AND NOT EXISTS (SELECT 1 FROM error_group_jobs j
-                  WHERE j.project_id = p.id AND j.job_type = 'route_map'
-                    AND j.status IN ('pending','claimed'))
-ON CONFLICT (project_id, job_type) WHERE job_type = 'route_map' AND status IN ('pending','claimed') DO NOTHING
-```
-
-This is the whole trigger story (spec r2): repo-connect is covered ≤ one tick later, pre-existing repos are covered, new URLs re-trigger automatically; `llm-unresolved` rows stop the loop for unclassifiable patterns.
-
-- [ ] **Step 3: Run** — `go test ./priority/` + `pnpm --filter @opslane/worker test` + `pnpm --filter @opslane/shared build` → PASS.
-- [ ] **Step 4: Commit** — `git commit -m "feat: enqueue route_map jobs in the lowest claim lane"`
-
-### Task 10: Worker route-map job
-
-**Files:**
+- Modify: `packages/worker/src/db.ts:273-283` — claim `ORDER BY CASE` gains `WHEN job_type = 'route_map' THEN 4`, inserted **above** the generic `WHEN job_type <> 'session_analysis' THEN 2` clause (CASE takes the first match; below it, the clause is dead code and route_map competes in lane 2)
 - Create: `packages/worker/src/route-map.ts`
 - Modify: `packages/worker/src/index.ts` — dispatch branch beside `ci_watch` (:329): `if (job.jobType === 'route_map') { await processRouteMapJob(job, signal); return; }`
-- Modify: `packages/worker/src/db.ts` — export `listUnmappedPatterns(projectId): Promise<string[]>` and `upsertRouteMapRows(projectId, rows, unresolved: string[]): Promise<void>`
-- Test: `packages/worker/src/__tests__/route-map.test.ts`
+- Modify: `packages/worker/src/db.ts` — export `listUnmappedPatterns(projectId): Promise<string[]>` and `upsertRouteMapRows(args: { projectId: string; jobId: string; workerId: string; leaseGeneration: string; rows: RouteMapRow[]; unresolved: string[] }): Promise<boolean>`
+- Test: `packages/worker/src/__tests__/route-map.test.ts`; extend the claim-order test colocated with `db.ts`
 
 **Interfaces:**
 - Consumes: `cloneRepo({ githubRepo, jobId, githubToken })` (`repo-clone.ts:185`) with the GitHub token resolved exactly as the investigation path does (`index.ts:~490-510`: installation token via the GitHub App helper, `GITHUB_TOKEN` fallback); `runReadOnlyAgent(input: ReadOnlyRunInput)` (`readonly-agent.ts:133`) — REQUIRES `terminalTool`; `completeJob(jobId, workerId, leaseGeneration)` / `failJob(...)` (`db.ts:417/:446`) — the same lease-generation-aware calls the `session_analysis` handler makes; `AbortSignal` + `checkAbort(signal)` (`index.ts:235`).
@@ -726,6 +721,8 @@ describe('buildRouteMapFirstMessage', () => {
   });
 });
 ```
+
+Claim-order test (extend the existing `db.ts` claim tests): seed one job of EVERY kind (`error_fix`, `investigate`, `fix`, `setup_pr`, `session_analysis`, `ci_watch`, `route_map`) with the `route_map` job's `created_at` OLDEST; repeated `claimJob` calls must return `route_map` LAST.
 
 - [ ] **Step 2: Run** — `pnpm --filter @opslane/worker test -- route-map` → FAIL.
 
@@ -770,10 +767,10 @@ Skip patterns you cannot ground in code. Finish by calling submit_route_map once
 
 `processRouteMapJob(job, signal)`:
 1. `checkAbort(signal)`; load project (`github_repo`) and `listUnmappedPatterns(job.projectId)` (SQL: distinct stamped `page_url_normalized` of open groups minus existing `route_map` patterns). Empty → `completeJob` and return.
-2. Resolve GitHub token via the same helper chain the investigation branch uses (`index.ts:~490-510`), `cloneRepo({ githubRepo, jobId: job.id, githubToken })`; `cleanup()` in `finally`.
-3. `runReadOnlyAgent({ apiKey, model: <same default as investigate.ts>, maxTurns: 20, budgetUsd: 0.5, pricing: <table from agent-loop.ts:8-18>, systemPrompt, firstMessage: buildRouteMapFirstMessage(patterns), terminalTool: routeMapTerminalTool() })`, wrapped in `traceSpan('route_map.classify', ...)`; `checkAbort(signal)` before and after.
+2. Resolve GitHub token via the same helper chain the investigation branch uses (`index.ts:~490-510`), then `const { repoDir, cleanup } = await cloneRepo({ githubRepo, jobId: job.id, githubToken })`; `cleanup()` in `finally`.
+3. `runReadOnlyAgent({ apiKey, model: <same default as investigate.ts>, repoPath: repoDir, maxTurns: 20, budgetUsd: 0.5, pricing: <table from agent-loop.ts:8-18>, systemPrompt, firstMessage: buildRouteMapFirstMessage(patterns), terminalTool: routeMapTerminalTool() })` — `repoPath` is a required `ReadOnlyRunInput` field — wrapped in `traceSpan('route_map.classify', ...)`; `checkAbort(signal)` before and after.
 4. `parseRouteMapSubmission(result.terminalInput, patterns)`; on a non-terminal stop or parse failure → `failJob` with the message (queue lease/backoff handles retry).
-5. `upsertRouteMapRows`: parsed rows upserted with `source='llm'`; every asked-but-unreturned pattern upserted as `{ name: pattern, purpose: 'unclassified', tier: 'standard', source: 'llm-unresolved' }` — weight-neutral, and it stops the sweeper from re-enqueueing forever. Both upserts guard `WHERE route_map.source <> 'human'`:
+5. `upsertRouteMapRows({...})` — **lease-fenced**: one transaction that first verifies the claim is still ours (`SELECT 1 FROM error_group_jobs WHERE id=$jobId AND worker_id=$workerId AND lease_generation=$leaseGeneration AND status='claimed' FOR UPDATE`; zero rows → return `false`, write nothing — a stale worker must not clobber a newer lease's rows), then upserts parsed rows with `source='llm'` and every asked-but-unreturned pattern as `{ name: pattern, purpose: 'unclassified', tier: 'standard', source: 'llm-unresolved' }` (weight-neutral; stops the sweeper from re-enqueueing forever). Both upserts guard human rows:
 
 ```sql
 INSERT INTO route_map (project_id, pattern, name, purpose, tier, source)
@@ -784,10 +781,45 @@ SET name=EXCLUDED.name, purpose=EXCLUDED.purpose, tier=EXCLUDED.tier,
 WHERE route_map.source <> 'human'
 ```
 
-6. `completeJob(job.id, workerId, job.leaseGeneration)`.
+6. If the fenced write returned `false` → return without completing (the lease is gone; the new claimant owns the job). Otherwise `const ok = await completeJob(job.id, workerId, job.leaseGeneration)`; log at warn when `!ok` (lost the lease between write and completion — rows are correct, the retry will find nothing unmapped and complete as a no-op).
 
-- [ ] **Step 4: Run** — `pnpm --filter @opslane/worker test && pnpm --filter @opslane/worker build` → PASS.
-- [ ] **Step 5: Commit** — `git commit -m "feat(worker): route_map job classifies stamped URL patterns from the repo"`
+- [ ] **Step 4: Run** — `pnpm --filter @opslane/worker test && pnpm --filter @opslane/worker build && pnpm --filter @opslane/shared build` → PASS.
+- [ ] **Step 5: Commit** — `git commit -m "feat(worker): route_map job kind, lane, and classification handler"`
+
+### Task 10: Enqueue route-map jobs from the sweeper
+
+**Files:**
+- Modify: `packages/ingestion/priority/sweeper.go` (`RunOnce` final phase)
+- Test: extend sweeper tests
+
+**Interfaces:**
+- Consumes: Task 9's deployed handler (enqueue MUST NOT ship before it); Task 8's partial unique index.
+- Produces: pending `error_group_jobs` rows (`job_type='route_map'`, `project_id` set, `error_group_id` NULL).
+
+- [ ] **Step 1: Failing tests** — project with `github_repo='o/r'` + one stamped unmapped pattern → exactly one pending job; second `RunOnce` → still one; `github_repo=''` or NULL → none; pattern with any `route_map` row (including `llm-unresolved`) → none; **cooldown**: a `dead_letter` route-map job created 1h ago → no new job; created 25h ago → one new job.
+
+- [ ] **Step 2: Implement** — race-safe via the partial unique index, with a 24h per-project cooldown so terminal failures (dead-letter after `max_attempts`) cannot re-trigger unbounded clone/LLM cycles every tick:
+
+```sql
+INSERT INTO error_group_jobs (project_id, job_type)
+SELECT p.id, 'route_map' FROM projects p
+WHERE p.github_repo IS NOT NULL AND p.github_repo <> ''
+  AND EXISTS (SELECT 1 FROM error_groups eg
+              WHERE eg.project_id = p.id AND eg.page_url_normalized IS NOT NULL
+                AND eg.status NOT IN ('resolved','merged','archived')
+                AND NOT EXISTS (SELECT 1 FROM route_map rm
+                                WHERE rm.project_id = p.id AND rm.pattern = eg.page_url_normalized))
+  AND NOT EXISTS (SELECT 1 FROM error_group_jobs j
+                  WHERE j.project_id = p.id AND j.job_type = 'route_map'
+                    AND (j.status IN ('pending','claimed')
+                         OR j.created_at > now() - interval '24 hours'))
+ON CONFLICT (project_id, job_type) WHERE job_type = 'route_map' AND status IN ('pending','claimed') DO NOTHING
+```
+
+This is the whole trigger story (spec r2): repo-connect is covered ≤ one tick later, pre-existing repos are covered, new URLs re-trigger automatically (at most one attempt per project per day); `llm-unresolved` rows stop the loop for unclassifiable patterns.
+
+- [ ] **Step 3: Run** — `go test ./priority/` → PASS.
+- [ ] **Step 4: Commit** — `git commit -m "feat(ingestion): enqueue route_map jobs with dead-letter cooldown"`
 
 ### Task 11: Dashboard — audience reason strings
 
@@ -830,10 +862,16 @@ regression-reopen logic). Record the result here before touching prod.
    raw UPDATE on retained prod data. 4. Confirm the groups left the feed and counts.
 ```
 
-- [ ] **Step 3: Full gate + end-to-end smoke through the real path.** Repeat Task 6's smoke, then: connect a repo to the seeded project (or seed `github_repo` + a scoped token via env), wait one sweeper tick → assert a `route_map` job appears; run the worker with `ANTHROPIC_API_KEY` set against `test-fixtures/vue-app`'s repo → assert `route_map` rows exist, next tick re-scores with weights, and the API's `priority_inputs.route_weight` reflects the tier. If no Anthropic key is available in the environment, run the worker with a stubbed model port for the smoke and note it in the PR — but never skip the enqueue→claim→upsert path. Then the full AGENTS.md repository gate (zero skips).
+- [ ] **Step 3: Full gate + end-to-end smoke through the real path.** Repeat Task 6's smoke, then: connect a repo to the seeded project (or seed `github_repo` + a scoped token via env), wait one sweeper tick → assert a `route_map` job appears; run the worker with `ANTHROPIC_API_KEY` set against `test-fixtures/vue-app`'s repo → assert the produced `route_map` rows **match a hand-written expected table for the fixture's routes** (exact patterns, tier per route from the fixture's own auth structure — write the table into the smoke script before running; name-similarity may be eyeballed, tier must match exactly), the next tick re-scores with weights, and the API's `priority_inputs.route_weight` reflects the tier. If no Anthropic key is available, run the worker with a stubbed model port for the queue-path smoke and note in the PR that live classification is unverified — never skip the enqueue→claim→fenced-upsert path. (Live-LLM classification stays out of CI by decision: cost and flakiness; the exact-row check lives in this manual smoke.) Then the full AGENTS.md repository gate (zero skips).
 - [ ] **Step 4: Commit** — `git commit -m "docs: archive runbook + identify checklist; test: route-map fixture contract"`
 
 ---
+
+## Review revisions (Codex, 2026-08-07 — iteration 2)
+
+Accepted: Task 9/10 swapped so the worker handler (job kind, lane, dispatch) ships before any enqueue exists; claim-lane clause placed above the generic `<> 'session_analysis'` CASE arm (which would otherwise shadow it) with an all-kinds oldest-first claim test; 24h per-project enqueue cooldown covering dead-letter jobs; tenant predicates (`ee.project_id = eg.project_id`, `fs.project_id = eg.project_id`) on every per-group subquery — `error_group_id` has no FK; `repoPath: repoDir` in the `runReadOnlyAgent` call; lease-fenced `upsertRouteMapRows` + checked `completeJob` result; alpha-only ≥25 and base64url ≥22 token rules with tests; `id DESC` tiebreak unified across both branches; identify-hint condition defined (`anon_sessions_7d > users_7d`) with mixed-reach tests; IssuesList integration test asserting `PriorityReason` renders with real props; manual smoke upgraded to exact expected-row assertions for the fixture repo.
+
+Pushed back: live-LLM classification in CI (cost/flakiness — the exact-row contract runs in the mandatory manual smoke instead; CI covers prompt/parser/queue plumbing).
 
 ## Review revisions (Codex, 2026-08-07 — iteration 1)
 
