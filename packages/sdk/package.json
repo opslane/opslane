@@ -46,7 +46,7 @@
   "devDependencies": {
     "@jridgewell/trace-mapping": "^0.3.31",
     "@opslane/shared": "workspace:*",
-    "@playwright/test": "^1.61.1",
+    "@playwright/test": "^1.62.1",
     "@rrweb/types": "2.1.1",
     "@testing-library/react": "^16.0.0",
     "@types/react": "^18.3.0",
