@@ -15,6 +15,7 @@ query($owner:String!,$name:String!,$n:Int!) {
 | select(.title|test("^fix"))
 | {repo:"'"$REPO"'", pr:.number, pr_title:.title,
    base_sha:.mergeCommit.parents.nodes[0].oid,
+   fix_sha:.mergeCommit.oid,
    ground_truth:[.files.nodes[].path]|map(select(test("test|spec|__|\\.md$|changeset")|not)),
    issue:.closingIssuesReferences.nodes[0].number,
    issue_title:.closingIssuesReferences.nodes[0].title,

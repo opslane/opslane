@@ -9,7 +9,8 @@ const SDK_PATH = execSync(
   " -name sdk.mjs -path '*claude-agent-sdk*' | head -1", { encoding: 'utf8' }).trim();
 if (!SDK_PATH) throw new Error('claude-agent-sdk not found in the workspace');
 const { query } = await import(SDK_PATH);
-import { readFileSync, existsSync, mkdirSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
+import { cloneAtBase } from './clone.mjs';
 
 const HERE = new URL('.', import.meta.url).pathname;
 const CASE_FILE = process.env.CASES ?? 'cases-apps.jsonl';
@@ -22,14 +23,17 @@ function extract(body, title) {
 }
 
 const cases = readFileSync(`${HERE}${CASE_FILE}`,'utf8').trim().split('\n').map(l=>JSON.parse(l));
+// An optional fix_sha would silently disable the leak check for exactly the
+// case that omitted it.
+const missing = cases.filter((c) => !c.fix_sha).map((c) => `${c.repo}#${c.issue}`);
+if (missing.length > 0) {
+  throw new Error(`Cases missing fix_sha, so the leak assertion cannot run: ${missing.join(', ')}`);
+}
+
 const only = process.argv[2] ? cases.filter(c => `${c.repo}#${c.issue}` === process.argv[2]) : cases.slice(0, Number(process.argv[3]||2));
-mkdirSync('/tmp/opslane-gheval-repos', { recursive: true });
 
 for (const c of only) {
-  const dir = `/tmp/opslane-gheval-repos/${c.repo.replace('/','__')}-${c.base_sha.slice(0,8)}`;
-  if (!existsSync(dir)) {
-    execSync(`git clone -q --filter=blob:none --no-checkout https://github.com/${c.repo}.git ${dir} && cd ${dir} && git checkout -q ${c.base_sha}`, { stdio: 'pipe' });
-  }
+  const dir = cloneAtBase(`https://github.com/${c.repo}.git`, c.base_sha, c.fix_sha);
   const e = extract(c.issue_body, c.issue_title);
 
   const prompt = `A production bug was reported against this repository. Find its ROOT CAUSE.

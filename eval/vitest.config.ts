@@ -5,6 +5,6 @@ export default defineConfig({
     environment: 'node',
     globals: false,
     testTimeout: 120_000,
-    include: ['src/__tests__/**/*.test.ts'],
+    include: ['src/__tests__/**/*.test.ts', 'github-cases/__tests__/**/*.test.mjs'],
   },
 });

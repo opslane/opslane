@@ -1,5 +1,5 @@
-import { execSync } from 'node:child_process';
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
+import { cloneAtBase } from './clone.mjs';
 const HERE = new URL('.', import.meta.url).pathname;
 const W = `${HERE}../../packages/worker/dist`;
 const { investigateError } = await import(`${W}/investigate.js`);
@@ -20,15 +20,18 @@ function extract(body, title) {
 }
 
 const cases = readFileSync(`${HERE}cases.jsonl`,'utf8').trim().split('\n').map(l=>JSON.parse(l));
+// An optional fix_sha would silently disable the leak check for exactly the
+// case that omitted it.
+const missing = cases.filter((c) => !c.fix_sha).map((c) => `${c.repo}#${c.issue}`);
+if (missing.length > 0) {
+  throw new Error(`Cases missing fix_sha, so the leak assertion cannot run: ${missing.join(', ')}`);
+}
+
 const only = process.argv[2] ? cases.filter(c => `${c.repo}#${c.issue}` === process.argv[2]) : cases.slice(0, Number(process.argv[3]||3));
-mkdirSync('/tmp/opslane-gheval-repos', { recursive: true });
 const results = [];
 
 for (const c of only) {
-  const dir = `/tmp/opslane-gheval-repos/${c.repo.replace('/','__')}-${c.base_sha.slice(0,8)}`;
-  if (!existsSync(dir)) {
-    execSync(`git clone -q --filter=blob:none --no-checkout https://github.com/${c.repo}.git ${dir} && cd ${dir} && git checkout -q ${c.base_sha}`, { stdio: 'pipe' });
-  }
+  const dir = cloneAtBase(`https://github.com/${c.repo}.git`, c.base_sha, c.fix_sha);
   const input = extract(c.issue_body, c.issue_title);
   // Retry transient API failures: a long sequential batch trips rate limits,
   // and an api_error scored as a miss makes the agent look worse than it is.
