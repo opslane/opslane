@@ -1,110 +1,144 @@
-# Session tags: the v1 session-analysis layer
+# Session analysis: typed per-session facts, the v1 analysis layer
 
-Status: draft for review
+Status: draft for review (rev 2 — incorporates external review)
 Date: 2026-08-07
-Evidence: every design decision here was validated against 34 production
+Evidence: every design decision was validated against 34 production
 sessions (491 chunks, five cohorts) pulled read-only from the production
-instance on 2026-08-07, with the taggers run as real code and the
+instance on 2026-08-07, with the analyzers run as real code and the
 adjudicator run as real model calls over real evidence windows. Visual
 walkthrough: the "Session labels" artifact from the same session.
+
+Rev 2 changes after review: typed one-row-per-session table replaces the
+open-vocabulary tag table; digest attribution keyed to session
+`started_at` (rebuild-safe); honest mechanical names
+(`successful_write_count`, not "task-completed"; "same-origin", not
+"first-party"); struggle stays solely in `friction_signals`; adjudication
+keeps the per-signal interface and gains evidence windows; coverage is an
+explicit tri-state owned by the analyzer; model-call caps and shadow
+rollout added; `bounced`/`marathon` cut (the latter is derivable from
+`sessions` alone).
 
 ## Problem
 
 Always-on recording stores every session, but the analysis layer only
 speaks about ~4% of them: sessions with an error event or a friction
-signal. The friction pipeline's three detectors have a measured 6%
-acceptance rate after LLM adjudication (form_abandon: 2 accepted of 975
-adjudicated), and its outputs are point events with no way to state a
-fact about a whole session ("this was an idle embedded panel", "this
-session completed a checkout"). The daily digest (CEO plan #4) has no
-substrate to read, and investigation has no session-level context.
+signal. The friction detectors have a measured 6% acceptance rate after
+LLM adjudication (form_abandon: 2 accepted of 975 adjudicated), and
+their outputs are point events with no way to state a fact about a whole
+session ("this was an idle embedded panel", "this session completed a
+write"). The daily digest (CEO plan #4) has no substrate to read, and
+investigation has no session-level context.
 
 Production facts that constrain any design (measured 2026-08-07):
 
 - 127,776 sessions in 14 days; one active project.
 - 36% of sessions have zero replay chunks. 27% of error-linked sessions
   (775 of 2,833) have no replay. No analysis can see these; they must be
-  a visible bucket, and the SDK coverage gap is a separate fix.
+  a visible coverage bucket, and the SDK gap is a separate fix.
 - 88% of sessions enter at `/issue-context` (embedded Jira panel);
-  idle-panel traffic drowns every metric unless labeled.
+  idle-panel traffic drowns every metric unless classified.
 - 5.9% of sessions have an identified user. v1 counts sessions, not
-  users. The priority score's "affected users" input is weak until
-  identification improves.
+  users.
 - Telemetry coverage: request start/end pairs in 94% of sampled
   sessions, form_submit in 26%, clicks in 47%.
+- Friction flag rate: 1.8% of prod sessions have any signal today
+  (pre-suppression). The 12-of-34 rate in the sample is an artifact of
+  stratified sampling, not a volume estimate.
 
 ## Decision summary
 
-Three tiers, each validated on the production sample:
-
-1. **Rules label every session** at close — free, deterministic,
-   session-level tags in one new table. Eight taggers (below).
-2. **The LLM adjudicates only rule-flagged sessions**, one small call
-   per flagged session, reading the real ±15s event window around the
-   flagged clicks. Measured on prod: 34 sessions → 12 flagged →
-   2 confirmed / 3 uncertain / 7 rejected, every verdict citing window
-   events. Uncertain does not surface.
+1. **The analyzer writes one typed facts row per session** at close —
+   free, deterministic, mechanical facts only, in `session_analysis`.
+2. **The LLM adjudicates only detector-flagged signals**, through the
+   existing per-signal interface and gates, upgraded to read the real
+   evidence window around each occurrence. Measured on prod: window
+   verdicts overruled 4 of 12 shallow verdicts and produced
+   2 confirmed / 3 uncertain / 7 rejected, each citing window events.
 3. **The LLM never browses.** Unflagged sessions are never model-read.
-   Digest is a template over tag counts (no LLM, per CEO plan #4).
+   The digest is a template over SQL rollups (no LLM, per CEO plan #4).
    Deep e2e session reads happen only inside investigations, as today.
 
 This matches PostHog (on-demand, pre-filtered, condensed events) and
 LogRocket Galileo (deterministic detection + anonymized-count severity
-model; LLM only narrates severe issues).
+model; LLM narrates only severe issues).
 
-## The `session_tags` table
+## The `session_analysis` table
+
+One row per session; the analyzer is its sole writer (including empty
+and no-replay sessions — the analysis job runs for every closed
+session). Idempotent upsert; a late scrubbed chunk re-runs analysis and
+upgrades the row in place. Nothing references this table by foreign key,
+so rebuild is safe by construction.
 
 ```sql
-CREATE TABLE session_tags (
-  session_id   TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-  project_id   UUID NOT NULL,
-  tag          TEXT NOT NULL,          -- open vocabulary, no CHECK enum
-  value        INTEGER,                -- optional count (struggled-with-form → 8)
-  source       TEXT NOT NULL DEFAULT 'rule',   -- 'rule' | 'model' (model unused in v1)
-  evidence     JSONB,                  -- what fired the rule, human-readable
-  rule_version INTEGER NOT NULL,
-  created_at   timestamptz NOT NULL DEFAULT now(),
-  PRIMARY KEY (session_id, tag)
+CREATE TABLE session_analysis (
+  session_id          TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+  project_id          UUID NOT NULL,
+  environment_id      UUID,
+  session_started_at  timestamptz NOT NULL,  -- copied from sessions; digest attribution key
+  coverage            TEXT NOT NULL CHECK (coverage IN ('complete','partial','no_replay')),
+  activity_class      TEXT NOT NULL CHECK (activity_class IN
+                        ('active','light_touch','zero_interaction','idle_tab','unknown')),
+  entry_path          TEXT,                  -- normalized; NULL when no_replay
+  click_count         INTEGER NOT NULL DEFAULT 0,
+  input_event_count   INTEGER NOT NULL DEFAULT 0,
+  page_event_count    INTEGER NOT NULL DEFAULT 0,
+  failed_request_4xx_count          INTEGER NOT NULL DEFAULT 0,  -- same-origin only
+  failed_request_5xx_count          INTEGER NOT NULL DEFAULT 0,  -- same-origin only
+  unattributed_failed_request_count INTEGER NOT NULL DEFAULT 0,  -- end with no recorded start
+  successful_write_count            INTEGER NOT NULL DEFAULT 0,  -- same-origin POST/PUT/PATCH → 2xx
+  failed_write_count                INTEGER NOT NULL DEFAULT 0,  -- same-origin write → ≥400
+  rule_version        INTEGER NOT NULL,
+  analyzed_at         timestamptz NOT NULL DEFAULT now()          -- audit only, never attribution
 );
-CREATE INDEX idx_session_tags_rollup ON session_tags (project_id, tag, created_at);
+CREATE INDEX idx_session_analysis_rollup
+  ON session_analysis (project_id, session_started_at);
 ```
 
-Two deliberate choices:
+Design points, each earned by the prod run or the review:
 
-- **Open vocabulary.** `tag` is TEXT with no CHECK constraint. The
-  triple-hardcoded `signal_type` enum (SQL CHECK + two TS unions) is the
-  reason adding a fourth signal type today requires a migration; tags
-  must not repeat that.
-- **Tags are rebuilt, not versioned.** Re-analysis DELETEs and
-  re-INSERTs a session's tags in one transaction. Tags are derived data
-  with no foreign keys into them; rebuilding sidesteps the
-  superseded_by machinery entirely. `rule_version` is recorded for
-  audit only. (`friction_signals` cannot take this shortcut — incidents
-  reference signals — so it keeps its versioning, repaired below.)
+- **Typed columns, not tags.** v1's vocabulary is fixed and
+  model-authored vocabulary is cut, so an open tag table would trade a
+  small database interface for a large unconstrained product interface.
+  A new concept requires a migration — deliberate review friction.
+  (Act-two model annotations, if approved, get their own table with
+  their own provenance; they do not retrofit into this one.)
+- **`session_started_at` is the attribution key.** Rollups and
+  week-over-week deltas group by it, never by `analyzed_at` — so
+  re-analysis and the backfill cannot shift history into "today".
+- **Raw counts are stored** so thresholds (the activity floor, a future
+  `bounced`) can be re-cut in SQL without re-reading chunks.
+- **Coverage is explicit.** `no_replay`: no playable (scrubbed,
+  readable) evidence existed at analysis time — not merely
+  `chunk_count = 0`. `partial`: the bounded reader truncated (20 MiB
+  session cap) or some chunks were unreadable. `partial` and
+  `no_replay` rows are excluded from behavioral digest denominators and
+  reported as their own line. `activity_class = 'unknown'` whenever
+  coverage is not `complete`… with one exception: a `complete` session
+  with zero events is `zero_interaction`, not `unknown`.
 
-## The eight v1 taggers
+### Fact semantics (mechanical, honestly named)
 
-All run inside the existing `session_analysis` job after
-`analyzeSession`, on data already decoded. All were run against the
-production sample; verdicts and counts below are measured.
-
-| tag | rule | sample result |
+| fact | rule | sample result |
 | --- | --- | --- |
-| activity class (one of `idle-tab`, `zero-interaction`, `light-touch`, `active`) | `idle-tab`: span ≥ 10 min, 0 clicks + 0 inputs. `zero-interaction`: 0 + 0, shorter. `light-touch`: 1–2 interactions. `active`: ≥ 3 interactions. | 22 active / 10 zero-interaction / 2 idle-tab (with the ≥1 floor; the ≥3 floor is a deliberate tightening so digest "active" means engagement) |
-| `entry:<path>` | first page event's pathname, normalized: strip query/hash, template numeric and uuid segments to `:id`, strip `_ctx_*` Forge blobs | 34/34; without `_ctx` stripping, 429 prod sessions produce garbage rows |
-| `failed-requests` (value = n) | request_end status ≥ 400 whose request_start URL is first-party; third-party (observed page origins define first-party) excluded; ends with no matching start count as unattributed | 3 sessions — after the split removed 8 false ones (dead Defender SDK, CDN beacons) |
-| `task-completed` (value = n) | first-party POST/PUT/PATCH → 2xx | 9 sessions, incl. checkout POST → 201 |
-| `form-submit-failed` | first-party write → ≥ 400 | 0 in sample |
-| `struggled-with-form` (value = n) | dead/rage click signals after suppressions (below), rolled up per session | 12 flagged → adjudicated 2 / 3 / 7 |
-| `bounced` | span < 60s, ≤ 2 page events, ≤ 1 click, no successful write | 4 |
-| `marathon-session` | event span > 2h | 1 (6.4h) |
-| `no-replay` | chunk_count = 0 at close (written by the closer, not the analyzer — there is nothing to analyze) | 36% of prod |
+| `activity_class` | `idle_tab`: span ≥ 10 min, 0 clicks + 0 inputs. `zero_interaction`: 0 + 0, shorter. `light_touch`: 1–2 interactions. `active`: ≥ 3 interactions (clicks + inputs). | 22 active / 10 zero-interaction / 2 idle-tab at the ≥1 floor; the ≥3 floor is a deliberate tightening so "active" means engagement |
+| `entry_path` | first page event's pathname, normalized: strip query/hash, template numeric and uuid segments to `:id`, strip `_ctx_*` Forge blobs | without `_ctx` stripping, 429 prod sessions produce garbage rows |
+| failed request counts | request_end status ≥ 400 whose request_start URL is **same-origin** with the session's observed page origins; cross-origin excluded (the dead Defender SDK and CDN beacons produced 8 of 11 naive positives); an end with no recorded start increments `unattributed_failed_request_count` (observed: panel-bootstrap 401s whose start predates recording) | 3 sessions with same-origin failures after the split |
+| write counts | same-origin POST/PUT/PATCH by result status. **Named `successful_write_count`, not "task completed"** — a 2xx write may be an autosave or preference update; task semantics require product-specific flow definitions, which v1 cuts | 9 sessions with successful writes, incl. checkout POST → 201 |
 
-Detector suppressions (these fix the measured 94% false-positive rate at
-the source):
+Not in the table: struggle (owned by `friction_signals`, below);
+`marathon` (derivable as `last_chunk_at - started_at` from `sessions` by
+any consumer, no analyzer needed); `bounced` (re-enters when a consumer
+names it; its inputs are already stored as raw counts).
 
-1. Clicks on `cursor: text` targets never count as rage/dead clicks
-   (focus / select-all clicking; two prod rage_clicks were this).
+## Friction detection: what changes, what stays
+
+**Kept — point-signal detection.** `rage_click` and `dead_click` stay in
+`analyzeSession`, gaining four suppressions that fix the measured
+false-positive sources at the origin:
+
+1. Clicks on `cursor: text` targets never count (focus/select-all
+   clicking; two prod rage_clicks were this).
 2. A dead-click candidate answered by an option-select
    (`#react-select-*-option-*` or `[role=option]`) within 5s is
    suppressed.
@@ -115,128 +149,125 @@ the source):
    (`-N-remove`); fingerprints for `react-select`-generated ids use the
    widget container, not the indexed id.
 
-## Superset of friction detection: what changes, what stays
-
-This layer does not sit beside the friction pipeline; it subsumes it.
-The existing pipeline is stage-by-stage either kept, upgraded, or
-retired:
-
-**Kept — point-signal detection (`analyzeSession`).** `rage_click` and
-`dead_click` detection stays, with the four suppressions. Signals remain
-the point-event evidence that the `struggled-with-form` tag rolls up;
-`friction_signals` remains their store, and incidents keep referencing
-them. New requirement: signals must record **per-occurrence
-timestamps** (new JSONB column `occurred_ats`), because the adjudicator
-needs windows centered on each occurrence — the fold currently keeps
-only the min timestamp, which placed evidence windows 20 minutes early
-in the prod run.
+`friction_signals` remains the sole store and source of truth for
+struggle. Session-level struggle counts are derived by consumers from
+accepted signals (the session ledger already does exactly this). New
+schema requirement: signals record **per-occurrence timestamps**
+(`occurred_ats` JSONB), because evidence windows must center on each
+occurrence — the fold's min-timestamp put windows 20 minutes early in
+the prod run.
 
 **Retired — `form_abandon`.** Measured acceptance 2 of 975 (0.2%); in
 the deep run both remaining candidates were unadjudicable inline-edit
 focus clicks. The detector stops producing signals at the new
-RULE_VERSION. Its replacements are mechanical: `form-submit-failed`
-(exact) plus `task-completed` (its absence in an `active` session on a
-form page is digest-visible). Historical rows remain; the enum keeps the
-value.
+RULE_VERSION. Mechanical replacements: `failed_write_count` (exact) and
+the absence of successful writes in an `active` session (digest-visible).
+Historical rows remain; the enum keeps the value.
 
-**Upgraded — adjudication.** Same gate, same generation/threshold
-machinery, same prompt-version discipline; two changes:
+**Upgraded — adjudication input only.** The per-signal interface, the
+generation/threshold machinery, the eager error-fold path, and promotion
+semantics (fingerprint identity, 5 users / 7 days) are all unchanged —
+per-session batched verdicts are deferred until measured cost justifies
+their state machinery. Two changes:
 
 1. **Input**: the adjudicator receives the ±15s condensed event window
    around each flagged occurrence (clicks with selector+cursor, request
    start/end pairs, page events, form_submits) instead of the selector
-   string alone. Windows are centered on the occurrence and
-   click/submit events are always retained when the window is trimmed.
-   Chunks are fetched by the occurrence's time range via existing
-   `first_event_ms`/`last_event_ms` metadata. Verdicts must cite window
-   events; a third verdict `uncertain` is allowed and does not surface.
-   Measured effect: the window-based verdicts overruled 4 of the
-   shallow story-based judgments in the prod run — evidence beats vibes.
-2. **Unit**: one call per flagged session (covering all its windows),
-   not one call per signal. The eager per-signal fold path is removed;
-   the ±30s error-fold *attach* logic (pure SQL) stays.
+   string alone. Windows center on the occurrence; click/submit events
+   are always retained when trimming; chunks are fetched by the
+   occurrence's time range via existing `first_event_ms`/`last_event_ms`
+   metadata. Verdicts must cite window events. Measured effect: window
+   verdicts overruled 4 of 12 shallow judgments.
+2. **Uncertain maps to rejected.** The run produced 3 windows with
+   genuinely insufficient evidence. The persisted state machine keeps
+   its four states; an uncertain verdict is stored as `rejected` with
+   `adjudication_reason = 'uncertain'` — same surfacing (none), the
+   distinction preserved for threshold tuning, no migration.
 
-**Unchanged — promotion and incidents.** Fingerprint identity,
-5-users-in-7-days threshold, `error_groups` with `kind='friction'`,
-autonomy ladder, insight cards, PR dedup interplay: untouched. Tags do
-not promote; only adjudicated signals do, exactly as today.
-
-**Unchanged — investigation deep reads.** Error and friction
-investigations keep their evidence paths; they additionally read the
-session's tags for context ("this error occurred in an
-`entry:/getting-started` `struggled-with-form` session") and the PR
-description may say so.
+**Cost and rollout guards** (new): a per-project daily adjudication-call
+cap (default 500) with overflow left `pending` for the next day's
+budget; a feature flag for window-input adjudication with a shadow mode
+that logs the would-be verdict while the selector-only path still
+decides; the backfill runs rate-limited behind the same cap; call
+counts and verdict distribution are logged per project per day.
 
 **Prerequisite repair — re-analysis.** Bumping RULE_VERSION today
 double-counts: v2 signal rows insert alongside still-active v1 rows
 because `superseded_by` is written by no code path. Before the new
 RULE_VERSION ships: re-analysis marks prior-version rows
 `superseded_by` (as the 2026-07-13 design specified), and a one-time
-backfill job re-analyzes retained sessions (30-day window) so tags and
-corrected signals exist historically — this also seeds week-over-week
-trends on day one.
+rate-limited backfill re-analyzes retained sessions (30-day window) so
+facts rows and corrected signals exist historically — attribution by
+`session_started_at` makes this safe for trends by construction.
 
 ## Consumers
 
-**Daily digest (CEO plan #4).** A template over tag-count queries; no
-LLM. Data contract (per project, per day): sessions by activity class;
-`no-replay` count; `task-completed` count; confirmed
-`struggled-with-form` sessions (adjudication-accepted only) grouped by
-entry path with counts; `failed-requests` sessions grouped by status
-class; deltas vs the trailing 7-day mean once history exists. Template
-lines render only above thresholds (no "0 friction today" noise).
-Delivery mechanics (Slack wiring, scheduling) are the digest plan's
-scope, not this spec's.
+**Daily digest (CEO plan #4).** A template over SQL rollups; no LLM.
+Per project, per `session_started_at` day: sessions by coverage bucket;
+activity-class distribution over `coverage = 'complete'` sessions only;
+`successful_write_count` totals; adjudication-accepted struggle sessions
+(from `friction_signals`, joined to `sessions` for the day and to
+`session_analysis.entry_path` for grouping); same-origin failed-request
+sessions by status class; deltas vs the trailing 7-day mean once history
+exists. Template lines render only above thresholds. Delivery mechanics
+(Slack wiring, scheduling) are the digest plan's scope.
 
-**Session ledger.** Tag chips on the session row (activity class +
-notable tags). Existing accepted-signal badges unchanged.
+**Session ledger.** Chips derived from the typed columns (coverage,
+activity class, failure counts). Existing accepted-signal badges
+unchanged (already derived from `friction_signals`).
 
-**Investigation.** `getSessionForAnalysis`-style read of
-`session_tags` for the pointed session; included in investigation
-context and PR narrative.
+**Investigation.** Reads the pointed session's `session_analysis` row
+for context ("error in an active `/getting-started` session with 6
+same-origin failures") and may say so in the PR narrative.
 
-**Keyless self-host.** Every tag except `struggled-with-form` is
-mechanical and fully visible without an API key. `struggled-with-form`
-without an adjudicator shows as "unverified" instead of being invisible
-(today's behavior: detected friction is silently hidden keyless).
+**Keyless self-host.** Every fact is mechanical and fully visible
+without an API key. Detected-but-unadjudicated signals surface as
+"unverified" via a UI query over `pending` signals (today they are
+silently invisible keyless).
 
 ## Explicitly cut (re-entry requires a new decision)
 
+- Open-vocabulary and model-minted annotations (future table if approved)
+- Per-session batched adjudication verdicts
 - Anomaly detection / statistical outlier flagging
 - Periodic LLM sweeps over unlabeled sessions
-- AI-authored per-app tag vocabulary (semantic flow names)
-- Model-minted tags (`source='model'` is reserved, unused)
-- Per-session LLM reads outside adjudication and investigation
-- Refresh-burst tagger (naive rule false-fired on 20/34 sample sessions
-  because chunk boundaries re-emit page events; needs a proven
-  navigation discriminator first)
-- Latency/slow-request tagger (durations derivable via requestId join,
+- AI-authored per-app flow vocabulary (semantic task names)
+- `bounced`, `marathon` (derivable; no consumer yet)
+- Refresh-burst detection (naive rule false-fired on 20/34 sample
+  sessions — chunk boundaries re-emit page events; needs a proven
+  navigation discriminator)
+- Latency/slow-request facts (durations derivable via requestId join,
   no baselines yet)
-- @opslane Q&A (act two; it will query this same table)
+- @opslane Q&A (act two; queries this same table)
 
 ## Verification
 
-- Unit: golden tests per tagger over synthetic envelopes shaped like
-  the five prod cohorts (idle panel, checkout, marathon, bounce,
+- Unit: golden tests per fact over synthetic envelopes shaped like the
+  five prod cohorts (idle panel, checkout, marathon, bounce,
   failed-bootstrap). Prod data itself must not enter the repo.
-- The existing analyzer bench gate (p95 < 5s) must hold with taggers
-  added.
+- The existing analyzer bench gate (p95 < 5s) must hold with fact
+  extraction added.
 - Suppression regression tests: cursor-text click, answered
   option-select, synthetic download anchor, react-select reindex.
-- Re-analysis: bump RULE_VERSION in a test, assert prior signals are
-  superseded and tags are rebuilt without duplication.
+- Coverage: truncated-read session asserts `partial` and
+  `activity_class = 'unknown'`; unscrubbed-chunks-only session asserts
+  `no_replay`; late-chunk re-analysis upgrades the row in place.
+- Re-analysis: bump RULE_VERSION in a test; assert prior signals are
+  superseded, facts rows upserted without duplication, and a
+  yesterday-started session backfilled today attributes to yesterday.
 - Live smoke per AGENTS.md: seeded session with a scripted timeline →
-  close → assert exact expected tag rows; keyless run → assert
-  mechanical tags present and struggled-with-form marked unverified.
+  close → assert the exact expected `session_analysis` row; keyless run
+  → assert facts present and pending signals shown as unverified.
 
 ## Constraints stated honestly
 
 - v1 counts sessions, not users (5.9% identified).
-- 36% of sessions are `no-replay`; the digest reports the bucket, and
-  the SDK coverage gap (status-0 event POSTs inside Jira iframes were
-  observed in the sample) is a separate issue to file.
-- `struggled-with-form` precision after suppressions was 2 confirmed +
-  3 uncertain of 12 flagged on the sample — the adjudicator is not
-  optional for this tag.
-- Digest numbers scale from a one-project instance; a second production
-  project may move the thresholds.
+- 36% of sessions are `no_replay`; the digest reports the bucket; the
+  SDK coverage gap (status-0 event POSTs inside Jira iframes were
+  observed) is a separate issue to file.
+- Struggle precision after suppressions was 2 confirmed + 3 uncertain
+  of 12 flagged on the stratified sample — the adjudicator is not
+  optional for struggle; prod flag volume (~1.8% pre-suppression) is
+  the planning number, not the sample rate.
+- Digest numbers come from a one-project instance; a second production
+  project may move thresholds.
