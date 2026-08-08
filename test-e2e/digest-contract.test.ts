@@ -4,7 +4,7 @@
  *
  * The stack must be booted with the sink's host on the webhook allowlist:
  *
- *   NOTIFY_UNSAFE_EXTRA_WEBHOOK_HOSTS=host.docker.internal:9999
+ *   NOTIFY_UNSAFE_EXTRA_WEBHOOK_HOSTS=host.docker.internal:9998
  *
  * Required:
  *   DATABASE_URL       — Postgres connection string
@@ -24,7 +24,10 @@ import {
   type TestTenant,
 } from './helpers.js';
 
-const SINK_PORT = 9999;
+// 9998, not 9999: notifications-contract.test.ts binds 9999, and vitest runs
+// test files in parallel, so sharing the port makes whichever suite loses the
+// race die on EADDRINUSE. Both ports are on the stack's webhook allowlist.
+const SINK_PORT = 9998;
 const SINK_HOST = process.env['E2E_WEBHOOK_SINK_HOST'] ?? `host.docker.internal:${SINK_PORT}`;
 
 interface SinkHit {

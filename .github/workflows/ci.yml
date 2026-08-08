@@ -345,9 +345,11 @@ jobs:
           fi
       - name: Boot the stack without an LLM key
         env:
-          # The notifications contract test runs a webhook sink on the runner;
-          # the container reaches it via the extra_hosts host-gateway mapping.
-          NOTIFY_UNSAFE_EXTRA_WEBHOOK_HOSTS: host.docker.internal:9999
+          # The notifications and digest contract tests each run a webhook sink
+          # on the runner; the container reaches them via the extra_hosts
+          # host-gateway mapping. Separate ports because vitest runs the two
+          # files in parallel and they cannot share a listener.
+          NOTIFY_UNSAFE_EXTRA_WEBHOOK_HOSTS: host.docker.internal:9999,host.docker.internal:9998
           # The friction suites wait on the chunk scrubber 13 times. A 1s tick
           # removes up to 15s from each wait. The 30s eligibility grace is
           # deliberately left at its production value; the tests fast-forward
