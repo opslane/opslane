@@ -1,6 +1,7 @@
 import { performance } from 'node:perf_hooks';
 import type { SessionChunkEnvelope, SessionTelemetryEvent } from '@opslane/shared';
 import { analyzeSession } from '../src/friction/analyzer.js';
+import { extractSessionFacts } from '../src/friction/facts.js';
 
 const CHUNK_COUNT = 40;
 const NOISE_EVENTS_PER_CHUNK = 920;
@@ -78,9 +79,10 @@ let correct = true;
 for (let run = 0; run < RUN_COUNT; run += 1) {
   const startedAt = performance.now();
   const signals = analyzeSession(chunks);
+  extractSessionFacts(chunks);
   durations.push(performance.now() - startedAt);
   const types = new Set(signals.map((signal) => signal.signalType));
-  correct &&= types.has('rage_click') && types.has('dead_click') && types.has('form_abandon');
+  correct &&= types.has('rage_click') && types.has('dead_click') && !types.has('form_abandon');
 }
 
 durations.sort((a, b) => a - b);

@@ -33,6 +33,10 @@ vi.mock('../db.js', () => ({
   getFrictionSignalsForGroup: vi.fn(),
   getScrubbedChunksForSession: vi.fn(),
   getSessionForAnalysis: vi.fn(),
+  upsertSessionAnalysis: vi.fn(),
+  getSessionAnalysis: vi.fn(),
+  getScrubbedChunksInRange: vi.fn(),
+  enqueueSessionAnalysisForBudgetRetry: vi.fn(),
   setSessionAnalysisStatus: vi.fn(),
   assertJobLease: vi.fn(),
   reserveDelivery: vi.fn(),
@@ -87,11 +91,25 @@ vi.mock('../visual-analysis.js', () => ({ runVisualAnalysis: vi.fn() }));
 vi.mock('../friction/friction-evidence.js', () => ({ gatherFrictionEvidence: vi.fn() }));
 vi.mock('../friction/investigate-friction.js', () => ({ investigateFriction: vi.fn() }));
 vi.mock('../friction/chunk-reader.js', () => ({ readChunksBounded: vi.fn() }));
-vi.mock('../friction/analyzer.js', () => ({ analyzeSession: vi.fn(), RULE_VERSION: 1 }));
+vi.mock('../friction/analyzer.js', () => ({ analyzeSession: vi.fn(), RULE_VERSION: 2 }));
+vi.mock('../friction/facts.js', () => ({
+  extractSessionFacts: vi.fn(() => ({
+    entryPath: null, clickCount: 0, inputEventCount: 0, pageEventCount: 0,
+    failedRequest4xxCount: 0, failedRequest5xxCount: 0,
+    unattributedFailedRequestCount: 0, successfulWriteCount: 0, failedWriteCount: 0,
+    firstEventMs: null, lastEventMs: null,
+  })),
+  deriveCoverage: vi.fn(() => 'no_replay'),
+  classifyActivity: vi.fn(() => 'unknown'),
+}));
 vi.mock('../friction/persist.js', () => ({ writeFrictionSignals: vi.fn() }));
 vi.mock('../friction/promotion.js', () => ({ processFrictionOutcomes: vi.fn() }));
 vi.mock('../friction/adjudicator.js', () => ({
   createAnthropicAdjudicator: vi.fn(() => ({ modelId: 'real', promptVersion: 1, adjudicate: vi.fn() })),
+}));
+vi.mock('../friction/evidence-window.js', () => ({
+  EVIDENCE_WINDOW_MS: 15_000,
+  buildEvidenceWindows: vi.fn(() => []),
 }));
 
 const db = await import('../db.js');
@@ -822,10 +840,10 @@ describe('session_analysis handler', () => {
 
   it('dispatches before the error-group-required guard', async () => {
     vi.mocked(db.getSessionForAnalysis).mockResolvedValue({
-      id: 'session-1', project_id: 'proj-1', environment_id: 'env-1', end_user_id: null, status: 'closed',
+      id: 'session-1', project_id: 'proj-1', environment_id: 'env-1', end_user_id: null, status: 'closed', started_at: '2026-08-01T00:00:00Z', chunk_count: 0,
     });
     vi.mocked(db.getScrubbedChunksForSession).mockResolvedValue([]);
-    vi.mocked(readChunksBounded).mockResolvedValue({ envelopes: [], inflatedBytes: 0, truncated: false });
+    vi.mocked(readChunksBounded).mockResolvedValue({ envelopes: [], envelopeSeqs: [], inflatedBytes: 0, truncated: false, unreadableCount: 0 });
     vi.mocked(analyzeSession).mockReturnValue([]);
 
     await expect(processJobInner(job, new AbortController().signal)).resolves.toBeUndefined();
@@ -834,29 +852,35 @@ describe('session_analysis handler', () => {
 
   it('analyzes scrubbed chunks, persists signals, and marks the session analyzed', async () => {
     const session = {
-      id: 'session-1', project_id: 'proj-1', environment_id: 'env-1', end_user_id: null, status: 'closed',
+      id: 'session-1', project_id: 'proj-1', environment_id: 'env-1', end_user_id: null, status: 'closed', started_at: '2026-08-01T00:00:00Z', chunk_count: 0,
     };
     vi.mocked(db.getSessionForAnalysis).mockResolvedValue(session);
     vi.mocked(db.getScrubbedChunksForSession).mockResolvedValue([]);
-    vi.mocked(readChunksBounded).mockResolvedValue({ envelopes: [], inflatedBytes: 0, truncated: false });
+    vi.mocked(readChunksBounded).mockResolvedValue({ envelopes: [], envelopeSeqs: [], inflatedBytes: 0, truncated: false, unreadableCount: 0 });
     vi.mocked(analyzeSession).mockReturnValue([]);
 
     await processSessionAnalysisJob(job, new AbortController().signal);
 
     expect(db.setSessionAnalysisStatus).toHaveBeenNthCalledWith(1, 'session-1', 'proj-1', 'analyzing', undefined, job);
     expect(db.assertJobLease).toHaveBeenCalledWith(job);
-    expect(writeFrictionSignals).toHaveBeenCalledWith(session, [], 1);
-    expect(db.setSessionAnalysisStatus).toHaveBeenLastCalledWith('session-1', 'proj-1', 'analyzed', 1, job);
+    expect(db.upsertSessionAnalysis).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: 'session-1', coverage: 'no_replay', activityClass: 'unknown', ruleVersion: 2,
+    }));
+    expect(writeFrictionSignals).toHaveBeenCalledWith(session, [], 2);
+    expect(db.setSessionAnalysisStatus).toHaveBeenLastCalledWith('session-1', 'proj-1', 'analyzed', 2, job);
     expect(db.updateGroupAndCreateFixJob).not.toHaveBeenCalled();
+    expect(vi.mocked(db.assertJobLease).mock.invocationCallOrder[0]!).toBeLessThan(
+      vi.mocked(db.upsertSessionAnalysis).mock.invocationCallOrder[0]!,
+    );
   });
 
   it('runs friction adjudication after signal persistence when a key is set', async () => {
     const session = {
-      id: 'session-1', project_id: 'proj-1', environment_id: 'env-1', end_user_id: null, status: 'closed',
+      id: 'session-1', project_id: 'proj-1', environment_id: 'env-1', end_user_id: null, status: 'closed', started_at: '2026-08-01T00:00:00Z', chunk_count: 0,
     };
     vi.mocked(db.getSessionForAnalysis).mockResolvedValue(session);
     vi.mocked(db.getScrubbedChunksForSession).mockResolvedValue([]);
-    vi.mocked(readChunksBounded).mockResolvedValue({ envelopes: [], inflatedBytes: 0, truncated: false });
+    vi.mocked(readChunksBounded).mockResolvedValue({ envelopes: [], envelopeSeqs: [], inflatedBytes: 0, truncated: false, unreadableCount: 0 });
     vi.mocked(analyzeSession).mockReturnValue([]);
     const prevKey = process.env['ANTHROPIC_API_KEY'];
     process.env['ANTHROPIC_API_KEY'] = 'test-key';
@@ -870,6 +894,7 @@ describe('session_analysis handler', () => {
       session,
       'analysis-1',
       expect.objectContaining({ modelId: 'real' }),
+      expect.objectContaining({ windowMode: 'off' }),
     );
     // Ordering: adjudication runs after persistence, before 'analyzed'.
     expect(vi.mocked(writeFrictionSignals).mock.invocationCallOrder[0]!).toBeLessThan(
@@ -879,11 +904,11 @@ describe('session_analysis handler', () => {
 
   it('skips friction adjudication without a key (keyless mode) and still analyzes', async () => {
     const session = {
-      id: 'session-1', project_id: 'proj-1', environment_id: 'env-1', end_user_id: null, status: 'closed',
+      id: 'session-1', project_id: 'proj-1', environment_id: 'env-1', end_user_id: null, status: 'closed', started_at: '2026-08-01T00:00:00Z', chunk_count: 0,
     };
     vi.mocked(db.getSessionForAnalysis).mockResolvedValue(session);
     vi.mocked(db.getScrubbedChunksForSession).mockResolvedValue([]);
-    vi.mocked(readChunksBounded).mockResolvedValue({ envelopes: [], inflatedBytes: 0, truncated: false });
+    vi.mocked(readChunksBounded).mockResolvedValue({ envelopes: [], envelopeSeqs: [], inflatedBytes: 0, truncated: false, unreadableCount: 0 });
     vi.mocked(analyzeSession).mockReturnValue([]);
     const prevKey = process.env['ANTHROPIC_API_KEY'];
     delete process.env['ANTHROPIC_API_KEY'];
@@ -893,12 +918,12 @@ describe('session_analysis handler', () => {
       if (prevKey !== undefined) process.env['ANTHROPIC_API_KEY'] = prevKey;
     }
     expect(processFrictionOutcomes).not.toHaveBeenCalled();
-    expect(db.setSessionAnalysisStatus).toHaveBeenLastCalledWith('session-1', 'proj-1', 'analyzed', 1, job);
+    expect(db.setSessionAnalysisStatus).toHaveBeenLastCalledWith('session-1', 'proj-1', 'analyzed', 2, job);
   });
 
   it('marks analysis_failed and rethrows corrupt chunk failures', async () => {
     vi.mocked(db.getSessionForAnalysis).mockResolvedValue({
-      id: 'session-1', project_id: 'proj-1', environment_id: 'env-1', end_user_id: null, status: 'closed',
+      id: 'session-1', project_id: 'proj-1', environment_id: 'env-1', end_user_id: null, status: 'closed', started_at: '2026-08-01T00:00:00Z', chunk_count: 0,
     });
     vi.mocked(db.getScrubbedChunksForSession).mockResolvedValue([]);
     vi.mocked(readChunksBounded).mockRejectedValue(new Error('corrupt gzip'));

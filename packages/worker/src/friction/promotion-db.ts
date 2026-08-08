@@ -3,6 +3,22 @@ import type pg from 'pg';
 import { getPool } from '../db.js';
 import type { AdjudicationVerdict } from './adjudicator.js';
 
+export async function tryReserveAdjudicationCall(
+  client: pg.PoolClient,
+  projectId: string,
+  dailyCap: number,
+): Promise<boolean> {
+  const result = await client.query(
+    `INSERT INTO adjudication_call_budget (project_id, day, calls)
+     SELECT $1, CURRENT_DATE, 1 WHERE $2 > 0
+     ON CONFLICT (project_id, day)
+     DO UPDATE SET calls = adjudication_call_budget.calls + 1
+     WHERE adjudication_call_budget.calls < $2`,
+    [projectId, dailyCap],
+  );
+  return (result.rowCount ?? 0) > 0;
+}
+
 /**
  * DB primitives for Batch 4 fold/promotion (issue #56). Every function takes
  * a checked-out client so callers control transaction boundaries; the

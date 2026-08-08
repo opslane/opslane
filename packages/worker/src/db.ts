@@ -1946,6 +1946,24 @@ export interface SessionChunkRow {
   has_full_snapshot: boolean;
 }
 
+export async function getScrubbedChunksInRange(
+  sessionId: string,
+  projectId: string,
+  fromMs: number,
+  toMs: number,
+): Promise<SessionChunkRow[]> {
+  const { rows } = await getPool().query<SessionChunkRow>(
+    `SELECT session_id, seq, object_key, size_bytes, has_full_snapshot
+     FROM session_chunks
+     WHERE session_id = $1 AND project_id = $2 AND scrubbed_at IS NOT NULL
+       AND first_event_ms IS NOT NULL AND last_event_ms IS NOT NULL
+       AND first_event_ms <= $4 AND last_event_ms >= $3
+     ORDER BY seq ASC`,
+    [sessionId, projectId, fromMs, toMs],
+  );
+  return rows;
+}
+
 /** Only server-scrubbed, committed chunks are eligible for worker reads. */
 export async function getScrubbedChunksForSession(
   sessionId: string,
@@ -1968,6 +1986,8 @@ export interface SessionRow {
   environment_id: string;
   end_user_id: string | null;
   status: string;
+  started_at: string;
+  chunk_count: number;
 }
 
 export async function getSessionForAnalysis(
@@ -1976,12 +1996,116 @@ export async function getSessionForAnalysis(
 ): Promise<SessionRow | null> {
   const db = getPool();
   const { rows } = await db.query<SessionRow>(
-    `SELECT id, project_id, environment_id, end_user_id, status
+    `SELECT id, project_id, environment_id, end_user_id, status,
+            started_at::text AS started_at, chunk_count
      FROM sessions
      WHERE id = $1 AND project_id = $2`,
     [sessionId, projectId],
   );
   return rows[0] ?? null;
+}
+
+export interface SessionAnalysisUpsert {
+  sessionId: string;
+  projectId: string;
+  environmentId: string | null;
+  sessionStartedAt: string;
+  coverage: 'complete' | 'partial' | 'no_replay';
+  activityClass: 'active' | 'light_touch' | 'zero_interaction' | 'idle_tab' | 'unknown';
+  entryPath: string | null;
+  clickCount: number;
+  inputEventCount: number;
+  pageEventCount: number;
+  failedRequest4xxCount: number;
+  failedRequest5xxCount: number;
+  unattributedFailedRequestCount: number;
+  successfulWriteCount: number;
+  failedWriteCount: number;
+  ruleVersion: number;
+}
+
+export async function upsertSessionAnalysis(row: SessionAnalysisUpsert): Promise<void> {
+  await getPool().query(
+    `INSERT INTO session_analysis
+       (session_id, project_id, environment_id, session_started_at, coverage,
+        activity_class, entry_path, click_count, input_event_count, page_event_count,
+        failed_request_4xx_count, failed_request_5xx_count,
+        unattributed_failed_request_count, successful_write_count, failed_write_count,
+        rule_version, analyzed_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,now())
+     ON CONFLICT (session_id) DO UPDATE SET
+       coverage = EXCLUDED.coverage,
+       activity_class = EXCLUDED.activity_class,
+       entry_path = EXCLUDED.entry_path,
+       click_count = EXCLUDED.click_count,
+       input_event_count = EXCLUDED.input_event_count,
+       page_event_count = EXCLUDED.page_event_count,
+       failed_request_4xx_count = EXCLUDED.failed_request_4xx_count,
+       failed_request_5xx_count = EXCLUDED.failed_request_5xx_count,
+       unattributed_failed_request_count = EXCLUDED.unattributed_failed_request_count,
+       successful_write_count = EXCLUDED.successful_write_count,
+       failed_write_count = EXCLUDED.failed_write_count,
+       rule_version = EXCLUDED.rule_version,
+       analyzed_at = now()`,
+    [row.sessionId, row.projectId, row.environmentId, row.sessionStartedAt, row.coverage,
+      row.activityClass, row.entryPath, row.clickCount, row.inputEventCount, row.pageEventCount,
+      row.failedRequest4xxCount, row.failedRequest5xxCount, row.unattributedFailedRequestCount,
+      row.successfulWriteCount, row.failedWriteCount, row.ruleVersion],
+  );
+}
+
+export async function getSessionAnalysis(
+  sessionId: string,
+  projectId: string,
+): Promise<(SessionAnalysisUpsert & { analyzedAt: string }) | null> {
+  const { rows } = await getPool().query<{
+    session_id: string; project_id: string; environment_id: string | null;
+    session_started_at: string; coverage: SessionAnalysisUpsert['coverage'];
+    activity_class: SessionAnalysisUpsert['activityClass']; entry_path: string | null;
+    click_count: number; input_event_count: number; page_event_count: number;
+    failed_request_4xx_count: number; failed_request_5xx_count: number;
+    unattributed_failed_request_count: number; successful_write_count: number;
+    failed_write_count: number; rule_version: number; analyzed_at: string;
+  }>(
+    `SELECT session_id, project_id, environment_id, session_started_at::text,
+            coverage, activity_class, entry_path, click_count, input_event_count,
+            page_event_count, failed_request_4xx_count, failed_request_5xx_count,
+            unattributed_failed_request_count, successful_write_count, failed_write_count,
+            rule_version, analyzed_at::text
+       FROM session_analysis WHERE session_id = $1 AND project_id = $2`,
+    [sessionId, projectId],
+  );
+  const row = rows[0];
+  if (!row) return null;
+  return {
+    sessionId: row.session_id, projectId: row.project_id, environmentId: row.environment_id,
+    sessionStartedAt: row.session_started_at, coverage: row.coverage,
+    activityClass: row.activity_class, entryPath: row.entry_path, clickCount: row.click_count,
+    inputEventCount: row.input_event_count, pageEventCount: row.page_event_count,
+    failedRequest4xxCount: row.failed_request_4xx_count,
+    failedRequest5xxCount: row.failed_request_5xx_count,
+    unattributedFailedRequestCount: row.unattributed_failed_request_count,
+    successfulWriteCount: row.successful_write_count, failedWriteCount: row.failed_write_count,
+    ruleVersion: row.rule_version, analyzedAt: row.analyzed_at,
+  };
+}
+
+export async function enqueueSessionAnalysisForBudgetRetry(
+  sessionId: string,
+  projectId: string,
+): Promise<void> {
+  // The current analysis row is still claimed when this runs, so only a
+  // future pending row can be the idempotence guard. Including claimed rows
+  // would suppress the retry every time.
+  await getPool().query(
+    `INSERT INTO error_group_jobs (project_id, job_type, session_id, available_at)
+     SELECT $2, 'session_analysis', $1, date_trunc('day', now()) + interval '1 day'
+     WHERE NOT EXISTS (
+       SELECT 1 FROM error_group_jobs
+       WHERE session_id = $1 AND project_id = $2 AND job_type = 'session_analysis'
+         AND status = 'pending')`,
+    [sessionId, projectId],
+  );
 }
 
 export async function setSessionAnalysisStatus(

@@ -7,6 +7,7 @@ import {
   findFoldTarget,
   applyFoldOutcome,
   recomputeIncidentImpact,
+  tryReserveAdjudicationCall,
   type FoldSignal,
 } from '../promotion-db.js';
 import { writeFrictionSignals } from '../persist.js';
@@ -134,6 +135,7 @@ async function seedAnalysisJob(sessionId: string): Promise<string> {
 }
 
 async function cleanup(): Promise<void> {
+  await pool.query(`DELETE FROM adjudication_call_budget WHERE project_id = $1`, [projectId]);
   await pool.query(`DELETE FROM friction_adjudication_generations WHERE project_id = $1`, [projectId]);
   await pool.query(`UPDATE error_groups SET representative_signal_id = NULL WHERE project_id = $1`, [projectId]);
   await pool.query(`DELETE FROM friction_signals WHERE project_id = $1`, [projectId]);
@@ -170,6 +172,48 @@ describeDb('promotion-db integration', () => {
 
   beforeEach(async () => {
     await cleanup();
+  });
+
+  it('reserves the per-project adjudication budget atomically', async () => {
+    const client = await getPool().connect();
+    try {
+      expect(await tryReserveAdjudicationCall(client, projectId, 3)).toBe(true);
+      expect(await tryReserveAdjudicationCall(client, projectId, 3)).toBe(true);
+      expect(await tryReserveAdjudicationCall(client, projectId, 3)).toBe(true);
+      expect(await tryReserveAdjudicationCall(client, projectId, 3)).toBe(false);
+    } finally {
+      client.release();
+    }
+  });
+
+  it('supersedes prior-version signals and persists occurrence timestamps', async () => {
+    const sessionId = await seedSession();
+    const session = {
+      id: sessionId, project_id: projectId, environment_id: environmentId,
+      end_user_id: null, status: 'analyzing', started_at: new Date().toISOString(), chunk_count: 1,
+    };
+    const detected = (fingerprint: string, version: number) => ({
+      signalType: 'dead_click' as const,
+      fingerprint,
+      elementSelector: '#save',
+      pageUrlNormalized: '/settings',
+      occurredAt: 1_754_000_000_000,
+      occurredAts: [1_754_000_000_000],
+      occurrenceCount: 1,
+      ruleVersion: version,
+    });
+    await writeFrictionSignals(session, [detected('kept', 1), detected('removed', 1)], 1);
+    await writeFrictionSignals(session, [detected('kept', 2)], 2);
+
+    const { rows } = await pool.query<{
+      fingerprint: string; rule_version: number; superseded_by: string | null;
+      retracted_at: Date | null; occurred_ats: number[] | null;
+    }>(`SELECT fingerprint, rule_version, superseded_by, retracted_at, occurred_ats
+        FROM friction_signals WHERE session_id = $1 ORDER BY rule_version, fingerprint`, [sessionId]);
+    expect(rows).toHaveLength(3);
+    expect(rows.find((row) => row.rule_version === 1 && row.fingerprint === 'kept')?.superseded_by).not.toBeNull();
+    expect(rows.find((row) => row.fingerprint === 'removed')?.retracted_at).not.toBeNull();
+    expect(rows.find((row) => row.rule_version === 2)?.occurred_ats).toEqual([1_754_000_000_000]);
   });
 
   describe('claimSignalsForAdjudication', () => {
@@ -722,6 +766,8 @@ describeDb('promotion-db integration', () => {
         environment_id: environmentId,
         end_user_id: null,
         status: 'pending',
+        started_at: '2026-08-01T00:00:00Z',
+        chunk_count: 1,
       };
       const detected = (occurredAt: Date, occurrenceCount: number) => ({
         signalType: 'rage_click' as const,
@@ -729,6 +775,7 @@ describeDb('promotion-db integration', () => {
         elementSelector: '#checkout',
         pageUrlNormalized: '/checkout',
         occurredAt: occurredAt.getTime(),
+        occurredAts: [occurredAt.getTime()],
         occurrenceCount,
         ruleVersion: 1,
       });

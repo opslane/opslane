@@ -29,20 +29,25 @@ type sessionEndUserJSON struct {
 }
 
 type sessionJSON struct {
-	ID                 string              `json:"id"`
-	StartedAt          string              `json:"started_at"`
-	LastChunkAt        *string             `json:"last_chunk_at,omitempty"`
-	Status             string              `json:"status"`
-	ChunkCount         int                 `json:"chunk_count"`
-	PlayableChunkCount int                 `json:"playable_chunk_count"`
-	BytesStored        int64               `json:"bytes_stored"`
-	PageURL            *string             `json:"page_url,omitempty"`
-	SDKRelease         *string             `json:"sdk_release,omitempty"`
-	ErrorCount         int                 `json:"error_count"`
-	RageClickCount     int                 `json:"rage_click_count"`
-	DeadClickCount     int                 `json:"dead_click_count"`
-	FormAbandonCount   int                 `json:"form_abandon_count"`
-	EndUser            *sessionEndUserJSON `json:"end_user,omitempty"`
+	ID                    string              `json:"id"`
+	StartedAt             string              `json:"started_at"`
+	LastChunkAt           *string             `json:"last_chunk_at,omitempty"`
+	Status                string              `json:"status"`
+	ChunkCount            int                 `json:"chunk_count"`
+	PlayableChunkCount    int                 `json:"playable_chunk_count"`
+	BytesStored           int64               `json:"bytes_stored"`
+	PageURL               *string             `json:"page_url,omitempty"`
+	SDKRelease            *string             `json:"sdk_release,omitempty"`
+	ErrorCount            int                 `json:"error_count"`
+	RageClickCount        int                 `json:"rage_click_count"`
+	DeadClickCount        int                 `json:"dead_click_count"`
+	FormAbandonCount      int                 `json:"form_abandon_count"`
+	Coverage              *string             `json:"coverage"`
+	ActivityClass         *string             `json:"activity_class"`
+	FailedRequestCount    int                 `json:"failed_request_count"`
+	SuccessfulWriteCount  int                 `json:"successful_write_count"`
+	UnverifiedSignalCount int                 `json:"unverified_signal_count"`
+	EndUser               *sessionEndUserJSON `json:"end_user,omitempty"`
 }
 
 type sessionChunkJSON struct {
@@ -67,18 +72,23 @@ type sessionDetailJSON struct {
 
 func toSessionJSON(session db.SessionSummary) sessionJSON {
 	result := sessionJSON{
-		ID:                 session.ID,
-		StartedAt:          session.StartedAt.Format(time.RFC3339Nano),
-		Status:             session.Status,
-		ChunkCount:         session.ChunkCount,
-		PlayableChunkCount: session.PlayableChunkCount,
-		BytesStored:        session.BytesStored,
-		PageURL:            session.PageURL,
-		SDKRelease:         session.SDKRelease,
-		ErrorCount:         session.ErrorCount,
-		RageClickCount:     session.RageClickCount,
-		DeadClickCount:     session.DeadClickCount,
-		FormAbandonCount:   session.FormAbandonCount,
+		ID:                    session.ID,
+		StartedAt:             session.StartedAt.Format(time.RFC3339Nano),
+		Status:                session.Status,
+		ChunkCount:            session.ChunkCount,
+		PlayableChunkCount:    session.PlayableChunkCount,
+		BytesStored:           session.BytesStored,
+		PageURL:               session.PageURL,
+		SDKRelease:            session.SDKRelease,
+		ErrorCount:            session.ErrorCount,
+		RageClickCount:        session.RageClickCount,
+		DeadClickCount:        session.DeadClickCount,
+		FormAbandonCount:      session.FormAbandonCount,
+		Coverage:              session.Coverage,
+		ActivityClass:         session.ActivityClass,
+		FailedRequestCount:    session.FailedRequestCount,
+		SuccessfulWriteCount:  session.SuccessfulWriteCount,
+		UnverifiedSignalCount: session.UnverifiedSignalCount,
 	}
 	if session.LastChunkAt != nil {
 		formatted := session.LastChunkAt.Format(time.RFC3339Nano)

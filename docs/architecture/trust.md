@@ -21,7 +21,7 @@ The worker pushes only to a reserved Opslane fix branch (`opslane/fix-<group-id>
 
 | Destination | What is sent | When |
 | --- | --- | --- |
-| Anthropic API | Error details, stack traces, relevant source file contents, test output (investigation and fix); route patterns and relevant source file contents (route classification) | During investigation, fix, and route classification, only with `ANTHROPIC_API_KEY` set |
+| Anthropic API | Error details, stack traces, relevant source file contents, test output, session context (activity class, entry path, request counts, coverage indicator), evidence windows (±15s event timelines around friction signals when enabled); route patterns and relevant source file contents (route classification) | Only during investigation, friction adjudication, fix, and route classification, only with `ANTHROPIC_API_KEY` set |
 | E2B sandbox | A clone of the connected repository, the candidate fix, dependency installs, test runs | Only during fix verification, only with `E2B_API_KEY` set |
 | Langfuse (tracing backend) | Telemetry spans (operation traces, Anthropic API prompts and responses) | When `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, and `LANGFUSE_BASE_URL` are set |
 | GitHub (worker) | The fix branch (pushed **before** PR creation — if the PR call then fails, the pushed branch remains and the incident ends `needs_human`), then the PR body (root cause, diff, verification evidence). The setup-PR flow likewise pushes an `opslane/setup` branch and opens a PR. | During fix delivery and setup-PR |

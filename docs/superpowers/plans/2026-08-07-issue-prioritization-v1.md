@@ -33,7 +33,7 @@
 ### Task 1: Migration 038 — score columns and window indexes
 
 **Files:**
-- Create: `packages/ingestion/db/migrations/038_priority_score.sql`
+- Create: `packages/ingestion/db/migrations/039_priority_score.sql`
 
 **Interfaces:**
 - Produces: `error_groups.priority_score REAL`, `error_groups.priority_scored_at TIMESTAMPTZ`, `error_groups.priority_inputs JSONB`; indexes `idx_error_events_group_created`, `idx_friction_signals_incident_reach`.
@@ -41,7 +41,7 @@
 - [ ] **Step 1: Write the migration**
 
 ```sql
--- 038_priority_score.sql
+-- 039_priority_score.sql
 -- Priority score v1 (spec: docs/superpowers/specs/2026-08-07-issue-prioritization-design.md).
 -- Project-wide score recomputed by the priority sweeper; NULL means "never scored".
 ALTER TABLE error_groups ADD COLUMN IF NOT EXISTS priority_score REAL;
@@ -70,7 +70,7 @@ Expected: both passes apply real files (output lists each migration; "No migrati
 - [ ] **Step 3: Commit**
 
 ```bash
-git add packages/ingestion/db/migrations/038_priority_score.sql
+git add packages/ingestion/db/migrations/039_priority_score.sql
 git commit -m "feat(ingestion): add priority score columns and window indexes"
 ```
 
@@ -619,7 +619,7 @@ Expected: `priority_score == 3` (1 user ×1 + 2 × 1 user-24h), `priority_inputs
 ### Task 8: Migration 039 + weight join in the score SQL
 
 **Files:**
-- Create: `packages/ingestion/db/migrations/039_route_map.sql`
+- Create: `packages/ingestion/db/migrations/040_route_map.sql`
 - Modify: `packages/ingestion/priority/sweeper.go` (both score SQLs)
 - Test: extend `packages/ingestion/priority/sweeper_test.go`
 
@@ -629,7 +629,7 @@ Expected: `priority_score == 3` (1 user ×1 + 2 × 1 user-24h), `priority_inputs
 - [ ] **Step 1: Migration**
 
 ```sql
--- 039_route_map.sql
+-- 040_route_map.sql
 CREATE TABLE IF NOT EXISTS route_map (
   project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   pattern    TEXT NOT NULL,          -- normalized templated path (/sign/:token, forge:portal-panel)

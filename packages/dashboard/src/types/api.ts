@@ -233,6 +233,11 @@ export interface SessionSummary {
   rage_click_count: number;
   dead_click_count: number;
   form_abandon_count: number;
+  coverage: 'complete' | 'partial' | 'no_replay' | null;
+  activity_class: 'active' | 'light_touch' | 'zero_interaction' | 'idle_tab' | 'unknown' | null;
+  failed_request_count: number;
+  successful_write_count: number;
+  unverified_signal_count: number;
   sdk_release?: string | null;
 }
 
