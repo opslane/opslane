@@ -40,6 +40,9 @@ func TestAdminJobsAllowsCIWatchFilter(t *testing.T) {
 	if _, ok := adminJobTypes["ci_watch"]; !ok {
 		t.Fatal("ci_watch is missing from the admin job-type allowlist")
 	}
+	if _, ok := adminJobTypes["route_map"]; !ok {
+		t.Fatal("route_map is missing from the admin job-type allowlist")
+	}
 }
 
 func TestRedactAdminError(t *testing.T) {

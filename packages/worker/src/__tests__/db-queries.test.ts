@@ -27,6 +27,9 @@ import {
   getSessionForAnalysis,
   setSessionAnalysisStatus,
   claimJob,
+  listUnmappedPatterns,
+  MAX_ROUTE_PATTERN_BYTES,
+  upsertRouteMapRows,
   updateGroupStatus,
   updateGroupInvestigation,
 } from '../db.js';
@@ -243,6 +246,9 @@ describe('claimJob friction scheduling fields', () => {
     // Scheduling policy: error_fix first, capped analysis, lane alternation.
     const claimSql = mockQuery.mock.calls[2][0] as string;
     expect(claimSql).toContain("WHEN job_type = 'error_fix' THEN 0");
+    expect(claimSql).toContain("WHEN job_type = 'route_map' THEN 4");
+    expect(claimSql.indexOf("WHEN job_type = 'route_map' THEN 4"))
+      .toBeLessThan(claimSql.indexOf("WHEN job_type <> 'session_analysis' THEN 2"));
     expect(claimSql).toContain("AND job_type = 'session_analysis'");
     expect(claimSql).toContain('< $3');
     // Cap defaults to 2 when SESSION_ANALYSIS_MAX_CONCURRENT is unset.
@@ -258,6 +264,76 @@ describe('claimJob friction scheduling fields', () => {
     mockQuery.mockResolvedValueOnce({}); // COMMIT
     await claimJob('worker-1', 30_000, 0);
     expect(mockQuery.mock.calls[2][1]).toEqual(['worker-1', 30, 0]);
+  });
+});
+
+describe('route-map persistence queries', () => {
+  beforeEach(() => mockQuery.mockReset());
+
+  it('lists distinct unmapped patterns only for open groups in one project', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ pattern: '/assets/:id' }] });
+
+    await expect(listUnmappedPatterns('p1')).resolves.toEqual(['/assets/:id']);
+
+    const [sql, params] = mockQuery.mock.calls[0] as [string, unknown[]];
+    expect(sql).toContain('eg.project_id = $1');
+    expect(sql).toContain("eg.status NOT IN ('resolved', 'merged', 'archived')");
+    expect(sql).toContain('rm.pattern = eg.page_url_normalized');
+    // A pattern too large for route_map's btree key would abort the single
+    // transaction that writes every other route for the project.
+    expect(sql).toContain('octet_length(eg.page_url_normalized) <= $2');
+    expect(params).toEqual(['p1', MAX_ROUTE_PATTERN_BYTES]);
+    expect(MAX_ROUTE_PATTERN_BYTES).toBeLessThan(2704);
+  });
+
+  it('lease-fences classification and unresolved writes and preserves human rows', async () => {
+    mockQuery.mockResolvedValueOnce({}); // BEGIN
+    mockQuery.mockResolvedValueOnce({ rowCount: 1, rows: [{ '?column?': 1 }] }); // lease
+    mockQuery.mockResolvedValueOnce({ rowCount: 1, rows: [] }); // model row
+    mockQuery.mockResolvedValueOnce({ rowCount: 1, rows: [] }); // unresolved row
+    mockQuery.mockResolvedValueOnce({}); // COMMIT
+
+    await expect(upsertRouteMapRows({
+      projectId: 'p1',
+      jobId: 'j1',
+      workerId: 'w1',
+      leaseGeneration: '7',
+      rows: [{ pattern: '/assets/:id', name: 'Asset', purpose: 'View asset', tier: 'standard' }],
+      unresolved: ['/unknown'],
+    })).resolves.toBe(true);
+
+    const leaseSql = String(mockQuery.mock.calls[1]?.[0]);
+    expect(leaseSql).toContain('project_id = $2');
+    expect(leaseSql).toContain('lease_generation = $4::bigint');
+    expect(leaseSql).toContain("status = 'claimed'");
+    expect(leaseSql).toContain('lease_expires_at > now()');
+    expect(leaseSql).toContain('FOR UPDATE');
+    expect(mockQuery.mock.calls[1]?.[1]).toEqual(['j1', 'p1', 'w1', '7']);
+
+    const writeSql = String(mockQuery.mock.calls[2]?.[0]);
+    expect(writeSql).toContain("WHERE route_map.source <> 'human'");
+    expect(mockQuery.mock.calls[2]?.[1]).toEqual([
+      'p1', '/assets/:id', 'Asset', 'View asset', 'standard', 'llm',
+    ]);
+    expect(mockQuery.mock.calls[3]?.[1]).toEqual([
+      'p1', '/unknown', '/unknown', 'unclassified', 'standard', 'llm-unresolved',
+    ]);
+    expect(mockQuery.mock.calls[4]?.[0]).toBe('COMMIT');
+  });
+
+  it('writes nothing when the job lease is no longer current', async () => {
+    mockQuery.mockResolvedValueOnce({}); // BEGIN
+    mockQuery.mockResolvedValueOnce({ rowCount: 0, rows: [] }); // lease
+    mockQuery.mockResolvedValueOnce({}); // ROLLBACK
+
+    await expect(upsertRouteMapRows({
+      projectId: 'p1', jobId: 'j1', workerId: 'w1', leaseGeneration: '6',
+      rows: [{ pattern: '/', name: 'Home', purpose: '', tier: 'standard' }],
+      unresolved: [],
+    })).resolves.toBe(false);
+
+    expect(mockQuery).toHaveBeenCalledTimes(3);
+    expect(mockQuery.mock.calls[2]?.[0]).toBe('ROLLBACK');
   });
 });
 

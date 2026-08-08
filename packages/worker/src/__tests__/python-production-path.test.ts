@@ -27,6 +27,7 @@ vi.mock('../minio-client.js', () => ({ fetchObject: vi.fn(), getMinIOConfig: vi.
 vi.mock('../poller.js', () => ({ createPoller: vi.fn(() => ({ start: vi.fn(), stop: vi.fn() })) }));
 vi.mock('../github-app.js', () => ({ getInstallationToken: vi.fn() }));
 vi.mock('../setup-pr.js', () => ({ processSetupPrJob: vi.fn() }));
+vi.mock('../route-map.js', () => ({ processRouteMapJob: vi.fn() }));
 vi.mock('../source-map.js', () => ({ parseStackFrames: vi.fn(() => []), resolveFrame: vi.fn() }));
 // Only the storage-backed resolver is stubbed; framesFromEnvelope is a pure
 // reshape of an already-stored row and the real one is what index.ts calls.

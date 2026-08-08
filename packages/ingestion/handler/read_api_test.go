@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/opslane/opslane/packages/ingestion/db"
 )
@@ -23,6 +24,31 @@ func TestIncidentJSON_ReplayID(t *testing.T) {
 	b2, _ := json.Marshal(inc2)
 	if strings.Contains(string(b2), "replay_id") {
 		t.Errorf("expected replay_id omitted when nil, got %s", string(b2))
+	}
+}
+
+func TestIncidentJSONIncludesPriorityFields(t *testing.T) {
+	score := 4.5
+	scoredAt := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
+	inc := toIncidentJSON(db.ErrorGroup{
+		PriorityScore:    &score,
+		PriorityInputs:   []byte(`{"impact":3,"route_weight":1.5}`),
+		PriorityScoredAt: &scoredAt,
+	})
+	body, err := json.Marshal(inc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["priority_score"] != 4.5 || got["priority_scored_at"] != "2026-08-07T12:00:00Z" {
+		t.Fatalf("priority fields = %s", body)
+	}
+	inputs, ok := got["priority_inputs"].(map[string]any)
+	if !ok || inputs["impact"] != float64(3) {
+		t.Fatalf("priority inputs = %#v", got["priority_inputs"])
 	}
 }
 

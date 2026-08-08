@@ -15,6 +15,7 @@ import (
 	"github.com/opslane/opslane/packages/ingestion/handler"
 	minioPkg "github.com/opslane/opslane/packages/ingestion/minio"
 	"github.com/opslane/opslane/packages/ingestion/notify"
+	"github.com/opslane/opslane/packages/ingestion/priority"
 	"github.com/opslane/opslane/packages/ingestion/retention"
 	"github.com/opslane/opslane/packages/ingestion/scrubber"
 )
@@ -198,6 +199,16 @@ func main() {
 			}
 		}
 	}()
+
+	prioritySweeper := &priority.Sweeper{Pool: pool}
+	priorityInterval := 30 * time.Minute
+	if v := os.Getenv("PRIORITY_SCORE_INTERVAL_SECONDS"); v != "" {
+		if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
+			priorityInterval = time.Duration(secs) * time.Second
+		}
+	}
+	go prioritySweeper.Start(context.Background(), priorityInterval)
+	slog.Info("priority sweeper started", "interval", priorityInterval.String())
 
 	// Raw chunks are fail-closed until this pass overwrites them with redacted
 	// bytes and stamps scrubbed_at. Every replica runs a scrubber; claims use

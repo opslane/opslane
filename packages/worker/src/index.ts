@@ -52,6 +52,7 @@ import {
 import { buildEvidenceWindows, EVIDENCE_WINDOW_MS } from './friction/evidence-window.js';
 import { VerificationInfraError } from './harness/errors.js';
 import { processCIWatchJob } from './ci-watch.js';
+import { processRouteMapJob } from './route-map.js';
 import { effectivePlatform, pythonPipelineEnabled } from './platform.js';
 import { parseRuntimeInfo } from './runtime-info.js';
 import { parseDiagnosis } from './diagnosis-schema.js';
@@ -355,6 +356,11 @@ export async function processJobInner(job: ClaimedJob, signal: AbortSignal): Pro
   if (job.jobType === 'ci_watch') {
     if (!job.errorGroupId) throw new Error(`Job ${job.id} missing error_group_id`);
     await processCIWatchJob(job as ClaimedJob & { errorGroupId: string }, signal);
+    return;
+  }
+
+  if (job.jobType === 'route_map') {
+    await processRouteMapJob(job, signal);
     return;
   }
 

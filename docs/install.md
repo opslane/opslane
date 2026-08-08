@@ -16,7 +16,15 @@ If you use hosted Opslane, follow the web setup flow below. If you self-host, fo
 3. Pick the repository you want Opslane to monitor.
 4. Save the generated ingest key as a build or deploy secret.
 5. Merge the setup PR Opslane opens for your repo.
-6. Deploy, trigger a test error, and wait for the dashboard to confirm the first event.
+6. Complete the user-identification (`identify()`) check: every independently built browser bundle that calls `init()` must also call the current SDK's `setUser()` after authentication. Check the main app, embeds, iframe apps, and portal or extension panels separately.
+7. Deploy, trigger a test error, and wait for the dashboard to confirm the first event.
+
+Do not infer that identity wiring in the main SPA covers another bundle. In the
+AMFJ integration, the main app identified users while its customer-facing JSM
+portal-panel bundle initialized Opslane without setting the same user. That left
+the most important surface with anonymous-only reach. The dashboard's **No user
+identification** hint is the runtime backstop: if it appears for a surface, check
+that surface's entry point even when identification works elsewhere.
 
 For Vite apps, set:
 
@@ -52,12 +60,15 @@ npm install @opslane/sdk
 Then initialize it in your browser entry point:
 
 ```ts
-import { init } from '@opslane/sdk';
+import { init, setUser } from '@opslane/sdk';
 
 init({
   apiKey: import.meta.env.VITE_OPSLANE_API_KEY,
   release: import.meta.env.VITE_OPSLANE_RELEASE,
 });
+
+// Run after sign-in, in every bundle that calls init().
+setUser({ id: currentUser.id, email: currentUser.email });
 ```
 
 For Vue apps, also register the Vue plugin before mounting:

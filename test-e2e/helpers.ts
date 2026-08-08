@@ -318,6 +318,21 @@ export interface Incident {
   };
   candidate_diff?: string;
   verification_evidence?: Record<string, unknown>;
+  priority_score?: number;
+  priority_scored_at?: string;
+  priority_inputs?: {
+    users_7d: number;
+    anon_sessions_7d: number;
+    users_24h: number;
+    anon_sessions_24h: number;
+    impact: number;
+    route_pattern: string | null;
+    route_name: string | null;
+    route_tier: 'customer' | 'standard' | 'admin' | null;
+    route_weight: number;
+    cap_applied: boolean;
+    reason_code: string | null;
+  };
 }
 
 /**
