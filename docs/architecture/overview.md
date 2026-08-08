@@ -43,7 +43,7 @@ flowchart LR
 | Component | Runtime | Role |
 | --- | --- | --- |
 | **Browser SDK** (`packages/sdk`) | Your users' browsers | Captures errors, breadcrumbs, network timings, and default-on session recordings; masks in the browser before upload, with a server-side scrub gate before reads. MIT licensed — it runs in *your* product. |
-| **Ingestion API** (`packages/ingestion`) | Go service | Receives events, drops known noise, groups errors by fingerprint (family-based or platform + error type + message + stack), enqueues investigation jobs, delivers notifications, serves the dashboard SPA, and exposes the read/write API. |
+| **Ingestion API** (`packages/ingestion`) | Go service | Receives events, drops known noise, groups errors by fingerprint (family-based or platform + error type + message + stack), enqueues investigation jobs, builds daily digests, delivers notifications, serves the dashboard SPA, and exposes the read/write API. |
 | **Worker** (`packages/worker`) | Node service | Claims jobs from Postgres, investigates with Claude, writes candidate fixes, verifies them in an E2B sandbox, and opens GitHub PRs. |
 | **Dashboard** (`packages/dashboard`) | Vue SPA, served by ingestion | Issues, replays, project and GitHub settings. |
 | **Postgres** | Database | System of record **and** the job queue — jobs are claimed with `FOR UPDATE SKIP LOCKED` and lease-based ownership. There is no Redis or external queue. |
@@ -60,4 +60,3 @@ flowchart LR
 - [Life of an error](life-of-an-error.md) — the pipeline stage by stage
 - [Precision](precision.md) — what "verified" guarantees and what it does not
 - [Trust](trust.md) — permissions, data flow, token handling, retention
-

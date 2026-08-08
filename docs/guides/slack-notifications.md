@@ -7,7 +7,7 @@ covers:
 ---
 # Slack notifications
 
-Opslane posts a message to Slack when a **new issue** is created — the first time an error groups into a fresh issue, not on every occurrence. Repeat events of the same issue raise its occurrence count without notifying again, so a noisy error is one message, not a flood.
+Opslane posts Slack messages for **new issue alerts** and **daily digests**. Issue alerts fire the first time an error groups into a fresh issue, not on every occurrence. Repeat events of the same issue raise its occurrence count without notifying again, so a noisy error is one message, not a flood.
 
 Delivery goes through a Slack **incoming webhook** you create in your workspace. The webhook URL is the only credential involved; Opslane never needs a Slack bot token or app installation.
 
@@ -21,7 +21,7 @@ Treat that URL as a secret: anyone holding it can post to your channel. Opslane 
 
 ## 2. Add the destination in Opslane
 
-Dashboard → **Settings** → **Integrations** → *Notification integrations*: add a destination, name it, and paste the webhook URL. Use the test action to send a test message and confirm the channel wiring before relying on it.
+Dashboard → **Settings** → **Integrations** → *Notification integrations*: add a destination, name it, and paste the webhook URL. Select which event types to receive; by default both new issue alerts and daily digests are enabled. Use the test actions to send samples of each message type and confirm the channel wiring before relying on it.
 
 Or via the API (session-authenticated — an SDK API key cannot manage destinations):
 
@@ -31,7 +31,9 @@ curl -X POST "https://your-instance/api/v1/projects/$PROJECT_ID/notification-des
   -d '{"name":"#eng-alerts","webhook_url":"https://hooks.slack.com/services/..."}'
 ```
 
-The full endpoint set (list, update, delete, test) is in [HTTP routes](../reference/http-routes.md). On cloud multi-org deployments, creating, updating, deleting, and testing destinations requires the **admin** organization role; self-hosted OSS deployments allow any signed-in org member.
+Omitting `event_types` enables both new issue alerts and daily digests by default; pass `"event_types":["issue.created"]` to receive only issue alerts or `"event_types":["digest.daily"]` for only digests.
+
+The full endpoint set (list, update, delete, test) is in [HTTP routes](../reference/http-routes.md). To test a specific message type, pass `{"event_type":"digest.daily"}` in the test request body; omitting it sends a test issue alert. On cloud multi-org deployments, creating, updating, deleting, and testing destinations requires the **admin** organization role; self-hosted OSS deployments allow any signed-in org member.
 
 ## Delivery semantics
 
