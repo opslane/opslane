@@ -216,7 +216,7 @@ func TestUpdateProjectFrictionAutonomy(t *testing.T) {
 	}
 
 	autoFix := "auto_fix"
-	project, err := q.UpdateProject(ctx, orgID, projectID, nil, &autoFix, nil, nil)
+	project, err := q.UpdateProject(ctx, orgID, projectID, nil, &autoFix, nil, nil, nil)
 	if err != nil || project == nil {
 		t.Fatalf("UpdateProject = (%+v, %v)", project, err)
 	}
@@ -227,13 +227,13 @@ func TestUpdateProjectFrictionAutonomy(t *testing.T) {
 		t.Fatalf("GithubRepo was clobbered: %v", project.GithubRepo)
 	}
 
-	project, err = q.UpdateProject(ctx, orgID, projectID, nil, nil, nil, nil)
+	project, err = q.UpdateProject(ctx, orgID, projectID, nil, nil, nil, nil, nil)
 	if err != nil || project == nil || project.FrictionAutonomy != autoFix {
 		t.Fatalf("omitted autonomy was not preserved: project=%+v err=%v", project, err)
 	}
 
 	invalid := "yolo"
-	if _, err := q.UpdateProject(ctx, orgID, projectID, nil, &invalid, nil, nil); err == nil {
+	if _, err := q.UpdateProject(ctx, orgID, projectID, nil, &invalid, nil, nil, nil); err == nil {
 		t.Fatal("expected invalid autonomy to violate the database constraint")
 	}
 }

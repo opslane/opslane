@@ -71,7 +71,7 @@ func TestNotificationDestinationCRUDAndTenantScope(t *testing.T) {
 
 	name := "Renamed alerts"
 	enabled := false
-	if err := queries.UpdateNotificationDestination(ctx, orgA, projectA, fixture.ID, &name, nil, nil, &enabled); err != nil {
+	if err := queries.UpdateNotificationDestination(ctx, orgA, projectA, fixture.ID, &name, nil, nil, &enabled, nil); err != nil {
 		t.Fatalf("UpdateNotificationDestination: %v", err)
 	}
 	got, err := queries.GetNotificationDestination(ctx, orgA, projectA, fixture.ID)
@@ -85,7 +85,7 @@ func TestNotificationDestinationCRUDAndTenantScope(t *testing.T) {
 	if _, err := queries.GetNotificationDestination(ctx, orgB, projectA, fixture.ID); !errors.Is(err, pgx.ErrNoRows) {
 		t.Fatalf("cross-org get error = %v, want pgx.ErrNoRows", err)
 	}
-	if err := queries.UpdateNotificationDestination(ctx, orgB, projectA, fixture.ID, &name, nil, nil, nil); !errors.Is(err, pgx.ErrNoRows) {
+	if err := queries.UpdateNotificationDestination(ctx, orgB, projectA, fixture.ID, &name, nil, nil, nil, nil); !errors.Is(err, pgx.ErrNoRows) {
 		t.Fatalf("cross-org update error = %v, want pgx.ErrNoRows", err)
 	}
 	if err := queries.DeleteNotificationDestination(ctx, orgB, projectA, fixture.ID); !errors.Is(err, pgx.ErrNoRows) {
@@ -110,5 +110,47 @@ func TestNotificationDestinationRejectsEmptyEventTypes(t *testing.T) {
 	fixture.EventTypes = []string{}
 	if _, err := queries.CreateNotificationDestination(context.Background(), orgID, projectID, fixture); err == nil {
 		t.Fatal("expected empty event_types to violate the database constraint")
+	}
+}
+
+func TestUpdateNotificationDestinationEventTypes(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	q := db.New(pool)
+	org, err := q.CreateOrg(ctx, "evt-org-"+uuid.NewString())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { cleanupTenant(t, pool, org.ID) })
+	project, err := q.CreateProject(ctx, org.ID, "evt-proj", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	destID := uuid.NewString()
+	if _, err := pool.Exec(ctx, `INSERT INTO notification_destinations
+		(id, project_id, type, name, config_encrypted, config_fingerprint)
+		VALUES ($1,$2,'slack','d',$3,'fp')`, destID, project.ID, []byte{0}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := q.UpdateNotificationDestination(ctx, org.ID, project.ID, destID, nil, nil, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	var types []string
+	if err := pool.QueryRow(ctx, `SELECT event_types FROM notification_destinations WHERE id=$1`, destID).Scan(&types); err != nil {
+		t.Fatal(err)
+	}
+	if len(types) != 2 {
+		t.Fatalf("expected default 2 types, got %v", types)
+	}
+
+	if err := q.UpdateNotificationDestination(ctx, org.ID, project.ID, destID, nil, nil, nil, nil, []string{"issue.created"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT event_types FROM notification_destinations WHERE id=$1`, destID).Scan(&types); err != nil {
+		t.Fatal(err)
+	}
+	if len(types) != 1 || types[0] != "issue.created" {
+		t.Fatalf("got %v", types)
 	}
 }

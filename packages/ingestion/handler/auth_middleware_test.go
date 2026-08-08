@@ -363,6 +363,49 @@ func TestUpdateProjectEndpoint_FrictionAutonomy(t *testing.T) {
 	}
 }
 
+func TestUpdateProjectEndpointDigestTimezone(t *testing.T) {
+	router, q, pool := authTestRouter(t)
+	orgID, projectID, _, _ := seedTenant(t, q)
+	t.Cleanup(func() { cleanupTenantHandler(t, pool, orgID) })
+	token, err := auth.SignAccessToken(
+		[]byte(authTestJWTSecret), "timezone-user", orgID, "timezone@example.com",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	patch := func(body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPatch, "/api/v1/projects/"+projectID, strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, req)
+		return response
+	}
+
+	// "Local" is accepted by time.LoadLocation but is the server process's zone,
+	// not an IANA name — replicas would derive different digest dates for it.
+	for _, value := range []string{"", "Not/AZone", "Local"} {
+		response := patch(`{"digest_timezone":` + fmt.Sprintf("%q", value) + `}`)
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("digest_timezone %q status=%d body=%s", value, response.Code, response.Body.String())
+		}
+	}
+	response := patch(`{"digest_timezone":"America/Los_Angeles"}`)
+	if response.Code != http.StatusOK {
+		t.Fatalf("valid digest_timezone status=%d body=%s", response.Code, response.Body.String())
+	}
+	var project struct {
+		DigestTimezone string `json:"digest_timezone"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&project); err != nil {
+		t.Fatal(err)
+	}
+	if project.DigestTimezone != "America/Los_Angeles" {
+		t.Fatalf("digest_timezone = %q", project.DigestTimezone)
+	}
+}
+
 func TestGetFixStatsEndpoint_AuthenticatedShape(t *testing.T) {
 	router, q, pool := authTestRouter(t)
 	orgID, projectID, _, _ := seedTenant(t, q)

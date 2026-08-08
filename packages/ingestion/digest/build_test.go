@@ -1,0 +1,453 @@
+package digest
+
+import (
+	"context"
+	"os"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+// Kept in sync with db/testhelper_test.go's constant of the same name.
+const defaultTestDSN = "postgres://opslane:opslane_dev@localhost:5434/opslane?sslmode=disable"
+
+func testPool(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+	// Mirror db/testhelper_test.go: fall back to the Compose DSN rather than
+	// skipping outright, so a bare `go test ./...` actually exercises this
+	// package instead of reporting ok having run nothing.
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		dsn = defaultTestDSN
+	}
+	pool, err := pgxpool.New(context.Background(), dsn)
+	if err != nil {
+		t.Skipf("skipping DB test: cannot connect to postgres: %v", err)
+	}
+	if err := pool.Ping(context.Background()); err != nil {
+		pool.Close()
+		t.Skipf("skipping DB test: postgres not reachable: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	return pool
+}
+
+type digestFixture struct {
+	OrgID, ProjectID, EnvID string
+	User1, User2            string
+	SessIn1, SessIn2        string
+	SessOld                 string
+}
+
+func seedDigestFixture(t *testing.T, pool *pgxpool.Pool, now time.Time) digestFixture {
+	return seedDigestFixtureWithSessionAge(t, pool, now, 30*time.Hour)
+}
+
+func seedDigestFixtureWithSessionAge(t *testing.T, pool *pgxpool.Pool, now time.Time, oldestSessionAge time.Duration) digestFixture {
+	t.Helper()
+	ctx := context.Background()
+	f := digestFixture{
+		User1:   uuid.NewString(),
+		User2:   uuid.NewString(),
+		SessIn1: "sess-" + uuid.NewString(),
+		SessIn2: "sess-" + uuid.NewString(),
+		SessOld: "sess-" + uuid.NewString(),
+	}
+	exec := func(sql string, args ...any) {
+		t.Helper()
+		if _, err := pool.Exec(ctx, sql, args...); err != nil {
+			t.Fatalf("seed: %v\n%s", err, sql)
+		}
+	}
+	if err := pool.QueryRow(ctx, `INSERT INTO orgs (name) VALUES ('digest-test') RETURNING id`).Scan(&f.OrgID); err != nil {
+		t.Fatalf("seed org: %v", err)
+	}
+	orgID := f.OrgID
+	t.Cleanup(func() {
+		for _, stmt := range []string{
+			`DELETE FROM outbound_deliveries WHERE destination_id IN (SELECT id FROM notification_destinations WHERE project_id IN (SELECT id FROM projects WHERE org_id = $1))`,
+			`DELETE FROM outbound_events WHERE project_id IN (SELECT id FROM projects WHERE org_id = $1)`,
+			`DELETE FROM notification_destinations WHERE project_id IN (SELECT id FROM projects WHERE org_id = $1)`,
+			`DELETE FROM friction_signals WHERE project_id IN (SELECT id FROM projects WHERE org_id = $1)`,
+			`DELETE FROM pr_outcomes WHERE project_id IN (SELECT id FROM projects WHERE org_id = $1)`,
+			`DELETE FROM error_group_affected_users WHERE error_group_id IN (SELECT id FROM error_groups WHERE project_id IN (SELECT id FROM projects WHERE org_id = $1))`,
+			`DELETE FROM sessions WHERE project_id IN (SELECT id FROM projects WHERE org_id = $1)`,
+			`DELETE FROM end_users WHERE project_id IN (SELECT id FROM projects WHERE org_id = $1)`,
+			`DELETE FROM error_groups WHERE project_id IN (SELECT id FROM projects WHERE org_id = $1)`,
+			`UPDATE projects SET default_environment_id = NULL WHERE org_id = $1`,
+			`DELETE FROM environments WHERE project_id IN (SELECT id FROM projects WHERE org_id = $1)`,
+			`DELETE FROM projects WHERE org_id = $1`,
+			`DELETE FROM orgs WHERE id = $1`,
+		} {
+			if _, err := pool.Exec(context.Background(), stmt, orgID); err != nil {
+				t.Errorf("cleanup: %v", err)
+			}
+		}
+	})
+	if err := pool.QueryRow(ctx, `INSERT INTO projects (org_id, name) VALUES ($1,'digest-proj') RETURNING id`, orgID).Scan(&f.ProjectID); err != nil {
+		t.Fatalf("seed project: %v", err)
+	}
+	projectID := f.ProjectID
+	if err := pool.QueryRow(ctx, `INSERT INTO environments (project_id, name) VALUES ($1,'production') RETURNING id`, projectID).Scan(&f.EnvID); err != nil {
+		t.Fatalf("seed env: %v", err)
+	}
+	envID := f.EnvID
+	exec(`UPDATE projects SET default_environment_id=$2 WHERE id=$1`, projectID, envID)
+
+	exec(`INSERT INTO end_users (id, project_id, external_user_id, account_name) VALUES
+		($2::uuid,$1::uuid,'u1-'||($2::uuid)::text,'acme.example'),
+		($3::uuid,$1::uuid,'u2-'||($3::uuid)::text,'globex.example')`, projectID, f.User1, f.User2)
+	exec(`INSERT INTO sessions (id, project_id, environment_id, end_user_id, started_at) VALUES
+		($3,$1,$2,$6,$7),
+		($4,$1,$2,$8,$9),
+		($5,$1,$2,$6,$10)`,
+		projectID, envID, f.SessIn1, f.SessIn2, f.SessOld,
+		f.User1, now.Add(-3*time.Hour), f.User2, now.Add(-1*time.Hour), now.Add(-oldestSessionAge))
+
+	var frictionGroupID string
+	if err := pool.QueryRow(ctx, `INSERT INTO error_groups
+		(project_id, environment_id, fingerprint, title, kind, status, signal_type,
+		 page_url_normalized, first_seen, last_seen, occurrence_count, affected_users_count)
+		VALUES ($1,$2,'fp-friction','Rage clicks on /x','friction','insight','rage_click',
+		 '/x',$3,$3,999,999) RETURNING id`, projectID, envID, now.Add(-48*time.Hour)).Scan(&frictionGroupID); err != nil {
+		t.Fatalf("seed friction group: %v", err)
+	}
+	exec(`INSERT INTO friction_signals
+		(session_id, project_id, environment_id, end_user_id, rule_version, signal_type,
+		 fingerprint, page_url_normalized, occurred_at, occurrence_count, incident_id)
+		VALUES
+		($4,$1,$2,$6,1,'rage_click','fp-friction','/x',$8,3,$3),
+		($5,$1,$2,$7,1,'rage_click','fp-friction','/x',$9,2,$3)`,
+		projectID, envID, frictionGroupID, f.SessIn1, f.SessIn2, f.User1, f.User2,
+		now.Add(-3*time.Hour), now.Add(-1*time.Hour))
+	exec(`INSERT INTO friction_signals
+		(session_id, project_id, environment_id, end_user_id, rule_version, signal_type,
+		 fingerprint, page_url_normalized, occurred_at, occurrence_count, incident_id, retracted_at)
+		VALUES ($4,$1,$2,$5,1,'rage_click','fp-friction','/x',$6,50,$3,now())`,
+		projectID, envID, frictionGroupID, f.SessOld, f.User1, now.Add(-2*time.Hour))
+
+	var newGroupID string
+	if err := pool.QueryRow(ctx, `INSERT INTO error_groups
+		(project_id, environment_id, fingerprint, title, kind, status,
+		 first_seen, last_seen, occurrence_count, affected_users_count)
+		VALUES ($1,$2,'fp-new','TypeError: boom','error','new',$3,$3,7,2) RETURNING id`,
+		projectID, envID, now.Add(-5*time.Hour)).Scan(&newGroupID); err != nil {
+		t.Fatalf("seed new group: %v", err)
+	}
+	exec(`INSERT INTO error_group_affected_users (error_group_id, end_user_id, first_seen, last_seen) VALUES
+		($1,$3,$2,$2),
+		($1,$4,$2,$2)`, newGroupID, now.Add(-5*time.Hour), f.User1, f.User2)
+
+	var prGroupID string
+	if err := pool.QueryRow(ctx, `INSERT INTO error_groups
+		(project_id, environment_id, fingerprint, title, kind, status, first_seen, last_seen,
+		 occurrence_count, affected_users_count, pr_created_at, pr_number, pr_url, root_cause)
+		VALUES ($1,$2,'fp-pr','NullPointer in checkout','error','pr_created',$3,$3,4,1,$4,42,
+		 'https://github.example/pr/42','CheckoutForm dereferences cart.items before load. Second sentence.') RETURNING id`,
+		projectID, envID, now.Add(-6*time.Hour), now.Add(-4*time.Hour)).Scan(&prGroupID); err != nil {
+		t.Fatalf("seed pr group: %v", err)
+	}
+	exec(`INSERT INTO pr_outcomes (project_id, error_group_id, pr_number, outcome, github_delivery_id, occurred_at)
+		VALUES ($1::uuid,$2::uuid,17,'merged','digest-test-old-pr-'||($2::uuid)::text,$3)`,
+		projectID, prGroupID, now.Add(-72*time.Hour))
+
+	exec(`INSERT INTO error_groups
+		(project_id, environment_id, fingerprint, title, kind, status, first_seen, last_seen,
+		 occurrence_count, affected_users_count, needs_human_at, reason_code, reason_message, remediation)
+		VALUES ($1,$2,'fp-nh','Error: cancelled','error','needs_human',$3,$3,2,1,$4,
+		 'external_cause','Cause looks external.','Review manually.')`,
+		projectID, envID, now.Add(-50*time.Hour), now.Add(-2*time.Hour))
+	exec(`INSERT INTO error_groups
+		(project_id, environment_id, fingerprint, title, kind, status, first_seen, last_seen,
+		 occurrence_count, affected_users_count, needs_human_at, reason_code, reason_message, remediation)
+		VALUES ($1,$2,'fp-nh-old','Old thing','error','needs_human',$3,$3,1,1,$3,
+		 'external_cause','Old.','Review.')`,
+		projectID, envID, now.Add(-10*24*time.Hour))
+
+	return f
+}
+
+func TestBuildDigestSections(t *testing.T) {
+	pool := testPool(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	f := seedDigestFixture(t, pool, now)
+	s := New(pool, "https://dash.example")
+
+	payload, err := s.Build(context.Background(), f.ProjectID, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := payload.Validate(); err != nil {
+		t.Fatalf("invalid envelope: %v", err)
+	}
+	d := payload.Digest
+
+	if len(d.Insights) != 1 {
+		t.Fatalf("insights = %d, want 1", len(d.Insights))
+	}
+	in := d.Insights[0]
+	if in.Occurrences != 5 || in.AffectedUsers != 2 {
+		t.Errorf("windowed metrics = %d occ / %d users, want 5/2", in.Occurrences, in.AffectedUsers)
+	}
+	if in.ReplayURL == nil || *in.ReplayURL != "https://dash.example/sessions/"+f.SessIn2 {
+		t.Errorf("replay should use latest signal session %s, got %v", f.SessIn2, in.ReplayURL)
+	}
+	if len(in.Accounts) != 2 || in.AccountsMore != 0 {
+		t.Errorf("accounts = %v +%d", in.Accounts, in.AccountsMore)
+	}
+
+	if len(d.TopNewIssues) != 1 || d.TopNewIssues[0].Title != "TypeError: boom" {
+		t.Fatalf("top_new_issues = %+v", d.TopNewIssues)
+	}
+	if d.TopNewIssues[0].RootCauseExcerpt != nil {
+		t.Errorf("uninvestigated group must have nil excerpt")
+	}
+	if len(d.TopNewIssues[0].Accounts) != 2 {
+		t.Errorf("issue accounts = %v", d.TopNewIssues[0].Accounts)
+	}
+
+	if len(d.Outcomes.PRsOpened) != 1 || d.Outcomes.PRsOpened[0].PRNumber != 42 {
+		t.Fatalf("prs_opened = %+v", d.Outcomes.PRsOpened)
+	}
+	if d.Outcomes.PRsOpened[0].Merged {
+		t.Errorf("PR #42 reported merged from unrelated receipt")
+	}
+	if got := d.Outcomes.PRsOpened[0].RootCauseExcerpt; got == nil || *got != "CheckoutForm dereferences cart.items before load." {
+		t.Errorf("excerpt = %v", got)
+	}
+	if len(d.Outcomes.NeedsHuman) != 1 || d.Outcomes.NeedsHuman[0].Title != "Error: cancelled" {
+		t.Fatalf("needs_human = %+v", d.Outcomes.NeedsHuman)
+	}
+	if d.NeedsHumanBacklog != 2 {
+		t.Errorf("backlog = %d, want 2", d.NeedsHumanBacklog)
+	}
+	if d.Watching.Sessions != 2 || d.Watching.Users != 2 {
+		t.Errorf("watching = %+v", d.Watching)
+	}
+}
+
+func TestBuildDigestQuietDay(t *testing.T) {
+	pool := testPool(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	f := seedDigestFixture(t, pool, now)
+	ctx := context.Background()
+	if _, err := pool.Exec(ctx, `DELETE FROM friction_signals WHERE project_id=$1`, f.ProjectID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `DELETE FROM error_group_affected_users WHERE error_group_id IN (SELECT id FROM error_groups WHERE project_id=$1)`, f.ProjectID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `DELETE FROM pr_outcomes WHERE project_id=$1`, f.ProjectID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `DELETE FROM error_groups WHERE project_id=$1`, f.ProjectID); err != nil {
+		t.Fatal(err)
+	}
+
+	payload, err := New(pool, "https://dash.example").Build(ctx, f.ProjectID, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := payload.Digest
+	if len(d.Insights) != 0 || len(d.TopNewIssues) != 0 || len(d.Outcomes.PRsOpened) != 0 || len(d.Outcomes.PRsMerged) != 0 || len(d.Outcomes.NeedsHuman) != 0 {
+		t.Fatalf("quiet digest has list items: %+v", d)
+	}
+	if d.Watching.Sessions != 2 || d.Watching.Users != 2 || d.NeedsHumanBacklog != 0 {
+		t.Fatalf("quiet digest watching/backlog = %+v / %d", d.Watching, d.NeedsHumanBacklog)
+	}
+}
+
+func TestBuildDigestCapsTopNewIssues(t *testing.T) {
+	pool := testPool(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	f := seedDigestFixture(t, pool, now)
+	for i := 0; i < 3; i++ {
+		if _, err := pool.Exec(context.Background(), `INSERT INTO error_groups
+			(project_id, environment_id, fingerprint, title, kind, status, first_seen, last_seen,
+			 occurrence_count, affected_users_count)
+			VALUES ($1,$2,$3,$4,'error','new',$5,$5,1,1)`,
+			f.ProjectID, f.EnvID, "fp-cap-"+uuid.NewString(), "cap issue", now.Add(-time.Duration(i+1)*time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	payload, err := New(pool, "https://dash.example").Build(context.Background(), f.ProjectID, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Digest.TopNewIssues) != 3 || !payload.Digest.TopNewIssuesHasMore {
+		t.Fatalf("top new issues = %d has_more=%v", len(payload.Digest.TopNewIssues), payload.Digest.TopNewIssuesHasMore)
+	}
+}
+
+func TestBuildDigestExcludesSupersededSignals(t *testing.T) {
+	pool := testPool(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	f := seedDigestFixture(t, pool, now)
+	ctx := context.Background()
+	if _, err := pool.Exec(ctx, `
+		WITH source AS (
+			SELECT id FROM friction_signals WHERE session_id=$1 AND retracted_at IS NULL
+		), replacement AS (
+			SELECT id FROM friction_signals WHERE session_id=$2 AND retracted_at IS NULL
+		)
+		UPDATE friction_signals SET superseded_by=(SELECT id FROM replacement)
+		WHERE id=(SELECT id FROM source)`, f.SessIn1, f.SessIn2); err != nil {
+		t.Fatal(err)
+	}
+	payload, err := New(pool, "https://dash.example").Build(ctx, f.ProjectID, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := payload.Digest.Insights[0]
+	if got.Occurrences != 2 || got.AffectedUsers != 1 {
+		t.Fatalf("superseded signal counted: %+v", got)
+	}
+}
+
+func TestBuildDigestInsightAccountsOverflowAndAnonymous(t *testing.T) {
+	pool := testPool(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	f := seedDigestFixture(t, pool, now)
+	ctx := context.Background()
+	var groupID string
+	if err := pool.QueryRow(ctx, `SELECT id FROM error_groups WHERE project_id=$1 AND kind='friction'`, f.ProjectID).Scan(&groupID); err != nil {
+		t.Fatal(err)
+	}
+	for _, account := range []string{"initech.example", "umbrella.example"} {
+		userID := uuid.NewString()
+		sessionID := "sess-" + uuid.NewString()
+		if _, err := pool.Exec(ctx, `INSERT INTO end_users
+			(id,project_id,external_user_id,account_name) VALUES ($1,$2,$3,$4)`,
+			userID, f.ProjectID, "user-"+userID, account); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, `INSERT INTO sessions
+			(id,project_id,environment_id,end_user_id,started_at) VALUES ($1,$2,$3,$4,$5)`,
+			sessionID, f.ProjectID, f.EnvID, userID, now.Add(-30*time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, `INSERT INTO friction_signals
+			(session_id,project_id,environment_id,end_user_id,rule_version,signal_type,fingerprint,
+			 page_url_normalized,occurred_at,occurrence_count,incident_id)
+			VALUES ($1,$2,$3,$4,1,'rage_click','fp-friction','/x',$5,1,$6)`,
+			sessionID, f.ProjectID, f.EnvID, userID, now.Add(-30*time.Minute), groupID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	anonSession := "sess-" + uuid.NewString()
+	if _, err := pool.Exec(ctx, `INSERT INTO sessions
+		(id,project_id,environment_id,started_at) VALUES ($1,$2,$3,$4)`,
+		anonSession, f.ProjectID, f.EnvID, now.Add(-15*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO friction_signals
+		(session_id,project_id,environment_id,rule_version,signal_type,fingerprint,
+		 page_url_normalized,occurred_at,occurrence_count,incident_id)
+		VALUES ($1,$2,$3,1,'rage_click','fp-friction','/x',$4,1,$5)`,
+		anonSession, f.ProjectID, f.EnvID, now.Add(-15*time.Minute), groupID); err != nil {
+		t.Fatal(err)
+	}
+
+	payload, err := New(pool, "https://dash.example").Build(ctx, f.ProjectID, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	insight := payload.Digest.Insights[0]
+	if len(insight.Accounts) != 3 || insight.AccountsMore != 1 {
+		t.Fatalf("accounts = %v +%d", insight.Accounts, insight.AccountsMore)
+	}
+	for _, account := range insight.Accounts {
+		if account == "" {
+			t.Fatal("anonymous traffic produced an account name")
+		}
+	}
+}
+
+func TestBuildDigestMergedReceiptsAreEventTimeTruth(t *testing.T) {
+	pool := testPool(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	f := seedDigestFixture(t, pool, now)
+	ctx := context.Background()
+	var mergedGroupID, staleGroupID string
+	if err := pool.QueryRow(ctx, `INSERT INTO error_groups
+		(project_id, environment_id, fingerprint, title, kind, status, first_seen, last_seen,
+		 occurrence_count, affected_users_count, pr_created_at, pr_number, pr_url, merged_at)
+		VALUES ($1,$2,$3,'merged by receipt','error','merged',$4,$4,1,1,$4,77,'https://github.example/pr/77',$5)
+		RETURNING id`, f.ProjectID, f.EnvID, "fp-merged-"+uuid.NewString(), now.Add(-72*time.Hour), now.Add(-time.Hour)).Scan(&mergedGroupID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO pr_outcomes
+		(project_id,error_group_id,pr_number,outcome,github_delivery_id,occurred_at)
+		VALUES ($1,$2,77,'merged',$3,$4)`, f.ProjectID, mergedGroupID, "delivery-"+uuid.NewString(), now.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `INSERT INTO error_groups
+		(project_id, environment_id, fingerprint, title, kind, status, first_seen, last_seen,
+		 occurrence_count, affected_users_count, pr_created_at, pr_number, pr_url, merged_at)
+		VALUES ($1,$2,$3,'stale mutable stamp','error','merged',$4,$4,1,1,$4,78,'https://github.example/pr/78',$5)
+		RETURNING id`, f.ProjectID, f.EnvID, "fp-stale-"+uuid.NewString(), now.Add(-72*time.Hour), now.Add(-time.Hour)).Scan(&staleGroupID); err != nil {
+		t.Fatal(err)
+	}
+	payload, err := New(pool, "https://dash.example").Build(ctx, f.ProjectID, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Digest.Outcomes.PRsMerged) != 1 || payload.Digest.Outcomes.PRsMerged[0].PRNumber != 77 {
+		t.Fatalf("merged receipts = %+v", payload.Digest.Outcomes.PRsMerged)
+	}
+	for _, item := range payload.Digest.Outcomes.PRsOpened {
+		if item.PRNumber == 77 {
+			t.Fatalf("old opened PR overlapped opened outcomes: %+v", item)
+		}
+	}
+	_ = staleGroupID
+}
+
+func TestBuildDigestUsesProjectLocalDate(t *testing.T) {
+	pool := testPool(t)
+	now := time.Date(2026, 8, 7, 13, 30, 0, 123456789, time.UTC)
+	f := seedDigestFixture(t, pool, now)
+	if _, err := pool.Exec(context.Background(), `UPDATE projects SET digest_timezone='Pacific/Auckland' WHERE id=$1`, f.ProjectID); err != nil {
+		t.Fatal(err)
+	}
+	payload, err := New(pool, "https://dash.example").Build(context.Background(), f.ProjectID, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if payload.Digest.Date != "2026-08-08" {
+		t.Fatalf("local date = %q", payload.Digest.Date)
+	}
+	windowTo, err := time.Parse(time.RFC3339Nano, payload.Digest.Window.To)
+	if err != nil || !windowTo.Equal(now) {
+		t.Fatalf("window to = %q (%v), want exact %s", payload.Digest.Window.To, err, now)
+	}
+}
+
+func TestDigestExcerptAndSessionURLHelpers(t *testing.T) {
+	s := New(nil, "https://dash.example/")
+	if got := s.sessionURL(""); got != nil {
+		t.Fatalf("empty session URL = %v", got)
+	}
+	if got := s.sessionURL("a/b"); got == nil || *got != "https://dash.example/sessions/a%2Fb" {
+		t.Fatalf("escaped session URL = %v", got)
+	}
+	if rootCauseExcerpt(nil) != nil {
+		t.Fatal("nil root cause returned an excerpt")
+	}
+	empty := "  "
+	if rootCauseExcerpt(&empty) != nil {
+		t.Fatal("empty root cause returned an excerpt")
+	}
+	prose := "First sentence. Second sentence."
+	if got := rootCauseExcerpt(&prose); got == nil || *got != "First sentence." {
+		t.Fatalf("first sentence = %v", got)
+	}
+	long := strings.Repeat("界", 230)
+	got := rootCauseExcerpt(&long)
+	if got == nil || len([]rune(*got)) != 220 || !strings.HasSuffix(*got, "…") {
+		t.Fatalf("bounded excerpt has %d runes: %v", len([]rune(*got)), got)
+	}
+}

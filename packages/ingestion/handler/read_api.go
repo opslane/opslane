@@ -143,6 +143,7 @@ type projectJSON struct {
 	FrictionAutonomy     string  `json:"friction_autonomy"`
 	PrPosture            string  `json:"pr_posture"`
 	DefaultEnvironmentID *string `json:"default_environment_id"`
+	DigestTimezone       string  `json:"digest_timezone"`
 	CreatedAt            string  `json:"created_at"`
 }
 
@@ -154,6 +155,7 @@ func toProjectJSON(p db.Project) projectJSON {
 		FrictionAutonomy:     p.FrictionAutonomy,
 		PrPosture:            p.PrPosture,
 		DefaultEnvironmentID: p.DefaultEnvironmentID,
+		DigestTimezone:       p.DigestTimezone,
 		CreatedAt:            p.CreatedAt.Format(time.RFC3339),
 	}
 }
@@ -667,6 +669,7 @@ func (d *Dependencies) UpdateProjectEndpoint(w http.ResponseWriter, r *http.Requ
 		FrictionAutonomy     *string         `json:"friction_autonomy"`
 		PrPosture            *string         `json:"pr_posture"`
 		DefaultEnvironmentID json.RawMessage `json:"default_environment_id"`
+		DigestTimezone       *string         `json:"digest_timezone"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid request body")
@@ -691,6 +694,19 @@ func (d *Dependencies) UpdateProjectEndpoint(w http.ResponseWriter, r *http.Requ
 			return
 		}
 	}
+	if req.DigestTimezone != nil {
+		// "" resolves to UTC and "Local" to the server process's zone; neither is
+		// an IANA name, and "Local" would make replicas in different zones derive
+		// different digest dates for the same project.
+		if *req.DigestTimezone == "" || *req.DigestTimezone == "Local" {
+			writeJSONError(w, http.StatusBadRequest, "digest_timezone must be a valid IANA zone name")
+			return
+		}
+		if _, err := time.LoadLocation(*req.DigestTimezone); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "digest_timezone must be a valid IANA zone name")
+			return
+		}
+	}
 	var defaultEnvironmentID *string
 	if req.DefaultEnvironmentID != nil {
 		if string(req.DefaultEnvironmentID) == "null" {
@@ -710,7 +726,7 @@ func (d *Dependencies) UpdateProjectEndpoint(w http.ResponseWriter, r *http.Requ
 	}
 
 	project, err := d.Queries.UpdateProject(
-		r.Context(), orgID, projectID, req.GithubRepo, req.FrictionAutonomy, req.PrPosture, defaultEnvironmentID,
+		r.Context(), orgID, projectID, req.GithubRepo, req.FrictionAutonomy, req.PrPosture, defaultEnvironmentID, req.DigestTimezone,
 	)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "failed to update project")

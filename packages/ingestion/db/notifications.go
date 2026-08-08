@@ -153,6 +153,7 @@ func (q *Queries) UpdateNotificationDestination(
 	configEncrypted []byte,
 	configFingerprint *string,
 	enabled *bool,
+	eventTypes []string,
 ) error {
 	command, err := q.pool.Exec(ctx, `
 		UPDATE notification_destinations d
@@ -160,6 +161,7 @@ func (q *Queries) UpdateNotificationDestination(
 		    config_encrypted = COALESCE($5::bytea, d.config_encrypted),
 		    config_fingerprint = COALESCE($6, d.config_fingerprint),
 		    enabled = COALESCE($7, d.enabled),
+		    event_types = COALESCE($8, d.event_types),
 		    updated_at = now()
 		FROM projects p
 		WHERE d.id = $3 AND d.project_id = $2
@@ -171,6 +173,7 @@ func (q *Queries) UpdateNotificationDestination(
 		configEncrypted,
 		configFingerprint,
 		enabled,
+		eventTypes,
 	)
 	if err != nil {
 		return fmt.Errorf("update notification destination: %w", err)
@@ -228,10 +231,13 @@ func publishIssueCreated(
 	payload := notify.EventPayload{
 		Version:      1,
 		EventType:    "issue.created",
-		Issue:        notify.IssueRef{ID: groupID, Title: title, FirstSeen: firstSeen.UTC().Format(time.RFC3339)},
+		Issue:        &notify.IssueRef{ID: groupID, Title: title, FirstSeen: firstSeen.UTC().Format(time.RFC3339)},
 		Project:      notify.ProjectRef{ID: projectID, Name: projectName},
 		Environment:  environmentName,
 		DashboardURL: notify.BuildIncidentURL(dashboardURL, groupID, projectID),
+	}
+	if err := payload.Validate(); err != nil {
+		return fmt.Errorf("validate payload: %w", err)
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {

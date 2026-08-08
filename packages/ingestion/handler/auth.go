@@ -108,6 +108,7 @@ type Dependencies struct {
 	ConfigCipher          *notify.ConfigCipher
 	NotifyExtraHosts      []string
 	NotifySender          *notify.Sender
+	DigestBuilder         DigestBuilder
 }
 
 // NewDependencies validates production-only invariants that direct, narrow

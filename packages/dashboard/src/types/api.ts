@@ -54,12 +54,14 @@ export interface OrgInvitation {
   revoked_at?: string;
 }
 
+export type NotificationEventType = 'issue.created' | 'digest.daily';
+
 export interface NotificationDestination {
   id: string;
   type: 'slack';
   name: string;
   config_fingerprint: string;
-  event_types: string[];
+  event_types: NotificationEventType[];
   enabled: boolean;
   created_at: string;
   last_delivery: { status: string; at: string; error: string | null } | null;

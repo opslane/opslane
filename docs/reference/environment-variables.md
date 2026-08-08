@@ -40,6 +40,7 @@ systems use it for a branch name.
 | `DASHBOARD_DIR` | no | Directory of built dashboard SPA to serve (set in the Docker image) |
 | `DASHBOARD_ORIGIN` | no | Allowed dashboard origin for CORS **and** the OAuth redirect target. For the bundled Compose setup, set `http://localhost:8082`. This is separate from the worker's reader-facing `DASHBOARD_URL`. |
 | `DASHBOARD_URL` | no | Public or private HTTP(S) dashboard base URL used for reader-facing notification links. Configure it explicitly; loopback URLs are rejected, and `DASHBOARD_ORIGIN` is not used as a fallback. This mirrors the worker variable of the same name. |
+| `DIGEST_SWEEP_ENABLED` | no (`false`) | Enables the ingestion-side daily digest sweep only when set to the literal `true`. Keep it disabled during rollout phase 1; enable it after every ingestion replica has the `digest.daily` formatter. |
 | `NOTIFY_UNSAFE_EXTRA_WEBHOOK_HOSTS` | no | **Development/test only.** Comma-separated exact `host[:port]` additions to the Slack webhook allowlist; added hosts may use HTTP. Never set this in production. |
 | `GITHUB_APP_ID` | for GitHub App | App ID |
 | `GITHUB_APP_CLIENT_ID` | for OAuth sign-in | OAuth client ID |

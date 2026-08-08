@@ -27,7 +27,7 @@ The worker pushes only to a reserved Opslane fix branch (`opslane/fix-<group-id>
 | GitHub (worker) | The fix branch (pushed **before** PR creation — if the PR call then fails, the pushed branch remains and the incident ends `needs_human`), then the PR body (root cause, diff, verification evidence). The setup-PR flow likewise pushes an `opslane/setup` branch and opens a PR. | During fix delivery and setup-PR |
 | Configured identity provider | OAuth code exchange and user/email lookup (sign-in); email verification codes when the OAuth provider requires verification | During dashboard sign-in and OAuth email verification |
 | GitHub (ingestion) | Installation and repository listing (App setup) | During GitHub App setup |
-| Configured webhooks | Issue event data: issue ID, title, first-seen timestamp; project ID and name; environment | When enabled notification destinations are triggered by subscribed events |
+| Configured webhooks | Issue events (issue ID, title, first-seen timestamp; environment) and digest events (date, session and user counts); both include project ID and name | When enabled notification destinations are triggered by subscribed events |
 | WorkOS (ingestion) | Email addresses, passwords, verification codes, reset tokens | Only when password authentication is enabled; during sign-in, signup, email verification, and password reset |
 
 With no credentials configured, **nothing leaves your host** — the stack ingests, groups, and files `needs_human` incidents entirely locally.

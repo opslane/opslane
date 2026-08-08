@@ -88,10 +88,10 @@ func TestPublishIssueCreatedFanoutAndIncrementBehavior(t *testing.T) {
 	assertOutboundCounts(t, pool, projectID, 2, 3)
 
 	disabled := false
-	if err := queries.UpdateNotificationDestination(ctx, orgID, projectID, first.ID, nil, nil, nil, &disabled); err != nil {
+	if err := queries.UpdateNotificationDestination(ctx, orgID, projectID, first.ID, nil, nil, nil, &disabled, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := queries.UpdateNotificationDestination(ctx, orgID, projectID, second.ID, nil, nil, nil, &disabled); err != nil {
+	if err := queries.UpdateNotificationDestination(ctx, orgID, projectID, second.ID, nil, nil, nil, &disabled, nil); err != nil {
 		t.Fatal(err)
 	}
 	ingestNotificationIssue(t, queries, projectID, environmentID, "notify-fp-3", "no subscribers", when.Add(3*time.Minute))

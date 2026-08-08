@@ -11,7 +11,7 @@ func samplePayload(title, dashboardURL string) EventPayload {
 	return EventPayload{
 		Version:      1,
 		EventType:    "issue.created",
-		Issue:        IssueRef{ID: "g1", Title: title, FirstSeen: "2026-07-19T00:00:00Z"},
+		Issue:        &IssueRef{ID: "g1", Title: title, FirstSeen: "2026-07-19T00:00:00Z"},
 		Project:      ProjectRef{ID: "p1", Name: "storefront"},
 		Environment:  "production",
 		DashboardURL: dashboardURL,
@@ -73,5 +73,16 @@ func TestSlackFormatLimitsAreRuneSafe(t *testing.T) {
 	}
 	if got := utf8.RuneCountInString(document.Blocks[1].Text.Text); got > 3000 {
 		t.Fatalf("section has %d runes", got)
+	}
+}
+
+func TestSlackFormatRejectsUnknownAndMissingIssueBody(t *testing.T) {
+	for _, payload := range []EventPayload{
+		{EventType: "bogus"},
+		{EventType: "issue.created"},
+	} {
+		if _, _, err := FormatSlack(payload); err == nil {
+			t.Fatalf("FormatSlack(%q) unexpectedly succeeded", payload.EventType)
+		}
 	}
 }

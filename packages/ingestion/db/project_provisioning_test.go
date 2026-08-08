@@ -26,7 +26,7 @@ func TestProvisionProjectIsIdempotentAndRotatesTheOneTimeKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := q.UpdateProject(ctx, org.ID, first.Project.ID, nil, nil, nil, &staging.ID); err != nil {
+	if _, err := q.UpdateProject(ctx, org.ID, first.Project.ID, nil, nil, nil, &staging.ID, nil); err != nil {
 		t.Fatal(err)
 	}
 	second, err := q.ProvisionProject(ctx, org.ID, "ignored retry name", nil, "attempt-1")

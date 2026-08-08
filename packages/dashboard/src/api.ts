@@ -149,6 +149,7 @@ export interface Project {
   friction_autonomy: 'ask_first' | 'auto_fix' | 'auto_fix_ux';
   pr_posture: 'verified_only' | 'draft_when_unverified';
   default_environment_id: string | null;
+  digest_timezone: string;
   created_at: string;
 }
 
@@ -439,6 +440,7 @@ export function updateProject(
     friction_autonomy?: Project['friction_autonomy'];
     pr_posture?: Project['pr_posture'];
     default_environment_id?: string;
+    digest_timezone?: string;
   }
 ): Promise<Project> {
   return patchJSON<Project>(`/projects/${projectId}`, data);
@@ -477,7 +479,12 @@ export function createNotificationDestination(
 export function updateNotificationDestination(
   projectId: string,
   destinationId: string,
-  patch: { name?: string; webhook_url?: string; enabled?: boolean },
+  patch: {
+    name?: string;
+    webhook_url?: string;
+    enabled?: boolean;
+    event_types?: NotificationDestination['event_types'];
+  },
 ): Promise<NotificationDestination> {
   return patchJSON<NotificationDestination>(
     `/projects/${projectId}/notification-destinations/${destinationId}`,
@@ -497,10 +504,11 @@ export function deleteNotificationDestination(
 export function testNotificationDestination(
   projectId: string,
   destinationId: string,
+  opts?: { eventType?: NotificationDestination['event_types'][number] },
 ): Promise<NotificationTestResult> {
   return postJSON<NotificationTestResult>(
     `/projects/${projectId}/notification-destinations/${destinationId}/test`,
-    {},
+    opts?.eventType ? { event_type: opts.eventType } : {},
   );
 }
 

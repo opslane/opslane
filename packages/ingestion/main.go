@@ -9,9 +9,11 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	_ "time/tzdata"
 
 	"github.com/opslane/opslane/packages/ingestion/auth"
 	"github.com/opslane/opslane/packages/ingestion/db"
+	"github.com/opslane/opslane/packages/ingestion/digest"
 	"github.com/opslane/opslane/packages/ingestion/handler"
 	minioPkg "github.com/opslane/opslane/packages/ingestion/minio"
 	"github.com/opslane/opslane/packages/ingestion/notify"
@@ -152,6 +154,7 @@ func main() {
 		}
 	}()
 	notifySender := notify.NewSender(0, notifyExtraHosts)
+	digestSweeper := digest.New(pool, queries.DashboardURL)
 	deps, err := handler.NewDependencies(&handler.Dependencies{
 		Queries:               queries,
 		MinIO:                 minioClient,
@@ -170,6 +173,7 @@ func main() {
 		ConfigCipher:          configCipher,
 		NotifyExtraHosts:      notifyExtraHosts,
 		NotifySender:          notifySender,
+		DigestBuilder:         digestSweeper,
 	})
 	if err != nil {
 		slog.Error("Failed to initialize handler dependencies", "error", err)
@@ -178,6 +182,10 @@ func main() {
 	r := handler.NewRouterWithPool(deps, pool)
 	dispatcher := notify.New(pool, configCipher, notify.Options{ExtraHosts: notifyExtraHosts})
 	go dispatcher.Run(ctx)
+	if os.Getenv("DIGEST_SWEEP_ENABLED") == "true" {
+		go digestSweeper.Start(ctx, 5*time.Minute)
+		slog.Info("digest sweep enabled")
+	}
 
 	// Periodic cleanup of expired/revoked refresh tokens and auth codes
 	go func() {

@@ -33,6 +33,7 @@ const project = {
   friction_autonomy: 'ask_first' as const,
   pr_posture: 'verified_only' as const,
   default_environment_id: 'env-production',
+  digest_timezone: 'UTC',
   created_at: '2026-07-19T00:00:00Z',
 };
 
@@ -101,6 +102,40 @@ describe('project default environment setting', () => {
     expect(wrapper.text()).toContain('Default');
     expect(wrapper.text()).not.toContain('Make default');
     expect(updateProject).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+});
+
+describe('daily digest timezone setting', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    localStorage.setItem('opslane_project_id', project.id);
+    localStorage.setItem('opslane_project_name', project.name);
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+    localStorage.clear();
+  });
+
+  it('shows the project timezone and saves a changed IANA zone', async () => {
+    const wrapper = await mountSettings('admin');
+    vi.mocked(updateProject).mockResolvedValue({
+      ...project,
+      digest_timezone: 'America/New_York',
+    });
+
+    const timezone = wrapper.get('#digest-timezone');
+    expect((timezone.element as HTMLInputElement).value).toBe('UTC');
+    expect(timezone.attributes('list')).toBe('digest-timezone-options');
+    expect(wrapper.get('#digest-timezone-options').findAll('option').length).toBeGreaterThan(1);
+
+    await timezone.setValue('America/New_York');
+    await flushPromises();
+
+    expect(updateProject).toHaveBeenCalledWith(project.id, {
+      digest_timezone: 'America/New_York',
+    });
     wrapper.unmount();
   });
 });

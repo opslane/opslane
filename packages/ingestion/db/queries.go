@@ -87,6 +87,7 @@ type Project struct {
 	FrictionAutonomy     string
 	PrPosture            string
 	DefaultEnvironmentID *string
+	DigestTimezone       string
 	CreatedAt            time.Time
 }
 
@@ -197,7 +198,7 @@ func (q *Queries) provisionProjectTx(
 		ON CONFLICT (org_id, idempotency_token) WHERE idempotency_token IS NOT NULL
 		DO UPDATE SET idempotency_token = EXCLUDED.idempotency_token
 		RETURNING id, org_id, name, github_repo, default_branch,
-		          friction_autonomy, pr_posture, default_environment_id, created_at`,
+		          friction_autonomy, pr_posture, default_environment_id, digest_timezone, created_at`,
 		orgID, name, githubRepo, idempotencyToken,
 	).Scan(
 		&result.Project.ID,
@@ -208,6 +209,7 @@ func (q *Queries) provisionProjectTx(
 		&result.Project.FrictionAutonomy,
 		&result.Project.PrPosture,
 		&result.Project.DefaultEnvironmentID,
+		&result.Project.DigestTimezone,
 		&result.Project.CreatedAt,
 	)
 	if err != nil {
@@ -2922,7 +2924,7 @@ func (q *Queries) ConsumeAuthorizationCode(ctx context.Context, codeHash string)
 // ListProjectsByOrg returns all projects for a given org. Tenant-scoped.
 func (q *Queries) ListProjectsByOrg(ctx context.Context, orgID string) ([]Project, error) {
 	rows, err := q.pool.Query(ctx,
-		`SELECT id, org_id, name, github_repo, default_branch, friction_autonomy, pr_posture, default_environment_id, created_at
+		`SELECT id, org_id, name, github_repo, default_branch, friction_autonomy, pr_posture, default_environment_id, digest_timezone, created_at
 		 FROM projects
 		 WHERE org_id = $1
 		 ORDER BY created_at ASC`,
@@ -2936,7 +2938,7 @@ func (q *Queries) ListProjectsByOrg(ctx context.Context, orgID string) ([]Projec
 	var projects []Project
 	for rows.Next() {
 		var p Project
-		if err := rows.Scan(&p.ID, &p.OrgID, &p.Name, &p.GithubRepo, &p.DefaultBranch, &p.FrictionAutonomy, &p.PrPosture, &p.DefaultEnvironmentID, &p.CreatedAt); err != nil {
+		if err := rows.Scan(&p.ID, &p.OrgID, &p.Name, &p.GithubRepo, &p.DefaultBranch, &p.FrictionAutonomy, &p.PrPosture, &p.DefaultEnvironmentID, &p.DigestTimezone, &p.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan project: %w", err)
 		}
 		projects = append(projects, p)
@@ -2949,10 +2951,10 @@ func (q *Queries) ListProjectsByOrg(ctx context.Context, orgID string) ([]Projec
 func (q *Queries) GetProjectByOrgID(ctx context.Context, orgID, projectID string) (*Project, error) {
 	var p Project
 	err := q.pool.QueryRow(ctx,
-		`SELECT id, org_id, name, github_repo, default_branch, friction_autonomy, pr_posture, default_environment_id, created_at
+		`SELECT id, org_id, name, github_repo, default_branch, friction_autonomy, pr_posture, default_environment_id, digest_timezone, created_at
 		 FROM projects WHERE id = $1 AND org_id = $2`,
 		projectID, orgID,
-	).Scan(&p.ID, &p.OrgID, &p.Name, &p.GithubRepo, &p.DefaultBranch, &p.FrictionAutonomy, &p.PrPosture, &p.DefaultEnvironmentID, &p.CreatedAt)
+	).Scan(&p.ID, &p.OrgID, &p.Name, &p.GithubRepo, &p.DefaultBranch, &p.FrictionAutonomy, &p.PrPosture, &p.DefaultEnvironmentID, &p.DigestTimezone, &p.CreatedAt)
 	if err == pgx.ErrNoRows {
 		return nil, nil
 	}
@@ -2964,28 +2966,30 @@ func (q *Queries) GetProjectByOrgID(ctx context.Context, orgID, projectID string
 
 // UpdateProject updates a project's settings. Only non-nil fields are changed.
 // Tenant-scoped by orgID.
-func (q *Queries) UpdateProject(ctx context.Context, orgID, projectID string, githubRepo, frictionAutonomy, prPosture, defaultEnvironmentID *string) (*Project, error) {
+func (q *Queries) UpdateProject(ctx context.Context, orgID, projectID string, githubRepo, frictionAutonomy, prPosture, defaultEnvironmentID, digestTimezone *string) (*Project, error) {
 	var p Project
 	query := `UPDATE projects
 		 SET github_repo = COALESCE($3, github_repo),
 		     friction_autonomy = COALESCE($4, friction_autonomy),
-		     pr_posture = COALESCE($5, pr_posture)
+		     pr_posture = COALESCE($5, pr_posture),
+		     digest_timezone = COALESCE($6, digest_timezone)
 		 WHERE id = $2 AND org_id = $1
-		 RETURNING id, org_id, name, github_repo, default_branch, friction_autonomy, pr_posture, default_environment_id, created_at`
-	args := []any{orgID, projectID, githubRepo, frictionAutonomy, prPosture}
+		 RETURNING id, org_id, name, github_repo, default_branch, friction_autonomy, pr_posture, default_environment_id, digest_timezone, created_at`
+	args := []any{orgID, projectID, githubRepo, frictionAutonomy, prPosture, digestTimezone}
 	if defaultEnvironmentID != nil {
 		query = `UPDATE projects p
 		 SET github_repo = COALESCE($3, p.github_repo),
 		     friction_autonomy = COALESCE($4, p.friction_autonomy),
 		     pr_posture = COALESCE($5, p.pr_posture),
+		     digest_timezone = COALESCE($6, p.digest_timezone),
 		     default_environment_id = e.id
 		 FROM environments e
 		 WHERE p.id = $2 AND p.org_id = $1
-		   AND e.id = $6 AND e.project_id = p.id
-		 RETURNING p.id, p.org_id, p.name, p.github_repo, p.default_branch, p.friction_autonomy, p.pr_posture, p.default_environment_id, p.created_at`
+		   AND e.id = $7 AND e.project_id = p.id
+		 RETURNING p.id, p.org_id, p.name, p.github_repo, p.default_branch, p.friction_autonomy, p.pr_posture, p.default_environment_id, p.digest_timezone, p.created_at`
 		args = append(args, *defaultEnvironmentID)
 	}
-	err := q.pool.QueryRow(ctx, query, args...).Scan(&p.ID, &p.OrgID, &p.Name, &p.GithubRepo, &p.DefaultBranch, &p.FrictionAutonomy, &p.PrPosture, &p.DefaultEnvironmentID, &p.CreatedAt)
+	err := q.pool.QueryRow(ctx, query, args...).Scan(&p.ID, &p.OrgID, &p.Name, &p.GithubRepo, &p.DefaultBranch, &p.FrictionAutonomy, &p.PrPosture, &p.DefaultEnvironmentID, &p.DigestTimezone, &p.CreatedAt)
 	if err == pgx.ErrNoRows {
 		return nil, nil
 	}
@@ -3193,9 +3197,9 @@ func (q *Queries) CreateProjectTx(ctx context.Context, tx pgx.Tx, orgID, name st
 	err := tx.QueryRow(ctx,
 		`INSERT INTO projects (org_id, name, github_repo)
 		 VALUES ($1, $2, $3)
-		 RETURNING id, org_id, name, github_repo, default_branch, friction_autonomy, pr_posture, default_environment_id, created_at`,
+		 RETURNING id, org_id, name, github_repo, default_branch, friction_autonomy, pr_posture, default_environment_id, digest_timezone, created_at`,
 		orgID, name, githubRepo,
-	).Scan(&p.ID, &p.OrgID, &p.Name, &p.GithubRepo, &p.DefaultBranch, &p.FrictionAutonomy, &p.PrPosture, &p.DefaultEnvironmentID, &p.CreatedAt)
+	).Scan(&p.ID, &p.OrgID, &p.Name, &p.GithubRepo, &p.DefaultBranch, &p.FrictionAutonomy, &p.PrPosture, &p.DefaultEnvironmentID, &p.DigestTimezone, &p.CreatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("create project tx: %w", err)
 	}
@@ -3406,13 +3410,13 @@ func (q *Queries) MarkAgentSessionAuthClicked(ctx context.Context, sessionID str
 func (q *Queries) FindProjectByRepoURL(ctx context.Context, repoURL string) (*Project, error) {
 	var p Project
 	err := q.pool.QueryRow(ctx,
-		`SELECT id, org_id, name, github_repo, default_branch, friction_autonomy, pr_posture, default_environment_id, created_at
+		`SELECT id, org_id, name, github_repo, default_branch, friction_autonomy, pr_posture, default_environment_id, digest_timezone, created_at
 		 FROM projects
 		 WHERE github_repo = $1
 		 ORDER BY created_at ASC
 		 LIMIT 1`,
 		repoURL,
-	).Scan(&p.ID, &p.OrgID, &p.Name, &p.GithubRepo, &p.DefaultBranch, &p.FrictionAutonomy, &p.PrPosture, &p.DefaultEnvironmentID, &p.CreatedAt)
+	).Scan(&p.ID, &p.OrgID, &p.Name, &p.GithubRepo, &p.DefaultBranch, &p.FrictionAutonomy, &p.PrPosture, &p.DefaultEnvironmentID, &p.DigestTimezone, &p.CreatedAt)
 	if err == pgx.ErrNoRows {
 		return nil, nil
 	}

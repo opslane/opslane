@@ -102,10 +102,27 @@ const autonomyError = ref('');
 const prPosture = ref<Project['pr_posture']>('verified_only');
 const prPostureSaving = ref(false);
 const prPostureError = ref('');
+const digestTimezone = ref('UTC');
+const digestTimezoneSaving = ref(false);
+const digestTimezoneError = ref('');
+const commonDigestTimezones = [
+  'UTC',
+  'America/Los_Angeles',
+  'America/Denver',
+  'America/Chicago',
+  'America/New_York',
+  'Europe/London',
+  'Europe/Berlin',
+  'Asia/Kolkata',
+  'Asia/Singapore',
+  'Asia/Tokyo',
+  'Australia/Sydney',
+] as const;
 const fixStats = ref<Record<'error' | 'friction', FixStats> | null>(null);
 let statsRequestToken = 0;
 let autonomySaveToken = 0;
 let prPostureSaveToken = 0;
+let digestTimezoneSaveToken = 0;
 let lastLoadedProjectId: string | null = null;
 
 // Environments tab
@@ -149,6 +166,8 @@ watch(selectedProjectId, () => {
   autonomySaving.value = false;
   prPostureSaveToken += 1;
   prPostureSaving.value = false;
+  digestTimezoneSaveToken += 1;
+  digestTimezoneSaving.value = false;
   void loadAutonomyAndStats();
 }, { immediate: true });
 watch(projects, () => {
@@ -158,6 +177,7 @@ watch(projects, () => {
   // refetching stats, which would flicker the receipts for nothing).
   autonomy.value = selectedProject.value?.friction_autonomy ?? 'ask_first';
   prPosture.value = selectedProject.value?.pr_posture ?? 'verified_only';
+  digestTimezone.value = selectedProject.value?.digest_timezone ?? 'UTC';
   if ((selectedProject.value?.id ?? null) !== lastLoadedProjectId) {
     void loadAutonomyAndStats();
   }
@@ -266,6 +286,37 @@ async function savePRPosture(value: Project['pr_posture']): Promise<void> {
   } finally {
     if (saveToken === prPostureSaveToken) {
       prPostureSaving.value = false;
+    }
+  }
+}
+
+async function saveDigestTimezone(event: Event): Promise<void> {
+  const project = selectedProject.value;
+  if (!project || digestTimezoneSaving.value) return;
+  if (!(event.target instanceof HTMLInputElement)) return;
+
+  const value = event.target.value.trim();
+  const projectId = project.id;
+  const previous = project.digest_timezone;
+  const saveToken = ++digestTimezoneSaveToken;
+  digestTimezone.value = value;
+  digestTimezoneSaving.value = true;
+  digestTimezoneError.value = '';
+  try {
+    const updated = await updateProject(projectId, { digest_timezone: value });
+    projects.value = projects.value.map((candidate) =>
+      candidate.id === updated.id ? updated : candidate,
+    );
+  } catch (err: unknown) {
+    if (saveToken === digestTimezoneSaveToken && selectedProjectId.value === projectId) {
+      digestTimezone.value = previous;
+      digestTimezoneError.value = err instanceof Error
+        ? err.message
+        : 'Failed to save digest timezone';
+    }
+  } finally {
+    if (saveToken === digestTimezoneSaveToken) {
+      digestTimezoneSaving.value = false;
     }
   }
 }
@@ -465,6 +516,34 @@ async function handleDisconnectGithub(): Promise<void> {
           Use the project switcher in the header to change projects safely.
         </p>
       </div>
+
+      <section class="mt-8 p-4 bg-surface border border-border rounded-lg space-y-3">
+        <div>
+          <h3 class="text-sm font-medium text-text">Daily digest timezone</h3>
+          <p class="mt-1 text-xs text-muted">
+            Daily digests are sent after 09:00 in this project's timezone.
+          </p>
+        </div>
+        <label for="digest-timezone" class="block text-sm font-medium text-muted">IANA timezone</label>
+        <input
+          id="digest-timezone"
+          v-model="digestTimezone"
+          type="text"
+          list="digest-timezone-options"
+          autocomplete="off"
+          placeholder="UTC"
+          :disabled="!selectedProject || digestTimezoneSaving"
+          class="block w-full rounded-md border border-border bg-surface-subtle px-3 py-2 text-sm text-text focus:border-accent focus:ring-1 focus:ring-accent disabled:opacity-50"
+          @change="saveDigestTimezone"
+        />
+        <datalist id="digest-timezone-options">
+          <option v-for="timezone in commonDigestTimezones" :key="timezone" :value="timezone"></option>
+        </datalist>
+        <p v-if="!selectedProject" class="text-xs text-faint">
+          Select one of your projects above to manage its digest timezone.
+        </p>
+        <p v-if="digestTimezoneError" class="text-sm text-danger" role="alert" v-text="digestTimezoneError"></p>
+      </section>
 
       <!-- GitHub Integration -->
       <div class="mt-8 pt-6 border-t border-border">
