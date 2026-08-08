@@ -9,6 +9,7 @@ import {
   findValidAcceptedGeneration,
   applyBucketOutcome,
   attachInheritedSignal,
+  attachGenerationEvidenceToIncident,
   frictionIncidentFingerprint,
   type FoldSignal,
 } from '../promotion-db.js';
@@ -500,6 +501,127 @@ describeDb('bucket promotion integration', () => {
       )).rows[0]!;
       expect(group.status).toBe('queued');
       expect(group.affected_users_count).toBe(5);
+    });
+  });
+
+  describe('attachGenerationEvidenceToIncident', () => {
+    async function seedGeneration(): Promise<string> {
+      const gen = await claimGeneration(tuple(), await seedJob());
+      await pool.query(
+        `UPDATE friction_adjudication_generations
+         SET status = 'accepted', adjudicated_at = now(), valid_until = now() + interval '7 days'
+         WHERE id = $1`,
+        [gen!.id]
+      );
+      return gen!.id;
+    }
+
+    async function recordEvidence(generationId: string, signalIds: string[]): Promise<void> {
+      await pool.query(
+        `INSERT INTO friction_generation_evidence (generation_id, signal_id, project_id)
+         SELECT $1, unnest($2::uuid[]), $3`,
+        [generationId, signalIds, projectId]
+      );
+    }
+
+    it('attaches previously rejected evidence to the incident on a later acceptance', async () => {
+      const incidentId = await withClient((c) =>
+        ensureCandidate(c, tuple(), {
+          signalType: 'rage_click',
+          pageUrlNormalized: '/checkout',
+          elementSelector: '#buy',
+        })
+      );
+      const generationId = await seedGeneration();
+
+      // Three users were rejected in an earlier round; two are accepted now.
+      const signalIds: string[] = [];
+      for (let i = 0; i < 5; i++) {
+        const seeded = await seedSignal({
+          user: `evidence-user-${i}`,
+          status: i < 3 ? 'rejected' : 'accepted',
+        });
+        signalIds.push(seeded.id);
+      }
+      await recordEvidence(generationId, signalIds);
+
+      expect(
+        await attachGenerationEvidenceToIncident(generationId, projectId, incidentId, RULE_VERSION)
+      ).toBe(5);
+
+      const group = (await pool.query(
+        `SELECT affected_users_count, occurrence_count FROM error_groups
+         WHERE id = $1 AND project_id = $2`,
+        [incidentId, projectId]
+      )).rows[0]!;
+      expect(group.affected_users_count).toBe(5);
+      expect(group.occurrence_count).toBe(5);
+
+      // The rejected rows keep their verdict: only incident_id changed.
+      const verdicts = await pool.query<{ n: number }>(
+        `SELECT count(*)::int AS n FROM friction_signals
+         WHERE id = ANY($1::uuid[]) AND adjudication_status = 'rejected'`,
+        [signalIds]
+      );
+      expect(verdicts.rows[0]!.n).toBe(3);
+    });
+
+    it('leaves already-attached, unchecked and retracted evidence alone', async () => {
+      const incidentId = await withClient((c) =>
+        ensureCandidate(c, tuple(), {
+          signalType: 'rage_click',
+          pageUrlNormalized: '/checkout',
+          elementSelector: '#buy',
+        })
+      );
+      // A signal that already folded onto an error incident keeps that one.
+      const otherIncidentId = await withClient((c) =>
+        ensureCandidate(c, tuple(stagingEnvironmentId), {
+          signalType: 'rage_click',
+          pageUrlNormalized: '/checkout',
+          elementSelector: '#buy',
+        })
+      );
+      const generationId = await seedGeneration();
+
+      const attachable = await seedSignal({ user: 'skip-attachable', status: 'rejected' });
+      const alreadyAttached = await seedSignal({ user: 'skip-folded', status: 'accepted' });
+      await pool.query(`UPDATE friction_signals SET incident_id = $1 WHERE id = $2`, [
+        otherIncidentId,
+        alreadyAttached.id,
+      ]);
+      const unchecked = await seedSignal({ user: 'skip-unchecked', status: 'unchecked' });
+      const retracted = await seedSignal({ user: 'skip-retracted', status: 'rejected' });
+      await pool.query(`UPDATE friction_signals SET retracted_at = now() WHERE id = $1`, [
+        retracted.id,
+      ]);
+      const otherRuleVersion = await seedSignal({ user: 'skip-rule-version', status: 'rejected' });
+      await pool.query(`UPDATE friction_signals SET rule_version = $1 WHERE id = $2`, [
+        RULE_VERSION + 1,
+        otherRuleVersion.id,
+      ]);
+      await recordEvidence(generationId, [
+        attachable.id,
+        alreadyAttached.id,
+        unchecked.id,
+        retracted.id,
+        otherRuleVersion.id,
+      ]);
+
+      expect(
+        await attachGenerationEvidenceToIncident(generationId, projectId, incidentId, RULE_VERSION)
+      ).toBe(1);
+
+      const rows = await pool.query<{ id: string; incident_id: string | null }>(
+        `SELECT id, incident_id FROM friction_signals WHERE id = ANY($1::uuid[])`,
+        [[attachable.id, alreadyAttached.id, unchecked.id, retracted.id, otherRuleVersion.id]]
+      );
+      const byId = new Map(rows.rows.map((r) => [r.id, r.incident_id]));
+      expect(byId.get(attachable.id)).toBe(incidentId);
+      expect(byId.get(alreadyAttached.id)).toBe(otherIncidentId);
+      expect(byId.get(unchecked.id)).toBeNull();
+      expect(byId.get(retracted.id)).toBeNull();
+      expect(byId.get(otherRuleVersion.id)).toBeNull();
     });
   });
 

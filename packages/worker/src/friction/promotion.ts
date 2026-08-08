@@ -14,6 +14,7 @@ import {
   findValidAcceptedGeneration,
   attachInheritedSignal,
   applyBucketOutcome,
+  attachGenerationEvidenceToIncident,
   tryReserveAdjudicationCall,
   readBucketState,
   recordBucketEvaluation,
@@ -235,6 +236,36 @@ export async function processFrictionOutcomes(
       verdict: stored,
       meta: { modelId: adjudicator.modelId, promptVersion: adjudicator.promptVersion, jobId },
     });
+    // The outcome only owns the rows it claimed for this call, so the incident
+    // would report a fraction of the evidence the model was actually shown.
+    // Attach the rest here — incident_id only, so no verdict is rewritten.
+    // 'promoted' and 'updated' are exactly the accepting outcomes; gating on
+    // them rather than on `verdict` also keeps an uncertain verdict (stored as
+    // a rejection) out of this path.
+    if (outcome === 'promoted' || outcome === 'updated') {
+      const incidentId = await withClient(async (c) => {
+        const { rows } = await c.query<{ promoted_incident_id: string | null }>(
+          `SELECT promoted_incident_id FROM friction_adjudication_generations
+           WHERE id = $1 AND project_id = $2`,
+          [generation.id, signal.project_id],
+        );
+        return rows[0]?.promoted_incident_id ?? null;
+      });
+      if (incidentId) {
+        const attached = await attachGenerationEvidenceToIncident(
+          generation.id,
+          signal.project_id,
+          incidentId,
+          signal.rule_version,
+        );
+        logger.info('Attached bucket evidence to incident', {
+          project_id: signal.project_id,
+          generation_id: generation.id,
+          incident_id: incidentId,
+          attached,
+        });
+      }
+    }
     // Watermark the evidence level this verdict was formed at, so the next
     // session only re-judges once the bucket has grown materially. Known and
     // accepted: a concurrent job reading between the outcome and this write

@@ -24,6 +24,7 @@ const db = {
   findValidAcceptedGeneration: looseAsyncMock(),
   attachInheritedSignal: looseAsyncMock(),
   applyBucketOutcome: looseAsyncMock(),
+  attachGenerationEvidenceToIncident: looseAsyncMock(),
   tryReserveAdjudicationCall: looseAsyncMock(),
   readBucketState: looseAsyncMock(),
   recordBucketEvaluation: looseAsyncMock(),
@@ -40,6 +41,8 @@ vi.mock('../promotion-db.js', () => ({
   findValidAcceptedGeneration: (...a: unknown[]) => db.findValidAcceptedGeneration(...a),
   attachInheritedSignal: (...a: unknown[]) => db.attachInheritedSignal(...a),
   applyBucketOutcome: (...a: unknown[]) => db.applyBucketOutcome(...a),
+  attachGenerationEvidenceToIncident: (...a: unknown[]) =>
+    db.attachGenerationEvidenceToIncident(...a),
   tryReserveAdjudicationCall: (...a: unknown[]) => db.tryReserveAdjudicationCall(...a),
   readBucketState: (...a: unknown[]) => db.readBucketState(...a),
   recordBucketEvaluation: (...a: unknown[]) => db.recordBucketEvaluation(...a),
@@ -118,6 +121,7 @@ beforeEach(() => {
   db.findValidAcceptedGeneration.mockResolvedValue(null);
   db.attachInheritedSignal.mockResolvedValue('attached');
   db.applyBucketOutcome.mockResolvedValue('promoted');
+  db.attachGenerationEvidenceToIncident.mockResolvedValue(0);
   db.tryReserveAdjudicationCall.mockResolvedValue(true);
   // No prior evaluation, so the growth gate never fires: every pre-existing
   // test keeps the meaning it had before the watermark existed.

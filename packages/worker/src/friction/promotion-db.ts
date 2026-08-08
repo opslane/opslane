@@ -892,3 +892,59 @@ export async function recomputeIncidentImpact(
     [incidentId, projectId],
   );
 }
+
+/**
+ * Attaches this generation's recorded evidence to the incident it produced.
+ *
+ * `applyBucketOutcome` only owns the rows it claimed for this call, so once
+ * evidence survives verdicts the model is shown 32 users while the incident
+ * reports 4. This closes that gap from the other side, deliberately as a
+ * separate statement rather than by widening the outcome's selection: those
+ * rows also receive the verdict and audit columns, so a wider selection would
+ * rewrite the history of every previously judged signal — and would do it on
+ * rejections too, since that update runs before the rejected early return.
+ *
+ * Sets `incident_id` ONLY. `adjudication_status`, `generation_id` and the
+ * audit columns belong to whichever generation actually judged each signal.
+ *
+ * Skips rows already attached anywhere, so a signal folded onto an error
+ * incident keeps that incident rather than being moved onto the friction one.
+ * Runs only after an accepting outcome. Returns the number of rows newly
+ * attached.
+ */
+export async function attachGenerationEvidenceToIncident(
+  generationId: string,
+  projectId: string,
+  incidentId: string,
+  ruleVersion: number,
+): Promise<number> {
+  const client = await getPool().connect();
+  try {
+    await client.query('BEGIN');
+    const res = await client.query(
+      `UPDATE friction_signals s
+          SET incident_id = $3
+         FROM friction_generation_evidence e
+        WHERE e.generation_id = $1
+          AND e.signal_id = s.id
+          AND e.project_id = $2
+          AND s.project_id = $2
+          AND s.rule_version = $4
+          AND s.incident_id IS NULL
+          AND s.adjudication_status <> 'unchecked'
+          AND s.retracted_at IS NULL AND s.superseded_by IS NULL`,
+      [generationId, projectId, incidentId, ruleVersion],
+    );
+    // Rebuild impact from source rows: the newly attached evidence has to show
+    // up in occurrence and affected-user counts, and the recompute takes the
+    // group-row lock that serializes this with folds and error ingest.
+    await recomputeIncidentImpact(client, incidentId, projectId);
+    await client.query('COMMIT');
+    return res.rowCount ?? 0;
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
