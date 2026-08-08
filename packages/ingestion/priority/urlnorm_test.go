@@ -13,15 +13,16 @@ func TestNormalizePageURL(t *testing.T) {
 		{"uuid id", "https://a.example.com/x/6428e085-905a-40e4-9c67-d0b9772ceec6", "/x/:id"},
 		{"hashbang fragment", "https://app.example.com/#!/reports", "/reports"},
 		{"hashbang with id", "https://app.example.com/#!/assets/42", "/assets/:id"},
-		{"forge known module", "https://x.cdn.prod.atlassian-dev.net/a/b/c/issue-context/_ctx_abc/", "forge:issue-context"},
-		{"forge unknown module", "https://x.cdn.prod.atlassian-dev.net/a/b/c/custom-thing/_ctx_abc/", "forge:custom-thing"},
-		// No marker means the module is the last segment, not "unknown":
-		// fingerprint.ts strips _ctx_ before friction groups are stamped, so
-		// this is the shape the friction side arrives in.
-		{"forge no ctx marker", "https://x.cdn.prod.atlassian-dev.net/a/b/c/", "forge:c"},
-		{"forge module without marker", "https://x.cdn.prod.atlassian-dev.net/a/b/issue-context/", "forge:issue-context"},
-		{"forge module without marker templated", "https://x.cdn.prod.atlassian-dev.net/a/b/9f8e7d6c5b4a3928/", "forge::token"},
-		{"forge root has no module", "https://x.cdn.prod.atlassian-dev.net/", "forge:unknown"},
+		// Framework context segments (Forge's _ctx_*, and anything shaped like
+		// it) carry per-session state, so they are dropped rather than given a
+		// vendor-specific namespace. The surrounding opaque ids template
+		// normally, which is what makes the result stable across deploys.
+		{"context segment dropped", "https://x.cdn.prod.example.net/a/b/c/issue-context/_ctx_abc/", "/a/b/c/issue-context"},
+		{"context segment with opaque ids", "https://x.cdn.prod.example.net/6428e085-905a-40e4-9c67-d0b9772ceec6/9f2c1a44-1b3e-4f4a-9c7a-4b2d8e6f0a11/issue-context/_ctx_H4sIAAAAAAAA/", "/:id/:id/issue-context"},
+		{"no context marker is unremarkable", "https://x.cdn.prod.example.net/a/b/c/", "/a/b/c"},
+		{"context-only path", "https://x.cdn.prod.example.net/_ctx_abc/", "/"},
+		// A vendor host is no longer special, so a lookalike cannot be either.
+		{"lookalike host is not special", "https://evilexample.net/a/SUPERSECRETTOKEN12345/_ctx_x", "/a/:token"},
 		{"jwt segment", "https://app.example.com/c/eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.dQw4w9WgXcQ", "/c/:token"},
 		{"hex token", "https://app.example.com/sign/a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6", "/sign/:token"},
 		{"percent-encoded token", "https://app.example.com/sign/a1b2c3d4e5f6a7b8%2Bc9d0e1f2a3b4c5d6", "/sign/:token"},
@@ -40,16 +41,6 @@ func TestNormalizePageURL(t *testing.T) {
 		{"bare hashbang fragment", "/#!/reports", "/reports"},
 		{"bare hashbang with id", "/#!/assets/42", "/assets/:id"},
 		{"bare query stripped", "/orders/123?token=secret", "/orders/:id"},
-
-		// The forge branch returns before the main templating loop, so it has
-		// to template the module segment itself or it publishes opaque ids.
-		{"forge opaque module templated", "https://x.cdn.prod.atlassian-dev.net/a/9f8e7d6c5b4a3928/_ctx_x", "forge::token"},
-		{"forge numeric module templated", "https://x.cdn.prod.atlassian-dev.net/a/402931/_ctx_x", "forge::id"},
-
-		// A bare suffix test also matches lookalike domains, which would route
-		// an attacker-chosen path through the forge branch.
-		{"forge lookalike host is not forge", "https://evilatlassian-dev.net/a/SUPERSECRETTOKEN12345/_ctx_x", "/a/:token/_ctx_x"},
-		{"forge apex host", "https://atlassian-dev.net/a/issue-context/_ctx_x", "forge:issue-context"},
 	}
 	// route_map's btree primary key refuses an oversized pattern, and one such
 	// row aborts the transaction that writes every other route for the project.
@@ -73,13 +64,13 @@ func TestNormalizePageURL(t *testing.T) {
 // the raw browser URL, friction groups from a value fingerprint.ts already
 // normalized (origin kept, _ctx_ segments dropped). Both must land on one
 // pattern or route_map weights only half the incidents on a page.
-func TestForgeConvergesAcrossBothStampingPaths(t *testing.T) {
+func TestConvergesAcrossBothStampingPaths(t *testing.T) {
 	cases := []struct{ name, raw, preNormalized, want string }{
 		{
-			"forge panel",
-			"https://x.cdn.prod.atlassian-dev.net/a/b/issue-context/_ctx_abc/",
-			"https://x.cdn.prod.atlassian-dev.net/a/b/issue-context",
-			"forge:issue-context",
+			"embedded panel with a context segment",
+			"https://x.cdn.prod.example.net/a/b/issue-context/_ctx_abc/",
+			"https://x.cdn.prod.example.net/a/b/issue-context",
+			"/a/b/issue-context",
 		},
 		{
 			"ordinary page",

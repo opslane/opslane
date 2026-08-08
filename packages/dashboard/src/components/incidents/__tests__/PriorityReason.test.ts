@@ -152,12 +152,12 @@ describe('PriorityReason', () => {
   });
 
   it.each([
-    ['customer', 'JSM portal panel · your customers see this page'],
-    ['admin', 'JSM portal panel · internal config page'],
+    ['customer', 'Customer portal · your customers see this page'],
+    ['admin', 'Customer portal · internal config page'],
   ] as const)('labels %s routes with their audience', (routeTier, expected) => {
     const wrapper = render({
       priority_inputs: inputs({
-        route_name: 'JSM portal panel',
+        route_name: 'Customer portal',
         route_pattern: '/portal',
         route_tier: routeTier,
       }),

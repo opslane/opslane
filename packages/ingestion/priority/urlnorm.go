@@ -26,8 +26,6 @@ var (
 // them. This cap sits far below the btree limit and far above any real route.
 const MaxPatternBytes = 512
 
-const forgeHost = "atlassian-dev.net"
-
 // NormalizePageURL maps an observed URL or bare path to a normalized,
 // templated path. Opaque segments are removed before the value is stored or
 // sent to a classifier.
@@ -35,7 +33,7 @@ func NormalizePageURL(raw string) string {
 	if raw == "" {
 		return ""
 	}
-	var host, path, frag string
+	var path, frag string
 	if strings.HasPrefix(raw, "/") {
 		path = raw
 		// A bare path carries its own fragment. url.Parse splits that off in
@@ -50,10 +48,7 @@ func NormalizePageURL(raw string) string {
 		if err != nil || u.Host == "" {
 			return "/not-parseable"
 		}
-		host, path, frag = u.Hostname(), u.EscapedPath(), u.Fragment
-	}
-	if isForgeHost(host) {
-		return boundPattern("forge:" + forgeModule(path))
+		path, frag = u.EscapedPath(), u.Fragment
 	}
 	if strings.HasPrefix(frag, "!") {
 		path = strings.TrimPrefix(frag, "!")
@@ -64,19 +59,16 @@ func NormalizePageURL(raw string) string {
 	segs := strings.Split(strings.Trim(path, "/"), "/")
 	out := make([]string, 0, len(segs))
 	for _, s := range segs {
-		if s == "" {
+		// A framework context segment carries per-session state, not route
+		// identity. packages/worker/src/friction/fingerprint.ts drops these
+		// too; dropping them on both sides is what keeps an error group and a
+		// friction group on the same page keyed alike.
+		if s == "" || strings.HasPrefix(s, "_ctx_") {
 			continue
 		}
 		out = append(out, templateSegment(s))
 	}
 	return boundPattern("/" + strings.Join(out, "/"))
-}
-
-// isForgeHost matches the Forge CDN apex and its subdomains only. A bare
-// suffix test also accepts lookalikes such as "evilatlassian-dev.net", which
-// would hand an attacker-chosen path to the forge branch.
-func isForgeHost(host string) bool {
-	return host == forgeHost || strings.HasSuffix(host, "."+forgeHost)
 }
 
 // templateSegment replaces an opaque path segment with a placeholder. Every
@@ -107,33 +99,4 @@ func boundPattern(pattern string) string {
 		return "/too-long"
 	}
 	return pattern
-}
-
-// forgeModule names the Forge module from the segment before the _ctx_ marker.
-// That segment is templated like any other: this branch returns before the
-// main loop runs, and the segment is frequently an opaque tenant id.
-//
-// The marker is not always present. Error groups are stamped from the raw
-// browser URL and keep it, but friction groups are stamped from a value the
-// worker's fingerprint.ts already normalized, and that normalizer drops _ctx_
-// segments. Falling back to the last segment is what keeps the two kinds on
-// one pattern: with the marker "/a/b/issue-context/_ctx_x" gives
-// "issue-context", and without it "/a/b/issue-context" gives the same. An
-// empty path still has no module to name.
-func forgeModule(path string) string {
-	segs := make([]string, 0, 4)
-	for _, s := range strings.Split(strings.Trim(path, "/"), "/") {
-		if s != "" {
-			segs = append(segs, s)
-		}
-	}
-	for i, s := range segs {
-		if strings.HasPrefix(s, "_ctx_") && i > 0 {
-			return templateSegment(segs[i-1])
-		}
-	}
-	if len(segs) == 0 {
-		return "unknown"
-	}
-	return templateSegment(segs[len(segs)-1])
 }
