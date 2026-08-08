@@ -83,7 +83,20 @@ describe.skipIf(!configured || !playwrightAvailable)('dashboard environment filt
     await ingest(tenant.ingestKey, sharedTitle);
     await ingest(stagingAPIKey, sharedTitle, 'staging');
     await ingest(tenant.ingestKey, productionOnlyTitle);
-    await ingest(stagingAPIKey, stagingOnlyTitle, 'staging');
+    const stagingOnlyGroupId = await ingest(stagingAPIKey, stagingOnlyTitle, 'staging');
+
+    // Stamp priority on a group directly so PriorityReason renders without
+    // waiting on a sweeper tick (interval is deployment-dependent). The score
+    // pipeline itself is covered by priority-score.test.ts; this test asserts
+    // the environment-filtered UI admits the score is project-wide.
+    await db.query(
+      `UPDATE error_groups SET priority_score = 3, priority_scored_at = now(),
+        priority_inputs = '{"users_7d":1,"anon_sessions_7d":0,"users_24h":1,"anon_sessions_24h":0,
+          "impact":3,"route_pattern":null,"route_name":null,"route_tier":null,"route_weight":1,
+          "cap_applied":false,"reason_code":null}'::jsonb
+       WHERE id = $1`,
+      [stagingOnlyGroupId],
+    );
 
     await initSession(
       tenant.ingestKey,
@@ -151,6 +164,8 @@ describe.skipIf(!configured || !playwrightAvailable)('dashboard environment filt
         'production',
         'staging',
       ]);
+      // Unfiltered view: reach reads without the project-wide qualifier.
+      expect(await page.getByText('project-wide').count()).toBe(0);
 
       await Promise.all([
         page.waitForResponse((response) => response.url().includes(`environment_id=${stagingEnvironmentId}`)),
@@ -159,6 +174,9 @@ describe.skipIf(!configured || !playwrightAvailable)('dashboard environment filt
       await page.getByText('across all environments').waitFor();
       await page.getByRole('link', { name: sharedTitle }).waitFor();
       await page.getByRole('link', { name: stagingOnlyTitle }).waitFor();
+      // The scored row's reason line must admit the score ignores the filter.
+      // Scope to the table: the stacked mobile layout renders a hidden copy.
+      await page.getByRole('table').getByText('project-wide').first().waitFor();
       await expect.poll(
         () => page.getByRole('link', { name: productionOnlyTitle }).count(),
       ).toBe(0);
