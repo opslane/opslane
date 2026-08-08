@@ -99,6 +99,7 @@ services:
       ADMIN_EMAILS: ${OPSLANE_ADMIN_EMAILS:-}
       # Test lanes shorten the scrub tick. The retained 30s eligibility grace
       # is not tunable; shortening it is a separate privacy-timing decision.
+      PRIORITY_SCORE_INTERVAL_SECONDS: ${PRIORITY_SCORE_INTERVAL_SECONDS:-}
       SCRUB_INTERVAL_SECONDS: ${SCRUB_INTERVAL_SECONDS:-}
     # Lets the e2e webhook sink on the host be reached from the container on
     # Linux; Docker Desktop resolves host.docker.internal natively.

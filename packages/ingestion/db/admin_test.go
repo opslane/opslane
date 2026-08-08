@@ -46,6 +46,9 @@ func TestAdminOverviewHourlyBucketsAreZeroFilledAndBoundarySafe(t *testing.T) {
 	if _, ok := before.Jobs.ByType["ci_watch"]; !ok {
 		t.Fatal("admin job overview omitted ci_watch")
 	}
+	if _, ok := before.Jobs.ByType["route_map"]; !ok {
+		t.Fatal("admin job overview omitted route_map")
+	}
 	for i := 1; i < len(before.Events.Hourly); i++ {
 		if before.Events.Hourly[i].Hour.Sub(before.Events.Hourly[i-1].Hour) != time.Hour {
 			t.Fatalf("buckets %d and %d are not one hour apart", i-1, i)
