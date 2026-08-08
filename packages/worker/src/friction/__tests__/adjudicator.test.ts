@@ -3,6 +3,7 @@ import {
   buildAdjudicationPrompt,
   parseVerdict,
   ADJUDICATION_PROMPT_VERSION,
+  ADJUDICATION_PROMPT_VERSION_WINDOWS,
   createAnthropicAdjudicator,
 } from '../adjudicator.js';
 
@@ -88,11 +89,34 @@ describe('parseVerdict', () => {
     }
   });
 
-  it('parses uncertainty and rejects contradictory verdicts', () => {
+  it('parses uncertainty, and lets uncertainty veto acceptance', () => {
     expect(parseVerdict('{"accepted":false,"uncertain":true,"reason":"short window"}')).toEqual({
       accepted: false, uncertain: true, reason: 'short window',
     });
-    expect(() => parseVerdict('{"accepted":true,"uncertain":true,"reason":"x"}')).toThrow();
+    // Live models return this shape. It used to throw, which stranded the
+    // durable generation in 'adjudicating' and wedged the whole bucket.
+    // Uncertainty vetoes acceptance instead — the same policy storedVerdict()
+    // already applies downstream.
+    expect(parseVerdict('{"accepted":true,"uncertain":true,"reason":"looks real but unsure"}'))
+      .toEqual({ accepted: false, uncertain: true, reason: 'looks real but unsure' });
+  });
+
+  it('offers the uncertain field only where its meaning is stated', () => {
+    const base = {
+      scope: 'bucket' as const,
+      signalType: 'dead_click' as const,
+      elementSelector: 'button.save',
+      pageUrlNormalized: '/settings',
+      occurrenceCount: 9,
+      bucketSummary: { distinctUsers: 9, totalOccurrences: 9, windowDays: 7 },
+    };
+    const withoutWindows = buildAdjudicationPrompt(base);
+    expect(withoutWindows).toContain('{"accepted": boolean, "reason": string}');
+    expect(withoutWindows).not.toContain('"uncertain"?: boolean');
+
+    const withWindows = buildAdjudicationPrompt({ ...base, evidenceWindows: [[]] });
+    expect(withWindows).toContain('"uncertain"?: boolean');
+    expect(withWindows).toContain('do not guess');
   });
 });
 
@@ -142,8 +166,14 @@ describe('prompt versioning', () => {
     expect(ADJUDICATION_PROMPT_VERSION).toBeGreaterThan(0);
   });
   it('uses the windows prompt version only for deciding window mode', () => {
-    expect(createAnthropicAdjudicator('k', 'on').promptVersion).toBe(4);
-    expect(createAnthropicAdjudicator('k', 'off').promptVersion).toBe(3);
-    expect(createAnthropicAdjudicator('k', 'shadow').promptVersion).toBe(3);
+    // Against the constants, not literals: a version bump is a routine part of
+    // changing the prompt contract and must not require editing this test.
+    expect(createAnthropicAdjudicator('k', 'on').promptVersion)
+      .toBe(ADJUDICATION_PROMPT_VERSION_WINDOWS);
+    expect(createAnthropicAdjudicator('k', 'off').promptVersion)
+      .toBe(ADJUDICATION_PROMPT_VERSION);
+    expect(createAnthropicAdjudicator('k', 'shadow').promptVersion)
+      .toBe(ADJUDICATION_PROMPT_VERSION);
+    expect(ADJUDICATION_PROMPT_VERSION_WINDOWS).not.toBe(ADJUDICATION_PROMPT_VERSION);
   });
 });

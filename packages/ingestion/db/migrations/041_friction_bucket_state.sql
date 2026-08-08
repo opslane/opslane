@@ -38,8 +38,25 @@ CREATE TABLE IF NOT EXISTS friction_generation_evidence (
   PRIMARY KEY (generation_id, signal_id)
 );
 
-CREATE INDEX IF NOT EXISTS idx_friction_generation_evidence_signal
-  ON friction_generation_evidence(project_id, signal_id);
+-- signal_id leads: the ON DELETE CASCADE from friction_signals probes this
+-- table per deleted signal row, and session retention deletes signals in bulk.
+-- A project_id-leading index cannot serve that probe. Dropping the earlier
+-- project-leading form matters because IF NOT EXISTS would otherwise keep the
+-- old definition alive on any database that already applied this file.
+DROP INDEX IF EXISTS idx_friction_generation_evidence_signal;
+CREATE INDEX IF NOT EXISTS idx_friction_generation_evidence_by_signal
+  ON friction_generation_evidence(signal_id, project_id);
+
+-- Both release paths (budget-exhausted claims, non-terminal job failures)
+-- DELETE from friction_adjudication_generations at runtime; the SET NULL
+-- trigger and the FK integrity probe below each scan their referencing table
+-- without these indexes.
+CREATE INDEX IF NOT EXISTS idx_friction_bucket_state_last_generation
+  ON friction_bucket_state(last_generation_id)
+  WHERE last_generation_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_friction_signals_generation
+  ON friction_signals(generation_id)
+  WHERE generation_id IS NOT NULL;
 
 -- Evidence counting reads active signals of one rule version regardless of
 -- verdict status, which the pre-041 indexes do not serve. INCLUDE carries the

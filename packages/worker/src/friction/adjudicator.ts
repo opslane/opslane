@@ -4,8 +4,8 @@ import type { WindowEvent } from './evidence-window.js';
 
 /** Bump when the prompt contract changes: a new version always opens a new
  * adjudication generation (plan D1); verdicts never carry across versions. */
-export const ADJUDICATION_PROMPT_VERSION = 3;
-export const ADJUDICATION_PROMPT_VERSION_WINDOWS = 4;
+export const ADJUDICATION_PROMPT_VERSION = 5;
+export const ADJUDICATION_PROMPT_VERSION_WINDOWS = 6;
 export const ADJUDICATION_MODEL = 'claude-sonnet-4-6';
 export type EvidenceWindowMode = 'off' | 'shadow' | 'on';
 
@@ -80,8 +80,14 @@ export function buildAdjudicationPrompt(input: AdjudicationInput): string {
       'The reason must cite relevant window events by time.',
     );
   }
+  // Advertise "uncertain" only where it has a stated meaning. Offering it on
+  // every request, with the rule for using it given only in the evidence-window
+  // branch, invited {"accepted": true, "uncertain": true} — a shape that used to
+  // be a parse error and wedged the bucket.
   instructions.push(
-    'Respond with only a JSON object: {"accepted": boolean, "reason": string, "uncertain"?: boolean}.',
+    input.evidenceWindows
+      ? 'Respond with only a JSON object: {"accepted": boolean, "reason": string, "uncertain"?: boolean}.'
+      : 'Respond with only a JSON object: {"accepted": boolean, "reason": string}.',
     'The reason must be one short sentence and must not quote selector text verbatim.',
   );
   return instructions.join('\n');
@@ -107,8 +113,18 @@ export function parseVerdict(raw: string): AdjudicationVerdict {
   ) {
     throw new Error('adjudication verdict: missing or mistyped accepted/reason');
   }
+  // "Accepted but uncertain" is not a parse error. Uncertainty vetoes
+  // acceptance, which is the policy storedVerdict() in promotion.ts already
+  // applies to every uncertain verdict; throwing here only stopped that policy
+  // from running. It also stranded the durable generation in 'adjudicating',
+  // which wedges the bucket behind uq_friction_generation_inflight — observed
+  // on 4 of 4 live calls under prompt version 3.
   if (obj['accepted'] && obj['uncertain']) {
-    throw new Error('adjudication verdict: accepted and uncertain are contradictory');
+    return {
+      accepted: false,
+      uncertain: true,
+      reason: obj['reason'] as string,
+    };
   }
   return {
     accepted: obj['accepted'],

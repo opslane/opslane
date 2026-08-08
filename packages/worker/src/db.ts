@@ -1,6 +1,9 @@
 import pg from 'pg';
 import type { Diagnosis, DiagnosisOutcome, ErrorGroupStatus, NeedsHumanReason, ConfidenceLevel, JobType, SetupPrStatus, EvidenceRecord, PRPosture } from '@opslane/shared';
-import { reconcileDeadLetteredSessionAnalysis } from './friction/dead-letter.js';
+import {
+  reconcileDeadLetteredSessionAnalysis,
+  releaseUnfinishedGeneration,
+} from './friction/dead-letter.js';
 import type { Platform } from './platform.js';
 import type { DerivedDecision } from './classify.js';
 import type { RouteMapRow } from './route-map.js';
@@ -507,6 +510,10 @@ export async function failJob(
     // block the in-flight generation slot; reconcile in the SAME transaction.
     if (row && row.status === 'dead_letter' && row.job_type === 'session_analysis') {
       await reconcileDeadLetteredSessionAnalysis(client, jobId, row.project_id);
+    } else if (row && row.job_type === 'session_analysis') {
+      // Non-terminal failure: the job is going back on the queue, so it must
+      // not keep the in-flight adjudication slot. Same transaction as the flip.
+      await releaseUnfinishedGeneration(client, jobId, row.project_id);
     }
     await client.query('COMMIT');
     return row !== undefined;
@@ -589,6 +596,11 @@ export async function requeueStaleJobs(): Promise<number> {
             [row.session_id, row.project_id],
           );
         }
+      } else if (row.job_type === 'session_analysis') {
+        // Lease expired and the job is going back to pending. A worker that
+        // died mid-adjudication never ran its own cleanup, so release the
+        // in-flight generation here or the bucket stays wedged.
+        await releaseUnfinishedGeneration(client, row.id, row.project_id);
       }
     }
     await client.query('COMMIT');

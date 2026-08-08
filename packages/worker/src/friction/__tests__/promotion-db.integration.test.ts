@@ -15,6 +15,7 @@ import {
   type FoldSignal,
 } from '../promotion-db.js';
 import { writeFrictionSignals } from '../persist.js';
+import { releaseUnfinishedGeneration } from '../dead-letter.js';
 
 const DATABASE_URL = process.env['DATABASE_URL'];
 const describeDb = DATABASE_URL ? describe : describe.skip;
@@ -1003,6 +1004,89 @@ describeDb('promotion-db integration', () => {
 
       await pool.query(`DELETE FROM projects WHERE id = $1`, [otherProject]);
       await pool.query(`DELETE FROM orgs WHERE id = $1`, [otherOrg]);
+    });
+  });
+
+
+  describe('non-terminal failure never wedges a bucket', () => {
+    // The live failure this guards against: the model returned a shape the parser
+    // rejected, the job failed and went back on the queue still holding an
+    // 'adjudicating' generation, and every later session for that bucket logged
+    // "generation already in flight, skipping". The retry then met its own row,
+    // skipped, and COMPLETED — so the job never dead-lettered and the existing
+    // dead-letter reconciliation never ran. The wedge was permanent and silent.
+    it('releases the in-flight generation when a job fails non-terminally', async () => {
+      const sessionId = await seedSession();
+      const jobId = await seedAnalysisJob(sessionId);
+      const tuple = {
+        projectId,
+        environmentId,
+        fingerprint: 'wedge-guard-fp',
+        ruleVersion: 3,
+        promptVersion: 5,
+      };
+
+      const claimed = await claimGeneration(tuple, jobId);
+      expect(claimed).not.toBeNull();
+      // The slot is held: nobody else can claim this bucket.
+      expect(await claimGeneration(tuple, jobId)).toBeNull();
+
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        const released = await releaseUnfinishedGeneration(client, jobId, projectId);
+        await client.query('COMMIT');
+        expect(released).toBe(1);
+      } finally {
+        client.release();
+      }
+
+      // Slot free again: a later job can adjudicate this bucket.
+      const laterJob = await seedAnalysisJob(await seedSession());
+      const reclaimed = await claimGeneration(tuple, laterJob);
+      expect(reclaimed).not.toBeNull();
+      expect(reclaimed!.id).not.toBe(claimed!.id);
+    });
+
+    it('never releases another job’s claim or a finished generation', async () => {
+      const ownerJob = await seedAnalysisJob(await seedSession());
+      const strangerJob = await seedAnalysisJob(await seedSession());
+      const tuple = {
+        projectId,
+        environmentId,
+        fingerprint: 'wedge-guard-fp-2',
+        ruleVersion: 3,
+        promptVersion: 5,
+      };
+      const claimed = await claimGeneration(tuple, ownerJob);
+      expect(claimed).not.toBeNull();
+
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        // Wrong job: must not touch it.
+        expect(await releaseUnfinishedGeneration(client, strangerJob, projectId)).toBe(0);
+        // Wrong project: must not touch it.
+        expect(await releaseUnfinishedGeneration(
+          client, ownerJob, '00000000-0000-0000-0000-0000000000ff',
+        )).toBe(0);
+        // Finished generation: must survive.
+        await client.query(
+          `UPDATE friction_adjudication_generations
+              SET status = 'rejected', adjudicated_at = now() WHERE id = $1`,
+          [claimed!.id],
+        );
+        expect(await releaseUnfinishedGeneration(client, ownerJob, projectId)).toBe(0);
+        await client.query('COMMIT');
+      } finally {
+        client.release();
+      }
+
+      const survived = await pool.query(
+        `SELECT count(*)::int AS n FROM friction_adjudication_generations WHERE id = $1`,
+        [claimed!.id],
+      );
+      expect(survived.rows[0]!.n).toBe(1);
     });
   });
 });
