@@ -29,7 +29,9 @@ import {
 const tickSeconds = Number(process.env['PRIORITY_SCORE_INTERVAL_SECONDS'] ?? NaN);
 const fastTick = Number.isFinite(tickSeconds) && tickSeconds > 0 && tickSeconds <= 30;
 
-const OPAQUE_TOKEN = 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6';
+// A hex path segment, not a credential: the assertions below prove it is
+// templated to ':token' and never reaches the stamp or the API payload.
+const OPAQUE_PATH_SEGMENT = 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6';
 
 function eventPayload(opts: {
   type: string;
@@ -110,7 +112,7 @@ describe.skipIf(!fastTick)('priority score pipeline (event → sweeper → feed)
       // identified with a templatable id in the path
       { type: 'E2EPriorityAssets', url: 'https://app.example.com/assets/2985977', sessionId: 'e2e-pri-s5', userId: 'e2e-pri-u4' },
       // opaque token path, anonymous
-      { type: 'E2EPriorityToken', url: `https://app.example.com/sign/${OPAQUE_TOKEN}`, sessionId: 'e2e-pri-s6' },
+      { type: 'E2EPriorityToken', url: `https://app.example.com/sign/${OPAQUE_PATH_SEGMENT}`, sessionId: 'e2e-pri-s6' },
       // LO last so its last_seen is newest
       { type: 'E2EPriorityLo', url: 'https://app.example.com/loanees', sessionId: 'e2e-pri-s7' },
     ];
@@ -188,6 +190,6 @@ describe.skipIf(!fastTick)('priority score pipeline (event → sweeper → feed)
     // The raw token must not appear anywhere in the feed payload. The stack
     // trace posted for this group deliberately contains the URL, so this also
     // proves the read surface carries the stamp, not the raw path.
-    expect(JSON.stringify(token.priority_inputs)).not.toContain(OPAQUE_TOKEN);
+    expect(JSON.stringify(token.priority_inputs)).not.toContain(OPAQUE_PATH_SEGMENT);
   });
 });
