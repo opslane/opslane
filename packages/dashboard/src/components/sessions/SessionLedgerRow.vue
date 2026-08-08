@@ -88,6 +88,20 @@ const signals = computed<StatusRecipe[]>(() => {
   if (props.session.form_abandon_count > 0) {
     result.push(frictionSignalRecipe('form_abandon', props.session.form_abandon_count));
   }
+  if (props.session.activity_class) {
+    result.push({ label: props.session.activity_class.replace('_', ' '), tone: 'neutral', class: '' });
+  }
+  if (props.session.coverage === 'no_replay') {
+    result.push({ label: 'no replay', tone: 'neutral', class: '' });
+  } else if (props.session.coverage === 'partial') {
+    result.push({ label: 'partial', tone: 'warning', class: '' });
+  }
+  if (props.session.failed_request_count > 0) {
+    result.push({ label: `⚠ ${props.session.failed_request_count} failed requests`, tone: 'warning', class: '' });
+  }
+  if (props.session.unverified_signal_count > 0) {
+    result.push({ label: `${props.session.unverified_signal_count} unverified`, tone: 'neutral', class: '' });
+  }
 
   switch (props.session.status) {
     case 'recording':

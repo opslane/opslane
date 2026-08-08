@@ -34,6 +34,11 @@ function session(overrides: Partial<SessionSummary> = {}): SessionSummary {
     rage_click_count: 2,
     dead_click_count: 1,
     form_abandon_count: 1,
+    coverage: 'complete',
+    activity_class: 'active',
+    failed_request_count: 0,
+    successful_write_count: 0,
+    unverified_signal_count: 0,
     sdk_release: '1.4.2',
     ...overrides,
   };

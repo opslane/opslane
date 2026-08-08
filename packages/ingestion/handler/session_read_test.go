@@ -109,6 +109,25 @@ func TestSessionRead_ListAndDetailRoutes(t *testing.T) {
 		t.Fatalf("seed friction signal: %v", err)
 	}
 	if _, err := pool.Exec(context.Background(), `
+		INSERT INTO friction_signals (
+			session_id, project_id, environment_id, rule_version, signal_type,
+			fingerprint, page_url_normalized, occurred_at, occurrence_count,
+			adjudication_status
+		) VALUES ($1, $2, $3, 2, 'dead_click', 'handler-pending', '/', now(), 1, 'pending')`,
+		listIDs[0], projectID, envID,
+	); err != nil {
+		t.Fatalf("seed pending friction signal: %v", err)
+	}
+	if _, err := pool.Exec(context.Background(), `
+		INSERT INTO session_analysis (
+			session_id, project_id, environment_id, session_started_at, coverage,
+			activity_class, failed_request_4xx_count, successful_write_count, rule_version
+		) VALUES ($1, $2, $3, $4, 'complete', 'active', 2, 1, 2)`,
+		listIDs[0], projectID, envID, started,
+	); err != nil {
+		t.Fatalf("seed session analysis: %v", err)
+	}
+	if _, err := pool.Exec(context.Background(), `
 		INSERT INTO error_events (
 			project_id, environment_id, timestamp, error_type, error_message,
 			stack_trace_raw, session_id
@@ -150,7 +169,12 @@ func TestSessionRead_ListAndDetailRoutes(t *testing.T) {
 		list.Sessions[0]["error_count"] != float64(1) ||
 		list.Sessions[0]["rage_click_count"] != float64(4) ||
 		list.Sessions[0]["dead_click_count"] != float64(0) ||
-		list.Sessions[0]["form_abandon_count"] != float64(0) {
+		list.Sessions[0]["form_abandon_count"] != float64(0) ||
+		list.Sessions[0]["coverage"] != "complete" ||
+		list.Sessions[0]["activity_class"] != "active" ||
+		list.Sessions[0]["failed_request_count"] != float64(2) ||
+		list.Sessions[0]["successful_write_count"] != float64(1) ||
+		list.Sessions[0]["unverified_signal_count"] != float64(1) {
 		t.Fatalf("summary fields = %+v", list.Sessions[0])
 	}
 	if _, ok := list.Sessions[0]["end_user"].(map[string]any); !ok {
@@ -193,6 +217,11 @@ func TestSessionRead_ListAndDetailRoutes(t *testing.T) {
 	wrongProject := dashboardRequest(t, router, token, "/api/v1/projects/"+otherProjectID+"/sessions")
 	if wrongProject.Code != http.StatusForbidden {
 		t.Fatalf("wrong project returned %d", wrongProject.Code)
+	}
+	unanalyzed := dashboardRequest(t, router, token, "/api/v1/projects/"+projectID+"/sessions/"+listIDs[1])
+	var unanalyzedJSON map[string]any
+	if err := json.Unmarshal(unanalyzed.Body.Bytes(), &unanalyzedJSON); err != nil || unanalyzedJSON["coverage"] != nil {
+		t.Fatalf("unanalyzed coverage = %#v err=%v", unanalyzedJSON["coverage"], err)
 	}
 
 	detail := dashboardRequest(t, router, token, "/api/v1/projects/"+projectID+"/sessions/"+listIDs[0])

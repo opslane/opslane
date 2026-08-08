@@ -212,8 +212,11 @@ func TestListSessions_CountsAcceptedActiveSignalsAndSearchesIdentity(t *testing.
 		t.Fatalf("signal counts = errors:%d rage:%d dead:%d abandon:%d, want 2/3/2/5",
 			got.ErrorCount, got.RageClickCount, got.DeadClickCount, got.FormAbandonCount)
 	}
-	if pendingOnly := all[2]; pendingOnly.ID != pendingSessionID || pendingOnly.RageClickCount != 0 {
-		t.Fatalf("pending-only counts = %+v, want zero visible signals", pendingOnly)
+	if got.UnverifiedSignalCount != 7 {
+		t.Fatalf("unverified count = %d, want 7", got.UnverifiedSignalCount)
+	}
+	if pendingOnly := all[2]; pendingOnly.ID != pendingSessionID || pendingOnly.RageClickCount != 0 || pendingOnly.UnverifiedSignalCount != 12 {
+		t.Fatalf("pending-only counts = %+v, want zero accepted and 12 unverified", pendingOnly)
 	}
 
 	detail, err := q.GetSessionSummary(ctx, projectID, signalSessionID)
@@ -234,7 +237,7 @@ func TestListSessions_CountsAcceptedActiveSignalsAndSearchesIdentity(t *testing.
 	}
 
 	withSignals, _, err := q.ListSessions(ctx, projectID, db.SessionFilters{HasSignals: true}, nil, 50)
-	if err != nil || len(withSignals) != 1 || withSignals[0].ID != signalSessionID {
+	if err != nil || len(withSignals) != 2 || withSignals[0].ID != signalSessionID || withSignals[1].ID != pendingSessionID {
 		t.Fatalf("with-signals filter = %+v err=%v", withSignals, err)
 	}
 }

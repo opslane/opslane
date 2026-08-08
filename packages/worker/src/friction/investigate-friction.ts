@@ -65,13 +65,19 @@ export async function investigateFriction(
   group: ErrorGroupData,
   evidence: FrictionEvidence | null,
   repoPath: string,
+  sessionContext: string | null = null,
 ): Promise<FrictionInvestigationResult> {
   // Shared factory so ANTHROPIC_BASE_URL is honored — investigate.ts already
   // routes through it; a divergent direct client here would bypass provider
   // twins and any configured proxy.
   const client = createAnthropicClient(apiKey);
   const evidenceText = evidence
-    ? JSON.stringify({ signals: evidence.signals, timeline: evidence.timeline, truncated: evidence.truncated })
+    ? JSON.stringify({
+        signals: evidence.signals,
+        timeline: evidence.timeline,
+        truncated: evidence.truncated,
+        sessionContext,
+      })
     : 'No folded signal evidence is available; investigate from the incident descriptors only.';
   const system = `You investigate user-friction incidents using read-only repository tools.
 
