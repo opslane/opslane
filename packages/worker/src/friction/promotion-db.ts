@@ -461,6 +461,41 @@ export async function claimGeneration(
   return rows[0] ?? null;
 }
 
+/**
+ * Frees the in-flight slot held by a generation this job claimed but never
+ * adjudicated — the budget-exhausted path, where the claim succeeds and the
+ * model call never happens. Without it the row stays 'adjudicating' and
+ * `uq_friction_generation_inflight` blocks every future claim for that bucket
+ * permanently.
+ *
+ * Deletes rather than terminalizing to 'unchecked': that status specifically
+ * means a job exhausted its retries before reaching a verdict (007 migration,
+ * dead-letter.ts), and dead-letter reconciliation only writes a diagnostic
+ * candidate for generations it transitions itself — so a budget-released row
+ * marked 'unchecked' would sit there forever with a misleading status and no
+ * diagnostic. A generation that was never adjudicated has no audit value.
+ *
+ * Scoped to the claiming job and to rows with no verdict, so it can never
+ * delete another worker's in-flight claim or destroy a finished generation.
+ * `friction_generation_evidence.generation_id` cascades and
+ * `friction_bucket_state.last_generation_id` nulls, so the delete orphans
+ * neither. `friction_signals.generation_id` has no cascade, but no signal can
+ * reference this generation yet: the release runs before
+ * `claimSignalsForAdjudication`.
+ */
+export async function releaseGeneration(
+  generationId: string,
+  projectId: string,
+  claimJobId: string,
+): Promise<void> {
+  await getPool().query(
+    `DELETE FROM friction_adjudication_generations
+      WHERE id = $1 AND project_id = $2 AND claim_job_id = $3
+        AND status = 'adjudicating' AND adjudicated_at IS NULL`,
+    [generationId, projectId, claimJobId],
+  );
+}
+
 /** An accepted generation whose verdict is still valid; later matching
  * signals inherit it instead of triggering a new model call. */
 export async function findValidAcceptedGeneration(

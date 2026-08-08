@@ -11,6 +11,7 @@ import {
   listEligibleSignals,
   ensureCandidate,
   claimGeneration,
+  releaseGeneration,
   findValidAcceptedGeneration,
   attachInheritedSignal,
   applyBucketOutcome,
@@ -199,8 +200,11 @@ export async function processFrictionOutcomes(
       continue;
     }
 
-    // Threshold crossed: claim the durable generation; losers skip the call.
-    if (!await reserveOrRevisit(session, signal, jobId, runtime)) break;
+    // Threshold crossed. Claim the durable generation first, so a job that
+    // loses the claim never burns a call from the daily budget it was never
+    // going to make. If the budget is then exhausted, the claim must be
+    // released: a generation left 'adjudicating' holds the in-flight slot and
+    // uq_friction_generation_inflight would block every retry for this bucket.
     const generation = await claimGeneration(tuple, jobId);
     if (!generation) {
       logger.info('Friction generation already in flight, skipping', {
@@ -209,6 +213,16 @@ export async function processFrictionOutcomes(
         job_id: jobId,
       });
       continue;
+    }
+    if (!await reserveOrRevisit(session, signal, jobId, runtime)) {
+      await releaseGeneration(generation.id, signal.project_id, jobId);
+      logger.info('Released generation: adjudication budget exhausted', {
+        project_id: signal.project_id,
+        signal_id: signal.id,
+        job_id: jobId,
+        generation_id: generation.id,
+      });
+      break;
     }
     const eligible = await withClient((c) => listEligibleSignals(c, tuple));
     await withClient((c) => claimSignalsForAdjudication(c, eligible.ids, jobId));

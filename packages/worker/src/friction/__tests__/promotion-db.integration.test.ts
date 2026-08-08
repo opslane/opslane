@@ -3,12 +3,14 @@ import { purgeDiagnosisDecisions } from '../../__tests__/purge-diagnosis-decisio
 import pg from 'pg';
 import { getPool, closePool } from '../../db.js';
 import {
+  claimGeneration,
   claimSignalsForAdjudication,
   countEligibleUsers,
   findFoldTarget,
   applyFoldOutcome,
   listEligibleSignals,
   recomputeIncidentImpact,
+  releaseGeneration,
   tryReserveAdjudicationCall,
   type FoldSignal,
 } from '../promotion-db.js';
@@ -311,6 +313,49 @@ describeDb('promotion-db integration', () => {
     } finally {
       client.release();
     }
+  });
+
+  it('releasing a claimed generation frees the in-flight slot', async () => {
+    // claim_job_id is a foreign key, so these must be real job rows.
+    const releaseJobId = await seedAnalysisJob(await seedSession());
+    const otherJobId = await seedAnalysisJob(await seedSession());
+    const tuple = {
+      projectId,
+      environmentId,
+      fingerprint: 'release-fp',
+      ruleVersion: 3,
+      promptVersion: 3,
+    };
+    const first = await claimGeneration(tuple, releaseJobId);
+    expect(first).not.toBeNull();
+
+    // The in-flight partial unique index blocks a second claim.
+    expect(await claimGeneration(tuple, releaseJobId)).toBeNull();
+
+    // Another worker's job id must never free this claim, nor another tenant.
+    await releaseGeneration(first!.id, projectId, otherJobId);
+    await releaseGeneration(first!.id, crypto.randomUUID(), releaseJobId);
+    expect(await claimGeneration(tuple, releaseJobId)).toBeNull();
+
+    await releaseGeneration(first!.id, projectId, releaseJobId);
+
+    // After release, a later job can claim again.
+    const third = await claimGeneration(tuple, releaseJobId);
+    expect(third).not.toBeNull();
+    expect(third!.id).not.toBe(first!.id);
+
+    // A finished generation is never deleted by release.
+    await pool.query(
+      `UPDATE friction_adjudication_generations
+          SET status = 'rejected', adjudicated_at = now() WHERE id = $1`,
+      [third!.id]
+    );
+    await releaseGeneration(third!.id, projectId, releaseJobId);
+    const { rows } = await pool.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM friction_adjudication_generations WHERE id = $1`,
+      [third!.id]
+    );
+    expect(rows[0]!.n).toBe(1);
   });
 
   describe('claimSignalsForAdjudication', () => {
