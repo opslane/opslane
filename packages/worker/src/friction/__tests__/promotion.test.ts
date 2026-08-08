@@ -25,6 +25,9 @@ const db = {
   attachInheritedSignal: looseAsyncMock(),
   applyBucketOutcome: looseAsyncMock(),
   tryReserveAdjudicationCall: looseAsyncMock(),
+  readBucketState: looseAsyncMock(),
+  recordBucketEvaluation: looseAsyncMock(),
+  recordGenerationEvidence: looseAsyncMock(),
 };
 vi.mock('../promotion-db.js', () => ({
   findFoldTarget: (...a: unknown[]) => db.findFoldTarget(...a),
@@ -38,6 +41,9 @@ vi.mock('../promotion-db.js', () => ({
   attachInheritedSignal: (...a: unknown[]) => db.attachInheritedSignal(...a),
   applyBucketOutcome: (...a: unknown[]) => db.applyBucketOutcome(...a),
   tryReserveAdjudicationCall: (...a: unknown[]) => db.tryReserveAdjudicationCall(...a),
+  readBucketState: (...a: unknown[]) => db.readBucketState(...a),
+  recordBucketEvaluation: (...a: unknown[]) => db.recordBucketEvaluation(...a),
+  recordGenerationEvidence: (...a: unknown[]) => db.recordGenerationEvidence(...a),
 }));
 
 import { processFrictionOutcomes } from '../promotion.js';
@@ -113,6 +119,11 @@ beforeEach(() => {
   db.attachInheritedSignal.mockResolvedValue('attached');
   db.applyBucketOutcome.mockResolvedValue('promoted');
   db.tryReserveAdjudicationCall.mockResolvedValue(true);
+  // No prior evaluation, so the growth gate never fires: every pre-existing
+  // test keeps the meaning it had before the watermark existed.
+  db.readBucketState.mockResolvedValue(null);
+  db.recordBucketEvaluation.mockResolvedValue(undefined);
+  db.recordGenerationEvidence.mockResolvedValue(undefined);
 });
 
 describe('processFrictionOutcomes', () => {

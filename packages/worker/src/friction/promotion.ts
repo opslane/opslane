@@ -15,12 +15,19 @@ import {
   attachInheritedSignal,
   applyBucketOutcome,
   tryReserveAdjudicationCall,
+  readBucketState,
+  recordBucketEvaluation,
+  recordGenerationEvidence,
   type FoldSignal,
   type BucketTuple,
 } from './promotion-db.js';
 
-const PROMOTION_THRESHOLD_USERS = 5;
-const WINDOW_DAYS = 7;
+export const PROMOTION_THRESHOLD_USERS = 5;
+/** Re-judge only when evidence has grown by half again since the last verdict.
+ * Without this, a bucket over threshold is re-judged on every session. */
+export const RE_ADJUDICATION_GROWTH = 1.5;
+export const EVIDENCE_WINDOW_DAYS = 7;
+const WINDOW_DAYS = EVIDENCE_WINDOW_DAYS;
 
 interface PendingSignalRow extends FoldSignal {
   signal_type: 'rage_click' | 'dead_click' | 'form_abandon';
@@ -175,6 +182,22 @@ export async function processFrictionOutcomes(
       continue;
     }
 
+    // Evidence now survives verdicts, so being over threshold is no longer a
+    // one-shot event: without this gate every later session in the bucket
+    // would re-ask the same question. The watermark expires with the evidence
+    // window, so a bucket whose evidence decayed is not frozen forever.
+    const state = await withClient((c) => readBucketState(c, tuple));
+    if (state && eligibleUsers < Math.ceil(state.evaluatedUsers * RE_ADJUDICATION_GROWTH)) {
+      logger.info('Friction bucket judged and not materially grown', {
+        project_id: signal.project_id,
+        signal_id: signal.id,
+        job_id: jobId,
+        eligible_users: eligibleUsers,
+        evaluated_users: state.evaluatedUsers,
+      });
+      continue;
+    }
+
     // Threshold crossed: claim the durable generation; losers skip the call.
     if (!await reserveOrRevisit(session, signal, jobId, runtime)) break;
     const generation = await claimGeneration(tuple, jobId);
@@ -188,6 +211,10 @@ export async function processFrictionOutcomes(
     }
     const eligible = await withClient((c) => listEligibleSignals(c, tuple));
     await withClient((c) => claimSignalsForAdjudication(c, eligible.ids, jobId));
+    // Membership must exist before applyBucketOutcome runs: the outcome path
+    // reads it to attach the full evidence set to the incident.
+    await withClient((c) =>
+      recordGenerationEvidence(c, generation.id, signal.project_id, eligible.ids));
     const input: AdjudicationInput = {
       scope: 'bucket',
       signalType: signal.signal_type,
@@ -208,6 +235,15 @@ export async function processFrictionOutcomes(
       verdict: stored,
       meta: { modelId: adjudicator.modelId, promptVersion: adjudicator.promptVersion, jobId },
     });
+    // Watermark the evidence level this verdict was formed at, so the next
+    // session only re-judges once the bucket has grown materially. Known and
+    // accepted: a concurrent job reading between the outcome and this write
+    // can produce one duplicate model call. It cannot corrupt state — the
+    // membership insert is idempotent and the verdict path is advisory-locked.
+    await withClient((c) => recordBucketEvaluation(c, tuple, {
+      evaluatedUsers: eligibleUsers,
+      generationId: generation.id,
+    }));
     logger.info('Friction bucket adjudicated', {
       project_id: signal.project_id,
       session_id: signal.session_id,

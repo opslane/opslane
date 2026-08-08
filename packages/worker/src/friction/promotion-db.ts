@@ -347,6 +347,91 @@ export async function countEligibleUsers(
   return rows[0]!.n;
 }
 
+/** Distinct identified users present the last time this bucket was judged by
+ * this rule and prompt version. Returns null when never judged, or when the
+ * last judgement is older than the evidence window: a bucket whose evidence
+ * decayed must not stay frozen behind a stale high-water mark (a bucket judged
+ * at 100 users whose evidence falls to 5 would otherwise need 150 forever).
+ * Takes the full tuple because prompt_version is part of the watermark key: a
+ * new prompt must be able to re-judge what an older prompt already judged. */
+export async function readBucketState(
+  client: pg.PoolClient,
+  tuple: BucketTuple,
+): Promise<{ evaluatedUsers: number } | null> {
+  const { rows } = await client.query<{ evaluated_users: number }>(
+    `SELECT evaluated_users
+     FROM friction_bucket_state
+     WHERE project_id = $1 AND environment_id = $2
+       AND fingerprint = $3 AND rule_version = $4 AND prompt_version = $5
+       AND evaluated_at IS NOT NULL
+       AND evaluated_at > now() - interval '7 days'`,
+    [
+      tuple.projectId, tuple.environmentId, tuple.fingerprint,
+      tuple.ruleVersion, tuple.promptVersion,
+    ],
+  );
+  const row = rows[0];
+  return row ? { evaluatedUsers: row.evaluated_users } : null;
+}
+
+/** Records that this bucket was judged at a given evidence level. Serialized
+ * on the bucket advisory lock so evaluated_users, evaluated_at and
+ * last_generation_id always describe the same evaluation. Last-write-wins, not
+ * GREATEST: under the lock the last writer is the one that actually judged the
+ * bucket, and a monotonic maximum is exactly what freezes a decayed bucket. */
+export async function recordBucketEvaluation(
+  client: pg.PoolClient,
+  tuple: BucketTuple,
+  opts: { evaluatedUsers: number; generationId: string | null },
+): Promise<void> {
+  await client.query('BEGIN');
+  try {
+    const [k1, k2] = tupleLockKey(tuple.projectId, tuple.environmentId, tuple.fingerprint);
+    await client.query('SELECT pg_advisory_xact_lock($1, $2)', [k1, k2]);
+    await client.query(
+      `INSERT INTO friction_bucket_state
+         (project_id, environment_id, fingerprint, rule_version, prompt_version,
+          evaluated_users, evaluated_at, last_generation_id)
+       VALUES ($1, $2, $3, $4, $5, $6, now(), $7)
+       ON CONFLICT (project_id, environment_id, fingerprint, rule_version, prompt_version)
+       DO UPDATE SET
+         evaluated_users = EXCLUDED.evaluated_users,
+         evaluated_at = EXCLUDED.evaluated_at,
+         last_generation_id = EXCLUDED.last_generation_id,
+         updated_at = now()`,
+      [
+        tuple.projectId, tuple.environmentId, tuple.fingerprint,
+        tuple.ruleVersion, tuple.promptVersion,
+        opts.evaluatedUsers, opts.generationId,
+      ],
+    );
+    await client.query('COMMIT');
+  } catch (error: unknown) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  }
+}
+
+/** Which signals this generation was shown. Re-running is a no-op. The insert
+ * joins back to friction_signals on project_id so a signal id belonging to
+ * another tenant can never be recorded as this generation's evidence. */
+export async function recordGenerationEvidence(
+  client: pg.PoolClient,
+  generationId: string,
+  projectId: string,
+  signalIds: string[],
+): Promise<void> {
+  if (signalIds.length === 0) return;
+  await client.query(
+    `INSERT INTO friction_generation_evidence (generation_id, signal_id, project_id)
+     SELECT $1, s.id, $3
+     FROM friction_signals s
+     WHERE s.id = ANY($2::uuid[]) AND s.project_id = $3
+     ON CONFLICT (generation_id, signal_id) DO NOTHING`,
+    [generationId, signalIds, projectId],
+  );
+}
+
 /** Creates the durable in-flight generation for a threshold crossing. The
  * partial unique index arbitrates: concurrent fifth-user claimers get null
  * and skip their model call — exactly one adjudication per crossing. Runs
