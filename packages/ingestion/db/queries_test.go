@@ -558,7 +558,7 @@ func TestUpdateProjectPrPosture_DefaultValidationAndTenantScope(t *testing.T) {
 	}
 
 	draft := "draft_when_unverified"
-	project, err = q.UpdateProject(ctx, orgID, projectID, nil, nil, &draft, nil)
+	project, err = q.UpdateProject(ctx, orgID, projectID, nil, nil, &draft, nil, nil)
 	if err != nil || project == nil {
 		t.Fatalf("UpdateProject posture = (%+v, %v)", project, err)
 	}
@@ -566,17 +566,51 @@ func TestUpdateProjectPrPosture_DefaultValidationAndTenantScope(t *testing.T) {
 		t.Fatalf("PrPosture = %q, want %q", project.PrPosture, draft)
 	}
 
-	project, err = q.UpdateProject(ctx, orgID, projectID, nil, nil, nil, nil)
+	project, err = q.UpdateProject(ctx, orgID, projectID, nil, nil, nil, nil, nil)
 	if err != nil || project == nil || project.PrPosture != draft {
 		t.Fatalf("omitted posture was not preserved: project=%+v err=%v", project, err)
 	}
 
 	invalid := "publish_everything"
-	if _, err := q.UpdateProject(ctx, orgID, projectID, nil, nil, &invalid, nil); err == nil {
+	if _, err := q.UpdateProject(ctx, orgID, projectID, nil, nil, &invalid, nil, nil); err == nil {
 		t.Fatal("expected invalid pr_posture to violate the database constraint")
 	}
-	if project, err := q.UpdateProject(ctx, otherOrgID, projectID, nil, nil, &draft, nil); err != nil || project != nil {
+	if project, err := q.UpdateProject(ctx, otherOrgID, projectID, nil, nil, &draft, nil, nil); err != nil || project != nil {
 		t.Fatalf("cross-org UpdateProject = (%+v, %v), want nil, nil", project, err)
+	}
+}
+
+func TestUpdateProjectDigestTimezone(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	q := db.New(pool)
+	org, err := q.CreateOrg(ctx, "digest-timezone")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { cleanupTenant(t, pool, org.ID) })
+	project, err := q.CreateProject(ctx, org.ID, "digest-timezone-project", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if project.DigestTimezone != "UTC" {
+		t.Fatalf("default DigestTimezone = %q, want UTC", project.DigestTimezone)
+	}
+
+	project, err = q.UpdateProject(ctx, org.ID, project.ID, nil, nil, nil, nil, ptrStr("America/Los_Angeles"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if project.DigestTimezone != "America/Los_Angeles" {
+		t.Fatalf("DigestTimezone = %q", project.DigestTimezone)
+	}
+
+	project, err = q.UpdateProject(ctx, org.ID, project.ID, nil, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if project.DigestTimezone != "America/Los_Angeles" {
+		t.Fatalf("nil update reset DigestTimezone to %q", project.DigestTimezone)
 	}
 }
 

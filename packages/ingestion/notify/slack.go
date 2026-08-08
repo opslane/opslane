@@ -3,6 +3,7 @@ package notify
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	"github.com/opslane/opslane/packages/ingestion/masking"
@@ -27,8 +28,22 @@ func truncate(value string, max int) string {
 	return string(runes[:max-1]) + "…"
 }
 
-// FormatSlack renders an issue.created payload as Slack Block Kit JSON.
+// FormatSlack renders a supported notification payload as Slack Block Kit JSON.
 func FormatSlack(payload EventPayload) ([]byte, string, error) {
+	switch payload.EventType {
+	case "issue.created":
+		return formatSlackIssue(payload)
+	case "digest.daily":
+		return formatSlackDigest(payload)
+	default:
+		return nil, "application/json", fmt.Errorf("no slack formatter for event_type %q", payload.EventType)
+	}
+}
+
+func formatSlackIssue(payload EventPayload) ([]byte, string, error) {
+	if payload.Issue == nil {
+		return nil, "application/json", fmt.Errorf("issue.created payload missing issue body")
+	}
 	title := masking.RedactURL(masking.RedactBody(payload.Issue.Title))
 	title = strings.ReplaceAll(title, "`", "'")
 	title = truncate(slackEscape(title), sectionMax)

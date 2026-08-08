@@ -89,4 +89,70 @@ describe('IntegrationsSettings', () => {
     expect(wrapper.text()).not.toContain('Test');
     expect(wrapper.text()).not.toContain('Delete');
   });
+
+  it('shows subscriptions and keeps the final event type selected', async () => {
+    api.listNotificationDestinations.mockResolvedValue({
+      can_manage: true,
+      destinations: [destination('destination-1', 'Production alerts')],
+    });
+
+    const wrapper = mount(IntegrationsSettings, { props: { projectId: 'project-a' } });
+    await flushPromises();
+
+    const issueAlerts = wrapper.get('input[aria-label="New issue alerts for Production alerts"]');
+    const dailyDigest = wrapper.get('input[aria-label="Daily digest for Production alerts"]');
+    expect((issueAlerts.element as HTMLInputElement).checked).toBe(true);
+    expect(issueAlerts.attributes('disabled')).toBeDefined();
+    expect((dailyDigest.element as HTMLInputElement).checked).toBe(false);
+    expect(dailyDigest.attributes('disabled')).toBeUndefined();
+  });
+
+  it('updates a destination subscription from its event type checkbox', async () => {
+    api.listNotificationDestinations.mockResolvedValue({
+      can_manage: true,
+      destinations: [destination('destination-1', 'Production alerts')],
+    });
+    api.updateNotificationDestination.mockResolvedValue({
+      ...destination('destination-1', 'Production alerts'),
+      event_types: ['issue.created', 'digest.daily'],
+    });
+
+    const wrapper = mount(IntegrationsSettings, { props: { projectId: 'project-a' } });
+    await flushPromises();
+
+    await wrapper.get('input[aria-label="Daily digest for Production alerts"]').setValue(true);
+    await flushPromises();
+
+    expect(api.updateNotificationDestination).toHaveBeenCalledWith(
+      'project-a',
+      'destination-1',
+      { event_types: ['issue.created', 'digest.daily'] },
+    );
+  });
+
+  it('sends a digest preview for a destination', async () => {
+    api.listNotificationDestinations.mockResolvedValue({
+      can_manage: true,
+      destinations: [destination('destination-1', 'Production alerts')],
+    });
+    api.testNotificationDestination.mockResolvedValue({
+      ok: true,
+      classification: 'delivered',
+      status_code: 200,
+    });
+
+    const wrapper = mount(IntegrationsSettings, { props: { projectId: 'project-a' } });
+    await flushPromises();
+
+    const preview = wrapper.findAll('button').find((button) => button.text() === 'Send digest preview');
+    expect(preview).toBeDefined();
+    await preview!.trigger('click');
+    await flushPromises();
+
+    expect(api.testNotificationDestination).toHaveBeenCalledWith(
+      'project-a',
+      'destination-1',
+      { eventType: 'digest.daily' },
+    );
+  });
 });

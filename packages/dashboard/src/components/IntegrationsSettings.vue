@@ -7,7 +7,7 @@ import {
   testNotificationDestination,
   updateNotificationDestination,
 } from '../api';
-import type { NotificationDestination } from '../types/api';
+import type { NotificationDestination, NotificationEventType } from '../types/api';
 import { formatDate } from '../utils';
 import Button from './ui/Button.vue';
 
@@ -24,6 +24,14 @@ const creating = ref(false);
 const mutationPending = ref<Record<string, boolean>>({});
 const testResults = ref<Record<string, { ok: boolean; message: string }>>({});
 let loadToken = 0;
+
+const notificationEventTypes: ReadonlyArray<{
+  value: NotificationEventType;
+  label: string;
+}> = [
+  { value: 'issue.created', label: 'New issue alerts' },
+  { value: 'digest.daily', label: 'Daily digest' },
+];
 
 function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback;
@@ -109,6 +117,41 @@ function onEnabledChange(destination: NotificationDestination, event: Event): vo
   void setEnabled(destination, enabled);
 }
 
+async function setEventType(
+  destination: NotificationDestination,
+  eventType: NotificationEventType,
+  checked: boolean,
+): Promise<void> {
+  if (!canManage.value || mutationPending.value[destination.id]) return;
+
+  const eventTypes = checked
+    ? [...destination.event_types, eventType]
+    : destination.event_types.filter((candidate) => candidate !== eventType);
+  if (eventTypes.length === 0) return;
+
+  setMutationPending(destination.id, true);
+  loadError.value = '';
+  try {
+    await updateNotificationDestination(props.projectId, destination.id, {
+      event_types: eventTypes,
+    });
+    await refresh();
+  } catch (error: unknown) {
+    loadError.value = errorMessage(error, 'Failed to update notification subscriptions');
+  } finally {
+    setMutationPending(destination.id, false);
+  }
+}
+
+function onEventTypeChange(
+  destination: NotificationDestination,
+  eventType: NotificationEventType,
+  event: Event,
+): void {
+  const checked = event.target instanceof HTMLInputElement && event.target.checked;
+  void setEventType(destination, eventType, checked);
+}
+
 async function removeDestination(destination: NotificationDestination): Promise<void> {
   if (!canManage.value || mutationPending.value[destination.id]) return;
   if (!window.confirm(`Delete notification destination "${destination.name}"?`)) return;
@@ -125,7 +168,10 @@ async function removeDestination(destination: NotificationDestination): Promise<
   }
 }
 
-async function sendTest(destination: NotificationDestination): Promise<void> {
+async function sendTest(
+  destination: NotificationDestination,
+  eventType?: NotificationEventType,
+): Promise<void> {
   if (!canManage.value || mutationPending.value[destination.id]) return;
 
   setMutationPending(destination.id, true);
@@ -133,7 +179,11 @@ async function sendTest(destination: NotificationDestination): Promise<void> {
   delete previousResults[destination.id];
   testResults.value = previousResults;
   try {
-    const result = await testNotificationDestination(props.projectId, destination.id);
+    const result = await testNotificationDestination(
+      props.projectId,
+      destination.id,
+      eventType ? { eventType } : undefined,
+    );
     const status = result.status_code ? ` (HTTP ${result.status_code})` : '';
     testResults.value = {
       ...testResults.value,
@@ -175,7 +225,7 @@ watch(
     <div>
       <h3 class="text-sm font-medium text-text">Notification integrations</h3>
       <p class="mt-1 text-sm text-muted">
-        Send a Slack message when Opslane creates a new issue for this project.
+        Send new issue alerts and daily project digests to Slack.
       </p>
     </div>
 
@@ -225,6 +275,28 @@ watch(
             </label>
           </div>
 
+          <fieldset v-if="canManage" class="mt-4">
+            <legend class="text-xs font-medium text-muted">Messages to send</legend>
+            <div class="mt-2 flex flex-wrap gap-x-5 gap-y-2">
+              <label
+                v-for="eventType in notificationEventTypes"
+                :key="eventType.value"
+                class="inline-flex items-center gap-2 text-sm text-text"
+              >
+                <input
+                  type="checkbox"
+                  :aria-label="`${eventType.label} for ${destination.name}`"
+                  :checked="destination.event_types.includes(eventType.value)"
+                  :disabled="mutationPending[destination.id]
+                    || (destination.event_types.length === 1
+                      && destination.event_types.includes(eventType.value))"
+                  @change="onEventTypeChange(destination, eventType.value, $event)"
+                />
+                <span v-text="eventType.label"></span>
+              </label>
+            </div>
+          </fieldset>
+
           <div class="mt-4 flex flex-wrap items-center gap-2 text-xs">
             <template v-if="destination.last_delivery">
               <span
@@ -253,6 +325,9 @@ watch(
           <div v-if="canManage" class="mt-4 flex flex-wrap items-center gap-3">
             <Button variant="secondary" :disabled="mutationPending[destination.id]" @click="sendTest(destination)">
               {{ mutationPending[destination.id] ? 'Working...' : 'Test' }}
+            </Button>
+            <Button variant="secondary" :disabled="mutationPending[destination.id]" @click="sendTest(destination, 'digest.daily')">
+              Send digest preview
             </Button>
             <Button variant="danger" class="rounded-lg text-danger hover:bg-danger/10" :disabled="mutationPending[destination.id]" @click="removeDestination(destination)">
               Delete

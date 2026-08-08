@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -20,6 +21,11 @@ const notificationRequestLimit = 16 << 10
 
 var knownNotificationEventTypes = map[string]struct{}{
 	"issue.created": {},
+	"digest.daily":  {},
+}
+
+type DigestBuilder interface {
+	Build(ctx context.Context, projectID string, now time.Time) (notify.EventPayload, error)
 }
 
 type notificationDestinationJSON struct {
@@ -52,9 +58,10 @@ type createNotificationDestinationRequest struct {
 }
 
 type updateNotificationDestinationRequest struct {
-	Name       *string `json:"name"`
-	WebhookURL *string `json:"webhook_url"`
-	Enabled    *bool   `json:"enabled"`
+	Name       *string   `json:"name"`
+	WebhookURL *string   `json:"webhook_url"`
+	Enabled    *bool     `json:"enabled"`
+	EventTypes *[]string `json:"event_types"`
 }
 
 type notificationConfig struct {
@@ -138,7 +145,7 @@ func (d *Dependencies) CreateNotificationDestinationEndpoint(w http.ResponseWrit
 		return
 	}
 	if len(request.EventTypes) == 0 {
-		request.EventTypes = []string{"issue.created"}
+		request.EventTypes = []string{"issue.created", "digest.daily"}
 	}
 	if !validNotificationEventTypes(request.EventTypes) {
 		writeJSONError(w, http.StatusBadRequest, "event_types contains an unsupported value")
@@ -183,7 +190,7 @@ func (d *Dependencies) UpdateNotificationDestinationEndpoint(w http.ResponseWrit
 		writeJSONError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	if request.Name == nil && request.WebhookURL == nil && request.Enabled == nil {
+	if request.Name == nil && request.WebhookURL == nil && request.Enabled == nil && request.EventTypes == nil {
 		writeJSONError(w, http.StatusBadRequest, "at least one field is required")
 		return
 	}
@@ -194,6 +201,14 @@ func (d *Dependencies) UpdateNotificationDestinationEndpoint(w http.ResponseWrit
 			writeJSONError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+	}
+	var eventTypes []string
+	if request.EventTypes != nil {
+		if len(*request.EventTypes) == 0 || !validNotificationEventTypes(*request.EventTypes) {
+			writeJSONError(w, http.StatusBadRequest, "event_types contains an unsupported value")
+			return
+		}
+		eventTypes = *request.EventTypes
 	}
 
 	var sealed []byte
@@ -229,6 +244,7 @@ func (d *Dependencies) UpdateNotificationDestinationEndpoint(w http.ResponseWrit
 		sealed,
 		fingerprint,
 		request.Enabled,
+		eventTypes,
 	); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeJSONError(w, http.StatusNotFound, "notification destination not found")
@@ -289,13 +305,49 @@ func (d *Dependencies) TestNotificationDestinationEndpoint(w http.ResponseWriter
 		writeJSONError(w, http.StatusInternalServerError, "invalid notification configuration")
 		return
 	}
-	outcome := d.NotifySender.Send(r.Context(), destination.Type, config.WebhookURL, notify.EventPayload{
-		Version:     1,
-		EventType:   "issue.created",
-		Issue:       notify.IssueRef{ID: "test", Title: "Test notification from Opslane", FirstSeen: time.Now().UTC().Format(time.RFC3339)},
-		Project:     notify.ProjectRef{ID: projectID, Name: "Opslane"},
-		Environment: "test",
-	})
+	r.Body = http.MaxBytesReader(w, r.Body, notificationRequestLimit)
+	var request struct {
+		EventType string `json:"event_type"`
+	}
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil {
+		if !errors.Is(err, io.EOF) {
+			writeJSONError(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+	} else if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		writeJSONError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	var payload notify.EventPayload
+	switch request.EventType {
+	case "", "issue.created":
+		payload = notify.EventPayload{
+			Version:     1,
+			EventType:   "issue.created",
+			Issue:       &notify.IssueRef{ID: "test", Title: "Test notification from Opslane", FirstSeen: time.Now().UTC().Format(time.RFC3339)},
+			Project:     notify.ProjectRef{ID: projectID, Name: "Opslane"},
+			Environment: "test",
+		}
+	case "digest.daily":
+		if d.DigestBuilder == nil {
+			writeJSONError(w, http.StatusServiceUnavailable, "digest unavailable")
+			return
+		}
+		var err error
+		payload, err = d.DigestBuilder.Build(r.Context(), projectID, time.Now().UTC())
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "failed to build digest")
+			return
+		}
+	default:
+		writeJSONError(w, http.StatusBadRequest, "unsupported event_type")
+		return
+	}
+
+	outcome := d.NotifySender.Send(r.Context(), destination.Type, config.WebhookURL, payload)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":             outcome.Class == "delivered",
 		"classification": outcome.Class,

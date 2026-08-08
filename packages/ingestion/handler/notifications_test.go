@@ -21,6 +21,16 @@ import (
 
 const notificationCipherSecret = "notification-handler-test-secret-32-bytes"
 
+type fixedDigestBuilder struct {
+	payload notify.EventPayload
+	calls   atomic.Int64
+}
+
+func (b *fixedDigestBuilder) Build(context.Context, string, time.Time) (notify.EventPayload, error) {
+	b.calls.Add(1)
+	return b.payload, nil
+}
+
 func notificationRouter(t *testing.T, cloud bool, extraHosts []string) (*handler.Dependencies, http.Handler, string, string, string) {
 	t.Helper()
 	deps, pool := testDeps(t)
@@ -132,6 +142,82 @@ func TestNotificationDestinationCRUDAndTestEndpointOSS(t *testing.T) {
 	}
 }
 
+func TestNotificationDestinationTestEventType(t *testing.T) {
+	var sinkCalls atomic.Int64
+	sink := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		sinkCalls.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer sink.Close()
+	parsedSink, err := url.Parse(sink.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deps, router, orgID, projectID, _ := notificationRouter(t, false, []string{parsedSink.Host})
+	token := notificationToken(t, "digest-user", orgID, "digest@example.com")
+	create := notificationHTTP(t, router, http.MethodPost,
+		"/api/v1/projects/"+projectID+"/notification-destinations", token,
+		map[string]any{"name": "Digest preview", "webhook_url": sink.URL + "/hook"})
+	if create.Code != http.StatusCreated {
+		t.Fatalf("create status=%d body=%s", create.Code, create.Body.String())
+	}
+	var created struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(create.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	builder := &fixedDigestBuilder{payload: notify.EventPayload{
+		Version:   1,
+		EventType: "digest.daily",
+		Project:   notify.ProjectRef{ID: projectID, Name: "Digest project"},
+		Digest: &notify.DigestPayload{
+			Date:     "2026-08-07",
+			Watching: notify.DigestWatching{Sessions: 1, Users: 1},
+		},
+	}}
+	deps.DigestBuilder = builder
+	path := "/api/v1/projects/" + projectID + "/notification-destinations/" + created.ID + "/test"
+
+	digestResponse := notificationHTTP(t, router, http.MethodPost, path, token, map[string]any{"event_type": "digest.daily"})
+	if digestResponse.Code != http.StatusOK || !strings.Contains(digestResponse.Body.String(), `"classification":"delivered"`) {
+		t.Fatalf("digest test status=%d body=%s", digestResponse.Code, digestResponse.Body.String())
+	}
+	if builder.calls.Load() != 1 || sinkCalls.Load() != 1 {
+		t.Fatalf("builder calls=%d sink calls=%d", builder.calls.Load(), sinkCalls.Load())
+	}
+
+	bogus := notificationHTTP(t, router, http.MethodPost, path, token, map[string]any{"event_type": "bogus"})
+	if bogus.Code != http.StatusBadRequest {
+		t.Fatalf("bogus status=%d body=%s", bogus.Code, bogus.Body.String())
+	}
+	unknownField := notificationHTTP(t, router, http.MethodPost, path, token, map[string]any{
+		"event_type": "digest.daily",
+		"extra":      true,
+	})
+	if unknownField.Code != http.StatusBadRequest {
+		t.Fatalf("unknown-field status=%d body=%s", unknownField.Code, unknownField.Body.String())
+	}
+	trailingRequest := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{} {}`))
+	trailingRequest.Header.Set("Content-Type", "application/json")
+	trailingRequest.AddCookie(&http.Cookie{Name: handler.AccessCookieName, Value: token})
+	trailingResponse := httptest.NewRecorder()
+	router.ServeHTTP(trailingResponse, trailingRequest)
+	if trailingResponse.Code != http.StatusBadRequest {
+		t.Fatalf("trailing-json status=%d body=%s", trailingResponse.Code, trailingResponse.Body.String())
+	}
+	deps.DigestBuilder = nil
+	unavailable := notificationHTTP(t, router, http.MethodPost, path, token, map[string]any{"event_type": "digest.daily"})
+	if unavailable.Code != http.StatusServiceUnavailable {
+		t.Fatalf("unavailable status=%d body=%s", unavailable.Code, unavailable.Body.String())
+	}
+
+	issueResponse := notificationHTTP(t, router, http.MethodPost, path, token, nil)
+	if issueResponse.Code != http.StatusOK || !strings.Contains(issueResponse.Body.String(), `"classification":"delivered"`) {
+		t.Fatalf("empty-body issue test status=%d body=%s", issueResponse.Code, issueResponse.Body.String())
+	}
+}
+
 func TestNotificationDestinationValidationAndCrossOrg(t *testing.T) {
 	deps, router, orgID, projectID, _ := notificationRouter(t, false, nil)
 	token := notificationToken(t, "oss-user", orgID, "oss@example.com")
@@ -173,6 +259,54 @@ func TestNotificationDestinationValidationAndCrossOrg(t *testing.T) {
 	}
 	if _, err := deps.Queries.Pool().Exec(context.Background(), `DELETE FROM orgs WHERE id = $1`, otherOrg.ID); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestNotificationDestinationEventTypes(t *testing.T) {
+	_, router, orgID, projectID, _ := notificationRouter(t, false, nil)
+	token := notificationToken(t, "event-types-user", orgID, "event-types@example.com")
+	path := "/api/v1/projects/" + projectID + "/notification-destinations"
+
+	create := notificationHTTP(t, router, http.MethodPost, path, token, map[string]any{
+		"name":        "Digest alerts",
+		"webhook_url": "https://hooks.slack.com/services/T/B/x",
+	})
+	if create.Code != http.StatusCreated {
+		t.Fatalf("create status=%d body=%s", create.Code, create.Body.String())
+	}
+	var created struct {
+		ID         string   `json:"id"`
+		EventTypes []string `json:"event_types"`
+	}
+	if err := json.Unmarshal(create.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	if len(created.EventTypes) != 2 || created.EventTypes[0] != "issue.created" || created.EventTypes[1] != "digest.daily" {
+		t.Fatalf("create event_types = %v", created.EventTypes)
+	}
+
+	updatePath := path + "/" + created.ID
+	for _, eventTypes := range [][]string{{}, {"bogus"}} {
+		response := notificationHTTP(t, router, http.MethodPatch, updatePath, token, map[string]any{"event_types": eventTypes})
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("PATCH event_types=%v status=%d body=%s", eventTypes, response.Code, response.Body.String())
+		}
+	}
+
+	response := notificationHTTP(t, router, http.MethodPatch, updatePath, token, map[string]any{
+		"event_types": []string{"issue.created"},
+	})
+	if response.Code != http.StatusOK {
+		t.Fatalf("valid PATCH status=%d body=%s", response.Code, response.Body.String())
+	}
+	var updated struct {
+		EventTypes []string `json:"event_types"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &updated); err != nil {
+		t.Fatal(err)
+	}
+	if len(updated.EventTypes) != 1 || updated.EventTypes[0] != "issue.created" {
+		t.Fatalf("PATCH event_types = %v", updated.EventTypes)
 	}
 }
 

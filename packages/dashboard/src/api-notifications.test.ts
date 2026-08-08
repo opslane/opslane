@@ -92,6 +92,28 @@ describe('notification destinations API', () => {
     );
   });
 
+  it('patches the event types delivered to a destination', async () => {
+    const result = { id: 'destination-1', event_types: ['digest.daily'] };
+    const fetchMock = vi.fn().mockResolvedValue(response(result));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(updateNotificationDestination(
+      'project-1',
+      'destination-1',
+      { event_types: ['digest.daily'] },
+    )).resolves.toEqual(result);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/v1/projects/project-1/notification-destinations/destination-1',
+      expect.objectContaining({
+        method: 'PATCH',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ event_types: ['digest.daily'] }),
+      }),
+    );
+  });
+
   it('deletes a destination', async () => {
     const fetchMock = vi.fn().mockResolvedValue(response({ ok: true }));
     vi.stubGlobal('fetch', fetchMock);
@@ -124,6 +146,28 @@ describe('notification destinations API', () => {
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: '{}',
+      }),
+    );
+  });
+
+  it('requests a daily digest preview', async () => {
+    const result = { ok: true, classification: 'delivered', status_code: 200 };
+    const fetchMock = vi.fn().mockResolvedValue(response(result));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(testNotificationDestination(
+      'project-1',
+      'destination-1',
+      { eventType: 'digest.daily' },
+    )).resolves.toEqual(result);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/v1/projects/project-1/notification-destinations/destination-1/test',
+      expect.objectContaining({
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ event_type: 'digest.daily' }),
       }),
     );
   });

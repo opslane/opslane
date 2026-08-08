@@ -9,6 +9,35 @@ afterEach(() => {
 });
 
 describe('project settings API', () => {
+  it('sends the digest timezone as a partial project PATCH', async () => {
+    const project = {
+      id: 'project-1',
+      name: 'Example',
+      github_repo: 'acme/example',
+      friction_autonomy: 'ask_first' as const,
+      pr_posture: 'verified_only' as const,
+      default_environment_id: 'env-production',
+      digest_timezone: 'America/New_York',
+      created_at: '2026-07-17T00:00:00Z',
+    };
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => project,
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(updateProject('project-1', {
+      digest_timezone: 'America/New_York',
+    })).resolves.toEqual(project);
+
+    expect(fetchMock).toHaveBeenCalledWith('/api/v1/projects/project-1', expect.objectContaining({
+      method: 'PATCH',
+      credentials: 'include',
+      body: JSON.stringify({ digest_timezone: 'America/New_York' }),
+    }));
+  });
+
   it('sends the draft posture as a partial project PATCH', async () => {
     const project = {
       id: 'project-1',
