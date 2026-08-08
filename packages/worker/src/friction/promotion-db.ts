@@ -93,21 +93,25 @@ export async function findFoldTarget(
     : null;
 }
 
-/** Ids and total session-level occurrences of the signals a bucket
- * adjudication would claim: pending, active, identified, in-window. */
+/** Ids and total session-level occurrences of the bucket's evidence at this
+ * rule version: active, identified, in-window, whatever the verdict. A verdict
+ * must not delete the evidence it judged, or the bucket refills from zero and
+ * asks the model the same question again. `unchecked` alone is excluded: it
+ * means the owning job dead-lettered before a verdict (dead-letter.ts:14). */
 export async function listEligibleSignals(
   client: pg.PoolClient,
-  tuple: Pick<BucketTuple, 'projectId' | 'environmentId' | 'fingerprint'>,
+  tuple: Pick<BucketTuple, 'projectId' | 'environmentId' | 'fingerprint' | 'ruleVersion'>,
 ): Promise<{ ids: string[]; totalOccurrences: number }> {
   const { rows } = await client.query<{ id: string; occurrence_count: number }>(
     `SELECT id, occurrence_count
      FROM friction_signals
      WHERE project_id = $1 AND environment_id = $2 AND fingerprint = $3
-       AND adjudication_status = 'pending'
+       AND rule_version = $4
        AND end_user_id IS NOT NULL
+       AND adjudication_status <> 'unchecked'
        AND retracted_at IS NULL AND superseded_by IS NULL
        AND occurred_at > now() - interval '7 days'`,
-    [tuple.projectId, tuple.environmentId, tuple.fingerprint],
+    [tuple.projectId, tuple.environmentId, tuple.fingerprint, tuple.ruleVersion],
   );
   return {
     ids: rows.map((r) => r.id),
@@ -316,22 +320,29 @@ export async function ensureCandidate(
   return rows[0]!.id;
 }
 
-/** Distinct identified users behind pending active signals for the tuple in
- * the rolling seven-day window. Anonymous signals never count (plan D3);
- * terminal, retracted, and superseded signals never count (plan D5). */
+/** Distinct identified users behind the bucket's active evidence at this rule
+ * version, in the rolling seven-day window. Adjudicated rows stay evidence:
+ * counting only 'pending' made every verdict delete what it had just judged,
+ * so the bucket refilled from zero and re-asked the same question. Anonymous
+ * signals never count (plan D3); retracted and superseded signals never count
+ * (plan D5); `unchecked` never counts, because it marks a job that
+ * dead-lettered before reaching a verdict (dead-letter.ts:14). Rule version is
+ * part of the key: signals from different detector generations must not pool
+ * into one threshold that is then stamped with a single version. */
 export async function countEligibleUsers(
   client: pg.PoolClient,
-  tuple: Pick<BucketTuple, 'projectId' | 'environmentId' | 'fingerprint'>,
+  tuple: Pick<BucketTuple, 'projectId' | 'environmentId' | 'fingerprint' | 'ruleVersion'>,
 ): Promise<number> {
   const { rows } = await client.query<{ n: number }>(
     `SELECT COUNT(DISTINCT end_user_id)::int AS n
      FROM friction_signals
      WHERE project_id = $1 AND environment_id = $2 AND fingerprint = $3
-       AND adjudication_status = 'pending'
+       AND rule_version = $4
        AND end_user_id IS NOT NULL
+       AND adjudication_status <> 'unchecked'
        AND retracted_at IS NULL AND superseded_by IS NULL
        AND occurred_at > now() - interval '7 days'`,
-    [tuple.projectId, tuple.environmentId, tuple.fingerprint],
+    [tuple.projectId, tuple.environmentId, tuple.fingerprint, tuple.ruleVersion],
   );
   return rows[0]!.n;
 }

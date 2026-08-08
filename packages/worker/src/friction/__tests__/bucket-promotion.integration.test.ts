@@ -185,15 +185,29 @@ describeDb('bucket promotion integration', () => {
       expect(await withClient((c) => countEligibleUsers(c, tuple()))).toBe(5);
     });
 
-    it('excludes anonymous, terminal, superseded, out-of-window, and other-environment signals', async () => {
+    it('excludes anonymous, unchecked, retracted, out-of-window, and other-environment signals', async () => {
       await seedSignal({ user: null }); // anonymous
-      await seedSignal({ user: 'r', status: 'rejected' });
       await seedSignal({ user: 'u', status: 'unchecked' });
       await seedSignal({ user: 'old', occurredAt: new Date(Date.now() - 8 * 24 * 3600 * 1000).toISOString() });
       await seedSignal({ user: 'other-env', environmentId: stagingEnvironmentId });
       const retracted = await seedSignal({ user: 'retracted' });
       await pool.query(`UPDATE friction_signals SET retracted_at = now() WHERE id = $1`, [retracted.id]);
+      const superseded = await seedSignal({ user: 'superseded' });
+      await pool.query(`UPDATE friction_signals SET superseded_by = $1 WHERE id = $2`, [
+        retracted.id,
+        superseded.id,
+      ]);
       expect(await withClient((c) => countEligibleUsers(c, tuple()))).toBe(0);
+    });
+
+    it('counts rejected signals toward the threshold but not unchecked ones', async () => {
+      // Rejected rows remain evidence: a verdict must not delete what it judged.
+      // Unchecked rows are excluded by the dead-letter contract (dead-letter.ts:14).
+      await seedSignal({ user: 'pending-user' });
+      await seedSignal({ user: 'rejected-user', status: 'rejected' });
+      await seedSignal({ user: 'accepted-user', status: 'accepted' });
+      await seedSignal({ user: 'unchecked-user', status: 'unchecked' });
+      expect(await withClient((c) => countEligibleUsers(c, tuple()))).toBe(3);
     });
   });
 

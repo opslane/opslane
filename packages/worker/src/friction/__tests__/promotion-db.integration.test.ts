@@ -4,8 +4,10 @@ import pg from 'pg';
 import { getPool, closePool } from '../../db.js';
 import {
   claimSignalsForAdjudication,
+  countEligibleUsers,
   findFoldTarget,
   applyFoldOutcome,
+  listEligibleSignals,
   recomputeIncidentImpact,
   tryReserveAdjudicationCall,
   type FoldSignal,
@@ -93,6 +95,40 @@ async function seedSignal(opts: {
     ]
   );
   return { id: res.rows[0]!.id, sessionId };
+}
+
+async function seedEndUsers(n: number): Promise<string[]> {
+  const ids: string[] = [];
+  for (let i = 0; i < n; i++) {
+    ids.push(await seedEndUser(`evidence-user-${crypto.randomUUID()}`));
+  }
+  return ids;
+}
+
+/** Like seedSignal, but lets a test pin the rule version and pre-retract the
+ * row: evidence counting keys on both. */
+async function insertSignal(opts: {
+  fingerprint: string;
+  ruleVersion: number;
+  endUserId: string | null;
+  adjudicationStatus: 'pending' | 'accepted' | 'rejected' | 'unchecked';
+  retracted?: boolean;
+}): Promise<string> {
+  const sessionId = await seedSession();
+  const { rows } = await pool.query<{ id: string }>(
+    `INSERT INTO friction_signals
+       (session_id, project_id, environment_id, end_user_id, rule_version,
+        signal_type, fingerprint, element_selector, page_url_normalized,
+        occurred_at, occurrence_count, adjudication_status, retracted_at)
+     VALUES ($1, $2, $3, $4, $5, 'dead_click', $6, 'button.save', '/x',
+             now(), 1, $7, CASE WHEN $8::boolean THEN now() ELSE NULL END)
+     RETURNING id`,
+    [
+      sessionId, projectId, environmentId, opts.endUserId, opts.ruleVersion,
+      opts.fingerprint, opts.adjudicationStatus, opts.retracted === true,
+    ]
+  );
+  return rows[0]!.id;
 }
 
 async function seedErrorGroupWithEvent(opts: {
@@ -214,6 +250,67 @@ describeDb('promotion-db integration', () => {
     expect(rows.find((row) => row.rule_version === 1 && row.fingerprint === 'kept')?.superseded_by).not.toBeNull();
     expect(rows.find((row) => row.fingerprint === 'removed')?.retracted_at).not.toBeNull();
     expect(rows.find((row) => row.rule_version === 2)?.occurred_ats).toEqual([1_754_000_000_000]);
+  });
+
+  it('counts adjudicated signals as evidence but never unchecked ones', async () => {
+    const fingerprint = 'evidence-fp-1';
+    const users = await seedEndUsers(6);
+    // Three rejected, two pending: all five are still evidence.
+    for (const [index, userId] of users.slice(0, 5).entries()) {
+      await insertSignal({
+        fingerprint, ruleVersion: 3, endUserId: userId,
+        adjudicationStatus: index < 3 ? 'rejected' : 'pending',
+      });
+    }
+    // An unchecked row is contractually not evidence (dead-letter.ts:14).
+    await insertSignal({
+      fingerprint, ruleVersion: 3, endUserId: users[5]!, adjudicationStatus: 'unchecked',
+    });
+    // A different rule version must not contribute.
+    const [otherVersionUser] = await seedEndUsers(1);
+    await insertSignal({
+      fingerprint, ruleVersion: 2, endUserId: otherVersionUser!, adjudicationStatus: 'pending',
+    });
+
+    const client = await getPool().connect();
+    try {
+      const tuple = { projectId, environmentId, fingerprint, ruleVersion: 3 };
+      expect(await countEligibleUsers(client, tuple)).toBe(5);
+      expect((await listEligibleSignals(client, tuple)).ids).toHaveLength(5);
+    } finally {
+      client.release();
+    }
+  });
+
+  it('excludes retracted and superseded signals from evidence', async () => {
+    const fingerprint = 'evidence-fp-2';
+    const users = await seedEndUsers(4);
+    await insertSignal({ fingerprint, ruleVersion: 3, endUserId: users[0]!, adjudicationStatus: 'pending' });
+    await insertSignal({ fingerprint, ruleVersion: 3, endUserId: users[1]!, adjudicationStatus: 'pending', retracted: true });
+    await insertSignal({ fingerprint, ruleVersion: 3, endUserId: users[2]!, adjudicationStatus: 'accepted' });
+
+    // A genuinely superseded row: the replacement carries the evidence.
+    const replacement = await insertSignal({
+      fingerprint, ruleVersion: 3, endUserId: users[3]!, adjudicationStatus: 'pending',
+    });
+    const superseded = await insertSignal({
+      fingerprint, ruleVersion: 3, endUserId: users[3]!, adjudicationStatus: 'pending',
+    });
+    await pool.query(
+      `UPDATE friction_signals SET superseded_by = $1 WHERE id = $2`,
+      [replacement, superseded]
+    );
+
+    const client = await getPool().connect();
+    try {
+      // users[0] pending, users[2] accepted, users[3] via the replacement row.
+      // users[1] retracted and the superseded row are both excluded.
+      expect(await countEligibleUsers(client, {
+        projectId, environmentId, fingerprint, ruleVersion: 3,
+      })).toBe(3);
+    } finally {
+      client.release();
+    }
   });
 
   describe('claimSignalsForAdjudication', () => {
