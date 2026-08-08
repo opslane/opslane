@@ -184,21 +184,21 @@ describe('IssuesList URL filters', () => {
     wrapper.unmount();
   });
 
-  it('defaults to users affected descending', async () => {
+  it('defaults to priority descending', async () => {
     mocks.route.query = { project_id: 'p1' };
     window.history.replaceState({}, '', '/?project_id=p1');
     const lowImpact = incident('low', 'Low impact', 'javascript');
-    lowImpact.affected_users_count = 2;
+    lowImpact.priority_score = 2;
     const highImpact = incident('high', 'High impact', 'javascript');
-    highImpact.affected_users_count = 3_000;
+    highImpact.priority_score = 3_000;
     mocks.listIncidents.mockResolvedValue([lowImpact, highImpact]);
 
     const wrapper = mountFeed();
     await flushPromises();
 
     expect(wrapper.findAll('tbody tr')[0]?.text()).toContain('High impact');
-    const usersHeader = wrapper.findAll('thead th').find((th) => th.text().includes('Users'));
-    expect(usersHeader?.attributes('aria-sort')).toBe('descending');
+    const titleHeader = wrapper.findAll('thead th').find((th) => th.text().includes('Title'));
+    expect(titleHeader?.attributes('aria-sort')).toBe('descending');
 
     wrapper.unmount();
   });
@@ -255,8 +255,10 @@ describe('IssuesList URL filters', () => {
     await flushPromises();
 
     const headers = wrapper.findAll('thead th');
+    // Title sorts by priority — the server feed's own order, and the only way
+    // back to it on desktop once another column is chosen.
     const sortable = headers.filter((th) => th.find('button').exists());
-    expect(sortable).toHaveLength(5);
+    expect(sortable).toHaveLength(6);
     for (const header of sortable) {
       expect(header.attributes('aria-sort')).toBeDefined();
       expect(header.get('button').attributes('type')).toBe('button');
@@ -287,7 +289,7 @@ describe('IssuesList URL filters', () => {
     expect(titleHeader.classes()).toEqual(expect.arrayContaining(['uppercase', 'tracking-[0.14em]']));
 
     const buttons = headers.filter((th) => th.find('button').exists()).map((th) => th.get('button'));
-    expect(buttons).toHaveLength(5);
+    expect(buttons).toHaveLength(6);
     for (const button of buttons) {
       expect(button.classes()).toEqual(expect.arrayContaining(['uppercase', 'tracking-[0.14em]']));
     }
