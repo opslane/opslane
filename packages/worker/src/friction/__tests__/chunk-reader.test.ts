@@ -33,7 +33,9 @@ describe('readChunksBounded', () => {
   beforeEach(() => vi.clearAllMocks());
 
   it('accepts an empty scrubbed session without requiring object storage', async () => {
-    await expect(readChunksBounded([])).resolves.toEqual({ envelopes: [], inflatedBytes: 0, truncated: false });
+    await expect(readChunksBounded([])).resolves.toEqual({
+      envelopes: [], envelopeSeqs: [], inflatedBytes: 0, truncated: false, unreadableCount: 0,
+    });
     expect(fetchObject).not.toHaveBeenCalled();
   });
 
@@ -48,6 +50,32 @@ describe('readChunksBounded', () => {
   it('rejects corrupt gzip bytes', async () => {
     vi.mocked(fetchObject).mockResolvedValue(Buffer.from('not gzip'));
     await expect(readChunksBounded([row()])).rejects.toThrow(/gunzip failed/);
+  });
+
+  it('skips chunk-local failures only when requested', async () => {
+    vi.mocked(fetchObject)
+      .mockResolvedValueOnce(envelope())
+      .mockResolvedValueOnce(Buffer.from('not gzip'))
+      .mockResolvedValueOnce(envelope());
+    const result = await readChunksBounded([
+      row(), row({ seq: 1, object_key: 'chunks/1.json.gz' }),
+      row({ seq: 2, object_key: 'chunks/2.json.gz' }),
+    ], { skipUnreadable: true });
+    expect(result.envelopeSeqs).toEqual([0, 2]);
+    expect(result.unreadableCount).toBe(1);
+  });
+
+  it('rethrows a transport failure even when skipping unreadable chunks', async () => {
+    // A fetch failure says nothing about the chunk. Swallowing it would record
+    // a permanent degraded-coverage analysis row for an intact replay, and
+    // nothing re-analyzes that session. It has to fail so the job retries.
+    vi.mocked(fetchObject)
+      .mockResolvedValueOnce(envelope())
+      .mockRejectedValueOnce(new Error('connect ECONNREFUSED minio:9000'));
+
+    await expect(readChunksBounded([
+      row(), row({ seq: 1, object_key: 'chunks/1.json.gz' }),
+    ], { skipUnreadable: true })).rejects.toThrow(/ECONNREFUSED/);
   });
 
   it('bounds a gzip bomb during decompression', async () => {

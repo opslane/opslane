@@ -32,6 +32,11 @@ function mountView(durationSeconds: number) {
     rage_click_count: 0,
     dead_click_count: 0,
     form_abandon_count: 0,
+    coverage: 'complete',
+    activity_class: 'active',
+    failed_request_count: 0,
+    successful_write_count: 0,
+    unverified_signal_count: 0,
     chunks: [],
   };
 

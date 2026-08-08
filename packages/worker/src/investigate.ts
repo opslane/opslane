@@ -36,6 +36,7 @@ const DEFAULT_SPEND_CEILING_USD = 2.0;
 const MAX_ERROR_MESSAGE = 500;
 const MAX_STACK_TRACE = 3000;
 const MAX_BREADCRUMBS = 4000;
+const MAX_SESSION_CONTEXT = 500;
 
 const MODEL_PRICING: Record<string, { input: number; output: number; cacheWrite: number; cacheRead: number }> = {
   'claude-sonnet-4-6': { input: 3, output: 15, cacheWrite: 3.75, cacheRead: 0.30 },
@@ -56,6 +57,13 @@ export interface InvestigateInput {
   stackTrace: string;
   resolvedStackTrace: unknown;
   breadcrumbs: string;
+  /**
+   * One-line session facts from the analyzer, or null when the session was
+   * never analyzed. Its own field, not appended to `breadcrumbs`: the
+   * breadcrumb budget truncates head-first, so a concatenated context line is
+   * silently dropped on exactly the busy sessions it exists to explain.
+   */
+  sessionContext?: string | null;
 }
 
 export interface InvestigationResult extends TriageResult {
@@ -111,6 +119,9 @@ function evidenceBlock(input: InvestigateInput): string {
   const resolved = input.resolvedStackTrace
     ? `\n\nResolved Stack Trace (source-mapped):\n<untrusted_data>\n${fenced(JSON.stringify(input.resolvedStackTrace), MAX_STACK_TRACE)}\n</untrusted_data>`
     : '';
+  const sessionContext = input.sessionContext
+    ? `\n\nSession context (analyzer facts for the recorded session):\n<untrusted_data>\n${fenced(input.sessionContext, MAX_SESSION_CONTEXT)}\n</untrusted_data>`
+    : '';
   return `## Error
 Type: ${input.errorType}
 Title: ${input.title}
@@ -133,7 +144,7 @@ ${fenced(input.stackTrace, MAX_STACK_TRACE)}
 Breadcrumbs, every one, with timestamps:
 <untrusted_data>
 ${fenced(input.breadcrumbs || '[]', MAX_BREADCRUMBS)}
-</untrusted_data>
+</untrusted_data>${sessionContext}
 
 ${python
     ? 'Follow the traceback newest-first and use exact repository paths. Python runs do not use browser source maps.'

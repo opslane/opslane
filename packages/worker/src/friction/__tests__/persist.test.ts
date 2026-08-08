@@ -29,8 +29,16 @@ const query = vi.fn(async (sql: string, params?: unknown[]): Promise<{ rows: unk
       fingerprint: String(values[6]),
       retracted: false,
       supersededBy: rows.get(key)?.supersededBy ?? null,
-      occurrenceCount: Number(values[10]),
+      occurrenceCount: Number(values[11]),
     });
+  } else if (sql.includes('UPDATE friction_signals SET retracted_at') && sql.includes('rule_version <')) {
+    const values = params ?? [];
+    for (const row of rows.values()) {
+      if (row.sessionId === values[0] && row.projectId === values[1]
+        && row.ruleVersion < Number(values[2]) && !row.retracted && row.supersededBy === null) {
+        row.retracted = true;
+      }
+    }
   } else if (sql.includes('UPDATE friction_signals SET retracted_at')) {
     const values = params ?? [];
     const liveFingerprints = new Set(values[3] as string[]);
@@ -64,6 +72,8 @@ const session = {
   environment_id: 'environment-from-session',
   end_user_id: 'user-from-session',
   status: 'pending',
+  started_at: '2026-08-01T00:00:00Z',
+  chunk_count: 1,
 };
 
 function signal(fingerprint: string, occurrenceCount = 1): DetectedSignal {
@@ -73,6 +83,7 @@ function signal(fingerprint: string, occurrenceCount = 1): DetectedSignal {
     elementSelector: '#save',
     pageUrlNormalized: 'https://app.example.com/checkout/:id',
     occurredAt: 1720000001000,
+    occurredAts: [1720000001000],
     occurrenceCount,
     ruleVersion: 1,
   };

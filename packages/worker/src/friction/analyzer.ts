@@ -5,13 +5,13 @@ import type {
 } from '@opslane/shared';
 import { frictionFingerprint, normalizePageUrl } from './fingerprint.js';
 
-export const RULE_VERSION = 1;
+export const RULE_VERSION = 2;
 
 const CLICK_CLUSTER_GAP_MS = 1_000;
 const RAGE_MIN_CLICKS = 3;
 const RESPONSE_WINDOW_MS = 1_000;
-const FORM_MIN_FIELDS = 2;
-const FORM_MIN_ENGAGED_MS = 10_000;
+const OPTION_ANSWER_WINDOW_MS = 5_000;
+const SYNTHETIC_ANCHOR_WINDOW_MS = 50;
 
 export interface DetectedSignal {
   signalType: FrictionSignalType;
@@ -19,6 +19,7 @@ export interface DetectedSignal {
   elementSelector: string | null;
   pageUrlNormalized: string;
   occurredAt: number;
+  occurredAts: number[];
   occurrenceCount: number;
   ruleVersion: number;
 }
@@ -37,11 +38,6 @@ interface RawEvent {
 interface PageEntry {
   timestamp: number;
   href: string;
-}
-
-interface InputEntry {
-  timestamp: number;
-  id: string | number;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -156,6 +152,8 @@ function foldSignal(signals: Map<string, DetectedSignal>, signal: DetectedSignal
     return;
   }
   current.occurrenceCount += signal.occurrenceCount;
+  current.occurredAts.push(...signal.occurredAts);
+  current.occurredAts.sort((a, b) => a - b);
   current.occurredAt = Math.min(current.occurredAt, signal.occurredAt);
 }
 
@@ -171,6 +169,7 @@ function makeSignal(
     elementSelector: selector,
     pageUrlNormalized: pageUrl,
     occurredAt,
+    occurredAts: [occurredAt],
     occurrenceCount: 1,
     ruleVersion: RULE_VERSION,
   };
@@ -180,7 +179,6 @@ function makeSignal(
 export function analyzeSession(chunks: SessionChunkEnvelope[]): DetectedSignal[] {
   const telemetry = extractTelemetryEvents(chunks);
   const mutations: number[] = [];
-  const inputs: InputEntry[] = [];
   const pages: PageEntry[] = [];
 
   for (const chunk of chunks) {
@@ -189,14 +187,6 @@ export function analyzeSession(chunks: SessionChunkEnvelope[]): DetectedSignal[]
       const raw = asRawEvent(value);
       if (!raw) continue;
       if (raw.type === 3 && raw.data['source'] === 0) mutations.push(raw.timestamp);
-      if (
-        raw.type === 3 &&
-        raw.data['source'] === 5 &&
-        isSaneEpochMs(raw.timestamp) &&
-        (typeof raw.data['id'] === 'string' || typeof raw.data['id'] === 'number')
-      ) {
-        inputs.push({ timestamp: raw.timestamp, id: raw.data['id'] });
-      }
       if (raw.type === 4 && typeof raw.data['href'] === 'string') {
         pages.push({ timestamp: raw.timestamp, href: raw.data['href'] });
       }
@@ -204,12 +194,18 @@ export function analyzeSession(chunks: SessionChunkEnvelope[]): DetectedSignal[]
   }
 
   mutations.sort((a, b) => a - b);
-  inputs.sort((a, b) => a.timestamp - b.timestamp);
   pages.sort((a, b) => a.timestamp - b.timestamp);
 
   const requestStartsByClickId = new Map<string, number[]>();
   const clicksBySelector = new Map<string, Array<Extract<SessionTelemetryEvent, { kind: 'click' }>>>();
-  const formSubmits: number[] = [];
+  const optionClickTimes = telemetry
+    .filter(({ event }) => event.kind === 'click' && isOptionSelector(event.selector))
+    .map(({ event }) => event.at)
+    .sort((a, b) => a - b);
+  const allClickTimes = telemetry
+    .filter(({ event }) => event.kind === 'click')
+    .map(({ event }) => event.at)
+    .sort((a, b) => a - b);
 
   for (const { event } of telemetry) {
     if (event.kind === 'request_start' && event.clickId !== null) {
@@ -217,16 +213,18 @@ export function analyzeSession(chunks: SessionChunkEnvelope[]): DetectedSignal[]
       starts.push(event.at);
       requestStartsByClickId.set(event.clickId, starts);
     } else if (event.kind === 'click') {
+      if (event.cursor === 'text' || isOptionSelector(event.selector)) continue;
+      if (
+        event.selector === 'body > a' &&
+        hasTimestampInWindow(allClickTimes, event.at - SYNTHETIC_ANCHOR_WINDOW_MS, event.at - 1)
+      ) continue;
       const clicks = clicksBySelector.get(event.selector) ?? [];
       clicks.push(event);
       clicksBySelector.set(event.selector, clicks);
-    } else if (event.kind === 'form_submit') {
-      formSubmits.push(event.at);
     }
   }
 
   for (const starts of requestStartsByClickId.values()) starts.sort((a, b) => a - b);
-  formSubmits.sort((a, b) => a - b);
 
   const answered = (click: Extract<SessionTelemetryEvent, { kind: 'click' }>): boolean => {
     const windowEnd = click.at + RESPONSE_WINDOW_MS;
@@ -234,6 +232,13 @@ export function analyzeSession(chunks: SessionChunkEnvelope[]): DetectedSignal[]
     const requestStarts = requestStartsByClickId.get(click.clickId) ?? [];
     return hasTimestampInWindow(requestStarts, click.at, windowEnd);
   };
+  const deadClickAnswered = (
+    click: Extract<SessionTelemetryEvent, { kind: 'click' }>,
+  ): boolean => answered(click) || hasTimestampInWindow(
+    optionClickTimes,
+    click.at,
+    click.at + OPTION_ANSWER_WINDOW_MS,
+  );
 
   const signals = new Map<string, DetectedSignal>();
   for (const clicks of clicksBySelector.values()) {
@@ -258,31 +263,12 @@ export function analyzeSession(chunks: SessionChunkEnvelope[]): DetectedSignal[]
         }
       } else {
         for (const click of cluster) {
-          if (click.cursor !== 'pointer' || answered(click)) continue;
+          if (click.cursor !== 'pointer' || deadClickAnswered(click)) continue;
           const pageUrl = pageAt(pages, click.at);
           foldSignal(signals, makeSignal('dead_click', click.selector, pageUrl, click.at));
         }
       }
       clusterStart = clusterEnd;
-    }
-  }
-
-  if (inputs.length > 0) {
-    const firstInput = inputs[0];
-    const lastInput = inputs[inputs.length - 1];
-    const distinctFields = new Set(inputs.map((input) => input.id));
-    const submittedLater = firstInput
-      ? hasTimestampInWindow(formSubmits, firstInput.timestamp, Number.POSITIVE_INFINITY)
-      : false;
-    if (
-      firstInput &&
-      lastInput &&
-      distinctFields.size >= FORM_MIN_FIELDS &&
-      lastInput.timestamp - firstInput.timestamp >= FORM_MIN_ENGAGED_MS &&
-      !submittedLater
-    ) {
-      const pageUrl = pageAt(pages, lastInput.timestamp);
-      foldSignal(signals, makeSignal('form_abandon', null, pageUrl, lastInput.timestamp));
     }
   }
 
@@ -292,4 +278,10 @@ export function analyzeSession(chunks: SessionChunkEnvelope[]): DetectedSignal[]
       a.signalType.localeCompare(b.signalType) ||
       a.fingerprint.localeCompare(b.fingerprint),
   );
+}
+
+function isOptionSelector(selector: string): boolean {
+  return /#react-select-.*-option-/.test(selector)
+    || /\[role=["']?option/.test(selector)
+    || /\brole=option\b/.test(selector);
 }

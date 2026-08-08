@@ -81,6 +81,8 @@ Ingestion reads **only** the `REPLAY_STORE_*` names; `MINIO_*` names appear in i
 | `RESOLVE_AGE_DAYS` | no (14) | Days without a new occurrence before `needs_human` and `investigated` issues are auto-resolved |
 | `INACTIVITY_CHECK_INTERVAL_MS` | no (900000) | How often the worker sweeps for inactive issues (15 minutes by default) |
 | `SESSION_ANALYSIS_MAX_CONCURRENT` | no (2) | Fleet-wide cap on concurrently claimed `session_analysis` jobs; `0` disables analysis claiming entirely; raising it has no effect at fleet size 1 |
+| `ADJUDICATION_EVIDENCE_WINDOWS` | no (`off`) | Evidence-window adjudication mode: `off`, `shadow`, or `on`. `shadow` makes a second model call for flagged signals while the selector-only verdict still decides. |
+| `ADJUDICATION_DAILY_CAP` | no (500) | Per-project daily model-call cap for friction adjudication. Overflow signals remain pending and are revisited on the next budget day. |
 | `HEALTH_PORT` | no (8081) | Health endpoint port. The worker's `/health` returns `status: ok`, `stalled` (eligible work waiting, no claims in the last minute, nothing in flight), or `unknown` (no queue sample has landed, or the last one is stale), plus `claims_per_minute` and a per-job-type `queue_depth` carrying eligible, backed-off, and oldest-eligible-seconds counts. The queue is sampled once a minute, not per claim |
 | `REPLAY_STORE_ENDPOINT` / `REPLAY_STORE_ACCESS_KEY` / `REPLAY_STORE_SECRET_KEY` / `REPLAY_STORE_BUCKET` | for replay analysis | Reading stored replays |
 | `MINIO_ENDPOINT` / `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` / `MINIO_BUCKET` | legacy aliases | Worker-side fallback names for the same settings |

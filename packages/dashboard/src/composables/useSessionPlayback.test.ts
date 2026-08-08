@@ -46,6 +46,11 @@ const detail = (chunks: SessionChunkMeta[]): SessionDetail => ({
   rage_click_count: 0,
   dead_click_count: 0,
   form_abandon_count: 0,
+  coverage: null,
+  activity_class: null,
+  failed_request_count: 0,
+  successful_write_count: 0,
+  unverified_signal_count: 0,
   chunks,
 });
 
