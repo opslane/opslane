@@ -24,6 +24,7 @@ new owned primitive or domain component is added.
 | `EvidenceWell.vue` | `views/IncidentDetail.vue` | dark evidence surface |
 | `ProvenanceFooter.vue` | `components/evidence/EvidenceWell.vue` | evidence provenance |
 | `IssueRow.vue` | `views/IssuesList.vue` | issue list row |
+| `PriorityReason.vue` | `components/incidents/IssueRow.vue` | why an issue ranks where it does |
 | `IncidentConclusion.vue` | `views/IncidentDetail.vue` | outcome and next action |
 | `IncidentLifecycle.vue` | `views/IncidentDetail.vue` | truthful current-state summary |
 | `SessionLedgerRow.vue` | `views/SessionsList.vue` | session list row |
