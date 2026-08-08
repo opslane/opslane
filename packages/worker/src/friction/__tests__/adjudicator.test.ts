@@ -3,6 +3,7 @@ import {
   buildAdjudicationPrompt,
   parseVerdict,
   ADJUDICATION_PROMPT_VERSION,
+  createAnthropicAdjudicator,
 } from '../adjudicator.js';
 
 const INJECTION =
@@ -41,6 +42,16 @@ describe('adjudication prompt fencing', () => {
   });
 });
 
+it('includes fenced evidence windows and uncertainty instructions', () => {
+  const prompt = buildAdjudicationPrompt({
+    scope: 'fold', signalType: 'dead_click', elementSelector: '.x',
+    pageUrlNormalized: '/x', occurrenceCount: 1,
+    evidenceWindows: [[{ t: 1, kind: 'click', selector: '.x', cursor: 'pointer' }]],
+  });
+  expect(prompt).toContain('"evidence_windows"');
+  expect(prompt).toContain('uncertain');
+});
+
 describe('parseVerdict', () => {
   it('accepts a strict verdict object', () => {
     expect(parseVerdict('{"accepted": true, "reason": "dead control"}')).toEqual({
@@ -76,11 +87,23 @@ describe('parseVerdict', () => {
       expect(String(err)).not.toContain('Ignore previous instructions');
     }
   });
+
+  it('parses uncertainty and rejects contradictory verdicts', () => {
+    expect(parseVerdict('{"accepted":false,"uncertain":true,"reason":"short window"}')).toEqual({
+      accepted: false, uncertain: true, reason: 'short window',
+    });
+    expect(() => parseVerdict('{"accepted":true,"uncertain":true,"reason":"x"}')).toThrow();
+  });
 });
 
 describe('prompt versioning', () => {
   it('has a positive integer prompt version', () => {
     expect(Number.isInteger(ADJUDICATION_PROMPT_VERSION)).toBe(true);
     expect(ADJUDICATION_PROMPT_VERSION).toBeGreaterThan(0);
+  });
+  it('uses prompt v2 only for deciding window mode', () => {
+    expect(createAnthropicAdjudicator('k', 'on').promptVersion).toBe(2);
+    expect(createAnthropicAdjudicator('k', 'off').promptVersion).toBe(1);
+    expect(createAnthropicAdjudicator('k', 'shadow').promptVersion).toBe(1);
   });
 });

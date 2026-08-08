@@ -42,6 +42,9 @@ type incidentJSON struct {
 	SuggestedMitigation  *string                   `json:"suggested_mitigation,omitempty"`
 	VerificationEvidence json.RawMessage           `json:"verification_evidence,omitempty"`
 	CandidateDiff        *string                   `json:"candidate_diff,omitempty"`
+	PriorityScore        *float64                  `json:"priority_score,omitempty"`
+	PriorityInputs       json.RawMessage           `json:"priority_inputs,omitempty"`
+	PriorityScoredAt     *time.Time                `json:"priority_scored_at,omitempty"`
 	MergedAt             *string                   `json:"merged_at,omitempty"`
 	ResolvedAt           *string                   `json:"resolved_at,omitempty"`
 	ArchivedAt           *string                   `json:"archived_at,omitempty"`
@@ -110,12 +113,17 @@ func toIncidentJSON(g db.ErrorGroup) incidentJSON {
 		RootCause:           g.RootCause,
 		SuggestedMitigation: g.SuggestedMitigation,
 		CandidateDiff:       g.CandidateDiff,
+		PriorityScore:       g.PriorityScore,
+		PriorityScoredAt:    g.PriorityScoredAt,
 		MergedAt:            fmtTimePtr(g.MergedAt),
 		ResolvedAt:          fmtTimePtr(g.ResolvedAt),
 		ArchivedAt:          fmtTimePtr(g.ArchivedAt),
 	}
 	if len(g.VerificationEvidence) > 0 {
 		inc.VerificationEvidence = json.RawMessage(g.VerificationEvidence)
+	}
+	if len(g.PriorityInputs) > 0 {
+		inc.PriorityInputs = json.RawMessage(g.PriorityInputs)
 	}
 	if g.ReasonCode != nil && g.ReasonMessage != nil && g.Remediation != nil {
 		inc.Reason = &needsHumanReason{

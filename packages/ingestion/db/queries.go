@@ -402,6 +402,9 @@ type ErrorGroup struct {
 	SignalType           *string
 	ElementSelector      *string
 	PageURLNormalized    *string
+	PriorityScore        *float64
+	PriorityInputs       []byte
+	PriorityScoredAt     *time.Time
 	CreatedAt            time.Time
 	UpdatedAt            time.Time
 	MergedAt             *time.Time
@@ -826,11 +829,12 @@ func (q *Queries) ListErrorGroups(ctx context.Context, projectID string, filters
 		               eg.reason_code, eg.reason_message, eg.remediation,
 		               eg.confidence, eg.pr_url, eg.root_cause, eg.suggested_mitigation,
 		               eg.signal_type, eg.element_selector, eg.page_url_normalized,
+		               eg.priority_score, eg.priority_inputs, eg.priority_scored_at,
 		               eg.created_at, eg.updated_at,
 		               eg.merged_at, eg.resolved_at, eg.archived_at
 		        FROM error_groups eg
 		        WHERE ` + strings.Join(wheres, " AND ") + `
-		        ORDER BY eg.last_seen DESC, eg.id DESC
+		        ORDER BY COALESCE(eg.priority_score, 0) DESC, eg.last_seen DESC, eg.id DESC
 		        LIMIT 100`
 	} else {
 		errorWheres := []string{
@@ -893,17 +897,19 @@ func (q *Queries) ListErrorGroups(ctx context.Context, projectID string, filters
 			)`, identityPredicate("identity_user")))
 		}
 		query = fmt.Sprintf(`WITH candidates AS (
-			(SELECT ege.error_group_id AS id, ege.first_seen, ege.last_seen, ege.occurrence_count
+			(SELECT ege.error_group_id AS id, ege.first_seen, ege.last_seen, ege.occurrence_count,
+			        eg.priority_score, eg.priority_inputs, eg.priority_scored_at
 			 FROM error_group_environments ege
 			 JOIN error_groups eg ON eg.id = ege.error_group_id
 			 WHERE %s
-			 ORDER BY ege.last_seen DESC, ege.error_group_id
+			 ORDER BY COALESCE(eg.priority_score, 0) DESC, ege.last_seen DESC, ege.error_group_id DESC
 			 LIMIT 100)
 			UNION ALL
-			(SELECT eg.id, eg.first_seen, eg.last_seen, eg.occurrence_count::bigint
+			(SELECT eg.id, eg.first_seen, eg.last_seen, eg.occurrence_count::bigint,
+			        eg.priority_score, eg.priority_inputs, eg.priority_scored_at
 			 FROM error_groups eg
 			 WHERE %s
-			 ORDER BY eg.last_seen DESC, eg.id
+			 ORDER BY COALESCE(eg.priority_score, 0) DESC, eg.last_seen DESC, eg.id DESC
 			 LIMIT 100)
 		)
 		SELECT eg.id, eg.project_id, eg.fingerprint, eg.title, candidates.first_seen, candidates.last_seen,
@@ -912,11 +918,12 @@ func (q *Queries) ListErrorGroups(ctx context.Context, projectID string, filters
 		       eg.reason_code, eg.reason_message, eg.remediation,
 		       eg.confidence, eg.pr_url, eg.root_cause, eg.suggested_mitigation,
 		       eg.signal_type, eg.element_selector, eg.page_url_normalized,
+		       candidates.priority_score, candidates.priority_inputs, candidates.priority_scored_at,
 		       eg.created_at, eg.updated_at,
 		       eg.merged_at, eg.resolved_at, eg.archived_at
 		FROM candidates
 		JOIN error_groups eg ON eg.id = candidates.id
-		ORDER BY candidates.last_seen DESC, candidates.id
+		ORDER BY COALESCE(candidates.priority_score, 0) DESC, candidates.last_seen DESC, candidates.id DESC
 		LIMIT 100`, strings.Join(errorWheres, " AND "), strings.Join(frictionWheres, " AND "))
 	}
 
@@ -936,6 +943,7 @@ func (q *Queries) ListErrorGroups(ctx context.Context, projectID string, filters
 			&g.ReasonCode, &g.ReasonMessage, &g.Remediation,
 			&g.Confidence, &g.PrURL, &g.RootCause, &g.SuggestedMitigation,
 			&g.SignalType, &g.ElementSelector, &g.PageURLNormalized,
+			&g.PriorityScore, &g.PriorityInputs, &g.PriorityScoredAt,
 			&g.CreatedAt, &g.UpdatedAt,
 			&g.MergedAt, &g.ResolvedAt, &g.ArchivedAt,
 		)
@@ -1093,6 +1101,7 @@ func (q *Queries) GetErrorGroup(ctx context.Context, projectID, groupID string) 
 		        confidence, pr_url, root_cause, suggested_mitigation,
 		        verification_evidence, candidate_diff,
 		        signal_type, element_selector, page_url_normalized,
+		        priority_score, priority_inputs, priority_scored_at,
 		        created_at, updated_at,
 		        merged_at, resolved_at, archived_at
 		 FROM error_groups
@@ -1107,6 +1116,7 @@ func (q *Queries) GetErrorGroup(ctx context.Context, projectID, groupID string) 
 		&g.Confidence, &g.PrURL, &g.RootCause, &g.SuggestedMitigation,
 		&g.VerificationEvidence, &g.CandidateDiff,
 		&g.SignalType, &g.ElementSelector, &g.PageURLNormalized,
+		&g.PriorityScore, &g.PriorityInputs, &g.PriorityScoredAt,
 		&g.CreatedAt, &g.UpdatedAt,
 		&g.MergedAt, &g.ResolvedAt, &g.ArchivedAt,
 	)

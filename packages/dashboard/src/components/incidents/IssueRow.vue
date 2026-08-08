@@ -6,15 +6,20 @@ import { kindBadge } from '../incident-kind';
 import { platformBadge } from '../platform-badge';
 import StatusLabel from '../ui/StatusLabel.vue';
 import { incidentStatusRecipe } from '../../status-recipes';
+import PriorityReason from './PriorityReason.vue';
 
 const props = withDefaults(defineProps<{
   incident: Incident;
   projectId: string;
   layout?: 'table' | 'stacked';
   showPlatform?: boolean;
+  environmentFiltered?: boolean;
+  projectHasIdentify?: boolean;
 }>(), {
   layout: 'table',
   showPlatform: false,
+  environmentFiltered: false,
+  projectHasIdentify: false,
 });
 
 // Error is the default kind and says nothing in a dense queue. Friction rows
@@ -52,6 +57,11 @@ const showMarkers = computed(() => kind.value || (props.showPlatform && platform
         v-text="platform.label"
       ></span>
     </div>
+    <PriorityReason
+      :incident="incident"
+      :environment-filtered="environmentFiltered"
+      :project-has-identify="projectHasIdentify"
+    />
     <div class="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted">
       <a
         v-if="prUrl"
@@ -94,6 +104,11 @@ const showMarkers = computed(() => kind.value || (props.showPlatform && platform
           v-text="platform.label"
         ></span>
       </div>
+      <PriorityReason
+        :incident="incident"
+        :environment-filtered="environmentFiltered"
+        :project-has-identify="projectHasIdentify"
+      />
     </td>
     <td class="px-4 py-4">
       <a

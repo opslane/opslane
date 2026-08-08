@@ -12,7 +12,7 @@ var adminJobStatuses = map[string]struct{}{
 }
 
 var adminJobTypes = map[string]struct{}{
-	"investigate": {}, "fix": {}, "error_fix": {}, "setup_pr": {}, "session_analysis": {}, "ci_watch": {},
+	"investigate": {}, "fix": {}, "error_fix": {}, "setup_pr": {}, "session_analysis": {}, "ci_watch": {}, "route_map": {},
 }
 
 var secretRedactors = []struct {

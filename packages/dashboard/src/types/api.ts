@@ -131,6 +131,20 @@ export interface EvidenceRecord {
   };
 }
 
+export interface PriorityInputs {
+  users_7d: number;
+  anon_sessions_7d: number;
+  users_24h: number;
+  anon_sessions_24h: number;
+  impact: number;
+  route_pattern: string | null;
+  route_name: string | null;
+  route_tier: 'customer' | 'standard' | 'admin' | null;
+  route_weight: number;
+  cap_applied: boolean;
+  reason_code: string | null;
+}
+
 export interface Incident {
   id: string;
   project_id: string;
@@ -148,6 +162,9 @@ export interface Incident {
   last_seen: string;
   occurrence_count: number;
   affected_users_count: number;
+  priority_score?: number;
+  priority_inputs?: PriorityInputs;
+  priority_scored_at?: string;
   confidence?: ConfidenceLevel;
   pr_url?: string;
   reason?: NeedsHumanReason;
@@ -218,6 +235,11 @@ export interface SessionSummary {
   rage_click_count: number;
   dead_click_count: number;
   form_abandon_count: number;
+  coverage: 'complete' | 'partial' | 'no_replay' | null;
+  activity_class: 'active' | 'light_touch' | 'zero_interaction' | 'idle_tab' | 'unknown' | null;
+  failed_request_count: number;
+  successful_write_count: number;
+  unverified_signal_count: number;
   sdk_release?: string | null;
 }
 
@@ -318,7 +340,8 @@ export type AdminJobType =
   | 'error_fix'
   | 'setup_pr'
   | 'ci_watch'
-  | 'session_analysis';
+  | 'session_analysis'
+  | 'route_map';
 
 export interface AdminHourlyEventBucket {
   hour: string;

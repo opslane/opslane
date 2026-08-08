@@ -10,7 +10,21 @@ function fixture(name: string): SessionChunkEnvelope[] {
   ) as SessionChunkEnvelope[];
 }
 
-describe('friction analyzer v1', () => {
+function clickEnvelope(clicks: Array<{ at: number; selector: string; cursor: string }>): SessionChunkEnvelope[] {
+  return [{
+    events: [
+      { type: 4, data: { href: 'https://app.example.com/x' }, timestamp: 1720000000000 },
+      ...clicks.map((click, index) => ({
+        type: 5,
+        timestamp: click.at,
+        data: { tag: 'opslane.telemetry', payload: { kind: 'click', clickId: `c${index}`, ...click } },
+      })),
+    ],
+    meta: { sdk_version: 'test', has_full_snapshot: true, chunked_at: 1720000000000 },
+  }];
+}
+
+describe('friction analyzer v2', () => {
   it('flags unanswered repeated clicks as one rage click', () => {
     const signals = analyzeSession(fixture('rage_dead_click'));
 
@@ -49,15 +63,62 @@ describe('friction analyzer v1', () => {
     ]);
   });
 
-  it('flags multi-field form engagement without a submit', () => {
-    expect(analyzeSession(fixture('form_abandon'))).toEqual([
-      expect.objectContaining({
-        signalType: 'form_abandon',
-        elementSelector: null,
-        occurredAt: 1720000013000,
-        pageUrlNormalized: 'https://app.example.com/checkout/:id',
-      }),
+  it('retires form abandonment detection', () => {
+    expect(analyzeSession(fixture('form_abandon'))).toEqual([]);
+  });
+
+  it('filters text-cursor clicks before rage clustering', () => {
+    expect(analyzeSession(clickEnvelope([
+      { at: 1720000001000, selector: '.search', cursor: 'text' },
+      { at: 1720000001200, selector: '.search', cursor: 'text' },
+      { at: 1720000001400, selector: '.search', cursor: 'text' },
+    ]))).toEqual([]);
+    const mixed = analyzeSession(clickEnvelope([
+      { at: 1720000001000, selector: '.search', cursor: 'pointer' },
+      { at: 1720000001100, selector: '.search', cursor: 'text' },
+      { at: 1720000001200, selector: '.search', cursor: 'pointer' },
+      { at: 1720000001300, selector: '.search', cursor: 'text' },
+    ]));
+    expect(mixed.map((signal) => signal.signalType)).toEqual(['dead_click']);
+    expect(mixed[0]?.occurrenceCount).toBe(2);
+  });
+
+  it('suppresses picker-answered dead clicks but not rage clicks', () => {
+    const dead = clickEnvelope([
+      { at: 1720000001000, selector: '.picker', cursor: 'pointer' },
+      { at: 1720000004000, selector: '#react-select-9-option-0', cursor: 'pointer' },
     ]);
+    expect(analyzeSession(dead)).toEqual([]);
+    const rage = clickEnvelope([
+      { at: 1720000001000, selector: '.picker', cursor: 'pointer' },
+      { at: 1720000001200, selector: '.picker', cursor: 'pointer' },
+      { at: 1720000001400, selector: '.picker', cursor: 'pointer' },
+      { at: 1720000004000, selector: '#react-select-9-option-0', cursor: 'pointer' },
+    ]);
+    expect(analyzeSession(rage).map((signal) => signal.signalType)).toEqual(['rage_click']);
+  });
+
+  it('suppresses synthetic download anchors', () => {
+    const signals = analyzeSession(clickEnvelope([
+      { at: 1720000001000, selector: '#export', cursor: 'pointer' },
+      { at: 1720000001005, selector: 'body > a', cursor: 'pointer' },
+    ]));
+    expect(signals.some((signal) => signal.elementSelector === 'body > a')).toBe(false);
+  });
+
+  it('records one timestamp per persisted occurrence unit', () => {
+    const signals = analyzeSession(clickEnvelope([
+      { at: 1720000001000, selector: '.save', cursor: 'pointer' },
+      { at: 1720000061000, selector: '.save', cursor: 'pointer' },
+    ]));
+    expect(signals[0]?.occurredAts).toEqual([1720000001000, 1720000061000]);
+    const rage = analyzeSession(clickEnvelope([
+      { at: 1720000001000, selector: '.save', cursor: 'pointer' },
+      { at: 1720000001200, selector: '.save', cursor: 'pointer' },
+      { at: 1720000001400, selector: '.save', cursor: 'pointer' },
+      { at: 1720000001600, selector: '.save', cursor: 'pointer' },
+    ]));
+    expect(rage[0]?.occurredAts).toEqual([1720000001600]);
   });
 
   it('does not flag a submitted form', () => {
@@ -146,5 +207,11 @@ describe('friction fingerprinting', () => {
     expect(first).toBe(second);
     expect(first).toMatch(/^[0-9a-f]{32}$/);
     expect(frictionFingerprint('rage_click', '#save', 'https://app.example.com/orders/:id')).not.toBe(first);
+  });
+
+  it('normalizes Forge context segments and react-select indexed ids', () => {
+    expect(normalizePageUrl('https://x.test/foo/_ctx_H4sIAAAA/bar')).toBe('https://x.test/foo/bar');
+    expect(frictionFingerprint('dead_click', '#react-select-8-selected-value-3-remove', '/x'))
+      .toBe(frictionFingerprint('dead_click', '#react-select-8-selected-value-7-remove', '/x'));
   });
 });

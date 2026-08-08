@@ -17,10 +17,10 @@ export async function writeFrictionSignals(
     const attached = await client.query<{ incident_id: string }>(
       `SELECT DISTINCT incident_id
        FROM friction_signals
-       WHERE session_id = $1 AND project_id = $2 AND rule_version = $3
+       WHERE session_id = $1 AND project_id = $2
          AND incident_id IS NOT NULL
        ORDER BY incident_id`,
-      [session.id, session.project_id, ruleVersion],
+      [session.id, session.project_id],
     );
     const affectedIncidents = [...new Set(
       attached.rows.flatMap((row) => row.incident_id ? [row.incident_id] : []),
@@ -39,11 +39,12 @@ export async function writeFrictionSignals(
         `INSERT INTO friction_signals
            (session_id, project_id, environment_id, end_user_id, rule_version,
             signal_type, fingerprint, element_selector, page_url_normalized,
-            occurred_at, occurrence_count)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,to_timestamp($10 / 1000.0),$11)
+            occurred_at, occurred_ats, occurrence_count)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,to_timestamp($10 / 1000.0),$11::jsonb,$12)
          ON CONFLICT (session_id, fingerprint, rule_version)
          DO UPDATE SET occurrence_count = EXCLUDED.occurrence_count,
                        occurred_at = EXCLUDED.occurred_at,
+                       occurred_ats = EXCLUDED.occurred_ats,
                        retracted_at = NULL`,
         [
           session.id,
@@ -56,10 +57,29 @@ export async function writeFrictionSignals(
           signal.elementSelector,
           signal.pageUrlNormalized,
           signal.occurredAt,
+          JSON.stringify(signal.occurredAts),
           signal.occurrenceCount,
         ],
       );
     }
+
+    await client.query(
+      `UPDATE friction_signals old SET superseded_by = new.id
+       FROM friction_signals new
+       WHERE old.session_id = $1 AND old.project_id = $2
+         AND old.rule_version < $3
+         AND old.retracted_at IS NULL AND old.superseded_by IS NULL
+         AND new.session_id = old.session_id AND new.project_id = old.project_id
+         AND new.fingerprint = old.fingerprint AND new.rule_version = $3`,
+      [session.id, session.project_id, ruleVersion],
+    );
+    await client.query(
+      `UPDATE friction_signals SET retracted_at = now()
+       WHERE session_id = $1 AND project_id = $2
+         AND rule_version < $3
+         AND retracted_at IS NULL AND superseded_by IS NULL`,
+      [session.id, session.project_id, ruleVersion],
+    );
 
     await client.query(
       `UPDATE friction_signals SET retracted_at = now()

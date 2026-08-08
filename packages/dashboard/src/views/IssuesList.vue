@@ -37,7 +37,7 @@ const statusOrder: Record<ErrorGroupStatus, number> = {
   archived: 10,
 };
 
-type SortKey = 'last_seen' | 'occurrences' | 'users' | 'status' | 'age';
+type SortKey = 'priority' | 'last_seen' | 'occurrences' | 'users' | 'status' | 'age';
 
 const {
   sortKey,
@@ -47,8 +47,14 @@ const {
   ariaSort,
 } = useTableSort<SortKey, Incident>(
   incidents,
-  'users',
+  'priority',
   {
+    priority: (a, b) => {
+      const difference = (a.priority_score ?? 0) - (b.priority_score ?? 0);
+      return difference !== 0
+        ? difference
+        : new Date(a.last_seen).getTime() - new Date(b.last_seen).getTime();
+    },
     occurrences: (a, b) => a.occurrence_count - b.occurrence_count,
     users: (a, b) => a.affected_users_count - b.affected_users_count,
     status: (a, b) => (statusOrder[a.status] ?? 99) - (statusOrder[b.status] ?? 99),
@@ -64,6 +70,9 @@ const platformsVary = computed(
 );
 const hasActiveFilters = computed(() => Object.keys(currentFilters.value).length > 0);
 const viewingArchived = computed(() => currentFilters.value.status === 'archived');
+const projectHasIdentify = computed(
+  () => incidents.value.some((incident) => (incident.priority_inputs?.users_7d ?? 0) > 0),
+);
 
 function viewArchived() {
   filterBar.value?.showArchived();
@@ -180,6 +189,7 @@ onUnmounted(() => stopPolling());
             class="min-h-10 max-md:min-h-11 rounded-md border border-border bg-surface py-1.5 pl-9 pr-8 text-sm text-text"
             @change="onMobileSortChange"
           >
+            <option value="priority">Priority</option>
             <option value="users">Most users</option>
             <option value="occurrences">Most events</option>
             <option value="last_seen">Most recent</option>
@@ -275,6 +285,8 @@ onUnmounted(() => stopPolling());
           :incident="incident"
           :project-id="projectId"
           :show-platform="platformsVary"
+          :environment-filtered="Boolean(currentFilters.environment_id)"
+          :project-has-identify="projectHasIdentify"
           layout="stacked"
         />
       </div>
@@ -283,8 +295,14 @@ onUnmounted(() => stopPolling());
         <table class="min-w-full text-sm" aria-label="Issues">
         <thead>
           <tr class="border-b border-border bg-surface-subtle">
-            <th scope="col" class="px-4 py-2.5 text-left text-[11px] font-semibold uppercase tracking-[0.14em] text-muted sm:px-5">
-              Title
+            <th
+              scope="col"
+              :aria-sort="ariaSort('priority')"
+              class="px-4 py-2.5 text-left text-[11px] font-semibold uppercase tracking-[0.14em] text-muted sm:px-5"
+            >
+              <button type="button" class="inline-flex items-center gap-1 uppercase tracking-[0.14em] hover:text-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent" @click="toggleSort('priority')">
+                Title<span aria-hidden="true">{{ sortIndicator('priority') }}</span>
+              </button>
             </th>
             <th
               scope="col"
@@ -345,14 +363,19 @@ onUnmounted(() => stopPolling());
             :incident="incident"
             :project-id="projectId"
             :show-platform="platformsVary"
+            :environment-filtered="Boolean(currentFilters.environment_id)"
+            :project-has-identify="projectHasIdentify"
           />
         </tbody>
         </table>
       </div>
     </template>
 
-    <p v-if="!loading && !error && incidents.length > 0" class="mt-3 text-xs text-muted">
-      {{ incidents.length }} issue{{ incidents.length === 1 ? '' : 's' }}
-    </p>
+    <div v-if="!loading && !error && incidents.length > 0" class="mt-3 space-y-1 text-xs text-muted">
+      <p v-if="sortKey !== 'priority'">
+        Sorting the loaded issues only — the server feed is ordered by priority.
+      </p>
+      <p>{{ incidents.length }} issue{{ incidents.length === 1 ? '' : 's' }}</p>
+    </div>
   </div>
 </template>

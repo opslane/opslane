@@ -640,6 +640,44 @@ describeDb('db.ts integration tests', () => {
       return jobId;
     }
 
+    it('claims route-map enrichment after every production job kind even when it is oldest', async () => {
+      const group = await testPool.query<{ id: string }>(
+        `INSERT INTO error_groups
+           (project_id, fingerprint, title, first_seen, last_seen, status)
+         VALUES ($1, $2, 'Route lane ordering', now(), now(), 'queued')
+         RETURNING id`,
+        [testProjectId, `fp-${crypto.randomUUID()}`],
+      );
+      const groupId = group.rows[0]!.id;
+      const kinds = [
+        'error_fix',
+        'investigate',
+        'fix',
+        'setup_pr',
+        'session_analysis',
+        'ci_watch',
+        'route_map',
+      ] as const;
+      for (const [index, kind] of kinds.entries()) {
+        await testPool.query(
+          `INSERT INTO error_group_jobs
+             (error_group_id, project_id, status, job_type, created_at)
+           VALUES ($1, $2, 'pending', $3, now() - ($4 * interval '1 minute'))`,
+          [kind === 'route_map' ? null : groupId, testProjectId, kind, kind === 'route_map' ? 60 : index],
+        );
+      }
+
+      const claimed: string[] = [];
+      for (let index = 0; index < kinds.length; index++) {
+        const job = await claimJob(`route-order-${index}`, 600_000, 2);
+        expect(job).not.toBeNull();
+        claimed.push(job!.jobType);
+      }
+      expect(claimed).toHaveLength(kinds.length);
+      expect(claimed.at(-1)).toBe('route_map');
+      expect(new Set(claimed)).toEqual(new Set(kinds));
+    });
+
     it('caps concurrently claimed session_analysis jobs', async () => {
       await seedAnalysisJob();
       await sleep(5);

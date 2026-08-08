@@ -3,6 +3,7 @@ import type { Diagnosis, DiagnosisOutcome, ErrorGroupStatus, NeedsHumanReason, C
 import { reconcileDeadLetteredSessionAnalysis } from './friction/dead-letter.js';
 import type { Platform } from './platform.js';
 import type { DerivedDecision } from './classify.js';
+import type { RouteMapRow } from './route-map.js';
 
 const { Pool } = pg;
 
@@ -277,6 +278,9 @@ export async function claimJob(
                 < COALESCE((SELECT MAX(claimed_at) FROM error_group_jobs
                              WHERE job_type <> 'session_analysis'), 'epoch'::timestamptz)
            THEN 1
+         -- Route classification is background enrichment. Keep it behind every
+         -- incident/session lane even when its rows are older.
+         WHEN job_type = 'route_map' THEN 4
          WHEN job_type <> 'session_analysis' THEN 2
          ELSE 3
        END, created_at ASC
@@ -1255,6 +1259,122 @@ export async function getProject(projectId: string): Promise<ProjectData | null>
   return rows[0] ?? null;
 }
 
+/** Mirrors priority.MaxPatternBytes in packages/ingestion/priority/urlnorm.go. */
+export const MAX_ROUTE_PATTERN_BYTES = 512;
+
+/**
+ * Normalized routes on open groups that do not yet have a classification.
+ * Exact matching is intentional, and a row from any source (including
+ * llm-unresolved) resolves a pattern permanently until an operator changes it.
+ *
+ * Both kinds are stamped onto error_groups by the ingestion sweeper, which
+ * runs every URL through one normalizer, so an error and a friction incident
+ * on the same page share a pattern. Do not assume the upstream values agree:
+ * ./friction/fingerprint.ts still writes an origin-prefixed, less-templated
+ * value onto friction_signals, and the sweeper re-normalizes it on the way in.
+ *
+ * The length filter is defence in depth for anything that reaches the column
+ * by another route. An oversized pattern is unindexable by route_map's
+ * (project_id, pattern) btree, and since every route is written in one
+ * transaction, one such row would abort the whole project's classification on
+ * every run. Dropping it here leaves that route unclassified at weight 1.0,
+ * which is the degradation we want.
+ */
+export async function listUnmappedPatterns(projectId: string): Promise<string[]> {
+  const { rows } = await getPool().query<{ pattern: string }>(
+    `SELECT DISTINCT eg.page_url_normalized AS pattern
+       FROM error_groups eg
+      WHERE eg.project_id = $1
+        AND eg.page_url_normalized IS NOT NULL
+        AND eg.page_url_normalized <> ''
+        AND octet_length(eg.page_url_normalized) <= $2
+        AND eg.status NOT IN ('resolved', 'merged', 'archived')
+        AND NOT EXISTS (
+          SELECT 1
+            FROM route_map rm
+           WHERE rm.project_id = eg.project_id
+             AND rm.pattern = eg.page_url_normalized
+        )
+      ORDER BY pattern`,
+    [projectId, MAX_ROUTE_PATTERN_BYTES],
+  );
+  return rows.map((row) => row.pattern);
+}
+
+/**
+ * Persist one route-classification result while holding the job row lock.
+ *
+ * The lease check and route writes share a transaction so an expired or
+ * reclaimed worker can never overwrite the newer owner's classifications.
+ * Human-authored rows are authoritative and are never overwritten by either
+ * model output or the neutral unresolved placeholder.
+ */
+export async function upsertRouteMapRows(args: {
+  projectId: string;
+  jobId: string;
+  workerId: string;
+  leaseGeneration: string;
+  rows: RouteMapRow[];
+  unresolved: string[];
+}): Promise<boolean> {
+  const client = await getPool().connect();
+  try {
+    await client.query('BEGIN');
+    const lease = await client.query(
+      `SELECT 1
+         FROM error_group_jobs
+        WHERE id = $1
+          AND project_id = $2
+          AND worker_id = $3
+          AND lease_generation = $4::bigint
+          AND status = 'claimed'
+          AND lease_expires_at > now()
+        FOR UPDATE`,
+      [args.jobId, args.projectId, args.workerId, args.leaseGeneration],
+    );
+    if ((lease.rowCount ?? 0) === 0) {
+      await client.query('ROLLBACK');
+      return false;
+    }
+
+    const write = async (
+      row: RouteMapRow,
+      source: 'llm' | 'llm-unresolved',
+    ): Promise<void> => {
+      await client.query(
+        `INSERT INTO route_map (project_id, pattern, name, purpose, tier, source)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (project_id, pattern) DO UPDATE
+         SET name = EXCLUDED.name,
+             purpose = EXCLUDED.purpose,
+             tier = EXCLUDED.tier,
+             source = EXCLUDED.source,
+             updated_at = now()
+         WHERE route_map.source <> 'human'`,
+        [args.projectId, row.pattern, row.name, row.purpose, row.tier, source],
+      );
+    };
+
+    for (const row of args.rows) await write(row, 'llm');
+    for (const pattern of args.unresolved) {
+      await write({
+        pattern,
+        name: pattern,
+        purpose: 'unclassified',
+        tier: 'standard',
+      }, 'llm-unresolved');
+    }
+
+    await client.query('COMMIT');
+    return true;
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 /**
  * Refresh the cached default branch. Best-effort by contract: the column is a
  * cache, never an authority, so a failed write cannot fail a job that already
@@ -1826,6 +1946,24 @@ export interface SessionChunkRow {
   has_full_snapshot: boolean;
 }
 
+export async function getScrubbedChunksInRange(
+  sessionId: string,
+  projectId: string,
+  fromMs: number,
+  toMs: number,
+): Promise<SessionChunkRow[]> {
+  const { rows } = await getPool().query<SessionChunkRow>(
+    `SELECT session_id, seq, object_key, size_bytes, has_full_snapshot
+     FROM session_chunks
+     WHERE session_id = $1 AND project_id = $2 AND scrubbed_at IS NOT NULL
+       AND first_event_ms IS NOT NULL AND last_event_ms IS NOT NULL
+       AND first_event_ms <= $4 AND last_event_ms >= $3
+     ORDER BY seq ASC`,
+    [sessionId, projectId, fromMs, toMs],
+  );
+  return rows;
+}
+
 /** Only server-scrubbed, committed chunks are eligible for worker reads. */
 export async function getScrubbedChunksForSession(
   sessionId: string,
@@ -1848,6 +1986,8 @@ export interface SessionRow {
   environment_id: string;
   end_user_id: string | null;
   status: string;
+  started_at: string;
+  chunk_count: number;
 }
 
 export async function getSessionForAnalysis(
@@ -1856,12 +1996,116 @@ export async function getSessionForAnalysis(
 ): Promise<SessionRow | null> {
   const db = getPool();
   const { rows } = await db.query<SessionRow>(
-    `SELECT id, project_id, environment_id, end_user_id, status
+    `SELECT id, project_id, environment_id, end_user_id, status,
+            started_at::text AS started_at, chunk_count
      FROM sessions
      WHERE id = $1 AND project_id = $2`,
     [sessionId, projectId],
   );
   return rows[0] ?? null;
+}
+
+export interface SessionAnalysisUpsert {
+  sessionId: string;
+  projectId: string;
+  environmentId: string | null;
+  sessionStartedAt: string;
+  coverage: 'complete' | 'partial' | 'no_replay';
+  activityClass: 'active' | 'light_touch' | 'zero_interaction' | 'idle_tab' | 'unknown';
+  entryPath: string | null;
+  clickCount: number;
+  inputEventCount: number;
+  pageEventCount: number;
+  failedRequest4xxCount: number;
+  failedRequest5xxCount: number;
+  unattributedFailedRequestCount: number;
+  successfulWriteCount: number;
+  failedWriteCount: number;
+  ruleVersion: number;
+}
+
+export async function upsertSessionAnalysis(row: SessionAnalysisUpsert): Promise<void> {
+  await getPool().query(
+    `INSERT INTO session_analysis
+       (session_id, project_id, environment_id, session_started_at, coverage,
+        activity_class, entry_path, click_count, input_event_count, page_event_count,
+        failed_request_4xx_count, failed_request_5xx_count,
+        unattributed_failed_request_count, successful_write_count, failed_write_count,
+        rule_version, analyzed_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,now())
+     ON CONFLICT (session_id) DO UPDATE SET
+       coverage = EXCLUDED.coverage,
+       activity_class = EXCLUDED.activity_class,
+       entry_path = EXCLUDED.entry_path,
+       click_count = EXCLUDED.click_count,
+       input_event_count = EXCLUDED.input_event_count,
+       page_event_count = EXCLUDED.page_event_count,
+       failed_request_4xx_count = EXCLUDED.failed_request_4xx_count,
+       failed_request_5xx_count = EXCLUDED.failed_request_5xx_count,
+       unattributed_failed_request_count = EXCLUDED.unattributed_failed_request_count,
+       successful_write_count = EXCLUDED.successful_write_count,
+       failed_write_count = EXCLUDED.failed_write_count,
+       rule_version = EXCLUDED.rule_version,
+       analyzed_at = now()`,
+    [row.sessionId, row.projectId, row.environmentId, row.sessionStartedAt, row.coverage,
+      row.activityClass, row.entryPath, row.clickCount, row.inputEventCount, row.pageEventCount,
+      row.failedRequest4xxCount, row.failedRequest5xxCount, row.unattributedFailedRequestCount,
+      row.successfulWriteCount, row.failedWriteCount, row.ruleVersion],
+  );
+}
+
+export async function getSessionAnalysis(
+  sessionId: string,
+  projectId: string,
+): Promise<(SessionAnalysisUpsert & { analyzedAt: string }) | null> {
+  const { rows } = await getPool().query<{
+    session_id: string; project_id: string; environment_id: string | null;
+    session_started_at: string; coverage: SessionAnalysisUpsert['coverage'];
+    activity_class: SessionAnalysisUpsert['activityClass']; entry_path: string | null;
+    click_count: number; input_event_count: number; page_event_count: number;
+    failed_request_4xx_count: number; failed_request_5xx_count: number;
+    unattributed_failed_request_count: number; successful_write_count: number;
+    failed_write_count: number; rule_version: number; analyzed_at: string;
+  }>(
+    `SELECT session_id, project_id, environment_id, session_started_at::text,
+            coverage, activity_class, entry_path, click_count, input_event_count,
+            page_event_count, failed_request_4xx_count, failed_request_5xx_count,
+            unattributed_failed_request_count, successful_write_count, failed_write_count,
+            rule_version, analyzed_at::text
+       FROM session_analysis WHERE session_id = $1 AND project_id = $2`,
+    [sessionId, projectId],
+  );
+  const row = rows[0];
+  if (!row) return null;
+  return {
+    sessionId: row.session_id, projectId: row.project_id, environmentId: row.environment_id,
+    sessionStartedAt: row.session_started_at, coverage: row.coverage,
+    activityClass: row.activity_class, entryPath: row.entry_path, clickCount: row.click_count,
+    inputEventCount: row.input_event_count, pageEventCount: row.page_event_count,
+    failedRequest4xxCount: row.failed_request_4xx_count,
+    failedRequest5xxCount: row.failed_request_5xx_count,
+    unattributedFailedRequestCount: row.unattributed_failed_request_count,
+    successfulWriteCount: row.successful_write_count, failedWriteCount: row.failed_write_count,
+    ruleVersion: row.rule_version, analyzedAt: row.analyzed_at,
+  };
+}
+
+export async function enqueueSessionAnalysisForBudgetRetry(
+  sessionId: string,
+  projectId: string,
+): Promise<void> {
+  // The current analysis row is still claimed when this runs, so only a
+  // future pending row can be the idempotence guard. Including claimed rows
+  // would suppress the retry every time.
+  await getPool().query(
+    `INSERT INTO error_group_jobs (project_id, job_type, session_id, available_at)
+     SELECT $2, 'session_analysis', $1, date_trunc('day', now()) + interval '1 day'
+     WHERE NOT EXISTS (
+       SELECT 1 FROM error_group_jobs
+       WHERE session_id = $1 AND project_id = $2 AND job_type = 'session_analysis'
+         AND status = 'pending')`,
+    [sessionId, projectId],
+  );
 }
 
 export async function setSessionAnalysisStatus(

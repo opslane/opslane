@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import http from 'node:http';
 import type { ClaimedJob, ErrorEventData, QueueDepthRow } from './db.js';
+import type { SessionChunkEnvelope } from '@opslane/shared';
 import * as db from './db.js';
 import {
   requeueStaleJobs,
@@ -40,20 +41,46 @@ import { gatherFrictionEvidence } from './friction/friction-evidence.js';
 import { investigateFriction } from './friction/investigate-friction.js';
 import { readChunksBounded } from './friction/chunk-reader.js';
 import { analyzeSession, RULE_VERSION } from './friction/analyzer.js';
+import { classifyActivity, deriveCoverage, extractSessionFacts, formatSessionContext } from './friction/facts.js';
 import { writeFrictionSignals } from './friction/persist.js';
 import { processFrictionOutcomes } from './friction/promotion.js';
-import { createAnthropicAdjudicator, type Adjudicator } from './friction/adjudicator.js';
+import {
+  createAnthropicAdjudicator,
+  type Adjudicator,
+  type EvidenceWindowMode,
+} from './friction/adjudicator.js';
+import { buildEvidenceWindows, EVIDENCE_WINDOW_MS } from './friction/evidence-window.js';
 import { VerificationInfraError } from './harness/errors.js';
 import { processCIWatchJob } from './ci-watch.js';
+import { processRouteMapJob } from './route-map.js';
 import { effectivePlatform, pythonPipelineEnabled } from './platform.js';
 import { parseRuntimeInfo } from './runtime-info.js';
 import { parseDiagnosis } from './diagnosis-schema.js';
 
 /** Injectable seam: unit tests and the e2e gate substitute a deterministic
  * adjudicator; production uses the real Anthropic-backed one. */
-let frictionAdjudicatorFactory: (apiKey: string) => Adjudicator = createAnthropicAdjudicator;
-export function setFrictionAdjudicatorFactory(factory: (apiKey: string) => Adjudicator): void {
+let frictionAdjudicatorFactory: (apiKey: string, mode: EvidenceWindowMode) => Adjudicator = createAnthropicAdjudicator;
+export function setFrictionAdjudicatorFactory(
+  factory: (apiKey: string, mode: EvidenceWindowMode) => Adjudicator,
+): void {
   frictionAdjudicatorFactory = factory;
+}
+
+const configuredEvidenceWindowMode = process.env['ADJUDICATION_EVIDENCE_WINDOWS'] ?? 'off';
+const evidenceWindowMode: EvidenceWindowMode = ['off', 'shadow', 'on'].includes(configuredEvidenceWindowMode)
+  ? configuredEvidenceWindowMode as EvidenceWindowMode
+  : 'off';
+if (evidenceWindowMode !== configuredEvidenceWindowMode) {
+  logger.warn('Invalid ADJUDICATION_EVIDENCE_WINDOWS; using off', {
+    configured: configuredEvidenceWindowMode,
+  });
+}
+const configuredDailyCap = Number(process.env['ADJUDICATION_DAILY_CAP'] ?? 500);
+const adjudicationDailyCap = Number.isInteger(configuredDailyCap) && configuredDailyCap >= 0
+  ? configuredDailyCap
+  : 500;
+if (adjudicationDailyCap !== configuredDailyCap) {
+  logger.warn('Invalid ADJUDICATION_DAILY_CAP; using 500', { configured: configuredDailyCap });
 }
 
 /**
@@ -332,6 +359,11 @@ export async function processJobInner(job: ClaimedJob, signal: AbortSignal): Pro
     return;
   }
 
+  if (job.jobType === 'route_map') {
+    await processRouteMapJob(job, signal);
+    return;
+  }
+
   if (!job.errorGroupId) {
     throw new Error(`Job ${job.id} missing error_group_id`);
   }
@@ -534,6 +566,12 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
   try {
     checkAbort(signal);
 
+    const sessionPointer = await db.getSessionPointerForGroup(job.errorGroupId, job.projectId);
+    const sessionAnalysis = sessionPointer
+      ? await db.getSessionAnalysis(sessionPointer.session_id, job.projectId)
+      : null;
+    const sessionContext = sessionAnalysis ? formatSessionContext(sessionAnalysis) : null;
+
     // Run codebase-aware investigation
     const triage = await investigateError(apiKey, {
       platform,
@@ -544,6 +582,7 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
       stackTrace: event?.stack_trace_raw ?? '',
       resolvedStackTrace: resolvedStack ?? framesFromEnvelope(event?.stack_trace_resolved) ?? null,
       breadcrumbs: event?.breadcrumbs ?? '[]',
+      sessionContext,
     }, repoDir);
     checkAbort(signal);
 
@@ -714,8 +753,13 @@ export async function processFrictionInvestigateJob(
 
   try {
     const evidence = await gatherFrictionEvidence(job.errorGroupId, job.projectId);
+    const evidenceSessionID = evidence?.signals[0]?.session_id;
+    const sessionAnalysis = evidenceSessionID
+      ? await db.getSessionAnalysis(evidenceSessionID, job.projectId)
+      : null;
+    const sessionContext = sessionAnalysis ? formatSessionContext(sessionAnalysis) : null;
     checkAbort(signal);
-    const result = await investigateFriction(apiKey, group, evidence, clone.repoDir);
+    const result = await investigateFriction(apiKey, group, evidence, clone.repoDir, sessionContext);
     checkAbort(signal);
     if (result.codeCause) {
       // auto_fix_ux shares the code-caused auto-fix path until UX-suggestion
@@ -783,10 +827,44 @@ export async function processSessionAnalysisJob(
     await db.setSessionAnalysisStatus(job.sessionId, job.projectId, 'analyzing', undefined, job);
     checkAbort(signal);
     const chunks = await db.getScrubbedChunksForSession(job.sessionId, job.projectId);
-    const read = await readChunksBounded(chunks);
+    const read = await readChunksBounded(chunks, { skipUnreadable: true });
+    if (read.unreadableCount > 0) {
+      // Skipped chunks degrade coverage below 'complete'. Log it: otherwise a
+      // corrupt-chunk session is indistinguishable from a short one.
+      logger.warn('Session analysis skipped unreadable chunks', {
+        job_id: job.id,
+        session_id: job.sessionId,
+        unreadable_chunks: read.unreadableCount,
+        readable_chunks: read.envelopes.length,
+      });
+    }
     checkAbort(signal);
     const signals = analyzeSession(read.envelopes);
     await db.assertJobLease(job);
+    const facts = extractSessionFacts(read.envelopes);
+    const coverage = deriveCoverage({
+      totalChunkCount: session.chunk_count,
+      envelopeCount: read.envelopes.length,
+      truncated: read.truncated,
+    });
+    await db.upsertSessionAnalysis({
+      sessionId: session.id,
+      projectId: session.project_id,
+      environmentId: session.environment_id,
+      sessionStartedAt: session.started_at,
+      coverage,
+      activityClass: classifyActivity(facts, coverage),
+      entryPath: facts.entryPath,
+      clickCount: facts.clickCount,
+      inputEventCount: facts.inputEventCount,
+      pageEventCount: facts.pageEventCount,
+      failedRequest4xxCount: facts.failedRequest4xxCount,
+      failedRequest5xxCount: facts.failedRequest5xxCount,
+      unattributedFailedRequestCount: facts.unattributedFailedRequestCount,
+      successfulWriteCount: facts.successfulWriteCount,
+      failedWriteCount: facts.failedWriteCount,
+      ruleVersion: RULE_VERSION,
+    });
     await writeFrictionSignals(session, signals, RULE_VERSION);
     // Batch 4: adjudicate → fold/aggregate before the session is marked
     // analyzed, so a crash retries the whole ordered pass. Keyless
@@ -794,7 +872,36 @@ export async function processSessionAnalysisJob(
     const adjudicationKey = process.env['ANTHROPIC_API_KEY'];
     if (adjudicationKey) {
       checkAbort(signal);
-      await processFrictionOutcomes(session, job.id, frictionAdjudicatorFactory(adjudicationKey));
+      await processFrictionOutcomes(
+        session,
+        job.id,
+        frictionAdjudicatorFactory(adjudicationKey, evidenceWindowMode),
+        {
+          windowMode: evidenceWindowMode,
+          dailyCap: adjudicationDailyCap,
+          loadWindows: async (candidate) => {
+            const occurredAts = candidate.occurred_ats ?? [];
+            if (occurredAts.length === 0) return [];
+            const envelopesBySeq = new Map<number, SessionChunkEnvelope>();
+            for (const occurredAt of occurredAts) {
+              const rangeChunks = await db.getScrubbedChunksInRange(
+                candidate.session_id,
+                candidate.project_id,
+                occurredAt - EVIDENCE_WINDOW_MS,
+                occurredAt + EVIDENCE_WINDOW_MS,
+              );
+              const unseen = rangeChunks.filter((chunk) => !envelopesBySeq.has(chunk.seq));
+              if (unseen.length === 0) continue;
+              const windowRead = await readChunksBounded(unseen, { skipUnreadable: true });
+              windowRead.envelopes.forEach((envelope, index) => {
+                const seq = windowRead.envelopeSeqs[index];
+                if (seq !== undefined) envelopesBySeq.set(seq, envelope);
+              });
+            }
+            return buildEvidenceWindows([...envelopesBySeq.values()], occurredAts);
+          },
+        },
+      );
     } else {
       logger.warn('ANTHROPIC_API_KEY unset; friction adjudication skipped, signals stay pending', {
         job_id: job.id,

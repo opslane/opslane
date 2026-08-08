@@ -58,6 +58,18 @@ const stubAdjudicator = {
   adjudicate: async () => ({ accepted: true, reason: 'e2e deterministic accept' }),
 };
 
+/**
+ * Production's default adjudication runtime: evidence windows off, the stock
+ * daily cap. `loadWindows` is never reached while the mode is 'off', but it is
+ * supplied rather than omitted so turning the mode on here fails loudly instead
+ * of silently adjudicating without evidence.
+ */
+const adjudicationRuntime = {
+  windowMode: 'off' as const,
+  dailyCap: 500,
+  loadWindows: async () => [],
+};
+
 function telemetryClick(at: number, clickId: string, selector: string) {
   return {
     type: 5,
@@ -126,7 +138,7 @@ async function analyzeSessionInProcess(sessionId: string, projectId: string): Pr
   const read = await readChunksBounded(chunks);
   const signals = analyzeSession(read.envelopes);
   await writeFrictionSignals(session, signals, RULE_VERSION);
-  await processFrictionOutcomes(session, jobRes.rows[0]!.id, stubAdjudicator);
+  await processFrictionOutcomes(session, jobRes.rows[0]!.id, stubAdjudicator, adjudicationRuntime);
 }
 
 async function driveRageSession(

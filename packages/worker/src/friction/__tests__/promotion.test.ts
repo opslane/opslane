@@ -3,8 +3,10 @@ import type { AdjudicationInput, Adjudicator } from '../adjudicator.js';
 
 const mockPoolQuery = vi.fn();
 const mockClient = { query: vi.fn(async () => ({ rows: [] })), release: vi.fn() };
+const enqueueSessionAnalysisForBudgetRetry = vi.hoisted(() => vi.fn());
 vi.mock('../../db.js', () => ({
   getPool: () => ({ query: mockPoolQuery, connect: async () => mockClient }),
+  enqueueSessionAnalysisForBudgetRetry,
 }));
 
 type LooseAsyncMock = ReturnType<typeof vi.fn<(...args: unknown[]) => Promise<unknown>>>;
@@ -22,6 +24,7 @@ const db = {
   findValidAcceptedGeneration: looseAsyncMock(),
   attachInheritedSignal: looseAsyncMock(),
   applyBucketOutcome: looseAsyncMock(),
+  tryReserveAdjudicationCall: looseAsyncMock(),
 };
 vi.mock('../promotion-db.js', () => ({
   findFoldTarget: (...a: unknown[]) => db.findFoldTarget(...a),
@@ -34,6 +37,7 @@ vi.mock('../promotion-db.js', () => ({
   findValidAcceptedGeneration: (...a: unknown[]) => db.findValidAcceptedGeneration(...a),
   attachInheritedSignal: (...a: unknown[]) => db.attachInheritedSignal(...a),
   applyBucketOutcome: (...a: unknown[]) => db.applyBucketOutcome(...a),
+  tryReserveAdjudicationCall: (...a: unknown[]) => db.tryReserveAdjudicationCall(...a),
 }));
 
 import { processFrictionOutcomes } from '../promotion.js';
@@ -44,7 +48,11 @@ const SESSION = {
   environment_id: 'env-1',
   end_user_id: 'eu-1',
   status: 'analyzing',
+  started_at: '2026-08-01T00:00:00Z',
+  chunk_count: 1,
 };
+
+const RUNTIME = { windowMode: 'off' as const, dailyCap: 500, loadWindows: async () => [] };
 
 function signalRow(overrides: Record<string, unknown> = {}) {
   return {
@@ -60,6 +68,7 @@ function signalRow(overrides: Record<string, unknown> = {}) {
     element_selector: 'INJECT<script>alert(1)</script>',
     occurrence_count: 3,
     rule_version: 1,
+    occurred_ats: [1_754_000_000_000],
     ...overrides,
   };
 }
@@ -103,16 +112,43 @@ beforeEach(() => {
   db.findValidAcceptedGeneration.mockResolvedValue(null);
   db.attachInheritedSignal.mockResolvedValue('attached');
   db.applyBucketOutcome.mockResolvedValue('promoted');
+  db.tryReserveAdjudicationCall.mockResolvedValue(true);
 });
 
 describe('processFrictionOutcomes', () => {
+  it('leaves work pending and schedules tomorrow when the daily cap is spent', async () => {
+    setPendingSignals([signalRow()]);
+    db.findFoldTarget.mockResolvedValue({ errorGroupId: 'g1', status: 'queued', title: 'boom', secondsAway: 5 });
+    db.tryReserveAdjudicationCall.mockResolvedValue(false);
+    const adjudicator = stubAdjudicator(true);
+
+    await processFrictionOutcomes(SESSION, 'job-1', adjudicator, RUNTIME);
+
+    expect(adjudicator.calls).toHaveLength(0);
+    expect(db.claimSignalsForAdjudication).not.toHaveBeenCalled();
+    expect(enqueueSessionAnalysisForBudgetRetry).toHaveBeenCalledWith('sess-1', 'proj-1');
+  });
+
+  it('stores uncertain verdicts as rejected with the exact uncertain reason', async () => {
+    setPendingSignals([signalRow()]);
+    db.findFoldTarget.mockResolvedValue({ errorGroupId: 'g1', status: 'queued', title: 'boom', secondsAway: 5 });
+    const adjudicator: Adjudicator = {
+      modelId: 'stub', promptVersion: 2,
+      adjudicate: async () => ({ accepted: false, uncertain: true, reason: 'window ends too soon' }),
+    };
+    await processFrictionOutcomes(SESSION, 'job-1', adjudicator, RUNTIME);
+    expect(db.applyFoldOutcome).toHaveBeenCalledWith(expect.objectContaining({
+      verdict: { accepted: false, reason: 'uncertain' },
+    }));
+  });
+
   it('adjudicates eagerly when a fold target exists (one call, fold scope)', async () => {
     const sig = signalRow();
     setPendingSignals([sig]);
     db.findFoldTarget.mockResolvedValue({ errorGroupId: 'g1', status: 'queued', title: 'boom', secondsAway: 5 });
     const adjudicator = stubAdjudicator(true);
 
-    await processFrictionOutcomes(SESSION, 'job-1', adjudicator);
+    await processFrictionOutcomes(SESSION, 'job-1', adjudicator, RUNTIME);
 
     expect(adjudicator.calls).toHaveLength(1);
     expect(adjudicator.calls[0]!.scope).toBe('fold');
@@ -126,7 +162,7 @@ describe('processFrictionOutcomes', () => {
     db.countEligibleUsers.mockResolvedValue(3);
     const adjudicator = stubAdjudicator();
 
-    await processFrictionOutcomes(SESSION, 'job-1', adjudicator);
+    await processFrictionOutcomes(SESSION, 'job-1', adjudicator, RUNTIME);
 
     expect(adjudicator.calls).toHaveLength(0);
     expect(db.ensureCandidate).toHaveBeenCalledTimes(1);
@@ -141,7 +177,7 @@ describe('processFrictionOutcomes', () => {
     db.claimGeneration.mockResolvedValue({ id: 'gen-1', status: 'adjudicating', claim_job_id: 'job-1', model_id: null, prompt_version: 1, promoted_incident_id: null });
     const adjudicator = stubAdjudicator(true);
 
-    await processFrictionOutcomes(SESSION, 'job-1', adjudicator);
+    await processFrictionOutcomes(SESSION, 'job-1', adjudicator, RUNTIME);
 
     expect(adjudicator.calls).toHaveLength(1);
     expect(adjudicator.calls[0]!.scope).toBe('bucket');
@@ -157,7 +193,7 @@ describe('processFrictionOutcomes', () => {
     db.claimGeneration.mockResolvedValue(null);
     const adjudicator = stubAdjudicator();
 
-    await processFrictionOutcomes(SESSION, 'job-1', adjudicator);
+    await processFrictionOutcomes(SESSION, 'job-1', adjudicator, RUNTIME);
     expect(adjudicator.calls).toHaveLength(0);
     expect(db.applyBucketOutcome).not.toHaveBeenCalled();
   });
@@ -169,7 +205,7 @@ describe('processFrictionOutcomes', () => {
     db.findValidAcceptedGeneration.mockResolvedValue(gen);
     const adjudicator = stubAdjudicator();
 
-    await processFrictionOutcomes(SESSION, 'job-1', adjudicator);
+    await processFrictionOutcomes(SESSION, 'job-1', adjudicator, RUNTIME);
 
     expect(adjudicator.calls).toHaveLength(0);
     expect(db.attachInheritedSignal).toHaveBeenCalledWith(
@@ -188,7 +224,7 @@ describe('processFrictionOutcomes', () => {
       .mockResolvedValueOnce(null);
     const adjudicator = stubAdjudicator(true);
 
-    await processFrictionOutcomes(SESSION, 'job-1', adjudicator);
+    await processFrictionOutcomes(SESSION, 'job-1', adjudicator, RUNTIME);
 
     // One eager fold call for the first anonymous signal; the second anonymous
     // signal reaches neither threshold counting nor candidate creation.
@@ -208,7 +244,7 @@ describe('processFrictionOutcomes', () => {
       },
     };
 
-    await expect(processFrictionOutcomes(SESSION, 'job-1', adjudicator)).rejects.toThrow(
+    await expect(processFrictionOutcomes(SESSION, 'job-1', adjudicator, RUNTIME)).rejects.toThrow(
       'model unavailable'
     );
   });
@@ -217,7 +253,7 @@ describe('processFrictionOutcomes', () => {
     const sig = signalRow();
     setPendingSignals([sig]);
     db.findFoldTarget.mockResolvedValue({ errorGroupId: 'g1', status: 'queued', title: 'boom', secondsAway: 2 });
-    await processFrictionOutcomes(SESSION, 'job-1', stubAdjudicator(true));
+    await processFrictionOutcomes(SESSION, 'job-1', stubAdjudicator(true), RUNTIME);
 
     const combined = logLines.join('\n');
     expect(combined).toContain(sig.id);

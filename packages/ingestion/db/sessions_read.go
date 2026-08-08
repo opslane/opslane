@@ -12,24 +12,29 @@ import (
 // SessionSummary is the project-scoped metadata exposed by session browsing.
 // End-user fields are nullable because anonymous recordings are valid.
 type SessionSummary struct {
-	ID                 string
-	StartedAt          time.Time
-	LastChunkAt        *time.Time
-	Status             string
-	ChunkCount         int
-	PlayableChunkCount int
-	BytesStored        int64
-	PageURL            *string
-	SDKRelease         *string
-	EndUserID          *string
-	ExternalUserID     *string
-	EndUserEmail       *string
-	ExternalAccountID  *string
-	AccountName        *string
-	ErrorCount         int
-	RageClickCount     int
-	DeadClickCount     int
-	FormAbandonCount   int
+	ID                    string
+	StartedAt             time.Time
+	LastChunkAt           *time.Time
+	Status                string
+	ChunkCount            int
+	PlayableChunkCount    int
+	BytesStored           int64
+	PageURL               *string
+	SDKRelease            *string
+	EndUserID             *string
+	ExternalUserID        *string
+	EndUserEmail          *string
+	ExternalAccountID     *string
+	AccountName           *string
+	ErrorCount            int
+	RageClickCount        int
+	DeadClickCount        int
+	FormAbandonCount      int
+	Coverage              *string
+	ActivityClass         *string
+	FailedRequestCount    int
+	SuccessfulWriteCount  int
+	UnverifiedSignalCount int
 }
 
 type SessionFilters struct {
@@ -60,6 +65,8 @@ func scanSessionSummary(row sessionScanner) (SessionSummary, error) {
 		&session.ExternalAccountID, &session.AccountName, &session.PlayableChunkCount,
 		&session.ErrorCount, &session.RageClickCount, &session.DeadClickCount,
 		&session.FormAbandonCount,
+		&session.Coverage, &session.ActivityClass, &session.FailedRequestCount,
+		&session.SuccessfulWriteCount, &session.UnverifiedSignalCount,
 	)
 	return session, err
 }
@@ -69,19 +76,23 @@ const sessionSummarySelect = `SELECT s.id, s.started_at, s.last_chunk_at, s.stat
        eu.id, eu.external_user_id, eu.email, eu.external_account_id, eu.account_name,
        (SELECT count(*) FROM session_chunks c
          WHERE c.session_id = s.id AND c.scrubbed_at IS NOT NULL),
-       e.errors, f.rage, f.dead, f.abandon
+       e.errors, f.rage, f.dead, f.abandon,
+       sa.coverage, sa.activity_class,
+       COALESCE(sa.failed_request_4xx_count + sa.failed_request_5xx_count, 0),
+       COALESCE(sa.successful_write_count, 0), f.pending
   FROM sessions s
   LEFT JOIN end_users eu ON eu.id = s.end_user_id AND eu.project_id = $1
+  LEFT JOIN session_analysis sa ON sa.session_id = s.id AND sa.project_id = $1
   LEFT JOIN LATERAL (
-    SELECT COALESCE(sum(fs.occurrence_count) FILTER (WHERE fs.signal_type = 'rage_click'), 0) AS rage,
-           COALESCE(sum(fs.occurrence_count) FILTER (WHERE fs.signal_type = 'dead_click'), 0) AS dead,
-           COALESCE(sum(fs.occurrence_count) FILTER (WHERE fs.signal_type = 'form_abandon'), 0) AS abandon
+    SELECT COALESCE(sum(fs.occurrence_count) FILTER (WHERE fs.adjudication_status = 'accepted' AND fs.signal_type = 'rage_click'), 0) AS rage,
+           COALESCE(sum(fs.occurrence_count) FILTER (WHERE fs.adjudication_status = 'accepted' AND fs.signal_type = 'dead_click'), 0) AS dead,
+           COALESCE(sum(fs.occurrence_count) FILTER (WHERE fs.adjudication_status = 'accepted' AND fs.signal_type = 'form_abandon'), 0) AS abandon,
+           COALESCE(sum(fs.occurrence_count) FILTER (WHERE fs.adjudication_status = 'pending'), 0) AS pending
       FROM friction_signals fs
      WHERE fs.session_id = s.id
        AND fs.project_id = $1
        AND fs.retracted_at IS NULL
        AND fs.superseded_by IS NULL
-       AND fs.adjudication_status = 'accepted'
   ) f ON true
   LEFT JOIN LATERAL (
     SELECT count(*) AS errors
@@ -122,7 +133,7 @@ func (q *Queries) ListSessions(ctx context.Context, projectID string, filters Se
                  OR eu.account_name ILIKE '%' || $9 || '%'
                  OR eu.external_account_id ILIKE '%' || $9 || '%'
                  OR s.id = $9)
-   AND ($10 = false OR (f.rage + f.dead + f.abandon + e.errors) > 0)
+   AND ($10 = false OR (f.rage + f.dead + f.abandon + f.pending + e.errors) > 0)
  ORDER BY s.started_at DESC, s.id DESC
  LIMIT $11`, projectID, filters.EndUserID, filters.AccountID, filters.From, filters.To,
 		filters.EnvironmentID, cursorStartedAt, cursorID, filters.Search, filters.HasSignals, limit+1)
@@ -150,6 +161,75 @@ func (q *Queries) ListSessions(ctx context.Context, projectID string, filters Se
 		next = &SessionCursor{StartedAt: last.StartedAt, ID: last.ID}
 	}
 	return sessions, next, nil
+}
+
+type SessionAnalysisDailyRollup struct {
+	Day                     time.Time
+	TotalSessions           int
+	NoReplaySessions        int
+	PartialSessions         int
+	ActiveSessions          int
+	LightTouchSessions      int
+	ZeroInteractionSessions int
+	IdleTabSessions         int
+	SuccessfulWrites        int
+	SessionsWithFailures    int
+}
+
+func (q *Queries) SessionAnalysisDailyRollup(ctx context.Context, projectID string, day time.Time) (SessionAnalysisDailyRollup, error) {
+	result := SessionAnalysisDailyRollup{Day: day}
+	err := q.pool.QueryRow(ctx, `
+		SELECT count(*),
+		       count(*) FILTER (WHERE coverage = 'no_replay'),
+		       count(*) FILTER (WHERE coverage = 'partial'),
+		       count(*) FILTER (WHERE coverage = 'complete' AND activity_class = 'active'),
+		       count(*) FILTER (WHERE coverage = 'complete' AND activity_class = 'light_touch'),
+		       count(*) FILTER (WHERE coverage = 'complete' AND activity_class = 'zero_interaction'),
+		       count(*) FILTER (WHERE coverage = 'complete' AND activity_class = 'idle_tab'),
+		       COALESCE(sum(successful_write_count) FILTER (WHERE coverage = 'complete'), 0),
+		       count(*) FILTER (WHERE coverage = 'complete'
+		                          AND failed_request_4xx_count + failed_request_5xx_count > 0)
+		  FROM session_analysis
+		 WHERE project_id = $1
+		   AND session_started_at >= $2::date
+		   AND session_started_at < $2::date + interval '1 day'`, projectID, day).Scan(
+		&result.TotalSessions, &result.NoReplaySessions, &result.PartialSessions,
+		&result.ActiveSessions, &result.LightTouchSessions, &result.ZeroInteractionSessions,
+		&result.IdleTabSessions, &result.SuccessfulWrites, &result.SessionsWithFailures)
+	return result, err
+}
+
+func (q *Queries) EnqueueAnalysisBackfillBatch(ctx context.Context, ruleVersion, batch int) (int, error) {
+	tag, err := q.pool.Exec(ctx, `
+		INSERT INTO error_group_jobs (project_id, session_id, job_type, status)
+		SELECT s.project_id, s.id, 'session_analysis', 'pending'
+		  FROM sessions s
+		 WHERE s.status IN ('closed', 'analyzed', 'analysis_failed')
+		   AND s.started_at >= now() - interval '30 days'
+		   AND NOT EXISTS (SELECT 1 FROM session_analysis sa
+		                    WHERE sa.session_id = s.id AND sa.rule_version >= $1)
+		   AND NOT EXISTS (SELECT 1 FROM error_group_jobs j
+		                    WHERE j.session_id = s.id AND j.job_type = 'session_analysis'
+		                      AND j.status IN ('pending', 'claimed'))
+		 ORDER BY s.started_at DESC
+		 LIMIT $2`, ruleVersion, batch)
+	if err != nil {
+		return 0, err
+	}
+	return int(tag.RowsAffected()), nil
+}
+
+func (q *Queries) CountAnalysisBackfillCandidates(ctx context.Context, ruleVersion int) (int, error) {
+	var count int
+	err := q.pool.QueryRow(ctx, `SELECT count(*) FROM sessions s
+		WHERE s.status IN ('closed', 'analyzed', 'analysis_failed')
+		  AND s.started_at >= now() - interval '30 days'
+		  AND NOT EXISTS (SELECT 1 FROM session_analysis sa
+		                  WHERE sa.session_id = s.id AND sa.rule_version >= $1)
+		  AND NOT EXISTS (SELECT 1 FROM error_group_jobs j
+		                  WHERE j.session_id = s.id AND j.job_type = 'session_analysis'
+		                    AND j.status IN ('pending', 'claimed'))`, ruleVersion).Scan(&count)
+	return count, err
 }
 
 // HasIdentifiedSessions reports whether the project has any non-deleting
