@@ -256,6 +256,20 @@ export type AdjudicationStatus = 'pending' | 'accepted' | 'rejected' | 'unchecke
  * bucket-level call at the five-user promotion threshold. */
 export type AdjudicationScope = 'fold' | 'bucket';
 
+export interface PriorityInputs {
+  users_7d: number;
+  anon_sessions_7d: number;
+  users_24h: number;
+  anon_sessions_24h: number;
+  impact: number;
+  route_pattern: string | null;
+  route_name: string | null;
+  route_tier: 'customer' | 'standard' | 'admin' | null;
+  route_weight: number;
+  cap_applied: boolean;
+  reason_code: string | null;
+}
+
 export interface Incident {
   id: string;
   project_id: string;
@@ -275,6 +289,9 @@ export interface Incident {
   last_seen: string;
   occurrence_count: number;
   affected_users_count: number;
+  priority_score?: number;
+  priority_inputs?: PriorityInputs;
+  priority_scored_at?: string;
   environments?: Array<{
     id: string;
     name: string;
@@ -356,7 +373,7 @@ export interface Account {
   last_seen: string;
 }
 
-export type JobType = 'error_fix' | 'investigate' | 'fix' | 'setup_pr' | 'session_analysis' | 'ci_watch';
+export type JobType = 'error_fix' | 'investigate' | 'fix' | 'setup_pr' | 'session_analysis' | 'ci_watch' | 'route_map';
 
 export type PRPosture = 'verified_only' | 'draft_when_unverified';
 

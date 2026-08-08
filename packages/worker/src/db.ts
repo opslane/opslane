@@ -3,6 +3,7 @@ import type { Diagnosis, DiagnosisOutcome, ErrorGroupStatus, NeedsHumanReason, C
 import { reconcileDeadLetteredSessionAnalysis } from './friction/dead-letter.js';
 import type { Platform } from './platform.js';
 import type { DerivedDecision } from './classify.js';
+import type { RouteMapRow } from './route-map.js';
 
 const { Pool } = pg;
 
@@ -277,6 +278,9 @@ export async function claimJob(
                 < COALESCE((SELECT MAX(claimed_at) FROM error_group_jobs
                              WHERE job_type <> 'session_analysis'), 'epoch'::timestamptz)
            THEN 1
+         -- Route classification is background enrichment. Keep it behind every
+         -- incident/session lane even when its rows are older.
+         WHEN job_type = 'route_map' THEN 4
          WHEN job_type <> 'session_analysis' THEN 2
          ELSE 3
        END, created_at ASC
@@ -1253,6 +1257,122 @@ export async function getProject(projectId: string): Promise<ProjectData | null>
     [projectId],
   );
   return rows[0] ?? null;
+}
+
+/** Mirrors priority.MaxPatternBytes in packages/ingestion/priority/urlnorm.go. */
+export const MAX_ROUTE_PATTERN_BYTES = 512;
+
+/**
+ * Normalized routes on open groups that do not yet have a classification.
+ * Exact matching is intentional, and a row from any source (including
+ * llm-unresolved) resolves a pattern permanently until an operator changes it.
+ *
+ * Both kinds are stamped onto error_groups by the ingestion sweeper, which
+ * runs every URL through one normalizer, so an error and a friction incident
+ * on the same page share a pattern. Do not assume the upstream values agree:
+ * ./friction/fingerprint.ts still writes an origin-prefixed, less-templated
+ * value onto friction_signals, and the sweeper re-normalizes it on the way in.
+ *
+ * The length filter is defence in depth for anything that reaches the column
+ * by another route. An oversized pattern is unindexable by route_map's
+ * (project_id, pattern) btree, and since every route is written in one
+ * transaction, one such row would abort the whole project's classification on
+ * every run. Dropping it here leaves that route unclassified at weight 1.0,
+ * which is the degradation we want.
+ */
+export async function listUnmappedPatterns(projectId: string): Promise<string[]> {
+  const { rows } = await getPool().query<{ pattern: string }>(
+    `SELECT DISTINCT eg.page_url_normalized AS pattern
+       FROM error_groups eg
+      WHERE eg.project_id = $1
+        AND eg.page_url_normalized IS NOT NULL
+        AND eg.page_url_normalized <> ''
+        AND octet_length(eg.page_url_normalized) <= $2
+        AND eg.status NOT IN ('resolved', 'merged', 'archived')
+        AND NOT EXISTS (
+          SELECT 1
+            FROM route_map rm
+           WHERE rm.project_id = eg.project_id
+             AND rm.pattern = eg.page_url_normalized
+        )
+      ORDER BY pattern`,
+    [projectId, MAX_ROUTE_PATTERN_BYTES],
+  );
+  return rows.map((row) => row.pattern);
+}
+
+/**
+ * Persist one route-classification result while holding the job row lock.
+ *
+ * The lease check and route writes share a transaction so an expired or
+ * reclaimed worker can never overwrite the newer owner's classifications.
+ * Human-authored rows are authoritative and are never overwritten by either
+ * model output or the neutral unresolved placeholder.
+ */
+export async function upsertRouteMapRows(args: {
+  projectId: string;
+  jobId: string;
+  workerId: string;
+  leaseGeneration: string;
+  rows: RouteMapRow[];
+  unresolved: string[];
+}): Promise<boolean> {
+  const client = await getPool().connect();
+  try {
+    await client.query('BEGIN');
+    const lease = await client.query(
+      `SELECT 1
+         FROM error_group_jobs
+        WHERE id = $1
+          AND project_id = $2
+          AND worker_id = $3
+          AND lease_generation = $4::bigint
+          AND status = 'claimed'
+          AND lease_expires_at > now()
+        FOR UPDATE`,
+      [args.jobId, args.projectId, args.workerId, args.leaseGeneration],
+    );
+    if ((lease.rowCount ?? 0) === 0) {
+      await client.query('ROLLBACK');
+      return false;
+    }
+
+    const write = async (
+      row: RouteMapRow,
+      source: 'llm' | 'llm-unresolved',
+    ): Promise<void> => {
+      await client.query(
+        `INSERT INTO route_map (project_id, pattern, name, purpose, tier, source)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (project_id, pattern) DO UPDATE
+         SET name = EXCLUDED.name,
+             purpose = EXCLUDED.purpose,
+             tier = EXCLUDED.tier,
+             source = EXCLUDED.source,
+             updated_at = now()
+         WHERE route_map.source <> 'human'`,
+        [args.projectId, row.pattern, row.name, row.purpose, row.tier, source],
+      );
+    };
+
+    for (const row of args.rows) await write(row, 'llm');
+    for (const pattern of args.unresolved) {
+      await write({
+        pattern,
+        name: pattern,
+        purpose: 'unclassified',
+        tier: 'standard',
+      }, 'llm-unresolved');
+    }
+
+    await client.query('COMMIT');
+    return true;
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 /**

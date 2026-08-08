@@ -64,6 +64,7 @@ vi.mock('../pipeline.js', () => ({ runPipeline: vi.fn() }));
 vi.mock('../poller.js', () => ({ createPoller: vi.fn(() => ({ start: vi.fn(), stop: vi.fn() })) }));
 vi.mock('../github-app.js', () => ({ getInstallationToken: vi.fn() }));
 vi.mock('../setup-pr.js', () => ({ processSetupPrJob: vi.fn() }));
+vi.mock('../route-map.js', () => ({ processRouteMapJob: vi.fn() }));
 vi.mock('../pr.js', () => ({}));
 vi.mock('../source-map.js', () => ({ parseStackFrames: vi.fn(() => []), resolveFrame: vi.fn() }));
 // Only the storage-backed resolver is stubbed. framesFromEnvelope is a pure
@@ -104,6 +105,7 @@ const { readChunksBounded } = await import('../friction/chunk-reader.js');
 const { analyzeSession } = await import('../friction/analyzer.js');
 const { writeFrictionSignals } = await import('../friction/persist.js');
 const { processFrictionOutcomes } = await import('../friction/promotion.js');
+const { processRouteMapJob } = await import('../route-map.js');
 
 const mockGetErrorGroup = vi.mocked(db.getErrorGroup);
 const mockGetErrorEvent = vi.mocked(db.getErrorEvent);
@@ -789,6 +791,21 @@ describe('friction worker path', () => {
       'grp-1', 'proj-1', 'awaiting_approval', expect.objectContaining({ confidence: 'high' }), job,
     );
     expect(mockCloneRepo).not.toHaveBeenCalled();
+  });
+});
+
+describe('route_map dispatch', () => {
+  it('dispatches project-scoped jobs before the error-group-required guard', async () => {
+    const job: ClaimedJob = {
+      id: 'route-map-1', workerId: 'worker-1', leaseGeneration: '1',
+      errorGroupId: null, sourceId: null, projectId: 'proj-1',
+      jobType: 'route_map', attempts: 0, guidance: null, triggeredBy: 'auto', sessionId: null,
+    };
+    const signal = new AbortController().signal;
+
+    await expect(processJobInner(job, signal)).resolves.toBeUndefined();
+
+    expect(processRouteMapJob).toHaveBeenCalledWith(job, signal);
   });
 });
 
