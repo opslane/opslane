@@ -5,16 +5,16 @@ import {
   routeMapTerminalTool,
 } from '../route-map.js';
 
-const ASKED = ['/assets/:id', 'forge:portal-panel'];
+const ASKED = ['/assets/:id', '/portal/panel'];
 
 describe('parseRouteMapSubmission', () => {
   it('accepts valid rows', () => {
     expect(parseRouteMapSubmission({ rows: [
       { pattern: '/assets/:id', name: 'Asset detail', purpose: 'Manage an asset', tier: 'standard' },
-      { pattern: 'forge:portal-panel', name: 'Portal panel', purpose: 'Help a customer', tier: 'customer' },
+      { pattern: '/portal/panel', name: 'Portal panel', purpose: 'Help a customer', tier: 'customer' },
     ] }, ASKED)).toEqual([
       { pattern: '/assets/:id', name: 'Asset detail', purpose: 'Manage an asset', tier: 'standard' },
-      { pattern: 'forge:portal-panel', name: 'Portal panel', purpose: 'Help a customer', tier: 'customer' },
+      { pattern: '/portal/panel', name: 'Portal panel', purpose: 'Help a customer', tier: 'customer' },
     ]);
   });
 
