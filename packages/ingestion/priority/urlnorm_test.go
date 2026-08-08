@@ -15,7 +15,13 @@ func TestNormalizePageURL(t *testing.T) {
 		{"hashbang with id", "https://app.example.com/#!/assets/42", "/assets/:id"},
 		{"forge known module", "https://x.cdn.prod.atlassian-dev.net/a/b/c/issue-context/_ctx_abc/", "forge:issue-context"},
 		{"forge unknown module", "https://x.cdn.prod.atlassian-dev.net/a/b/c/custom-thing/_ctx_abc/", "forge:custom-thing"},
-		{"forge no ctx marker", "https://x.cdn.prod.atlassian-dev.net/a/b/c/", "forge:unknown"},
+		// No marker means the module is the last segment, not "unknown":
+		// fingerprint.ts strips _ctx_ before friction groups are stamped, so
+		// this is the shape the friction side arrives in.
+		{"forge no ctx marker", "https://x.cdn.prod.atlassian-dev.net/a/b/c/", "forge:c"},
+		{"forge module without marker", "https://x.cdn.prod.atlassian-dev.net/a/b/issue-context/", "forge:issue-context"},
+		{"forge module without marker templated", "https://x.cdn.prod.atlassian-dev.net/a/b/9f8e7d6c5b4a3928/", "forge::token"},
+		{"forge root has no module", "https://x.cdn.prod.atlassian-dev.net/", "forge:unknown"},
 		{"jwt segment", "https://app.example.com/c/eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.dQw4w9WgXcQ", "/c/:token"},
 		{"hex token", "https://app.example.com/sign/a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6", "/sign/:token"},
 		{"percent-encoded token", "https://app.example.com/sign/a1b2c3d4e5f6a7b8%2Bc9d0e1f2a3b4c5d6", "/sign/:token"},
@@ -58,6 +64,36 @@ func TestNormalizePageURL(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			if got := NormalizePageURL(c.in); got != c.want {
 				t.Errorf("NormalizePageURL(%q) = %q, want %q", c.in, got, c.want)
+			}
+		})
+	}
+}
+
+// The two kinds reach NormalizePageURL in different shapes: error groups from
+// the raw browser URL, friction groups from a value fingerprint.ts already
+// normalized (origin kept, _ctx_ segments dropped). Both must land on one
+// pattern or route_map weights only half the incidents on a page.
+func TestForgeConvergesAcrossBothStampingPaths(t *testing.T) {
+	cases := []struct{ name, raw, preNormalized, want string }{
+		{
+			"forge panel",
+			"https://x.cdn.prod.atlassian-dev.net/a/b/issue-context/_ctx_abc/",
+			"https://x.cdn.prod.atlassian-dev.net/a/b/issue-context",
+			"forge:issue-context",
+		},
+		{
+			"ordinary page",
+			"https://app.test/orders/4021",
+			"https://app.test/orders/:id",
+			"/orders/:id",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			gotError := NormalizePageURL(c.raw)
+			gotFriction := NormalizePageURL(c.preNormalized)
+			if gotError != c.want || gotFriction != c.want {
+				t.Errorf("error path = %q, friction path = %q, want both %q", gotError, gotFriction, c.want)
 			}
 		})
 	}

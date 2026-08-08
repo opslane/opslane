@@ -112,12 +112,28 @@ func boundPattern(pattern string) string {
 // forgeModule names the Forge module from the segment before the _ctx_ marker.
 // That segment is templated like any other: this branch returns before the
 // main loop runs, and the segment is frequently an opaque tenant id.
+//
+// The marker is not always present. Error groups are stamped from the raw
+// browser URL and keep it, but friction groups are stamped from a value the
+// worker's fingerprint.ts already normalized, and that normalizer drops _ctx_
+// segments. Falling back to the last segment is what keeps the two kinds on
+// one pattern: with the marker "/a/b/issue-context/_ctx_x" gives
+// "issue-context", and without it "/a/b/issue-context" gives the same. An
+// empty path still has no module to name.
 func forgeModule(path string) string {
-	segs := strings.Split(strings.Trim(path, "/"), "/")
+	segs := make([]string, 0, 4)
+	for _, s := range strings.Split(strings.Trim(path, "/"), "/") {
+		if s != "" {
+			segs = append(segs, s)
+		}
+	}
 	for i, s := range segs {
 		if strings.HasPrefix(s, "_ctx_") && i > 0 {
 			return templateSegment(segs[i-1])
 		}
 	}
-	return "unknown"
+	if len(segs) == 0 {
+		return "unknown"
+	}
+	return templateSegment(segs[len(segs)-1])
 }
