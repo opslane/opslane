@@ -96,14 +96,54 @@ describe('parseVerdict', () => {
   });
 });
 
+describe('bucket prompt rubric', () => {
+  const input = {
+    scope: 'bucket' as const,
+    signalType: 'dead_click' as const,
+    elementSelector: 'button.save',
+    pageUrlNormalized: '/settings',
+    occurrenceCount: 47,
+    bucketSummary: { distinctUsers: 19, totalOccurrences: 47, windowDays: 7 },
+  };
+
+  it('states that the volume threshold is already cleared', () => {
+    const prompt = buildAdjudicationPrompt(input);
+    expect(prompt).toMatch(/already .*(cleared|met)/i);
+    expect(prompt).toContain('5 distinct users');
+  });
+
+  it('forbids rejecting on volume alone', () => {
+    const prompt = buildAdjudicationPrompt(input);
+    expect(prompt).toMatch(/not a valid reason to reject/i);
+  });
+
+  it('still fences the untrusted evidence', () => {
+    const prompt = buildAdjudicationPrompt(input);
+    expect(prompt).toContain('<untrusted-evidence>');
+    expect(prompt).toContain('</untrusted-evidence>');
+  });
+
+  it('omits the rubric for fold scope', () => {
+    const foldPrompt = buildAdjudicationPrompt({
+      scope: 'fold' as const,
+      signalType: 'dead_click' as const,
+      elementSelector: 'button.save',
+      pageUrlNormalized: '/settings',
+      occurrenceCount: 1,
+      nearbyError: { title: 'TypeError: x', secondsAway: 3 },
+    });
+    expect(foldPrompt).not.toMatch(/not a valid reason to reject/i);
+  });
+});
+
 describe('prompt versioning', () => {
   it('has a positive integer prompt version', () => {
     expect(Number.isInteger(ADJUDICATION_PROMPT_VERSION)).toBe(true);
     expect(ADJUDICATION_PROMPT_VERSION).toBeGreaterThan(0);
   });
-  it('uses prompt v2 only for deciding window mode', () => {
-    expect(createAnthropicAdjudicator('k', 'on').promptVersion).toBe(2);
-    expect(createAnthropicAdjudicator('k', 'off').promptVersion).toBe(1);
-    expect(createAnthropicAdjudicator('k', 'shadow').promptVersion).toBe(1);
+  it('uses the windows prompt version only for deciding window mode', () => {
+    expect(createAnthropicAdjudicator('k', 'on').promptVersion).toBe(4);
+    expect(createAnthropicAdjudicator('k', 'off').promptVersion).toBe(3);
+    expect(createAnthropicAdjudicator('k', 'shadow').promptVersion).toBe(3);
   });
 });

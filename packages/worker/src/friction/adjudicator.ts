@@ -4,8 +4,8 @@ import type { WindowEvent } from './evidence-window.js';
 
 /** Bump when the prompt contract changes: a new version always opens a new
  * adjudication generation (plan D1); verdicts never carry across versions. */
-export const ADJUDICATION_PROMPT_VERSION = 1;
-export const ADJUDICATION_PROMPT_VERSION_WINDOWS = 2;
+export const ADJUDICATION_PROMPT_VERSION = 3;
+export const ADJUDICATION_PROMPT_VERSION_WINDOWS = 4;
 export const ADJUDICATION_MODEL = 'claude-sonnet-4-6';
 export type EvidenceWindowMode = 'off' | 'shadow' | 'on';
 
@@ -58,6 +58,20 @@ export function buildAdjudicationPrompt(input: AdjudicationInput): string {
     evidence,
     '</untrusted-evidence>',
   ];
+  // Pushed after the fence closes so untrusted page content can never be read
+  // as part of the rubric. Bucket scope only: fold scope judges a single
+  // signal next to an error and has no volume bar to state.
+  if (input.bucketSummary) {
+    instructions.push(
+      'This detection has ALREADY cleared the product significance bar: a bucket',
+      'is only sent to you once at least 5 distinct users have hit it inside the',
+      'window. Volume is therefore not a valid reason to reject. Judge only',
+      'whether the DETECTOR is right: does this interaction pattern describe a',
+      'real user-facing problem, or is it an artifact (an intentional repeat',
+      'click, a non-interactive element a user idly clicked, a control that',
+      'legitimately does nothing on that page)?',
+    );
+  }
   if (input.evidenceWindows) {
     instructions.push(
       'Each evidence window is the real event timeline (±15s) around one flagged click.',
