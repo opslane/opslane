@@ -353,6 +353,12 @@ jobs:
           # deliberately left at its production value; the tests fast-forward
           # their own fixtures instead (see makeChunksScrubbable).
           SCRUB_INTERVAL_SECONDS: "1"
+          # The priority suite posts events and waits for the sweeper to stamp
+          # and score them. At the 30m production tick that wait can never
+          # finish, so the suite gates itself off this variable instead of
+          # sleeping; it must be set on the container and on the test process
+          # below, or the suite silently skips.
+          PRIORITY_SCORE_INTERVAL_SECONDS: "5"
         run: |
           docker compose up -d postgres minio minio-setup
           docker compose run --rm migrate
@@ -373,20 +379,32 @@ jobs:
           # Interpreter the python smoke serves the Flask fixture with; the
           # setup-python step above put flask in it.
           OPSLANE_PYTHON: python
+          # Must match the value the ingestion container booted with above.
+          # The priority suite reads it to decide whether a sweeper tick will
+          # land inside its poll window.
+          PRIORITY_SCORE_INTERVAL_SECONDS: "5"
         run: >
           pnpm --filter @opslane/test-e2e exec vitest run
           --reporter=default --reporter=json
           --outputFile=${{ runner.temp }}/e2e-results.json
       - name: Enforce zero unexpected skips
         env:
-          # Two suites may skip. The with-secrets PR pipeline suite needs
+          # Three suites may skip. The with-secrets PR pipeline suite needs
           # credentials this job does not have. The dashboard screenshot suite
           # is an opt-in generator, not a test: it writes PNGs into
           # docs/design/dashboard-v1/screenshots/ and only runs when
           # CAPTURE_DASHBOARD_SCREENSHOTS=1, which CI never sets, so it can
           # only ever skip here. It asserts nothing about product behaviour and
           # belongs outside the graded suite; allowlisting is the narrow fix.
-          E2E_ALLOWED_SKIP_PATTERN: '^(pr_created pipeline \(full flow\)|dashboard approved-fixture screenshot capture)'
+          #
+          # The route_map suite clones opslane/defender-test-fixture, a private
+          # repo. The default GITHUB_TOKEN is scoped to this repository, so the
+          # clone cannot succeed here however the suite is wired — same class
+          # as the PR pipeline suite above. Give the job a token that can read
+          # that fixture (or point E2E_ROUTE_MAP_REPO at a public one) and drop
+          # this entry; until then the enqueue -> claim -> fenced-upsert path is
+          # covered by unit and DB tests only.
+          E2E_ALLOWED_SKIP_PATTERN: '^(pr_created pipeline \(full flow\)|dashboard approved-fixture screenshot capture|route_map job pipeline \(stubbed model\))'
           # The exact collected total, not a slack floor, so any silently
           # dropped test trips it. Re-derive from an actual run's
           # numTotalTests — NOT from `vitest list`, which does not expand
