@@ -39,12 +39,14 @@ type AdminWorkerOverview struct {
 }
 
 type AdminOutcomeOverview struct {
-	ByStatus     map[string]int64 `json:"by_status"`
-	PRCreated24H int64            `json:"pr_created_24h"`
-	PRCreated7D  int64            `json:"pr_created_7d"`
-	NeedsHuman7D int64            `json:"needs_human_7d"`
-	Merged7D     int64            `json:"merged_7d"`
-	Closed7D     int64            `json:"closed_7d"`
+	ByStatus          map[string]int64 `json:"by_status"`
+	PRCreated24H      int64            `json:"pr_created_24h"`
+	PRCreated7D       int64            `json:"pr_created_7d"`
+	NeedsHuman7D      int64            `json:"needs_human_7d"`
+	Merged7D          int64            `json:"merged_7d"`
+	Closed7D          int64            `json:"closed_7d"`
+	SpendUSD7D        float64          `json:"spend_usd_7d"`
+	CostPerMergedPR7D *float64         `json:"cost_per_merged_pr_7d"`
 }
 
 // AdminOnboardingOverview is the agent-onboarding funnel over v2 sessions in
@@ -93,7 +95,7 @@ func (q *Queries) AdminOverviewData(ctx context.Context) (*AdminOverview, error)
 		Events: AdminEventOverview{Hourly: make([]AdminHourlyEventBucket, 0, 48), TopProjects: make([]AdminTopProject, 0, 10)},
 		Jobs: AdminJobOverview{
 			ByStatus: map[string]int64{"pending": 0, "claimed": 0, "completed": 0, "failed": 0, "dead_letter": 0},
-			ByType:   map[string]int64{"investigate": 0, "fix": 0, "error_fix": 0, "setup_pr": 0, "session_analysis": 0, "ci_watch": 0, "route_map": 0},
+			ByType:   map[string]int64{"investigate": 0, "fix": 0, "error_fix": 0, "setup_pr": 0, "session_analysis": 0, "ci_watch": 0, "route_map": 0, "score_sync": 0},
 		},
 		Outcomes:   AdminOutcomeOverview{ByStatus: make(map[string]int64)},
 		Onboarding: AdminOnboardingOverview{ByFailureReason: make(map[string]int64)},
@@ -320,6 +322,17 @@ func (q *Queries) AdminOverviewData(ctx context.Context) (*AdminOverview, error)
 			count(*) FILTER (WHERE outcome = 'closed' AND occurred_at >= now() - interval '7 days')
 		FROM pr_outcomes`).Scan(&result.Outcomes.Merged7D, &result.Outcomes.Closed7D); err != nil {
 		return nil, fmt.Errorf("admin PR outcomes: %w", err)
+	}
+
+	if err := q.pool.QueryRow(ctx, `
+		SELECT COALESCE(SUM(cost_usd), 0)::float8
+		FROM job_usage
+		WHERE created_at >= now() - interval '7 days'`).Scan(&result.Outcomes.SpendUSD7D); err != nil {
+		return nil, fmt.Errorf("admin spend aggregate: %w", err)
+	}
+	if result.Outcomes.Merged7D > 0 {
+		unit := result.Outcomes.SpendUSD7D / float64(result.Outcomes.Merged7D)
+		result.Outcomes.CostPerMergedPR7D = &unit
 	}
 
 	return result, nil

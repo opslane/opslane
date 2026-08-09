@@ -58,6 +58,26 @@ The environment used when telemetry omits a label or supplies an invalid one.
 Every project begins with `production` as its default.
 _Avoid_: "key environment", "production fallback"
 
+**Usage ledger** (decided 2026-08-08; ADR-0001):
+The insert-only Postgres record of what a job spent: one row per
+(job, execution, phase, model) carrying provider-returned token counts and
+estimated cost. Written best-effort by the worker at phase completion; never
+blocks or fails the job, and can undercount (see ADR-0001). Authoritative
+relative to Langfuse traces, which carry the same numbers but are optional.
+_Avoid_: "billing table" (nothing is invoiced from it; it is not reconciled
+provider spend), "cost column"
+
+**Phase**:
+A named stage of a job that spends model tokens (e.g. investigation, fix,
+judge, narrative). Enumerated in worker code, stored as plain text — a new
+phase must not require a migration.
+
+**Outcome score**:
+A measurement pushed onto a job's Langfuse trace: the diagnosis outcome and
+confidence at decision time, and the PR outcome (merged/closed) later via
+the job queue when the GitHub webhook lands.
+_Avoid_: "eval" (scores record what happened; evals judge it)
+
 ## Relationships
 
 - A **Project** has any number of active keys per **Scope**; minting never

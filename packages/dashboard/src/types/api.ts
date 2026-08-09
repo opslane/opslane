@@ -341,7 +341,8 @@ export type AdminJobType =
   | 'setup_pr'
   | 'ci_watch'
   | 'session_analysis'
-  | 'route_map';
+  | 'route_map'
+  | 'score_sync';
 
 export interface AdminHourlyEventBucket {
   hour: string;
@@ -380,6 +381,8 @@ export interface AdminOverview {
     needs_human_7d: number;
     merged_7d: number;
     closed_7d: number;
+    spend_usd_7d: number;
+    cost_per_merged_pr_7d: number | null;
   };
   onboarding?: {
     started: number;

@@ -165,6 +165,9 @@ const TERMINAL_FIELDS_INCOMPATIBLE_QUERY = `
   ORDER BY project_id, id
 `;
 
+// score_sync is post-terminal bookkeeping by design: the PR webhook enqueues
+// it in the same transaction that makes the group terminal, so a pending
+// score_sync on a merged group is the contract working, not a violation.
 const TERMINAL_GROUPS_WITH_LIVE_JOBS_QUERY = `
   SELECT eg.id, eg.project_id, eg.status,
          ARRAY_AGG(job.id ORDER BY job.created_at, job.id) AS live_job_ids
@@ -172,6 +175,7 @@ const TERMINAL_GROUPS_WITH_LIVE_JOBS_QUERY = `
   JOIN error_group_jobs job ON job.error_group_id = eg.id
   WHERE eg.status IN ('pr_created', 'needs_human', 'resolved', 'merged', 'archived')
     AND job.status IN ('pending', 'claimed')
+    AND job.job_type <> 'score_sync'
   GROUP BY eg.id, eg.project_id, eg.status
   ORDER BY eg.project_id, eg.id
 `;

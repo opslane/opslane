@@ -11,6 +11,7 @@ vi.mock('e2b', async (importOriginal) => ({
 // Mock the agent loop
 vi.mock('../harness/agent-loop.js', () => ({
   runAgentLoop: vi.fn(),
+  pricingFor: vi.fn(() => ({ input: 3, output: 15, cacheWrite: 3.75, cacheRead: 0.30 })),
 }));
 
 // Mock the diff judge
@@ -44,9 +45,13 @@ vi.mock('../harness/test-runner.js', async (importOriginal) => {
 
 // The fix job's authorization gate reads the persisted decision, so the db
 // module is the seam. Default: an authorised, high-confidence code_fix.
-const { mockLoadDiagnosisDecision } = vi.hoisted(() => ({ mockLoadDiagnosisDecision: vi.fn() }));
+const { mockLoadDiagnosisDecision, mockRecordJobUsage } = vi.hoisted(() => ({
+  mockLoadDiagnosisDecision: vi.fn(),
+  mockRecordJobUsage: vi.fn(),
+}));
 vi.mock('../db.js', () => ({
   loadDiagnosisDecision: mockLoadDiagnosisDecision,
+  recordJobUsage: mockRecordJobUsage,
 }));
 
 // Mock the investigation module (vi.hoisted ensures the fn exists before vi.mock factory runs)
@@ -1009,6 +1014,34 @@ describe('runAgentFix', () => {
     // Agent should still run
     expect(Sandbox.create).toHaveBeenCalled();
     expect(runAgentLoop).toHaveBeenCalled();
+  });
+
+  it('records fix-tier usage when the agent loop throws after consuming tokens', async () => {
+    vi.mocked(runAgentLoop).mockImplementationOnce(async (config) => {
+      config.externalState!.tokenUsage = {
+        input: 1000,
+        output: 100,
+        cacheRead: 200,
+        cacheWrite: 50,
+      };
+      throw new Error('provider connection reset');
+    });
+
+    await runAgentFix(makeInput({
+      model: 'claude-sonnet-4-6',
+      usageContext: { jobId: 'fix-job-1', execution: 2 },
+    }));
+
+    expect(mockRecordJobUsage).toHaveBeenCalledTimes(1);
+    expect(mockRecordJobUsage).toHaveBeenCalledWith({
+      jobId: 'fix-job-1',
+      execution: 2,
+      phase: 'fix',
+      model: 'claude-sonnet-4-6',
+      usage: { input: 1000, output: 100, cacheRead: 200, cacheWrite: 50 },
+      costUsd: expect.any(Number),
+    });
+    expect(mockRecordJobUsage.mock.calls[0]?.[0].costUsd).toBeCloseTo(0.0047475, 10);
   });
 
   it('includes filesRead and findings in system prompt when investigation provides them', async () => {

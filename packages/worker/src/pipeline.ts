@@ -22,6 +22,7 @@ export interface PipelineInput {
   platform?: Platform;
   customerRuntime?: RuntimeInfo | null;
   jobId: string;
+  usageContext?: { jobId: string; execution: number };
   errorGroupId: string;
   projectId: string;
   title: string;
@@ -126,6 +127,7 @@ export async function runPipeline(input: PipelineInput): Promise<PipelineResult>
     triggeredBy: input.triggeredBy,
     platform: input.platform,
     customerRuntime: input.customerRuntime,
+    usageContext: input.usageContext,
   });
 
   const publishDraft = fixResult.status === 'needs_human'

@@ -644,6 +644,29 @@ export async function cleanupTenant(orgId: string): Promise<void> {
     await db.query('ALTER TABLE diagnosis_decisions ENABLE TRIGGER diagnosis_decisions_immutable_row');
   }
 
+  // job_usage references error_group_jobs with no ON DELETE and is insert-only
+  // via a BEFORE DELETE row trigger (migration 043) — the same wedge as
+  // diagnosis_decisions above: the FK blocks the jobs delete while the trigger
+  // blocks the only fix, and the leftover jobs then fail the next system
+  // test's no-live-jobs precondition.
+  await db.query('ALTER TABLE job_usage DISABLE TRIGGER job_usage_immutable_row');
+  try {
+    await db.query(
+      `DELETE FROM job_usage WHERE job_id IN (
+         SELECT j.id FROM error_group_jobs j JOIN projects p ON j.project_id = p.id WHERE p.org_id = $1
+       )`,
+      [orgId]
+    );
+  } finally {
+    await db.query('ALTER TABLE job_usage ENABLE TRIGGER job_usage_immutable_row');
+  }
+
+  // pr_outcomes.fix_job_id references error_group_jobs with no ON DELETE
+  // (migration 008), so outcomes must go before the jobs they point at.
+  await db.query(
+    `DELETE FROM pr_outcomes WHERE project_id IN (SELECT id FROM projects WHERE org_id = $1)`,
+    [orgId]
+  );
   await db.query(
     `DELETE FROM error_group_jobs WHERE project_id IN (SELECT id FROM projects WHERE org_id = $1)`,
     [orgId]

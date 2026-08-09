@@ -263,6 +263,16 @@ onUnmounted(() => {
               <p class="text-xs text-muted">Closed 7d</p>
               <p class="mt-1 text-xl font-semibold tabular-nums">{{ overview.outcomes.closed_7d }}</p>
             </div>
+            <div class="rounded-md bg-surface-subtle p-3">
+              <p class="text-xs text-muted">Spend 7d</p>
+              <p class="mt-1 text-xl font-semibold tabular-nums">${{ overview.outcomes.spend_usd_7d.toFixed(2) }}</p>
+            </div>
+            <div class="rounded-md bg-surface-subtle p-3">
+              <p class="text-xs text-muted">Cost / merged PR 7d</p>
+              <p class="mt-1 text-xl font-semibold tabular-nums">
+                {{ overview.outcomes.cost_per_merged_pr_7d === null ? '—' : '$' + overview.outcomes.cost_per_merged_pr_7d.toFixed(2) }}
+              </p>
+            </div>
           </div>
           <div class="mt-4 flex flex-wrap gap-2">
             <span

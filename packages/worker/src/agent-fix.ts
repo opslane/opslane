@@ -1,7 +1,7 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import { createAnthropicClient } from './anthropic-client.js';
 import { SandboxUnavailableError, type SandboxRuntime } from './harness/sandbox-runtime.js';
-import { runAgentLoop } from './harness/agent-loop.js';
+import { pricingFor, runAgentLoop } from './harness/agent-loop.js';
 import { createToolBridge } from './harness/tool-bridge.js';
 import { createDefaultMiddleware } from './harness/tool-middleware.js';
 import { extractStackTraceFiles, resolveTrackedFiles } from './harness/stack-trace-utils.js';
@@ -17,7 +17,8 @@ import type { RuntimeInfo } from './runtime-info.js';
 import { buildReason, reasonCodeForDecision, reproductionRemediation } from './reason-codes.js';
 import { deriveOutcome } from './classify.js';
 import { adjudicationFromDecline, strings } from './diagnose-schema.js';
-import { loadDiagnosisDecision } from './db.js';
+import { loadDiagnosisDecision, recordJobUsage } from './db.js';
+import { calculateCost } from '@opslane/agent-core';
 import type { AgentCompletionResult, VisualAnalysisOutput, SourceFile, AgentState } from './harness/types.js';
 import { scrubSecrets } from './harness/redact.js';
 import { escapeUntrustedLabel, fenced } from './prompt-fence.js';
@@ -89,6 +90,7 @@ export interface AgentFixInput {
   maxTurns?: number;
   budgetUsd?: number;
   model?: string;
+  usageContext?: { jobId: string; execution: number };
   frictionEvidence?: string;
   kind?: 'error' | 'friction';
   /**
@@ -775,6 +777,8 @@ export async function runAgentFix(input: AgentFixInput): Promise<AgentFixResult>
         agentState.toolHistoryEntries = [];
       }
 
+      try {
+
       // Inner retry loop: run agent + test gate, retry once with failure feedback
       let attempt = 0;
       let lastTestOutput = '';
@@ -1204,6 +1208,22 @@ export async function runAgentFix(input: AgentFixInput): Promise<AgentFixResult>
         sandboxRuntime: repoSandbox.sandboxRuntime,
         tokenUsage: totalTokenUsage,
       };
+      } finally {
+        const usage = agentState.tokenUsage;
+        if (
+          input.usageContext
+          && (usage.input > 0 || usage.output > 0 || usage.cacheRead > 0 || usage.cacheWrite > 0)
+        ) {
+          await recordJobUsage({
+            jobId: input.usageContext.jobId,
+            execution: input.usageContext.execution,
+            phase: 'fix',
+            model: tier.model,
+            usage: { ...usage },
+            costUsd: calculateCost(usage, pricingFor(tier.model)),
+          });
+        }
+      }
     }
 
     // Should not reach here, but satisfy TypeScript

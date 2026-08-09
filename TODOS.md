@@ -4,6 +4,22 @@ Deferred work with enough context to pick up cold. Add items with What / Why / P
 
 ---
 
+## Update Sonnet 5 pricing when the introductory rate expires on 2026-08-31
+
+**What:** Change `claude-sonnet-5` from the introductory `{ input: 2, output: 10, cacheWrite: 2.50, cacheRead: 0.20 }` to list `{ input: 3, output: 15, cacheWrite: 3.75, cacheRead: 0.30 }` in BOTH pricing tables: `packages/worker/src/harness/agent-loop.ts` (`MODEL_PRICING`) and `packages/worker/src/investigate.ts` (`MODEL_PRICING`). Optionally collapse the two tables onto the exported `pricingFor()` so the next rate change is a one-file edit.
+
+**Why:** After 2026-08-31 every investigation's `job_usage.cost_usd` understates real spend by ~33%, and the ledger is insert-only by design — wrong rows can never be corrected. The admin "Spend 7d" and "Cost / merged PR 7d" tiles present these numbers as dollars, and the investigation budget ceiling also enforces against the stale rate.
+
+**Pros:** Two-line change if done on time; keeps the immutable ledger honest from the switchover day.
+
+**Cons:** None — the only risk is forgetting, which is what this entry exists to prevent.
+
+**Context:** Flagged during `/review` of the job-usage-ledger branch on 2026-08-09 (Codex ranked it the top finding). Both tables carry a "runs through 2026-08-31" comment; nothing else enforces the date.
+
+**Depends on:** Nothing.
+
+---
+
 ## Replace full-list polling on the issue list with a count or since-timestamp endpoint
 
 **What:** `ActivityFeed.vue` (renamed to `IssuesList.vue`) polls `listIncidents()` every 30 seconds and uses only `latest.length`. Replace it with a lightweight endpoint that returns a count, or a `since=<timestamp>` query that returns only what changed.

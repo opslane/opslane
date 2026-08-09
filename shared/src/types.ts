@@ -373,7 +373,7 @@ export interface Account {
   last_seen: string;
 }
 
-export type JobType = 'error_fix' | 'investigate' | 'fix' | 'setup_pr' | 'session_analysis' | 'ci_watch' | 'route_map';
+export type JobType = 'error_fix' | 'investigate' | 'fix' | 'setup_pr' | 'session_analysis' | 'ci_watch' | 'route_map' | 'score_sync';
 
 export type PRPosture = 'verified_only' | 'draft_when_unverified';
 

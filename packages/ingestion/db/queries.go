@@ -1707,6 +1707,20 @@ func (q *Queries) ProcessPRWebhook(ctx context.Context, githubRepo string, prNum
 		}
 		return PRWebhookResult{GroupID: groupID, Duplicate: true}, nil
 	}
+	if fixJobID != nil {
+		// max_attempts 10: with the worker's capped exponential backoff this
+		// tolerates a multi-hour Langfuse outage; the default 3 dead-letters
+		// the score after ~5 minutes, and nothing re-enqueues from pr_outcomes.
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO error_group_jobs (error_group_id, project_id, job_type, max_attempts, payload)
+			 VALUES ($1, $2, 'score_sync', 10, jsonb_build_object(
+			   'fix_job_id', $3::text, 'outcome', $4::text, 'delivery_id', $5::text,
+			   'occurred_at', to_char($6::timestamptz AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')))`,
+			groupID, projectID, *fixJobID, outcome, deliveryID, occurredAt,
+		); err != nil {
+			return PRWebhookResult{}, fmt.Errorf("enqueue score_sync: %w", err)
+		}
+	}
 
 	if merged {
 		// merged_at anchors the silence checker's post-merge window, so use the
@@ -1832,6 +1846,18 @@ func recoverReopenedMerge(ctx context.Context, tx pgx.Tx, githubRepo string, prN
 			return PRWebhookResult{}, fmt.Errorf("commit duplicate recovered PR webhook: %w", err)
 		}
 		return PRWebhookResult{GroupID: groupID, Duplicate: true}, nil
+	}
+	if fixJobID != nil {
+		// max_attempts 10: see the enqueue in ProcessPRWebhook.
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO error_group_jobs (error_group_id, project_id, job_type, max_attempts, payload)
+			 VALUES ($1, $2, 'score_sync', 10, jsonb_build_object(
+			   'fix_job_id', $3::text, 'outcome', 'merged', 'delivery_id', $4::text,
+			   'occurred_at', to_char($5::timestamptz AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')))`,
+			groupID, projectID, *fixJobID, deliveryID, occurredAt,
+		); err != nil {
+			return PRWebhookResult{}, fmt.Errorf("enqueue score_sync: %w", err)
+		}
 	}
 
 	if status == "investigated" || status == "awaiting_approval" {

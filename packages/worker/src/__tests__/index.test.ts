@@ -42,6 +42,7 @@ vi.mock('../db.js', () => ({
   reserveDelivery: vi.fn(),
   recordDeliveryPushed: vi.fn(),
   finalizeDelivery: vi.fn(),
+  recordJobUsage: vi.fn(),
 }));
 vi.mock('../logger.js', () => ({
   logger: { info: vi.fn(), error: vi.fn(), warn: vi.fn(), debug: vi.fn() },
@@ -69,6 +70,8 @@ vi.mock('../poller.js', () => ({ createPoller: vi.fn(() => ({ start: vi.fn(), st
 vi.mock('../github-app.js', () => ({ getInstallationToken: vi.fn() }));
 vi.mock('../setup-pr.js', () => ({ processSetupPrJob: vi.fn() }));
 vi.mock('../route-map.js', () => ({ processRouteMapJob: vi.fn() }));
+vi.mock('../score-sync.js', () => ({ processScoreSyncJob: vi.fn() }));
+vi.mock('../scores.js', () => ({ pushScore: vi.fn() }));
 vi.mock('../pr.js', () => ({}));
 vi.mock('../source-map.js', () => ({ parseStackFrames: vi.fn(() => []), resolveFrame: vi.fn() }));
 // Only the storage-backed resolver is stubbed. framesFromEnvelope is a pure
@@ -124,6 +127,9 @@ const { analyzeSession } = await import('../friction/analyzer.js');
 const { writeFrictionSignals } = await import('../friction/persist.js');
 const { processFrictionOutcomes } = await import('../friction/promotion.js');
 const { processRouteMapJob } = await import('../route-map.js');
+const { processScoreSyncJob } = await import('../score-sync.js');
+const { pushScore } = await import('../scores.js');
+const { getActiveTraceId } = await import('../tracing.js');
 
 const mockGetErrorGroup = vi.mocked(db.getErrorGroup);
 const mockGetErrorEvent = vi.mocked(db.getErrorEvent);
@@ -276,6 +282,7 @@ describe('processInvestigateJob — pre-clone guard for stackless errors', () =>
 describe('processInvestigateJob diagnosis routing', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(getActiveTraceId).mockReturnValue(null);
     process.env['ANTHROPIC_API_KEY'] = 'test-key';
     process.env['GITHUB_TOKEN'] = 'test-token';
     mockGetSessionPointerForGroup.mockResolvedValue(null);
@@ -340,6 +347,14 @@ describe('processInvestigateJob diagnosis routing', () => {
       }), makeJob(),
     );
     expect(db.updateGroupAndCreateFixJob).not.toHaveBeenCalled();
+    expect(db.recordJobUsage).toHaveBeenCalledWith({
+      jobId: 'job-1',
+      execution: 0,
+      phase: 'investigation',
+      model: 'claude-sonnet-5',
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      costUsd: 0.12,
+    });
   });
 
   it('routes needs_more_context to needs_human with a complete reason', async () => {
@@ -411,8 +426,74 @@ describe('processInvestigateJob diagnosis routing', () => {
         outcome: 'code_fix',
         causeLocation: 'src/App.vue:42',
       }),
+      sourceJobId: 'job-1',
     });
     expect(fields).not.toHaveProperty('suggestedMitigation');
+  });
+
+  it('pushes diagnosis scores only after the durable outcome write', async () => {
+    vi.mocked(getActiveTraceId).mockReturnValue('trace-1');
+    mockInvestigateError.mockResolvedValue({
+      fixable: false,
+      confidence: 'medium',
+      reason: 'The cause is outside this codebase',
+      adjudication: null,
+      costUsd: 0.01,
+      usage: { input: 10, output: 2, cacheRead: 0, cacheWrite: 0 },
+      decisionReason: 'The cause is outside this codebase',
+      decisionBasis: 'cause_outside_codebase',
+      outcome: 'not_actionable',
+      diagnosis: null,
+      filesRead: [],
+      findings: '',
+      stop: 'terminal',
+    });
+
+    await processInvestigateJob(makeJob(), new AbortController().signal);
+
+    expect(pushScore).toHaveBeenNthCalledWith(1, {
+      traceId: 'trace-1',
+      name: 'diagnosis_outcome',
+      value: 'not_actionable',
+      dataType: 'CATEGORICAL',
+      id: 'diagnosis-outcome-job-1-0',
+    });
+    expect(pushScore).toHaveBeenNthCalledWith(2, {
+      traceId: 'trace-1',
+      name: 'diagnosis_confidence',
+      value: 'medium',
+      dataType: 'CATEGORICAL',
+      id: 'diagnosis-confidence-job-1-0',
+    });
+    expect(
+      vi.mocked(db.updateGroupInvestigation).mock.invocationCallOrder[0],
+    ).toBeLessThan(vi.mocked(pushScore).mock.invocationCallOrder[0]!);
+  });
+
+  it('a rejected diagnosis score push never fails the investigation job', async () => {
+    vi.mocked(getActiveTraceId).mockReturnValue('trace-1');
+    vi.mocked(pushScore).mockRejectedValue(new Error('Langfuse score rejected: 503'));
+    mockInvestigateError.mockResolvedValue({
+      fixable: false,
+      confidence: 'medium',
+      reason: 'The cause is outside this codebase',
+      adjudication: null,
+      costUsd: 0.01,
+      usage: { input: 10, output: 2, cacheRead: 0, cacheWrite: 0 },
+      decisionReason: 'The cause is outside this codebase',
+      decisionBasis: 'cause_outside_codebase',
+      outcome: 'not_actionable',
+      diagnosis: null,
+      filesRead: [],
+      findings: '',
+      stop: 'terminal',
+    });
+
+    await expect(
+      processInvestigateJob(makeJob(), new AbortController().signal),
+    ).resolves.toBeUndefined();
+    expect(pushScore).toHaveBeenCalled();
+    expect(db.updateGroupInvestigation).toHaveBeenCalled();
   });
 
   // The confidence half of the gate that decides whether a PR opens unattended.
@@ -824,6 +905,34 @@ describe('route_map dispatch', () => {
     await expect(processJobInner(job, signal)).resolves.toBeUndefined();
 
     expect(processRouteMapJob).toHaveBeenCalledWith(job, signal);
+  });
+});
+
+describe('score_sync dispatch', () => {
+  it('dispatches project-scoped score jobs before the error-group-required guard', async () => {
+    const job: ClaimedJob = {
+      id: 'score-sync-1', workerId: 'worker-1', leaseGeneration: '1',
+      errorGroupId: null, sourceId: null, projectId: 'proj-1',
+      jobType: 'score_sync', attempts: 0, guidance: null, triggeredBy: null, sessionId: null,
+      payload: { fix_job_id: 'fix-1', outcome: 'merged', delivery_id: 'delivery-1' },
+    };
+
+    await expect(processJobInner(job, new AbortController().signal)).resolves.toBeUndefined();
+    expect(processScoreSyncJob).toHaveBeenCalledWith(job);
+  });
+});
+
+describe('unknown job type dispatch', () => {
+  it('throws instead of falling through to a paid investigation', async () => {
+    const job: ClaimedJob = {
+      id: 'mystery-1', workerId: 'worker-1', leaseGeneration: '1',
+      errorGroupId: 'group-1', sourceId: null, projectId: 'proj-1',
+      jobType: 'bogus_future_type' as never, attempts: 0,
+      guidance: null, triggeredBy: null, sessionId: null, payload: null,
+    };
+
+    await expect(processJobInner(job, new AbortController().signal))
+      .rejects.toThrow("Unknown job_type 'bogus_future_type'");
   });
 });
 
