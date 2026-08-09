@@ -21,7 +21,7 @@
 - Every worker DB helper is tenant-scoped: queries take and filter by `project_id` (`packages/ingestion/AGENTS.md`; same contract in the worker).
 - Langfuse credentials stay in the worker only. The Go service never talks to Langfuse.
 - Do not change existing log `msg` strings — `~/deploy` runbook queries match on them exactly.
-- Do not edit or renumber existing migrations; the new migration is `041_job_usage_ledger.sql`. Migration verification follows `packages/ingestion/AGENTS.md`: apply to a **disposable clean database** and a **representative existing database**, then **reapply** to verify idempotency.
+- Do not edit or renumber existing migrations; the new migration is `043_job_usage_ledger.sql`. Migration verification follows `packages/ingestion/AGENTS.md`: apply to a **disposable clean database** and a **representative existing database**, then **reapply** to verify idempotency.
 - `JobType` is a closed union in `shared/src/types.ts:376`. Adding `score_sync` means editing shared, rebuilding workspaces (`pnpm -r build`), and updating every job-type allowlist: `adminJobTypes` in `packages/ingestion/handler/admin.go:14` and the dashboard's `AdminJobType` in `packages/dashboard/src/types/api.ts:~337`.
 - Worker DB tests are DATABASE_URL-gated integration tests in `packages/worker/src/__tests__/`; they skip (not fail) without `DATABASE_URL`. Tests that insert `job_usage` rows must clean up via the Task 2 purge helper **before** deleting their `error_group_jobs` fixtures (the FK blocks the delete and the trigger blocks a plain `DELETE FROM job_usage`).
 
@@ -30,7 +30,7 @@
 ### Task 1: Migration 041 — `job_usage` table, immutability triggers, `source_job_id`
 
 **Files:**
-- Create: `packages/ingestion/db/migrations/041_job_usage_ledger.sql`
+- Create: `packages/ingestion/db/migrations/043_job_usage_ledger.sql`
 - Test: applied-and-reapplied verification below + Task 2's integration test
 
 **Interfaces:**
@@ -118,7 +118,7 @@ for f in packages/ingestion/db/migrations/*.sql; do psql "$_MIG_URL" -v ON_ERROR
 docker compose run --rm migrate
 
 # 3. Reapply for idempotency: run the new file again against both.
-psql "$_MIG_URL" -v ON_ERROR_STOP=1 -f packages/ingestion/db/migrations/041_job_usage_ledger.sql
+psql "$_MIG_URL" -v ON_ERROR_STOP=1 -f packages/ingestion/db/migrations/043_job_usage_ledger.sql
 docker compose run --rm migrate
 ```
 
@@ -156,7 +156,7 @@ psql "$_MIG_URL" -c "TRUNCATE job_usage;"                     # expect: job_usag
 - [ ] **Step 4: Commit**
 
 ```bash
-git add packages/ingestion/db/migrations/041_job_usage_ledger.sql
+git add packages/ingestion/db/migrations/043_job_usage_ledger.sql
 git commit -m "feat(db): job_usage ledger, immutability triggers, source_job_id"
 ```
 
