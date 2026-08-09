@@ -15,10 +15,8 @@ import {
   findValidAcceptedGeneration,
   attachInheritedSignal,
   applyBucketOutcome,
-  attachGenerationEvidenceToIncident,
   tryReserveAdjudicationCall,
   readBucketState,
-  recordBucketEvaluation,
   recordGenerationEvidence,
   type FoldSignal,
   type BucketTuple,
@@ -244,51 +242,19 @@ export async function processFrictionOutcomes(
     };
     const verdict = await adjudicate(adjudicator, input, signal, jobId, runtime);
     const stored = storedVerdict(verdict);
+    // The outcome transaction also attaches the generation's wider recorded
+    // evidence to an accepted incident and writes the growth-gate watermark,
+    // so a crash between verdict and either of those can never leave an
+    // undercounted incident or an unwatermarked judged bucket. A 'noop'
+    // outcome (the generation was released or terminalized under us) writes
+    // neither.
     const outcome = await applyBucketOutcome({
       tuple,
       generationId: generation.id,
       verdict: stored,
+      evaluatedUsers: eligibleUsers,
       meta: { modelId: adjudicator.modelId, promptVersion: adjudicator.promptVersion, jobId },
     });
-    // The outcome only owns the rows it claimed for this call, so the incident
-    // would report a fraction of the evidence the model was actually shown.
-    // Attach the rest here — incident_id only, so no verdict is rewritten.
-    // 'promoted' and 'updated' are exactly the accepting outcomes; gating on
-    // them rather than on `verdict` also keeps an uncertain verdict (stored as
-    // a rejection) out of this path.
-    if (outcome === 'promoted' || outcome === 'updated') {
-      const incidentId = await withClient(async (c) => {
-        const { rows } = await c.query<{ promoted_incident_id: string | null }>(
-          `SELECT promoted_incident_id FROM friction_adjudication_generations
-           WHERE id = $1 AND project_id = $2`,
-          [generation.id, signal.project_id],
-        );
-        return rows[0]?.promoted_incident_id ?? null;
-      });
-      if (incidentId) {
-        const attached = await attachGenerationEvidenceToIncident(
-          generation.id,
-          signal.project_id,
-          incidentId,
-          signal.rule_version,
-        );
-        logger.info('Attached bucket evidence to incident', {
-          project_id: signal.project_id,
-          generation_id: generation.id,
-          incident_id: incidentId,
-          attached,
-        });
-      }
-    }
-    // Watermark the evidence level this verdict was formed at, so the next
-    // session only re-judges once the bucket has grown materially. Known and
-    // accepted: a concurrent job reading between the outcome and this write
-    // can produce one duplicate model call. It cannot corrupt state — the
-    // membership insert is idempotent and the verdict path is advisory-locked.
-    await withClient((c) => recordBucketEvaluation(c, tuple, {
-      evaluatedUsers: eligibleUsers,
-      generationId: generation.id,
-    }));
     logger.info('Friction bucket adjudicated', {
       project_id: signal.project_id,
       session_id: signal.session_id,

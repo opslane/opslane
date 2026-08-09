@@ -122,6 +122,10 @@ async function cleanup(): Promise<void> {
     [projectId]
   );
   await pool.query(`DELETE FROM friction_signals WHERE project_id = $1`, [projectId]);
+  // applyBucketOutcome writes the growth-gate watermark in the same
+  // transaction as the verdict, so every outcome test leaves bucket state
+  // behind; it references environments without a cascade.
+  await pool.query(`DELETE FROM friction_bucket_state WHERE project_id = $1`, [projectId]);
   await pool.query(`DELETE FROM friction_adjudication_generations WHERE project_id = $1`, [projectId]);
   await purgeDiagnosisDecisions(pool, projectId);
   await pool.query(`DELETE FROM error_group_jobs WHERE project_id = $1`, [projectId]);
@@ -278,6 +282,7 @@ describeDb('bucket promotion integration', () => {
         tuple: tuple(),
         generationId: gen!.id,
         verdict: { accepted: true, reason: 'real friction' },
+        evaluatedUsers: 5,
         meta: { ...META, jobId },
       });
       expect(outcome).toBe('promoted');
@@ -341,6 +346,7 @@ describeDb('bucket promotion integration', () => {
           tuple: tuple(),
           generationId: gen!.id,
           verdict: { accepted: true, reason: 'real friction' },
+          evaluatedUsers: 5,
           meta: { ...META, jobId },
         })
       ).toBe('noop');
@@ -362,6 +368,7 @@ describeDb('bucket promotion integration', () => {
         tuple: tuple(),
         generationId: gen!.id,
         verdict: { accepted: false, reason: 'noise' },
+        evaluatedUsers: 5,
         meta: { ...META, jobId },
       });
       expect(outcome).toBe('rejected');
@@ -396,6 +403,7 @@ describeDb('bucket promotion integration', () => {
         tuple: tuple(),
         generationId: gen1!.id,
         verdict: { accepted: true, reason: 'r' },
+        evaluatedUsers: 5,
         meta: { ...META, jobId },
       });
       // Expire the first generation's validity.
@@ -415,6 +423,7 @@ describeDb('bucket promotion integration', () => {
         tuple: tuple(),
         generationId: gen2!.id,
         verdict: { accepted: true, reason: 'still real' },
+        evaluatedUsers: 5,
         meta: { ...META, jobId: jobId2 },
       });
       expect(outcome).toBe('updated');
@@ -448,6 +457,7 @@ describeDb('bucket promotion integration', () => {
         tuple: tuple(),
         generationId: gen!.id,
         verdict: { accepted: true, reason: 'r' },
+        evaluatedUsers: 5,
         meta: { ...META, jobId },
       });
 
@@ -491,6 +501,7 @@ describeDb('bucket promotion integration', () => {
         tuple: tuple(),
         generationId: gen!.id,
         verdict: { accepted: true, reason: 'resume' },
+        evaluatedUsers: 5,
         meta: { ...META, jobId },
       });
       expect(outcome).toBe('promoted');
@@ -641,6 +652,7 @@ describeDb('bucket promotion integration', () => {
         tuple: tuple(),
         generationId: gen!.id,
         verdict: { accepted: true, reason: 'r' },
+        evaluatedUsers: 5,
         meta: { ...META, jobId },
       });
 
