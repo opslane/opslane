@@ -993,7 +993,7 @@ describeDb('db.ts integration tests', () => {
       expect(again.rows[0]!.id).toBeTruthy();
     });
 
-    it('a retryable failure reconciles nothing', async () => {
+    it('a retryable failure reconciles nothing, but releases the in-flight slot', async () => {
       const { envId, sessionId } = await seedEnvAndSession();
       const jobRowId = await seedAnalysisJobRow(sessionId, 3);
       const claim = await claimJob('dl-worker-2', 60_000);
@@ -1002,14 +1002,35 @@ describeDb('db.ts integration tests', () => {
 
       await failJob(jobRowId, 'dl-worker-2', claim!.leaseGeneration, 'transient');
 
+      // Reconciliation still does NOT happen on a retry: the signal keeps its
+      // pending status rather than being flipped to 'unchecked', and no
+      // diagnostic is written. That was this test's original point and it holds.
       const sig = (await testPool.query(
         `SELECT adjudication_status FROM friction_signals WHERE id = $1`, [pending]
       )).rows[0]!;
       expect(sig.adjudication_status).toBe('pending');
-      const gen = (await testPool.query(
+
+      // What DID change: the generation is released rather than left
+      // 'adjudicating'. Leaving it stranded wedged the bucket permanently —
+      // the retry met its own in-flight row, logged "already in flight,
+      // skipping", and then COMPLETED, so the job never dead-lettered and the
+      // reconciliation above never ran. Verified live: 12 affected users, zero
+      // incidents, until this release was added.
+      const gen = await testPool.query(
         `SELECT status FROM friction_adjudication_generations WHERE id = $1`, [generationId]
-      )).rows[0]!;
-      expect(gen.status).toBe('adjudicating');
+      );
+      expect(gen.rows).toHaveLength(0);
+
+      // And the slot is genuinely free: the same bucket can be claimed again.
+      const again = await testPool.query(
+        `INSERT INTO friction_adjudication_generations
+           (project_id, environment_id, fingerprint, rule_version, prompt_version,
+            status, window_start, window_end)
+         VALUES ($1, $2, 'fp-deadletter', 1, 1, 'adjudicating', now() - interval '7 days', now())
+         RETURNING id`,
+        [testProjectId, envId]
+      );
+      expect(again.rows[0]!.id).toBeTruthy();
     });
 
     it('lease-reaper dead-lettering performs the same reconciliation', async () => {

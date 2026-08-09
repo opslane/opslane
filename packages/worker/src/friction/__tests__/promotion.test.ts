@@ -21,10 +21,15 @@ const db = {
   listEligibleSignals: looseAsyncMock(),
   ensureCandidate: looseAsyncMock(),
   claimGeneration: looseAsyncMock(),
+  releaseGeneration: looseAsyncMock(),
   findValidAcceptedGeneration: looseAsyncMock(),
   attachInheritedSignal: looseAsyncMock(),
   applyBucketOutcome: looseAsyncMock(),
+  attachGenerationEvidenceToIncident: looseAsyncMock(),
   tryReserveAdjudicationCall: looseAsyncMock(),
+  readBucketState: looseAsyncMock(),
+  recordBucketEvaluation: looseAsyncMock(),
+  recordGenerationEvidence: looseAsyncMock(),
 };
 vi.mock('../promotion-db.js', () => ({
   findFoldTarget: (...a: unknown[]) => db.findFoldTarget(...a),
@@ -34,10 +39,16 @@ vi.mock('../promotion-db.js', () => ({
   listEligibleSignals: (...a: unknown[]) => db.listEligibleSignals(...a),
   ensureCandidate: (...a: unknown[]) => db.ensureCandidate(...a),
   claimGeneration: (...a: unknown[]) => db.claimGeneration(...a),
+  releaseGeneration: (...a: unknown[]) => db.releaseGeneration(...a),
   findValidAcceptedGeneration: (...a: unknown[]) => db.findValidAcceptedGeneration(...a),
   attachInheritedSignal: (...a: unknown[]) => db.attachInheritedSignal(...a),
   applyBucketOutcome: (...a: unknown[]) => db.applyBucketOutcome(...a),
+  attachGenerationEvidenceToIncident: (...a: unknown[]) =>
+    db.attachGenerationEvidenceToIncident(...a),
   tryReserveAdjudicationCall: (...a: unknown[]) => db.tryReserveAdjudicationCall(...a),
+  readBucketState: (...a: unknown[]) => db.readBucketState(...a),
+  recordBucketEvaluation: (...a: unknown[]) => db.recordBucketEvaluation(...a),
+  recordGenerationEvidence: (...a: unknown[]) => db.recordGenerationEvidence(...a),
 }));
 
 import { processFrictionOutcomes } from '../promotion.js';
@@ -112,7 +123,13 @@ beforeEach(() => {
   db.findValidAcceptedGeneration.mockResolvedValue(null);
   db.attachInheritedSignal.mockResolvedValue('attached');
   db.applyBucketOutcome.mockResolvedValue('promoted');
+  db.attachGenerationEvidenceToIncident.mockResolvedValue(0);
   db.tryReserveAdjudicationCall.mockResolvedValue(true);
+  // No prior evaluation, so the growth gate never fires: every pre-existing
+  // test keeps the meaning it had before the watermark existed.
+  db.readBucketState.mockResolvedValue(null);
+  db.recordBucketEvaluation.mockResolvedValue(undefined);
+  db.recordGenerationEvidence.mockResolvedValue(undefined);
 });
 
 describe('processFrictionOutcomes', () => {

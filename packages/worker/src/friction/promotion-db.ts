@@ -93,21 +93,25 @@ export async function findFoldTarget(
     : null;
 }
 
-/** Ids and total session-level occurrences of the signals a bucket
- * adjudication would claim: pending, active, identified, in-window. */
+/** Ids and total session-level occurrences of the bucket's evidence at this
+ * rule version: active, identified, in-window, whatever the verdict. A verdict
+ * must not delete the evidence it judged, or the bucket refills from zero and
+ * asks the model the same question again. `unchecked` alone is excluded: it
+ * means the owning job dead-lettered before a verdict (dead-letter.ts:14). */
 export async function listEligibleSignals(
   client: pg.PoolClient,
-  tuple: Pick<BucketTuple, 'projectId' | 'environmentId' | 'fingerprint'>,
+  tuple: Pick<BucketTuple, 'projectId' | 'environmentId' | 'fingerprint' | 'ruleVersion'>,
 ): Promise<{ ids: string[]; totalOccurrences: number }> {
   const { rows } = await client.query<{ id: string; occurrence_count: number }>(
     `SELECT id, occurrence_count
      FROM friction_signals
      WHERE project_id = $1 AND environment_id = $2 AND fingerprint = $3
-       AND adjudication_status = 'pending'
+       AND rule_version = $4
        AND end_user_id IS NOT NULL
+       AND adjudication_status <> 'unchecked'
        AND retracted_at IS NULL AND superseded_by IS NULL
        AND occurred_at > now() - interval '7 days'`,
-    [tuple.projectId, tuple.environmentId, tuple.fingerprint],
+    [tuple.projectId, tuple.environmentId, tuple.fingerprint, tuple.ruleVersion],
   );
   return {
     ids: rows.map((r) => r.id),
@@ -316,24 +320,128 @@ export async function ensureCandidate(
   return rows[0]!.id;
 }
 
-/** Distinct identified users behind pending active signals for the tuple in
- * the rolling seven-day window. Anonymous signals never count (plan D3);
- * terminal, retracted, and superseded signals never count (plan D5). */
+/** Distinct identified users behind the bucket's active evidence at this rule
+ * version, in the rolling seven-day window. Adjudicated rows stay evidence:
+ * counting only 'pending' made every verdict delete what it had just judged,
+ * so the bucket refilled from zero and re-asked the same question. Anonymous
+ * signals never count (plan D3); retracted and superseded signals never count
+ * (plan D5); `unchecked` never counts, because it marks a job that
+ * dead-lettered before reaching a verdict (dead-letter.ts:14). Rule version is
+ * part of the key: signals from different detector generations must not pool
+ * into one threshold that is then stamped with a single version. */
 export async function countEligibleUsers(
   client: pg.PoolClient,
-  tuple: Pick<BucketTuple, 'projectId' | 'environmentId' | 'fingerprint'>,
+  tuple: Pick<BucketTuple, 'projectId' | 'environmentId' | 'fingerprint' | 'ruleVersion'>,
 ): Promise<number> {
   const { rows } = await client.query<{ n: number }>(
     `SELECT COUNT(DISTINCT end_user_id)::int AS n
      FROM friction_signals
      WHERE project_id = $1 AND environment_id = $2 AND fingerprint = $3
-       AND adjudication_status = 'pending'
+       AND rule_version = $4
        AND end_user_id IS NOT NULL
+       AND adjudication_status <> 'unchecked'
        AND retracted_at IS NULL AND superseded_by IS NULL
        AND occurred_at > now() - interval '7 days'`,
-    [tuple.projectId, tuple.environmentId, tuple.fingerprint],
+    [tuple.projectId, tuple.environmentId, tuple.fingerprint, tuple.ruleVersion],
   );
   return rows[0]!.n;
+}
+
+/** Distinct identified users present the last time this bucket was judged by
+ * this rule and prompt version. Returns null when never judged, or when the
+ * last judgement is older than the evidence window: a bucket whose evidence
+ * decayed must not stay frozen behind a stale high-water mark (a bucket judged
+ * at 100 users whose evidence falls to 5 would otherwise need 150 forever).
+ * Takes the full tuple because prompt_version is part of the watermark key: a
+ * new prompt must be able to re-judge what an older prompt already judged. */
+export async function readBucketState(
+  client: pg.PoolClient,
+  tuple: BucketTuple,
+): Promise<{ evaluatedUsers: number } | null> {
+  const { rows } = await client.query<{ evaluated_users: number }>(
+    `SELECT evaluated_users
+     FROM friction_bucket_state
+     WHERE project_id = $1 AND environment_id = $2
+       AND fingerprint = $3 AND rule_version = $4 AND prompt_version = $5
+       AND evaluated_at IS NOT NULL
+       AND evaluated_at > now() - interval '7 days'`,
+    [
+      tuple.projectId, tuple.environmentId, tuple.fingerprint,
+      tuple.ruleVersion, tuple.promptVersion,
+    ],
+  );
+  const row = rows[0];
+  return row ? { evaluatedUsers: row.evaluated_users } : null;
+}
+
+/** The watermark upsert itself. Callers own the transaction and must already
+ * hold the bucket advisory lock, so evaluated_users, evaluated_at and
+ * last_generation_id always describe the same evaluation. Last-write-wins, not
+ * GREATEST: under the lock the last writer is the one that actually judged the
+ * bucket, and a monotonic maximum is exactly what freezes a decayed bucket. */
+async function writeBucketState(
+  client: pg.PoolClient,
+  tuple: BucketTuple,
+  opts: { evaluatedUsers: number; generationId: string | null },
+): Promise<void> {
+  await client.query(
+    `INSERT INTO friction_bucket_state
+       (project_id, environment_id, fingerprint, rule_version, prompt_version,
+        evaluated_users, evaluated_at, last_generation_id)
+     VALUES ($1, $2, $3, $4, $5, $6, now(), $7)
+     ON CONFLICT (project_id, environment_id, fingerprint, rule_version, prompt_version)
+     DO UPDATE SET
+       evaluated_users = EXCLUDED.evaluated_users,
+       evaluated_at = EXCLUDED.evaluated_at,
+       last_generation_id = EXCLUDED.last_generation_id,
+       updated_at = now()`,
+    [
+      tuple.projectId, tuple.environmentId, tuple.fingerprint,
+      tuple.ruleVersion, tuple.promptVersion,
+      opts.evaluatedUsers, opts.generationId,
+    ],
+  );
+}
+
+/** Standalone watermark write for callers outside applyBucketOutcome's
+ * transaction (none in production today — the outcome path writes the
+ * watermark atomically with the verdict). Takes the bucket advisory lock in
+ * its own transaction. */
+export async function recordBucketEvaluation(
+  client: pg.PoolClient,
+  tuple: BucketTuple,
+  opts: { evaluatedUsers: number; generationId: string | null },
+): Promise<void> {
+  await client.query('BEGIN');
+  try {
+    const [k1, k2] = tupleLockKey(tuple.projectId, tuple.environmentId, tuple.fingerprint);
+    await client.query('SELECT pg_advisory_xact_lock($1, $2)', [k1, k2]);
+    await writeBucketState(client, tuple, opts);
+    await client.query('COMMIT');
+  } catch (error: unknown) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  }
+}
+
+/** Which signals this generation was shown. Re-running is a no-op. The insert
+ * joins back to friction_signals on project_id so a signal id belonging to
+ * another tenant can never be recorded as this generation's evidence. */
+export async function recordGenerationEvidence(
+  client: pg.PoolClient,
+  generationId: string,
+  projectId: string,
+  signalIds: string[],
+): Promise<void> {
+  if (signalIds.length === 0) return;
+  await client.query(
+    `INSERT INTO friction_generation_evidence (generation_id, signal_id, project_id)
+     SELECT $1, s.id, $3
+     FROM friction_signals s
+     WHERE s.id = ANY($2::uuid[]) AND s.project_id = $3
+     ON CONFLICT (generation_id, signal_id) DO NOTHING`,
+    [generationId, signalIds, projectId],
+  );
 }
 
 /** Creates the durable in-flight generation for a threshold crossing. The
@@ -363,6 +471,41 @@ export async function claimGeneration(
     ],
   );
   return rows[0] ?? null;
+}
+
+/**
+ * Frees the in-flight slot held by a generation this job claimed but never
+ * adjudicated — the budget-exhausted path, where the claim succeeds and the
+ * model call never happens. Without it the row stays 'adjudicating' and
+ * `uq_friction_generation_inflight` blocks every future claim for that bucket
+ * permanently.
+ *
+ * Deletes rather than terminalizing to 'unchecked': that status specifically
+ * means a job exhausted its retries before reaching a verdict (007 migration,
+ * dead-letter.ts), and dead-letter reconciliation only writes a diagnostic
+ * candidate for generations it transitions itself — so a budget-released row
+ * marked 'unchecked' would sit there forever with a misleading status and no
+ * diagnostic. A generation that was never adjudicated has no audit value.
+ *
+ * Scoped to the claiming job and to rows with no verdict, so it can never
+ * delete another worker's in-flight claim or destroy a finished generation.
+ * `friction_generation_evidence.generation_id` cascades and
+ * `friction_bucket_state.last_generation_id` nulls, so the delete orphans
+ * neither. `friction_signals.generation_id` has no cascade, but no signal can
+ * reference this generation yet: the release runs before
+ * `claimSignalsForAdjudication`.
+ */
+export async function releaseGeneration(
+  generationId: string,
+  projectId: string,
+  claimJobId: string,
+): Promise<void> {
+  await getPool().query(
+    `DELETE FROM friction_adjudication_generations
+      WHERE id = $1 AND project_id = $2 AND claim_job_id = $3
+        AND status = 'adjudicating' AND adjudicated_at IS NULL`,
+    [generationId, projectId, claimJobId],
+  );
 }
 
 /** An accepted generation whose verdict is still valid; later matching
@@ -470,6 +613,11 @@ export async function applyBucketOutcome(opts: {
   tuple: BucketTuple;
   generationId: string;
   verdict: AdjudicationVerdict;
+  /** Distinct eligible users the threshold check counted for this call; the
+   * watermark is written at this level in the same transaction as the verdict,
+   * so a crash can never leave a judged bucket without its gate (duplicate
+   * paid call) or a gated bucket without its judgement. */
+  evaluatedUsers: number;
   meta: FoldMeta;
 }): Promise<BucketOutcome> {
   const { tuple, generationId, verdict, meta } = opts;
@@ -515,7 +663,24 @@ export async function applyBucketOutcome(opts: {
       [tuple.projectId, tuple.environmentId, tuple.fingerprint, claimJobId, generationId],
     );
     const signals = signalRes.rows;
-    if (isResume && signals.length === 0) {
+    if (signals.length === 0) {
+      // Resume with nothing left to attach, or every claimed row was
+      // retracted, superseded, or expired between claim and outcome. An
+      // accepted verdict over vanished evidence must not build a candidate
+      // from `signals[0]`, and the generation must not stay 'adjudicating'
+      // or uq_friction_generation_inflight wedges the bucket: terminalize
+      // as rejected. No watermark: the count this verdict was formed at no
+      // longer describes the bucket.
+      if (!isResume) {
+        await client.query(
+          `UPDATE friction_adjudication_generations
+           SET status = 'rejected',
+               verdict_reason = 'evidence disappeared before the outcome applied',
+               model_id = $2, adjudicated_at = now(), finished_at = now()
+           WHERE id = $1`,
+          [generationId, meta.modelId],
+        );
+      }
       await client.query('COMMIT');
       return 'noop';
     }
@@ -553,6 +718,7 @@ export async function applyBucketOutcome(opts: {
       ],
     );
     if (!verdict.accepted) {
+      await writeBucketState(client, tuple, { evaluatedUsers: opts.evaluatedUsers, generationId });
       await client.query('COMMIT');
       return 'rejected';
     }
@@ -571,11 +737,17 @@ export async function applyBucketOutcome(opts: {
     );
     const wasCandidate = groupRes.rows[0]!.status === 'candidate';
 
-    // Attach every owned signal, then materialize impact from source rows.
+    // Attach every owned signal, then the generation's wider recorded
+    // evidence (incident_id only — verdicts on previously judged rows are
+    // never rewritten), then materialize impact once from source rows. Doing
+    // the attach here rather than after commit means a crash can never leave
+    // an accepted incident undercounting the evidence the model was shown,
+    // and the retention-pin below covers the attached evidence's sessions.
     await client.query(
       `UPDATE friction_signals SET incident_id = $2 WHERE id = ANY($1::uuid[])`,
       [signals.map((s) => s.id), incidentId],
     );
+    await attachEvidenceRows(client, generationId, tuple, incidentId);
     await recomputeIncidentImpact(client, incidentId, tuple.projectId);
     await client.query(
       `UPDATE sessions
@@ -621,6 +793,7 @@ export async function applyBucketOutcome(opts: {
       [generationId, incidentId],
     );
 
+    await writeBucketState(client, tuple, { evaluatedUsers: opts.evaluatedUsers, generationId });
     await client.query('COMMIT');
     return outcome;
   } catch (err) {
@@ -795,4 +968,80 @@ export async function recomputeIncidentImpact(
      WHERE id = $1 AND project_id = $2`,
     [incidentId, projectId],
   );
+}
+
+/**
+ * Attaches this generation's recorded evidence to the incident it produced.
+ *
+ * `applyBucketOutcome` only owns the rows it claimed for this call, so once
+ * evidence survives verdicts the model is shown 32 users while the incident
+ * reports 4. This closes that gap from the other side, deliberately as a
+ * separate statement rather than by widening the outcome's selection: those
+ * rows also receive the verdict and audit columns, so a wider selection would
+ * rewrite the history of every previously judged signal — and would do it on
+ * rejections too, since that update runs before the rejected early return.
+ *
+ * Sets `incident_id` ONLY. `adjudication_status`, `generation_id` and the
+ * audit columns belong to whichever generation actually judged each signal.
+ *
+ * Skips rows already attached anywhere, so a signal folded onto an error
+ * incident keeps that incident rather than being moved onto the friction one.
+ * Returns the number of rows newly attached.
+ *
+ * The production accept path runs this attach inside applyBucketOutcome's
+ * transaction; this standalone wrapper exists for repair tooling and tests.
+ */
+export async function attachGenerationEvidenceToIncident(
+  generationId: string,
+  projectId: string,
+  incidentId: string,
+  ruleVersion: number,
+): Promise<number> {
+  const client = await getPool().connect();
+  try {
+    await client.query('BEGIN');
+    const attached = await attachEvidenceRows(
+      client,
+      generationId,
+      { projectId, ruleVersion },
+      incidentId,
+    );
+    // Rebuild impact from source rows: the newly attached evidence has to show
+    // up in occurrence and affected-user counts, and the recompute takes the
+    // group-row lock that serializes this with folds and error ingest.
+    await recomputeIncidentImpact(client, incidentId, projectId);
+    await client.query('COMMIT');
+    return attached;
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+/** The attach itself: incident_id only, scoped to the tenant, the generation's
+ * recorded membership, and the bucket's rule version. Callers own the
+ * transaction and the follow-up impact recompute. */
+async function attachEvidenceRows(
+  client: pg.PoolClient,
+  generationId: string,
+  tuple: Pick<BucketTuple, 'projectId' | 'ruleVersion'>,
+  incidentId: string,
+): Promise<number> {
+  const res = await client.query(
+    `UPDATE friction_signals s
+        SET incident_id = $3
+       FROM friction_generation_evidence e
+      WHERE e.generation_id = $1
+        AND e.signal_id = s.id
+        AND e.project_id = $2
+        AND s.project_id = $2
+        AND s.rule_version = $4
+        AND s.incident_id IS NULL
+        AND s.adjudication_status <> 'unchecked'
+        AND s.retracted_at IS NULL AND s.superseded_by IS NULL`,
+    [generationId, tuple.projectId, incidentId, tuple.ruleVersion],
+  );
+  return res.rowCount ?? 0;
 }

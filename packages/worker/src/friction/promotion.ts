@@ -11,16 +11,23 @@ import {
   listEligibleSignals,
   ensureCandidate,
   claimGeneration,
+  releaseGeneration,
   findValidAcceptedGeneration,
   attachInheritedSignal,
   applyBucketOutcome,
   tryReserveAdjudicationCall,
+  readBucketState,
+  recordGenerationEvidence,
   type FoldSignal,
   type BucketTuple,
 } from './promotion-db.js';
 
-const PROMOTION_THRESHOLD_USERS = 5;
-const WINDOW_DAYS = 7;
+export const PROMOTION_THRESHOLD_USERS = 5;
+/** Re-judge only when evidence has grown by half again since the last verdict.
+ * Without this, a bucket over threshold is re-judged on every session. */
+export const RE_ADJUDICATION_GROWTH = 1.5;
+export const EVIDENCE_WINDOW_DAYS = 7;
+const WINDOW_DAYS = EVIDENCE_WINDOW_DAYS;
 
 interface PendingSignalRow extends FoldSignal {
   signal_type: 'rage_click' | 'dead_click' | 'form_abandon';
@@ -175,8 +182,27 @@ export async function processFrictionOutcomes(
       continue;
     }
 
-    // Threshold crossed: claim the durable generation; losers skip the call.
-    if (!await reserveOrRevisit(session, signal, jobId, runtime)) break;
+    // Evidence now survives verdicts, so being over threshold is no longer a
+    // one-shot event: without this gate every later session in the bucket
+    // would re-ask the same question. The watermark expires with the evidence
+    // window, so a bucket whose evidence decayed is not frozen forever.
+    const state = await withClient((c) => readBucketState(c, tuple));
+    if (state && eligibleUsers < Math.ceil(state.evaluatedUsers * RE_ADJUDICATION_GROWTH)) {
+      logger.info('Friction bucket judged and not materially grown', {
+        project_id: signal.project_id,
+        signal_id: signal.id,
+        job_id: jobId,
+        eligible_users: eligibleUsers,
+        evaluated_users: state.evaluatedUsers,
+      });
+      continue;
+    }
+
+    // Threshold crossed. Claim the durable generation first, so a job that
+    // loses the claim never burns a call from the daily budget it was never
+    // going to make. If the budget is then exhausted, the claim must be
+    // released: a generation left 'adjudicating' holds the in-flight slot and
+    // uq_friction_generation_inflight would block every retry for this bucket.
     const generation = await claimGeneration(tuple, jobId);
     if (!generation) {
       logger.info('Friction generation already in flight, skipping', {
@@ -186,8 +212,22 @@ export async function processFrictionOutcomes(
       });
       continue;
     }
+    if (!await reserveOrRevisit(session, signal, jobId, runtime)) {
+      await releaseGeneration(generation.id, signal.project_id, jobId);
+      logger.info('Released generation: adjudication budget exhausted', {
+        project_id: signal.project_id,
+        signal_id: signal.id,
+        job_id: jobId,
+        generation_id: generation.id,
+      });
+      break;
+    }
     const eligible = await withClient((c) => listEligibleSignals(c, tuple));
     await withClient((c) => claimSignalsForAdjudication(c, eligible.ids, jobId));
+    // Membership must exist before applyBucketOutcome runs: the outcome path
+    // reads it to attach the full evidence set to the incident.
+    await withClient((c) =>
+      recordGenerationEvidence(c, generation.id, signal.project_id, eligible.ids));
     const input: AdjudicationInput = {
       scope: 'bucket',
       signalType: signal.signal_type,
@@ -202,10 +242,17 @@ export async function processFrictionOutcomes(
     };
     const verdict = await adjudicate(adjudicator, input, signal, jobId, runtime);
     const stored = storedVerdict(verdict);
+    // The outcome transaction also attaches the generation's wider recorded
+    // evidence to an accepted incident and writes the growth-gate watermark,
+    // so a crash between verdict and either of those can never leave an
+    // undercounted incident or an unwatermarked judged bucket. A 'noop'
+    // outcome (the generation was released or terminalized under us) writes
+    // neither.
     const outcome = await applyBucketOutcome({
       tuple,
       generationId: generation.id,
       verdict: stored,
+      evaluatedUsers: eligibleUsers,
       meta: { modelId: adjudicator.modelId, promptVersion: adjudicator.promptVersion, jobId },
     });
     logger.info('Friction bucket adjudicated', {

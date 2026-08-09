@@ -4,8 +4,8 @@ import type { WindowEvent } from './evidence-window.js';
 
 /** Bump when the prompt contract changes: a new version always opens a new
  * adjudication generation (plan D1); verdicts never carry across versions. */
-export const ADJUDICATION_PROMPT_VERSION = 1;
-export const ADJUDICATION_PROMPT_VERSION_WINDOWS = 2;
+export const ADJUDICATION_PROMPT_VERSION = 5;
+export const ADJUDICATION_PROMPT_VERSION_WINDOWS = 6;
 export const ADJUDICATION_MODEL = 'claude-sonnet-4-6';
 export type EvidenceWindowMode = 'off' | 'shadow' | 'on';
 
@@ -58,6 +58,20 @@ export function buildAdjudicationPrompt(input: AdjudicationInput): string {
     evidence,
     '</untrusted-evidence>',
   ];
+  // Pushed after the fence closes so untrusted page content can never be read
+  // as part of the rubric. Bucket scope only: fold scope judges a single
+  // signal next to an error and has no volume bar to state.
+  if (input.bucketSummary) {
+    instructions.push(
+      'This detection has ALREADY cleared the product significance bar: a bucket',
+      'is only sent to you once at least 5 distinct users have hit it inside the',
+      'window. Volume is therefore not a valid reason to reject. Judge only',
+      'whether the DETECTOR is right: does this interaction pattern describe a',
+      'real user-facing problem, or is it an artifact (an intentional repeat',
+      'click, a non-interactive element a user idly clicked, a control that',
+      'legitimately does nothing on that page)?',
+    );
+  }
   if (input.evidenceWindows) {
     instructions.push(
       'Each evidence window is the real event timeline (±15s) around one flagged click.',
@@ -66,8 +80,14 @@ export function buildAdjudicationPrompt(input: AdjudicationInput): string {
       'The reason must cite relevant window events by time.',
     );
   }
+  // Advertise "uncertain" only where it has a stated meaning. Offering it on
+  // every request, with the rule for using it given only in the evidence-window
+  // branch, invited {"accepted": true, "uncertain": true} — a shape that used to
+  // be a parse error and wedged the bucket.
   instructions.push(
-    'Respond with only a JSON object: {"accepted": boolean, "reason": string, "uncertain"?: boolean}.',
+    input.evidenceWindows
+      ? 'Respond with only a JSON object: {"accepted": boolean, "reason": string, "uncertain"?: boolean}.'
+      : 'Respond with only a JSON object: {"accepted": boolean, "reason": string}.',
     'The reason must be one short sentence and must not quote selector text verbatim.',
   );
   return instructions.join('\n');
@@ -93,8 +113,18 @@ export function parseVerdict(raw: string): AdjudicationVerdict {
   ) {
     throw new Error('adjudication verdict: missing or mistyped accepted/reason');
   }
+  // "Accepted but uncertain" is not a parse error. Uncertainty vetoes
+  // acceptance, which is the policy storedVerdict() in promotion.ts already
+  // applies to every uncertain verdict; throwing here only stopped that policy
+  // from running. It also stranded the durable generation in 'adjudicating',
+  // which wedges the bucket behind uq_friction_generation_inflight — observed
+  // on 4 of 4 live calls under prompt version 3.
   if (obj['accepted'] && obj['uncertain']) {
-    throw new Error('adjudication verdict: accepted and uncertain are contradictory');
+    return {
+      accepted: false,
+      uncertain: true,
+      reason: obj['reason'] as string,
+    };
   }
   return {
     accepted: obj['accepted'],
