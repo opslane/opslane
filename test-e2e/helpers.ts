@@ -708,22 +708,12 @@ export async function cleanupTenant(orgId: string): Promise<void> {
      )`,
     [orgId]
   );
-  // Bucket state and generation evidence reference environments with no
-  // cascade, so they must go before the environments delete or it fails on
-  // friction_bucket_state_environment_id_fkey. Evidence also cascades from
-  // signals, but bucket state has no cascade from anything.
-  await db.query(
-    `DELETE FROM friction_generation_evidence WHERE project_id IN (
-       SELECT id FROM projects WHERE org_id = $1
-     )`,
-    [orgId]
-  );
-  await db.query(
-    `DELETE FROM friction_bucket_state WHERE project_id IN (
-       SELECT id FROM projects WHERE org_id = $1
-     )`,
-    [orgId]
-  );
+  // Generations reference projects and environments without a cascade, on
+  // purpose: a generation records a paid model call and its verdict, so a
+  // delete that would destroy one should fail rather than cascade silently.
+  // Tearing a test tenant down is exactly the case that deletes them
+  // deliberately. Bucket state and generation evidence cascade from their
+  // project and environment (migration 042), so they need no delete here.
   await db.query(
     `DELETE FROM friction_adjudication_generations WHERE project_id IN (
        SELECT id FROM projects WHERE org_id = $1
