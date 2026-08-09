@@ -648,6 +648,13 @@ export async function cleanupTenant(orgId: string): Promise<void> {
     `DELETE FROM error_group_jobs WHERE project_id IN (SELECT id FROM projects WHERE org_id = $1)`,
     [orgId]
   );
+  // A generation can point at a signal the sessions cascade is about to
+  // remove, and that reference does not cascade. Break it first.
+  await db.query(
+    `UPDATE friction_adjudication_generations SET representative_signal_id = NULL
+      WHERE project_id IN (SELECT id FROM projects WHERE org_id = $1)`,
+    [orgId]
+  );
   // Sessions cascade to session_chunks and friction_signals.
   await db.query(
     `DELETE FROM sessions WHERE project_id IN (SELECT id FROM projects WHERE org_id = $1)`,
@@ -697,6 +704,28 @@ export async function cleanupTenant(orgId: string): Promise<void> {
   );
   await db.query(
     `DELETE FROM project_api_keys WHERE project_id IN (
+       SELECT id FROM projects WHERE org_id = $1
+     )`,
+    [orgId]
+  );
+  // Bucket state and generation evidence reference environments with no
+  // cascade, so they must go before the environments delete or it fails on
+  // friction_bucket_state_environment_id_fkey. Evidence also cascades from
+  // signals, but bucket state has no cascade from anything.
+  await db.query(
+    `DELETE FROM friction_generation_evidence WHERE project_id IN (
+       SELECT id FROM projects WHERE org_id = $1
+     )`,
+    [orgId]
+  );
+  await db.query(
+    `DELETE FROM friction_bucket_state WHERE project_id IN (
+       SELECT id FROM projects WHERE org_id = $1
+     )`,
+    [orgId]
+  );
+  await db.query(
+    `DELETE FROM friction_adjudication_generations WHERE project_id IN (
        SELECT id FROM projects WHERE org_id = $1
      )`,
     [orgId]
