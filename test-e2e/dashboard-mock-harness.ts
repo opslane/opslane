@@ -253,7 +253,7 @@ function mockAdminOverview(): Record<string, unknown> {
     events: { last_1h: 0, last_24h: 0, last_7d: 0, hourly: [], top_projects: [] },
     jobs: { by_status: {}, by_type: {}, oldest_pending_age_seconds: null, dead_letters_7d: 0 },
     workers: { live_claims: 0, active_5m: 0 },
-    outcomes: { by_status: {}, pr_created_24h: 0, pr_created_7d: 0, needs_human_7d: 0, merged_7d: 0, closed_7d: 0 },
+    outcomes: { by_status: {}, pr_created_24h: 0, pr_created_7d: 0, needs_human_7d: 0, merged_7d: 0, closed_7d: 0, spend_usd_7d: 0, cost_per_merged_pr_7d: null },
   };
 }
 
