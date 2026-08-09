@@ -16,6 +16,16 @@ export async function purgeStaleTenants(pool: pg.Pool, orgName: string): Promise
     [orgName],
   );
   await pool.query(`DELETE FROM friction_signals WHERE project_id IN ${orgScope}`, [orgName]);
+  // Both reference friction_adjudication_generations, so they go first.
+  // last_generation_id is ON DELETE SET NULL and the evidence FKs cascade, so
+  // this is belt-and-braces for generations, but friction_bucket_state also
+  // references projects and environments without a cascade, so purging it
+  // explicitly is what keeps bucket state from outliving its project.
+  await pool.query(
+    `DELETE FROM friction_generation_evidence WHERE project_id IN ${orgScope}`,
+    [orgName],
+  );
+  await pool.query(`DELETE FROM friction_bucket_state WHERE project_id IN ${orgScope}`, [orgName]);
   await pool.query(
     `DELETE FROM friction_adjudication_generations WHERE project_id IN ${orgScope}`,
     [orgName],

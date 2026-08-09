@@ -5,7 +5,7 @@ import type {
 } from '@opslane/shared';
 import { frictionFingerprint, normalizePageUrl } from './fingerprint.js';
 
-export const RULE_VERSION = 2;
+export const RULE_VERSION = 3;
 
 const CLICK_CLUSTER_GAP_MS = 1_000;
 const RAGE_MIN_CLICKS = 3;

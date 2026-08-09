@@ -7,6 +7,44 @@ const TYPE_TITLES: Record<string, string> = {
 };
 
 /**
+ * Non-terminal failure reconciliation: a job going back on the queue must never
+ * keep holding an in-flight adjudication generation.
+ *
+ * The dead-letter path below already terminalizes the generation, but an
+ * ordinary retry did not, and that gap is not self-healing. The retry re-runs,
+ * meets its OWN 'adjudicating' row, logs "generation already in flight,
+ * skipping", and then completes successfully — so the job never dead-letters
+ * and reconciliation never runs. The bucket stays wedged behind
+ * uq_friction_generation_inflight forever, silently.
+ *
+ * Deleting rather than terminalizing: 'unchecked' means retries were exhausted,
+ * which is not what happened here, and an adjudication that never produced a
+ * verdict has no audit value. Scoped to the owning job and guarded on having no
+ * verdict and no referencing signal, so it can never remove another worker's
+ * claim, a finished generation, or a row something still points at.
+ *
+ * Runs INSIDE the caller's transaction so the job flip and the release commit
+ * together.
+ */
+export async function releaseUnfinishedGeneration(
+  client: pg.PoolClient,
+  jobId: string,
+  projectId: string,
+): Promise<number> {
+  const result = await client.query(
+    `DELETE FROM friction_adjudication_generations g
+      WHERE g.claim_job_id = $1 AND g.project_id = $2
+        AND g.status = 'adjudicating'
+        AND g.adjudicated_at IS NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM friction_signals s WHERE s.generation_id = g.id
+        )`,
+    [jobId, projectId],
+  );
+  return result.rowCount ?? 0;
+}
+
+/**
  * Dead-letter reconciliation for a session_analysis job (plan D5 / issue #56).
  * Runs INSIDE the caller's dead-letter transaction so the job flip, signal
  * flips, generation release, and diagnostic upserts commit atomically:
