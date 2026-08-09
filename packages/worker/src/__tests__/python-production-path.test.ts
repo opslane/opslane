@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import { purgeDiagnosisDecisions } from './purge-diagnosis-decisions.js';
+import { purgeJobUsage } from './purge-job-usage.js';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import pg from 'pg';
 
@@ -243,6 +244,12 @@ describeDb('Python two-stage production path', () => {
     delete process.env['ANTHROPIC_API_KEY'];
     delete process.env['GITHUB_TOKEN'];
     await purgeDiagnosisDecisions(pool, projectId);
+    // The real investigate processor records job_usage rows (migration 041),
+    // which FK-block deleting their jobs; purge them first.
+    const jobs = await pool.query<{ id: string }>(
+      `SELECT id FROM error_group_jobs WHERE project_id = $1`, [projectId],
+    );
+    await purgeJobUsage(pool, jobs.rows.map((row) => row.id));
     await pool.query(`DELETE FROM error_group_jobs WHERE project_id = $1`, [projectId]);
     await pool.query(`DELETE FROM error_events WHERE project_id = $1`, [projectId]);
     await pool.query(`DELETE FROM error_groups WHERE project_id = $1`, [projectId]);

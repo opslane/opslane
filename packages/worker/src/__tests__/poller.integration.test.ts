@@ -12,9 +12,10 @@
  */
 import crypto from 'node:crypto';
 import { purgeDiagnosisDecisions } from './purge-diagnosis-decisions.js';
-import { describe, it, expect, beforeAll, afterEach, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterEach, afterAll, vi } from 'vitest';
 import pg from 'pg';
 import { createPoller } from '../poller.js';
+import { logger } from '../logger.js';
 import type { ClaimedJob } from '../db.js';
 import {
   completeJob,
@@ -210,6 +211,49 @@ describeDb('real poller under lease loss', () => {
     await poller.stop();
 
     expect(elapsed).toBeLessThan(5000);
+  });
+
+  it('includes job_type in claim, completion, and failure lifecycle logs', async () => {
+    const [completedJobId, failedJobId] = await seedJobsInOneProject(2);
+    const infoSpy = vi.spyOn(logger, 'info').mockImplementation(() => {});
+    const errorSpy = vi.spyOn(logger, 'error').mockImplementation(() => {});
+    const poller = createPoller({
+      intervalMs: 50,
+      leaseDurationMs: 30_000,
+      workerId: 'logging-it',
+      processJob: async (job) => {
+        if (job.id === failedJobId) throw new Error('expected logging failure');
+      },
+    });
+
+    poller.start();
+    try {
+      await waitFor(async () =>
+        infoSpy.mock.calls.some(([message, fields]) =>
+          message === 'Completed job' && fields?.['job_id'] === completedJobId,
+        ) &&
+        errorSpy.mock.calls.some(([message, fields]) =>
+          message === 'Job failed' && fields?.['job_id'] === failedJobId,
+        ),
+      );
+
+      expect(infoSpy).toHaveBeenCalledWith(
+        'Claimed job',
+        expect.objectContaining({ job_id: completedJobId, job_type: 'investigate' }),
+      );
+      expect(infoSpy).toHaveBeenCalledWith(
+        'Completed job',
+        expect.objectContaining({ job_id: completedJobId, job_type: 'investigate' }),
+      );
+      expect(errorSpy).toHaveBeenCalledWith(
+        'Job failed',
+        expect.objectContaining({ job_id: failedJobId, job_type: 'investigate' }),
+      );
+    } finally {
+      await poller.stop();
+      infoSpy.mockRestore();
+      errorSpy.mockRestore();
+    }
   });
 
   it('leaves no claimed job behind after stop() resolves', async () => {

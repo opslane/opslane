@@ -14,6 +14,7 @@ import {
   resolveSilentMergedGroups,
   updateJobTraceUrl,
   getQueueDepth,
+  recordJobUsage,
 } from './db.js';
 import { buildReason, reasonCodeForDecision, reproductionRemediation } from './reason-codes.js';
 import { logger, safeErrorMessage, setWorkerId } from './logger.js';
@@ -56,6 +57,8 @@ import { processRouteMapJob } from './route-map.js';
 import { effectivePlatform, pythonPipelineEnabled } from './platform.js';
 import { parseRuntimeInfo } from './runtime-info.js';
 import { parseDiagnosis } from './diagnosis-schema.js';
+import { pushScore } from './scores.js';
+import { processScoreSyncJob } from './score-sync.js';
 
 /** Injectable seam: unit tests and the e2e gate substitute a deterministic
  * adjudicator; production uses the real Anthropic-backed one. */
@@ -364,6 +367,11 @@ export async function processJobInner(job: ClaimedJob, signal: AbortSignal): Pro
     return;
   }
 
+  if (job.jobType === 'score_sync') {
+    await processScoreSyncJob(job);
+    return;
+  }
+
   if (!job.errorGroupId) {
     throw new Error(`Job ${job.id} missing error_group_id`);
   }
@@ -431,8 +439,14 @@ export async function processJobInner(job: ClaimedJob, signal: AbortSignal): Pro
       }
       logger.error('Fix job threw — terminated as needs_human', { job_id: errorJob.id, error: safeMessage });
     }
-  } else {
+  } else if (errorJob.jobType === 'investigate' || errorJob.jobType === 'error_fix') {
     await processInvestigateJob(errorJob, signal);
+  } else {
+    // Never fall through to a paid investigation: a job type this binary does
+    // not know (enqueued by a newer ingestion during a skewed deploy) must
+    // fail loudly and dead-letter instead of silently investigating a group
+    // that may already be terminal.
+    throw new Error(`Unknown job_type '${errorJob.jobType}' for job ${errorJob.id}`);
   }
 }
 
@@ -584,6 +598,14 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
       breadcrumbs: event?.breadcrumbs ?? '[]',
       sessionContext,
     }, repoDir);
+    await recordJobUsage({
+      jobId: job.id,
+      execution: job.attempts,
+      phase: 'investigation',
+      model: INVESTIGATION_MODEL,
+      usage: triage.usage,
+      costUsd: triage.costUsd,
+    });
     checkAbort(signal);
 
     logger.info('Investigation result', {
@@ -654,6 +676,7 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
         confidence: triage.confidence,
         platform,
         decision,
+        sourceJobId: job.id,
       }, job);
       if (fixResult.created) {
         jobsProcessed++;
@@ -686,6 +709,33 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
       } else {
         logger.info('Investigation: investigated (awaiting user)', {
           job_id: job.id, confidence: triage.confidence, duration_ms: durationMs,
+        });
+      }
+    }
+
+    const outcomeTraceId = getActiveTraceId();
+    if (outcomeTraceId) {
+      try {
+        await pushScore({
+          traceId: outcomeTraceId,
+          name: 'diagnosis_outcome',
+          value: triage.outcome,
+          dataType: 'CATEGORICAL',
+          id: `diagnosis-outcome-${job.id}-${job.attempts}`,
+        });
+        if (triage.confidence) {
+          await pushScore({
+            traceId: outcomeTraceId,
+            name: 'diagnosis_confidence',
+            value: triage.confidence,
+            dataType: 'CATEGORICAL',
+            id: `diagnosis-confidence-${job.id}-${job.attempts}`,
+          });
+        }
+      } catch (err: unknown) {
+        logger.warn('diagnosis score push failed', {
+          job_id: job.id,
+          error: safeErrorMessage(err),
         });
       }
     }
@@ -772,6 +822,7 @@ export async function processFrictionInvestigateJob(
         const fixResult = await updateGroupAndCreateFixJob(job.errorGroupId, job.projectId, {
           rootCause: result.reason,
           confidence: result.confidence,
+          sourceJobId: job.id,
         }, job, { allowFriction: true });
         if (fixResult.created) {
           logger.info('Friction investigation: auto-triggering fix (autonomy ladder)', {
@@ -1116,6 +1167,7 @@ export async function processFixJob(job: ClaimedJob & { errorGroupId: string }, 
       platform,
       customerRuntime,
       jobId: job.id,
+      usageContext: { jobId: job.id, execution: job.attempts },
       errorGroupId: job.errorGroupId,
       projectId: job.projectId,
       title: group.title,

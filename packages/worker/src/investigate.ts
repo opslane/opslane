@@ -10,6 +10,7 @@ import { runReadOnlyAgent, type ReadOnlyStop, type TokenUsage } from './readonly
 import type { RuntimeInfo } from './runtime-info.js';
 import { traceSpan } from './tracing.js';
 import type { TriageResult } from './agent-fix.js';
+import { calculateCost } from '@opslane/agent-core';
 
 /**
  * The model the investigation actually runs on.
@@ -259,7 +260,7 @@ export async function investigateError(
     }));
 
   const filesRead = run.filesRead;
-  const costUsd = Number(run.costUsd.toFixed(4));
+  const costUsd = Number(calculateCost(run.usage, pricing).toFixed(4));
 
   if (run.stop !== 'terminal') {
     // Cost is carried on EVERY return path. Dropping it here would undercount

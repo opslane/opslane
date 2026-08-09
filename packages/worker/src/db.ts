@@ -4,6 +4,7 @@ import { reconcileDeadLetteredSessionAnalysis } from './friction/dead-letter.js'
 import type { Platform } from './platform.js';
 import type { DerivedDecision } from './classify.js';
 import type { RouteMapRow } from './route-map.js';
+import { logger, safeErrorMessage } from './logger.js';
 
 const { Pool } = pg;
 
@@ -128,6 +129,56 @@ export async function recordDiagnosisDecision(
   row: DecisionRow,
 ): Promise<void> {
   await insertDiagnosisDecision(getPool(), errorGroupId, projectId, row);
+}
+
+export type UsagePhase = 'investigation' | 'fix';
+
+export interface TokenUsage {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+}
+
+/**
+ * Best-effort append to the immutable job usage ledger. Spend analytics must
+ * never turn an otherwise successful job into a failure; duplicate phase
+ * writes for the same execution and model are collapsed by the database key.
+ */
+export async function recordJobUsage(entry: {
+  jobId: string;
+  execution: number;
+  phase: UsagePhase;
+  model: string;
+  usage: TokenUsage;
+  costUsd: number;
+}): Promise<void> {
+  try {
+    await getPool().query(
+      `INSERT INTO job_usage
+         (job_id, execution, phase, model, input_tokens, output_tokens,
+          cache_read_tokens, cache_write_tokens, cost_usd)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       ON CONFLICT (job_id, execution, phase, model) DO NOTHING`,
+      [
+        entry.jobId,
+        entry.execution,
+        entry.phase,
+        entry.model,
+        Math.round(entry.usage.input),
+        Math.round(entry.usage.output),
+        Math.round(entry.usage.cacheRead),
+        Math.round(entry.usage.cacheWrite),
+        Math.max(0, entry.costUsd).toFixed(4),
+      ],
+    );
+  } catch (err: unknown) {
+    logger.error('job_usage insert failed', {
+      job_id: entry.jobId,
+      phase: entry.phase,
+      error: safeErrorMessage(err),
+    });
+  }
 }
 
 export interface ClaimedJob {
@@ -1777,6 +1828,7 @@ export async function updateGroupAndCreateFixJob(
     confidence?: ConfidenceLevel;
     platform?: Platform;
     decision?: DecisionRow;
+    sourceJobId?: string;
   },
   lease: JobLease,
   opts?: { allowFriction?: boolean },
@@ -1843,12 +1895,14 @@ export async function updateGroupAndCreateFixJob(
         `UPDATE error_group_jobs
          SET platform = COALESCE(platform, $2),
              payload = COALESCE(payload, $3::jsonb),
+             source_job_id = COALESCE(source_job_id, $4),
              updated_at = now()
          WHERE id = $1`,
         [
           existingFix.rows[0].id,
           fields.platform ?? 'javascript',
           fields.diagnosis === undefined ? null : JSON.stringify({ diagnosis: fields.diagnosis }),
+          fields.sourceJobId ?? null,
         ],
       );
       await client.query(
@@ -1886,14 +1940,16 @@ export async function updateGroupAndCreateFixJob(
       );
     }
     const result = await client.query<{ id: string }>(
-      `INSERT INTO error_group_jobs (error_group_id, project_id, job_type, triggered_by, platform, payload)
-       VALUES ($1, $2, 'fix', 'auto', $3, $4::jsonb)
+      `INSERT INTO error_group_jobs
+         (error_group_id, project_id, job_type, triggered_by, platform, payload, source_job_id)
+       VALUES ($1, $2, 'fix', 'auto', $3, $4::jsonb, $5)
        RETURNING id`,
       [
         errorGroupId,
         projectId,
         fields.platform ?? 'javascript',
         fields.diagnosis === undefined ? null : JSON.stringify({ diagnosis: fields.diagnosis }),
+        fields.sourceJobId ?? null,
       ]
     );
     if (fields.decision) {

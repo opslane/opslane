@@ -49,6 +49,8 @@ const baseOverview: AdminOverview = {
     needs_human_7d: 0,
     merged_7d: 0,
     closed_7d: 0,
+    spend_usd_7d: 0,
+    cost_per_merged_pr_7d: null,
   },
 };
 
@@ -102,6 +104,22 @@ describe('AdminView onboarding funnel', () => {
 
     expect(wrapper.text()).toContain('System observability');
     expect(wrapper.find('[aria-label="Agent onboarding funnel"]').exists()).toBe(false);
+
+    wrapper.unmount();
+  });
+
+  it('renders spend and cost per merged PR outcome tiles', async () => {
+    api.getAdminOverview.mockResolvedValue(baseOverview);
+
+    const wrapper = mount(AdminView);
+    await flushPromises();
+
+    const outcomesHeading = wrapper.findAll('h2').find((heading) => heading.text() === 'Incident outcomes');
+    const outcomesCard = outcomesHeading?.element.parentElement;
+    expect(outcomesCard?.textContent).toContain('Spend 7d');
+    expect(outcomesCard?.textContent).toContain('$0.00');
+    expect(outcomesCard?.textContent).toContain('Cost / merged PR 7d');
+    expect(outcomesCard?.textContent).toContain('—');
 
     wrapper.unmount();
   });

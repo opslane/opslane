@@ -97,6 +97,7 @@ export function createPoller(options: PollerOptions): Poller {
       job_id: job.id,
       error_group_id: job.errorGroupId,
       project_id: job.projectId,
+      job_type: job.jobType,
     });
 
     const controller = new AbortController();
@@ -148,6 +149,7 @@ export function createPoller(options: PollerOptions): Poller {
       logger.info('Completed job', {
         job_id: job.id,
         error_group_id: job.errorGroupId,
+        job_type: job.jobType,
       });
       return 'completed';
     } catch (err: unknown) {
@@ -159,6 +161,7 @@ export function createPoller(options: PollerOptions): Poller {
       logger.error('Job failed', {
         job_id: job.id,
         error_group_id: job.errorGroupId,
+        job_type: job.jobType,
         error: message,
       });
       try {

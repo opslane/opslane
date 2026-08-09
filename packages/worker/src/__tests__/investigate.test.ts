@@ -224,6 +224,20 @@ describe('execution failures never masquerade as findings', () => {
     expect(result.costUsd).toBeGreaterThan(0);
   });
 
+  it('recomputes truncated-response cost from the complete token usage', async () => {
+    mockMessagesCreate.mockResolvedValueOnce({
+      content: [{ type: 'text', text: 'partial answer' }],
+      stop_reason: 'max_tokens',
+      usage: USAGE,
+    });
+
+    const result = await investigateError('key', makeInput(), tempDir);
+
+    expect(result.stop).toBe('truncated');
+    expect(result.usage).toEqual({ input: 500, output: 100, cacheRead: 0, cacheWrite: 0 });
+    expect(result.costUsd).toBe(0.002);
+  });
+
   it('keeps a diagnosis that arrives in the same response that blows the budget', async () => {
     process.env['INVESTIGATION_BUDGET_USD'] = '0.0000001';
     happyPath();

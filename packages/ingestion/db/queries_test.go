@@ -101,6 +101,54 @@ func seedGroup(t *testing.T, pool *pgxpool.Pool, q *db.Queries, name string) (or
 	return org.ID, proj.ID, env.ID, result.GroupID
 }
 
+func assertScoreSyncJob(t *testing.T, pool *pgxpool.Pool, deliveryID, fixJobID, outcome string) {
+	t.Helper()
+	ctx := context.Background()
+	var count int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM error_group_jobs
+		 WHERE job_type = 'score_sync' AND payload->>'delivery_id' = $1`,
+		deliveryID,
+	).Scan(&count); err != nil {
+		t.Fatalf("count score_sync jobs for %s: %v", deliveryID, err)
+	}
+	if count != 1 {
+		t.Fatalf("score_sync jobs for %s = %d, want 1", deliveryID, count)
+	}
+	var status, gotFixJobID, gotOutcome, occurredAt string
+	var maxAttempts int
+	if err := pool.QueryRow(ctx,
+		`SELECT status::text, payload->>'fix_job_id', payload->>'outcome', payload->>'occurred_at', max_attempts
+		 FROM error_group_jobs
+		 WHERE job_type = 'score_sync' AND payload->>'delivery_id' = $1`,
+		deliveryID,
+	).Scan(&status, &gotFixJobID, &gotOutcome, &occurredAt, &maxAttempts); err != nil {
+		t.Fatalf("load score_sync job for %s: %v", deliveryID, err)
+	}
+	if status != "pending" || gotFixJobID != fixJobID || gotOutcome != outcome || occurredAt == "" {
+		t.Fatalf("score_sync job for %s = (%q, %q, %q, %q), want pending/%s/%s/non-empty time",
+			deliveryID, status, gotFixJobID, gotOutcome, occurredAt, fixJobID, outcome)
+	}
+	if maxAttempts != 10 {
+		t.Fatalf("score_sync max_attempts for %s = %d, want 10 (outage tolerance)", deliveryID, maxAttempts)
+	}
+}
+
+func assertNoScoreSyncJob(t *testing.T, pool *pgxpool.Pool, deliveryID string) {
+	t.Helper()
+	var count int
+	if err := pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM error_group_jobs
+		 WHERE job_type = 'score_sync' AND payload->>'delivery_id' = $1`,
+		deliveryID,
+	).Scan(&count); err != nil {
+		t.Fatalf("count score_sync jobs for %s: %v", deliveryID, err)
+	}
+	if count != 0 {
+		t.Fatalf("score_sync jobs for %s = %d, want 0", deliveryID, count)
+	}
+}
+
 // oauthContinuationQueries isolates continuation tests in a disposable
 // database. These records contain sealed bearer credentials, so tests never
 // apply the migration or insert fixtures into a retained development database.
@@ -689,6 +737,17 @@ func TestProcessPRWebhook_ReceiptBeforeTransition_Idempotent(t *testing.T) {
 	if _, err := pool.Exec(ctx, `UPDATE error_groups SET pr_number = 7 WHERE id = $1`, groupID); err != nil {
 		t.Fatalf("set pr_number: %v", err)
 	}
+	var fixJobID string
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO error_group_jobs (error_group_id, project_id, job_type)
+		 VALUES ($1, $2, 'fix') RETURNING id`,
+		groupID, projID,
+	).Scan(&fixJobID); err != nil {
+		t.Fatalf("insert fix job: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE error_groups SET pr_fix_job_id = $2 WHERE id = $1`, groupID, fixJobID); err != nil {
+		t.Fatalf("set pr_fix_job_id: %v", err)
+	}
 
 	result, err := q.ProcessPRWebhook(ctx, "org/pr-lifecycle", 7, true, "delivery-merge", time.Now())
 	if err != nil || result.GroupID != groupID || result.Duplicate {
@@ -720,6 +779,7 @@ func TestProcessPRWebhook_ReceiptBeforeTransition_Idempotent(t *testing.T) {
 	if count != 1 {
 		t.Fatalf("receipts = %d, want 1", count)
 	}
+	assertScoreSyncJob(t, pool, "delivery-merge", fixJobID, "merged")
 }
 
 func TestProcessPRWebhook_DraftCloseRestoresNeedsHumanAndClosesDelivery(t *testing.T) {
@@ -925,6 +985,7 @@ func TestProcessPRWebhook_FrictionCloseAttributesAndReturnsToAwaitingApproval(t 
 	if receiptJobID == nil || *receiptJobID != fixJobID {
 		t.Fatalf("receipt fix_job_id = %v, want %s", receiptJobID, fixJobID)
 	}
+	assertScoreSyncJob(t, q.Pool(), "delivery-friction-close", fixJobID, "closed")
 
 	var prURL *string
 	var prNumber *int
@@ -974,6 +1035,7 @@ func TestProcessPRWebhook_ErrorCloseRevertsToInvestigated(t *testing.T) {
 	if prURL != nil || prNumber != nil {
 		t.Fatalf("PR fields not cleared on close: pr_url=%v pr_number=%v", prURL, prNumber)
 	}
+	assertNoScoreSyncJob(t, pool, "delivery-error-close")
 }
 
 func TestProcessPRWebhook_ReopenedMergeRecoversViaReceipt(t *testing.T) {
@@ -1028,6 +1090,7 @@ func TestProcessPRWebhook_ReopenedMergeRecoversViaReceipt(t *testing.T) {
 	if receiptJobID == nil || *receiptJobID != fixJobID {
 		t.Fatalf("recovered receipt fix_job_id = %v, want %s", receiptJobID, fixJobID)
 	}
+	assertScoreSyncJob(t, q.Pool(), "delivery-reopen-merge", fixJobID, "merged")
 	var mergedAtDB time.Time
 	if err := q.Pool().QueryRow(ctx,
 		`SELECT merged_at FROM error_groups WHERE id = $1`, groupID,
@@ -1052,6 +1115,8 @@ func TestProcessPRWebhook_ReopenedMergeRecoversViaReceipt(t *testing.T) {
 	if receipts != 2 {
 		t.Fatalf("receipts = %d, want 2 (close + recovered merge)", receipts)
 	}
+	assertScoreSyncJob(t, q.Pool(), "delivery-reopen-close", fixJobID, "closed")
+	assertScoreSyncJob(t, q.Pool(), "delivery-reopen-merge", fixJobID, "merged")
 }
 
 func TestProcessPRWebhook_NoMatch(t *testing.T) {
@@ -1062,6 +1127,7 @@ func TestProcessPRWebhook_NoMatch(t *testing.T) {
 	if err != nil || result.GroupID != "" || result.Duplicate {
 		t.Fatalf("no match = (%+v, %v), want empty result", result, err)
 	}
+	assertNoScoreSyncJob(t, q.Pool(), "delivery-no-match")
 }
 
 func TestResolveArchiveUnarchiveLifecycle(t *testing.T) {
