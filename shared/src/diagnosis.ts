@@ -32,6 +32,15 @@ export interface CauseLocation {
   note?: string;
 }
 
+export interface EvidenceCitation {
+  /** Repository-relative path, undecorated (same rule as CauseLocation.path). */
+  path: string;
+  /** What was found at this path. */
+  detail: string;
+  /** How that finding links to the customer-visible symptom. */
+  symptomLink: string;
+}
+
 /** What the investigation submits after checking its own citations. */
 export interface Adjudication {
   /** The statement of the hypothesis the evidence best supports. */
@@ -74,6 +83,8 @@ export interface Adjudication {
   why_chain: string[];
   /** Steps reproducing the winning cause. What a human acts on when we open no PR. */
   reproduction_steps: string[];
+  evidence?: EvidenceCitation[];
+  agent_task_brief?: string;
 }
 
 /** The artifact handed to the fix agent. Built in code from the adjudication. */
@@ -86,6 +97,12 @@ export interface Diagnosis {
   reproduction_steps: string[];
   /** A repository file and line, or a description of the external system. */
   cause_location: string;
+  evidence?: EvidenceCitation[];
+  agentTaskBrief?: string;
 }
 
-export type DiagnosisOutcome = 'code_fix' | 'not_actionable' | 'needs_more_context';
+export type DiagnosisOutcome =
+  | 'code_fix'
+  | 'not_actionable'
+  | 'needs_more_context'
+  | 'incomplete';

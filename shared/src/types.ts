@@ -17,6 +17,30 @@ export interface Project {
   created_at: string;
 }
 
+// === Digest receipt payload ===
+
+export interface ReceiptItem {
+  kind: string;
+  incident_id: string;
+  title: string;
+  occurrence_count: number;
+  impact_class?: string;
+  impact_visits?: number;
+  impact_visits_recovered?: number;
+  receipt_state: string;
+  pr_url?: string;
+  session_url?: string;
+  root_cause_excerpt?: string;
+  mitigation_excerpt?: string;
+  has_saved_diff?: boolean;
+  cluster_incident_ids?: string[];
+}
+
+export interface DigestReceiptFields {
+  schema_version?: number;
+  receipt_items?: ReceiptItem[];
+}
+
 export interface Environment {
   id: string;
   project_id: string;
@@ -416,6 +440,7 @@ export type {
   CauseLocation,
   Diagnosis,
   DiagnosisOutcome,
+  EvidenceCitation,
   EvidenceStrength,
   HypothesisKind,
 } from './diagnosis.js';
