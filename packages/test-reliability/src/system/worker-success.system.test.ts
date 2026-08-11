@@ -56,7 +56,7 @@ describe('event-to-pr reliability system tracer', () => {
     }
   });
 
-  it('persists one real event through investigate and fix jobs to a verified draft PR', async () => {
+  it('persists one real event through investigate and fix jobs to a delivered PR', async () => {
     for (const key of envKeys) savedEnv.set(key, process.env[key]);
 
     const health = await fetch(`${ingestionUrl}/health`);
@@ -241,9 +241,6 @@ describe('event-to-pr reliability system tracer', () => {
     expect(jobs.rows).toEqual([
       { job_type: 'investigate', status: 'completed' },
       { job_type: 'fix', status: 'completed' },
-      // Draft delivery opens with a CI watcher that stays pending until the
-      // draft's checks report (drafts are the v1 terminal posture).
-      { job_type: 'ci_watch', status: 'pending' },
     ]);
 
     // Reading an incident needs a signed-in user, not the ingest key. The
@@ -257,18 +254,17 @@ describe('event-to-pr reliability system tracer', () => {
     expect(incident).toMatchObject({
       id: accepted.group_id,
       project_id: tenant.projectId,
-      // Drafts are the v1 terminal posture for automated PRs.
-      status: 'pr_draft',
+      status: 'pr_created',
       confidence: 'high',
       pr_url: `https://github.test/${githubRepo}/pull/42`,
     });
     expect(await scanReliabilityInvariants(db)).toEqual([]);
 
-    // 9 calls under the citation + fail-first contracts: investigation
+    // 8 calls under the citation + fail-first contracts: investigation
     // read_file + submit_diagnosis, fix edit/test/declare_failing_test/finish,
-    // judge, and narrative turns. Anchor the two load-bearing calls by content
-    // rather than hard-coding every position.
-    expect(providers.anthropicJournal).toHaveLength(9);
+    // judge, and narrative. Anchor the judge call by content rather than
+    // hard-coding every position.
+    expect(providers.anthropicJournal).toHaveLength(8);
     expect(toolNames(providers.anthropicJournal[0]!.body)).toContain('submit_diagnosis');
     const judgeCalls = providers.anthropicJournal.filter(
       (entry) => toolNames(entry.body).includes('score_diff'),
