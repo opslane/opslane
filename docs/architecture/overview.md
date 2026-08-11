@@ -48,7 +48,7 @@ flowchart LR
 | **Ingestion API** (`packages/ingestion`) | Go service | Receives events, drops known noise, groups errors by fingerprint (family-based or platform + error type + message + stack), scores issue priority, enqueues investigation jobs, builds daily digests, delivers notifications, serves the dashboard SPA, and exposes the read/write API. |
 | **Worker** (`packages/worker`) | Node service | Claims jobs from Postgres, analyzes sessions, investigates and adjudicates with Claude, classifies routes, writes candidate fixes, verifies them in an E2B sandbox, and opens GitHub PRs. |
 | **Dashboard** (`packages/dashboard`) | Vue SPA, served by ingestion | Issues, replays, project and GitHub settings. |
-| **Postgres** | Database | System of record **and** the job queue — jobs are claimed with `FOR UPDATE SKIP LOCKED` and lease-based ownership. There is no Redis or external queue. |
+| **Postgres** | Database | System of record, job queue, and verification ledger — jobs are claimed with `FOR UPDATE SKIP LOCKED` and lease-based ownership. There is no Redis or external queue. |
 | **Object storage** | MinIO (local) or any S3-compatible store | Replay payloads and screenshots. |
 
 ## Trust boundaries
