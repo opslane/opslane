@@ -52,6 +52,26 @@ type DigestPayload struct {
 	Outcomes            DigestOutcomes  `json:"outcomes"`
 	NeedsHumanBacklog   int             `json:"needs_human_backlog"`
 	Watching            DigestWatching  `json:"watching"`
+	SchemaVersion       int             `json:"schema_version,omitempty"`
+	ReceiptItems        []ReceiptItem   `json:"receipt_items,omitempty"`
+}
+
+// ReceiptItem is one digest card. Kind is error, friction, or cluster.
+type ReceiptItem struct {
+	Kind               string   `json:"kind"`
+	IncidentID         string   `json:"incident_id"`
+	Title              string   `json:"title"`
+	OccurrenceCount    int64    `json:"occurrence_count"`
+	ImpactClass        string   `json:"impact_class,omitempty"`
+	ImpactVisits       *int64   `json:"impact_visits,omitempty"`
+	ImpactRecovered    *int64   `json:"impact_visits_recovered,omitempty"`
+	ReceiptState       string   `json:"receipt_state"`
+	PRURL              string   `json:"pr_url,omitempty"`
+	SessionURL         string   `json:"session_url,omitempty"`
+	RootCauseExcerpt   string   `json:"root_cause_excerpt,omitempty"`
+	MitigationExcerpt  string   `json:"mitigation_excerpt,omitempty"`
+	HasSavedDiff       bool     `json:"has_saved_diff,omitempty"`
+	ClusterIncidentIDs []string `json:"cluster_incident_ids,omitempty"`
 }
 
 type DigestWindow struct {
