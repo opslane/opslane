@@ -104,6 +104,11 @@ func (s *Sweeper) buildInsights(ctx context.Context, projectID string, from, to 
 		WHERE fs.project_id = $1 AND fs.occurred_at >= $2 AND fs.occurred_at < $3
 		  AND fs.retracted_at IS NULL AND fs.superseded_by IS NULL
 		  AND g.status = 'insight'
+		  -- C1 interim readiness gate: ineligible/pending excluded; absent rows are the legacy book and render as today. C4 flips to eligible-only after the C3 backfill.
+		  AND NOT EXISTS (
+		    SELECT 1 FROM digest_readiness dr
+		    WHERE dr.incident_id = g.id AND dr.status IN ('ineligible', 'pending')
+		  )
 		GROUP BY g.id
 		ORDER BY COUNT(DISTINCT fs.end_user_id) DESC, g.id
 		LIMIT $4`, projectID, from, to, listCap+1)
@@ -202,6 +207,10 @@ func (s *Sweeper) buildTopNewIssues(ctx context.Context, projectID string, from,
 		  AND (g.pr_created_at IS NULL OR g.pr_created_at < $2 OR g.pr_created_at >= $3)
 		  AND (g.needs_human_at IS NULL OR g.needs_human_at < $2 OR g.needs_human_at >= $3)
 		  AND (g.merged_at IS NULL OR g.merged_at < $2 OR g.merged_at >= $3)
+		  AND NOT EXISTS (
+		    SELECT 1 FROM digest_readiness dr
+		    WHERE dr.incident_id = g.id AND dr.status IN ('ineligible', 'pending')
+		  )
 		ORDER BY (g.affected_users_count::bigint * g.occurrence_count::bigint) DESC, g.id
 		LIMIT $4`, projectID, from, to, listCap+1)
 	if err != nil {
@@ -247,6 +256,10 @@ func (s *Sweeper) buildPRsOpened(ctx context.Context, projectID string, from, to
 		                AND po.outcome = 'merged')
 		FROM error_groups g
 		WHERE g.project_id = $1 AND g.pr_created_at >= $2 AND g.pr_created_at < $3
+		  AND NOT EXISTS (
+		    SELECT 1 FROM digest_readiness dr
+		    WHERE dr.incident_id = g.id AND dr.status IN ('ineligible', 'pending')
+		  )
 		ORDER BY g.pr_created_at DESC
 		LIMIT $4`, projectID, from, to, listCap+1)
 	if err != nil {
@@ -278,6 +291,10 @@ func (s *Sweeper) buildPRsMerged(ctx context.Context, projectID string, from, to
 		WHERE po.project_id = $1 AND po.outcome = 'merged'
 		  AND po.occurred_at >= $2 AND po.occurred_at < $3
 		  AND (g.pr_created_at IS NULL OR g.pr_created_at < $2)
+		  AND NOT EXISTS (
+		    SELECT 1 FROM digest_readiness dr
+		    WHERE dr.incident_id = g.id AND dr.status IN ('ineligible', 'pending')
+		  )
 		ORDER BY po.occurred_at DESC
 		LIMIT $4`, projectID, from, to, listCap+1)
 	if err != nil {
@@ -304,6 +321,10 @@ func (s *Sweeper) buildNeedsHuman(ctx context.Context, projectID string, from, t
 		SELECT g.id, g.title, COALESCE(g.reason_message,'')
 		FROM error_groups g
 		WHERE g.project_id = $1 AND g.needs_human_at >= $2 AND g.needs_human_at < $3
+		  AND NOT EXISTS (
+		    SELECT 1 FROM digest_readiness dr
+		    WHERE dr.incident_id = g.id AND dr.status IN ('ineligible', 'pending')
+		  )
 		ORDER BY g.needs_human_at DESC
 		LIMIT $4`, projectID, from, to, listCap+1)
 	if err != nil {

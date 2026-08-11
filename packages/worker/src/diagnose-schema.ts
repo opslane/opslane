@@ -1,5 +1,5 @@
 import type Anthropic from '@anthropic-ai/sdk';
-import type { Adjudication, CauseLocation, EvidenceStrength, HypothesisKind } from '@opslane/shared';
+import type { Adjudication, CauseLocation, EvidenceCitation, EvidenceStrength, HypothesisKind } from '@opslane/shared';
 
 const KINDS: HypothesisKind[] = ['local_code', 'external_system', 'data_or_input', 'configuration', 'unknown'];
 const STRENGTHS: EvidenceStrength[] = ['conclusive', 'suggestive', 'insufficient'];
@@ -38,7 +38,7 @@ function candidates(value: unknown): Adjudication['candidates_considered'] {
  * every object in a strict schema (a 400 otherwise: "For 'object' type,
  * 'additionalProperties' must be explicitly set to false").
  */
-function seal<T>(node: T): T {
+export function seal<T>(node: T): T {
   if (!node || typeof node !== 'object') return node;
   const schema = node as unknown as Record<string, unknown>;
   if (schema['type'] === 'object') {
@@ -48,6 +48,24 @@ function seal<T>(node: T): T {
   if (schema['type'] === 'array') seal(schema['items']);
   return node;
 }
+
+/** Evidence citation sub-schema, shared verbatim by submit_diagnosis and the
+ * friction lane's classify_friction so the prompt-load-bearing descriptions
+ * cannot drift between the two pipelines. */
+export const EVIDENCE_ARRAY_SCHEMA = {
+  type: 'array',
+  minItems: 1,
+  description: 'Citations that will be mechanically checked against the checkout. At least one is required; a verdict without citations is rejected as incomplete. Cite only files you actually read.',
+  items: {
+    type: 'object',
+    properties: {
+      path: { type: 'string', description: 'Repository-relative path, undecorated.' },
+      detail: { type: 'string', description: 'What was found at this path.' },
+      symptomLink: { type: 'string', description: 'How that finding links to the customer-visible symptom.' },
+    },
+    required: ['path', 'detail', 'symptomLink'],
+  },
+};
 
 /**
  * The one terminal tool the investigation may call.
@@ -122,10 +140,16 @@ export function submitDiagnosisTool(): Anthropic.Tool {
         reasoning: { type: 'string' },
         why_chain: { type: 'array', items: { type: 'string' } },
         reproduction_steps: { type: 'array', items: { type: 'string' } },
+        evidence: EVIDENCE_ARRAY_SCHEMA,
+        agent_task_brief: {
+          type: 'string',
+          description: 'Self-contained markdown brief a coding agent can execute: symptom, files, cause, change, verification. Empty string if you cannot support one.',
+        },
       },
       required: [
         'best_supported', 'evidence_check', 'candidates_considered', 'rejected',
         'evidence_strength', 'cause_kind', 'cause_locations', 'reasoning',
+        'evidence', 'agent_task_brief',
       ],
     }),
   };
@@ -202,6 +226,24 @@ export function parseLocations(value: unknown): CauseLocation[] {
   });
 }
 
+/** Shared with the friction lane (classify_friction) — keep the narrowing in
+ * one place so the two pipelines cannot drift. Returns undefined when the
+ * value is not an array; malformed entries are dropped and the validator
+ * judges sufficiency of what remains. */
+export function parseEvidence(value: unknown): EvidenceCitation[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const citations: EvidenceCitation[] = [];
+  for (const entry of value) {
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) continue;
+    const record = entry as Record<string, unknown>;
+    const path = typeof record['path'] === 'string' ? record['path'].trim() : '';
+    const detail = typeof record['detail'] === 'string' ? record['detail'].trim() : '';
+    const symptomLink = typeof record['symptomLink'] === 'string' ? record['symptomLink'].trim() : '';
+    if (path && detail && symptomLink) citations.push({ path, detail, symptomLink });
+  }
+  return citations;
+}
+
 export function parseAdjudication(raw: Record<string, unknown>): Adjudication | null {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null;
   const best = typeof raw['best_supported'] === 'string' ? raw['best_supported'].trim() : '';
@@ -222,6 +264,8 @@ export function parseAdjudication(raw: Record<string, unknown>): Adjudication | 
     reasoning: typeof raw['reasoning'] === 'string' ? raw['reasoning'].trim() : '',
     why_chain: strings(raw['why_chain']),
     reproduction_steps: strings(raw['reproduction_steps']),
+    evidence: parseEvidence(raw['evidence']),
+    agent_task_brief: typeof raw['agent_task_brief'] === 'string' ? raw['agent_task_brief'] : undefined,
   };
 }
 

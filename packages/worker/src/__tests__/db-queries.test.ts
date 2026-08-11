@@ -49,7 +49,13 @@ describe('group lifecycle timestamp queries', () => {
       },
     });
 
-    for (const call of mockQuery.mock.calls) {
+    // A needs_human transition also demotes a pending readiness row in a
+    // follow-up query; assert the timestamp CASEs on the group updates only.
+    const groupUpdates = mockQuery.mock.calls.filter(
+      (call) => String(call[0]).includes('UPDATE error_groups'),
+    );
+    expect(groupUpdates).toHaveLength(2);
+    for (const call of groupUpdates) {
       const query = String(call[0]);
       expect(query).toContain("WHEN $3::error_group_status = 'pr_created'");
       expect(query).toContain("AND status IS DISTINCT FROM 'pr_created' THEN now()");
@@ -58,8 +64,13 @@ describe('group lifecycle timestamp queries', () => {
       expect(query).toContain("AND status IS DISTINCT FROM 'needs_human' THEN now()");
       expect(query).toContain('ELSE needs_human_at');
     }
-    expect(mockQuery.mock.calls[0]?.[1]?.[2]).toBe('pr_created');
-    expect(mockQuery.mock.calls[1]?.[1]?.[2]).toBe('needs_human');
+    expect(groupUpdates[0]?.[1]?.[2]).toBe('pr_created');
+    expect(groupUpdates[1]?.[1]?.[2]).toBe('needs_human');
+    const demotion = mockQuery.mock.calls.find(
+      (call) => String(call[0]).includes('UPDATE digest_readiness'),
+    );
+    expect(String(demotion?.[0])).toContain("status = 'pending'");
+    expect(demotion?.[1]?.[2]).toBe('missing_llm_key');
   });
 
   it('stamps needs-human investigation results without clearing lifecycle timestamps', async () => {
@@ -94,7 +105,12 @@ describe('group lifecycle timestamp queries', () => {
       candidate_diff: 'DIFF',
       evidence: { version: 1, tier: 'E0', checks: [] },
     });
-    const [sql, params] = mockQuery.mock.calls.at(-1) as [string, unknown[]];
+    // The last call is the pending-readiness demotion; the group update is the
+    // one carrying the diff and evidence.
+    const groupUpdate = mockQuery.mock.calls.find(
+      (call) => String(call[0]).includes('UPDATE error_groups'),
+    ) as [string, unknown[]];
+    const [sql, params] = groupUpdate;
     expect(sql).toContain('candidate_diff');
     expect(sql).toContain('verification_evidence');
     expect(params).toContain('DIFF');

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseAdjudication, parseLocations, submitDiagnosisTool } from '../diagnose-schema.js';
+import { parseAdjudication, parseLocations, seal, submitDiagnosisTool } from '../diagnose-schema.js';
 
 const valid = {
   best_supported: 'The retry loop never resets its counter',
@@ -15,6 +15,11 @@ const valid = {
   reasoning: 'The counter is declared outside the loop body',
   why_chain: ['Request fails', 'Retry fires', 'Counter never resets'],
   reproduction_steps: ['Trigger one failure', 'Observe unbounded retries'],
+  evidence: [
+    { path: 'src/retry.ts', detail: 'counter is outside the loop', symptomLink: 'retries never stop' },
+    { path: 'src/request.ts', detail: 'failure enters retry', symptomLink: 'starts the retry loop' },
+  ],
+  agent_task_brief: '## Change\nReset the retry counter after success.',
 };
 
 describe('submitDiagnosisTool', () => {
@@ -39,8 +44,8 @@ describe('submitDiagnosisTool', () => {
     };
     walk(submitDiagnosisTool().input_schema);
 
-    // Root, candidates_considered items, cause_locations items.
-    expect(objects.length).toBe(3);
+    // Root, candidates_considered items, cause_locations items, evidence items.
+    expect(objects.length).toBe(4);
     for (const schema of objects) expect(schema['additionalProperties']).toBe(false);
   });
 
@@ -49,7 +54,12 @@ describe('submitDiagnosisTool', () => {
     expect(required).toEqual(expect.arrayContaining([
       'best_supported', 'evidence_strength', 'cause_kind', 'cause_locations',
       'candidates_considered', 'rejected',
+      'evidence', 'agent_task_brief',
     ]));
+  });
+
+  it('exports the recursive strict-schema sealer', () => {
+    expect(seal({ type: 'object', properties: {} })).toMatchObject({ additionalProperties: false });
   });
 });
 
@@ -100,6 +110,28 @@ describe('parseAdjudication', () => {
       evidence_strength: 'suggestive',
       cause_kind: 'local_code',
       cause_locations: [{ path: 'src/retry.ts', line: 42 }],
+      evidence: valid.evidence,
+      agent_task_brief: valid.agent_task_brief,
+    });
+  });
+
+  it('drops malformed citations while preserving valid siblings', () => {
+    expect(parseAdjudication({
+      ...valid,
+      evidence: [
+        { path: 'src/bad.ts' },
+        { path: 'src/good.ts', detail: 'the guard is absent', symptomLink: 'null reaches render' },
+      ],
+    })?.evidence).toEqual([
+      { path: 'src/good.ts', detail: 'the guard is absent', symptomLink: 'null reaches render' },
+    ]);
+  });
+
+  it('keeps legacy submissions parseable when the new fields are absent', () => {
+    const { evidence: _evidence, agent_task_brief: _brief, ...legacy } = valid;
+    expect(parseAdjudication(legacy)).toMatchObject({
+      evidence: undefined,
+      agent_task_brief: undefined,
     });
   });
 

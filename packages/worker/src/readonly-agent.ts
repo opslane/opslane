@@ -59,6 +59,8 @@ export interface ReadOnlyRunInput {
   /** The tool that ends the run. Its raw input is returned. */
   terminalTool: Anthropic.Tool;
   repoPath: string;
+  /** Optional evidence gate followed by one dedicated verdict-only turn. */
+  classification?: { minFilesRead: number };
 }
 
 /** Prefixes trace span and log names, e.g. "diagnose.read_file". */
@@ -77,6 +79,7 @@ export type ReadOnlyStop =
   | 'no_tool_call'
   | 'api_error'
   | 'turns_exhausted'
+  | 'no_evidence'
   /** The model ran out of output tokens mid-answer. See the stop_reason check below. */
   | 'truncated';
 
@@ -148,6 +151,18 @@ export async function runReadOnlyAgent(input: ReadOnlyRunInput): Promise<ReadOnl
   ];
   const messages: Anthropic.MessageParam[] = [{ role: 'user', content: input.firstMessage }];
 
+  const recordUsage = (response: Anthropic.Message): void => {
+    usage.input += response.usage.input_tokens;
+    usage.output += response.usage.output_tokens;
+    usage.cacheRead += response.usage.cache_read_input_tokens ?? 0;
+    usage.cacheWrite += response.usage.cache_creation_input_tokens ?? 0;
+    costUsd =
+      (usage.input / 1_000_000) * input.pricing.input +
+      (usage.output / 1_000_000) * input.pricing.output +
+      (usage.cacheWrite / 1_000_000) * input.pricing.cacheWrite +
+      (usage.cacheRead / 1_000_000) * input.pricing.cacheRead;
+  };
+
   for (let turn = 0; turn < input.maxTurns; turn++) {
     markLastUserMessageForCaching(messages);
 
@@ -157,9 +172,10 @@ export async function runReadOnlyAgent(input: ReadOnlyRunInput): Promise<ReadOnl
       if (last.role === 'user' && Array.isArray(last.content)) {
         last.content.push({
           type: 'text' as const,
-          text:
-            `You have ${remaining} turn(s) remaining. Call ${input.terminalTool.name} now with what the ` +
-            'evidence you have already gathered supports. Do not read more files.',
+          text: input.classification
+            ? `You have ${remaining} exploration turn(s) remaining.`
+            : `You have ${remaining} turn(s) remaining. Call ${input.terminalTool.name} now with what the ` +
+              'evidence you have already gathered supports. Do not read more files.',
         });
       }
     }
@@ -177,7 +193,7 @@ export async function runReadOnlyAgent(input: ReadOnlyRunInput): Promise<ReadOnl
         system: systemMessages,
         messages,
         tools,
-        ...(turn === input.maxTurns - 1
+        ...(!input.classification && turn === input.maxTurns - 1
           ? { tool_choice: { type: 'tool' as const, name: input.terminalTool.name } }
           : {}),
       });
@@ -189,6 +205,8 @@ export async function runReadOnlyAgent(input: ReadOnlyRunInput): Promise<ReadOnl
       return { terminalInput: null, stop: 'api_error', filesRead: [...filesRead], lastModelText, costUsd, usage };
     }
 
+    recordUsage(response);
+
     // A truncated turn is not a completed one. Nothing read `stop_reason`, so a
     // `submit_diagnosis` call cut off mid-argument was pushed into `toolCalls`
     // and returned as `terminalInput`; the run then looked successful and every
@@ -199,22 +217,8 @@ export async function runReadOnlyAgent(input: ReadOnlyRunInput): Promise<ReadOnl
         turn,
         max_tokens: 16000,
       });
-      usage.input += response.usage.input_tokens;
-      usage.output += response.usage.output_tokens;
-      usage.cacheRead += response.usage.cache_read_input_tokens ?? 0;
-      usage.cacheWrite += response.usage.cache_creation_input_tokens ?? 0;
       return { terminalInput: null, stop: 'truncated', filesRead: [...filesRead], lastModelText, costUsd, usage };
     }
-
-    usage.input += response.usage.input_tokens;
-    usage.output += response.usage.output_tokens;
-    usage.cacheRead += response.usage.cache_read_input_tokens ?? 0;
-    usage.cacheWrite += response.usage.cache_creation_input_tokens ?? 0;
-    costUsd =
-      (usage.input / 1_000_000) * input.pricing.input +
-      (usage.output / 1_000_000) * input.pricing.output +
-      (usage.cacheWrite / 1_000_000) * input.pricing.cacheWrite +
-      (usage.cacheRead / 1_000_000) * input.pricing.cacheRead;
 
     // Parse before the budget check: this response is already paid for, so
     // discarding it when it carries the answer wastes the spend and the answer.
@@ -235,6 +239,7 @@ export async function runReadOnlyAgent(input: ReadOnlyRunInput): Promise<ReadOnl
     messages.push({ role: 'assistant', content: response.content });
 
     if (toolCalls.length === 0) {
+      if (input.classification) break;
       // The model wrote its answer as prose instead of calling the tool. Returning
       // here threw away two correct diagnoses on a six-case run: the loop exited
       // before the last turn, which is the only place tool_choice forces the
@@ -304,6 +309,54 @@ export async function runReadOnlyAgent(input: ReadOnlyRunInput): Promise<ReadOnl
       results.push({ type: 'tool_result', tool_use_id: id, content: output });
     }
     messages.push({ role: 'user', content: results });
+  }
+
+  if (input.classification) {
+    if (filesRead.size < input.classification.minFilesRead) {
+      return { terminalInput: null, stop: 'no_evidence', filesRead: [...filesRead], lastModelText, costUsd, usage };
+    }
+
+    messages.push({
+      role: 'user',
+      content: 'Exploration is over. Submit your verdict now using only evidence you actually gathered.',
+    });
+    markLastUserMessageForCaching(messages);
+
+    let response: Anthropic.Message;
+    try {
+      response = await client.messages.create({
+        model: input.model,
+        max_tokens: 16000,
+        system: systemMessages,
+        messages,
+        tools,
+        tool_choice: { type: 'tool', name: input.terminalTool.name },
+      });
+    } catch (error: unknown) {
+      logger.warn(`${SPAN_PREFIX}: classification call failed`, {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return { terminalInput: null, stop: 'api_error', filesRead: [...filesRead], lastModelText, costUsd, usage };
+    }
+
+    recordUsage(response);
+    if (response.stop_reason === 'max_tokens') {
+      return { terminalInput: null, stop: 'truncated', filesRead: [...filesRead], lastModelText, costUsd, usage };
+    }
+    for (const block of response.content) {
+      if (block.type === 'text') lastModelText = block.text;
+      if (block.type === 'tool_use' && block.name === input.terminalTool.name) {
+        return {
+          terminalInput: block.input as Record<string, unknown>,
+          stop: 'terminal',
+          filesRead: [...filesRead],
+          lastModelText,
+          costUsd,
+          usage,
+        };
+      }
+    }
+    return { terminalInput: null, stop: 'no_tool_call', filesRead: [...filesRead], lastModelText, costUsd, usage };
   }
 
   return { terminalInput: null, stop: 'turns_exhausted', filesRead: [...filesRead], lastModelText, costUsd, usage };

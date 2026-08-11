@@ -19,6 +19,8 @@ export interface CloneResult {
   repoDir: string;
   /** Resolved from the clone itself; authoritative for this job. */
   defaultBranch: string;
+  /** Commit checked out by the clone and investigated by this job. */
+  headSha: string;
   cleanup: () => Promise<void>;
 }
 
@@ -100,7 +102,7 @@ export function execFileGitRunner(repoDir: string): GitRunner {
 export async function resolveClonedBranch(
   run: GitRunner,
   repo: string,
-): Promise<string> {
+): Promise<{ branch: string; headSha: string }> {
   const heads = await run(['ls-remote', '--heads', 'origin']);
   if (heads.exitCode !== 0) {
     throw new Error(
@@ -121,7 +123,7 @@ export async function resolveClonedBranch(
   if (head.exitCode !== 0) {
     throw new CloneResolutionError('invalid_default_branch', repo, branch);
   }
-  return branch;
+  return { branch, headSha: head.stdout.trim() };
 }
 
 /** Turn clone failures into actionable terminal reasons. */
@@ -210,9 +212,9 @@ export async function cloneRepo(options: CloneOptions): Promise<CloneResult> {
     ].filter(Boolean).join('\n')));
   }
 
-  let defaultBranch: string;
+  let resolved: { branch: string; headSha: string };
   try {
-    defaultBranch = await resolveClonedBranch(
+    resolved = await resolveClonedBranch(
       execFileGitRunner(repoDir),
       githubRepo,
     );
@@ -224,7 +226,8 @@ export async function cloneRepo(options: CloneOptions): Promise<CloneResult> {
   }
   return {
     repoDir,
-    defaultBranch,
+    defaultBranch: resolved.branch,
+    headSha: resolved.headSha,
     cleanup: async () => {
       await execFile('rm', ['-rf', repoDir]).catch(() => {});
     },

@@ -18,6 +18,10 @@ const title = computed(() => {
 });
 
 const prUrl = computed(() => safeUrl(props.incident.pr_url, GITHUB_PR_URL_OPTIONS));
+const causeHidden = computed(() =>
+  props.incident.investigation_readiness === 'ineligible'
+  || props.incident.investigation_readiness === 'pending',
+);
 </script>
 
 <template>
@@ -25,19 +29,21 @@ const prUrl = computed(() => safeUrl(props.incident.pr_url, GITHUB_PR_URL_OPTION
     <p class="text-xs font-semibold uppercase tracking-[0.16em] text-accent">Outcome</p>
     <h2 id="conclusion-heading" class="mt-2 text-lg font-semibold text-text" v-text="title"></h2>
 
-    <dl v-if="incident.confidence" class="mt-4 border-t border-border pt-3 text-sm">
+    <p v-if="causeHidden" class="mt-4 text-sm text-text">Investigation has not verified a cause yet.</p>
+
+    <dl v-if="incident.confidence && !causeHidden" class="mt-4 border-t border-border pt-3 text-sm">
       <div class="flex justify-between gap-4">
         <dt class="text-muted">Confidence</dt>
         <dd class="font-medium capitalize text-text" v-text="incident.confidence"></dd>
       </div>
     </dl>
 
-    <div v-if="incident.root_cause" class="mt-5">
+    <div v-if="incident.root_cause && !causeHidden" class="mt-5">
       <h3 class="text-xs font-semibold uppercase tracking-wide text-muted">Root cause</h3>
       <p class="mt-2 whitespace-pre-wrap text-sm leading-6 text-text" v-text="incident.root_cause"></p>
     </div>
 
-    <div v-if="incident.suggested_mitigation" class="mt-5">
+    <div v-if="incident.suggested_mitigation && !causeHidden" class="mt-5">
       <h3 class="text-xs font-semibold uppercase tracking-wide text-muted">Suggested mitigation</h3>
       <p class="mt-2 whitespace-pre-wrap text-sm leading-6 text-text" v-text="incident.suggested_mitigation"></p>
     </div>

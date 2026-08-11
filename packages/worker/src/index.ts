@@ -39,7 +39,7 @@ import {
 } from './replay-evidence.js';
 import { hasNoAppFrames } from './harness/stack-trace-utils.js';
 import { gatherFrictionEvidence } from './friction/friction-evidence.js';
-import { investigateFriction } from './friction/investigate-friction.js';
+import { FRICTION_INVESTIGATION_MODEL, investigateFriction } from './friction/investigate-friction.js';
 import { readChunksBounded } from './friction/chunk-reader.js';
 import { analyzeSession, RULE_VERSION } from './friction/analyzer.js';
 import { classifyActivity, deriveCoverage, extractSessionFacts, formatSessionContext } from './friction/facts.js';
@@ -558,6 +558,7 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
 
   // Clone repo for investigation
   let repoDir: string;
+  let investigatedCommit: string;
   let cleanup: () => Promise<void>;
   try {
     const cloneResult = await cloneRepo({
@@ -566,6 +567,7 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
       githubToken,
     });
     repoDir = cloneResult.repoDir;
+    investigatedCommit = cloneResult.headSha;
     cleanup = cloneResult.cleanup;
     await db.cacheProjectDefaultBranch(job.projectId, cloneResult.defaultBranch);
   } catch (err: unknown) {
@@ -597,7 +599,7 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
       resolvedStackTrace: resolvedStack ?? framesFromEnvelope(event?.stack_trace_resolved) ?? null,
       breadcrumbs: event?.breadcrumbs ?? '[]',
       sessionContext,
-    }, repoDir);
+    }, repoDir, investigatedCommit);
     await recordJobUsage({
       jobId: job.id,
       execution: job.attempts,
@@ -616,11 +618,19 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
     });
 
     const durationMs = Date.now() - jobStart;
+    const persistedDiagnosis = triage.diagnosis
+      ? {
+        ...triage.diagnosis,
+        evidence: triage.evidence,
+        agentTaskBrief: triage.agentTaskBrief ?? undefined,
+        investigatedCommit: triage.investigatedCommit,
+      }
+      : null;
     const decision = {
       outcome: triage.outcome,
       decisionReason: triage.decisionReason,
-      causeLocation: triage.diagnosis?.cause_location ?? null,
-      diagnosis: triage.diagnosis,
+      causeLocation: persistedDiagnosis?.cause_location ?? null,
+      diagnosis: persistedDiagnosis,
       model: INVESTIGATION_MODEL,
       promptVersion: 'diagnosis-v1',
       jobId: job.id,
@@ -634,16 +644,38 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
     let parked = false;
     let kindGateRefusal: string | null = null;
 
-    if (triage.outcome === 'needs_more_context') {
+    if (triage.outcome === 'incomplete') {
       await updateGroupInvestigation(job.errorGroupId, job.projectId, 'needs_human', {
-        rootCause: triage.decisionReason,
+        rootCause: null,
         confidence: triage.confidence,
         reason: {
           reason_code: 'insufficient_context',
           reason_message: triage.decisionReason,
+          remediation: 'Re-run the investigation after more evidence accumulates; the previous run could not verify a cause.',
+        },
+        decision,
+        readiness: { status: 'ineligible', reason: triage.decisionReason },
+      }, job);
+      jobsFailed++;
+      logger.warn('Investigation: needs_human (unverified verdict)', {
+        job_id: job.id, duration_ms: durationMs,
+      });
+
+    } else if (triage.outcome === 'needs_more_context') {
+      // decisionReason here is model-derived prose from an UNVALIDATED verdict.
+      // It must not reach any rendered field: the readiness gate nulls
+      // root_cause on the API, but reason_message renders ungated, so both get
+      // computed copy. The prose survives in the decision row for forensics.
+      await updateGroupInvestigation(job.errorGroupId, job.projectId, 'needs_human', {
+        rootCause: null,
+        confidence: triage.confidence,
+        reason: {
+          reason_code: 'insufficient_context',
+          reason_message: 'The investigation could not establish a verified cause from the available evidence.',
           remediation: 'Review the error manually; the investigation could not establish a cause.',
         },
         decision,
+        readiness: { status: 'pending', reason: 'reinvestigating' },
       }, job);
       jobsFailed++;
       logger.warn('Investigation: needs_human (no usable diagnosis)', {
@@ -665,11 +697,12 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
           ),
         },
         decision,
+        readiness: { status: 'eligible', reason: 'validated_cause' },
       }, job);
       jobsProcessed++;
       logger.info('Investigation: conclusion', { job_id: job.id, duration_ms: durationMs });
 
-    } else if (triage.confidence === 'high') {
+    } else if (triage.confidence === 'high' && job.triggeredBy !== 'reinvestigate_report_only') {
       const fixResult = await updateGroupAndCreateFixJob(job.errorGroupId, job.projectId, {
         rootCause: triage.diagnosis?.one_line_description ?? triage.decisionReason,
         diagnosis: triage.diagnosis,
@@ -677,6 +710,7 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
         platform,
         decision,
         sourceJobId: job.id,
+        readiness: { status: 'eligible', reason: 'validated_cause' },
       }, job);
       if (fixResult.created) {
         jobsProcessed++;
@@ -700,6 +734,7 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
         rootCause: triage.diagnosis?.one_line_description ?? triage.decisionReason,
         confidence: triage.confidence,
         decision,
+        readiness: { status: 'eligible', reason: 'validated_cause' },
       }, job);
       jobsProcessed++;
       if (kindGateRefusal) {
@@ -809,20 +844,89 @@ export async function processFrictionInvestigateJob(
       : null;
     const sessionContext = sessionAnalysis ? formatSessionContext(sessionAnalysis) : null;
     checkAbort(signal);
-    const result = await investigateFriction(apiKey, group, evidence, clone.repoDir, sessionContext);
+    const result = await investigateFriction(apiKey, {
+      group,
+      evidence,
+      repoPath: clone.repoDir,
+      sessionContext,
+      investigatedCommit: clone.headSha,
+    });
+    await recordJobUsage({
+      jobId: job.id,
+      execution: job.attempts,
+      phase: 'investigation',
+      model: FRICTION_INVESTIGATION_MODEL,
+      usage: result.usage,
+      costUsd: result.costUsd,
+    });
     checkAbort(signal);
-    if (result.codeCause) {
+    if (result.status === 'incomplete') {
+      const decision = {
+        outcome: 'incomplete' as const,
+        decisionReason: result.reason,
+        causeLocation: null,
+        // The rejected verdict's evidence and brief are kept for forensics.
+        // They never render: incomplete decisions are readiness-ineligible and
+        // GetLatestAgentTaskBrief filters to validated outcomes.
+        diagnosis: {
+          evidence: result.rejected?.evidence ?? [],
+          agentTaskBrief: result.rejected?.agentTaskBrief ?? null,
+          investigatedCommit: result.investigatedCommit,
+        },
+        model: FRICTION_INVESTIGATION_MODEL,
+        promptVersion: 'friction-diagnosis-v2',
+        jobId: job.id,
+        basis: 'friction_classify' as const,
+        confidence: 'low' as const,
+      };
+      await updateGroupInvestigation(job.errorGroupId, job.projectId, 'needs_human', {
+        rootCause: null,
+        confidence: 'low',
+        reason: {
+          reason_code: 'insufficient_context',
+          reason_message: result.reason,
+          remediation: 'Re-run the investigation after more evidence accumulates; the previous run could not verify a cause.',
+        },
+        decision,
+        readiness: { status: 'ineligible', reason: result.reason },
+      }, job);
+      jobsFailed++;
+      lastJobAt = new Date().toISOString();
+      return;
+    }
+
+    const verdict = result.verdict;
+    const decision = {
+      outcome: verdict.codeCause ? 'code_fix' as const : 'not_actionable' as const,
+      decisionReason: verdict.reason,
+      causeLocation: verdict.evidence.map((citation) => citation.path).join(', ') || null,
+      diagnosis: {
+        evidence: verdict.evidence,
+        agentTaskBrief: verdict.agentTaskBrief,
+        investigatedCommit: result.investigatedCommit,
+        verdict,
+      },
+      model: FRICTION_INVESTIGATION_MODEL,
+      promptVersion: 'friction-diagnosis-v2',
+      jobId: job.id,
+      basis: 'friction_classify' as const,
+      confidence: verdict.confidence,
+    };
+
+    if (verdict.codeCause) {
       // auto_fix_ux shares the code-caused auto-fix path until UX-suggestion
       // fixes exist; insights remain terminal and never produce a PR.
       const autonomyAllowsFix = project.friction_autonomy === 'auto_fix'
         || project.friction_autonomy === 'auto_fix_ux';
-      if (result.confidence === 'high' && autonomyAllowsFix) {
+      if (verdict.confidence === 'high' && autonomyAllowsFix && job.triggeredBy !== 'reinvestigate_report_only') {
         // allowFriction is the ladder's explicit opt-in past the kind gate;
         // refuse-by-default stays intact for every other caller (issue #56).
         const fixResult = await updateGroupAndCreateFixJob(job.errorGroupId, job.projectId, {
-          rootCause: result.reason,
-          confidence: result.confidence,
+          rootCause: verdict.reason,
+          confidence: verdict.confidence,
           sourceJobId: job.id,
+          decision,
+          readiness: { status: 'eligible', reason: 'validated_cause' },
         }, job, { allowFriction: true });
         if (fixResult.created) {
           logger.info('Friction investigation: auto-triggering fix (autonomy ladder)', {
@@ -833,8 +937,10 @@ export async function processFrictionInvestigateJob(
         } else {
           // Never drop the investigation: park it for human approval instead.
           await updateGroupInvestigation(job.errorGroupId, job.projectId, 'awaiting_approval', {
-            rootCause: result.reason,
-            confidence: result.confidence,
+            rootCause: verdict.reason,
+            confidence: verdict.confidence,
+            decision,
+            readiness: { status: 'eligible', reason: 'validated_cause' },
           }, job);
           logger.warn('Friction investigation: auto-fix refused by kind gate — parked for approval', {
             job_id: job.id,
@@ -843,22 +949,26 @@ export async function processFrictionInvestigateJob(
         }
       } else {
         await updateGroupInvestigation(job.errorGroupId, job.projectId, 'awaiting_approval', {
-          rootCause: result.reason,
-          confidence: result.confidence,
+          rootCause: verdict.reason,
+          confidence: verdict.confidence,
+          decision,
+          readiness: { status: 'eligible', reason: 'validated_cause' },
         }, job);
         logger.info('Friction investigation: awaiting human approval', {
           job_id: job.id,
-          confidence: result.confidence,
+          confidence: verdict.confidence,
         });
       }
     } else {
       await updateGroupInvestigation(job.errorGroupId, job.projectId, 'insight', {
-        rootCause: result.reason,
-        confidence: result.confidence,
+        rootCause: verdict.reason,
+        confidence: verdict.confidence,
+        decision,
+        readiness: { status: 'eligible', reason: 'validated_cause' },
       }, job);
       logger.info('Friction investigation: recorded insight', {
         job_id: job.id,
-        confidence: result.confidence,
+        confidence: verdict.confidence,
       });
     }
     jobsProcessed++;
@@ -990,6 +1100,17 @@ export async function processSessionAnalysisJob(
 export async function processFixJob(job: ClaimedJob & { errorGroupId: string }, signal: AbortSignal): Promise<void> {
   const jobStart = Date.now();
   checkAbort(signal);
+
+  // Report-only attribution is only valid for investigation jobs. Refuse a
+  // malformed/stale fix job before any group read or mutation, and narrow the
+  // trigger type passed into the fix pipeline below.
+  if (job.triggeredBy === 'reinvestigate_report_only') {
+    logger.warn('Refused report-only fix job', {
+      job_id: job.id,
+      error_group_id: job.errorGroupId,
+    });
+    return;
+  }
 
   // Fetch real data
   const group = await db.getErrorGroup(job.errorGroupId, job.projectId);

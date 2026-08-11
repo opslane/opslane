@@ -99,6 +99,8 @@ export interface Diagnosis {
   cause_location: string;
   evidence?: EvidenceCitation[];
   agentTaskBrief?: string;
+  /** Commit whose repository contents were inspected for this diagnosis. */
+  investigatedCommit?: string;
 }
 
 export type DiagnosisOutcome =

@@ -1,4 +1,4 @@
-import type { Adjudication, Diagnosis, DiagnosisOutcome } from '@opslane/shared';
+import type { Adjudication, Diagnosis, DiagnosisOutcome, EvidenceCitation } from '@opslane/shared';
 import { deriveOutcome, type DerivedDecision } from './classify.js';
 import { parseAdjudication, submitDiagnosisTool } from './diagnose-schema.js';
 import { resolveInsideRepo } from './repo-paths.js';
@@ -11,6 +11,7 @@ import type { RuntimeInfo } from './runtime-info.js';
 import { traceSpan } from './tracing.js';
 import type { TriageResult } from './agent-fix.js';
 import { calculateCost } from '@opslane/agent-core';
+import { validateVerdict } from './verdict-validation.js';
 
 /**
  * The model the investigation actually runs on.
@@ -39,7 +40,7 @@ const MAX_STACK_TRACE = 3000;
 const MAX_BREADCRUMBS = 4000;
 const MAX_SESSION_CONTEXT = 500;
 
-const MODEL_PRICING: Record<string, { input: number; output: number; cacheWrite: number; cacheRead: number }> = {
+export const MODEL_PRICING: Record<string, { input: number; output: number; cacheWrite: number; cacheRead: number }> = {
   'claude-sonnet-4-6': { input: 3, output: 15, cacheWrite: 3.75, cacheRead: 0.30 },
   // Sonnet 5's introductory rate, $2/$10, runs through 2026-08-31. List is
   // $3/$15. Every eval cost figure is computed from this table, so the list
@@ -47,7 +48,7 @@ const MODEL_PRICING: Record<string, { input: number; output: number; cacheWrite:
   'claude-sonnet-5': { input: 2, output: 10, cacheWrite: 2.50, cacheRead: 0.20 },
   'claude-haiku-4-5-20251001': { input: 1, output: 5, cacheWrite: 1.25, cacheRead: 0.10 },
 };
-const DEFAULT_PRICING = { input: 3, output: 15, cacheWrite: 3.75, cacheRead: 0.30 };
+export const DEFAULT_PRICING = { input: 3, output: 15, cacheWrite: 3.75, cacheRead: 0.30 };
 
 export interface InvestigateInput {
   platform?: Platform;
@@ -104,6 +105,9 @@ export interface InvestigationResult extends TriageResult {
    * on ours.
    */
   stop: ReadOnlyStop;
+  evidence: EvidenceCitation[];
+  agentTaskBrief: string | null;
+  investigatedCommit: string;
 }
 
 function truncate(text: string, max: number): string {
@@ -178,6 +182,8 @@ evidence you actually read. Rules:
 - List every cause you weighed in candidates_considered, including the one you chose.
 - If you conclude the cause is outside this codebase, reject every local candidate by name in "rejected". A conclusion reached instead of the local candidates rather than against them will not be acted on.
 - In cause_locations, the FIRST entry is your claim and the only one we act on. Put the file you are most confident about first. path is the bare repository path with no line numbers and no parentheses; put line numbers in the line field and any explanation in the note field. Extra entries do not improve your answer.
+- Your verdict is machine-checked: the evidence field must cite at least one file you actually read, with what you found there (detail) and how it links to the customer-visible symptom (symptomLink). A verdict with no citations is discarded as incomplete, whatever its prose says.
+- Only files you opened with read_file count as read. A file you have only seen in search results does not count — read it before citing it.
 
 ${evidenceBlock(input)}`;
 }
@@ -195,6 +201,8 @@ function stopReason(stop: ReadOnlyStop, stage: string): string {
       return `${stage} ran out of turns`;
     case 'truncated':
       return `${stage} hit the output token ceiling mid-answer`;
+    case 'no_evidence':
+      return 'no_files_read: the investigation read no repository files';
     default:
       return `${stage} did not complete`;
   }
@@ -207,21 +215,26 @@ function failed(
   filesRead: string[],
   findings: string,
   stop: ReadOnlyStop,
+  investigatedCommit: string,
 ): InvestigationResult {
+  const noEvidence = stop === 'no_evidence';
   return {
     fixable: false,
     confidence: 'low',
     reason,
     adjudication: null,
     diagnosis: null,
-    outcome: 'needs_more_context',
+    outcome: noEvidence ? 'incomplete' : 'needs_more_context',
     decisionReason: reason,
-    decisionBasis: 'no_adjudication',
+    decisionBasis: noEvidence ? 'no_evidence' : 'no_adjudication',
     filesRead,
     findings,
     costUsd: 0,
     usage: NO_USAGE,
     stop,
+    evidence: [],
+    agentTaskBrief: null,
+    investigatedCommit,
   };
 }
 
@@ -235,6 +248,7 @@ export async function investigateError(
   apiKey: string,
   input: InvestigateInput,
   repoPath: string,
+  investigatedCommit = 'unknown',
 ): Promise<InvestigationResult> {
   const pricing = MODEL_PRICING[INVESTIGATION_MODEL] ?? DEFAULT_PRICING;
   const spendCeilingUsd = Number(process.env['INVESTIGATION_BUDGET_USD'] ?? DEFAULT_SPEND_CEILING_USD);
@@ -257,6 +271,7 @@ export async function investigateError(
         `the evidence supports rather than running out.${hints}`,
       terminalTool: submitDiagnosisTool(),
       repoPath,
+      classification: { minFilesRead: 1 },
     }));
 
   const filesRead = run.filesRead;
@@ -266,7 +281,7 @@ export async function investigateError(
     // Cost is carried on EVERY return path. Dropping it here would undercount
     // exactly the failed and retried runs the eval most needs to price.
     return {
-      ...failed(stopReason(run.stop, 'Investigation'), filesRead, run.lastModelText, run.stop),
+      ...failed(stopReason(run.stop, 'Investigation'), filesRead, run.lastModelText, run.stop, investigatedCommit),
       costUsd,
       usage: run.usage,
     };
@@ -282,7 +297,24 @@ export async function investigateError(
     });
   }
 
-  const decision = deriveOutcome(adjudication, (cited) => resolveInsideRepo(repoPath, cited));
+  let decision = deriveOutcome(adjudication, (cited) => resolveInsideRepo(repoPath, cited));
+  if (adjudication) {
+    const validation = validateVerdict({
+      causeText: adjudication.best_supported,
+      claimsCodeCause: decision.outcome === 'code_fix',
+      evidence: adjudication.evidence ?? [],
+      agentTaskBrief: adjudication.agent_task_brief ?? null,
+      filesRead,
+    }, (cited) => resolveInsideRepo(repoPath, cited));
+    if (validation.status === 'incomplete') {
+      decision = {
+        outcome: 'incomplete',
+        basis: 'invalid_verdict',
+        reason: validation.reason,
+        confidence: 'low',
+      };
+    }
+  }
 
   const diagnosis: Diagnosis | null = adjudication
     ? {
@@ -290,6 +322,8 @@ export async function investigateError(
       why_chain: adjudication.why_chain,
       reproduction_steps: adjudication.reproduction_steps,
       cause_location: adjudication.cause_locations.map((l) => l.path).join(', '),
+      evidence: adjudication.evidence,
+      agentTaskBrief: adjudication.agent_task_brief,
     }
     : null;
 
@@ -301,6 +335,7 @@ export async function investigateError(
     'investigation.files_read': filesRead.join(','),
     'investigation.cost_usd': costUsd,
     'investigation.stop': run.stop,
+    'investigation.investigated_commit': investigatedCommit,
     // The cache figures, not just the dollar total. A cost number cannot answer
     // whether prompt caching is working — these were computed on every run and
     // then dropped, so the one measurement that would catch a broken cache
@@ -328,5 +363,8 @@ export async function investigateError(
     costUsd,
     usage: run.usage,
     stop: run.stop,
+    evidence: adjudication?.evidence ?? [],
+    agentTaskBrief: adjudication?.agent_task_brief ?? null,
+    investigatedCommit,
   };
 }

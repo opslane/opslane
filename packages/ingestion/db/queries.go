@@ -377,39 +377,40 @@ func (q *Queries) releaseNotOlder(ctx context.Context, tx pgx.Tx, projectID, can
 // === Error groups ===
 
 type ErrorGroup struct {
-	ID                   string
-	ProjectID            string
-	Fingerprint          string
-	Title                string
-	FirstSeen            time.Time
-	LastSeen             time.Time
-	OccurrenceCount      int
-	AffectedUsersCount   int
-	Status               string
-	Kind                 string
-	Platform             *string
-	EnvironmentID        *string
-	AdjudicationStatus   *string
-	ReasonCode           *string
-	ReasonMessage        *string
-	Remediation          *string
-	Confidence           *string
-	PrURL                *string
-	RootCause            *string
-	SuggestedMitigation  *string
-	VerificationEvidence []byte
-	CandidateDiff        *string
-	SignalType           *string
-	ElementSelector      *string
-	PageURLNormalized    *string
-	PriorityScore        *float64
-	PriorityInputs       []byte
-	PriorityScoredAt     *time.Time
-	CreatedAt            time.Time
-	UpdatedAt            time.Time
-	MergedAt             *time.Time
-	ResolvedAt           *time.Time
-	ArchivedAt           *time.Time
+	ID                     string
+	ProjectID              string
+	Fingerprint            string
+	Title                  string
+	FirstSeen              time.Time
+	LastSeen               time.Time
+	OccurrenceCount        int
+	AffectedUsersCount     int
+	Status                 string
+	Kind                   string
+	Platform               *string
+	EnvironmentID          *string
+	AdjudicationStatus     *string
+	ReasonCode             *string
+	ReasonMessage          *string
+	Remediation            *string
+	Confidence             *string
+	PrURL                  *string
+	RootCause              *string
+	SuggestedMitigation    *string
+	InvestigationReadiness *string
+	VerificationEvidence   []byte
+	CandidateDiff          *string
+	SignalType             *string
+	ElementSelector        *string
+	PageURLNormalized      *string
+	PriorityScore          *float64
+	PriorityInputs         []byte
+	PriorityScoredAt       *time.Time
+	CreatedAt              time.Time
+	UpdatedAt              time.Time
+	MergedAt               *time.Time
+	ResolvedAt             *time.Time
+	ArchivedAt             *time.Time
 }
 
 type IngestParams struct {
@@ -727,6 +728,15 @@ func (q *Queries) InsertErrorEventAndGroup(ctx context.Context, p IngestParams) 
 			if err != nil {
 				return nil, fmt.Errorf("update group status to queued on requeue: %w", err)
 			}
+			_, err = tx.Exec(ctx,
+				`UPDATE digest_readiness
+				 SET status = 'pending', reason = 'reinvestigating', updated_at = now()
+				 WHERE incident_id = $1`,
+				groupID,
+			)
+			if err != nil {
+				return nil, fmt.Errorf("reset digest readiness on requeue: %w", err)
+			}
 			requeued = true
 		}
 	}
@@ -827,12 +837,13 @@ func (q *Queries) ListErrorGroups(ctx context.Context, projectID string, filters
 		               eg.occurrence_count, eg.affected_users_count, eg.status, eg.kind, eg.platform,
 		               eg.environment_id, eg.adjudication_status,
 		               eg.reason_code, eg.reason_message, eg.remediation,
-		               eg.confidence, eg.pr_url, eg.root_cause, eg.suggested_mitigation,
+		               eg.confidence, eg.pr_url, eg.root_cause, eg.suggested_mitigation, dr.status,
 		               eg.signal_type, eg.element_selector, eg.page_url_normalized,
 		               eg.priority_score, eg.priority_inputs, eg.priority_scored_at,
 		               eg.created_at, eg.updated_at,
 		               eg.merged_at, eg.resolved_at, eg.archived_at
 		        FROM error_groups eg
+		        LEFT JOIN digest_readiness dr ON dr.incident_id = eg.id
 		        WHERE ` + strings.Join(wheres, " AND ") + `
 		        ORDER BY COALESCE(eg.priority_score, 0) DESC, eg.last_seen DESC, eg.id DESC
 		        LIMIT 100`
@@ -916,13 +927,14 @@ func (q *Queries) ListErrorGroups(ctx context.Context, projectID string, filters
 		       candidates.occurrence_count, eg.affected_users_count, eg.status, eg.kind, eg.platform,
 		       eg.environment_id, eg.adjudication_status,
 		       eg.reason_code, eg.reason_message, eg.remediation,
-		       eg.confidence, eg.pr_url, eg.root_cause, eg.suggested_mitigation,
+		       eg.confidence, eg.pr_url, eg.root_cause, eg.suggested_mitigation, dr.status,
 		       eg.signal_type, eg.element_selector, eg.page_url_normalized,
 		       candidates.priority_score, candidates.priority_inputs, candidates.priority_scored_at,
 		       eg.created_at, eg.updated_at,
 		       eg.merged_at, eg.resolved_at, eg.archived_at
 		FROM candidates
 		JOIN error_groups eg ON eg.id = candidates.id
+		LEFT JOIN digest_readiness dr ON dr.incident_id = eg.id
 		ORDER BY COALESCE(candidates.priority_score, 0) DESC, candidates.last_seen DESC, candidates.id DESC
 		LIMIT 100`, strings.Join(errorWheres, " AND "), strings.Join(frictionWheres, " AND "))
 	}
@@ -941,7 +953,7 @@ func (q *Queries) ListErrorGroups(ctx context.Context, projectID string, filters
 			&g.OccurrenceCount, &g.AffectedUsersCount, &g.Status, &g.Kind, &g.Platform,
 			&g.EnvironmentID, &g.AdjudicationStatus,
 			&g.ReasonCode, &g.ReasonMessage, &g.Remediation,
-			&g.Confidence, &g.PrURL, &g.RootCause, &g.SuggestedMitigation,
+			&g.Confidence, &g.PrURL, &g.RootCause, &g.SuggestedMitigation, &g.InvestigationReadiness,
 			&g.SignalType, &g.ElementSelector, &g.PageURLNormalized,
 			&g.PriorityScore, &g.PriorityInputs, &g.PriorityScoredAt,
 			&g.CreatedAt, &g.UpdatedAt,
@@ -1094,26 +1106,27 @@ func (q *Queries) GetAccountByID(ctx context.Context, projectID, externalAccount
 func (q *Queries) GetErrorGroup(ctx context.Context, projectID, groupID string) (*ErrorGroup, error) {
 	var g ErrorGroup
 	err := q.pool.QueryRow(ctx,
-		`SELECT id, project_id, fingerprint, title, first_seen, last_seen,
-		        occurrence_count, affected_users_count, status, kind, platform,
-		        environment_id, adjudication_status,
-		        reason_code, reason_message, remediation,
-		        confidence, pr_url, root_cause, suggested_mitigation,
-		        verification_evidence, candidate_diff,
-		        signal_type, element_selector, page_url_normalized,
-		        priority_score, priority_inputs, priority_scored_at,
-		        created_at, updated_at,
-		        merged_at, resolved_at, archived_at
-		 FROM error_groups
-		 WHERE id = $1 AND project_id = $2
-		   AND (status <> 'candidate' OR adjudication_status = 'unchecked')`,
+		`SELECT g.id, g.project_id, g.fingerprint, g.title, g.first_seen, g.last_seen,
+		        g.occurrence_count, g.affected_users_count, g.status, g.kind, g.platform,
+		        g.environment_id, g.adjudication_status,
+		        g.reason_code, g.reason_message, g.remediation,
+		        g.confidence, g.pr_url, g.root_cause, g.suggested_mitigation, dr.status,
+		        g.verification_evidence, g.candidate_diff,
+		        g.signal_type, g.element_selector, g.page_url_normalized,
+		        g.priority_score, g.priority_inputs, g.priority_scored_at,
+		        g.created_at, g.updated_at,
+		        g.merged_at, g.resolved_at, g.archived_at
+		 FROM error_groups g
+		 LEFT JOIN digest_readiness dr ON dr.incident_id = g.id
+		 WHERE g.id = $1 AND g.project_id = $2
+		   AND (g.status <> 'candidate' OR g.adjudication_status = 'unchecked')`,
 		groupID, projectID,
 	).Scan(
 		&g.ID, &g.ProjectID, &g.Fingerprint, &g.Title, &g.FirstSeen, &g.LastSeen,
 		&g.OccurrenceCount, &g.AffectedUsersCount, &g.Status, &g.Kind, &g.Platform,
 		&g.EnvironmentID, &g.AdjudicationStatus,
 		&g.ReasonCode, &g.ReasonMessage, &g.Remediation,
-		&g.Confidence, &g.PrURL, &g.RootCause, &g.SuggestedMitigation,
+		&g.Confidence, &g.PrURL, &g.RootCause, &g.SuggestedMitigation, &g.InvestigationReadiness,
 		&g.VerificationEvidence, &g.CandidateDiff,
 		&g.SignalType, &g.ElementSelector, &g.PageURLNormalized,
 		&g.PriorityScore, &g.PriorityInputs, &g.PriorityScoredAt,
@@ -1127,6 +1140,28 @@ func (q *Queries) GetErrorGroup(ctx context.Context, projectID, groupID string) 
 		return nil, fmt.Errorf("get error group: %w", err)
 	}
 	return &g, nil
+}
+
+// GetLatestAgentTaskBrief returns the newest validated decision's brief for a
+// group. The handler additionally requires readiness=eligible before serving it.
+func (q *Queries) GetLatestAgentTaskBrief(ctx context.Context, projectID, groupID string) (*string, error) {
+	var brief *string
+	err := q.pool.QueryRow(ctx,
+		`SELECT NULLIF(btrim(diagnosis->>'agentTaskBrief'), '')
+		 FROM diagnosis_decisions
+		 WHERE project_id = $1 AND error_group_id = $2
+		   AND outcome IN ('code_fix', 'not_actionable')
+		 ORDER BY decided_at DESC, id DESC
+		 LIMIT 1`,
+		projectID, groupID,
+	).Scan(&brief)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get latest agent task brief: %w", err)
+	}
+	return brief, nil
 }
 
 // SampleEvent is the representative event for an error group, used by the

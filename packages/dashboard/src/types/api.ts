@@ -172,6 +172,9 @@ export interface Incident {
   candidate_diff?: string;
   root_cause?: string;
   suggested_mitigation?: string;
+  investigation_readiness?: 'eligible' | 'ineligible' | 'pending';
+  /** Model-authored technical report; render only under an investigation-output label. */
+  agent_task_brief?: string;
   merged_at?: string;
   resolved_at?: string;
   archived_at?: string;

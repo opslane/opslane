@@ -56,7 +56,7 @@ describe('processRouteMapJob', () => {
       installationId: null,
       githubRepo: 'org/repo',
     });
-    vi.mocked(cloneRepo).mockResolvedValue({ repoDir: '/tmp/repo', defaultBranch: 'main', cleanup });
+    vi.mocked(cloneRepo).mockResolvedValue({ repoDir: '/tmp/repo', defaultBranch: 'main', headSha: 'abc123', cleanup });
     vi.mocked(db.upsertRouteMapRows).mockResolvedValue(true);
   });
 
