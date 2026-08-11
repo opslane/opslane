@@ -192,7 +192,10 @@ function normalizeError(input: unknown, fallbackMessage?: string, fallbackType =
     }
 
     return {
-      errorType: input.constructor.name || fallbackType,
+      // err.name first: it survives minification (it is a string, not an
+      // identifier), so titles and fingerprints stay stable across releases.
+      // The constructor name is minified junk in production bundles.
+      errorType: input.name || input.constructor.name || fallbackType,
       errorMessage: input.message,
       stack,
     };

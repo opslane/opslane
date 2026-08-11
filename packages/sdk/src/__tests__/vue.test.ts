@@ -60,6 +60,25 @@ describe('Vue 3 Plugin', () => {
     expect(payload.error.message).toBe('Cannot read properties of undefined');
   });
 
+  it('prefers err.name over the constructor name for the error type', () => {
+    const app = createMockApp();
+    app.use(opslaneVuePlugin);
+
+    // Simulates a minified bundle: the class identifier churns per release,
+    // the string assigned to this.name does not.
+    class Nu extends Error {
+      constructor(message: string) {
+        super(message);
+        this.name = 'FetchError';
+      }
+    }
+
+    app.config.errorHandler!(new Nu('Error deleting Assets'), null, 'render function');
+
+    const payload = (transport.enqueueEvent as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(payload.error.type).toBe('FetchError');
+  });
+
   it('should include Vue lifecycle info in breadcrumb data', () => {
     const app = createMockApp();
     app.use(opslaneVuePlugin);

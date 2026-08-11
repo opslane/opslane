@@ -40,7 +40,8 @@ export const opslaneVuePlugin = {
         let stack: string;
 
         if (err instanceof Error) {
-          errorType = err.constructor.name || 'Error';
+          // err.name survives minification; the constructor name does not.
+          errorType = err.name || err.constructor.name || 'Error';
           errorMessage = err.message;
           stack = err.stack || '';
         } else {
