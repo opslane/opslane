@@ -14,7 +14,7 @@ The SDK catches the error via global handlers (or a framework hook), attaches br
 
 ## 2. Ingest and group (ingestion API)
 
-The event is authenticated by API key, origin-checked for browser traffic, rate-limited, and masked again server-side (sensitive headers, API-key prefixes, URL credentials). Known JavaScript noise (ResizeObserver loops, stackless Script error., extension-only stacks) is dropped before persistence. Surviving events are fingerprinted: JavaScript stale-deploy asset failures (failed to fetch dynamically imported module and similar) share one family fingerprint per project; others on platform + error type + message + stack. Matching events join an existing **error group**, new fingerprints create one. New groups enqueue an `investigate` job — a Postgres row, not a message queue — and enqueue `issue.created` events for enabled notification destinations.
+The event is authenticated by API key, origin-checked for browser traffic, rate-limited, and masked again server-side (sensitive headers, API-key prefixes, URL credentials). Known JavaScript noise (ResizeObserver loops, stackless Script error., extension-only stacks) is dropped before persistence. Surviving events are fingerprinted: JavaScript stale-deploy asset failures (failed to fetch dynamically imported module and similar) share one family fingerprint per project; others on platform + error type + message + stack. Matching events join an existing **error group**, new fingerprints create one. New groups enqueue an `investigate` job — a Postgres row, not a message queue — and enqueue `issue.created` events for enabled notification destinations. Resolved groups that recur are re-queued for a fresh investigation.
 
 ## 3. Claim (worker)
 
@@ -26,7 +26,7 @@ A fast model call classifies the error: fixable in application code, or not? Hig
 
 ## 5. Investigate and fix
 
-For fixable errors, the worker clones the repository (GitHub token or App installation token), resolves the stack through uploaded source maps, and runs an agentic fix loop inside an **E2B sandbox**: read the referenced source, form a root cause, edit, install dependencies, and collect build/test evidence. Failed attempts escalate through model tiers before giving up.
+For fixable errors, the worker clones the repository (GitHub token or App installation token), resolves the stack through uploaded source maps, and runs an agentic fix loop inside an **E2B sandbox**: read the referenced source, form a root cause, edit, install dependencies, and collect build/test evidence. The verdict is validated: evidence must cite files the investigation actually read, and filler text is rejected. Failed attempts escalate through model tiers before giving up.
 
 ## 6. Route by confidence — two stages
 
