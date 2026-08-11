@@ -62,6 +62,12 @@ function diagnosisResponse(overrides: Record<string, unknown> = {}) {
         cause_kind: 'local_code',
         cause_locations: [{ path: 'src/App.vue', line: 42 }],
         reasoning: 'The cited line maps over a null default.',
+        evidence: [{
+          path: 'src/App.vue',
+          detail: 'items is mapped without a null guard',
+          symptomLink: 'the null value throws during render',
+        }],
+        agent_task_brief: '## Symptom\nRendering fails for null items.\n## Change\nGuard the list before mapping.',
         ...overrides,
       },
     }],
@@ -71,7 +77,9 @@ function diagnosisResponse(overrides: Record<string, unknown> = {}) {
 
 /** The single agent reads what it needs and submits once. */
 function happyPath(overrides: Record<string, unknown> = {}): void {
-  mockMessagesCreate.mockResolvedValueOnce(diagnosisResponse(overrides));
+  mockMessagesCreate
+    .mockResolvedValueOnce(toolUseResponse([{ name: 'read_file', input: { path: 'src/App.vue' } }]))
+    .mockResolvedValueOnce(diagnosisResponse(overrides));
 }
 
 beforeEach(async () => {
@@ -94,6 +102,10 @@ describe('safePath', () => {
     expect(safePath('/repo', 'src/App.vue')).toBe('/repo/src/App.vue');
   });
 
+  it('allows paths within a repo whose root has a trailing separator', () => {
+    expect(safePath('/repo/', 'src/App.vue')).toBe('/repo/src/App.vue');
+  });
+
   it('blocks traversal above the repo root', () => {
     expect(safePath('/repo', '../../etc/passwd')).toBeNull();
   });
@@ -103,13 +115,16 @@ describe('the single-pass investigation', () => {
   it('diagnoses in one model pass and derives the outcome', async () => {
     happyPath();
 
-    const result = await investigateError('key', makeInput(), tempDir);
+    const result = await investigateError('key', makeInput(), tempDir, 'commit-123');
 
-    expect(mockMessagesCreate).toHaveBeenCalledTimes(1);
+    expect(mockMessagesCreate).toHaveBeenCalledTimes(2);
     expect(result.adjudication?.evidence_strength).toBe('conclusive');
     expect(result.adjudication?.candidates_considered).toHaveLength(2);
     expect(result.outcome).toBe('code_fix');
     expect(result.fixable).toBe(true);
+    expect(result.evidence).toHaveLength(1);
+    expect(result.agentTaskBrief).toContain('## Change');
+    expect(result.investigatedCommit).toBe('commit-123');
   });
 
   it('offers submit_diagnosis as the only terminal tool', async () => {
@@ -188,15 +203,52 @@ describe('the agent never names an outcome', () => {
   });
 
   it('refuses a citation that does not exist in the clone', async () => {
-    happyPath({ cause_locations: [{ path: 'src/Ghost.vue', line: 9 }] });
+    happyPath({
+      cause_locations: [{ path: 'src/Ghost.vue', line: 9 }],
+      evidence: [{ path: 'src/Ghost.vue', detail: 'missing guard', symptomLink: 'render throws' }],
+    });
 
     const result = await investigateError('key', makeInput(), tempDir);
 
-    expect(result.outcome).toBe('needs_more_context');
+    expect(result.outcome).toBe('incomplete');
+    expect(result.decisionBasis).toBe('invalid_verdict');
+    expect(result.decisionReason).toMatch(/^citation_unresolvable:/);
+  });
+
+  it('rejects a citation of an existing file the agent never read', async () => {
+    happyPath({
+      evidence: [{ path: 'package.json', detail: 'package config drives startup', symptomLink: 'startup fails' }],
+    });
+
+    const result = await investigateError('key', makeInput(), tempDir, 'commit-456');
+
+    expect(result.outcome).toBe('incomplete');
+    expect(result.decisionReason).toMatch(/^citation_not_read:/);
+  });
+
+  it('rejects filler cause prose', async () => {
+    happyPath({ best_supported: 'placeholder while I continue reading' });
+
+    const result = await investigateError('key', makeInput(), tempDir, 'commit-789');
+
+    expect(result.outcome).toBe('incomplete');
+    expect(result.decisionReason).toMatch(/^filler_verdict:/);
   });
 });
 
 describe('execution failures never masquerade as findings', () => {
+  it('returns structured incomplete when exploration reads no files', async () => {
+    mockMessagesCreate.mockResolvedValue(
+      toolUseResponse([{ name: 'list_files', input: { path: '.' } }]),
+    );
+
+    const result = await investigateError('key', makeInput(), tempDir, 'commit-no-evidence');
+
+    expect(result.outcome).toBe('incomplete');
+    expect(result.decisionBasis).toBe('no_evidence');
+    expect(result.decisionReason).toMatch(/^no_files_read:/);
+  });
+
   it('fails closed when the agent exhausts its budget', async () => {
     process.env['INVESTIGATION_BUDGET_USD'] = '0.0000001';
     mockMessagesCreate.mockResolvedValueOnce(
@@ -240,7 +292,12 @@ describe('execution failures never masquerade as findings', () => {
 
   it('keeps a diagnosis that arrives in the same response that blows the budget', async () => {
     process.env['INVESTIGATION_BUDGET_USD'] = '0.0000001';
-    happyPath();
+    mockMessagesCreate
+      .mockResolvedValueOnce({
+        ...toolUseResponse([{ name: 'read_file', input: { path: 'src/App.vue' } }]),
+        usage: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+      })
+      .mockResolvedValueOnce(diagnosisResponse());
 
     const result = await investigateError('key', makeInput(), tempDir);
 

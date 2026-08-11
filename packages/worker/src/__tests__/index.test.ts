@@ -92,7 +92,10 @@ vi.mock('../tracing.js', () => ({
 }));
 vi.mock('../visual-analysis.js', () => ({ runVisualAnalysis: vi.fn() }));
 vi.mock('../friction/friction-evidence.js', () => ({ gatherFrictionEvidence: vi.fn() }));
-vi.mock('../friction/investigate-friction.js', () => ({ investigateFriction: vi.fn() }));
+vi.mock('../friction/investigate-friction.js', () => ({
+  investigateFriction: vi.fn(),
+  FRICTION_INVESTIGATION_MODEL: 'claude-sonnet-4-6',
+}));
 vi.mock('../friction/chunk-reader.js', () => ({ readChunksBounded: vi.fn() }));
 vi.mock('../friction/analyzer.js', () => ({ analyzeSession: vi.fn(), RULE_VERSION: 2 }));
 vi.mock('../friction/facts.js', () => ({
@@ -302,6 +305,7 @@ describe('processInvestigateJob diagnosis routing', () => {
       mockCloneRepo.mockResolvedValue({
       repoDir: '/tmp/repo',
       defaultBranch: 'main',
+      headSha: 'abc123',
       cleanup: vi.fn(),
     });
   });
@@ -330,6 +334,7 @@ describe('processInvestigateJob diagnosis routing', () => {
       },
       filesRead: [],
       findings: '',
+      evidence: [], agentTaskBrief: null, investigatedCommit: 'abc123',
       stop: 'terminal',
     });
 
@@ -371,6 +376,7 @@ describe('processInvestigateJob diagnosis routing', () => {
       diagnosis: null,
       filesRead: [],
       findings: '',
+      evidence: [], agentTaskBrief: null, investigatedCommit: 'abc123',
       stop: 'terminal',
     });
 
@@ -378,9 +384,13 @@ describe('processInvestigateJob diagnosis routing', () => {
 
     expect(db.updateGroupInvestigation).toHaveBeenCalledWith(
       'grp-1', 'proj-1', 'needs_human', expect.objectContaining({
+        // decisionReason is model-derived prose from an unvalidated verdict.
+        // reason_message renders ungated on the incident page, so it must be
+        // computed copy; the prose lives only in the decision row.
+        rootCause: null,
         reason: {
           reason_code: 'insufficient_context',
-          reason_message: 'The investigation produced no usable diagnosis',
+          reason_message: 'The investigation could not establish a verified cause from the available evidence.',
           remediation: expect.any(String),
         },
         decision: expect.objectContaining({
@@ -411,6 +421,7 @@ describe('processInvestigateJob diagnosis routing', () => {
       },
       filesRead: [],
       findings: '',
+      evidence: [], agentTaskBrief: null, investigatedCommit: 'abc123',
       stop: 'terminal',
     });
     vi.mocked(db.updateGroupAndCreateFixJob).mockResolvedValue({ created: true, fixJobId: 'fix-1' });
@@ -446,6 +457,7 @@ describe('processInvestigateJob diagnosis routing', () => {
       diagnosis: null,
       filesRead: [],
       findings: '',
+      evidence: [], agentTaskBrief: null, investigatedCommit: 'abc123',
       stop: 'terminal',
     });
 
@@ -486,6 +498,7 @@ describe('processInvestigateJob diagnosis routing', () => {
       diagnosis: null,
       filesRead: [],
       findings: '',
+      evidence: [], agentTaskBrief: null, investigatedCommit: 'abc123',
       stop: 'terminal',
     });
 
@@ -520,6 +533,7 @@ describe('processInvestigateJob diagnosis routing', () => {
       },
       filesRead: [],
       findings: '',
+      evidence: [], agentTaskBrief: null, investigatedCommit: 'abc123',
       stop: 'terminal',
     });
 
@@ -530,6 +544,26 @@ describe('processInvestigateJob diagnosis routing', () => {
       'grp-1', 'proj-1', 'investigated',
       expect.objectContaining({ confidence: 'medium' }),
       makeJob(),
+    );
+  });
+
+  it('parks a report-only high-confidence code fix instead of opening a fix job', async () => {
+    mockInvestigateError.mockResolvedValue({
+      fixable: true, confidence: 'high', reason: 'The cause is at src/App.vue', adjudication: null,
+      costUsd: 0.1, usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+      decisionReason: 'The cause is at src/App.vue', decisionBasis: 'local_defect', outcome: 'code_fix',
+      diagnosis: { one_line_description: 'Disconnected save handler', why_chain: [], reproduction_steps: [], cause_location: 'src/App.vue' },
+      filesRead: ['src/App.vue'], findings: '', stop: 'terminal', evidence: [], agentTaskBrief: 'wire it', investigatedCommit: 'abc123',
+    });
+    const job = { ...makeJob(), triggeredBy: 'reinvestigate_report_only' as const };
+
+    await processInvestigateJob(job, new AbortController().signal);
+
+    expect(db.updateGroupAndCreateFixJob).not.toHaveBeenCalled();
+    expect(db.updateGroupInvestigation).toHaveBeenCalledWith(
+      'grp-1', 'proj-1', 'investigated', expect.objectContaining({
+        readiness: { status: 'eligible', reason: 'validated_cause' },
+      }), job,
     );
   });
 });
@@ -586,6 +620,17 @@ describe('processFixJob — preserves writeup on failure (no revert/null)', () =
     delete process.env['INGESTION_BASE_URL'];
     delete process.env['INTERNAL_READ_TOKEN'];
     delete process.env['OPSLANE_PYTHON_PIPELINE'];
+  });
+
+  it('refuses a report-only fix job before reading or mutating the group', async () => {
+    await processFixJob(
+      { ...fixJob(), triggeredBy: 'reinvestigate_report_only' },
+      new AbortController().signal,
+    );
+
+    expect(mockGetErrorGroup).not.toHaveBeenCalled();
+    expect(mockUpdateGroupStatus).not.toHaveBeenCalled();
+    expect(mockRunPipeline).not.toHaveBeenCalled();
   });
 
   it('terminates as needs_human with all reason fields + confidence when the fix is below floor', async () => {
@@ -769,7 +814,7 @@ describe('friction worker path', () => {
       id: 'proj-1', name: 'app', github_repo: 'org/app', default_branch: 'main', friction_autonomy: 'ask_first',
     });
     vi.mocked(db.getProjectGitHubInstallation).mockResolvedValue(null);
-    mockCloneRepo.mockResolvedValue({ repoDir: '/tmp/repo', cleanup: vi.fn() } as never);
+    mockCloneRepo.mockResolvedValue({ repoDir: '/tmp/repo', defaultBranch: 'main', headSha: 'abc123', cleanup: vi.fn() });
     vi.mocked(gatherFrictionEvidence).mockResolvedValue({ signals: [], timeline: '', truncated: false });
     mockRunPipeline.mockResolvedValue({
       status: 'pr_created', confidence: 'high', pr_url: 'https://github.com/org/app/pull/9', pr_number: 9,
@@ -779,7 +824,9 @@ describe('friction worker path', () => {
 
   it('parks code-caused friction under ask-first autonomy', async () => {
     vi.mocked(investigateFriction).mockResolvedValue({
-      codeCause: true, confidence: 'high', reason: 'save handler is disconnected', remediation: 'wire the handler',
+      status: 'verdict', investigatedCommit: 'abc123', costUsd: 0.1,
+      usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+      verdict: { codeCause: true, confidence: 'high', reason: 'save handler is disconnected', remediation: 'wire the handler', evidence: [], agentTaskBrief: 'wire it' },
     });
 
     await processInvestigateJob(makeJob(), new AbortController().signal);
@@ -800,7 +847,9 @@ describe('friction worker path', () => {
         id: 'proj-1', name: 'app', github_repo: 'org/app', default_branch: 'main', friction_autonomy: frictionAutonomy,
       });
       vi.mocked(investigateFriction).mockResolvedValue({
-        codeCause: true, confidence: 'high', reason: 'save handler is disconnected', remediation: 'wire the handler',
+        status: 'verdict', investigatedCommit: 'abc123', costUsd: 0.1,
+        usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+        verdict: { codeCause: true, confidence: 'high', reason: 'save handler is disconnected', remediation: 'wire the handler', evidence: [], agentTaskBrief: 'wire it' },
       });
       vi.mocked(db.updateGroupAndCreateFixJob).mockResolvedValue({ created: true, fixJobId: 'fix-job-1' });
 
@@ -821,7 +870,9 @@ describe('friction worker path', () => {
       id: 'proj-1', name: 'app', github_repo: 'org/app', default_branch: 'main', friction_autonomy: 'auto_fix',
     });
     vi.mocked(investigateFriction).mockResolvedValue({
-      codeCause: true, confidence: 'medium', reason: 'save handler is disconnected', remediation: 'wire the handler',
+      status: 'verdict', investigatedCommit: 'abc123', costUsd: 0.1,
+      usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+      verdict: { codeCause: true, confidence: 'medium', reason: 'save handler is disconnected', remediation: 'wire the handler', evidence: [], agentTaskBrief: 'wire it' },
     });
 
     await processInvestigateJob(makeJob(), new AbortController().signal);
@@ -834,7 +885,9 @@ describe('friction worker path', () => {
 
   it('records friction without a code cause as an insight', async () => {
     vi.mocked(investigateFriction).mockResolvedValue({
-      codeCause: false, confidence: 'medium', reason: 'The workflow is confusing but functional.',
+      status: 'verdict', investigatedCommit: 'abc123', costUsd: 0.1,
+      usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+      verdict: { codeCause: false, confidence: 'medium', reason: 'The workflow is confusing but functional.', evidence: [], agentTaskBrief: null },
     });
 
     await processInvestigateJob(makeJob(), new AbortController().signal);
@@ -844,6 +897,27 @@ describe('friction worker path', () => {
       makeJob(),
     );
     expect(db.updateGroupAndCreateFixJob).not.toHaveBeenCalled();
+  });
+
+  it('parks report-only friction even when autonomy allows auto-fix', async () => {
+    mockGetProject.mockResolvedValue({
+      id: 'proj-1', name: 'app', github_repo: 'org/app', default_branch: 'main', friction_autonomy: 'auto_fix',
+    });
+    vi.mocked(investigateFriction).mockResolvedValue({
+      status: 'verdict', investigatedCommit: 'abc123', costUsd: 0.1,
+      usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+      verdict: { codeCause: true, confidence: 'high', reason: 'disconnected handler', evidence: [], agentTaskBrief: 'wire it' },
+    });
+    const job = { ...makeJob(), triggeredBy: 'reinvestigate_report_only' as const };
+
+    await processInvestigateJob(job, new AbortController().signal);
+
+    expect(db.updateGroupAndCreateFixJob).not.toHaveBeenCalled();
+    expect(db.updateGroupInvestigation).toHaveBeenCalledWith(
+      'grp-1', 'proj-1', 'awaiting_approval', expect.objectContaining({
+        readiness: { status: 'eligible', reason: 'validated_cause' },
+      }), job,
+    );
   });
 
   it('refuses an auto friction fix under ask-first while preserving confidence', async () => {

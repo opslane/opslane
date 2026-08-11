@@ -24,6 +24,10 @@ import { incidentStatusRecipe } from '../status-recipes';
 const route = useRoute();
 const incidentId = route.params['id'] as string;
 const incident = ref<Incident | null>(null);
+const causeHidden = computed(() =>
+  incident.value?.investigation_readiness === 'ineligible'
+  || incident.value?.investigation_readiness === 'pending',
+);
 const prHref = computed(() => safeUrl(incident.value?.pr_url, GITHUB_PR_URL_OPTIONS));
 const loading = ref(true);
 const error = ref<string | null>(null);
@@ -506,7 +510,15 @@ onMounted(async () => {
 
         <!-- Investigation results, including context preserved on drafts and needs_human -->
         <div
-          v-if="(incident.status === 'investigated' || incident.status === 'awaiting_approval' || incident.status === 'fixing' || incident.status === 'pr_draft' || incident.status === 'needs_human') && incident.root_cause"
+          v-if="causeHidden"
+          class="p-4 bg-accent/10 border border-accent/20 border-l-2 border-l-accent rounded-lg space-y-3"
+          data-testid="honest-state"
+        >
+          <h2 class="text-xs font-medium text-accent uppercase tracking-wide">Investigation</h2>
+          <p class="text-sm">Investigation has not verified a cause yet.</p>
+        </div>
+        <div
+          v-if="!causeHidden && (incident.status === 'investigated' || incident.status === 'awaiting_approval' || incident.status === 'fixing' || incident.status === 'pr_draft' || incident.status === 'needs_human') && incident.root_cause"
           class="p-4 bg-accent/10 border border-accent/20 border-l-2 border-l-accent rounded-lg space-y-3"
         >
           <div>
@@ -517,6 +529,10 @@ onMounted(async () => {
               class="mt-1 text-sm bg-surface border border-border p-3 rounded overflow-x-auto whitespace-pre-wrap text-text"
               v-text="incident.root_cause"
             ></pre>
+          </div>
+          <div v-if="incident.agent_task_brief" class="mt-4">
+            <h3 class="text-xs font-medium text-accent uppercase tracking-wide">Investigation output — agent task brief</h3>
+            <pre class="mt-1 whitespace-pre-wrap text-sm" v-text="incident.agent_task_brief"></pre>
           </div>
           <div v-if="incident.suggested_mitigation">
             <p class="text-xs font-medium text-accent uppercase tracking-wide">
@@ -534,7 +550,7 @@ onMounted(async () => {
              that places the cause outside this codebase routes here, so the
              copy has to branch on kind rather than assume friction. -->
         <div
-          v-if="incident.status === 'insight'"
+          v-if="incident.status === 'insight' && !causeHidden"
           class="p-4 bg-insight/10 border border-insight/20 border-l-2 border-l-insight rounded-lg space-y-3"
         >
           <p class="text-sm font-medium text-insight">Insight — no code cause</p>

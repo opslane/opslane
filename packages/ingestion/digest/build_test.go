@@ -229,6 +229,44 @@ func TestBuildDigestSections(t *testing.T) {
 	}
 }
 
+func TestBuildDigestExcludesIneligibleAndPendingAcrossEverySection(t *testing.T) {
+	for _, status := range []string{"ineligible", "pending"} {
+		t.Run(status, func(t *testing.T) {
+			pool := testPool(t)
+			now := time.Now().UTC().Truncate(time.Second)
+			f := seedDigestFixture(t, pool, now)
+			ctx := context.Background()
+
+			var mergedID string
+			if err := pool.QueryRow(ctx, `INSERT INTO error_groups
+				(project_id, environment_id, fingerprint, title, kind, status, first_seen, last_seen,
+				 occurrence_count, affected_users_count, pr_created_at, pr_number, pr_url)
+				VALUES ($1,$2,$3,'Merged today','error','merged',$4,$4,1,1,$5,88,'https://github.example/pr/88') RETURNING id`,
+				f.ProjectID, f.EnvID, "fp-merged-gate-"+uuid.NewString(), now.Add(-72*time.Hour), now.Add(-48*time.Hour)).Scan(&mergedID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := pool.Exec(ctx, `INSERT INTO pr_outcomes
+				(project_id,error_group_id,pr_number,outcome,github_delivery_id,occurred_at)
+				VALUES ($1,$2,88,'merged',$3,$4)`, f.ProjectID, mergedID, "gate-"+uuid.NewString(), now.Add(-time.Hour)); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := pool.Exec(ctx, `INSERT INTO digest_readiness (incident_id, project_id, status, reason)
+				SELECT id, project_id, $2, 'test' FROM error_groups WHERE project_id=$1`, f.ProjectID, status); err != nil {
+				t.Fatal(err)
+			}
+
+			payload, err := New(pool, "https://dash.example").Build(ctx, f.ProjectID, now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			d := payload.Digest
+			if len(d.Insights) != 0 || len(d.TopNewIssues) != 0 || len(d.Outcomes.PRsOpened) != 0 || len(d.Outcomes.PRsMerged) != 0 || len(d.Outcomes.NeedsHuman) != 0 {
+				t.Fatalf("%s readiness leaked into digest: %+v", status, d)
+			}
+		})
+	}
+}
+
 func TestBuildDigestQuietDay(t *testing.T) {
 	pool := testPool(t)
 	now := time.Now().UTC().Truncate(time.Second)

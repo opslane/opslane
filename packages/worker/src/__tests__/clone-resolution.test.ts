@@ -81,7 +81,7 @@ describe('resolveClonedBranch', () => {
     const dir = await cloneTo(await masterRemote('ok'), 'ok-clone');
     await expect(
       resolveClonedBranch(execFileGitRunner(dir), 'o/r'),
-    ).resolves.toBe('master');
+    ).resolves.toMatchObject({ branch: 'master', headSha: expect.any(String) });
   });
 
   it('classifies a repository with no commits', async () => {

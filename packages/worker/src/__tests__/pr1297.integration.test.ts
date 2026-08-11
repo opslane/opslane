@@ -40,6 +40,24 @@ function diagnosis(input: Record<string, unknown>) {
   return { content: [{ type: 'tool_use', id: 'a', name: 'submit_diagnosis', input }], usage: USAGE };
 }
 
+function readInvestigatorSource() {
+  return {
+    content: [{
+      type: 'tool_use',
+      id: 'read-1',
+      name: 'read_file',
+      input: { path: 'packages/worker/src/investigate.ts' },
+    }],
+    usage: USAGE,
+  };
+}
+
+const INVESTIGATOR_EVIDENCE = [{
+  path: 'packages/worker/src/investigate.ts',
+  detail: 'The local investigation code does not implement the remote search endpoint.',
+  symptomLink: 'The client timeout bounds the wait but cannot establish why the backend was slow.',
+}];
+
 beforeEach(() => mockMessagesCreate.mockReset());
 
 /**
@@ -55,6 +73,7 @@ beforeEach(() => mockMessagesCreate.mockReset());
 describe('PR #1297: a slow backend never becomes a frontend code change', () => {
   it('routes a backend cause to a conclusion when the surface is the frontend', async () => {
     mockMessagesCreate
+      .mockResolvedValueOnce(readInvestigatorSource())
       .mockResolvedValueOnce(diagnosis({
         best_supported: 'The search endpoint did not respond within the 10 second budget',
         why_chain: [
@@ -76,6 +95,8 @@ describe('PR #1297: a slow backend never becomes a frontend code change', () => 
         cause_kind: 'external_system',
         cause_locations: [{ path: 'GET /issue-context/api/assets/search', note: 'remote service' }],
         reasoning: 'The server never responded; the client timeout only bounds the wait.',
+        evidence: INVESTIGATOR_EVIDENCE,
+        agent_task_brief: '',
       }));
 
     const result = await investigateError('key', inputFrom(fixture('hard-h1-timeout')), REPO_ROOT);
@@ -90,6 +111,7 @@ describe('PR #1297: a slow backend never becomes a frontend code change', () => 
   // rather than act.
   it('does not open an unattended fix when the evidence is only suggestive', async () => {
     mockMessagesCreate
+      .mockResolvedValueOnce(readInvestigatorSource())
       .mockResolvedValueOnce(diagnosis({
         best_supported: 'The configured timeout is too short',
         why_chain: ['The budget is 10 seconds', 'The call exceeded it'],
@@ -103,6 +125,13 @@ describe('PR #1297: a slow backend never becomes a frontend code change', () => 
         cause_kind: 'configuration',
         cause_locations: [{ path: 'packages/worker/src/investigate.ts', line: 1 }],
         reasoning: 'Cannot establish that the timeout, rather than the server, is the cause.',
+        evidence: INVESTIGATOR_EVIDENCE,
+        agent_task_brief: [
+          '## Symptom',
+          'A slow search exceeds the configured request budget.',
+          '## Constraint',
+          'Do not raise the timeout without proving the local configuration is causal.',
+        ].join('\n'),
       }));
 
     const result = await investigateError('key', inputFrom(fixture('hard-h1-timeout')), REPO_ROOT);

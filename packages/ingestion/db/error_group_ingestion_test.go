@@ -459,6 +459,11 @@ func TestRequeueOnRecurrence_ResolvedGroup(t *testing.T) {
 	if group.Status != "resolved" {
 		t.Fatalf("group.status = %q, want %q", group.Status, "resolved")
 	}
+	if _, err := pool.Exec(ctx, `INSERT INTO digest_readiness
+		(incident_id, project_id, status, reason) VALUES ($1, $2, 'eligible', 'validated_cause')`,
+		r1.GroupID, proj.ID); err != nil {
+		t.Fatalf("seed readiness: %v", err)
+	}
 
 	// Second ingest with same fingerprint — should re-queue
 	r2, err := q.InsertErrorEventAndGroup(ctx, db.IngestParams{
@@ -504,6 +509,14 @@ func TestRequeueOnRecurrence_ResolvedGroup(t *testing.T) {
 	// Occurrence count must be 2
 	if group.OccurrenceCount != 2 {
 		t.Errorf("group.occurrence_count = %d, want 2", group.OccurrenceCount)
+	}
+	var readinessStatus, readinessReason string
+	if err := pool.QueryRow(ctx, `SELECT status, reason FROM digest_readiness WHERE incident_id=$1`, r1.GroupID).
+		Scan(&readinessStatus, &readinessReason); err != nil {
+		t.Fatalf("read readiness: %v", err)
+	}
+	if readinessStatus != "pending" || readinessReason != "reinvestigating" {
+		t.Fatalf("readiness = %s/%s, want pending/reinvestigating", readinessStatus, readinessReason)
 	}
 
 	// Total jobs for this group: 2 (original + requeue)
@@ -598,6 +611,13 @@ func TestRequeueOnRecurrence_NeedsHumanRetriable(t *testing.T) {
 	}
 	if group.CandidateDiff != nil {
 		t.Errorf("group.candidate_diff = %q, want nil (cleared on requeue)", *group.CandidateDiff)
+	}
+	var readinessRows int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM digest_readiness WHERE incident_id=$1`, r1.GroupID).Scan(&readinessRows); err != nil {
+		t.Fatalf("count readiness: %v", err)
+	}
+	if readinessRows != 0 {
+		t.Fatalf("legacy absent-row group gained %d readiness rows", readinessRows)
 	}
 
 	// Occurrence count must be 2

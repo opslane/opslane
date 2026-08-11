@@ -13,7 +13,10 @@ const MAX_LIST_ENTRIES = 200;
 /** Validate and resolve a path, blocking traversal outside repoPath. */
 export function safePath(repoPath: string, requested: string): string | null {
   const resolved = resolve(repoPath, requested);
-  const normalizedRepo = normalize(repoPath);
+  // `resolve` removes a trailing separator. Keeping it here made the prefix
+  // check compare against `repo//`, rejecting every valid child path when a
+  // caller supplied a repository URL-derived path ending in `/`.
+  const normalizedRepo = resolve(normalize(repoPath));
   if (!resolved.startsWith(normalizedRepo + '/') && resolved !== normalizedRepo) {
     return null;
   }

@@ -20,36 +20,38 @@ import (
 // incidentJSON is the JSON representation of an incident, matching the
 // Incident type in shared/src/types.ts. Fields use snake_case.
 type incidentJSON struct {
-	ID                   string                    `json:"id"`
-	ProjectID            string                    `json:"project_id"`
-	Fingerprint          string                    `json:"fingerprint"`
-	Title                string                    `json:"title"`
-	Status               string                    `json:"status"`
-	Kind                 string                    `json:"kind"`
-	Platform             *string                   `json:"platform,omitempty"`
-	EnvironmentID        *string                   `json:"environment_id,omitempty"`
-	AdjudicationStatus   *string                   `json:"adjudication_status,omitempty"`
-	FirstSeen            string                    `json:"first_seen"`
-	LastSeen             string                    `json:"last_seen"`
-	OccurrenceCount      int                       `json:"occurrence_count"`
-	AffectedUsersCount   int                       `json:"affected_users_count"`
-	Confidence           *string                   `json:"confidence,omitempty"`
-	PrURL                *string                   `json:"pr_url,omitempty"`
-	ReplayID             *string                   `json:"replay_id,omitempty"`
-	SessionPointer       *sessionPointerJSON       `json:"session_pointer,omitempty"`
-	Reason               *needsHumanReason         `json:"reason,omitempty"`
-	RootCause            *string                   `json:"root_cause,omitempty"`
-	SuggestedMitigation  *string                   `json:"suggested_mitigation,omitempty"`
-	VerificationEvidence json.RawMessage           `json:"verification_evidence,omitempty"`
-	CandidateDiff        *string                   `json:"candidate_diff,omitempty"`
-	PriorityScore        *float64                  `json:"priority_score,omitempty"`
-	PriorityInputs       json.RawMessage           `json:"priority_inputs,omitempty"`
-	PriorityScoredAt     *time.Time                `json:"priority_scored_at,omitempty"`
-	MergedAt             *string                   `json:"merged_at,omitempty"`
-	ResolvedAt           *string                   `json:"resolved_at,omitempty"`
-	ArchivedAt           *string                   `json:"archived_at,omitempty"`
-	TraceURL             *string                   `json:"trace_url,omitempty"`
-	Environments         []incidentEnvironmentJSON `json:"environments,omitempty"`
+	ID                     string                    `json:"id"`
+	ProjectID              string                    `json:"project_id"`
+	Fingerprint            string                    `json:"fingerprint"`
+	Title                  string                    `json:"title"`
+	Status                 string                    `json:"status"`
+	Kind                   string                    `json:"kind"`
+	Platform               *string                   `json:"platform,omitempty"`
+	EnvironmentID          *string                   `json:"environment_id,omitempty"`
+	AdjudicationStatus     *string                   `json:"adjudication_status,omitempty"`
+	FirstSeen              string                    `json:"first_seen"`
+	LastSeen               string                    `json:"last_seen"`
+	OccurrenceCount        int                       `json:"occurrence_count"`
+	AffectedUsersCount     int                       `json:"affected_users_count"`
+	Confidence             *string                   `json:"confidence,omitempty"`
+	PrURL                  *string                   `json:"pr_url,omitempty"`
+	ReplayID               *string                   `json:"replay_id,omitempty"`
+	SessionPointer         *sessionPointerJSON       `json:"session_pointer,omitempty"`
+	Reason                 *needsHumanReason         `json:"reason,omitempty"`
+	RootCause              *string                   `json:"root_cause,omitempty"`
+	SuggestedMitigation    *string                   `json:"suggested_mitigation,omitempty"`
+	InvestigationReadiness *string                   `json:"investigation_readiness,omitempty"`
+	AgentTaskBrief         *string                   `json:"agent_task_brief,omitempty"`
+	VerificationEvidence   json.RawMessage           `json:"verification_evidence,omitempty"`
+	CandidateDiff          *string                   `json:"candidate_diff,omitempty"`
+	PriorityScore          *float64                  `json:"priority_score,omitempty"`
+	PriorityInputs         json.RawMessage           `json:"priority_inputs,omitempty"`
+	PriorityScoredAt       *time.Time                `json:"priority_scored_at,omitempty"`
+	MergedAt               *string                   `json:"merged_at,omitempty"`
+	ResolvedAt             *string                   `json:"resolved_at,omitempty"`
+	ArchivedAt             *string                   `json:"archived_at,omitempty"`
+	TraceURL               *string                   `json:"trace_url,omitempty"`
+	Environments           []incidentEnvironmentJSON `json:"environments,omitempty"`
 }
 
 type incidentEnvironmentJSON struct {
@@ -95,29 +97,35 @@ func fmtTimePtr(t *time.Time) *string {
 
 func toIncidentJSON(g db.ErrorGroup) incidentJSON {
 	inc := incidentJSON{
-		ID:                  g.ID,
-		ProjectID:           g.ProjectID,
-		Fingerprint:         g.Fingerprint,
-		Title:               g.Title,
-		Status:              g.Status,
-		Kind:                g.Kind,
-		Platform:            g.Platform,
-		EnvironmentID:       g.EnvironmentID,
-		AdjudicationStatus:  g.AdjudicationStatus,
-		FirstSeen:           g.FirstSeen.Format(time.RFC3339),
-		LastSeen:            g.LastSeen.Format(time.RFC3339),
-		OccurrenceCount:     g.OccurrenceCount,
-		AffectedUsersCount:  g.AffectedUsersCount,
-		Confidence:          g.Confidence,
-		PrURL:               g.PrURL,
-		RootCause:           g.RootCause,
-		SuggestedMitigation: g.SuggestedMitigation,
-		CandidateDiff:       g.CandidateDiff,
-		PriorityScore:       g.PriorityScore,
-		PriorityScoredAt:    g.PriorityScoredAt,
-		MergedAt:            fmtTimePtr(g.MergedAt),
-		ResolvedAt:          fmtTimePtr(g.ResolvedAt),
-		ArchivedAt:          fmtTimePtr(g.ArchivedAt),
+		ID:                     g.ID,
+		ProjectID:              g.ProjectID,
+		Fingerprint:            g.Fingerprint,
+		Title:                  g.Title,
+		Status:                 g.Status,
+		Kind:                   g.Kind,
+		Platform:               g.Platform,
+		EnvironmentID:          g.EnvironmentID,
+		AdjudicationStatus:     g.AdjudicationStatus,
+		FirstSeen:              g.FirstSeen.Format(time.RFC3339),
+		LastSeen:               g.LastSeen.Format(time.RFC3339),
+		OccurrenceCount:        g.OccurrenceCount,
+		AffectedUsersCount:     g.AffectedUsersCount,
+		Confidence:             g.Confidence,
+		PrURL:                  g.PrURL,
+		RootCause:              g.RootCause,
+		SuggestedMitigation:    g.SuggestedMitigation,
+		InvestigationReadiness: g.InvestigationReadiness,
+		CandidateDiff:          g.CandidateDiff,
+		PriorityScore:          g.PriorityScore,
+		PriorityScoredAt:       g.PriorityScoredAt,
+		MergedAt:               fmtTimePtr(g.MergedAt),
+		ResolvedAt:             fmtTimePtr(g.ResolvedAt),
+		ArchivedAt:             fmtTimePtr(g.ArchivedAt),
+	}
+	if g.InvestigationReadiness != nil &&
+		(*g.InvestigationReadiness == "ineligible" || *g.InvestigationReadiness == "pending") {
+		inc.RootCause = nil
+		inc.SuggestedMitigation = nil
 	}
 	if len(g.VerificationEvidence) > 0 {
 		inc.VerificationEvidence = json.RawMessage(g.VerificationEvidence)
@@ -304,6 +312,11 @@ func (d *Dependencies) GetIncident(w http.ResponseWriter, r *http.Request) {
 	}
 
 	inc := toIncidentJSON(*group)
+	if group.InvestigationReadiness != nil && *group.InvestigationReadiness == "eligible" {
+		if brief, err := d.Queries.GetLatestAgentTaskBrief(r.Context(), projectID, incidentID); err == nil && brief != nil {
+			inc.AgentTaskBrief = brief
+		}
+	}
 	environments, err := d.Queries.ListGroupEnvironments(r.Context(), projectID, incidentID)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "failed to get incident environments")

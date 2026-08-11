@@ -209,6 +209,7 @@ describeDb('Python two-stage production path', () => {
     vi.mocked(cloneRepo).mockResolvedValue({
       repoDir: '/tmp/python-production-path',
       defaultBranch: 'main',
+      headSha: 'abc123',
       cleanup: vi.fn(),
     });
     vi.mocked(investigateError).mockResolvedValue({
@@ -226,6 +227,7 @@ describeDb('Python two-stage production path', () => {
       usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       filesRead: ['cart.py'],
       findings: 'The traceback resolves to application code in cart.py.',
+      evidence: [], agentTaskBrief: null, investigatedCommit: 'abc123',
       stop: 'terminal',
     });
     vi.mocked(runAgentFix).mockResolvedValue({

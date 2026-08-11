@@ -33,7 +33,7 @@ export interface DecisionRow {
   outcome: DiagnosisOutcome;
   decisionReason: string;
   causeLocation?: string | null;
-  diagnosis: Diagnosis | null;
+  diagnosis: Diagnosis | Record<string, unknown> | null;
   model: string;
   promptVersion: string;
   jobId?: string | null;
@@ -44,6 +44,12 @@ export interface DecisionRow {
    */
   basis: DerivedDecision['basis'];
   confidence: ConfidenceLevel;
+}
+
+export type ReadinessStatus = 'eligible' | 'ineligible' | 'pending';
+export interface ReadinessWrite {
+  status: ReadinessStatus;
+  reason: string;
 }
 
 /** What a fix job needs from a persisted decision to know whether it may run. */
@@ -86,6 +92,23 @@ async function insertDiagnosisDecision(
       row.basis,
       row.confidence,
     ],
+  );
+}
+
+async function upsertDigestReadiness(
+  queryable: Pick<pg.PoolClient, 'query'>,
+  errorGroupId: string,
+  projectId: string,
+  readiness: ReadinessWrite,
+): Promise<void> {
+  await queryable.query(
+    `INSERT INTO digest_readiness (incident_id, project_id, status, reason, updated_at)
+     VALUES ($1, $2, $3, $4, now())
+     ON CONFLICT (incident_id) DO UPDATE
+     SET status = EXCLUDED.status,
+         reason = EXCLUDED.reason,
+         updated_at = now()`,
+    [errorGroupId, projectId, readiness.status, readiness.reason],
   );
 }
 
@@ -197,7 +220,7 @@ export interface ClaimedJob {
   guidance: string | null;
   /** Monotonically increasing fencing token for this claim. */
   leaseGeneration: string;
-  triggeredBy: 'auto' | 'human' | null;
+  triggeredBy: 'auto' | 'human' | 'reinvestigate_report_only' | null;
   sessionId: string | null;
   /** Effective routing platform persisted on durable fix jobs. */
   platform?: Platform | null;
@@ -211,6 +234,7 @@ export interface JobLease {
   projectId: string;
   errorGroupId: string | null;
   sessionId: string | null;
+  triggeredBy?: 'auto' | 'human' | 'reinvestigate_report_only' | null;
 }
 
 export class LeaseLostError extends Error {
@@ -800,6 +824,22 @@ export async function updateGroupStatus(
   );
   if (lease && (result.rowCount ?? 0) === 0) {
     throw new LeaseLostError(lease.id);
+  }
+
+  // A failure-path park must not leave the incident invisible forever: a
+  // requeue may have set digest_readiness to 'pending', and the terminal
+  // transitions that come through here (no-app-frames, clone failure,
+  // verification-infra exits) never reach the investigation-completion writes
+  // that would resolve it. Demote only an existing pending row — legacy
+  // absent-row groups stay absent-row (C1 interim policy), and completion
+  // paths go through updateGroupInvestigation, which writes readiness itself.
+  if (status === 'needs_human' && (result.rowCount ?? 0) > 0) {
+    await db.query(
+      `UPDATE digest_readiness
+       SET status = 'ineligible', reason = $3, updated_at = now()
+       WHERE incident_id = $1 AND project_id = $2 AND status = 'pending'`,
+      [errorGroupId, projectId, fields?.reason?.reason_code ?? 'investigation_failed'],
+    );
   }
 }
 
@@ -1729,11 +1769,12 @@ export async function updateGroupInvestigation(
   projectId: string,
   status: 'investigated' | 'fixing' | 'pr_created' | 'needs_human' | 'insight' | 'awaiting_approval',
   fields: {
-    rootCause?: string;
-    suggestedMitigation?: string;
+    rootCause?: string | null;
+    suggestedMitigation?: string | null;
     confidence?: ConfidenceLevel;
     reason?: NeedsHumanReason;
     decision?: DecisionRow;
+    readiness?: ReadinessWrite;
   },
   lease?: JobLease,
 ): Promise<void> {
@@ -1806,6 +1847,9 @@ export async function updateGroupInvestigation(
     if ((result.rowCount ?? 0) > 0 && fields.decision) {
       await insertDiagnosisDecision(client, errorGroupId, projectId, fields.decision);
     }
+    if ((result.rowCount ?? 0) > 0 && fields.readiness) {
+      await upsertDigestReadiness(client, errorGroupId, projectId, fields.readiness);
+    }
     await client.query('COMMIT');
   } catch (err: unknown) {
     await client.query('ROLLBACK');
@@ -1828,7 +1872,7 @@ export async function updateGroupInvestigation(
  * gate in processFixJob re-checks autonomy at claim time as a second layer. */
 export type FixJobResult =
   | { created: true; fixJobId: string }
-  | { created: false; reason: 'kind_not_error' };
+  | { created: false; reason: 'kind_not_error' | 'report_only' };
 
 export async function updateGroupAndCreateFixJob(
   errorGroupId: string,
@@ -1841,10 +1885,14 @@ export async function updateGroupAndCreateFixJob(
     platform?: Platform;
     decision?: DecisionRow;
     sourceJobId?: string;
+    readiness?: ReadinessWrite;
   },
   lease: JobLease,
   opts?: { allowFriction?: boolean },
 ): Promise<FixJobResult> {
+  if (lease.triggeredBy === 'reinvestigate_report_only') {
+    return { created: false, reason: 'report_only' };
+  }
   const db = getPool();
   const client = await db.connect();
   try {
@@ -1926,6 +1974,9 @@ export async function updateGroupAndCreateFixJob(
       if (fields.decision) {
         await insertDiagnosisDecision(client, errorGroupId, projectId, fields.decision);
       }
+      if (fields.readiness) {
+        await upsertDigestReadiness(client, errorGroupId, projectId, fields.readiness);
+      }
       await client.query('COMMIT');
       return { created: true, fixJobId: existingFix.rows[0].id };
     }
@@ -1966,6 +2017,9 @@ export async function updateGroupAndCreateFixJob(
     );
     if (fields.decision) {
       await insertDiagnosisDecision(client, errorGroupId, projectId, fields.decision);
+    }
+    if (fields.readiness) {
+      await upsertDigestReadiness(client, errorGroupId, projectId, fields.readiness);
     }
     await client.query('COMMIT');
     return { created: true, fixJobId: result.rows[0]!.id };

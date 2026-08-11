@@ -18,7 +18,10 @@ export interface DerivedDecision {
     | 'unrejected_local_candidates'
     | 'uncitable_local_claim'
     | 'citation_unresolvable'
-    | 'local_defect';
+    | 'local_defect'
+    | 'invalid_verdict'
+    | 'no_evidence'
+    | 'friction_classify';
   /**
    * Only `high` opens a pull request unattended. It comes from the model's
    * judgement of verified evidence, not from counting fields: an earlier version

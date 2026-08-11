@@ -329,6 +329,9 @@ export interface Incident {
   session_pointer?: { session_id: string; error_at: string };
   reason?: NeedsHumanReason;
   root_cause?: string;
+  investigation_readiness?: 'eligible' | 'ineligible' | 'pending';
+  /** Model-authored technical report; render only under an investigation-output label. */
+  agent_task_brief?: string;
   /** Structured verification evidence for the latest fix attempt. */
   verification_evidence?: EvidenceRecord;
   /** Candidate diff preserved on needs_human for manual review. */
