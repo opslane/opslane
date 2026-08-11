@@ -133,8 +133,52 @@ export async function createFixtureRepository(
     name: 'opslane-reliability-fixture',
     private: true,
     type: 'module',
-    scripts: { test: 'node --test' },
+    scripts: { test: 'vitest run', build: 'node --check src/value.js' },
+    devDependencies: { vitest: '2.1.9' },
   }, null, 2));
+  // The fail-first harness only trusts a filterable runner and looks for
+  // ./node_modules/.bin/vitest (test-runner.ts selectTestCommand; plain npm
+  // scripts are npm_script_not_filterable). A real vitest install would need
+  // the network inside the sandbox clone, so the seed vendors a deterministic
+  // stand-in that ACTUALLY evaluates the planted bug and emits the Jest-style
+  // JSON parseSuiteJson consumes: red on the unguarded base, green once
+  // value() guards null. It honors `--outputFile=<path>` and ignores the
+  // file/`-t` filter arguments (the repo has exactly one test).
+  await mkdir(join(seed, 'node_modules', '.bin'), { recursive: true });
+  await writeFile(join(seed, 'node_modules', '.bin', 'vitest'), [
+    '#!/usr/bin/env node',
+    "import { pathToFileURL } from 'node:url';",
+    "import { writeFileSync } from 'node:fs';",
+    "import { join } from 'node:path';",
+    '',
+    "const outArg = process.argv.find((arg) => arg.startsWith('--outputFile='));",
+    "const outputFile = outArg ? outArg.slice('--outputFile='.length) : null;",
+    "const testName = 'handles missing production data';",
+    "let status = 'passed';",
+    'let failureMessages = [];',
+    'try {',
+    "  const { value } = await import(pathToFileURL(join(process.cwd(), 'src', 'value.js')).href);",
+    '  const result = value(null);',
+    "  if (result !== 'UNKNOWN') {",
+    "    status = 'failed';",
+    '    failureMessages = [`AssertionError: expected ${JSON.stringify(result)} to be UNKNOWN`];',
+    '  }',
+    '} catch (error) {',
+    "  status = 'failed';",
+    '  failureMessages = [String(error)];',
+    '}',
+    'const report = {',
+    '  numTotalTests: 1,',
+    '  testResults: [{',
+    "    name: join(process.cwd(), 'test', 'value.test.js'),",
+    '    assertionResults: [{ fullName: testName, title: testName, status, failureMessages }],',
+    '  }],',
+    '};',
+    'if (outputFile) writeFileSync(outputFile, JSON.stringify(report));',
+    "console.log(status === 'passed' ? `ok ${testName}` : `not ok ${testName}\\n${failureMessages.join('\\n')}`);",
+    "process.exit(status === 'passed' ? 0 : 1);",
+    '',
+  ].join('\n'), { mode: 0o755 });
   await writeFile(
     join(seed, 'src', 'value.js'),
     "export function value(input) { return input.value.toUpperCase(); }\n",
@@ -142,12 +186,11 @@ export async function createFixtureRepository(
   await writeFile(
     join(seed, 'test', 'value.test.js'),
     [
-      "import test from 'node:test';",
-      "import assert from 'node:assert/strict';",
+      "import { expect, test } from 'vitest';",
       "import { value } from '../src/value.js';",
       '',
       "test('handles missing production data', () => {",
-      "  assert.equal(value(null), 'UNKNOWN');",
+      "  expect(value(null)).toBe('UNKNOWN');",
       '});',
       '',
     ].join('\n'),
@@ -172,17 +215,35 @@ export async function startProviderRecorders(options: ProviderTwinOptions = {}):
     const names = toolNames(body);
     let message: Record<string, unknown>;
     if (names.includes('classify_friction')) {
-      message = anthropicMessage(body, [{
-        type: 'tool_use',
-        id: 'tool_classify_friction',
-        name: 'classify_friction',
-        input: {
-          codeCause: true,
-          confidence: 'high',
-          reason: 'The value renderer dereferences missing input, so the control appears dead.',
-          remediation: 'Guard the missing value with a narrow fallback.',
-        },
-      }], 'tool_use');
+      // C1's validator requires the verdict to cite a file the agent actually
+      // read, so the twin reads before classifying — exactly what a
+      // contract-compliant model does (mirrors test-e2e/support/anthropic-stub.mjs).
+      if (toolResultCount(body) === 0) {
+        message = anthropicMessage(body, [{
+          type: 'tool_use',
+          id: 'tool_read_for_classify',
+          name: 'read_file',
+          input: { path: 'src/value.js' },
+        }], 'tool_use');
+      } else {
+        message = anthropicMessage(body, [{
+          type: 'tool_use',
+          id: 'tool_classify_friction',
+          name: 'classify_friction',
+          input: {
+            codeCause: true,
+            confidence: 'high',
+            reason: 'The value renderer dereferences missing input, so the control appears dead.',
+            remediation: 'Guard the missing value with a narrow fallback.',
+            evidence: [{
+              path: 'src/value.js',
+              detail: 'value() dereferences its input before any null check',
+              symptomLink: 'clicking the control throws, so the click appears dead',
+            }],
+            agent_task_brief: '## Symptom\nThe control appears dead.\n## Change\nGuard the missing value with a narrow fallback in src/value.js.',
+          },
+        }], 'tool_use');
+      }
     } else if (names.includes('submit_diagnosis') && !names.includes('edit')) {
       // The investigation's terminal tool, which replaced classify_error when
       // the two-agent split was retired. Without a branch here the request fell
@@ -196,7 +257,17 @@ export async function startProviderRecorders(options: ProviderTwinOptions = {}):
       // with an investigation-shaped diagnosis, which it read as "the agent gave
       // up" — needs_human, at the last step of the pipeline. Only the
       // investigation lacks `edit`, so that is what tells the two apart.
-      message = anthropicMessage(body, [{
+      // Same contract: read first, then cite what was read (validator rejects
+      // citations of files absent from ReadOnlyRunResult.filesRead).
+      if (toolResultCount(body) === 0) {
+        message = anthropicMessage(body, [{
+          type: 'tool_use',
+          id: 'tool_read_for_diagnosis',
+          name: 'read_file',
+          input: { path: 'src/value.js' },
+        }], 'tool_use');
+      } else {
+        message = anthropicMessage(body, [{
         type: 'tool_use',
         id: 'tool_diagnose',
         name: 'submit_diagnosis',
@@ -216,8 +287,15 @@ export async function startProviderRecorders(options: ProviderTwinOptions = {}):
           reasoning: 'The stack names src/value.js, and the value is read before it is checked.',
           why_chain: ['Production data contains null', 'value is dereferenced', 'Rendering throws'],
           reproduction_steps: ['Render the fixture with a null value'],
+          evidence: [{
+            path: 'src/value.js',
+            detail: 'value() dereferences its input before any null check',
+            symptomLink: 'matches the production TypeError on null input',
+          }],
+          agent_task_brief: '## Symptom\nRendering throws on null input.\n## Change\nGuard the nullable value in src/value.js before dereferencing.',
         },
-      }], 'tool_use');
+        }], 'tool_use');
+      }
     } else if (names.includes('score_diff')) {
       message = anthropicMessage(body, [{
         type: 'tool_use',
@@ -228,6 +306,16 @@ export async function startProviderRecorders(options: ProviderTwinOptions = {}):
           correctness: 2,
           preservation: 2,
           explanation: 'The change is minimal and covers the failing null input.',
+        },
+      }], 'tool_use');
+    } else if (names.includes('submit_judge_verdict')) {
+      message = anthropicMessage(body, [{
+        type: 'tool_use',
+        id: 'tool_verification_judge',
+        name: 'submit_judge_verdict',
+        input: {
+          approved: true,
+          assessment: 'The declared test fails on the base null dereference, passes with the guard, and the diff is narrow.',
         },
       }], 'tool_use');
     } else if (names.includes('submit_fix_narrative')) {
@@ -260,7 +348,24 @@ export async function startProviderRecorders(options: ProviderTwinOptions = {}):
           type: 'tool_use',
           id: 'tool_test',
           name: 'bash',
-          input: { command: 'cd /home/user/repo && npm test -- --test-reporter=dot' },
+          input: { command: 'cd /home/user/repo && npm test' },
+        }], 'tool_use');
+      } else if (results === 2) {
+        // The fail-first floor requires a declared regression test the harness
+        // can verify red-then-green; without it the attempt caps below
+        // 'reproduced' and parks needs_human. The seeded fixture test fails on
+        // base (value(null) throws) and passes with the guard fix.
+        // expected_assertion must avoid quotes/backslashes (contract) and be a
+        // substring of the base failure output.
+        message = anthropicMessage(body, [{
+          type: 'tool_use',
+          id: 'tool_declare_test',
+          name: 'declare_failing_test',
+          input: {
+            test_files: ['test/value.test.js'],
+            identifier: 'handles missing production data',
+            expected_assertion: 'Cannot read properties of null',
+          },
         }], 'tool_use');
       } else {
         message = anthropicMessage(body, [{

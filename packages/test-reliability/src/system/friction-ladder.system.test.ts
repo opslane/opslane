@@ -160,11 +160,13 @@ describe('friction ladder system tracer (provider twins)', () => {
     );
     expect(await workerDb.completeJob(fixJob!.id, workerId, fixJob!.leaseGeneration)).toBe(true);
 
-    // The Suggestion contract: honest title, honest unverified-friction body.
+    // The Suggestion contract: honest title, and since the fail-first floor
+    // landed, a ledger-rendered verification section (real red-then-green
+    // receipts) instead of the old unverified-friction disclaimer.
     expect(providers.pullRequests).toHaveLength(1);
     const pull = providers.pullRequests[0]!;
     expect(pull.title).toMatch(/^\[Opslane\] Suggestion:/);
-    expect(pull.body).toContain('friction itself was not re-verified');
+    expect(pull.body).toContain('declared test');
     expect(pull.base).toBe('main');
 
     const afterFix = await db.query<{
@@ -176,7 +178,9 @@ describe('friction ladder system tracer (provider twins)', () => {
       [groupId],
     );
     expect(afterFix.rows[0]).toEqual({
-      status: 'pr_created',
+      // Drafts are the v1 terminal posture for automated PRs (program plan,
+      // global constraints).
+      status: 'pr_draft',
       pr_number: pull.number,
       pr_fix_job_id: fixJob!.id,
     });

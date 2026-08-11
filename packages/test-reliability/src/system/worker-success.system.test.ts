@@ -56,7 +56,7 @@ describe('event-to-pr reliability system tracer', () => {
     }
   });
 
-  it('persists one real event through investigate and fix jobs to pr_created', async () => {
+  it('persists one real event through investigate and fix jobs to a verified draft PR', async () => {
     for (const key of envKeys) savedEnv.set(key, process.env[key]);
 
     const health = await fetch(`${ingestionUrl}/health`);
@@ -98,7 +98,13 @@ describe('event-to-pr reliability system tracer', () => {
         stack: 'TypeError: missing value\n    at value (src/value.js:1:39)',
       },
       breadcrumbs: [],
-      context: { url: 'https://fixture.invalid/missing-value' },
+      context: {
+        url: 'https://fixture.invalid/missing-value',
+        // The fix branch only auto-runs above the impact bar (>=1 identified
+        // user or >=3 recent anon sessions); an anonymous single event parks
+        // as 'investigated' instead of 'fixing'.
+        user: { id: 'user-reliability-1', email: 'reliability@example.com' },
+      },
       sdk_version: '0.0.1-reliability',
     });
     expect(postResponse.status).toBe(202);
@@ -235,6 +241,9 @@ describe('event-to-pr reliability system tracer', () => {
     expect(jobs.rows).toEqual([
       { job_type: 'investigate', status: 'completed' },
       { job_type: 'fix', status: 'completed' },
+      // Draft delivery opens with a CI watcher that stays pending until the
+      // draft's checks report (drafts are the v1 terminal posture).
+      { job_type: 'ci_watch', status: 'pending' },
     ]);
 
     // Reading an incident needs a signed-in user, not the ingest key. The
@@ -248,15 +257,24 @@ describe('event-to-pr reliability system tracer', () => {
     expect(incident).toMatchObject({
       id: accepted.group_id,
       project_id: tenant.projectId,
-      status: 'pr_created',
+      // Drafts are the v1 terminal posture for automated PRs.
+      status: 'pr_draft',
       confidence: 'high',
       pr_url: `https://github.test/${githubRepo}/pull/42`,
     });
     expect(await scanReliabilityInvariants(db)).toEqual([]);
 
-    expect(providers.anthropicJournal).toHaveLength(6);
+    // 9 calls under the citation + fail-first contracts: investigation
+    // read_file + submit_diagnosis, fix edit/test/declare_failing_test/finish,
+    // judge, and narrative turns. Anchor the two load-bearing calls by content
+    // rather than hard-coding every position.
+    expect(providers.anthropicJournal).toHaveLength(9);
     expect(toolNames(providers.anthropicJournal[0]!.body)).toContain('submit_diagnosis');
-    expect(toolNames(providers.anthropicJournal[4]!.body)).toEqual(['score_diff']);
+    const judgeCalls = providers.anthropicJournal.filter(
+      (entry) => toolNames(entry.body).includes('score_diff'),
+    );
+    expect(judgeCalls).toHaveLength(1);
+    expect(toolNames(judgeCalls[0]!.body)).toEqual(['score_diff']);
     // Durable delivery reconciles before it creates: the pipeline looks for an
     // existing open PR on the stable branch, probes the branch head (absent →
     // push), and createPR runs its own idempotency lookup before the one POST.
