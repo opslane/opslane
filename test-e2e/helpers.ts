@@ -661,6 +661,11 @@ export async function cleanupTenant(orgId: string): Promise<void> {
     await db.query('ALTER TABLE job_usage ENABLE TRIGGER job_usage_immutable_row');
   }
 
+  await db.query(
+    `DELETE FROM fix_run_ledger WHERE project_id IN (SELECT id FROM projects WHERE org_id = $1)`,
+    [orgId],
+  );
+
   // pr_outcomes.fix_job_id references error_group_jobs with no ON DELETE
   // (migration 008), so outcomes must go before the jobs they point at.
   await db.query(
@@ -746,6 +751,15 @@ export async function cleanupTenant(orgId: string): Promise<void> {
   await db.query(`UPDATE projects SET default_environment_id = NULL WHERE org_id = $1`, [orgId]);
   await db.query(
     `DELETE FROM environments WHERE project_id IN (SELECT id FROM projects WHERE org_id = $1)`,
+    [orgId]
+  );
+  // Second jobs sweep, immediately before the projects delete: a browser page
+  // still flushing events can race the teardown and enqueue a group-less
+  // project-scoped job (route_map) after the first sweep, which then blocks
+  // the projects delete on error_group_jobs_project_id_fkey (observed on the
+  // keyless CI lane, 2026-08-11).
+  await db.query(
+    `DELETE FROM error_group_jobs WHERE project_id IN (SELECT id FROM projects WHERE org_id = $1)`,
     [orgId]
   );
   await db.query(`DELETE FROM projects WHERE org_id = $1`, [orgId]);
