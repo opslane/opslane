@@ -194,7 +194,7 @@ describe('runPipeline', () => {
     if (previousDashboardUrl === undefined) delete process.env['DASHBOARD_URL'];
     else process.env['DASHBOARD_URL'] = previousDashboardUrl;
 
-    expect(result.status).toBe('pr_created');
+    expect(result.status).toBe('pr_draft');
     expect(result.pr_url).toBe('https://github.com/org/repo/pull/99');
     expect(result.pr_number).toBe(99);
     expect(result.confidence).toBe('high');
@@ -217,6 +217,7 @@ describe('runPipeline', () => {
       narrative: FIX_NARRATIVE,
       environmentNames,
       environmentTotal: 2,
+      draft: true,
       incidentUrl: 'https://app.opslane.com/incidents/group-12345678?project_id=project-1',
     }), expect.any(Function));
     expect(result.narrative).toEqual(FIX_NARRATIVE);
@@ -400,20 +401,28 @@ describe('runPipeline', () => {
     expect(mockGitCommitAndPush).not.toHaveBeenCalled();
   });
 
-  it('GUARD: a fix_ready result with non-high confidence never opens a PR', async () => {
+  it('does not use confidence as a second authorization gate for fix_ready', async () => {
     mockRunAgentFix.mockResolvedValueOnce({
       status: 'fix_ready',
       diff: VALID_DIFF,
-      confidence: 'medium' as ConfidenceLevel, // must never happen post-gate, but the pipeline must not trust it
+      confidence: 'medium' as ConfidenceLevel,
       rootCause: 'rc',
       affectedFiles: ['f.ts'],
     });
 
+    mockCreatePR.mockResolvedValueOnce({
+      status: 'created',
+      prUrl: 'https://github.com/org/repo/pull/100',
+      prNumber: 100,
+    });
+
     const result = await runPipeline(makePipelineInput());
-    expect(result.status).toBe('needs_human');
-    expect(result.reason?.reason_code).toBe('low_confidence_fix');
-    expect(mockCreatePR).not.toHaveBeenCalled();
-    expect(mockGitCommitAndPush).not.toHaveBeenCalled();
+    expect(result.status).toBe('pr_draft');
+    expect(mockCreatePR).toHaveBeenCalledWith(
+      expect.objectContaining({ draft: true }),
+      expect.any(Function),
+    );
+    expect(mockGitCommitAndPush).toHaveBeenCalled();
   });
 
   it('returns needs_human with malformed_diff when diff path validation fails', async () => {

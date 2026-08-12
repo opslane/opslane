@@ -22,7 +22,7 @@ The worker polls Postgres and claims jobs with `FOR UPDATE SKIP LOCKED` under a 
 
 ## 4. Triage
 
-A fast model call classifies the error: fixable in application code, or not? High-confidence *unfixable* verdicts short-circuit immediately into `needs_human` with a specific reason — `unfixable_third_party`, `unfixable_infra`, `unfixable_test_error`, `unfixable_no_app_frames`, or `unfixable_no_sourcemap` — each with remediation text ([full catalog](../reference/reason-codes.md)).
+A fast model call classifies the error: fixable in application code, or not? High-confidence *unfixable* verdicts short-circuit immediately into `needs_human` with a specific reason — `unfixable_third_party`, `unfixable_infra`, `unfixable_test_error`, `unfixable_no_app_frames`, or `unfixable_no_sourcemap` — each with remediation text ([full catalog](../reference/reason-codes.md)). Fixable errors are checked against the impact bar: at least one identified user or three recent anonymous sessions qualifies for automated fixing; below that threshold the diagnosis parks at `investigated` for human review.
 
 ## 5. Investigate and fix
 
@@ -32,12 +32,12 @@ For fixable errors, the worker clones the repository (GitHub token or App instal
 
 Investigation and fixing are separate stages:
 
-- **Investigation stage.** High-confidence-fixable errors proceed straight to the fix stage. Medium/low-confidence investigations stop here: the **root-cause analysis** is persisted as **`investigated`** (no fix has been generated yet), waiting for a human to read it and trigger the fix from the dashboard.
-- **Fix stage** (automatic for high confidence, human-triggered from `investigated`). The agent writes a fix, records build/test evidence, and sends the diff through an independent judge. A high-confidence fix with executed suite evidence becomes a ready pull request (`pr_created`). If the project opted into `draft_when_unverified`, a judge-approved fix with a passing build and no negative execution evidence may instead become a clearly labeled draft (`pr_draft`); its exact head SHA is observed in repository CI and promoted only on green. Otherwise the bounded candidate diff and evidence are preserved on `needs_human` for manual review.
+- **Investigation stage.** Errors above the impact bar proceed straight to the fix stage. Below-threshold investigations stop here: the **root-cause analysis** is persisted as **`investigated`** (no fix has been generated yet), waiting for a human to read it and trigger the fix from the dashboard.
+- **Fix stage** (automatic for above-threshold, human-triggered from `investigated`). The agent writes a fix and declares a failing regression test; fail-first verification runs the test on the base commit (must fail with the declared assertion) and with the fix (must pass). An independent judge reviews the diff, declared test, and verification ledger; the judge may probe the sandbox (up to three commands) and can veto but cannot override mechanical predicates. A `reproduced` fix (red-then-green proof, clean suite, build passed) approved by the judge becomes a draft pull request (`pr_draft`). The exact head SHA is observed in repository CI and promoted to ready on green for human-triggered fixes; automated fixes remain draft. A `checked` fix (reproduction impossible, suite and build clean, quality confirmed) or judge veto preserves the bounded candidate diff and evidence on `needs_human` for manual review.
 - **Anything the worker cannot progress** at either stage → **`needs_human`** with `reason_code`, `reason_message`, and `remediation` — always all three.
 
 One known gap in this contract, stated honestly: if an **investigate** job repeatedly crashes or loses its lease until it dead-letters, its group can currently remain in `analyzing` without a terminal reason — dead-letter reconciliation covers fix jobs only. Tracked as [#25](https://github.com/opslane/opslane-oss/issues/25).
 
 ## 7. Human follow-up
 
-From the dashboard: review an `investigated` analysis and trigger the fix, open a `pr_draft` in GitHub to inspect its CI, resolve or archive incidents, or act on a `needs_human` remediation (connect the GitHub App, upload source maps, add context) and retry. Project settings keep draft delivery opt-in and default to verified-only.
+From the dashboard: review an `investigated` analysis and trigger the fix, open a `pr_draft` in GitHub to inspect its CI, resolve or archive incidents, or act on a `needs_human` remediation (connect the GitHub App, upload source maps, add context) and retry. Automated draft PRs wait for external CI observation before promotion to ready; human-triggered drafts promote on green CI. Project settings keep draft delivery opt-in and default to verified-only.

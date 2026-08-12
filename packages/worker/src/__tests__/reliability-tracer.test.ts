@@ -10,11 +10,14 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 // other than code_fix/high must refuse, which the agent-fix suite covers.
 vi.mock('../db.js', async () => ({
   ...(await vi.importActual<typeof import('../db.js')>('../db.js')),
-  loadDiagnosisDecision: vi.fn(async () => ({
+  insertFixRunLedger: vi.fn(async () => undefined),
+  loadDiagnosisDecisionForSource: vi.fn(async () => ({
+    id: 'decision-reliability',
     outcome: 'code_fix' as const,
     basis: 'local_defect',
     confidence: 'high' as const,
-    reason: 'The cause is at src/value.js',
+    policyEligible: true,
+    policyBasis: { v: 1 as const, identified_users: 1, recent_anon_sessions: 0 },
   })),
 }));
 
@@ -106,7 +109,7 @@ describe('deterministic reliability tracer', () => {
     });
 
     expect(result).toMatchObject({
-      status: 'pr_created',
+      status: 'pr_draft',
       pr_url: 'https://github.test/e2e/reliability/pull/42',
       pr_number: 42,
       confidence: 'high',
@@ -116,23 +119,18 @@ describe('deterministic reliability tracer', () => {
         checks: expect.arrayContaining([
           expect.objectContaining({ name: 'suite_baseline', outcome: 'failed' }),
           expect.objectContaining({ name: 'suite_post_patch', outcome: 'passed' }),
-          // The fixture seeds a build script (node --check) so the build gate
-          // actually runs — it was skipped_no_runner before the fixture
-          // vendored its deterministic vitest and build entries.
           expect.objectContaining({ name: 'build', outcome: 'passed' }),
         ]),
       },
     });
-    // Six calls: edit, test run, declare_failing_test (the fail-first
-    // declaration turn the citation-era twin now makes), the closing text,
-    // then judge and narrative.
-    expect(anthropicJournal).toHaveLength(6);
+    expect(anthropicJournal).toHaveLength(7);
     expect(anthropicJournal.every((entry) => entry.path === '/v1/messages')).toBe(true);
     expect(anthropicJournal.every((entry) => entry.authorization === 'test-anthropic-key')).toBe(true);
     expect(toolNames(anthropicJournal[0]!.body)).toContain('edit');
     expect(toolNames(anthropicJournal[4]!.body)).toEqual(['score_diff']);
-    expect(toolNames(anthropicJournal[5]!.body)).toEqual(['submit_fix_narrative']);
-    expect(anthropicJournal[5]!.body['max_tokens']).toBe(512);
+    expect(toolNames(anthropicJournal[5]!.body)).toContain('submit_judge_verdict');
+    expect(toolNames(anthropicJournal[6]!.body)).toEqual(['submit_fix_narrative']);
+    expect(anthropicJournal[6]!.body['max_tokens']).toBe(512);
     const system = anthropicJournal[0]!.body['system'] as Array<{ text: string }>;
     expect(system[0]?.text).toContain(
       '## Environments\n<untrusted_user_data>\n' +
@@ -151,6 +149,7 @@ describe('deterministic reliability tracer', () => {
       body: {
         head: 'opslane/fix-error-gr',
         base: 'main',
+        draft: true,
       },
     });
     expect(githubJournal[3]?.body).toMatchObject({
@@ -177,8 +176,8 @@ describe('deterministic reliability tracer', () => {
       '',
       'Rendering a record with missing data crashed the page.',
     ].join('\n'));
-    expect(pushedCommit.stdout).toContain(
-      'Verified: no new test failures compared with the pre-fix baseline; build\npassed.',
+    expect(pushedCommit.stdout).toMatch(
+      /Verified: no new test failures compared with the pre-fix baseline; build\s+passed; the reproduction passed with the fix\./,
     );
     const pushedSource = await execFile('git', ['show', `${pushedBranches[0]}:src/value.js`], {
       cwd: remote,

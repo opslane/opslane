@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import { purgeDiagnosisDecisions } from './purge-diagnosis-decisions.js';
+import { purgeFixRunLedger } from './purge-fix-run-ledger.js';
 import { purgeJobUsage } from './purge-job-usage.js';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import pg from 'pg';
@@ -85,13 +86,18 @@ describeDb('Python two-stage production path', () => {
   let environmentId = '';
 
   async function seedPythonIncident(): Promise<SeededIncident> {
+    const endUser = await pool.query<{ id: string }>(
+      `INSERT INTO end_users (project_id, external_user_id)
+       VALUES ($1, $2) RETURNING id`,
+      [projectId, `python-user-${crypto.randomUUID()}`],
+    );
     const event = await pool.query<{ id: string }>(
       `INSERT INTO error_events
          (project_id, environment_id, timestamp, error_type, error_message,
-          stack_trace_raw, breadcrumbs, context, platform)
-       VALUES ($1, $2, now(), 'TypeError', 'price cannot be null', $3, '[]', $4::jsonb, 'python')
+          stack_trace_raw, breadcrumbs, context, platform, end_user_id)
+       VALUES ($1, $2, now(), 'TypeError', 'price cannot be null', $3, '[]', $4::jsonb, 'python', $5)
        RETURNING id`,
-      [projectId, environmentId, PYTHON_TRACEBACK, JSON.stringify({ runtime: { name: 'CPython', version: '3.11.8' } })],
+      [projectId, environmentId, PYTHON_TRACEBACK, JSON.stringify({ runtime: { name: 'CPython', version: '3.11.8' } }), endUser.rows[0]!.id],
     );
     const eventId = event.rows[0]!.id;
 
@@ -105,6 +111,11 @@ describeDb('Python two-stage production path', () => {
     );
     const groupId = group.rows[0]!.id;
     await pool.query(`UPDATE error_events SET error_group_id = $1 WHERE id = $2`, [groupId, eventId]);
+    await pool.query(
+      `INSERT INTO error_group_affected_users (error_group_id, end_user_id)
+       VALUES ($1, $2)`,
+      [groupId, endUser.rows[0]!.id],
+    );
 
     const workerId = `python-investigate-${crypto.randomUUID()}`;
     const job = await pool.query<{ id: string; lease_generation: string }>(
@@ -246,6 +257,7 @@ describeDb('Python two-stage production path', () => {
     delete process.env['ANTHROPIC_API_KEY'];
     delete process.env['GITHUB_TOKEN'];
     await purgeDiagnosisDecisions(pool, projectId);
+    await purgeFixRunLedger(pool, projectId);
     // The real investigate processor records job_usage rows (migration 043),
     // which FK-block deleting their jobs; purge them first.
     const jobs = await pool.query<{ id: string }>(
@@ -254,7 +266,13 @@ describeDb('Python two-stage production path', () => {
     await purgeJobUsage(pool, jobs.rows.map((row) => row.id));
     await pool.query(`DELETE FROM error_group_jobs WHERE project_id = $1`, [projectId]);
     await pool.query(`DELETE FROM error_events WHERE project_id = $1`, [projectId]);
+    await pool.query(
+      `DELETE FROM error_group_affected_users
+       WHERE end_user_id IN (SELECT id FROM end_users WHERE project_id = $1)`,
+      [projectId],
+    );
     await pool.query(`DELETE FROM error_groups WHERE project_id = $1`, [projectId]);
+    await pool.query(`DELETE FROM end_users WHERE project_id = $1`, [projectId]);
   });
 
   afterAll(async () => {
