@@ -11,12 +11,14 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 	_ "time/tzdata"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	ingestiondb "github.com/opslane/opslane/packages/ingestion/db"
 	"github.com/opslane/opslane/packages/ingestion/notify"
 )
 
@@ -32,19 +34,35 @@ const (
 
 type Sweeper struct {
 	pool         *pgxpool.Pool
+	queries      *ingestiondb.Queries
 	dashboardURL string
 }
 
 func New(pool *pgxpool.Pool, dashboardURL string) *Sweeper {
-	return &Sweeper{pool: pool, dashboardURL: strings.TrimRight(dashboardURL, "/")}
+	return &Sweeper{pool: pool, queries: ingestiondb.New(pool), dashboardURL: strings.TrimRight(dashboardURL, "/")}
 }
 
-func (s *Sweeper) sessionURL(sessionID string) *string {
+func (s *Sweeper) sessionURLAt(sessionID string, anchorMs int64) *string {
 	if sessionID == "" || s.dashboardURL == "" {
 		return nil
 	}
-	u := s.dashboardURL + "/sessions/" + url.PathEscape(sessionID)
+	u := s.dashboardURL + "/sessions/" + url.PathEscape(sessionID) + "?t=" + strconv.FormatInt(anchorMs, 10)
 	return &u
+}
+
+// replayURLFor resolves the coverage-gated watch pointer best-effort. The
+// replay link is optional garnish on a digest item: a transient lookup failure
+// must cost one link, never the customer's whole digest.
+func (s *Sweeper) replayURLFor(ctx context.Context, groupID, projectID string) *string {
+	sessionID, anchorMs, ok, err := s.queries.WatchableSessionForGroup(ctx, groupID, projectID)
+	if err != nil {
+		slog.Warn("digest replay lookup failed; omitting the link", "group_id", groupID, "project_id", projectID, "error", err)
+		return nil
+	}
+	if !ok {
+		return nil
+	}
+	return s.sessionURLAt(sessionID, anchorMs)
 }
 
 func rootCauseExcerpt(rootCause *string) *string {

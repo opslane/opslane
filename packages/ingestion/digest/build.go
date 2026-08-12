@@ -97,8 +97,7 @@ func (s *Sweeper) buildInsights(ctx context.Context, projectID string, from, to 
 	rows, err := s.pool.Query(ctx, `
 		SELECT g.id, COALESCE(g.signal_type,''), COALESCE(g.page_url_normalized,''),
 		       SUM(fs.occurrence_count)::bigint,
-		       COUNT(DISTINCT fs.end_user_id),
-		       (array_agg(fs.session_id ORDER BY fs.occurred_at DESC))[1]
+		       COUNT(DISTINCT fs.end_user_id)
 		FROM friction_signals fs
 		JOIN error_groups g ON g.id = fs.incident_id
 		WHERE fs.project_id = $1 AND fs.occurred_at >= $2 AND fs.occurred_at < $3
@@ -119,14 +118,13 @@ func (s *Sweeper) buildInsights(ctx context.Context, projectID string, from, to 
 	items := make([]notify.DigestInsight, 0, listCap+1)
 	groupIDs := make([]string, 0, listCap+1)
 	for rows.Next() {
-		var groupID, replaySession string
+		var groupID string
 		var item notify.DigestInsight
 		var affectedUsers int64
-		if err := rows.Scan(&groupID, &item.SignalType, &item.Page, &item.Occurrences, &affectedUsers, &replaySession); err != nil {
+		if err := rows.Scan(&groupID, &item.SignalType, &item.Page, &item.Occurrences, &affectedUsers); err != nil {
 			return nil, false, fmt.Errorf("digest insights scan: %w", err)
 		}
 		item.AffectedUsers = int(affectedUsers)
-		item.ReplayURL = s.sessionURL(replaySession)
 		item.URL = notify.BuildIncidentURL(s.dashboardURL, groupID, projectID)
 		items = append(items, item)
 		groupIDs = append(groupIDs, groupID)
@@ -141,6 +139,7 @@ func (s *Sweeper) buildInsights(ctx context.Context, projectID string, from, to 
 
 	items, more := capped(items)
 	for i := range items {
+		items[i].ReplayURL = s.replayURLFor(ctx, groupIDs[i], projectID)
 		accounts, err := s.insightAccounts(ctx, groupIDs[i], from, to)
 		if err != nil {
 			return nil, false, err
@@ -200,7 +199,7 @@ func (s *Sweeper) accounts(ctx context.Context, query string, args ...any) (acco
 func (s *Sweeper) buildTopNewIssues(ctx context.Context, projectID string, from, to time.Time) ([]notify.DigestIssue, bool, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT g.id, g.title, g.occurrence_count::bigint, g.affected_users_count,
-		       g.root_cause, COALESCE(g.representative_session_id,'')
+		       g.root_cause
 		FROM error_groups g
 		WHERE g.project_id = $1 AND g.kind = 'error'
 		  AND g.first_seen >= $2 AND g.first_seen < $3
@@ -220,15 +219,14 @@ func (s *Sweeper) buildTopNewIssues(ctx context.Context, projectID string, from,
 	items := make([]notify.DigestIssue, 0, listCap+1)
 	groupIDs := make([]string, 0, listCap+1)
 	for rows.Next() {
-		var groupID, replaySession string
+		var groupID string
 		var rootCause *string
 		var item notify.DigestIssue
-		if err := rows.Scan(&groupID, &item.Title, &item.Occurrences, &item.AffectedUsers, &rootCause, &replaySession); err != nil {
+		if err := rows.Scan(&groupID, &item.Title, &item.Occurrences, &item.AffectedUsers, &rootCause); err != nil {
 			return nil, false, fmt.Errorf("digest top new issues scan: %w", err)
 		}
 		item.URL = notify.BuildIncidentURL(s.dashboardURL, groupID, projectID)
 		item.RootCauseExcerpt = rootCauseExcerpt(rootCause)
-		item.ReplayURL = s.sessionURL(replaySession)
 		items = append(items, item)
 		groupIDs = append(groupIDs, groupID)
 	}
@@ -239,6 +237,7 @@ func (s *Sweeper) buildTopNewIssues(ctx context.Context, projectID string, from,
 
 	items, more := capped(items)
 	for i := range items {
+		items[i].ReplayURL = s.replayURLFor(ctx, groupIDs[i], projectID)
 		accounts, err := s.groupAccounts(ctx, groupIDs[i])
 		if err != nil {
 			return nil, false, err

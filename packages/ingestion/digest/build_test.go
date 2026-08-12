@@ -2,6 +2,7 @@ package digest
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -73,6 +74,7 @@ func seedDigestFixtureWithSessionAge(t *testing.T, pool *pgxpool.Pool, now time.
 			`DELETE FROM notification_destinations WHERE project_id IN (SELECT id FROM projects WHERE org_id = $1)`,
 			`DELETE FROM friction_signals WHERE project_id IN (SELECT id FROM projects WHERE org_id = $1)`,
 			`DELETE FROM pr_outcomes WHERE project_id IN (SELECT id FROM projects WHERE org_id = $1)`,
+			`DELETE FROM error_events WHERE project_id IN (SELECT id FROM projects WHERE org_id = $1)`,
 			`DELETE FROM error_group_affected_users WHERE error_group_id IN (SELECT id FROM error_groups WHERE project_id IN (SELECT id FROM projects WHERE org_id = $1))`,
 			`DELETE FROM sessions WHERE project_id IN (SELECT id FROM projects WHERE org_id = $1)`,
 			`DELETE FROM end_users WHERE project_id IN (SELECT id FROM projects WHERE org_id = $1)`,
@@ -192,8 +194,8 @@ func TestBuildDigestSections(t *testing.T) {
 	if in.Occurrences != 5 || in.AffectedUsers != 2 {
 		t.Errorf("windowed metrics = %d occ / %d users, want 5/2", in.Occurrences, in.AffectedUsers)
 	}
-	if in.ReplayURL == nil || *in.ReplayURL != "https://dash.example/sessions/"+f.SessIn2 {
-		t.Errorf("replay should use latest signal session %s, got %v", f.SessIn2, in.ReplayURL)
+	if in.ReplayURL != nil {
+		t.Errorf("replay without proven chunk coverage = %v, want nil", in.ReplayURL)
 	}
 	if len(in.Accounts) != 2 || in.AccountsMore != 0 {
 		t.Errorf("accounts = %v +%d", in.Accounts, in.AccountsMore)
@@ -226,6 +228,82 @@ func TestBuildDigestSections(t *testing.T) {
 	}
 	if d.Watching.Sessions != 2 || d.Watching.Users != 2 {
 		t.Errorf("watching = %+v", d.Watching)
+	}
+}
+
+func TestBuildDigestReplayLinksRequireCoverage(t *testing.T) {
+	pool := testPool(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	f := seedDigestFixture(t, pool, now)
+	ctx := context.Background()
+
+	seedChunks := func(sessionID string, anchor time.Time, covered bool) {
+		t.Helper()
+		if !covered {
+			if _, err := pool.Exec(ctx, `INSERT INTO session_chunks
+				(session_id,seq,project_id,object_key,has_full_snapshot,scrubbed_at,first_event_ms,last_event_ms)
+				VALUES ($1,0,$2,$3,true,now(),$4::bigint,$4::bigint+1)`,
+				sessionID, f.ProjectID, "digest/"+sessionID+"/0", anchor.UnixMilli()); err != nil {
+				t.Fatal(err)
+			}
+			return
+		}
+		spans := [][2]int64{
+			{anchor.Add(-20 * time.Second).UnixMilli(), anchor.Add(-8 * time.Second).UnixMilli()},
+			{anchor.Add(-8 * time.Second).UnixMilli(), anchor.Add(2 * time.Second).UnixMilli()},
+			{anchor.Add(2 * time.Second).UnixMilli(), anchor.Add(16 * time.Second).UnixMilli()},
+		}
+		for i, span := range spans {
+			if _, err := pool.Exec(ctx, `INSERT INTO session_chunks
+				(session_id,seq,project_id,object_key,has_full_snapshot,scrubbed_at,first_event_ms,last_event_ms)
+				VALUES ($1,$2,$3,$4,$5,now(),$6,$7)`,
+				sessionID, i, f.ProjectID, fmt.Sprintf("digest/%s/%d", sessionID, i), i == 0, span[0], span[1]); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	insightCoveredAt := now.Add(-3 * time.Hour)
+	seedChunks(f.SessIn1, insightCoveredAt, true)
+	seedChunks(f.SessIn2, now.Add(-time.Hour), false)
+	if _, err := pool.Exec(ctx, `UPDATE friction_signals SET adjudication_status='accepted'
+		WHERE project_id=$1 AND retracted_at IS NULL`, f.ProjectID); err != nil {
+		t.Fatal(err)
+	}
+
+	issueAt := now.Add(-5 * time.Hour)
+	seedChunks(f.SessOld, issueAt, true)
+	var issueID string
+	if err := pool.QueryRow(ctx, `SELECT id FROM error_groups WHERE project_id=$1 AND fingerprint='fp-new'`, f.ProjectID).Scan(&issueID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO error_events
+		(project_id,environment_id,error_group_id,session_id,"timestamp",error_type,error_message,stack_trace_raw)
+		VALUES ($1,$2,$3,$4,$5,'TypeError','boom','at digest')`,
+		f.ProjectID, f.EnvID, issueID, f.SessOld, issueAt); err != nil {
+		t.Fatal(err)
+	}
+
+	payload, err := New(pool, "https://dash.example").Build(ctx, f.ProjectID, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := payload.Digest.Insights[0].ReplayURL; got == nil || *got != "https://dash.example/sessions/"+f.SessIn1+"?t="+fmt.Sprint(insightCoveredAt.UnixMilli()) {
+		t.Fatalf("covered friction fallback replay = %v", got)
+	}
+	if got := payload.Digest.TopNewIssues[0].ReplayURL; got == nil || *got != "https://dash.example/sessions/"+f.SessOld+"?t="+fmt.Sprint(issueAt.UnixMilli()) {
+		t.Fatalf("covered error replay = %v", got)
+	}
+
+	if _, err := pool.Exec(ctx, `DELETE FROM session_chunks WHERE session_id=$1`, f.SessOld); err != nil {
+		t.Fatal(err)
+	}
+	payload, err = New(pool, "https://dash.example").Build(ctx, f.ProjectID, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := payload.Digest.TopNewIssues[0].ReplayURL; got != nil {
+		t.Fatalf("issue replay without coverage = %v, want nil", got)
 	}
 }
 
@@ -466,11 +544,11 @@ func TestBuildDigestUsesProjectLocalDate(t *testing.T) {
 
 func TestDigestExcerptAndSessionURLHelpers(t *testing.T) {
 	s := New(nil, "https://dash.example/")
-	if got := s.sessionURL(""); got != nil {
-		t.Fatalf("empty session URL = %v", got)
+	if got := s.sessionURLAt("a/b", 123); got == nil || *got != "https://dash.example/sessions/a%2Fb?t=123" {
+		t.Fatalf("anchored session URL = %v", got)
 	}
-	if got := s.sessionURL("a/b"); got == nil || *got != "https://dash.example/sessions/a%2Fb" {
-		t.Fatalf("escaped session URL = %v", got)
+	if got := s.sessionURLAt("", 5); got != nil {
+		t.Fatalf("empty anchored session URL = %v, want nil", got)
 	}
 	if rootCauseExcerpt(nil) != nil {
 		t.Fatal("nil root cause returned an excerpt")

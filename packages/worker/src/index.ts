@@ -641,14 +641,7 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
       // run at all, and outcome alone cannot answer that.
       basis: triage.decisionBasis,
       confidence: triage.confidence,
-      ...(impactBar ? {
-        policyEligible: impactBar.eligible,
-        policyBasis: {
-          v: 1 as const,
-          identified_users: impactBar.identifiedUsers,
-          recent_anon_sessions: impactBar.recentAnonSessions,
-        },
-      } : {}),
+      ...db.policyFields(impactBar),
     };
 
     /** Set when the result is held for a human instead of opening a fix job. */
@@ -907,6 +900,9 @@ export async function processFrictionInvestigateJob(
     }
 
     const verdict = result.verdict;
+    const impactBar = verdict.codeCause
+      ? await db.getFrictionGroupImpactBar(job.errorGroupId, job.projectId)
+      : null;
     const decision = {
       outcome: verdict.codeCause ? 'code_fix' as const : 'not_actionable' as const,
       decisionReason: verdict.reason,
@@ -922,6 +918,7 @@ export async function processFrictionInvestigateJob(
       jobId: job.id,
       basis: 'friction_classify' as const,
       confidence: verdict.confidence,
+      ...db.policyFields(impactBar),
     };
 
     if (verdict.codeCause) {
@@ -929,9 +926,7 @@ export async function processFrictionInvestigateJob(
       // fixes exist; insights remain terminal and never produce a PR.
       const autonomyAllowsFix = project.friction_autonomy === 'auto_fix'
         || project.friction_autonomy === 'auto_fix_ux';
-      // C3 replaces this confidence check with the signal-session impact bar
-      // (program plan §C3); frozen, not endorsed — see C2 plan Task 3.
-      if (verdict.confidence === 'high' && autonomyAllowsFix && job.triggeredBy !== 'reinvestigate_report_only') {
+      if (impactBar?.eligible && autonomyAllowsFix && job.triggeredBy !== 'reinvestigate_report_only') {
         // allowFriction is the ladder's explicit opt-in past the kind gate;
         // refuse-by-default stays intact for every other caller (issue #56).
         const fixResult = await updateGroupAndCreateFixJob(job.errorGroupId, job.projectId, {

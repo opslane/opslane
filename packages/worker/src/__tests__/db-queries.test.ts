@@ -416,16 +416,34 @@ describe('session replay pointer queries', () => {
   beforeEach(() => mockQuery.mockReset());
 
   it('resolves the newest session pointer with event time and project scope', async () => {
-    mockQuery.mockResolvedValueOnce({
-      rows: [{ session_id: 'sess-1', error_at: new Date('2026-07-15T12:00:00Z') }],
-    });
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ kind: 'error' }] })
+      .mockResolvedValueOnce({
+        rows: [{ session_id: 'sess-1', error_at: new Date('2026-07-15T12:00:00Z') }],
+      });
 
     const pointer = await getSessionPointerForGroup('g1', 'p1');
 
     expect(pointer).toEqual({ session_id: 'sess-1', error_at: '2026-07-15T12:00:00.000Z' });
-    expect(mockQuery.mock.calls[0][1]).toEqual(['g1', 'p1']);
-    expect(mockQuery.mock.calls[0][0]).toContain('ee.timestamp AS error_at');
-    expect(mockQuery.mock.calls[0][0]).not.toContain('scrubbed_at');
+    expect(mockQuery.mock.calls[1][1]).toEqual(['g1', 'p1']);
+    expect(mockQuery.mock.calls[1][0]).toContain('ee.timestamp AS error_at');
+    expect(mockQuery.mock.calls[1][0]).not.toContain('scrubbed_at');
+  });
+
+  it('uses the live friction representative with earliest accepted fallback ordering', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ kind: 'friction' }] })
+      .mockResolvedValueOnce({
+        rows: [{ session_id: 'sess-friction', error_at: '2026-07-15T12:00:00Z' }],
+      });
+
+    await expect(getSessionPointerForGroup('g1', 'p1')).resolves.toEqual({
+      session_id: 'sess-friction', error_at: '2026-07-15T12:00:00Z',
+    });
+    const query = String(mockQuery.mock.calls[1]?.[0]);
+    expect(query).toContain("fs.adjudication_status = 'accepted'");
+    expect(query).toContain('fs.retracted_at IS NULL');
+    expect(query).toContain('(fs.id = g.representative_signal_id) DESC');
   });
 
   it('returns scrubbed chunk metadata in sequence order and normalizes bigint strings', async () => {

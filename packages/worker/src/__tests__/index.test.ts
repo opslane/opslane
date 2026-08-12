@@ -44,6 +44,16 @@ vi.mock('../db.js', () => ({
   finalizeDelivery: vi.fn(),
   recordJobUsage: vi.fn(),
   getGroupImpactBar: vi.fn(async () => ({ identifiedUsers: 1, recentAnonSessions: 0, eligible: true })),
+  getFrictionGroupImpactBar: vi.fn(async () => ({ identifiedUsers: 5, recentAnonSessions: 0, eligible: true })),
+  // Pure shape helper: mirror the real implementation so decision assertions
+  // see the exact persisted policy fields.
+  policyFields: (bar: { identifiedUsers: number; recentAnonSessions: number; eligible: boolean } | null) =>
+    bar
+      ? {
+          policyEligible: bar.eligible,
+          policyBasis: { v: 1, identified_users: bar.identifiedUsers, recent_anon_sessions: bar.recentAnonSessions },
+        }
+      : { policyEligible: null, policyBasis: null },
 }));
 vi.mock('../logger.js', () => ({
   logger: { info: vi.fn(), error: vi.fn(), warn: vi.fn(), debug: vi.fn() },
@@ -904,22 +914,51 @@ describe('friction worker path', () => {
     },
   );
 
-  it('parks medium-confidence friction even when autonomy allows auto-fix', async () => {
+  it('routes identical code-caused friction verdicts identically regardless of confidence', async () => {
     mockGetProject.mockResolvedValue({
       id: 'proj-1', name: 'app', github_repo: 'org/app', default_branch: 'main', friction_autonomy: 'auto_fix',
     });
+    vi.mocked(db.updateGroupAndCreateFixJob).mockResolvedValue({ created: true, fixJobId: 'fix-job' });
+    for (const confidence of ['high', 'low'] as const) {
+      vi.mocked(investigateFriction).mockResolvedValueOnce({
+        status: 'verdict', investigatedCommit: 'abc123', costUsd: 0.1,
+        usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+        verdict: { codeCause: true, confidence, reason: 'save handler is disconnected', remediation: 'wire the handler', evidence: [], agentTaskBrief: 'wire it' },
+      });
+      await processInvestigateJob(makeJob(), new AbortController().signal);
+    }
+
+    expect(db.updateGroupAndCreateFixJob).toHaveBeenCalledTimes(2);
+    for (const call of vi.mocked(db.updateGroupAndCreateFixJob).mock.calls) {
+      expect(call[2].decision).toMatchObject({
+        policyEligible: true,
+        policyBasis: { v: 1, identified_users: 5, recent_anon_sessions: 0 },
+      });
+    }
+  });
+
+  it('parks below-bar code-caused friction with its policy basis', async () => {
+    mockGetProject.mockResolvedValue({
+      id: 'proj-1', name: 'app', github_repo: 'org/app', default_branch: 'main', friction_autonomy: 'auto_fix',
+    });
+    vi.mocked(db.getFrictionGroupImpactBar).mockResolvedValueOnce({ identifiedUsers: 0, recentAnonSessions: 1, eligible: false });
     vi.mocked(investigateFriction).mockResolvedValue({
       status: 'verdict', investigatedCommit: 'abc123', costUsd: 0.1,
       usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
-      verdict: { codeCause: true, confidence: 'medium', reason: 'save handler is disconnected', remediation: 'wire the handler', evidence: [], agentTaskBrief: 'wire it' },
+      verdict: { codeCause: true, confidence: 'high', reason: 'save handler is disconnected', remediation: 'wire the handler', evidence: [], agentTaskBrief: 'wire it' },
     });
 
     await processInvestigateJob(makeJob(), new AbortController().signal);
 
-    expect(db.updateGroupInvestigation).toHaveBeenCalledWith(
-      'grp-1', 'proj-1', 'awaiting_approval', expect.objectContaining({ confidence: 'medium' }), makeJob(),
-    );
     expect(db.updateGroupAndCreateFixJob).not.toHaveBeenCalled();
+    expect(db.updateGroupInvestigation).toHaveBeenCalledWith(
+      'grp-1', 'proj-1', 'awaiting_approval', expect.objectContaining({
+        decision: expect.objectContaining({
+          policyEligible: false,
+          policyBasis: { v: 1, identified_users: 0, recent_anon_sessions: 1 },
+        }),
+      }), makeJob(),
+    );
   });
 
   it('records friction without a code cause as an insight', async () => {
