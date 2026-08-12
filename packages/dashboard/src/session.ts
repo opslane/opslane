@@ -30,5 +30,10 @@ const TENANT_SESSION_KEYS = ['opslane_post_auth_path'] as const;
 export function clearClientSession(): void {
   clearAuth();
   for (const key of TENANT_LOCAL_KEYS) localStorage.removeItem(key);
+  // Environment choices are stored per project ('opslane_environment_id:<id>');
+  // sweep the prefix so no project's filter survives to the next user.
+  for (const key of Object.keys(localStorage)) {
+    if (key.startsWith('opslane_environment_id:')) localStorage.removeItem(key);
+  }
   for (const key of TENANT_SESSION_KEYS) sessionStorage.removeItem(key);
 }

@@ -130,6 +130,14 @@ const environments = ref<Environment[]>([]);
 const loadingEnvs = ref(false);
 const envError = ref('');
 const defaultEnvironmentSavingId = ref('');
+const actionScopeEnabled = ref(false);
+const actionEnvironmentIds = ref<string[]>([]);
+const actionScopeSaving = ref(false);
+const actionScopeError = ref('');
+// Server snapshot the scope controls were last seeded from. Sibling settings
+// (autonomy, PR posture, "Make default") save-on-change and replace
+// projects.value; without this guard their saves would wipe unsaved scope edits.
+let actionScopeServerState = '';
 
 // GitHub integration
 const githubConfig = ref<GitHubConfig | null>(null);
@@ -178,6 +186,16 @@ watch(projects, () => {
   autonomy.value = selectedProject.value?.friction_autonomy ?? 'ask_first';
   prPosture.value = selectedProject.value?.pr_posture ?? 'verified_only';
   digestTimezone.value = selectedProject.value?.digest_timezone ?? 'UTC';
+  const serverScope = JSON.stringify([
+    selectedProject.value?.id ?? null,
+    selectedProject.value?.action_scope_enabled ?? false,
+    selectedProject.value?.action_environment_ids ?? [],
+  ]);
+  if (serverScope !== actionScopeServerState) {
+    actionScopeServerState = serverScope;
+    actionScopeEnabled.value = selectedProject.value?.action_scope_enabled ?? false;
+    actionEnvironmentIds.value = [...(selectedProject.value?.action_environment_ids ?? [])];
+  }
   if ((selectedProject.value?.id ?? null) !== lastLoadedProjectId) {
     void loadAutonomyAndStats();
   }
@@ -406,6 +424,44 @@ async function makeDefaultEnvironment(environment: Environment): Promise<void> {
     envError.value = err instanceof Error ? err.message : 'Failed to change default environment';
   } finally {
     defaultEnvironmentSavingId.value = '';
+  }
+}
+
+function onActionScopeToggle(event: Event): void {
+  actionScopeEnabled.value = event.target instanceof HTMLInputElement && event.target.checked;
+}
+
+function onActionEnvironmentToggle(environmentId: string, event: Event): void {
+  const checked = event.target instanceof HTMLInputElement && event.target.checked;
+  if (checked) {
+    if (!actionEnvironmentIds.value.includes(environmentId)) {
+      actionEnvironmentIds.value = [...actionEnvironmentIds.value, environmentId];
+    }
+  } else {
+    actionEnvironmentIds.value = actionEnvironmentIds.value.filter((id) => id !== environmentId);
+  }
+}
+
+async function saveActionScope(): Promise<void> {
+  const project = selectedProject.value;
+  if (!project || !canProvision.value || actionScopeSaving.value) return;
+
+  const projectId = project.id;
+  actionScopeSaving.value = true;
+  actionScopeError.value = '';
+  try {
+    const updated = await updateProject(projectId, {
+      action_environment_ids: actionScopeEnabled.value ? [...actionEnvironmentIds.value] : null,
+    });
+    projects.value = projects.value.map((candidate) => candidate.id === updated.id ? updated : candidate);
+  } catch (err: unknown) {
+    if (selectedProjectId.value === projectId) {
+      actionScopeEnabled.value = project.action_scope_enabled;
+      actionEnvironmentIds.value = [...project.action_environment_ids];
+      actionScopeError.value = err instanceof Error ? err.message : 'Failed to save automation scope';
+    }
+  } finally {
+    actionScopeSaving.value = false;
   }
 }
 
@@ -735,6 +791,54 @@ async function handleDisconnectGithub(): Promise<void> {
         </ul>
         <div v-else class="text-sm text-muted mb-6">No environments yet.</div>
         <div v-if="envError" class="mt-2 text-sm text-danger" v-text="envError"></div>
+
+        <section v-if="environments.length" class="mt-8 rounded-lg border border-border bg-surface p-4">
+          <label class="flex items-start gap-3">
+            <input
+              id="action-scope-enabled"
+              type="checkbox"
+              class="mt-1 size-4"
+              :checked="actionScopeEnabled"
+              :disabled="!canProvision || actionScopeSaving"
+              @change="onActionScopeToggle"
+            />
+            <span>
+              <span class="block text-sm font-medium text-text">Limit automatic error investigation to specific environments</span>
+              <span class="block text-xs text-muted">Errors outside the selection are recorded but do not start or restart automatic investigation. Session analysis is not affected.</span>
+            </span>
+          </label>
+
+          <fieldset v-if="actionScopeEnabled" class="mt-4 space-y-2">
+            <legend class="mb-2 text-sm font-medium text-text">Environments allowed to trigger error investigation</legend>
+            <label v-for="env in environments" :key="`action-${env.id}`" class="flex items-center gap-2 text-sm text-text">
+              <input
+                :data-action-environment-id="env.id"
+                type="checkbox"
+                class="size-4"
+                :value="env.id"
+                :checked="actionEnvironmentIds.includes(env.id)"
+                :disabled="!canProvision || actionScopeSaving"
+                @change="onActionEnvironmentToggle(env.id, $event)"
+              />
+              <span v-text="env.name"></span>
+            </label>
+            <p v-if="actionEnvironmentIds.length === 0" role="alert" class="text-sm text-warning">
+              No environments selected — automatic investigation is off for this project.
+            </p>
+          </fieldset>
+
+          <Button
+            v-if="canProvision"
+            class="mt-4"
+            variant="primary"
+            size="sm"
+            :disabled="actionScopeSaving"
+            @click="saveActionScope"
+          >
+            {{ actionScopeSaving ? 'Saving...' : 'Save automation scope' }}
+          </Button>
+          <p v-if="actionScopeError" role="alert" class="mt-2 text-sm text-danger" v-text="actionScopeError"></p>
+        </section>
       </div>
     </div>
 

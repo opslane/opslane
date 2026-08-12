@@ -268,7 +268,9 @@ func (d *Dependencies) ingestErrorEvent(w http.ResponseWriter, r *http.Request, 
 	if debugMeta.RegistryPresentZeroMatched {
 		RecordDebugMetaRegistryZeroMatched()
 	}
-	if result.IsNew || result.Requeued {
+	// A dormant out-of-scope group can be new without a job, and a dormant
+	// activation enqueues without IsNew or Requeued — count actual job creation.
+	if result.JobID != "" {
 		RecordJobEnqueued()
 	}
 	RecordIngestDuration(time.Since(start).Seconds())

@@ -1024,6 +1024,78 @@ describeDb('db.ts integration tests', () => {
       expect(row.lease_expires_at).toBeTruthy();
     });
 
+    it('returns the job evidence anchor instead of the mutable group sample', async () => {
+      const { errorGroupId, jobId } = await seedErrorGroupAndJob();
+      const environment = await testPool.query<{ id: string }>(
+        `INSERT INTO environments (project_id, name)
+         VALUES ($1, 'anchor-test')
+         ON CONFLICT (project_id, name) DO UPDATE SET name = EXCLUDED.name
+         RETURNING id`,
+        [testProjectId],
+      );
+      const eventIds: string[] = [];
+      for (const message of ['A', 'B']) {
+        const event = await testPool.query<{ id: string }>(
+          `INSERT INTO error_events
+             (project_id, environment_id, error_group_id, timestamp, error_type, error_message, stack_trace_raw)
+           VALUES ($1, $2, $3, now(), 'TypeError', $4, 'at app.js:1:1')
+           RETURNING id`,
+          [testProjectId, environment.rows[0]!.id, errorGroupId, message],
+        );
+        eventIds.push(event.rows[0]!.id);
+      }
+      await testPool.query(
+        `UPDATE error_groups SET sample_event_id = $2 WHERE id = $1`,
+        [errorGroupId, eventIds[1]],
+      );
+      await testPool.query(
+        `UPDATE error_group_jobs SET event_id = $2 WHERE id = $1`,
+        [jobId, eventIds[0]],
+      );
+
+      const job = await claimJob('anchor-worker', 60_000);
+
+      expect(job?.eventId).toBe(eventIds[0]);
+    });
+
+    it('propagates the investigate anchor onto the auto-created fix job', async () => {
+      const { errorGroupId, jobId } = await seedErrorGroupAndJob();
+      const environment = await testPool.query<{ id: string }>(
+        `INSERT INTO environments (project_id, name)
+         VALUES ($1, 'anchor-fix')
+         ON CONFLICT (project_id, name) DO UPDATE SET name = EXCLUDED.name
+         RETURNING id`,
+        [testProjectId],
+      );
+      const event = await testPool.query<{ id: string }>(
+        `INSERT INTO error_events
+           (project_id, environment_id, error_group_id, timestamp, error_type, error_message, stack_trace_raw)
+         VALUES ($1, $2, $3, now(), 'TypeError', 'anchor-fix', 'at app.js:1:1')
+         RETURNING id`,
+        [testProjectId, environment.rows[0]!.id, errorGroupId],
+      );
+      await testPool.query(
+        `UPDATE error_group_jobs SET event_id = $2 WHERE id = $1`,
+        [jobId, event.rows[0]!.id],
+      );
+
+      const claimed = await claimJob('anchor-fix-worker', 60_000);
+      expect(claimed?.id).toBe(jobId);
+      await updateGroupStatus(errorGroupId, testProjectId, 'analyzing', undefined, claimed!);
+      const fixResult = await updateGroupAndCreateFixJob(
+        errorGroupId,
+        testProjectId,
+        { rootCause: 'anchored', confidence: 'high', sourceJobId: claimed!.id },
+        claimed!,
+      );
+      expect(fixResult.created).toBe(true);
+      const fixJob = await testPool.query<{ event_id: string | null }>(
+        `SELECT event_id FROM error_group_jobs WHERE id = $1`,
+        [fixResult.created ? fixResult.fixJobId : ''],
+      );
+      expect(fixJob.rows[0]?.event_id).toBe(event.rows[0]!.id);
+    });
+
     it('should return null when no pending jobs exist', async () => {
       const job = await claimJob('worker-1', 60_000);
       expect(job).toBeNull();

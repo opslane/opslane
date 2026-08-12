@@ -7,6 +7,7 @@ import { environmentFilterQuery, useEnvironmentFilter } from '../composables/use
 
 const props = defineProps<{
   projectId: string;
+  defaultEnvironmentId?: string | null;
 }>();
 
 const emit = defineEmits<{
@@ -25,11 +26,17 @@ const selectedPlatform = ref<'' | 'javascript' | 'python'>(
 const rawEndUserId = route.query['end_user_id'];
 const selectedEndUserId = ref(typeof rawEndUserId === 'string' ? rawEndUserId : '');
 const {
+  clear: clearEnvironment,
   environments,
   filterAvailable,
+  resetToDefault: resetEnvironmentToDefault,
   rollupReady,
   selectedEnvironmentId,
-} = useEnvironmentFilter(toRef(props, 'projectId'), 'incidents');
+} = useEnvironmentFilter(
+  toRef(props, 'projectId'),
+  'incidents',
+  toRef(props, 'defaultEnvironmentId'),
+);
 
 onMounted(() => {
   // Apply URL-derived filters immediately. Account options are auxiliary and
@@ -90,7 +97,13 @@ function reset() {
   selectedStatus.value = '';
   selectedPlatform.value = '';
   selectedEndUserId.value = '';
-  selectedEnvironmentId.value = '';
+  resetEnvironmentToDefault();
+}
+
+function onEnvironmentChange(event: Event): void {
+  const value = (event.target as HTMLSelectElement).value;
+  if (value) selectedEnvironmentId.value = value;
+  else clearEnvironment();
 }
 
 function showArchived() {
@@ -201,9 +214,10 @@ watch(
         <path d="M5 5h14v14H5zM5 10h14M10 10v9" />
       </svg>
       <select
-        v-model="selectedEnvironmentId"
+        :value="selectedEnvironmentId"
         aria-label="Environment"
         class="min-h-10 max-md:min-h-11 rounded-md border border-border bg-surface py-1.5 pl-9 pr-8 text-sm"
+        @change="onEnvironmentChange"
       >
         <option value="">All environments</option>
         <option

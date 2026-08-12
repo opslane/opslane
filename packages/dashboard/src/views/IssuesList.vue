@@ -10,6 +10,10 @@ import InlineAlert from '../components/ui/InlineAlert.vue';
 import EmptyState from '../components/ui/EmptyState.vue';
 import SkeletonBlock from '../components/ui/SkeletonBlock.vue';
 
+defineProps<{
+  defaultEnvironmentId?: string | null;
+}>();
+
 const POLL_INTERVAL = 30_000; // 30 seconds
 
 const incidents = ref<Incident[]>([]);
@@ -167,6 +171,7 @@ onUnmounted(() => stopPolling());
       <FilterBar
         ref="filterBar"
         :project-id="projectId"
+        :default-environment-id="defaultEnvironmentId"
         class="w-full sm:min-w-0 sm:flex-1"
         @filter-change="onFilterChange"
       />

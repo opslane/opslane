@@ -79,7 +79,7 @@ describe('syncScoresForPrOutcome', () => {
 describe('processScoreSyncJob', () => {
   const baseJob: ClaimedJob = {
     id: 'ss-1', workerId: 'w1', leaseGeneration: '1',
-    errorGroupId: 'g1', sourceId: null, projectId: 'p1',
+    errorGroupId: 'g1', eventId: null, sourceId: null, projectId: 'p1',
     jobType: 'score_sync', attempts: 0, guidance: null,
     triggeredBy: null, sessionId: null,
     payload: { fix_job_id: 'fj1', outcome: 'merged', delivery_id: 'd1' },

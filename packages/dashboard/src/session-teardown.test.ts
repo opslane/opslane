@@ -19,6 +19,8 @@ describe('clearClientSession', () => {
     localStorage.setItem('opslane_project_id', 'project-1');
     localStorage.setItem('opslane_project_name', 'Acme');
     localStorage.setItem(ENVIRONMENT_STORAGE_KEY, 'env-1');
+    localStorage.setItem(`${ENVIRONMENT_STORAGE_KEY}:project-1`, 'env-2');
+    localStorage.setItem(`${ENVIRONMENT_STORAGE_KEY}:project-2`, '__all__');
     sessionStorage.setItem('opslane_post_auth_path', '/invite/accept?token=secret');
 
     clearClientSession();

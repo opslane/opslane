@@ -149,6 +149,8 @@ export interface Project {
   friction_autonomy: 'ask_first' | 'auto_fix' | 'auto_fix_ux';
   pr_posture: 'verified_only' | 'draft_when_unverified';
   default_environment_id: string | null;
+  action_scope_enabled: boolean;
+  action_environment_ids: string[];
   digest_timezone: string;
   created_at: string;
 }
@@ -440,6 +442,7 @@ export function updateProject(
     friction_autonomy?: Project['friction_autonomy'];
     pr_posture?: Project['pr_posture'];
     default_environment_id?: string;
+    action_environment_ids?: string[] | null;
     digest_timezone?: string;
   }
 ): Promise<Project> {

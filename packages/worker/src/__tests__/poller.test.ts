@@ -35,6 +35,7 @@ function makeJob(overrides?: Partial<ClaimedJob>): ClaimedJob {
     id: 'job-1',
     workerId: 'test-worker',
     errorGroupId: 'eg-1',
+    eventId: null,
     sourceId: null,
     projectId: 'proj-1',
     jobType: 'investigate',
