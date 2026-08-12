@@ -27,12 +27,24 @@ import {
   getSessionForAnalysis,
   setSessionAnalysisStatus,
   claimJob,
+  resolveEvidenceEventId,
   listUnmappedPatterns,
   MAX_ROUTE_PATTERN_BYTES,
   upsertRouteMapRows,
   updateGroupStatus,
   updateGroupInvestigation,
 } from '../db.js';
+
+describe('resolveEvidenceEventId', () => {
+  it('prefers a job anchor over the mutable group sample', () => {
+    expect(resolveEvidenceEventId({ eventId: 'A' }, { sample_event_id: 'B' })).toBe('A');
+  });
+
+  it('falls back to the sample for historical jobs', () => {
+    expect(resolveEvidenceEventId({ eventId: null }, { sample_event_id: 'B' })).toBe('B');
+    expect(resolveEvidenceEventId({ eventId: null }, { sample_event_id: null })).toBeNull();
+  });
+});
 
 describe('group lifecycle timestamp queries', () => {
   beforeEach(() => mockQuery.mockReset());

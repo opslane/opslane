@@ -7,7 +7,7 @@ import { VerificationInfraError } from '../harness/errors.js';
 // and main() is guarded behind !process.env.VITEST so the poller/servers never
 // boot here. The ONE module we deliberately leave real is harness/stack-trace-utils
 // (hasNoAppFrames) — that's the decision under test.
-vi.mock('../db.js', () => ({
+vi.mock('../db.js', async () => ({
   LeaseLostError: class LeaseLostError extends Error {},
   getErrorGroup: vi.fn(),
   getErrorEvent: vi.fn(),
@@ -43,6 +43,9 @@ vi.mock('../db.js', () => ({
   recordDeliveryPushed: vi.fn(),
   finalizeDelivery: vi.fn(),
   recordJobUsage: vi.fn(),
+  // Real implementation, not a copy: a drift in the anchor-preference rule
+  // must fail these tests, not be masked by a stale reimplementation.
+  resolveEvidenceEventId: (await vi.importActual<typeof import('../db.js')>('../db.js')).resolveEvidenceEventId,
 }));
 vi.mock('../logger.js', () => ({
   logger: { info: vi.fn(), error: vi.fn(), warn: vi.fn(), debug: vi.fn() },
@@ -149,6 +152,7 @@ function makeJob(): ClaimedJob & { errorGroupId: string } {
     id: 'job-1',
     workerId: 'worker-1',
     errorGroupId: 'grp-1',
+    eventId: null,
     sourceId: null,
     projectId: 'proj-1',
     jobType: 'investigate',
@@ -245,6 +249,19 @@ describe('processInvestigateJob — pre-clone guard for stackless errors', () =>
     expect(reason?.reason_code).toBe('unfixable_no_app_frames');
     expect(reason?.reason_message).toBeTruthy();
     expect(reason?.remediation).toBeTruthy();
+  });
+
+  it('fetches the job evidence anchor, not the mutable group sample', async () => {
+    mockGetErrorGroup.mockResolvedValue(makeGroup({ sample_event_id: 'evt-sample' }));
+    mockGetErrorEvent.mockResolvedValue(makeEvent('')); // stackless: guard exits before clone
+
+    await processInvestigateJob(
+      { ...makeJob(), eventId: 'evt-anchor' },
+      new AbortController().signal,
+    );
+
+    expect(mockGetErrorEvent).toHaveBeenCalledWith('evt-anchor', 'proj-1');
+    expect(mockGetErrorEvent).not.toHaveBeenCalledWith('evt-sample', 'proj-1');
   });
 
   it('does NOT fire the guard when the stack has real application frames', async () => {
@@ -604,6 +621,7 @@ describe('processFixJob — preserves writeup on failure (no revert/null)', () =
       id: 'j1',
       workerId: 'worker-1',
       errorGroupId: 'g1',
+      eventId: null,
       sourceId: null,
       projectId: 'p1',
       jobType: 'fix',
@@ -971,7 +989,7 @@ describe('route_map dispatch', () => {
   it('dispatches project-scoped jobs before the error-group-required guard', async () => {
     const job: ClaimedJob = {
       id: 'route-map-1', workerId: 'worker-1', leaseGeneration: '1',
-      errorGroupId: null, sourceId: null, projectId: 'proj-1',
+      errorGroupId: null, eventId: null, sourceId: null, projectId: 'proj-1',
       jobType: 'route_map', attempts: 0, guidance: null, triggeredBy: 'auto', sessionId: null,
     };
     const signal = new AbortController().signal;
@@ -986,7 +1004,7 @@ describe('score_sync dispatch', () => {
   it('dispatches project-scoped score jobs before the error-group-required guard', async () => {
     const job: ClaimedJob = {
       id: 'score-sync-1', workerId: 'worker-1', leaseGeneration: '1',
-      errorGroupId: null, sourceId: null, projectId: 'proj-1',
+      errorGroupId: null, eventId: null, sourceId: null, projectId: 'proj-1',
       jobType: 'score_sync', attempts: 0, guidance: null, triggeredBy: null, sessionId: null,
       payload: { fix_job_id: 'fix-1', outcome: 'merged', delivery_id: 'delivery-1' },
     };
@@ -1000,7 +1018,7 @@ describe('unknown job type dispatch', () => {
   it('throws instead of falling through to a paid investigation', async () => {
     const job: ClaimedJob = {
       id: 'mystery-1', workerId: 'worker-1', leaseGeneration: '1',
-      errorGroupId: 'group-1', sourceId: null, projectId: 'proj-1',
+      errorGroupId: 'group-1', eventId: null, sourceId: null, projectId: 'proj-1',
       jobType: 'bogus_future_type' as never, attempts: 0,
       guidance: null, triggeredBy: null, sessionId: null, payload: null,
     };
@@ -1017,7 +1035,7 @@ describe('session_analysis handler', () => {
 
   const job: ClaimedJob & { sessionId: string } = {
     id: 'analysis-1', workerId: 'worker-1', leaseGeneration: '1',
-    errorGroupId: null, sourceId: null, projectId: 'proj-1',
+    errorGroupId: null, eventId: null, sourceId: null, projectId: 'proj-1',
     jobType: 'session_analysis', attempts: 0, guidance: null, triggeredBy: 'auto', sessionId: 'session-1',
   };
 
