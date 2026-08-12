@@ -21,7 +21,9 @@ describe.skipIf(!process.env['DATABASE_URL'])('fix job source attribution', () =
 
   afterAll(async () => {
     await getPool().query('DELETE FROM error_group_jobs WHERE project_id = $1', [projectId]);
+    await getPool().query('DELETE FROM error_events WHERE project_id = $1', [projectId]);
     await getPool().query('DELETE FROM error_groups WHERE project_id = $1', [projectId]);
+    await getPool().query('DELETE FROM environments WHERE project_id = $1', [projectId]);
     await getPool().query('DELETE FROM projects WHERE id = $1', [projectId]);
     await getPool().query('DELETE FROM orgs WHERE id = $1', [orgId]);
     await closePool();
