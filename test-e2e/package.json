@@ -9,11 +9,11 @@
     "test": "tsc --noEmit && vitest run"
   },
   "dependencies": {
-    "pg": "^8.22.0"
+    "pg": "^8.23.0"
   },
   "devDependencies": {
-    "@playwright/test": "^1.61.1",
-    "@types/pg": "^8.20.0",
+    "@playwright/test": "^1.62.1",
+    "@types/pg": "^8.21.0",
     "@vitejs/plugin-react": "^4.3.0",
     "@vitejs/plugin-vue": "^6.0.8",
     "typescript": "^5.4.0",
