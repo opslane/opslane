@@ -1,0 +1,13 @@
+--- a/src/selection.test.ts
++++ b/src/selection.test.ts
+@@ -1,7 +1,10 @@
+ import { describe, expect, it } from 'vitest';
+ import { rebuildSelection } from './selection.js';
+ 
+ describe('rebuildSelection', () => {
++  it('renders the first option after a rebuild', () => {
++    expect(rebuildSelection('a', [{ id: 'a', label: 'Alpha' }])).toBe('a');
++  });
+   it('keeps the selected option when it remains first', () => {
+     expect(rebuildSelection('a', [
+       { id: 'a', label: 'Alpha' },

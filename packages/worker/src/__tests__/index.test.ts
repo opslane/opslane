@@ -43,6 +43,7 @@ vi.mock('../db.js', () => ({
   recordDeliveryPushed: vi.fn(),
   finalizeDelivery: vi.fn(),
   recordJobUsage: vi.fn(),
+  getGroupImpactBar: vi.fn(async () => ({ identifiedUsers: 1, recentAnonSessions: 0, eligible: true })),
 }));
 vi.mock('../logger.js', () => ({
   logger: { info: vi.fn(), error: vi.fn(), warn: vi.fn(), debug: vi.fn() },
@@ -133,6 +134,7 @@ const { processRouteMapJob } = await import('../route-map.js');
 const { processScoreSyncJob } = await import('../score-sync.js');
 const { pushScore } = await import('../scores.js');
 const { getActiveTraceId } = await import('../tracing.js');
+const { logger } = await import('../logger.js');
 
 const mockGetErrorGroup = vi.mocked(db.getErrorGroup);
 const mockGetErrorEvent = vi.mocked(db.getErrorEvent);
@@ -509,12 +511,12 @@ describe('processInvestigateJob diagnosis routing', () => {
     expect(db.updateGroupInvestigation).toHaveBeenCalled();
   });
 
-  // The confidence half of the gate that decides whether a PR opens unattended.
-  // Outcome was covered three ways (not_actionable, needs_more_context,
-  // code_fix/high) and confidence not at all, so deleting `=== 'high'` from
-  // index.ts would have opened unattended fixes on suggestive evidence with the
-  // suite still green. Parking this for a human IS the medium-confidence design.
-  it('parks a code_fix that is not high confidence instead of opening a fix job', async () => {
+  it('parks a code_fix below the impact bar regardless of model confidence', async () => {
+    vi.mocked(db.getGroupImpactBar).mockResolvedValueOnce({
+      identifiedUsers: 0,
+      recentAnonSessions: 2,
+      eligible: false,
+    });
     mockInvestigateError.mockResolvedValue({
       fixable: true,
       confidence: 'medium',
@@ -542,7 +544,13 @@ describe('processInvestigateJob diagnosis routing', () => {
     expect(db.updateGroupAndCreateFixJob).not.toHaveBeenCalled();
     expect(db.updateGroupInvestigation).toHaveBeenCalledWith(
       'grp-1', 'proj-1', 'investigated',
-      expect.objectContaining({ confidence: 'medium' }),
+      expect.objectContaining({
+        confidence: 'medium',
+        decision: expect.objectContaining({
+          policyEligible: false,
+          policyBasis: { v: 1, identified_users: 0, recent_anon_sessions: 2 },
+        }),
+      }),
       makeJob(),
     );
   });
@@ -620,6 +628,37 @@ describe('processFixJob — preserves writeup on failure (no revert/null)', () =
     delete process.env['INGESTION_BASE_URL'];
     delete process.env['INTERNAL_READ_TOKEN'];
     delete process.env['OPSLANE_PYTHON_PIPELINE'];
+  });
+
+  it('adopts a terminal result only when this fix job owns its marker', async () => {
+    mockGetErrorGroup.mockResolvedValue({
+      ...makeGroup({ id: 'g1', status: 'pr_draft' }),
+      terminal_fix_job_id: 'j1',
+    });
+
+    await processFixJob(fixJob(), new AbortController().signal);
+
+    expect(mockRunPipeline).not.toHaveBeenCalled();
+    expect(logger.info).toHaveBeenCalledWith(
+      'Fix delivery already committed; adopting existing state',
+      expect.objectContaining({ job_id: 'j1' }),
+    );
+  });
+
+  it('does not adopt or overwrite a terminal result owned by another fix job', async () => {
+    mockGetErrorGroup.mockResolvedValue({
+      ...makeGroup({ id: 'g1', status: 'needs_human' }),
+      terminal_fix_job_id: 'newer-fix-job',
+    });
+
+    await processFixJob(fixJob(), new AbortController().signal);
+
+    expect(mockRunPipeline).not.toHaveBeenCalled();
+    expect(mockUpdateGroupStatus).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(
+      'Refused terminal state owned by another fix job',
+      expect.objectContaining({ job_id: 'j1', terminal_fix_job_id: 'newer-fix-job' }),
+    );
   });
 
   it('refuses a report-only fix job before reading or mutating the group', async () => {

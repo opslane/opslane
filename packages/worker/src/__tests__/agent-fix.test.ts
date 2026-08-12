@@ -19,6 +19,34 @@ vi.mock('../harness/diff-judge.js', () => ({
   judgeDiff: vi.fn(),
 }));
 
+vi.mock('../harness/fail-first.js', () => ({
+  runFailFirst: vi.fn(async ({ recorder }: { recorder: { record: (entry: Record<string, unknown>, role: string, assertionMatched?: boolean) => void } }) => {
+    recorder.record({ command: 'vitest run src/foo.test.ts', commitSha: 'base', workdirDirty: true, discovered: 1, passed: 0, failed: 1, skipped: 0, truncated: false, timedOut: false }, 'repro_red', true);
+    recorder.record({ command: 'vitest run src/foo.test.ts', commitSha: 'fix', workdirDirty: false, discovered: 1, passed: 1, failed: 0, skipped: 0, truncated: false, timedOut: false }, 'repro_green');
+    return {
+      redObserved: true,
+      greenObserved: true,
+      contractViolation: null,
+      fixCommitSha: 'fix',
+      declaredTestSource: 'expect(foo()).toBe("good")',
+    };
+  }),
+}));
+
+vi.mock('../harness/fix-judge.js', () => ({
+  FIX_JUDGE_MODEL: 'claude-sonnet-5',
+  judgeFixAttempt: vi.fn(async () => ({
+    approved: true,
+    assessment: 'The declared regression is distinctive and the change is narrow.',
+    vetoReason: null,
+    sessionId: 'judge-session',
+    probesUsed: 0,
+    probeCommands: [],
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    costUsd: 0,
+  })),
+}));
+
 vi.mock('../harness/sandbox-repo.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../harness/sandbox-repo.js')>();
   return {
@@ -50,7 +78,7 @@ const { mockLoadDiagnosisDecision, mockRecordJobUsage } = vi.hoisted(() => ({
   mockRecordJobUsage: vi.fn(),
 }));
 vi.mock('../db.js', () => ({
-  loadDiagnosisDecision: mockLoadDiagnosisDecision,
+  loadDiagnosisDecisionForSource: mockLoadDiagnosisDecision,
   recordJobUsage: mockRecordJobUsage,
 }));
 
@@ -89,7 +117,14 @@ function makeAgentResult(overrides?: Partial<AgentCompletionResult>): AgentCompl
     toolCallCount: 5,
     testsRan: false,
     tokenUsage: { input: 1000, output: 500, cacheRead: 0, cacheWrite: 0 },
-    toolHistory: [],
+    toolHistory: [{
+      name: 'declare_failing_test',
+      input: {
+        test_files: ['src/foo.test.ts'],
+        identifier: 'works',
+        expected_assertion: 'expected bad to be good',
+      },
+    }],
     ...overrides,
   };
 }
@@ -217,7 +252,8 @@ function passingSandboxFake() {
 /** The persisted decision that authorises a fix job to run. */
 function authorisedDecision() {
   mockLoadDiagnosisDecision.mockResolvedValue({
-    outcome: 'code_fix', basis: 'local_defect', confidence: 'high',
+    id: 'decision-1', outcome: 'code_fix', basis: 'local_defect', confidence: 'high',
+    policyEligible: true, policyBasis: { v: 1, identified_users: 1, recent_anon_sessions: 0 },
   });
 }
 
@@ -255,29 +291,31 @@ beforeEach(() => {
 describe('fix jobs read the persisted decision instead of re-triaging', () => {
   it('short-circuits when the persisted decision was not code_fix', async () => {
     mockLoadDiagnosisDecision.mockResolvedValue({
-      outcome: 'not_actionable', basis: 'cause_outside_codebase', confidence: 'high',
+      id: 'decision-2', outcome: 'not_actionable', basis: 'cause_outside_codebase', confidence: 'high',
+      policyEligible: false, policyBasis: { v: 1, identified_users: 0, recent_anon_sessions: 0 },
     });
 
     const result = await runAgentFix(makeInput());
 
     expect(result.status).toBe('needs_human');
     expect(result.reason?.reason_code).toBe('unfixable_infra');
-    expect(result.reason?.reason_message).toContain('cause_outside_codebase');
+    expect(result.reason?.reason_message).toContain('did not authorize');
     expect(result.reason?.remediation).toBeTruthy();
     // No sandbox is provisioned on this path.
     expect(createE2BSandbox).not.toHaveBeenCalled();
   });
 
-  it('short-circuits on a code_fix decision that is not high confidence', async () => {
+  it('authorizes a policy-eligible code_fix regardless of confidence', async () => {
     mockLoadDiagnosisDecision.mockResolvedValue({
-      outcome: 'code_fix', basis: 'local_defect', confidence: 'medium',
+      id: 'decision-3', outcome: 'code_fix', basis: 'local_defect', confidence: 'medium',
+      policyEligible: true, policyBasis: { v: 1, identified_users: 1, recent_anon_sessions: 0 },
     });
+    vi.mocked(runAgentLoop).mockResolvedValue(makeAgentResult({ success: false }));
 
     const result = await runAgentFix(makeInput());
 
     expect(result.status).toBe('needs_human');
-    expect(result.reason?.reason_code).toBe('low_confidence_fix');
-    expect(createE2BSandbox).not.toHaveBeenCalled();
+    expect(createE2BSandbox).toHaveBeenCalled();
   });
 
   it('fails closed when no decision was persisted', async () => {
@@ -452,8 +490,8 @@ describe('runAgentFix', () => {
 
       expect(result.status).toBe('needs_human');
       expect(result.reason?.reason_code).toBe('low_confidence_fix');
-      expect(result.reason?.reason_message).toContain('no test runner');
-      expect(result.draftEligible).toBe(true);
+      expect(result.reason?.reason_message).toContain('mechanical red-then-green');
+      expect(result.draftEligible).toBe(false);
       expect(result.evidence?.checks).toEqual(expect.arrayContaining([
         expect.objectContaining({ name: 'suite_post_patch', outcome: 'skipped_no_runner' }),
       ]));
@@ -598,7 +636,7 @@ describe('runAgentFix', () => {
     expect(result.status).toBe('needs_human');
     expect(result.reason?.reason_code).toBe('low_confidence_fix');
     expect(result.confidence).toBe('medium'); // judge liked it, but tests could not run
-    expect(result.draftEligible).toBe(true);
+    expect(result.draftEligible).toBe(false);
     expect(result.diff).toContain('diff --git'); // candidate diff preserved for the human
   });
 
@@ -940,7 +978,7 @@ describe('runAgentFix', () => {
 
     const result = await runAgentFix(makeInput({ repoPath: '/tmp/opslane-repo-test' }));
     expect(result.status).toBe('fix_ready');
-    expect(mockLoadDiagnosisDecision).toHaveBeenCalledWith('eg-1', 'proj-1');
+    expect(mockLoadDiagnosisDecision).toHaveBeenCalledWith('eg-1', 'proj-1', null);
     expect(mockInvestigateError).toHaveBeenCalled();
   });
 

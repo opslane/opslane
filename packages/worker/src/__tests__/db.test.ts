@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { purgeDiagnosisDecisions } from './purge-diagnosis-decisions.js';
+import { purgeFixRunLedger } from './purge-fix-run-ledger.js';
 import { readFileSync } from 'node:fs';
 import pg from 'pg';
 import {
@@ -23,7 +24,11 @@ import {
   getQueueDepth,
   recordDiagnosisDecision,
   loadDiagnosisDecision,
+  loadDiagnosisDecisionForSource,
+  getGroupImpactBar,
+  insertFixRunLedger,
 } from '../db.js';
+import { createLedgerRecorder } from '../verification-ledger.js';
 
 const DATABASE_URL = process.env['DATABASE_URL'];
 
@@ -103,10 +108,17 @@ async function cleanupTestData(): Promise<void> {
   await testPool.query(`DELETE FROM friction_signals WHERE project_id = $1`, [testProjectId]);
   await testPool.query(`DELETE FROM friction_adjudication_generations WHERE project_id = $1`, [testProjectId]);
   await purgeDiagnosisDecisions(testPool, testProjectId);
+  await purgeFixRunLedger(testPool, testProjectId);
   await testPool.query(`DELETE FROM error_group_jobs WHERE project_id = $1`, [testProjectId]);
   await testPool.query(`DELETE FROM error_events WHERE project_id = $1`, [testProjectId]);
+  await testPool.query(
+    `DELETE FROM error_group_affected_users
+     WHERE end_user_id IN (SELECT id FROM end_users WHERE project_id = $1)`,
+    [testProjectId],
+  );
   await testPool.query(`DELETE FROM error_groups WHERE project_id = $1`, [testProjectId]);
   await testPool.query(`DELETE FROM sessions WHERE project_id = $1`, [testProjectId]);
+  await testPool.query(`DELETE FROM end_users WHERE project_id = $1`, [testProjectId]);
   await testPool.query(`DELETE FROM environments WHERE project_id = $1`, [testProjectId]);
   await testPool.query(`DELETE FROM projects WHERE id = $1`, [testProjectId]);
   await testPool.query(`DELETE FROM orgs WHERE id = $1`, [testOrgId]);
@@ -170,8 +182,14 @@ describeDb('db.ts integration tests', () => {
     await testPool.query(`DELETE FROM friction_signals WHERE project_id = $1`, [testProjectId]);
     await testPool.query(`DELETE FROM friction_adjudication_generations WHERE project_id = $1`, [testProjectId]);
     await purgeDiagnosisDecisions(testPool, testProjectId);
+    await purgeFixRunLedger(testPool, testProjectId);
     await testPool.query(`DELETE FROM error_group_jobs WHERE project_id = $1`, [testProjectId]);
     await testPool.query(`DELETE FROM error_events WHERE project_id = $1`, [testProjectId]);
+    await testPool.query(
+      `DELETE FROM error_group_affected_users
+       WHERE end_user_id IN (SELECT id FROM end_users WHERE project_id = $1)`,
+      [testProjectId],
+    );
     await testPool.query(`DELETE FROM error_groups WHERE project_id = $1`, [testProjectId]);
   });
 
@@ -239,6 +257,42 @@ describeDb('db.ts integration tests', () => {
 
         expect(await loadDiagnosisDecision(errorGroupId, testProjectId)).toMatchObject({
           outcome: 'code_fix', basis: 'local_defect', confidence: 'high',
+        });
+      });
+
+      it('loads the decision linked to the source investigation instead of a newer group decision', async () => {
+        const { errorGroupId, jobId: sourceJobId } = await seedErrorGroupAndJob();
+        const newerJob = await testPool.query<{ id: string }>(
+          `INSERT INTO error_group_jobs (error_group_id, project_id, job_type)
+           VALUES ($1, $2, 'investigate') RETURNING id`,
+          [errorGroupId, testProjectId],
+        );
+        await recordDiagnosisDecision(errorGroupId, testProjectId, {
+          ...baseDecision,
+          jobId: sourceJobId,
+          outcome: 'code_fix',
+          decisionReason: 'source decision',
+          policyEligible: true,
+          policyBasis: { v: 1, identified_users: 1, recent_anon_sessions: 0 },
+        });
+        await recordDiagnosisDecision(errorGroupId, testProjectId, {
+          ...baseDecision,
+          jobId: newerJob.rows[0]!.id,
+          outcome: 'not_actionable',
+          decisionReason: 'newer unrelated decision',
+          basis: 'cause_outside_codebase',
+          policyEligible: false,
+          policyBasis: { v: 1, identified_users: 0, recent_anon_sessions: 0 },
+        });
+
+        expect(await loadDiagnosisDecisionForSource(
+          errorGroupId,
+          testProjectId,
+          sourceJobId,
+        )).toMatchObject({
+          outcome: 'code_fix',
+          policyEligible: true,
+          policyBasis: { v: 1, identified_users: 1, recent_anon_sessions: 0 },
         });
       });
 
@@ -354,6 +408,91 @@ describeDb('db.ts integration tests', () => {
     });
   });
 
+  describe('impact policy', () => {
+    it('qualifies at one identified user or three recent anonymous sessions', async () => {
+      const { errorGroupId } = await seedErrorGroupAndJob();
+      const environment = await testPool.query<{ id: string }>(
+        `INSERT INTO environments (project_id, name) VALUES ($1, $2) RETURNING id`,
+        [testProjectId, `impact-${crypto.randomUUID()}`],
+      );
+      for (const sessionId of ['anon-1', 'anon-2']) {
+        await testPool.query(
+          `INSERT INTO error_events
+             (project_id, environment_id, error_group_id, session_id, timestamp,
+              error_type, error_message, stack_trace_raw)
+           VALUES ($1, $2, $3, $4, now(), 'Error', 'impact', 'stack')`,
+          [testProjectId, environment.rows[0]!.id, errorGroupId, sessionId],
+        );
+      }
+      await expect(getGroupImpactBar(errorGroupId, testProjectId)).resolves.toEqual({
+        identifiedUsers: 0,
+        recentAnonSessions: 2,
+        eligible: false,
+      });
+
+      await testPool.query(
+        `INSERT INTO error_events
+           (project_id, environment_id, error_group_id, session_id, timestamp,
+            error_type, error_message, stack_trace_raw)
+         VALUES ($1, $2, $3, 'anon-3', now(), 'Error', 'impact', 'stack')`,
+        [testProjectId, environment.rows[0]!.id, errorGroupId],
+      );
+      expect(await getGroupImpactBar(errorGroupId, testProjectId)).toMatchObject({
+        recentAnonSessions: 3,
+        eligible: true,
+      });
+
+      const user = await testPool.query<{ id: string }>(
+        `INSERT INTO end_users (project_id, external_user_id)
+         VALUES ($1, $2) RETURNING id`,
+        [testProjectId, `impact-user-${crypto.randomUUID()}`],
+      );
+      await testPool.query(
+        `INSERT INTO error_group_affected_users (error_group_id, end_user_id)
+         VALUES ($1, $2)`,
+        [errorGroupId, user.rows[0]!.id],
+      );
+      expect(await getGroupImpactBar(errorGroupId, testProjectId)).toMatchObject({
+        identifiedUsers: 1,
+        eligible: true,
+      });
+    });
+  });
+
+  describe('fix verification ledger', () => {
+    it('persists ordered harness entries and their explicit not-run set', async () => {
+      const { jobId } = await seedErrorGroupAndJob();
+      const recorder = createLedgerRecorder(jobId, testProjectId);
+      recorder.record({
+        command: 'pnpm test', commitSha: 'base-sha', workdirDirty: false,
+        discovered: 2, passed: 1, failed: 1, skipped: 0,
+        truncated: false, timedOut: false,
+      }, 'suite_baseline');
+      recorder.record({
+        command: 'pnpm build', commitSha: 'fix-sha', workdirDirty: false,
+        discovered: null, passed: null, failed: 0, skipped: null,
+        truncated: false, timedOut: false,
+      }, 'build');
+      recorder.finalizeNotRun(['repro_red', 'repro_green']);
+
+      await insertFixRunLedger(recorder.entries());
+
+      const { rows } = await testPool.query<{
+        entry_seq: number;
+        command: string;
+        not_run: string[];
+      }>(
+        `SELECT entry_seq, command, not_run
+         FROM fix_run_ledger WHERE run_id = $1 ORDER BY entry_seq`,
+        [recorder.runId],
+      );
+      expect(rows).toEqual([
+        { entry_seq: 1, command: 'pnpm test', not_run: [] },
+        { entry_seq: 2, command: 'pnpm build', not_run: ['repro_red', 'repro_green'] },
+      ]);
+    });
+  });
+
   describe('digest readiness projection', () => {
     it('upserts readiness in the same investigation write and leaves legacy rows absent', async () => {
       const first = await seedErrorGroupAndJob();
@@ -403,6 +542,52 @@ describeDb('db.ts integration tests', () => {
         `SELECT count(*)::int AS n FROM error_group_jobs WHERE error_group_id = $1 AND job_type IN ('fix','error_fix')`,
         [seeded.errorGroupId],
       )).rows[0]!.n).toBe(0);
+    });
+
+    it('never steals a pending human fix while still recording the new policy decision', async () => {
+      const seeded = await seedErrorGroupAndJob();
+      const claim = await claimJob('human-precedence-worker', 60_000);
+      expect(claim?.id).toBe(seeded.jobId);
+      const humanFix = await testPool.query<{ id: string }>(
+        `INSERT INTO error_group_jobs
+           (error_group_id, project_id, job_type, triggered_by)
+         VALUES ($1, $2, 'fix', 'human') RETURNING id`,
+        [seeded.errorGroupId, testProjectId],
+      );
+
+      const result = await updateGroupAndCreateFixJob(
+        seeded.errorGroupId,
+        testProjectId,
+        {
+          rootCause: 'new automated diagnosis',
+          sourceJobId: seeded.jobId,
+          decision: {
+            diagnosis: null,
+            model: 'claude-sonnet-5',
+            promptVersion: 'diagnosis-v1',
+            basis: 'local_defect',
+            confidence: 'medium',
+            jobId: seeded.jobId,
+            outcome: 'code_fix',
+            decisionReason: 'local cause above impact bar',
+            policyEligible: true,
+            policyBasis: { v: 1, identified_users: 1, recent_anon_sessions: 0 },
+          },
+          readiness: { status: 'eligible', reason: 'validated_cause' },
+        },
+        claim!,
+      );
+
+      expect(result).toEqual({ created: false, reason: 'pending_human_job' });
+      expect((await testPool.query(
+        `SELECT status, triggered_by FROM error_group_jobs WHERE id = $1`,
+        [humanFix.rows[0]!.id],
+      )).rows[0]).toEqual({ status: 'pending', triggered_by: 'human' });
+      expect(await loadDiagnosisDecisionForSource(
+        seeded.errorGroupId,
+        testProjectId,
+        seeded.jobId,
+      )).toMatchObject({ policyEligible: true });
     });
 
     it('reinvestigation script is idempotent over success and retries failures', async () => {
@@ -565,18 +750,25 @@ describeDb('db.ts integration tests', () => {
         },
         candidateDiff: '--- a/a\n+++ b/a\n',
         evidence: { version: 1, tier: 'E0', checks: [] },
+        readiness: { status: 'eligible', reason: 'fix_pr_opened' },
       }, claim!);
 
       const group = await testPool.query<{
         status: string;
         pr_number: number;
         reason_code: string;
-      }>(`SELECT status, pr_number, reason_code FROM error_groups WHERE id = $1`, [errorGroupId]);
+        terminal_fix_job_id: string | null;
+      }>(`SELECT status, pr_number, reason_code, terminal_fix_job_id FROM error_groups WHERE id = $1`, [errorGroupId]);
       expect(group.rows[0]).toMatchObject({
         status: 'pr_draft',
         pr_number: 7,
         reason_code: 'low_confidence_fix',
+        terminal_fix_job_id: jobId,
       });
+      expect((await testPool.query(
+        `SELECT status, reason FROM digest_readiness WHERE incident_id = $1`,
+        [errorGroupId],
+      )).rows[0]).toEqual({ status: 'eligible', reason: 'fix_pr_opened' });
       const delivery = await testPool.query<{ state: string; head_sha: string }>(
         `SELECT state, head_sha FROM delivery_reservations WHERE error_group_id = $1`,
         [errorGroupId],

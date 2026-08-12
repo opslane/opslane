@@ -48,12 +48,14 @@ export type TestStatus = 'passed' | 'failed';
 export interface ParsedSuite {
   tests: Map<string, TestStatus>;
   total: number;
+  failureMessages: Map<string, string>;
 }
 
 interface JsonAssertion {
   fullName?: string;
   title?: string;
   status?: string;
+  failureMessages?: string[];
 }
 
 interface JsonTestFile {
@@ -69,15 +71,19 @@ interface JsonReport {
 export function parseSuiteJson(raw: string): ParsedSuite {
   const report = JSON.parse(raw) as JsonReport;
   const tests = new Map<string, TestStatus>();
+  const failureMessages = new Map<string, string>();
   for (const file of report.testResults ?? []) {
     const fileName = (file.name ?? '').replace(`${SANDBOX_REPO}/`, '');
     for (const assertion of file.assertionResults ?? []) {
       const id = `${fileName}::${assertion.fullName ?? assertion.title ?? ''}`;
       if (assertion.status === 'passed') tests.set(id, 'passed');
-      else if (assertion.status === 'failed') tests.set(id, 'failed');
+      else if (assertion.status === 'failed') {
+        tests.set(id, 'failed');
+        failureMessages.set(id, (assertion.failureMessages ?? []).join('\n'));
+      }
     }
   }
-  return { tests, total: report.numTotalTests ?? tests.size };
+  return { tests, total: report.numTotalTests ?? tests.size, failureMessages };
 }
 
 export interface SuiteRun {
@@ -87,6 +93,9 @@ export interface SuiteRun {
   total: number | null;
   exitCode?: number;
   output: string;
+  timedOut?: boolean;
+  truncated?: boolean;
+  failureMessages?: Map<string, string>;
 }
 
 export interface SuiteComparison {
@@ -172,6 +181,10 @@ export async function planTests(
 
 function bound(raw: string): string {
   return scrubSecrets(raw).slice(-MAX_SUITE_OUTPUT);
+}
+
+export function shq(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
 interface CommandFailureLike {
@@ -263,6 +276,7 @@ export async function runSuite(
         tests: null,
         total: null,
         output: bound(output),
+        timedOut: true,
       };
     }
     exitCode = failureExitCode(error) ?? 1;
@@ -336,6 +350,7 @@ export async function runSuite(
       total: parsed.total,
       exitCode,
       output,
+      failureMessages: parsed.failureMessages,
     };
   }
 
@@ -346,5 +361,38 @@ export async function runSuite(
     total: null,
     exitCode,
     output,
+  };
+}
+
+export async function runDeclaredTest(
+  sandbox: SandboxRuntime,
+  plan: TestPlan,
+  testFiles: string[],
+  identifier: string,
+): Promise<{ runnable: boolean; reason?: string; run?: SuiteRun; failureMessage?: string }> {
+  if (plan.kind === 'none' || !plan.command) return { runnable: false, reason: 'no_test_runner' };
+  if (plan.kind === 'npm-script') return { runnable: false, reason: 'npm_script_not_filterable' };
+  if (plan.kind === 'pytest' && !identifier.includes('::')) {
+    return { runnable: false, reason: 'pytest_identifier_not_node_id' };
+  }
+
+  const filtered: TestPlan = plan.kind === 'pytest'
+    ? {
+      kind: 'pytest',
+      command: `python -m pytest ${shq(identifier)} --junit-xml=${PYTEST_RESULTS_PATH}`,
+    }
+    : {
+      kind: 'vitest',
+      command: `${plan.command} ${testFiles.map(shq).join(' ')} -t ${shq(identifier)}`,
+    };
+  const run = await runSuite(sandbox, filtered);
+  if (!run.tests) return { runnable: false, reason: 'declared_test_report_unavailable', run };
+  const match = [...run.tests.keys()].find((id) =>
+    id === identifier || id.endsWith(`::${identifier}`) || id.includes(identifier));
+  if (!match) return { runnable: false, reason: 'declared_test_not_reported', run };
+  return {
+    runnable: true,
+    run,
+    failureMessage: run.failureMessages?.get(match) ?? run.output,
   };
 }

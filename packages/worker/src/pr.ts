@@ -17,6 +17,7 @@ import {
   type FixNarrative,
 } from './narrative.js';
 import { formatRuntime, type RuntimeInfo } from './runtime-info.js';
+import type { LedgerEntry, LedgerRecorder, TierRecord } from './verification-ledger.js';
 /** Extract file paths from +++ headers in a unified diff. */
 function extractFiles(diff: string): string[] {
   const files: string[] = [];
@@ -97,6 +98,10 @@ export interface PRInput {
   kind?: 'error' | 'friction';
   evidence?: EvidenceRecord | null;
   draft?: boolean;
+  ledger?: LedgerEntry[];
+  ledgerRoles?: ReturnType<LedgerRecorder['roles']>;
+  tierRecord?: TierRecord;
+  judge?: EvidenceRecord['judge'];
 }
 
 export type PRResult =
@@ -350,8 +355,65 @@ function buildEvidenceLines(evidence: EvidenceRecord): string[] {
 
 export const VERIFICATION_START = '<!-- opslane-verification:start -->';
 export const VERIFICATION_END = '<!-- opslane-verification:end -->';
+export const CI_STATUS_START = '<!-- opslane-ci-status:start -->';
+export const CI_STATUS_END = '<!-- opslane-ci-status:end -->';
+
+function ciStatusLines(evidence: EvidenceRecord | null | undefined): string[] {
+  if (evidence?.external_ci?.outcome === 'passed') {
+    return [
+      CI_STATUS_START,
+      'External CI: passed for the exact published commit.',
+      ...evidence.external_ci.check_names.map((name) => `- ✅ ${sanitizeInline(name, 100)}`),
+      CI_STATUS_END,
+    ];
+  }
+  return [CI_STATUS_START, 'External CI: not yet observed.', CI_STATUS_END];
+}
+
+function tierLine(record: TierRecord): string {
+  if (record.tier === 'reproduced') {
+    return 'Tier: reproduced — the declared test failed on the unfixed code and passed with the fix.';
+  }
+  if (record.tier === 'checked') {
+    return 'Tier: checked — the suite, build, and quality gates passed without a mechanical reproduction.';
+  }
+  return 'Tier: attempted — the attempt did not satisfy the mechanical verification predicate.';
+}
+
+function buildLedgerLines(input: PRInput): string[] | null {
+  if (!input.ledger || !input.ledgerRoles || !input.tierRecord) return null;
+  const roles = new Map(input.ledgerRoles.map((role) => [role.entrySeq, role]));
+  const byRole = (role: string) => input.ledger!.filter((entry) => roles.get(entry.entrySeq)?.role === role);
+  const latest = (role: string) => byRole(role).at(-1);
+  const red = latest('repro_red');
+  const green = latest('repro_green');
+  const suite = latest('suite_post_patch');
+  const build = latest('build');
+  const lines = ['### Verification (executed)', tierLine(input.tierRecord)];
+  if (input.tierRecord.tier === 'checked' && input.tierRecord.reproductionImpossibleReason) {
+    lines.push(`Agent declaration: “${sanitizeInline(input.tierRecord.reproductionImpossibleReason, 600)}”`);
+  }
+  if (red) {
+    const matched = roles.get(red.entrySeq)?.assertionMatched === true;
+    lines.push(`- ${red.failed && matched ? '✅' : '❌'} \`${sanitizeInline(red.command, 500)}\` — failed as declared on base \`${sanitizeInline(red.commitSha.slice(0, 12), 12)}\`${matched ? ' (assertion matched)' : ''}`);
+  }
+  if (green) {
+    lines.push(`- ${green.failed === 0 ? '✅' : '❌'} declared test green with the fix on \`${sanitizeInline(green.commitSha.slice(0, 12), 12)}\``);
+  }
+  if (suite) {
+    const newFailures = input.evidence?.suite?.new_failures.length ?? suite.failed ?? 0;
+    lines.push(`- ${newFailures === 0 ? '✅' : '❌'} suite: ${suite.passed ?? 0} passed, ${newFailures} new failures (baseline compared)`);
+  }
+  if (build) lines.push(`- ${build.failed === 0 ? '✅' : '❌'} build ${build.failed === 0 ? 'passed' : 'failed'}`);
+  const notRun = [...new Set(input.ledger.flatMap((entry) => entry.notRun))];
+  lines.push(`Not run: ${notRun.length > 0 ? notRun.join(', ') : '(none)'}`);
+  lines.push(...ciStatusLines(input.evidence));
+  return lines;
+}
 
 export function buildVerificationSection(input: PRInput): string {
+  const ledgerLines = buildLedgerLines(input);
+  if (ledgerLines) return `${VERIFICATION_START}\n${ledgerLines.join('\n')}\n${VERIFICATION_END}`;
   let content: string;
   if (input.kind === 'friction') {
     const lines = [
@@ -359,11 +421,6 @@ export function buildVerificationSection(input: PRInput): string {
     ];
     if (input.evidence) lines.push(...buildEvidenceLines(input.evidence));
     content = lines.join('\n');
-  } else if (input.evidence?.external_ci?.outcome === 'passed') {
-    content = [
-      '**Verification: external CI passed.** Opslane observed successful repository checks for the exact published commit.',
-      ...input.evidence.external_ci.check_names.map((name) => `- ✅ ${sanitizeInline(name, 100)}`),
-    ].join('\n');
   } else if (input.draft) {
     const tier = input.evidence?.tier ?? 'E0';
     content = [
@@ -380,7 +437,18 @@ export function buildVerificationSection(input: PRInput): string {
       ...buildEvidenceLines(input.evidence),
     ].join('\n');
   }
-  return `${VERIFICATION_START}\n${content}\n${VERIFICATION_END}`;
+  return `${VERIFICATION_START}\n${content}\n${ciStatusLines(input.evidence).join('\n')}\n${VERIFICATION_END}`;
+}
+
+export function buildJudgeSection(input: PRInput): string | null {
+  const judge = input.judge ?? input.evidence?.judge;
+  if (!judge) return null;
+  return [
+    '### Judge review',
+    `Judge report: ${sanitize(judge.assessment).slice(0, 4000)}`,
+    judge.veto_reason ? `Veto reason: ${sanitize(judge.veto_reason).slice(0, 600)}` : null,
+    judge.probes_used > 0 ? `Probes used: ${judge.probes_used}` : null,
+  ].filter(Boolean).join('\n');
 }
 
 // === PR body construction ===
@@ -419,6 +487,7 @@ export function buildPRBody(input: PRInput): string {
       input.diff.trim(),
       fence,
       buildVerificationSection(input),
+      buildJudgeSection(input),
       buildTechnicalDetails(input),
       '---',
       `*Generated by Opslane · Error Group: ${inlineCode(input.errorGroupId.slice(0, 8))}*`,
@@ -436,6 +505,7 @@ export function buildPRBody(input: PRInput): string {
     input.diff.trim(),
     fence,
     buildVerificationSection(input),
+    buildJudgeSection(input),
     replayLink ? `📊 [Full investigation & session replay →](${replayLink})` : null,
     buildTechnicalDetails(input),
     '---',
@@ -631,6 +701,13 @@ export function replaceVerificationSection(body: string, replacement: string): s
   const end = body.indexOf(VERIFICATION_END);
   if (start < 0 || end < start) return `${body.trim()}\n\n${replacement}`;
   return `${body.slice(0, start)}${replacement}${body.slice(end + VERIFICATION_END.length)}`;
+}
+
+export function replaceCIStatusSection(body: string, replacement: string): string {
+  const start = body.indexOf(CI_STATUS_START);
+  const end = body.indexOf(CI_STATUS_END);
+  if (start < 0 || end < start) return body;
+  return `${body.slice(0, start)}${replacement}${body.slice(end + CI_STATUS_END.length)}`;
 }
 
 // === Main function ===

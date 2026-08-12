@@ -97,7 +97,7 @@ describe.skipIf(!process.env['DATABASE_URL'])('fix job source attribution', () =
     expect(row.rows[0]?.source_job_id).toBe(data.sourceJobId);
   });
 
-  it('backfills a reused pending fix only when source_job_id is null', async () => {
+  it('repoints a reused pending automated fix to the newest investigation', async () => {
     const data = await fixture(true);
     const first = await updateGroupAndCreateFixJob(
       data.groupId,
@@ -117,6 +117,25 @@ describe.skipIf(!process.env['DATABASE_URL'])('fix job source attribution', () =
       'SELECT source_job_id FROM error_group_jobs WHERE id = $1',
       [data.existingFixJobId],
     );
-    expect(row.rows[0]?.source_job_id).toBe(data.sourceJobId);
+    expect(row.rows[0]?.source_job_id).toBe(data.otherSourceJobId);
+  });
+
+  it('does not repoint a fix job after it has been claimed', async () => {
+    const data = await fixture(true);
+    await getPool().query(
+      `UPDATE error_group_jobs SET status = 'claimed' WHERE id = $1`,
+      [data.existingFixJobId],
+    );
+    await updateGroupAndCreateFixJob(
+      data.groupId,
+      projectId,
+      { rootCause: 'x', confidence: 'high', sourceJobId: data.otherSourceJobId },
+      data.lease,
+    );
+    const row = await getPool().query<{ source_job_id: string | null }>(
+      'SELECT source_job_id FROM error_group_jobs WHERE id = $1',
+      [data.existingFixJobId],
+    );
+    expect(row.rows[0]?.source_job_id).toBeNull();
   });
 });

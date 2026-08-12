@@ -17,7 +17,7 @@ import type { RuntimeInfo } from './runtime-info.js';
 import { buildReason, reasonCodeForDecision, reproductionRemediation } from './reason-codes.js';
 import { deriveOutcome } from './classify.js';
 import { adjudicationFromDecline, strings } from './diagnose-schema.js';
-import { loadDiagnosisDecision, recordJobUsage } from './db.js';
+import { loadDiagnosisDecisionForSource, recordJobUsage } from './db.js';
 import { calculateCost } from '@opslane/agent-core';
 import type { AgentCompletionResult, VisualAnalysisOutput, SourceFile, AgentState } from './harness/types.js';
 import { scrubSecrets } from './harness/redact.js';
@@ -39,6 +39,16 @@ import {
   type FixNarrative,
   type NarrativeFallbackInput,
 } from './narrative.js';
+import {
+  createLedgerRecorder,
+  detectLedgerAnomalies,
+  deriveTierRecord,
+  type LedgerEntry,
+  type LedgerRecorder,
+  type TierRecord,
+} from './verification-ledger.js';
+import { runFailFirst } from './harness/fail-first.js';
+import { FIX_JUDGE_MODEL, judgeFixAttempt } from './harness/fix-judge.js';
 
 /**
  * Record the machine's identity at the moment it failed. sandboxId appears
@@ -99,6 +109,9 @@ export interface AgentFixInput {
    * in runAgentFix.
    */
   triggeredBy?: 'auto' | 'human' | null;
+  sourceJobId?: string | null;
+  ledgerRecorder?: LedgerRecorder;
+  authorizationDecisionId?: string | null;
   /** Shell commands to run after clone+install, before agent starts (e.g. apply bug patch for eval). */
   setupCommands?: string[];
   /** Local repo clone path. When set, investigation uses codebase-aware classification instead of blind triage. */
@@ -128,6 +141,10 @@ export interface AgentFixResult {
   /** Explicit judge/build disposition used by the delivery policy. */
   draftEligible?: boolean;
   tokenUsage?: { input: number; output: number; cacheRead: number; cacheWrite: number };
+  ledger?: LedgerEntry[];
+  ledgerRoles?: ReturnType<LedgerRecorder['roles']>;
+  tierRecord?: TierRecord;
+  declaredTestSource?: string | null;
 }
 
 const MAX_ERROR_MESSAGE = 500;
@@ -286,6 +303,8 @@ You have access to the repository in the current working directory (/home/user/r
 4. Run tests to verify your fix works
 5. If you cannot fix this with code changes (${python ? 'infrastructure issue, third-party site-packages bug, incomplete traceback, or a required schema migration' : 'infrastructure issue, third-party library bug, minified stack with no sourcemap'}), call submit_diagnosis with what you established.
 
+Before you finish: write a regression test that fails on the current code because of this bug, then call declare_failing_test with its files, name, and the exact failure message you expect on the unfixed code. If such a test is genuinely impossible here, call declare_reproduction_impossible with the concrete reason. An attempt with neither declaration cannot open a PR.
+
 ## Rules
 - Keep changes minimal — only modify what's necessary
 - Always run tests before finishing
@@ -410,6 +429,66 @@ ${fenced(input.stackTrace, MAX_STACK_TRACE)}
 }
 
 export async function runAgentFix(input: AgentFixInput): Promise<AgentFixResult> {
+  const recorder = input.ledgerRecorder ?? createLedgerRecorder(input.usageContext?.jobId ?? input.errorGroupId, input.projectId);
+  const humanAuthorised = input.triggeredBy === 'human';
+  const frictionLadder = input.kind === 'friction';
+  let authorization: EvidenceRecord['authorization'];
+
+  if (humanAuthorised) {
+    authorization = {
+      decision_id: null,
+      source: 'human_bypass',
+      policy_eligible: null,
+    };
+  } else if (!frictionLadder) {
+    const decision = await traceSpan('load-diagnosis-decision', {}, () =>
+      loadDiagnosisDecisionForSource(
+        input.errorGroupId,
+        input.projectId,
+        input.sourceJobId ?? null,
+      ));
+    authorization = {
+      decision_id: decision?.id ?? null,
+      source: input.sourceJobId == null ? 'newest_fallback' : 'source_job',
+      policy_eligible: decision?.policyEligible ?? null,
+    };
+    if (!decision || decision.outcome !== 'code_fix' || decision.policyEligible !== true) {
+      logger.info('Fix job refused by the persisted policy decision', {
+        error_group_id: input.errorGroupId,
+        decision_id: decision?.id ?? null,
+        outcome: decision?.outcome ?? 'none',
+        policy_eligible: decision?.policyEligible ?? null,
+      });
+      return {
+        status: 'needs_human',
+        reason: {
+          reason_code: reasonCodeForDecision(decision),
+          reason_message: decision
+            ? 'The diagnosis decision did not authorize an automated fix attempt under the recorded policy.'
+            : 'No diagnosis decision was persisted for this fix job source.',
+          remediation: 'Review the diagnosis decision for this error group or trigger the fix manually.',
+        },
+        evidence: { ...createEvidenceRecorder().record(), authorization },
+        ledger: recorder.entries(),
+        ledgerRoles: recorder.roles(),
+      };
+    }
+  }
+
+  const result = await runAgentFixCore({
+    ...input,
+    ledgerRecorder: recorder,
+    authorizationDecisionId: authorization?.decision_id ?? null,
+  });
+  const recordedResult = { ...result, ledger: recorder.entries(), ledgerRoles: recorder.roles() };
+  if (!authorization) return recordedResult;
+  return {
+    ...recordedResult,
+    evidence: { ...(recordedResult.evidence ?? createEvidenceRecorder().record()), authorization },
+  };
+}
+
+async function runAgentFixCore(input: AgentFixInput): Promise<AgentFixResult> {
   const platform = input.platform ?? 'javascript';
   const pythonCleanup = platform === 'python'
     ? ` && git clean -fdX -- ':(glob)**/__pycache__/**' ':(glob)**/.pytest_cache/**' ':(glob)**/htmlcov/**' ':(glob)**/*.egg-info/**' ':(glob)**/*.pyc' ':(glob)**/.coverage' ':(glob)**/build/**' ':(glob)**/dist/**'`
@@ -424,69 +503,6 @@ export async function runAgentFix(input: AgentFixInput): Promise<AgentFixResult>
         remediation: 'Set the ANTHROPIC_API_KEY environment variable with a valid Anthropic API key',
       },
     };
-  }
-
-  // Who may skip the persisted-decision gate, and why.
-  //
-  // `human`: a person opened the incident and clicked through to a fix. That IS
-  // the approval the gate exists to collect, so requiring a second one from the
-  // database would refuse the very flow medium confidence parks an incident FOR.
-  // Keyed on who created the job, not on the optional guidance text: `guidance`
-  // is `job.guidance ?? undefined` (index.ts), and the dashboard sends
-  // `guidance.value || undefined`, so a human who clicks the button without
-  // typing anything sends null and would have had their approval discarded.
-  //
-  // `friction`: the friction ladder is a separate authorization path with its
-  // own kind gate and autonomy setting (index.ts), and it never writes a
-  // diagnosis_decisions row — its investigate job calls updateGroupAndCreateFixJob
-  // with no `decision`. Consulting a row that is never written refuses every
-  // friction fix, including ones a human approved.
-  //
-  // What is NOT authorization: carrying prior diagnosis prose. The gate used to
-  // key on `input.investigation` being present, which made it dead on the main
-  // path — index.ts sets `investigation` from `error_groups.root_cause`, written
-  // in the same transaction that creates every auto fix job.
-  const humanAuthorised = input.triggeredBy === 'human';
-  const frictionLadder = input.kind === 'friction';
-  if (humanAuthorised || frictionLadder) {
-    logger.info('Skipping the persisted-decision gate', {
-      error_group_id: input.errorGroupId,
-      authorised_by: humanAuthorised ? 'human_trigger' : 'friction_ladder',
-      has_guidance: Boolean(input.investigation?.guidance),
-    });
-  } else {
-    // The investigation already decided this and persisted it. Re-deciding here
-    // by error shape both duplicated the decision and reintroduced the
-    // classification this pipeline replaced. Loading the row rather than
-    // trusting an in-memory value also ties a retried or requeued job to the
-    // immutable decision it was created from.
-    //
-    // Deliberately OUTSIDE the try below: this is an authorization gate, so a
-    // database failure must fail the job, never fall through to the agent.
-    const decision = await traceSpan('load-diagnosis-decision', {}, () =>
-      loadDiagnosisDecision(input.errorGroupId, input.projectId));
-
-    // Confidence is checked as well as outcome. Checking the outcome alone
-    // would let a medium-confidence code_fix reach the sandbox, which the
-    // three-way routing in index.ts explicitly parks for a human.
-    if (!decision || decision.outcome !== 'code_fix' || decision.confidence !== 'high') {
-      logger.info('Fix job refused by the persisted decision', {
-        error_group_id: input.errorGroupId,
-        outcome: decision?.outcome ?? 'none',
-        basis: decision?.basis ?? 'none',
-        confidence: decision?.confidence ?? 'none',
-      });
-      return {
-        status: 'needs_human',
-        reason: {
-          reason_code: reasonCodeForDecision(decision),
-          reason_message: decision
-            ? `The investigation routed this to ${decision.outcome} at ${decision.confidence} confidence (${decision.basis})`
-            : 'No diagnosis decision was persisted for this error group',
-          remediation: 'Review the diagnosis decision for this error group',
-        },
-      };
-    }
   }
 
   // Enrichment, not authorization. These were one branch, and collapsing them
@@ -604,13 +620,63 @@ export async function runAgentFix(input: AgentFixInput): Promise<AgentFixResult>
       throw setupError;
     }
     sandbox = repoSandbox.sandbox;
+    const retainWorkingDiff = async (): Promise<{ diff: string; affectedFiles: string[] } | null> => {
+      try {
+        const extracted = await extractDiff(sandbox!, platform);
+        return extracted.diff.trim().length > 0 ? extracted : null;
+      } catch {
+        return null;
+      }
+    };
+    const recorder = input.ledgerRecorder!;
+    const baseShaResult = await sandbox.commands.run(
+      `cd ${SANDBOX_REPO_PATH} && git rev-parse HEAD`,
+      { timeoutMs: 10_000 },
+    );
+    if (baseShaResult.exitCode !== 0 || !baseShaResult.stdout.trim()) {
+      throw new VerificationInfraError('Could not identify the base commit for fail-first verification.', evidence.record());
+    }
+    const baseSha = baseShaResult.stdout.trim();
     const installOutcome = repoSandbox.installOutcome;
     const installFailed = installOutcome === 'failed';
 
     let verificationInfraError = false;
-    const withInfraRetry = async <T extends { outcome: CheckOutcome }>(run: () => Promise<T>): Promise<T> => {
-      const first = await run();
-      return first.outcome === 'infra_error' ? run() : first;
+    const withInfraRetry = async <T extends {
+      outcome: CheckOutcome;
+      command?: string;
+      tests?: Map<string, 'passed' | 'failed'> | null;
+      total?: number | null;
+      timedOut?: boolean;
+      truncated?: boolean;
+    }>(
+      role: 'suite_baseline' | 'suite_post_patch' | 'build',
+      command: string,
+      run: () => Promise<T>,
+    ): Promise<T> => {
+      const execute = async (): Promise<T> => {
+        const [sha, dirty] = await Promise.all([
+          sandbox!.commands.run(`cd ${SANDBOX_REPO_PATH} && git rev-parse HEAD`, { timeoutMs: 10_000 }),
+          sandbox!.commands.run(`cd ${SANDBOX_REPO_PATH} && git status --porcelain`, { timeoutMs: 10_000 }),
+        ]);
+        const value = await run();
+        const statuses = value.tests ? [...value.tests.values()] : [];
+        const passed = statuses.filter((status) => status === 'passed').length;
+        const failed = statuses.filter((status) => status === 'failed').length;
+        recorder.record({
+          command: value.command ?? command,
+          commitSha: sha.stdout.trim() || baseSha,
+          workdirDirty: dirty.stdout.trim().length > 0,
+          discovered: value.total ?? null,
+          passed: value.tests ? passed : null,
+          failed: value.tests ? failed : null,
+          skipped: value.tests && value.total != null ? Math.max(0, value.total - passed - failed) : null,
+          truncated: value.truncated ?? false,
+          timedOut: value.timedOut ?? false,
+        }, role);
+        return value;
+      };
+      const first = await execute();
+      return first.outcome === 'infra_error' ? execute() : first;
     };
 
     // E1 baseline: establish the pre-patch suite state before the agent edits.
@@ -628,7 +694,7 @@ export async function runAgentFix(input: AgentFixInput): Promise<AgentFixResult>
         baselineRun = await traceSpan(
           'suite-baseline',
           { 'suite.kind': testPlan.kind },
-          () => withInfraRetry(() => runSuite(sandbox!, testPlan)),
+          () => withInfraRetry('suite_baseline', testPlan.command ?? '', () => runSuite(sandbox!, testPlan)),
         );
         evidence.addCheck('suite_baseline', baselineRun.outcome, {
           command: baselineRun.command,
@@ -775,6 +841,8 @@ export async function runAgentFix(input: AgentFixInput): Promise<AgentFixResult>
         agentState.scopeReviewDone = false;
         agentState.tokenUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
         agentState.toolHistoryEntries = [];
+        agentState.declaredTest = undefined;
+        agentState.reproductionImpossibleReason = undefined;
       }
 
       try {
@@ -786,6 +854,8 @@ export async function runAgentFix(input: AgentFixInput): Promise<AgentFixResult>
       let testGatePassed = false;
       let testGateSkipped = false;
       let buildGatePassed = false;
+      let finalSuiteNewFailures: string[] | null = null;
+      let finalSuiteDiscovered: number | null = null;
       let candidateDiff: { diff: string; affectedFiles: string[] } | null = null;
 
       while (attempt <= MAX_TEST_RETRIES) {
@@ -816,6 +886,8 @@ export async function runAgentFix(input: AgentFixInput): Promise<AgentFixResult>
           agentState.submittedDiagnosis = undefined;
           agentState.scopeReviewDone = false;
           agentState.toolHistoryEntries = [];
+          agentState.declaredTest = undefined;
+          agentState.reproductionImpossibleReason = undefined;
         }
 
         result = await traceSpan(
@@ -849,6 +921,37 @@ export async function runAgentFix(input: AgentFixInput): Promise<AgentFixResult>
         // machine is gone.
         if (sandbox.unavailable) raiseSandboxGone('agent-loop');
 
+        // The real tool bridge writes declarations directly into AgentState.
+        // Replaying the last declaration from history keeps the completion
+        // record self-describing and supports provider/test-loop adapters that
+        // return history without sharing the same in-memory state object.
+        for (let historyIdx = result.toolHistory.length - 1; historyIdx >= 0; historyIdx--) {
+          const entry = result.toolHistory[historyIdx]!;
+          if (entry.name === 'declare_failing_test') {
+            const testFiles = entry.input['test_files'];
+            const identifier = entry.input['identifier'];
+            const expectedAssertion = entry.input['expected_assertion'];
+            if (
+              Array.isArray(testFiles)
+              && testFiles.every((value): value is string => typeof value === 'string')
+              && typeof identifier === 'string'
+              && typeof expectedAssertion === 'string'
+            ) {
+              agentState.declaredTest = { testFiles, identifier, expectedAssertion };
+              agentState.reproductionImpossibleReason = undefined;
+            }
+            break;
+          }
+          if (entry.name === 'declare_reproduction_impossible') {
+            const reason = entry.input['reason'];
+            if (typeof reason === 'string') {
+              agentState.declaredTest = undefined;
+              agentState.reproductionImpossibleReason = reason;
+            }
+            break;
+          }
+        }
+
         if (agentState.gaveUp) {
           const declined = adjudicationFromDecline(agentState.submittedDiagnosis ?? {});
           // Citation existence is still checked, against the tracked-file set
@@ -871,8 +974,10 @@ export async function runAgentFix(input: AgentFixInput): Promise<AgentFixResult>
         // A submitted diagnosis is terminal for this attempt; do not escalate.
         if (agentState.gaveUp && agentState.giveUpReason) {
           addTokenUsage(totalTokenUsage, agentState.tokenUsage);
+          const retained = await retainWorkingDiff();
           return {
             status: 'needs_human',
+            ...(retained ?? {}),
             reason: {
               reason_code: agentState.giveUpReason.reason_code as NeedsHumanReason['reason_code'],
               reason_message: agentState.giveUpReason.reason_message,
@@ -920,7 +1025,7 @@ export async function runAgentFix(input: AgentFixInput): Promise<AgentFixResult>
           const post = await traceSpan(
             'suite-post-patch',
             { 'suite.attempt': attempt, 'suite.tier': tierIdx },
-            () => withInfraRetry(() => runSuite(sandbox!, testPlan)),
+            () => withInfraRetry('suite_post_patch', testPlan.command ?? '', () => runSuite(sandbox!, testPlan)),
           );
           const comparison = compareSuiteRuns(baselineRun, post);
           const newFailures = [
@@ -931,6 +1036,8 @@ export async function runAgentFix(input: AgentFixInput): Promise<AgentFixResult>
             baseline_failed_tests: comparison.baselineFailed,
             new_failures: newFailures,
           });
+          finalSuiteNewFailures = newFailures;
+          finalSuiteDiscovered = post.total;
           if (post.outcome === 'infra_error') {
             verificationInfraError = true;
             testResult = { passed: true, skipped: true, output: post.output };
@@ -967,7 +1074,11 @@ export async function runAgentFix(input: AgentFixInput): Promise<AgentFixResult>
           ? await traceSpan(
               'build-gate',
               { 'build_gate.attempt': attempt, 'build_gate.tier': tierIdx },
-              () => withInfraRetry(() => runBuildGate(sandbox!, platform)),
+              () => withInfraRetry(
+                'build',
+                platform === 'python' ? 'python -m compileall' : 'build script or tsc --noEmit',
+                () => runBuildGate(sandbox!, platform),
+              ),
             )
           : {
               outcome: 'infra_error' as const,
@@ -1030,8 +1141,10 @@ export async function runAgentFix(input: AgentFixInput): Promise<AgentFixResult>
 
         // Last tier — return failure
         if (!result?.success) {
+          const retained = await retainWorkingDiff();
           return {
             status: 'needs_human',
+            ...(retained ?? {}),
             reason: {
               reason_code: 'budget_exhausted',
               reason_message: result?.summary ?? 'Agent could not complete',
@@ -1148,10 +1261,119 @@ export async function runAgentFix(input: AgentFixInput): Promise<AgentFixResult>
         continue;
       }
 
+      const failFirst = await runFailFirst({
+        sandbox,
+        platform,
+        plan: testPlan,
+        baseSha,
+        declaredTest: agentState.declaredTest ?? null,
+        reproductionImpossibleReason: agentState.reproductionImpossibleReason ?? null,
+        recorder,
+        evidence,
+      });
+      const tierRecord = deriveTierRecord({
+        declaredTest: agentState.declaredTest
+          ? {
+            identifier: agentState.declaredTest.identifier,
+            expectedAssertion: agentState.declaredTest.expectedAssertion,
+          }
+          : null,
+        reproductionImpossibleReason: agentState.reproductionImpossibleReason ?? null,
+        redObserved: failFirst.redObserved,
+        greenObserved: failFirst.greenObserved,
+        suiteNewFailures: finalSuiteNewFailures,
+        suiteDiscovered: finalSuiteDiscovered,
+        buildPassed: buildGatePassed,
+        qualityConfirmed,
+      });
+      const notRun: string[] = [];
+      if (!baselineRun) notRun.push('suite_baseline');
+      if (finalSuiteNewFailures === null) notRun.push('suite_post_patch');
+      if (!buildGatePassed) notRun.push('build');
+      if (!agentState.declaredTest) notRun.push('repro_red', 'repro_green');
+      recorder.finalizeNotRun([...new Set(notRun)]);
+      let verificationJudge: EvidenceRecord['judge'];
+      const tierEvidence = (): EvidenceRecord => ({
+        ...evidence.record(),
+        tier_record: {
+          tier: tierRecord.tier,
+          declared_test: tierRecord.declaredTest
+            ? {
+              identifier: tierRecord.declaredTest.identifier,
+              expected_assertion: tierRecord.declaredTest.expectedAssertion,
+            }
+            : null,
+          reproduction_impossible_reason: tierRecord.reproductionImpossibleReason,
+        },
+        ...(verificationJudge ? { judge: verificationJudge } : {}),
+      });
+
       // ---- PRECISION GATE ----
-      // A PR may open ONLY when the fix is both VERIFIED (tests actually ran AND
-      // passed — skipped tests do not count) and QUALITY-CONFIRMED (judge passed).
-      const verified = testGatePassed && !testGateSkipped;
+      // Automated ready PRs require the full red-then-green proof plus all
+      // pre-existing build and quality gates.
+      const verified = tierRecord.tier === 'reproduced' && buildGatePassed && qualityConfirmed;
+      const draftEligible = tierRecord.tier === 'checked';
+      const humanRun = input.triggeredBy === 'human';
+      if ((humanRun && diff.trim().length > 0) || (!humanRun && (verified || draftEligible))) {
+        const anomalies = detectLedgerAnomalies({
+          entries: recorder.entries(),
+          declaredTest: tierRecord.declaredTest,
+          declaredTestFiles: agentState.declaredTest?.testFiles ?? [],
+          diff,
+          testSource: failFirst.declaredTestSource,
+        });
+        const verdict = await judgeFixAttempt({
+          apiKey,
+          diagnosis: input.investigation?.diagnosis ?? null,
+          diff,
+          testSource: failFirst.declaredTestSource,
+          ledger: recorder.entries(),
+          tierRecord,
+          anomalies,
+          sandbox,
+          errorTitle: input.title,
+        });
+        const judgeFailed = verdict.vetoReason?.startsWith('judge_no_verdict:') ?? false;
+        if (!(humanRun && judgeFailed)) {
+          verificationJudge = {
+            approved: verdict.approved,
+            assessment: verdict.assessment,
+            veto_reason: verdict.vetoReason,
+            session_id: verdict.sessionId,
+            probes_used: verdict.probesUsed,
+            decision_id: input.authorizationDecisionId ?? null,
+          };
+        }
+        if (input.usageContext) {
+          await recordJobUsage({
+            jobId: input.usageContext.jobId,
+            execution: input.usageContext.execution,
+            phase: 'judge',
+            model: FIX_JUDGE_MODEL,
+            usage: verdict.usage,
+            costUsd: verdict.costUsd,
+          });
+        }
+        if (!humanRun && !verdict.approved) {
+          return {
+            status: 'needs_human',
+            diff,
+            affectedFiles,
+            confidence: 'low',
+            rootCause: result!.summary,
+            reason: buildReason(
+              'low_confidence_fix',
+              'The verification judge rejected this attempt; its report is attached to the incident.',
+            ),
+            evidence: tierEvidence(),
+            draftEligible: false,
+            tierRecord,
+            declaredTestSource: failFirst.declaredTestSource,
+            sandboxRuntime: repoSandbox.sandboxRuntime,
+            tokenUsage: totalTokenUsage,
+          };
+        }
+      }
 
       if (verified && qualityConfirmed) {
         const fallbackInput: NarrativeFallbackInput = {
@@ -1183,7 +1405,9 @@ export async function runAgentFix(input: AgentFixInput): Promise<AgentFixResult>
             : undefined,
           affectedFiles,
           sandboxRuntime: repoSandbox.sandboxRuntime,
-          evidence: evidence.record(),
+          evidence: tierEvidence(),
+          tierRecord,
+          declaredTestSource: failFirst.declaredTestSource,
           tokenUsage: totalTokenUsage,
         };
       }
@@ -1192,9 +1416,11 @@ export async function runAgentFix(input: AgentFixInput): Promise<AgentFixResult>
       // candidate diff + a below-floor confidence for the human reviewer.
       // confidence: judge-approved-but-unverified → 'medium'; otherwise → 'low'.
       const belowFloorConfidence: ConfidenceLevel = qualityConfirmed ? 'medium' : 'low';
-      const reasonMessage = !verified
-        ? 'A candidate fix was generated but no test runner was available to verify it, so it did not clear the bar for an automatic PR.'
-        : `A candidate fix was generated but the quality review did not pass${judgeExplanation ? ` (${judgeExplanation})` : ''}, so it did not clear the bar for an automatic PR.`;
+      const reasonMessage = !qualityConfirmed
+        ? 'The automated diff review scored this change below the quality floor; details are in the verification evidence.'
+        : tierRecord.tier === 'attempted'
+          ? 'The candidate fix did not satisfy the mechanical red-then-green verification predicate.'
+          : 'The candidate fix was checked but could not mechanically reproduce the original failure.';
 
       return {
         status: 'needs_human',
@@ -1203,8 +1429,10 @@ export async function runAgentFix(input: AgentFixInput): Promise<AgentFixResult>
         confidence: belowFloorConfidence,
         rootCause: result!.summary,
         reason: buildReason('low_confidence_fix', reasonMessage),
-        evidence: evidence.record(),
-        draftEligible: qualityConfirmed && buildGatePassed && !verified,
+        evidence: tierEvidence(),
+        draftEligible,
+        tierRecord,
+        declaredTestSource: failFirst.declaredTestSource,
         sandboxRuntime: repoSandbox.sandboxRuntime,
         tokenUsage: totalTokenUsage,
       };
@@ -1264,8 +1492,18 @@ export async function runAgentFix(input: AgentFixInput): Promise<AgentFixResult>
     }
     const rawMessage = err instanceof Error ? err.message : String(err);
     const message = rawMessage.replace(/https:\/\/[^@]+@/g, 'https://***@');
+    let retained: { diff: string; affectedFiles: string[] } | null = null;
+    if (sandbox) {
+      try {
+        const extracted = await extractDiff(sandbox, platform);
+        if (extracted.diff.trim().length > 0) retained = extracted;
+      } catch {
+        // Diff retention is best-effort and must never mask the original failure.
+      }
+    }
     return {
       status: 'needs_human',
+      ...(retained ?? {}),
       reason: {
         reason_code: 'worker_runtime_error',
         reason_message: `Agent harness error: ${message}`,

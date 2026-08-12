@@ -8,6 +8,7 @@ import type { Platform } from './platform.js';
 import type { DerivedDecision } from './classify.js';
 import type { RouteMapRow } from './route-map.js';
 import { logger, safeErrorMessage } from './logger.js';
+import type { LedgerEntry } from './verification-ledger.js';
 
 const { Pool } = pg;
 
@@ -44,6 +45,8 @@ export interface DecisionRow {
    */
   basis: DerivedDecision['basis'];
   confidence: ConfidenceLevel;
+  policyEligible?: boolean | null;
+  policyBasis?: { v: 1; identified_users: number; recent_anon_sessions: number } | null;
 }
 
 export type ReadinessStatus = 'eligible' | 'ineligible' | 'pending';
@@ -57,6 +60,12 @@ export interface PersistedDecision {
   outcome: DiagnosisOutcome;
   basis: DerivedDecision['basis'];
   confidence: ConfidenceLevel;
+}
+
+export interface LoadedDecision extends PersistedDecision {
+  id: string;
+  policyEligible: boolean | null;
+  policyBasis: { v: 1; identified_users: number; recent_anon_sessions: number } | null;
 }
 
 /**
@@ -77,8 +86,8 @@ async function insertDiagnosisDecision(
   await queryable.query(
     `INSERT INTO diagnosis_decisions
        (error_group_id, project_id, job_id, outcome, decision_reason, cause_location, diagnosis,
-        model, prompt_version, basis, confidence)
-     VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11)`,
+        model, prompt_version, basis, confidence, policy_eligible, policy_basis)
+     VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11, $12, $13::jsonb)`,
     [
       errorGroupId,
       projectId,
@@ -91,6 +100,8 @@ async function insertDiagnosisDecision(
       row.promptVersion,
       row.basis,
       row.confidence,
+      row.policyEligible ?? null,
+      row.policyBasis ? JSON.stringify(row.policyBasis) : null,
     ],
   );
 }
@@ -126,13 +137,16 @@ async function upsertDigestReadiness(
 export async function loadDiagnosisDecision(
   errorGroupId: string,
   projectId: string,
-): Promise<PersistedDecision | null> {
+): Promise<LoadedDecision | null> {
   const { rows } = await getPool().query<{
+    id: string;
     outcome: DiagnosisOutcome;
     basis: string | null;
     confidence: string | null;
+    policy_eligible: boolean | null;
+    policy_basis: LoadedDecision['policyBasis'];
   }>(
-    `SELECT outcome, basis, confidence
+    `SELECT id, outcome, basis, confidence, policy_eligible, policy_basis
      FROM diagnosis_decisions
      WHERE error_group_id = $1 AND project_id = $2
      ORDER BY decided_at DESC, id DESC
@@ -142,9 +156,78 @@ export async function loadDiagnosisDecision(
   const row = rows[0];
   if (!row || !row.basis || !row.confidence) return null;
   return {
+    id: row.id,
     outcome: row.outcome,
     basis: row.basis as DerivedDecision['basis'],
     confidence: row.confidence as ConfidenceLevel,
+    policyEligible: row.policy_eligible,
+    policyBasis: row.policy_basis,
+  };
+}
+
+export async function loadDiagnosisDecisionForSource(
+  errorGroupId: string,
+  projectId: string,
+  sourceJobId: string | null,
+): Promise<LoadedDecision | null> {
+  if (sourceJobId === null) return loadDiagnosisDecision(errorGroupId, projectId);
+  const { rows } = await getPool().query<{
+    id: string;
+    outcome: DiagnosisOutcome;
+    basis: string | null;
+    confidence: string | null;
+    policy_eligible: boolean | null;
+    policy_basis: LoadedDecision['policyBasis'];
+  }>(
+    `SELECT id, outcome, basis, confidence, policy_eligible, policy_basis
+     FROM diagnosis_decisions
+     WHERE error_group_id = $1 AND project_id = $2 AND job_id = $3
+     ORDER BY decided_at DESC, id DESC
+     LIMIT 1`,
+    [errorGroupId, projectId, sourceJobId],
+  );
+  const row = rows[0];
+  if (!row || !row.basis || !row.confidence) return null;
+  return {
+    id: row.id,
+    outcome: row.outcome,
+    basis: row.basis as DerivedDecision['basis'],
+    confidence: row.confidence as ConfidenceLevel,
+    policyEligible: row.policy_eligible,
+    policyBasis: row.policy_basis,
+  };
+}
+
+export interface ImpactBar {
+  identifiedUsers: number;
+  recentAnonSessions: number;
+  eligible: boolean;
+}
+
+export async function getGroupImpactBar(errorGroupId: string, projectId: string): Promise<ImpactBar> {
+  const { rows } = await getPool().query<{
+    identified_users: string;
+    recent_anon_sessions: string;
+  }>(
+    `SELECT
+       (SELECT count(*) FROM error_group_affected_users u
+         WHERE u.error_group_id = $1) AS identified_users,
+       (SELECT count(*) FROM (
+          SELECT ee.session_id FROM error_events ee
+          WHERE ee.project_id = $2 AND ee.error_group_id = $1
+            AND ee.session_id IS NOT NULL
+            AND ee.timestamp > now() - interval '7 days'
+          GROUP BY ee.session_id HAVING bool_and(ee.end_user_id IS NULL)
+        ) anon) AS recent_anon_sessions
+     WHERE EXISTS (SELECT 1 FROM error_groups eg WHERE eg.id = $1 AND eg.project_id = $2)`,
+    [errorGroupId, projectId],
+  );
+  const identifiedUsers = Number(rows[0]?.identified_users ?? 0);
+  const recentAnonSessions = Number(rows[0]?.recent_anon_sessions ?? 0);
+  return {
+    identifiedUsers,
+    recentAnonSessions,
+    eligible: identifiedUsers >= 1 || recentAnonSessions >= 3,
   };
 }
 
@@ -157,7 +240,7 @@ export async function recordDiagnosisDecision(
   await insertDiagnosisDecision(getPool(), errorGroupId, projectId, row);
 }
 
-export type UsagePhase = 'investigation' | 'fix';
+export type UsagePhase = 'investigation' | 'fix' | 'judge';
 
 export interface TokenUsage {
   input: number;
@@ -207,11 +290,45 @@ export async function recordJobUsage(entry: {
   }
 }
 
+export async function insertFixRunLedger(entries: LedgerEntry[]): Promise<void> {
+  if (entries.length === 0) return;
+  const params: unknown[] = [];
+  const values = entries.map((entry, index) => {
+    const offset = index * 14;
+    params.push(
+      entry.jobId,
+      entry.projectId,
+      entry.runId,
+      entry.entrySeq,
+      entry.command,
+      entry.commitSha,
+      entry.workdirDirty,
+      entry.discovered,
+      entry.passed,
+      entry.failed,
+      entry.skipped,
+      entry.truncated,
+      entry.timedOut,
+      JSON.stringify(entry.notRun),
+    );
+    return `(${Array.from({ length: 14 }, (_, column) => `$${offset + column + 1}`).join(', ')})`;
+  });
+  await getPool().query(
+    `INSERT INTO fix_run_ledger
+       (job_id, project_id, run_id, entry_seq, command, commit_sha, workdir_dirty,
+        discovered, passed, failed, skipped, truncated, timed_out, not_run)
+     VALUES ${values.join(', ')}
+     ON CONFLICT (run_id, entry_seq) DO NOTHING`,
+    params,
+  );
+}
+
 export interface ClaimedJob {
   id: string;
   workerId: string;
   errorGroupId: string | null;
   sourceId: string | null;
+  sourceJobId?: string | null;
   projectId: string;
   jobType: JobType;
   attempts: number;
@@ -314,6 +431,7 @@ export async function claimJob(
     id: string;
     error_group_id: string | null;
     source_id: string | null;
+    source_job_id: string | null;
     project_id: string;
     job_type: JobType;
     attempts: number;
@@ -321,7 +439,7 @@ export async function claimJob(
     guidance: string | null;
     worker_id: string;
     lease_generation: string;
-    triggered_by: 'auto' | 'human' | null;
+    triggered_by: 'auto' | 'human' | 'reinvestigate_report_only' | null;
     session_id: string | null;
     platform: string | null;
     payload: unknown;
@@ -365,7 +483,7 @@ export async function claimJob(
        LIMIT 1
        FOR UPDATE SKIP LOCKED
      )
-     RETURNING id, error_group_id, source_id, project_id, job_type, attempts, max_attempts, guidance,
+     RETURNING id, error_group_id, source_id, source_job_id, project_id, job_type, attempts, max_attempts, guidance,
                worker_id, lease_generation::text AS lease_generation,
                triggered_by, session_id, platform, payload`,
       [workerId, leaseDurationMs / 1000, sessionAnalysisCap]
@@ -386,6 +504,7 @@ export async function claimJob(
     workerId: row.worker_id,
     errorGroupId: row.error_group_id,
     sourceId: row.source_id,
+    sourceJobId: row.source_job_id,
     projectId: row.project_id,
     jobType: row.job_type,
     attempts: row.attempts,
@@ -747,6 +866,8 @@ export async function updateGroupStatus(
     reason?: NeedsHumanReason;
     candidate_diff?: string;
     evidence?: EvidenceRecord;
+    terminalFixJobId?: string;
+    readiness?: ReadinessWrite;
   },
   lease?: JobLease,
 ): Promise<void> {
@@ -765,13 +886,13 @@ export async function updateGroupStatus(
   }
 
   const reason = fields?.reason;
-  const db = getPool();
+  const client = await getPool().connect();
   const ownedCte = lease
     ? `WITH owned AS (
          SELECT id FROM error_group_jobs
-         WHERE id = $13
-           AND worker_id = $14
-           AND lease_generation = $15::bigint
+         WHERE id = $14
+           AND worker_id = $15
+           AND lease_generation = $16::bigint
            AND project_id = $2
            AND error_group_id = $1
            AND status = 'claimed'
@@ -779,7 +900,9 @@ export async function updateGroupStatus(
          FOR UPDATE
        )`
     : '';
-  const result = await db.query(
+  try {
+    await client.query('BEGIN');
+    const result = await client.query(
     `${ownedCte}
      UPDATE error_groups
      SET status = $3::error_group_status,
@@ -792,6 +915,7 @@ export async function updateGroupStatus(
          remediation = $10,
          candidate_diff = $11,
          verification_evidence = $12::jsonb,
+         terminal_fix_job_id = COALESCE($13, terminal_fix_job_id),
          pr_created_at = CASE
            WHEN $3::error_group_status = 'pr_created'
                 AND status IS DISTINCT FROM 'pr_created' THEN now()
@@ -819,12 +943,11 @@ export async function updateGroupStatus(
       reason?.remediation ?? null,
       fields?.candidate_diff ?? null,
       fields?.evidence ? JSON.stringify(fields.evidence) : null,
+      fields?.terminalFixJobId ?? null,
       ...(lease ? [lease.id, lease.workerId, lease.leaseGeneration] : []),
     ]
-  );
-  if (lease && (result.rowCount ?? 0) === 0) {
-    throw new LeaseLostError(lease.id);
-  }
+    );
+    if (lease && (result.rowCount ?? 0) === 0) throw new LeaseLostError(lease.id);
 
   // A failure-path park must not leave the incident invisible forever: a
   // requeue may have set digest_readiness to 'pending', and the terminal
@@ -833,13 +956,22 @@ export async function updateGroupStatus(
   // that would resolve it. Demote only an existing pending row — legacy
   // absent-row groups stay absent-row (C1 interim policy), and completion
   // paths go through updateGroupInvestigation, which writes readiness itself.
-  if (status === 'needs_human' && (result.rowCount ?? 0) > 0) {
-    await db.query(
-      `UPDATE digest_readiness
-       SET status = 'ineligible', reason = $3, updated_at = now()
-       WHERE incident_id = $1 AND project_id = $2 AND status = 'pending'`,
-      [errorGroupId, projectId, fields?.reason?.reason_code ?? 'investigation_failed'],
-    );
+    if ((result.rowCount ?? 0) > 0 && fields?.readiness) {
+      await upsertDigestReadiness(client, errorGroupId, projectId, fields.readiness);
+    } else if (status === 'needs_human' && (result.rowCount ?? 0) > 0) {
+      await client.query(
+        `UPDATE digest_readiness
+         SET status = 'ineligible', reason = $3, updated_at = now()
+         WHERE incident_id = $1 AND project_id = $2 AND status = 'pending'`,
+        [errorGroupId, projectId, fields?.reason?.reason_code ?? 'investigation_failed'],
+      );
+    }
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  } finally {
+    client.release();
   }
 }
 
@@ -1011,6 +1143,7 @@ export async function finalizeDelivery(
     reason?: NeedsHumanReason;
     candidateDiff?: string;
     evidence?: EvidenceRecord;
+    readiness?: ReadinessWrite;
   },
   lease: JobLease,
 ): Promise<void> {
@@ -1032,6 +1165,7 @@ export async function finalizeDelivery(
       `UPDATE error_groups
        SET status = $3::error_group_status, confidence = $4,
            pr_url = $5, pr_number = $6, pr_fix_job_id = $7,
+           terminal_fix_job_id = $7,
            reason_code = $8, reason_message = $9, remediation = $10,
            candidate_diff = $11, verification_evidence = $12::jsonb,
            pr_created_at = CASE WHEN $3::error_group_status = 'pr_created'
@@ -1084,6 +1218,9 @@ export async function finalizeDelivery(
          )`,
         [errorGroupId, projectId, JSON.stringify(payload)],
       );
+    }
+    if (input.readiness) {
+      await upsertDigestReadiness(client, errorGroupId, projectId, input.readiness);
     }
     await client.query('COMMIT');
   } catch (error) {
@@ -1211,6 +1348,8 @@ export interface ErrorGroupData {
   reason_message?: string | null;
   remediation?: string | null;
   verification_evidence?: EvidenceRecord | null;
+  terminal_fix_job_id?: string | null;
+  pr_fix_triggered_by?: 'auto' | 'human' | 'reinvestigate_report_only' | null;
 }
 
 export async function getErrorGroup(groupId: string, projectId: string): Promise<ErrorGroupData | null> {
@@ -1219,7 +1358,9 @@ export async function getErrorGroup(groupId: string, projectId: string): Promise
     `SELECT id, title, fingerprint, sample_event_id, occurrence_count, status,
             kind, signal_type, element_selector, page_url_normalized, confidence, platform,
             pr_url, pr_number, reason_code, reason_message, remediation,
-            verification_evidence
+            verification_evidence, terminal_fix_job_id,
+            (SELECT j.triggered_by FROM error_group_jobs j
+             WHERE j.id = error_groups.pr_fix_job_id AND j.project_id = error_groups.project_id) AS pr_fix_triggered_by
      FROM error_groups WHERE id = $1 AND project_id = $2`,
     [groupId, projectId],
   );
@@ -1872,7 +2013,7 @@ export async function updateGroupInvestigation(
  * gate in processFixJob re-checks autonomy at claim time as a second layer. */
 export type FixJobResult =
   | { created: true; fixJobId: string }
-  | { created: false; reason: 'kind_not_error' | 'report_only' };
+  | { created: false; reason: 'kind_not_error' | 'report_only' | 'pending_human_job' };
 
 export async function updateGroupAndCreateFixJob(
   errorGroupId: string,
@@ -1936,35 +2077,67 @@ export async function updateGroupAndCreateFixJob(
       return { created: false, reason: 'kind_not_error' };
     }
 
-    const existingFix = await client.query<{ id: string }>(
+    const humanFix = await client.query<{ id: string }>(
       `SELECT id
        FROM error_group_jobs
        WHERE error_group_id = $1
          AND project_id = $2
          AND job_type IN ('fix', 'error_fix')
          AND status IN ('pending', 'claimed')
+         AND triggered_by = 'human'
        ORDER BY created_at, id
-       LIMIT 1`,
+       LIMIT 1
+       FOR UPDATE`,
+      [errorGroupId, projectId],
+    );
+    if (humanFix.rows[0]) {
+      if (fields.decision) await insertDiagnosisDecision(client, errorGroupId, projectId, fields.decision);
+      if (fields.readiness) await upsertDigestReadiness(client, errorGroupId, projectId, fields.readiness);
+      await client.query('COMMIT');
+      return { created: false, reason: 'pending_human_job' };
+    }
+
+    const existingFix = await client.query<{ id: string; status: 'pending' | 'claimed' }>(
+      `SELECT id, status
+       FROM error_group_jobs
+       WHERE error_group_id = $1
+         AND project_id = $2
+         AND job_type IN ('fix', 'error_fix')
+         AND status IN ('pending', 'claimed')
+         AND triggered_by IS DISTINCT FROM 'human'
+       ORDER BY created_at, id
+       LIMIT 1
+       FOR UPDATE`,
       [errorGroupId, projectId],
     );
     if (
       existingFix.rows[0]
       && ['analyzing', 'fixing'].includes(group.rows[0]!.status)
     ) {
-      await client.query(
-        `UPDATE error_group_jobs
-         SET platform = COALESCE(platform, $2),
-             payload = COALESCE(payload, $3::jsonb),
-             source_job_id = COALESCE(source_job_id, $4),
-             updated_at = now()
-         WHERE id = $1`,
-        [
-          existingFix.rows[0].id,
-          fields.platform ?? 'javascript',
-          fields.diagnosis === undefined ? null : JSON.stringify({ diagnosis: fields.diagnosis }),
-          fields.sourceJobId ?? null,
-        ],
-      );
+      if (existingFix.rows[0].status === 'pending') {
+        // Atomic repoint (CP2/AC2.9): a pending fix job reused by a newer
+        // investigation must take the NEW decision's source and payload — this
+        // overwrite is deliberate and must NOT be COALESCE'd back (that would
+        // strand the job on the stale decision). Safe because both create and
+        // repoint default the same fields per lane: the error caller always
+        // passes platform+diagnosis, the friction caller never does, and a
+        // group's kind fixes which lane creates AND repoints it, so the values
+        // written here always match what the create branch wrote.
+        await client.query(
+          `UPDATE error_group_jobs
+           SET platform = $2,
+               payload = $3::jsonb,
+               source_job_id = $4,
+               updated_at = now()
+           WHERE id = $1`,
+          [
+            existingFix.rows[0].id,
+            fields.platform ?? 'javascript',
+            fields.diagnosis === undefined ? null : JSON.stringify({ diagnosis: fields.diagnosis }),
+            fields.sourceJobId ?? null,
+          ],
+        );
+      }
       await client.query(
         `UPDATE error_groups
          SET status = 'fixing', updated_at = now()
