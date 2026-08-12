@@ -22,7 +22,7 @@ The worker polls Postgres and claims jobs with `FOR UPDATE SKIP LOCKED` under a 
 
 ## 4. Triage
 
-A fast model call classifies the error: fixable in application code, or not? High-confidence *unfixable* verdicts short-circuit immediately into `needs_human` with a specific reason — `unfixable_third_party`, `unfixable_infra`, `unfixable_test_error`, `unfixable_no_app_frames`, or `unfixable_no_sourcemap` — each with remediation text ([full catalog](../reference/reason-codes.md)). Fixable errors are checked against the impact bar: at least one identified user or three recent anonymous sessions qualifies for automated fixing; below that threshold the diagnosis parks at `investigated` for human review.
+A fast model call classifies the error: fixable in application code, or not? High-confidence *unfixable* verdicts short-circuit immediately into `needs_human` with a specific reason — `unfixable_third_party`, `unfixable_infra`, `unfixable_test_error`, `unfixable_no_app_frames`, or `unfixable_no_sourcemap` — each with remediation text ([full catalog](../reference/reason-codes.md)). Fixable errors (and code-caused friction) are checked against the impact bar: at least one identified user or three recent anonymous sessions qualifies for automated fixing; below that threshold the diagnosis parks for human review.
 
 ## 5. Investigate and fix
 
