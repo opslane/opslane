@@ -612,12 +612,19 @@ func TestRequeueOnRecurrence_NeedsHumanRetriable(t *testing.T) {
 	if group.CandidateDiff != nil {
 		t.Errorf("group.candidate_diff = %q, want nil (cleared on requeue)", *group.CandidateDiff)
 	}
-	var readinessRows int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM digest_readiness WHERE incident_id=$1`, r1.GroupID).Scan(&readinessRows); err != nil {
-		t.Fatalf("count readiness: %v", err)
+	// Requeue upserts the projection row (C4): an absent-row incident (skipped by
+	// the 047 backfill, or a pre-flight failure that wrote no outcome) must enter
+	// the projection as pending/reinvestigating rather than stay permanently
+	// invisible to the eligible-only digest gate. C1's absent-row rendering
+	// policy that the old zero-row pin protected was retired by migration 047.
+	var readinessStatus, readinessReason string
+	if err := pool.QueryRow(ctx,
+		`SELECT status, reason FROM digest_readiness WHERE incident_id=$1`, r1.GroupID,
+	).Scan(&readinessStatus, &readinessReason); err != nil {
+		t.Fatalf("read readiness after requeue: %v", err)
 	}
-	if readinessRows != 0 {
-		t.Fatalf("legacy absent-row group gained %d readiness rows", readinessRows)
+	if readinessStatus != "pending" || readinessReason != "reinvestigating" {
+		t.Fatalf("requeued absent-row group readiness = (%q,%q), want (pending,reinvestigating)", readinessStatus, readinessReason)
 	}
 
 	// Occurrence count must be 2

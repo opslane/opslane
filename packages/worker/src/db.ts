@@ -118,7 +118,12 @@ async function upsertDigestReadiness(
      ON CONFLICT (incident_id) DO UPDATE
      SET status = EXCLUDED.status,
          reason = EXCLUDED.reason,
-         updated_at = now()`,
+         updated_at = CASE
+           WHEN digest_readiness.status IS DISTINCT FROM EXCLUDED.status
+             OR digest_readiness.reason IS DISTINCT FROM EXCLUDED.reason
+           THEN now()
+           ELSE digest_readiness.updated_at
+         END`,
     [errorGroupId, projectId, readiness.status, readiness.reason],
   );
 }

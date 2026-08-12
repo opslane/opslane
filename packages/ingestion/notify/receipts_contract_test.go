@@ -99,7 +99,11 @@ func TestReceiptItemRoundTrips(t *testing.T) {
 		ImpactClass: "blocked", ImpactVisits: &visits, ImpactRecovered: &recovered,
 		ReceiptState: "pr_open", PRURL: "https://github.com/x/1",
 	}
-	b, err := json.Marshal(DigestPayload{Date: "d", SchemaVersion: 2, ReceiptItems: []ReceiptItem{item}})
+	b, err := json.Marshal(DigestPayload{
+		Date: "d", SchemaVersion: 2, ReceiptItems: []ReceiptItem{item},
+		TriageCounts:  &DigestTriageCounts{PRsAwaitingReview: 1, NeedsDecision: 2},
+		HeldBackCount: 3, ReceiptOverflow: 4,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +111,9 @@ func TestReceiptItemRoundTrips(t *testing.T) {
 	if err := json.Unmarshal(b, &back); err != nil {
 		t.Fatal(err)
 	}
-	if back.SchemaVersion != 2 || len(back.ReceiptItems) != 1 || back.ReceiptItems[0].ImpactVisits == nil {
+	if back.SchemaVersion != 2 || len(back.ReceiptItems) != 1 || back.ReceiptItems[0].ImpactVisits == nil ||
+		back.TriageCounts == nil || back.TriageCounts.PRsAwaitingReview != 1 ||
+		back.HeldBackCount != 3 || back.ReceiptOverflow != 4 {
 		t.Fatalf("round trip lost data: %+v", back)
 	}
 }
@@ -142,5 +148,13 @@ func TestReceiptFieldsOmitEmptyValuesButKeepPointerZeros(t *testing.T) {
 		if strings.Contains(s, field) {
 			t.Errorf("empty %s serialized in %s", field, s)
 		}
+	}
+
+	b, err = json.Marshal(DigestPayload{Date: "d", TriageCounts: &DigestTriageCounts{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"triage_counts":{"prs_awaiting_review":0,"needs_decision":0}`) {
+		t.Fatalf("non-nil zero triage counts omitted: %s", b)
 	}
 }

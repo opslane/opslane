@@ -766,10 +766,17 @@ func (q *Queries) InsertErrorEventAndGroup(ctx context.Context, p IngestParams) 
 				if err != nil {
 					return nil, fmt.Errorf("update group status to queued on requeue: %w", err)
 				}
+				// Upsert, not UPDATE: an incident can lack a projection row (archived
+				// before the 047 backfill and unarchived later, or a pre-flight
+				// investigation failure that wrote no outcome). An UPDATE would match
+				// zero rows and leave the incident permanently invisible to the
+				// eligible-only digest gate.
 				_, err = tx.Exec(ctx,
-					`UPDATE digest_readiness
-					 SET status = 'pending', reason = 'reinvestigating', updated_at = now()
-					 WHERE incident_id = $1`,
+					`INSERT INTO digest_readiness (incident_id, project_id, status, reason, updated_at)
+					 SELECT id, project_id, 'pending', 'reinvestigating', now()
+					   FROM error_groups WHERE id = $1
+					 ON CONFLICT (incident_id) DO UPDATE
+					 SET status = 'pending', reason = 'reinvestigating', updated_at = now()`,
 					groupID,
 				)
 				if err != nil {

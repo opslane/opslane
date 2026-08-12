@@ -43,17 +43,26 @@ type ProjectRef struct {
 }
 
 type DigestPayload struct {
-	Date                string          `json:"date"`
-	Window              DigestWindow    `json:"window"`
-	Insights            []DigestInsight `json:"insights"`
-	InsightsHasMore     bool            `json:"insights_has_more"`
-	TopNewIssues        []DigestIssue   `json:"top_new_issues"`
-	TopNewIssuesHasMore bool            `json:"top_new_issues_has_more"`
-	Outcomes            DigestOutcomes  `json:"outcomes"`
-	NeedsHumanBacklog   int             `json:"needs_human_backlog"`
-	Watching            DigestWatching  `json:"watching"`
-	SchemaVersion       int             `json:"schema_version,omitempty"`
-	ReceiptItems        []ReceiptItem   `json:"receipt_items,omitempty"`
+	Date                string              `json:"date"`
+	Window              DigestWindow        `json:"window"`
+	Insights            []DigestInsight     `json:"insights"`
+	InsightsHasMore     bool                `json:"insights_has_more"`
+	TopNewIssues        []DigestIssue       `json:"top_new_issues"`
+	TopNewIssuesHasMore bool                `json:"top_new_issues_has_more"`
+	Outcomes            DigestOutcomes      `json:"outcomes"`
+	NeedsHumanBacklog   int                 `json:"needs_human_backlog"`
+	Watching            DigestWatching      `json:"watching"`
+	SchemaVersion       int                 `json:"schema_version,omitempty"`
+	ReceiptItems        []ReceiptItem       `json:"receipt_items,omitempty"`
+	TriageCounts        *DigestTriageCounts `json:"triage_counts,omitempty"`
+	HeldBackCount       int                 `json:"held_back_count,omitempty"`
+	ReceiptOverflow     int                 `json:"receipt_overflow,omitempty"`
+}
+
+// DigestTriageCounts are point-in-time counts rendered in the digest header.
+type DigestTriageCounts struct {
+	PRsAwaitingReview int `json:"prs_awaiting_review"`
+	NeedsDecision     int `json:"needs_decision"`
 }
 
 // ReceiptItem is one digest card. Kind is error, friction, or cluster.

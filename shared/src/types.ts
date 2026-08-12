@@ -39,6 +39,12 @@ export interface ReceiptItem {
 export interface DigestReceiptFields {
   schema_version?: number;
   receipt_items?: ReceiptItem[];
+  triage_counts?: {
+    prs_awaiting_review: number;
+    needs_decision: number;
+  };
+  held_back_count?: number;
+  receipt_overflow?: number;
 }
 
 export interface Environment {

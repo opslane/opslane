@@ -82,16 +82,47 @@ describe('daily digest contract (Slack webhook delivery)', () => {
       `INSERT INTO error_groups (
          project_id, environment_id, fingerprint, title, kind, status,
          signal_type, page_url_normalized, first_seen, last_seen,
-         occurrence_count, affected_users_count
+         occurrence_count, affected_users_count, root_cause,
+         impact_class, impact_visits, impact_visits_recovered
        ) VALUES (
          $1, $2, $3, 'Rage clicks in digest contract', 'friction', 'insight',
          'rage_click', '/digest-contract', now() - interval '3 hours',
-         now() - interval '1 hour', 2, 0
+         now() - interval '1 hour', 2, 0,
+         'The checkout control did not handle repeated activation.',
+         'degraded', 2, 1
        )
        RETURNING id`,
       [tenant.projectId, tenant.environmentId, fingerprint],
     );
     const frictionGroupId = groupResult.rows[0]!.id;
+
+    await db.query(
+      `INSERT INTO diagnosis_decisions (
+         error_group_id, project_id, outcome, decision_reason, diagnosis,
+         model, prompt_version, basis, confidence
+       ) VALUES (
+         $1, $2, 'not_actionable', 'digest contract receipt',
+         $3::jsonb, 'e2e-fixture', 'digest-contract-v2', 'investigation', 'high'
+       )`,
+      [
+        frictionGroupId,
+        tenant.projectId,
+        JSON.stringify({
+          evidence: [
+            {
+              path: 'src/checkout.ts',
+              detail: 'The activation path ignores a repeated click.',
+              symptomLink: 'Repeated clicks produce the observed friction signal.',
+            },
+          ],
+        }),
+      ],
+    );
+    await db.query(
+      `INSERT INTO digest_readiness (incident_id, project_id, status, reason, updated_at)
+       VALUES ($1, $2, 'eligible', 'validated_cause', now() - interval '30 minutes')`,
+      [frictionGroupId, tenant.projectId],
+    );
 
     await db.query(
       `INSERT INTO friction_signals (
@@ -206,8 +237,12 @@ describe('daily digest contract (Slack webhook delivery)', () => {
     const slackBody = JSON.parse(firstHits[0]!.body) as { blocks?: unknown };
     expect(Array.isArray(slackBody.blocks)).toBe(true);
     expect(firstHits[0]!.body).toContain('Daily digest');
-    expect(firstHits[0]!.body).toContain('/digest-contract');
-    expect(firstHits[0]!.body).toContain('Digest checkout failure needs review');
+    expect(firstHits[0]!.body).toContain(
+      'No fix PRs awaiting review, 1 issue needs a decision.',
+    );
+    expect(firstHits[0]!.body).toContain('Rage clicks in digest contract');
+    expect(firstHits[0]!.body).toContain('Investigation report ready.');
+    expect(firstHits[0]!.body).not.toContain('older issues still awaiting your review');
 
     const patchResponse = await fetch(destinationsUrl(`/${destination.id}`), {
       method: 'PATCH',

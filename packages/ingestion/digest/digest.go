@@ -24,6 +24,8 @@ import (
 
 const (
 	listCap         = 3
+	receiptCap      = 10
+	excerptMax      = 300
 	defaultInterval = 5 * time.Minute
 	sendHourLocal   = 9
 	// Ceiling on one project's build+publish so a slow or contended database

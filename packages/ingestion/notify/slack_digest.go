@@ -4,12 +4,12 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"regexp"
+	"log/slog"
 	"strconv"
 	"strings"
-	"unicode"
 
 	"github.com/opslane/opslane/packages/ingestion/masking"
+	"github.com/opslane/opslane/packages/ingestion/narrative"
 )
 
 const (
@@ -19,13 +19,17 @@ const (
 	digestAccountMax = 60
 )
 
-var proseEmailPattern = regexp.MustCompile(`(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b`)
-
 func formatSlackDigest(payload EventPayload) ([]byte, string, error) {
 	if payload.Digest == nil {
 		return nil, "application/json", fmt.Errorf("digest.daily payload missing digest body")
 	}
+	if payload.Digest.SchemaVersion >= 2 {
+		return formatSlackDigestV2(payload)
+	}
+	return formatSlackDigestV1(payload)
+}
 
+func formatSlackDigestV1(payload EventPayload) ([]byte, string, error) {
 	digest := payload.Digest
 	projectName := cleanProse(payload.Project.Name, headerMax)
 	blocks := []map[string]any{
@@ -68,6 +72,111 @@ func formatSlackDigest(payload EventPayload) ([]byte, string, error) {
 		return nil, "application/json", err
 	}
 	return body.Bytes(), "application/json", nil
+}
+
+type renderableReceipt struct {
+	item ReceiptItem
+	line string
+}
+
+func formatSlackDigestV2(payload EventPayload) ([]byte, string, error) {
+	digest := payload.Digest
+	projectName := cleanProse(payload.Project.Name, headerMax)
+	blocks := []map[string]any{
+		{
+			"type": "header",
+			"text": map[string]any{
+				"type":  "plain_text",
+				"text":  truncate("Daily digest — "+projectName, headerMax),
+				"emoji": true,
+			},
+		},
+		{
+			"type": "context",
+			"elements": []map[string]any{{
+				"type": "mrkdwn",
+				"text": cleanProse(digest.Date, digestTitleMax),
+			}},
+		},
+	}
+
+	renderable := make([]renderableReceipt, 0, len(digest.ReceiptItems))
+	for _, item := range digest.ReceiptItems {
+		if item.Kind != "error" && item.Kind != "friction" {
+			slog.Warn("digest receipt kind is not renderable", "incident_id", item.IncidentID, "kind", item.Kind)
+			continue
+		}
+		line, ok := narrative.ReceiptLine(item.ReceiptState)
+		if !ok {
+			slog.Warn("digest receipt state is not renderable", "incident_id", item.IncidentID, "state", item.ReceiptState)
+			continue
+		}
+		renderable = append(renderable, renderableReceipt{item: item, line: line})
+	}
+
+	counts := DigestTriageCounts{}
+	if digest.TriageCounts != nil {
+		counts = *digest.TriageCounts
+	}
+	quiet := len(renderable) == 0
+	blocks = append(blocks, digestSectionBlock(narrative.TriageLine(counts.PRsAwaitingReview, counts.NeedsDecision, quiet)))
+	for _, receipt := range renderable {
+		blocks = append(blocks, digestReceiptCardBlocks(payload, receipt.item, receipt.line)...)
+	}
+	if digest.ReceiptOverflow > 0 {
+		blocks = append(blocks, digestContextBlock(narrative.OverflowLine(digest.ReceiptOverflow)))
+	}
+	if digest.HeldBackCount > 0 {
+		blocks = append(blocks, digestContextBlock(narrative.HeldBackLine(digest.HeldBackCount)))
+	}
+	blocks = append(blocks, digestWatchingBlocks(digest.Watching)...)
+
+	var body bytes.Buffer
+	encoder := json.NewEncoder(&body)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(map[string]any{"blocks": blocks}); err != nil {
+		return nil, "application/json", err
+	}
+	return body.Bytes(), "application/json", nil
+}
+
+func digestReceiptCardBlocks(payload EventPayload, item ReceiptItem, receiptLine string) []map[string]any {
+	nounSingular, nounPlural := "crash", "crashes"
+	if item.Kind == "friction" {
+		nounSingular, nounPlural = "friction signal", "friction signals"
+	}
+	text := "*" + cleanProse(item.Title, digestTitleMax) + "*\n" +
+		narrative.Story(nounSingular, nounPlural, item.OccurrenceCount, narrative.Impact{
+			Class: item.ImpactClass, Visits: item.ImpactVisits, Recovered: item.ImpactRecovered,
+		}) + "\n" + receiptLine
+	if item.RootCauseExcerpt != "" {
+		text += "\nInvestigation: " + cleanProse(item.RootCauseExcerpt, digestDetailMax)
+	}
+
+	links := make([]string, 0, 3)
+	if item.ReceiptState == "pr_open" && item.PRURL != "" {
+		links = append(links, slackDigestLink(item.PRURL, "Review fix PR"))
+	}
+	if item.SessionURL != "" {
+		links = append(links, slackDigestLink(item.SessionURL, "Watch recording"))
+	}
+	issueURL := BuildIncidentURL(payload.DashboardURL, item.IncidentID, payload.Project.ID)
+	links = append(links, slackDigestLink(issueURL, "Issue page"))
+
+	return []map[string]any{
+		digestSectionBlock(text),
+		digestContextBlock(strings.Join(links, " · ")),
+	}
+}
+
+func digestContextBlock(text string) map[string]any {
+	return map[string]any{
+		"type": "context",
+		"elements": []map[string]any{{
+			"type": "mrkdwn",
+			"text": truncate(text, sectionMax),
+		}},
+	}
 }
 
 func digestInsightBlocks(digest *DigestPayload) []map[string]any {
@@ -269,21 +378,8 @@ func slackDigestLink(rawURL, label string) string {
 }
 
 func cleanProse(value string, budget int) string {
-	value = masking.RedactBody(value)
-	value = masking.RedactURL(value)
-	value = proseEmailPattern.ReplaceAllString(value, "[REDACTED]")
-	for _, marker := range []string{"`", "*", "_", "~"} {
-		value = strings.ReplaceAll(value, marker, "'")
-	}
-	// Digest sections are newline-delimited bullet lists, so a newline inside an
-	// untrusted field (error title, page, reason, account name) would forge an
-	// extra line in an otherwise authoritative message. Collapse every control
-	// character, including newlines, to a space.
-	value = strings.Map(func(r rune) rune {
-		if r == '\n' || r == '\r' || r == '\t' || unicode.IsControl(r) {
-			return ' '
-		}
-		return r
-	}, value)
-	return truncate(slackEscape(value), budget)
+	// Clean (unbounded), then one truncate after escaping — pre-truncating via
+	// SanitizeExcerpt would let slackEscape's entity expansion (&, <, >) push
+	// the text back over budget and the outer cut would drop the ellipsis.
+	return truncate(slackEscape(narrative.Clean(value)), budget)
 }

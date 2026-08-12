@@ -169,6 +169,14 @@ func seedDigestFixtureWithSessionAge(t *testing.T, pool *pgxpool.Pool, now time.
 		 'external_cause','Old.','Review.')`,
 		projectID, envID, now.Add(-10*24*time.Hour))
 
+	// C3 backfills every open incident. Digest sections are eligible-only from
+	// C4 onward, so legacy-section fixtures must model that invariant.
+	exec(`INSERT INTO digest_readiness (incident_id, project_id, status, reason, updated_at)
+		SELECT id, project_id, 'eligible', 'backfill_receipt_state', $2
+		FROM error_groups
+		WHERE project_id=$1 AND status NOT IN ('resolved','merged','archived')`,
+		projectID, now.Add(-time.Hour))
+
 	return f
 }
 
@@ -307,8 +315,8 @@ func TestBuildDigestReplayLinksRequireCoverage(t *testing.T) {
 	}
 }
 
-func TestBuildDigestExcludesIneligibleAndPendingAcrossEverySection(t *testing.T) {
-	for _, status := range []string{"ineligible", "pending"} {
+func TestBuildDigestSectionsAreEligibleOnlyExceptMerged(t *testing.T) {
+	for _, status := range []string{"absent", "ineligible", "pending"} {
 		t.Run(status, func(t *testing.T) {
 			pool := testPool(t)
 			now := time.Now().UTC().Truncate(time.Second)
@@ -328,9 +336,16 @@ func TestBuildDigestExcludesIneligibleAndPendingAcrossEverySection(t *testing.T)
 				VALUES ($1,$2,88,'merged',$3,$4)`, f.ProjectID, mergedID, "gate-"+uuid.NewString(), now.Add(-time.Hour)); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := pool.Exec(ctx, `INSERT INTO digest_readiness (incident_id, project_id, status, reason)
-				SELECT id, project_id, $2, 'test' FROM error_groups WHERE project_id=$1`, f.ProjectID, status); err != nil {
-				t.Fatal(err)
+			if status == "absent" {
+				if _, err := pool.Exec(ctx, `DELETE FROM digest_readiness WHERE project_id=$1`, f.ProjectID); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if _, err := pool.Exec(ctx, `INSERT INTO digest_readiness (incident_id, project_id, status, reason)
+					SELECT id, project_id, $2, 'test' FROM error_groups WHERE project_id=$1
+					ON CONFLICT (incident_id) DO UPDATE SET status=EXCLUDED.status, reason=EXCLUDED.reason`, f.ProjectID, status); err != nil {
+					t.Fatal(err)
+				}
 			}
 
 			payload, err := New(pool, "https://dash.example").Build(ctx, f.ProjectID, now)
@@ -338,8 +353,14 @@ func TestBuildDigestExcludesIneligibleAndPendingAcrossEverySection(t *testing.T)
 				t.Fatal(err)
 			}
 			d := payload.Digest
-			if len(d.Insights) != 0 || len(d.TopNewIssues) != 0 || len(d.Outcomes.PRsOpened) != 0 || len(d.Outcomes.PRsMerged) != 0 || len(d.Outcomes.NeedsHuman) != 0 {
+			if len(d.Insights) != 0 || len(d.TopNewIssues) != 0 || len(d.Outcomes.PRsOpened) != 0 || len(d.Outcomes.NeedsHuman) != 0 {
 				t.Fatalf("%s readiness leaked into digest: %+v", status, d)
+			}
+			if status == "absent" && len(d.Outcomes.PRsMerged) != 1 {
+				t.Fatalf("absent merged group should remain in transition-only section: %+v", d.Outcomes.PRsMerged)
+			}
+			if status != "absent" && len(d.Outcomes.PRsMerged) != 0 {
+				t.Fatalf("%s merged group leaked into digest: %+v", status, d.Outcomes.PRsMerged)
 			}
 		})
 	}
@@ -388,6 +409,14 @@ func TestBuildDigestCapsTopNewIssues(t *testing.T) {
 			f.ProjectID, f.EnvID, "fp-cap-"+uuid.NewString(), "cap issue", now.Add(-time.Duration(i+1)*time.Hour)); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if _, err := pool.Exec(context.Background(), `INSERT INTO digest_readiness
+		(incident_id,project_id,status,reason,updated_at)
+		SELECT id,project_id,'eligible','validated_cause',$2 FROM error_groups
+		WHERE project_id=$1 AND NOT EXISTS (
+			SELECT 1 FROM digest_readiness dr WHERE dr.incident_id=error_groups.id
+		)`, f.ProjectID, now.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
 	}
 	payload, err := New(pool, "https://dash.example").Build(context.Background(), f.ProjectID, now)
 	if err != nil {
@@ -539,6 +568,220 @@ func TestBuildDigestUsesProjectLocalDate(t *testing.T) {
 	windowTo, err := time.Parse(time.RFC3339Nano, payload.Digest.Window.To)
 	if err != nil || !windowTo.Equal(now) {
 		t.Fatalf("window to = %q (%v), want exact %s", payload.Digest.Window.To, err, now)
+	}
+}
+
+func TestBuildReceiptItemsPriorityWindowCapAndGate(t *testing.T) {
+	pool := testPool(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	f := seedDigestFixture(t, pool, now)
+	ctx := context.Background()
+	for _, stmt := range []string{
+		`DELETE FROM friction_signals WHERE project_id=$1`,
+		`DELETE FROM pr_outcomes WHERE project_id=$1`,
+		`DELETE FROM error_events WHERE project_id=$1`,
+		`DELETE FROM error_group_affected_users WHERE error_group_id IN (SELECT id FROM error_groups WHERE project_id=$1)`,
+		`DELETE FROM error_groups WHERE project_id=$1`,
+	} {
+		if _, err := pool.Exec(ctx, stmt, f.ProjectID); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var highestID string
+	for i := 0; i < 14; i++ {
+		var groupID string
+		title := fmt.Sprintf("Rank %02d", i)
+		if i == 13 {
+			title = "Top `receipt` at https://customer.example/pay\nsk_live_secret"
+		}
+		if err := pool.QueryRow(ctx, `INSERT INTO error_groups
+			(project_id,environment_id,fingerprint,title,kind,status,first_seen,last_seen,
+			 occurrence_count,affected_users_count,pr_created_at,pr_url,priority_score)
+			VALUES ($1,$2,$3,$4,'error','pr_draft',$5,$5,$6,1,$5,$7,$8) RETURNING id`,
+			f.ProjectID, f.EnvID, "receipt-"+uuid.NewString(), title,
+			now.Add(-time.Hour), i+1, fmt.Sprintf("https://github.example/pr/%d", i), i,
+		).Scan(&groupID); err != nil {
+			t.Fatal(err)
+		}
+		if i == 13 {
+			highestID = groupID
+		}
+		if _, err := pool.Exec(ctx, `INSERT INTO digest_readiness
+			(incident_id,project_id,status,reason,updated_at)
+			VALUES ($1,$2,'eligible','fix_pr_opened',$3)`, groupID, f.ProjectID, now.Add(-30*time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := pool.Exec(ctx, `WITH group_row AS (
+		INSERT INTO error_groups
+		(project_id,environment_id,fingerprint,title,kind,status,first_seen,last_seen,
+		 occurrence_count,affected_users_count,needs_human_at,reason_code,reason_message,remediation)
+		VALUES ($1,$2,$3,'Held receipt','error','needs_human',$4,$4,1,1,$4,
+		 'no_usable_diagnosis','No usable diagnosis.','Review manually.') RETURNING id,project_id
+	)
+	INSERT INTO digest_readiness (incident_id,project_id,status,reason,updated_at)
+	SELECT id,project_id,'ineligible','no_usable_diagnosis',$4 FROM group_row`,
+		f.ProjectID, f.EnvID, "held-"+uuid.NewString(), now.Add(-20*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+
+	payload, err := New(pool, "https://dash.example").Build(ctx, f.ProjectID, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := payload.Digest
+	if d.SchemaVersion != 2 || len(d.ReceiptItems) != receiptCap || d.ReceiptOverflow != 4 {
+		t.Fatalf("receipt cap/version/overflow = v%d %d +%d", d.SchemaVersion, len(d.ReceiptItems), d.ReceiptOverflow)
+	}
+	if d.ReceiptItems[0].IncidentID != highestID {
+		t.Fatalf("priority ordering starts with %s, want %s", d.ReceiptItems[0].IncidentID, highestID)
+	}
+	if got := d.ReceiptItems[0].Title; strings.Contains(got, "https://") || strings.ContainsAny(got, "`\n") || strings.Contains(got, "sk_live") {
+		t.Fatalf("title was not sanitized before payload storage: %q", got)
+	}
+	if d.TriageCounts == nil || d.TriageCounts.PRsAwaitingReview != 14 || d.TriageCounts.NeedsDecision != 1 {
+		t.Fatalf("triage = %+v", d.TriageCounts)
+	}
+	if d.HeldBackCount != 1 {
+		t.Fatalf("held_back_count = %d, want 1", d.HeldBackCount)
+	}
+
+	later, err := New(pool, "https://dash.example").Build(ctx, f.ProjectID, now.Add(25*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(later.Digest.ReceiptItems) != 0 || later.Digest.ReceiptOverflow != 0 || later.Digest.TriageCounts == nil {
+		t.Fatalf("expired receipt window = %+v", later.Digest)
+	}
+}
+
+func TestBuildReceiptItemsStatesAndValidatedProse(t *testing.T) {
+	pool := testPool(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	f := seedDigestFixture(t, pool, now)
+	ctx := context.Background()
+	for _, stmt := range []string{
+		`DELETE FROM friction_signals WHERE project_id=$1`,
+		`DELETE FROM pr_outcomes WHERE project_id=$1`,
+		`DELETE FROM error_events WHERE project_id=$1`,
+		`DELETE FROM error_group_affected_users WHERE error_group_id IN (SELECT id FROM error_groups WHERE project_id=$1)`,
+		`DELETE FROM error_groups WHERE project_id=$1`,
+	} {
+		if _, err := pool.Exec(ctx, stmt, f.ProjectID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() {
+		// The 033 FK blocks deleting this fixture's groups/project while decision
+		// rows reference them, and 034 makes decisions insert-only, so cleanup
+		// follows cleanupTenant's documented wedge — but in ONE transaction, so a
+		// killed test run can never leave the immutability trigger disabled on the
+		// retained database (ALTER TABLE is transactional; abort re-enables it).
+		cleanupCtx := context.Background()
+		tx, err := pool.Begin(cleanupCtx)
+		if err != nil {
+			t.Errorf("cleanup begin: %v", err)
+			return
+		}
+		defer tx.Rollback(cleanupCtx)
+		for _, step := range []struct {
+			sql  string
+			args []any
+		}{
+			{sql: `ALTER TABLE diagnosis_decisions DISABLE TRIGGER diagnosis_decisions_immutable_row`},
+			{sql: `DELETE FROM diagnosis_decisions WHERE project_id=$1`, args: []any{f.ProjectID}},
+			{sql: `ALTER TABLE diagnosis_decisions ENABLE TRIGGER diagnosis_decisions_immutable_row`},
+		} {
+			if _, err := tx.Exec(cleanupCtx, step.sql, step.args...); err != nil {
+				t.Errorf("cleanup diagnosis decisions: %v", err)
+				return
+			}
+		}
+		if err := tx.Commit(cleanupCtx); err != nil {
+			t.Errorf("cleanup commit: %v", err)
+		}
+	})
+
+	type receiptSeed struct {
+		status, wantState  string
+		withDiff, decision bool
+		prURL              string
+	}
+	seeds := []receiptSeed{
+		{status: "pr_draft", wantState: "pr_open", prURL: "https://github.example/pr/1"},
+		{status: "needs_human", wantState: "attempt_failed_with_diff", withDiff: true, decision: true},
+		{status: "needs_human", wantState: "attempt_failed_no_diff", decision: true},
+		{status: "investigated", wantState: "report_ready", decision: true},
+	}
+	wants := map[string]string{}
+	for i, seed := range seeds {
+		var groupID string
+		candidateDiff := ""
+		if seed.withDiff {
+			candidateDiff = "diff --git a/a.ts b/a.ts"
+		}
+		if err := pool.QueryRow(ctx, `INSERT INTO error_groups
+			(project_id,environment_id,fingerprint,title,kind,status,first_seen,last_seen,
+			 occurrence_count,affected_users_count,pr_url,candidate_diff,root_cause,suggested_mitigation,
+			 reason_code,reason_message,remediation,needs_human_at)
+			VALUES ($1,$2,$3,$4,'error',$5,$6::timestamptz,$6::timestamptz,$7,1,NULLIF($8,''),NULLIF($9,''),
+			 'Cause at https://customer.example/pay\nwith *detail*.', 'Guard the value.',
+			 CASE WHEN $5::error_group_status='needs_human' THEN 'fix_failed' END,
+			 CASE WHEN $5::error_group_status='needs_human' THEN 'Fix failed.' END,
+			 CASE WHEN $5::error_group_status='needs_human' THEN 'Review the report.' END,
+			 CASE WHEN $5::error_group_status='needs_human' THEN $6::timestamptz END)
+			RETURNING id`, f.ProjectID, f.EnvID, "state-"+uuid.NewString(),
+			fmt.Sprintf("State %d", i), seed.status, now.Add(-time.Hour), i+1, seed.prURL, candidateDiff,
+		).Scan(&groupID); err != nil {
+			t.Fatal(err)
+		}
+		wants[groupID] = seed.wantState
+		if seed.decision {
+			if _, err := pool.Exec(ctx, `INSERT INTO diagnosis_decisions
+				(error_group_id,project_id,outcome,decision_reason,diagnosis,model,prompt_version,basis,confidence)
+				VALUES ($1,$2,'not_actionable','test',$3::jsonb,'test','test','external','high')`,
+				groupID, f.ProjectID, `{"evidence":[{"path":"a.ts","detail":"d","symptomLink":"s"}]}`); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := pool.Exec(ctx, `INSERT INTO digest_readiness
+			(incident_id,project_id,status,reason,updated_at)
+			VALUES ($1,$2,'eligible','validated_cause',$3)`, groupID, f.ProjectID, now.Add(-30*time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := pool.Exec(ctx, `WITH group_row AS (
+			INSERT INTO error_groups
+			(project_id,environment_id,fingerprint,title,kind,status,first_seen,last_seen,
+			 occurrence_count,affected_users_count,needs_human_at,reason_code,reason_message,remediation)
+			VALUES ($1,$2,$3,'Held','error','needs_human',$4,$4,1,1,$4,
+			 'no_usable_diagnosis','No diagnosis.','Review manually.') RETURNING id,project_id)
+			INSERT INTO digest_readiness (incident_id,project_id,status,reason,updated_at)
+			SELECT id,project_id,'ineligible','no_usable_diagnosis',$4 FROM group_row`,
+			f.ProjectID, f.EnvID, "held-state-"+uuid.NewString(), now.Add(-time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	payload, err := New(pool, "https://dash.example").Build(ctx, f.ProjectID, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Digest.ReceiptItems) != 4 || payload.Digest.HeldBackCount != 2 {
+		t.Fatalf("items/held = %d/%d", len(payload.Digest.ReceiptItems), payload.Digest.HeldBackCount)
+	}
+	for _, item := range payload.Digest.ReceiptItems {
+		if item.ReceiptState != wants[item.IncidentID] {
+			t.Errorf("%s state = %s, want %s", item.IncidentID, item.ReceiptState, wants[item.IncidentID])
+		}
+		if item.ReceiptState == "pr_open" && item.RootCauseExcerpt != "" {
+			t.Errorf("unvalidated PR prose rendered: %q", item.RootCauseExcerpt)
+		}
+		if item.ReceiptState != "pr_open" && (item.RootCauseExcerpt == "" || strings.Contains(item.RootCauseExcerpt, "https://") || strings.ContainsAny(item.RootCauseExcerpt, "*`")) {
+			t.Errorf("validated prose missing or dirty: %q", item.RootCauseExcerpt)
+		}
 	}
 }
 

@@ -21,3 +21,11 @@ export const digestReceiptFields: DigestReceiptFields = {
   schema_version: 2,
   receipt_items: [receiptItem],
 };
+
+export const digestReceiptFieldsV2: DigestReceiptFields = {
+  schema_version: 2,
+  receipt_items: [receiptItem],
+  triage_counts: { prs_awaiting_review: 0, needs_decision: 0 },
+  held_back_count: 2,
+  receipt_overflow: 4,
+};
