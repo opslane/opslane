@@ -350,6 +350,26 @@ func isRequeueEligible(groupStatus string, reasonCode *string) bool {
 	return true
 }
 
+// eventInActionScope reports whether an event from environmentID may trigger
+// automation. The statement snapshot visible when this query executes decides
+// how a concurrent settings update is applied.
+func eventInActionScope(ctx context.Context, tx pgx.Tx, projectID, environmentID string) (bool, error) {
+	var inScope bool
+	err := tx.QueryRow(ctx,
+		`SELECT (NOT p.action_scope_enabled)
+		        OR EXISTS (
+		          SELECT 1 FROM project_action_environments pae
+		          WHERE pae.project_id = p.id AND pae.environment_id = $2
+		        )
+		 FROM projects p WHERE p.id = $1`,
+		projectID, environmentID,
+	).Scan(&inScope)
+	if err != nil {
+		return false, fmt.Errorf("action scope check: %w", err)
+	}
+	return inScope, nil
+}
+
 // releaseNotOlder reports whether candidate is the resolved release or newer,
 // ranked by first-seen time. First-seen uses server-recorded created_at (not the
 // client-supplied timestamp) so a back-dated event cannot poison release ordering
@@ -648,96 +668,115 @@ func (q *Queries) InsertErrorEventAndGroup(ctx context.Context, p IngestParams) 
 		}
 	}
 
-	// 4. Create queue job (new groups always, existing groups per requeue policy)
+	// 4. Create queue work only when this occurrence is in the project's action
+	// scope. Events and rollups above are recorded regardless of scope.
 	var jobID string
 	var requeued bool
+	inScope, err := eventInActionScope(ctx, tx, p.ProjectID, environmentID)
+	if err != nil {
+		return nil, err
+	}
 
-	if isNew {
-		err = tx.QueryRow(ctx,
-			`INSERT INTO error_group_jobs (error_group_id, project_id)
-			 VALUES ($1, $2)
+	enqueueFirst := func() error {
+		if err := tx.QueryRow(ctx,
+			`INSERT INTO error_group_jobs (error_group_id, project_id, event_id)
+			 VALUES ($1, $2, $3)
 			 RETURNING id`,
-			groupID, p.ProjectID,
-		).Scan(&jobID)
-		if err != nil {
-			return nil, fmt.Errorf("insert queue job: %w", err)
+			groupID, p.ProjectID, eventID,
+		).Scan(&jobID); err != nil {
+			return fmt.Errorf("insert queue job: %w", err)
 		}
 
-		_, err = tx.Exec(ctx,
+		if _, err := tx.Exec(ctx,
 			`UPDATE error_groups SET status = 'queued' WHERE id = $1`,
 			groupID,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("update group status to queued: %w", err)
+		); err != nil {
+			return fmt.Errorf("update group status to queued: %w", err)
 		}
 
 		if err := publishIssueCreated(ctx, tx, q.DashboardURL, p.ProjectID, environmentID, groupID, p.Title, eventTime); err != nil {
-			return nil, fmt.Errorf("publish issue.created: %w", err)
+			return fmt.Errorf("publish issue.created: %w", err)
 		}
-	} else {
+		return nil
+	}
+
+	if isNew && inScope {
+		if err := enqueueFirst(); err != nil {
+			return nil, err
+		}
+	} else if !isNew && inScope {
 		var groupStatus, resolvedInRelease string
 		var reasonCode *string
+		var hasJobs bool
 		err = tx.QueryRow(ctx,
-			`SELECT status, reason_code, COALESCE(resolved_in_release, '')
+			`SELECT status, reason_code, COALESCE(resolved_in_release, ''),
+			        EXISTS (SELECT 1 FROM error_group_jobs j
+			                WHERE j.error_group_id = error_groups.id
+			                  AND j.project_id = error_groups.project_id)
 			 FROM error_groups WHERE id = $1 AND project_id = $2`,
 			groupID, p.ProjectID,
-		).Scan(&groupStatus, &reasonCode, &resolvedInRelease)
+		).Scan(&groupStatus, &reasonCode, &resolvedInRelease, &hasJobs)
 		if err != nil {
 			return nil, fmt.Errorf("query group status for requeue check: %w", err)
 		}
-
-		eligible := isRequeueEligible(groupStatus, reasonCode)
-		if eligible && (groupStatus == "resolved" || groupStatus == "merged") {
-			notOlder, err := q.releaseNotOlder(ctx, tx, p.ProjectID, p.Release, resolvedInRelease)
-			if err != nil {
-				return nil, fmt.Errorf("release-order check: %w", err)
+		if groupStatus == "new" && !hasJobs {
+			if err := enqueueFirst(); err != nil {
+				return nil, err
 			}
-			eligible = notOlder
-		}
-
-		if eligible {
-			err = tx.QueryRow(ctx,
-				`INSERT INTO error_group_jobs (error_group_id, project_id)
-				 VALUES ($1, $2)
-				 RETURNING id`,
-				groupID, p.ProjectID,
-			).Scan(&jobID)
-			if err != nil {
-				return nil, fmt.Errorf("insert requeue job: %w", err)
+		} else {
+			eligible := isRequeueEligible(groupStatus, reasonCode)
+			if eligible && (groupStatus == "resolved" || groupStatus == "merged") {
+				notOlder, err := q.releaseNotOlder(ctx, tx, p.ProjectID, p.Release, resolvedInRelease)
+				if err != nil {
+					return nil, fmt.Errorf("release-order check: %w", err)
+				}
+				eligible = notOlder
 			}
 
-			_, err = tx.Exec(ctx,
-				`UPDATE error_groups
-				 SET status = 'queued',
-				     reason_code = NULL,
-				     reason_message = NULL,
-				     remediation = NULL,
-				     candidate_diff = NULL,
-				     verification_evidence = NULL,
-				     root_cause = NULL,
-				     suggested_mitigation = NULL,
-				     merged_at = NULL,
-				     resolved_at = NULL,
-				     archived_at = NULL,
-				     resolved_in_release = NULL,
-				     resolved_reason = NULL,
-				     updated_at = now()
-				 WHERE id = $1`,
-				groupID,
-			)
-			if err != nil {
-				return nil, fmt.Errorf("update group status to queued on requeue: %w", err)
+			if eligible {
+				err = tx.QueryRow(ctx,
+					`INSERT INTO error_group_jobs (error_group_id, project_id, event_id)
+					 VALUES ($1, $2, $3)
+					 RETURNING id`,
+					groupID, p.ProjectID, eventID,
+				).Scan(&jobID)
+				if err != nil {
+					return nil, fmt.Errorf("insert requeue job: %w", err)
+				}
+
+				_, err = tx.Exec(ctx,
+					`UPDATE error_groups
+					 SET status = 'queued',
+					     reason_code = NULL,
+					     reason_message = NULL,
+					     remediation = NULL,
+					     candidate_diff = NULL,
+					     verification_evidence = NULL,
+					     root_cause = NULL,
+					     suggested_mitigation = NULL,
+					     merged_at = NULL,
+					     resolved_at = NULL,
+					     archived_at = NULL,
+					     resolved_in_release = NULL,
+					     resolved_reason = NULL,
+					     updated_at = now()
+					 WHERE id = $1`,
+					groupID,
+				)
+				if err != nil {
+					return nil, fmt.Errorf("update group status to queued on requeue: %w", err)
+				}
+				_, err = tx.Exec(ctx,
+					`UPDATE digest_readiness
+					 SET status = 'pending', reason = 'reinvestigating', updated_at = now()
+					 WHERE incident_id = $1`,
+					groupID,
+				)
+				if err != nil {
+					return nil, fmt.Errorf("reset digest readiness on requeue: %w", err)
+				}
+				requeued = true
 			}
-			_, err = tx.Exec(ctx,
-				`UPDATE digest_readiness
-				 SET status = 'pending', reason = 'reinvestigating', updated_at = now()
-				 WHERE incident_id = $1`,
-				groupID,
-			)
-			if err != nil {
-				return nil, fmt.Errorf("reset digest readiness on requeue: %w", err)
-			}
-			requeued = true
 		}
 	}
 
@@ -1309,9 +1348,10 @@ func (q *Queries) TriggerFixJob(ctx context.Context, projectID, groupID, guidanc
 		// same durable routing decision an automatic fix job would. Without it
 		// the worker falls back to the live feature flag and can re-run a Python
 		// incident through the JavaScript pipeline.
-		`INSERT INTO error_group_jobs (error_group_id, project_id, job_type, guidance, triggered_by, platform)
+		`INSERT INTO error_group_jobs (error_group_id, project_id, job_type, guidance, triggered_by, platform, event_id)
 		 VALUES ($1, $2, 'fix', $3, 'human',
-		         (SELECT platform FROM error_groups WHERE id = $1 AND project_id = $2))
+		         (SELECT platform FROM error_groups WHERE id = $1 AND project_id = $2),
+		         (SELECT sample_event_id FROM error_groups WHERE id = $1 AND project_id = $2))
 		 RETURNING id`,
 		groupID, projectID, nilIfEmpty(guidance),
 	).Scan(&jobID)
@@ -3025,9 +3065,16 @@ func (q *Queries) GetProjectByOrgID(ctx context.Context, orgID, projectID string
 	return &p, nil
 }
 
-// UpdateProject updates a project's settings. Only non-nil fields are changed.
-// Tenant-scoped by orgID.
-func (q *Queries) UpdateProject(ctx context.Context, orgID, projectID string, githubRepo, frictionAutonomy, prPosture, defaultEnvironmentID, digestTimezone *string) (*Project, error) {
+type projectQueryRower interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func updateProject(
+	ctx context.Context,
+	queryer projectQueryRower,
+	orgID, projectID string,
+	githubRepo, frictionAutonomy, prPosture, defaultEnvironmentID, digestTimezone *string,
+) (*Project, error) {
 	var p Project
 	query := `UPDATE projects
 		 SET github_repo = COALESCE($3, github_repo),
@@ -3050,7 +3097,7 @@ func (q *Queries) UpdateProject(ctx context.Context, orgID, projectID string, gi
 		 RETURNING p.id, p.org_id, p.name, p.github_repo, p.default_branch, p.friction_autonomy, p.pr_posture, p.default_environment_id, p.digest_timezone, p.created_at`
 		args = append(args, *defaultEnvironmentID)
 	}
-	err := q.pool.QueryRow(ctx, query, args...).Scan(&p.ID, &p.OrgID, &p.Name, &p.GithubRepo, &p.DefaultBranch, &p.FrictionAutonomy, &p.PrPosture, &p.DefaultEnvironmentID, &p.DigestTimezone, &p.CreatedAt)
+	err := queryer.QueryRow(ctx, query, args...).Scan(&p.ID, &p.OrgID, &p.Name, &p.GithubRepo, &p.DefaultBranch, &p.FrictionAutonomy, &p.PrPosture, &p.DefaultEnvironmentID, &p.DigestTimezone, &p.CreatedAt)
 	if err == pgx.ErrNoRows {
 		return nil, nil
 	}
@@ -3058,6 +3105,18 @@ func (q *Queries) UpdateProject(ctx context.Context, orgID, projectID string, gi
 		return nil, fmt.Errorf("update project: %w", err)
 	}
 	return &p, nil
+}
+
+// UpdateProject updates a project's settings. Only non-nil fields are changed.
+// Tenant-scoped by orgID.
+func (q *Queries) UpdateProject(ctx context.Context, orgID, projectID string, githubRepo, frictionAutonomy, prPosture, defaultEnvironmentID, digestTimezone *string) (*Project, error) {
+	return updateProject(ctx, q.pool, orgID, projectID, githubRepo, frictionAutonomy, prPosture, defaultEnvironmentID, digestTimezone)
+}
+
+// UpdateProjectTx is UpdateProject on a caller-owned transaction, used when a
+// settings PATCH must atomically update multiple project-owned settings.
+func UpdateProjectTx(ctx context.Context, tx pgx.Tx, orgID, projectID string, githubRepo, frictionAutonomy, prPosture, defaultEnvironmentID, digestTimezone *string) (*Project, error) {
+	return updateProject(ctx, tx, orgID, projectID, githubRepo, frictionAutonomy, prPosture, defaultEnvironmentID, digestTimezone)
 }
 
 // FixStats are the receipts shown beside each autonomy option.

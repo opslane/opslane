@@ -145,17 +145,22 @@ func toIncidentJSON(g db.ErrorGroup) incidentJSON {
 
 // projectJSON is the JSON representation of a project for the dashboard API.
 type projectJSON struct {
-	ID                   string  `json:"id"`
-	Name                 string  `json:"name"`
-	GithubRepo           *string `json:"github_repo"`
-	FrictionAutonomy     string  `json:"friction_autonomy"`
-	PrPosture            string  `json:"pr_posture"`
-	DefaultEnvironmentID *string `json:"default_environment_id"`
-	DigestTimezone       string  `json:"digest_timezone"`
-	CreatedAt            string  `json:"created_at"`
+	ID                   string   `json:"id"`
+	Name                 string   `json:"name"`
+	GithubRepo           *string  `json:"github_repo"`
+	FrictionAutonomy     string   `json:"friction_autonomy"`
+	PrPosture            string   `json:"pr_posture"`
+	DefaultEnvironmentID *string  `json:"default_environment_id"`
+	ActionScopeEnabled   bool     `json:"action_scope_enabled"`
+	ActionEnvironmentIDs []string `json:"action_environment_ids"`
+	DigestTimezone       string   `json:"digest_timezone"`
+	CreatedAt            string   `json:"created_at"`
 }
 
-func toProjectJSON(p db.Project) projectJSON {
+func toProjectJSON(p db.Project, actionScopeEnabled bool, actionEnvironmentIDs []string) projectJSON {
+	if actionEnvironmentIDs == nil {
+		actionEnvironmentIDs = []string{}
+	}
 	return projectJSON{
 		ID:                   p.ID,
 		Name:                 p.Name,
@@ -163,6 +168,8 @@ func toProjectJSON(p db.Project) projectJSON {
 		FrictionAutonomy:     p.FrictionAutonomy,
 		PrPosture:            p.PrPosture,
 		DefaultEnvironmentID: p.DefaultEnvironmentID,
+		ActionScopeEnabled:   actionScopeEnabled,
+		ActionEnvironmentIDs: actionEnvironmentIDs,
 		DigestTimezone:       p.DigestTimezone,
 		CreatedAt:            p.CreatedAt.Format(time.RFC3339),
 	}
@@ -182,9 +189,16 @@ func (d *Dependencies) ListProjects(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	scopes, err := d.Queries.GetActionScopesByOrg(r.Context(), orgID)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "failed to load project action scopes")
+		return
+	}
+
 	result := make([]projectJSON, 0, len(projects))
 	for _, p := range projects {
-		result = append(result, toProjectJSON(p))
+		scope := scopes[p.ID]
+		result = append(result, toProjectJSON(p, scope.Enabled, scope.EnvironmentIDs))
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -653,7 +667,7 @@ func (d *Dependencies) CreateProjectEndpoint(w http.ResponseWriter, r *http.Requ
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(map[string]any{
-		"project": toProjectJSON(provisioning.Project),
+		"project": toProjectJSON(provisioning.Project, false, []string{}),
 		"environment": environmentJSON{
 			ID:        provisioning.Environment.ID,
 			ProjectID: provisioning.Environment.ProjectID,
@@ -682,6 +696,7 @@ func (d *Dependencies) UpdateProjectEndpoint(w http.ResponseWriter, r *http.Requ
 		FrictionAutonomy     *string         `json:"friction_autonomy"`
 		PrPosture            *string         `json:"pr_posture"`
 		DefaultEnvironmentID json.RawMessage `json:"default_environment_id"`
+		ActionEnvironmentIDs json.RawMessage `json:"action_environment_ids"`
 		DigestTimezone       *string         `json:"digest_timezone"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -737,9 +752,32 @@ func (d *Dependencies) UpdateProjectEndpoint(w http.ResponseWriter, r *http.Requ
 		}
 		defaultEnvironmentID = &value
 	}
+	var actionEnvironmentIDs *[]string
+	actionScopeTouched := req.ActionEnvironmentIDs != nil
+	if actionScopeTouched && string(req.ActionEnvironmentIDs) != "null" {
+		var values []string
+		if err := json.Unmarshal(req.ActionEnvironmentIDs, &values); err != nil || values == nil {
+			writeJSONError(w, http.StatusBadRequest, "action_environment_ids must be null or an array of UUID strings")
+			return
+		}
+		for _, value := range values {
+			if _, err := uuid.Parse(value); err != nil {
+				writeJSONError(w, http.StatusBadRequest, "action_environment_ids must contain only UUID strings")
+				return
+			}
+		}
+		actionEnvironmentIDs = &values
+	}
 
-	project, err := d.Queries.UpdateProject(
-		r.Context(), orgID, projectID, req.GithubRepo, req.FrictionAutonomy, req.PrPosture, defaultEnvironmentID, req.DigestTimezone,
+	tx, err := d.Queries.Pool().Begin(r.Context())
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "failed to update project")
+		return
+	}
+	defer tx.Rollback(r.Context())
+
+	project, err := db.UpdateProjectTx(
+		r.Context(), tx, orgID, projectID, req.GithubRepo, req.FrictionAutonomy, req.PrPosture, defaultEnvironmentID, req.DigestTimezone,
 	)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "failed to update project")
@@ -749,9 +787,31 @@ func (d *Dependencies) UpdateProjectEndpoint(w http.ResponseWriter, r *http.Requ
 		writeJSONError(w, http.StatusNotFound, "project not found")
 		return
 	}
+	if actionScopeTouched {
+		if err := db.SetProjectActionScope(r.Context(), tx, orgID, projectID, actionEnvironmentIDs); err != nil {
+			if errors.Is(err, db.ErrEnvironmentNotInProject) {
+				writeJSONError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			writeJSONError(w, http.StatusInternalServerError, "failed to update project action scope")
+			return
+		}
+	}
+	// Read the echo inside the transaction: after commit a concurrent PATCH
+	// could overwrite the state this request wrote, and a failed read would
+	// report 500 for a write that already committed.
+	actionScopeEnabled, storedActionEnvironmentIDs, err := db.GetProjectActionScopeTx(r.Context(), tx, orgID, projectID)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "failed to load project action scope")
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "failed to update project")
+		return
+	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(toProjectJSON(*project))
+	json.NewEncoder(w).Encode(toProjectJSON(*project, actionScopeEnabled, storedActionEnvironmentIDs))
 }
 
 // GetFixStatsEndpoint returns per-kind fix generation and PR outcome counts.
