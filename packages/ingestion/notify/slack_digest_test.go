@@ -2,6 +2,7 @@ package notify
 
 import (
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 )
@@ -192,6 +193,159 @@ func TestFormatSlackDigestNeutralizesInjectedLines(t *testing.T) {
 		}
 		if bullets != 1 {
 			t.Errorf("want 1 rendered bullet, got %d — injected lines survived:\n%s", bullets, str)
+		}
+	}
+}
+
+func TestFormatSlackDigestV2Golden(t *testing.T) {
+	visits, recovered := int64(3), int64(0)
+	payload := EventPayload{
+		Version: 1, EventType: "digest.daily",
+		Project: ProjectRef{ID: "p1", Name: "Acme"}, DashboardURL: "https://dash.example",
+		Digest: &DigestPayload{
+			SchemaVersion: 2, Date: "2026-08-12",
+			TriageCounts: &DigestTriageCounts{PRsAwaitingReview: 1, NeedsDecision: 3},
+			ReceiptItems: []ReceiptItem{
+				{Kind: "error", IncidentID: "pr", Title: "Checkout crashes", OccurrenceCount: 12,
+					ImpactClass: "blocked", ImpactVisits: &visits, ImpactRecovered: &recovered,
+					ReceiptState: "pr_open", PRURL: "https://github.example/pr/1",
+					SessionURL: "https://dash.example/sessions/s1", RootCauseExcerpt: "Cart was nil."},
+				{Kind: "error", IncidentID: "diff", Title: "Saved diff", ReceiptState: "attempt_failed_with_diff"},
+				{Kind: "error", IncidentID: "no-diff", Title: "No diff", ReceiptState: "attempt_failed_no_diff"},
+				{Kind: "friction", IncidentID: "report", Title: "Checkout friction", OccurrenceCount: 2,
+					ReceiptState: "report_ready"},
+			},
+			Watching: DigestWatching{Sessions: 20, Users: 7},
+		},
+	}
+	body, _, err := FormatSlack(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(body)
+	for _, want := range []string{
+		"1 fix PR awaiting review, 3 issues need a decision.",
+		"12 crashes across 3 visits, no visit recovered",
+		"2 friction signals; recording impact unavailable",
+		"Fix PR ready for review.",
+		"Fix attempt failed its checks; saved diff and report on the issue page.",
+		"Fix attempt failed before producing a change; investigation report on the issue page.",
+		"Investigation report ready.", "Review fix PR", "Watch recording", "Issue page", "Investigation: Cart was nil.",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("v2 digest missing %q: %s", want, s)
+		}
+	}
+	if strings.Contains(s, "Where customers struggled") || strings.Contains(s, "older issues still awaiting") {
+		t.Fatalf("legacy copy leaked into v2: %s", s)
+	}
+}
+
+func TestFormatSlackDigestV2QuietAndFooters(t *testing.T) {
+	payload := EventPayload{
+		Version: 1, EventType: "digest.daily", Project: ProjectRef{ID: "p", Name: "p"},
+		Digest: &DigestPayload{
+			SchemaVersion: 2, Date: "2026-08-12",
+			TriageCounts:  &DigestTriageCounts{PRsAwaitingReview: 2, NeedsDecision: 3},
+			HeldBackCount: 1, ReceiptOverflow: 4,
+			Watching: DigestWatching{Sessions: 9, Users: 4},
+		},
+	}
+	body, _, err := FormatSlack(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(body)
+	for _, want := range []string{
+		"2 fix PRs awaiting review, 3 issues need a decision, nothing else needs you today.",
+		"Held back: 1 item without a verified receipt yet.",
+		"4 more receipts ranked below these — open the dashboard for the full list.",
+		"Watched 9 sessions across 4 users",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("quiet v2 digest missing %q: %s", want, s)
+		}
+	}
+}
+
+func TestFormatSlackDigestV2SkipsUnsupportedItems(t *testing.T) {
+	for _, item := range []ReceiptItem{
+		{Kind: "cluster", IncidentID: "cluster", Title: "cluster", ReceiptState: "report_ready"},
+		{Kind: "widget", IncidentID: "widget", Title: "widget", ReceiptState: "report_ready"},
+		{Kind: "error", IncidentID: "future", Title: "future", ReceiptState: "future_state"},
+	} {
+		payload := EventPayload{Version: 1, EventType: "digest.daily", Project: ProjectRef{ID: "p", Name: "p"},
+			Digest: &DigestPayload{SchemaVersion: 2, ReceiptItems: []ReceiptItem{item}}}
+		body, _, err := FormatSlack(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := string(body)
+		if !strings.Contains(s, "nothing else needs you today") || strings.Contains(s, item.Title) {
+			t.Fatalf("unsupported item was not treated as quiet: %s", s)
+		}
+	}
+}
+
+func TestFormatSlackDigestV2CleansCapturedProse(t *testing.T) {
+	dirty := "user@example.com *claimed* https://customer.example/pay\n• forged " + strings.Repeat("界", 500)
+	payload := EventPayload{
+		Version: 1, EventType: "digest.daily", Project: ProjectRef{ID: "p", Name: "p"},
+		DashboardURL: "https://dash.example",
+		Digest: &DigestPayload{SchemaVersion: 2, ReceiptItems: []ReceiptItem{{
+			Kind: "error", IncidentID: "i", Title: dirty, ReceiptState: "report_ready",
+			RootCauseExcerpt: dirty,
+		}}},
+	}
+	body, _, err := FormatSlack(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	for _, block := range decoded["blocks"].([]any) {
+		blockMap := block.(map[string]any)
+		text, ok := blockMap["text"].(map[string]any)
+		if !ok {
+			continue
+		}
+		value := text["text"].(string)
+		if !strings.Contains(value, "Investigation:") {
+			continue
+		}
+		if strings.Contains(value, "user@example.com") || strings.Contains(value, "https://customer.example") || strings.Contains(value, "*claimed*") {
+			t.Fatalf("dirty captured prose survived: %s", value)
+		}
+		if len([]rune(value)) > sectionMax {
+			t.Fatalf("card section exceeds Slack budget: %d", len([]rune(value)))
+		}
+		if strings.Count(value, "\n• ") != 0 {
+			t.Fatalf("captured prose forged a line: %s", value)
+		}
+		return
+	}
+	t.Fatal("receipt card section not found")
+}
+
+func TestFormatSlackDigestV1CapturedPayloadStillRenders(t *testing.T) {
+	raw, err := os.ReadFile("testdata/digest_payload_v1.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload EventPayload
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatal(err)
+	}
+	body, _, err := FormatSlack(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(body)
+	for _, want := range []string{"Where customers struggled", "New errors customers hit", "older issues still awaiting your review"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("captured v1 payload missing legacy copy %q: %s", want, s)
 		}
 	}
 }

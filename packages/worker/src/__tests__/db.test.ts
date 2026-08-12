@@ -564,6 +564,40 @@ describeDb('db.ts integration tests', () => {
   });
 
   describe('digest readiness projection', () => {
+    it('moves the readiness clock only when status or reason changes', async () => {
+      const seeded = await seedErrorGroupAndJob();
+      await updateGroupInvestigation(seeded.errorGroupId, testProjectId, 'insight', {
+        rootCause: 'validated cause',
+        readiness: { status: 'eligible', reason: 'validated_cause' },
+      });
+      const oldClock = (await testPool.query<{ updated_at: Date }>(
+        `UPDATE digest_readiness SET updated_at = now() - interval '1 hour'
+         WHERE incident_id = $1 RETURNING updated_at`,
+        [seeded.errorGroupId],
+      )).rows[0]!.updated_at;
+
+      await updateGroupInvestigation(seeded.errorGroupId, testProjectId, 'insight', {
+        rootCause: 'validated cause',
+        readiness: { status: 'eligible', reason: 'validated_cause' },
+      });
+      const unchanged = (await testPool.query<{ updated_at: Date }>(
+        `SELECT updated_at FROM digest_readiness WHERE incident_id = $1`,
+        [seeded.errorGroupId],
+      )).rows[0]!.updated_at;
+      expect(unchanged.getTime()).toBe(oldClock.getTime());
+
+      await updateGroupInvestigation(seeded.errorGroupId, testProjectId, 'insight', {
+        rootCause: 'validated cause',
+        readiness: { status: 'eligible', reason: 'fix_pr_opened' },
+      });
+      const changed = (await testPool.query<{ updated_at: Date }>(
+        `SELECT updated_at FROM digest_readiness WHERE incident_id = $1`,
+        [seeded.errorGroupId],
+      )).rows[0]!.updated_at;
+      expect(changed.getTime()).toBeGreaterThan(oldClock.getTime());
+      expect(Date.now() - changed.getTime()).toBeLessThan(10_000);
+    });
+
     it('upserts readiness in the same investigation write and leaves legacy rows absent', async () => {
       const first = await seedErrorGroupAndJob();
       await updateGroupInvestigation(first.errorGroupId, testProjectId, 'insight', {
