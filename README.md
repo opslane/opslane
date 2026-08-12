@@ -6,6 +6,8 @@ Error trackers see stack traces. Opslane knows your product.
 
 It learns where users get stuck from errors and session recordings. You get a daily digest of what matters, and pull requests with tested fixes. When it can't fix something, it says why.
 
+[Docs](docs) · [Self-host quickstart](docs/quickstart/self-host.md) · [Install the SDK](docs/install.md) · [Issue tracker](https://github.com/opslane/opslane-oss/issues)
+
 ## See it work
 
 ### Error to pull request
@@ -16,26 +18,26 @@ It learns where users get stuck from errors and session recordings. You get a da
 
 <!-- PLACEHOLDER: screenshot of a real merged Opslane PR (e.g. #1232) — title, root-cause explanation, evidence section, diff. Scrub anything private; link the PR here. -->
 
-In two weeks on one production app (July to August 2026), Opslane captured 7,415 events, suppressed the 78% that were noise, and opened one pull request: a fix for a crash users had hit 614 times. A human reviewed and merged it.
+Over two weeks spanning July and August 2026, one production app sent Opslane 7,415 events. It suppressed the 78% that were noise and opened one pull request: a fix for a crash users had hit 614 times. A human reviewed and merged it.
 
 ## What it does
 
 - **Know what's broken without reading 7,000 alerts.** Errors group into causes, noise is suppressed, and issues are ranked by how many users they hit. One Slack digest a day.
 - **Get bugs fixed without losing the afternoon.** Opslane investigates in your repo and sends the fix as a pull request that built and passed your tests. You review and merge.
-- **See what the user saw.** Every error links to the session replay behind it: the clicks, pages, and requests that led up to it.
+- **See what the user saw.** When session recording is on, each issue links to the recording behind it: the clicks, pages, and requests that led up to it.
 - **Catch failures that never throw.** Dead buttons and abandoned forms surface from session recordings, even when the console is clean.
-- **Stay in control.** It never merges its own PRs, it says why whenever it stops, and the whole thing self-hosts on your infrastructure.
+- **Stay in control.** It never merges its own PRs, it says why whenever it stops, and the application stack runs on your infrastructure.
 
 ## How it works
 
-1. **Capture.** The SDK sends errors and session recordings to the ingestion server. Two lines of code to install.
-2. **Group.** The same bug hitting 500 users becomes one issue, not 500 alerts. Errors that come from browser extensions, cross-origin scripts, or known-harmless browser warnings get dropped.
+1. **Capture.** The SDK sends errors and session recordings to the ingestion server. Two lines of code to install ([install guide](docs/install.md)).
+2. **Group.** The same bug hitting 500 users becomes one issue, not 500 alerts. Errors that come from browser extensions, cross-origin scripts, or known-harmless browser warnings are filtered out before they become issues.
 3. **Investigate.** The worker clones the repository and reads the code until it finds the cause. The cause has to name the exact files involved; guesses get thrown out.
 4. **Verify.** The fix is applied in an isolated sandbox, where the build and tests run. Whatever passed before has to pass after.
 5. **Deliver.** A verified fix opens as a pull request on the repository, ready for review. A fix that could not be verified opens as a draft, marked as such, and only if the project allows drafts. When there is no fix, the issue shows the reason instead.
-6. **Digest.** Once a day, Slack gets the summary: what broke, what got fixed, what needs a human.
+6. **Digest.** When Slack is connected, a daily digest lists what broke, what got fixed, and what needs a human.
 
-The pipeline calls three outside services: Anthropic to investigate, E2B to run the sandbox, and GitHub for clones and pull requests. Everything else runs on the self-hosted stack, on Postgres. There is no Redis or queue service to operate. JavaScript apps are supported end to end today; a Python SDK (alpha) captures and triages server-side errors, with its fix pipeline off by default.
+The pipeline calls three outside services: Anthropic to investigate, E2B to run the sandbox, and GitHub for clones and pull requests. Everything else runs on the self-hosted stack: Postgres for state and jobs, S3-compatible object storage for session recordings (MinIO in the bundled stack). There is no Redis or queue service to operate. JavaScript apps are supported end to end today; a Python SDK (alpha) captures and triages server-side errors, with its fix pipeline off by default.
 
 ```mermaid
 flowchart LR
@@ -63,7 +65,7 @@ The exact evidence gates, their limits, and what they do not guarantee: [precisi
 
 ## Run it locally
 
-Prerequisites: Docker with Compose. No accounts or API keys needed for this first run.
+Prerequisites: Docker with Compose v2 and free host ports 8082, 5434, and 9012. No accounts or API keys needed for this first run.
 
 ```bash
 git clone https://github.com/opslane/opslane-oss.git
@@ -115,14 +117,14 @@ Exact permissions and environment variables are in the [self-host quickstart](do
 
 ## What leaves your host
 
-With no external integrations configured, no captured data (errors, replays, or repository source) leaves your deployment. Each integration you enable adds its own destination:
+With no external integrations configured, the self-hosted services send no captured data (errors, session recordings, or repository source) to anyone. Each integration you enable adds its own destination:
 
 - **GitHub:** authentication, repository access, clones, pull requests.
 - **Anthropic:** investigation context and selected source.
 - **E2B:** repository contents and commands for sandbox verification.
 - **WorkOS** (optional): cloud authentication.
-- **Slack** (optional): notifications.
-- **Langfuse** (optional): traces.
+- **Slack** (optional): issue titles, summaries, and links in notifications and digests.
+- **Langfuse** (optional): full investigation traces, including prompts and completions.
 
 The full data-flow and trust model, including what each destination receives: [trust and security](docs/architecture/trust.md).
 
