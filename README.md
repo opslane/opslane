@@ -18,7 +18,7 @@ It learns where users get stuck from errors and session recordings. You get a da
 
 <!-- PLACEHOLDER: screenshot of a real merged Opslane PR (e.g. #1232) — title, root-cause explanation, evidence section, diff. Scrub anything private; link the PR here. -->
 
-Over two weeks spanning July and August 2026, one production app sent Opslane 7,415 events. It suppressed the 78% that were noise and opened one pull request: a fix for a crash users had hit 614 times. A human reviewed and merged it.
+Over two weeks spanning July and August 2026, one production app sent Opslane 7,415 events. Opslane opened one pull request: a fix for a crash users had hit 614 times. A human reviewed and merged it.
 
 ## What it does
 
@@ -135,21 +135,6 @@ The full data-flow and trust model, including what each destination receives: [t
 - [Guides](docs/guides): React, Vue, vanilla JS, source maps, GitHub App, Slack notifications, replay privacy
 - [Architecture](docs/architecture/overview.md): components, trust boundaries, life of an error
 - [Reference](docs/reference): SDK options, HTTP routes, environment variables, reason codes, checked against source by [`scripts/check-docs-drift.mjs`](scripts/check-docs-drift.mjs) in CI
-
-## Repository layout
-
-```text
-packages/
-  ingestion/    Go ingestion API, grouping, storage, dashboard server
-  worker/       Investigation, verification, and PR pipeline
-  agent-core/   Provider-neutral agent loop
-  dashboard/    Vue dashboard
-  sdk/          Browser SDK, framework integrations, Vite source-map plugin
-  sdk-python/   Python SDK (alpha)
-shared/         Shared TypeScript contracts
-cli/            Opslane CLI
-docs/           Documentation (published by docs-site/)
-```
 
 ## Licensing
 
