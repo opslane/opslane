@@ -32,7 +32,7 @@ Deferred work with enough context to pick up cold. Add items with What / Why / P
 
 **Context:** Red-team finding from `/review` on 2026-08-12. The error-pipeline gate (S3) landed in the environment-scoping branch; this is the S4-adjacent follow-up.
 
-**Depends on:** Environment-scoping branch landing (migration 047 provides the allowlist table).
+**Depends on:** Environment-scoping branch landing (migration 049 provides the allowlist table).
 
 ---
 

@@ -393,6 +393,189 @@ func TestSessionPointerForGroup_UsesNewestIngestedOccurrenceAndEventTime(t *test
 	}
 }
 
+func seedPointerGroup(t *testing.T, pool *pgxpool.Pool, projectID, envID, fingerprint, kind string) string {
+	t.Helper()
+	var id string
+	if err := pool.QueryRow(context.Background(), `INSERT INTO error_groups
+		(project_id, environment_id, fingerprint, title, first_seen, last_seen, status, kind)
+		VALUES ($1, $2, $3, $3, now(), now(), $4, $5) RETURNING id`,
+		projectID, envID, fingerprint, map[string]string{"error": "new", "friction": "insight"}[kind], kind).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+func seedPointerSignal(t *testing.T, pool *pgxpool.Pool, projectID, envID, groupID, sessionID, fingerprint string, at time.Time) string {
+	t.Helper()
+	var id string
+	if err := pool.QueryRow(context.Background(), `INSERT INTO friction_signals
+		(session_id, project_id, environment_id, rule_version, signal_type, fingerprint,
+		 page_url_normalized, occurred_at, adjudication_status, incident_id)
+		VALUES ($1, $2, $3, 1, 'dead_click', $4, '/pointer', $5, 'accepted', $6)
+		RETURNING id`, sessionID, projectID, envID, fingerprint, at, groupID).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+func seedPointerChunk(t *testing.T, pool *pgxpool.Pool, projectID, sessionID string, seq int, firstMs, lastMs *int64, snapshot, scrubbed bool) {
+	t.Helper()
+	var scrubbedAt any
+	if scrubbed {
+		scrubbedAt = time.Now()
+	}
+	if _, err := pool.Exec(context.Background(), `INSERT INTO session_chunks
+		(session_id, seq, project_id, object_key, has_full_snapshot, scrubbed_at, first_event_ms, last_event_ms)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+		sessionID, seq, projectID, fmt.Sprintf("pointer/%s/%d", sessionID, seq), snapshot, scrubbedAt, firstMs, lastMs); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSessionPointerForGroup_FrictionRepresentativeAndFallback(t *testing.T) {
+	q, pool := sessionTestQueries(t)
+	ctx := context.Background()
+	projectID, envID := seedSessionProject(t, pool)
+	groupID := seedPointerGroup(t, pool, projectID, envID, "friction-pointer", "friction")
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `UPDATE error_groups SET representative_signal_id=NULL WHERE id=$1`, groupID)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM friction_signals WHERE incident_id=$1`, groupID)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM error_groups WHERE id=$1`, groupID)
+	})
+
+	earlySession, representativeSession := newSessionID(t), newSessionID(t)
+	insertReadSession(t, q, pool, projectID, envID, nil, earlySession, time.Now())
+	insertReadSession(t, q, pool, projectID, envID, nil, representativeSession, time.Now())
+	t1 := time.Now().UTC().Truncate(time.Millisecond).Add(-time.Minute)
+	t2 := t1.Add(30 * time.Second)
+	earlyID := seedPointerSignal(t, pool, projectID, envID, groupID, earlySession, "early", t1)
+	representativeID := seedPointerSignal(t, pool, projectID, envID, groupID, representativeSession, "representative", t2)
+	if _, err := pool.Exec(ctx, `UPDATE error_groups SET representative_signal_id=$2 WHERE id=$1`, groupID, representativeID); err != nil {
+		t.Fatal(err)
+	}
+
+	sessionID, anchor, ok, err := q.SessionPointerForGroup(ctx, groupID, projectID)
+	if err != nil || !ok || sessionID != representativeSession || !anchor.Equal(t2) {
+		t.Fatalf("representative pointer = %q %v ok=%v err=%v", sessionID, anchor, ok, err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE sessions SET status='deleting' WHERE id=$1`, representativeSession); err != nil {
+		t.Fatal(err)
+	}
+	sessionID, anchor, ok, err = q.SessionPointerForGroup(ctx, groupID, projectID)
+	if err != nil || !ok || sessionID != earlySession || !anchor.Equal(t1) {
+		t.Fatalf("deleting-session fallback = %q %v ok=%v err=%v", sessionID, anchor, ok, err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE sessions SET status='recording' WHERE id=$1`, representativeSession); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE friction_signals SET superseded_by=$2 WHERE id=$1`, representativeID, earlyID); err != nil {
+		t.Fatal(err)
+	}
+	sessionID, anchor, ok, err = q.SessionPointerForGroup(ctx, groupID, projectID)
+	if err != nil || !ok || sessionID != earlySession || !anchor.Equal(t1) {
+		t.Fatalf("superseded fallback = %q %v ok=%v err=%v", sessionID, anchor, ok, err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE friction_signals SET superseded_by=NULL WHERE id=$1`, representativeID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE friction_signals SET retracted_at=now() WHERE id=$1`, representativeID); err != nil {
+		t.Fatal(err)
+	}
+	sessionID, anchor, ok, err = q.SessionPointerForGroup(ctx, groupID, projectID)
+	if err != nil || !ok || sessionID != earlySession || !anchor.Equal(t1) {
+		t.Fatalf("retraction fallback = %q %v ok=%v err=%v", sessionID, anchor, ok, err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE friction_signals SET adjudication_status='rejected' WHERE id=$1`, earlyID); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, ok, err := q.SessionPointerForGroup(ctx, groupID, projectID); err != nil || ok {
+		t.Fatalf("all-inactive pointer ok=%v err=%v", ok, err)
+	}
+}
+
+func TestWatchableSessionForGroup_CoverageAndCandidateFallback(t *testing.T) {
+	q, pool := sessionTestQueries(t)
+	ctx := context.Background()
+	projectID, envID := seedSessionProject(t, pool)
+	groupID := seedPointerGroup(t, pool, projectID, envID, "watchable-error", "error")
+	frictionID := seedPointerGroup(t, pool, projectID, envID, "watchable-friction", "friction")
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `UPDATE error_groups SET representative_signal_id=NULL WHERE id IN ($1,$2)`, groupID, frictionID)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM friction_signals WHERE incident_id=$1`, frictionID)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM error_events WHERE error_group_id=$1`, groupID)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM error_groups WHERE id IN ($1,$2)`, groupID, frictionID)
+	})
+
+	anchor := time.Now().UTC().Truncate(time.Millisecond).Add(-time.Minute)
+	coveredSession, uncoveredSession := newSessionID(t), newSessionID(t)
+	insertReadSession(t, q, pool, projectID, envID, nil, coveredSession, anchor)
+	insertReadSession(t, q, pool, projectID, envID, nil, uncoveredSession, anchor)
+	spans := [][2]int64{
+		{anchor.Add(-20 * time.Second).UnixMilli(), anchor.Add(-8 * time.Second).UnixMilli()},
+		{anchor.Add(-8 * time.Second).UnixMilli(), anchor.Add(2 * time.Second).UnixMilli()},
+		{anchor.Add(2 * time.Second).UnixMilli(), anchor.Add(16 * time.Second).UnixMilli()},
+	}
+	for i, span := range spans {
+		first, last := span[0], span[1]
+		seedPointerChunk(t, pool, projectID, coveredSession, i, &first, &last, i == 0, true)
+	}
+	oneFirst, oneLast := anchor.UnixMilli(), anchor.UnixMilli()+1
+	seedPointerChunk(t, pool, projectID, uncoveredSession, 0, &oneFirst, &oneLast, true, true)
+	if _, err := pool.Exec(ctx, `INSERT INTO error_events
+		(project_id, environment_id, error_group_id, session_id, "timestamp", error_type, error_message, stack_trace_raw, created_at)
+		VALUES ($1,$2,$3,$4,$5,'TypeError','boom','at test',$6),
+		       ($1,$2,$3,$7,$5,'TypeError','boom','at test',$8)`,
+		projectID, envID, groupID, coveredSession, anchor, anchor.Add(-time.Second), uncoveredSession, anchor); err != nil {
+		t.Fatal(err)
+	}
+
+	sessionID, anchorMs, ok, err := q.WatchableSessionForGroup(ctx, groupID, projectID)
+	if err != nil || !ok || sessionID != coveredSession || anchorMs != anchor.UnixMilli() {
+		t.Fatalf("watchable error pointer = %q/%d ok=%v err=%v", sessionID, anchorMs, ok, err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE session_chunks SET has_full_snapshot=false WHERE session_id=$1`, coveredSession); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE session_chunks SET has_full_snapshot=true WHERE session_id=$1 AND seq=1`, coveredSession); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, ok, err := q.WatchableSessionForGroup(ctx, groupID, projectID); err != nil || ok {
+		t.Fatalf("late full snapshot coverage ok=%v err=%v, want false", ok, err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE session_chunks SET has_full_snapshot=(seq=0) WHERE session_id=$1`, coveredSession); err != nil {
+		t.Fatal(err)
+	}
+	seedPointerChunk(t, pool, projectID, coveredSession, 3, nil, nil, true, true)
+	if sessionID, _, ok, err := q.WatchableSessionForGroup(ctx, groupID, projectID); err != nil || !ok || sessionID != coveredSession {
+		t.Fatalf("NULL-bounded row changed coverage: session=%q ok=%v err=%v", sessionID, ok, err)
+	}
+
+	frictionCovered, frictionUncovered := newSessionID(t), newSessionID(t)
+	insertReadSession(t, q, pool, projectID, envID, nil, frictionCovered, anchor)
+	insertReadSession(t, q, pool, projectID, envID, nil, frictionUncovered, anchor)
+	for i, span := range spans {
+		first, last := span[0], span[1]
+		seedPointerChunk(t, pool, projectID, frictionCovered, i, &first, &last, i == 0, true)
+	}
+	seedPointerChunk(t, pool, projectID, frictionUncovered, 0, &oneFirst, &oneLast, true, true)
+	fallbackID := seedPointerSignal(t, pool, projectID, envID, frictionID, frictionCovered, "watchable-fallback", anchor)
+	representativeID := seedPointerSignal(t, pool, projectID, envID, frictionID, frictionUncovered, "watchable-representative", anchor.Add(time.Second))
+	if _, err := pool.Exec(ctx, `UPDATE error_groups SET representative_signal_id=$2 WHERE id=$1`, frictionID, representativeID); err != nil {
+		t.Fatal(err)
+	}
+	sessionID, anchorMs, ok, err = q.WatchableSessionForGroup(ctx, frictionID, projectID)
+	if err != nil || !ok || sessionID != frictionCovered || anchorMs != anchor.UnixMilli() {
+		t.Fatalf("watchable friction fallback = %q/%d ok=%v err=%v (fallback signal %s)", sessionID, anchorMs, ok, err, fallbackID)
+	}
+
+	if _, err := pool.Exec(ctx, `UPDATE session_chunks SET scrubbed_at=NULL WHERE session_id=$1`, coveredSession); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, ok, err := q.WatchableSessionForGroup(ctx, groupID, projectID); err != nil || ok {
+		t.Fatalf("unscrubbed coverage ok=%v err=%v", ok, err)
+	}
+}
+
 func TestInsertErrorEventAndGroup_PinsSessionWithoutLoweringLaterRetention(t *testing.T) {
 	q, pool := sessionTestQueries(t)
 	ctx := context.Background()

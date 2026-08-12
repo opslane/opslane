@@ -1,4 +1,4 @@
--- 047: per-project action scope. An enabled scope with an empty allowlist
+-- 049: per-project action scope. An enabled scope with an empty allowlist
 -- fails closed: no environment may trigger automatic error investigation.
 -- Session-analysis automation is outside the scope (see
 -- docs/contracts/action-scope.md).

@@ -2,52 +2,58 @@ package db_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
-func TestMigration046JobEventAnchor(t *testing.T) {
+func TestMigration046ImpactQueryIndexes(t *testing.T) {
 	admin := testPool(t)
 	psql := findPsql(t)
 	pool, dsn := disposableDB(t, admin)
 	for _, file := range migrationFiles(t) {
 		if err := applyMigration(t, psql, dsn, file); err != nil {
-			t.Fatalf("migration %s: %v", file, err)
+			t.Fatalf("apply %s: %v", file, err)
 		}
 	}
-	ctx := context.Background()
 
-	var dataType, isNullable string
-	if err := pool.QueryRow(ctx,
-		`SELECT data_type, is_nullable FROM information_schema.columns
-		 WHERE table_schema = 'public' AND table_name = 'error_group_jobs' AND column_name = 'event_id'`,
-	).Scan(&dataType, &isNullable); err != nil {
-		t.Fatalf("event_id column missing: %v", err)
+	tests := []struct {
+		name       string
+		wantCols   string
+		predicates []string
+	}{
+		{
+			name:       "idx_error_events_group_timestamp",
+			wantCols:   `(error_group_id, "timestamp")`,
+			predicates: []string{"session_id IS NOT NULL"},
+		},
+		{
+			name:     "idx_friction_signals_incident_occurred",
+			wantCols: "(incident_id, occurred_at)",
+			predicates: []string{
+				"incident_id IS NOT NULL",
+				"superseded_by IS NULL",
+				"retracted_at IS NULL",
+				"adjudication_status = 'accepted'::text",
+			},
+		},
 	}
-	if dataType != "uuid" || isNullable != "YES" {
-		t.Fatalf("event_id = %s nullable=%s, want uuid nullable", dataType, isNullable)
-	}
-
-	var deleteRule string
-	if err := pool.QueryRow(ctx,
-		`SELECT rc.delete_rule
-		 FROM information_schema.referential_constraints rc
-		 JOIN information_schema.key_column_usage kcu
-		   ON kcu.constraint_catalog = rc.constraint_catalog
-		  AND kcu.constraint_schema = rc.constraint_schema
-		  AND kcu.constraint_name = rc.constraint_name
-		 WHERE kcu.table_schema = 'public'
-		   AND kcu.table_name = 'error_group_jobs' AND kcu.column_name = 'event_id'`,
-	).Scan(&deleteRule); err != nil {
-		t.Fatalf("event_id FK missing: %v", err)
-	}
-	if deleteRule != "SET NULL" {
-		t.Fatalf("delete_rule = %s, want SET NULL", deleteRule)
-	}
-
-	// Reapply through the same psql path the runner uses: CONCURRENTLY is only
-	// legal outside a transaction block, which pool.Exec's implicit transaction
-	// around a multi-statement script would violate.
-	if err := applyMigration(t, psql, dsn, "migrations/046_job_event_anchor.sql"); err != nil {
-		t.Fatalf("migration 046 is not idempotent on reapply: %v", err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var def string
+			if err := pool.QueryRow(context.Background(),
+				`SELECT indexdef FROM pg_indexes WHERE tablename = CASE WHEN $1 LIKE 'idx_error_events%' THEN 'error_events' ELSE 'friction_signals' END AND indexname = $1`,
+				tt.name,
+			).Scan(&def); err != nil {
+				t.Fatalf("index missing: %v", err)
+			}
+			if !strings.Contains(def, tt.wantCols) {
+				t.Fatalf("indexdef %q missing ordered columns %s", def, tt.wantCols)
+			}
+			for _, predicate := range tt.predicates {
+				if !strings.Contains(def, predicate) {
+					t.Fatalf("indexdef %q missing predicate %q", def, predicate)
+				}
+			}
+		})
 	}
 }

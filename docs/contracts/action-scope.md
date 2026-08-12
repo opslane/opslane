@@ -64,9 +64,9 @@ is a known first-version limitation.
 
 Commit order is not safe rollout order:
 
-1. Evidence anchoring: deploy migration 046, then the NULL-tolerant worker, then
+1. Evidence anchoring: deploy migration 048, then the NULL-tolerant worker, then
    ingestion that stamps `event_id`.
-2. Action scope: deploy migration 047, then gate-bearing ingestion everywhere,
+2. Action scope: deploy migration 049, then gate-bearing ingestion everywhere,
    then expose the settings PATCH and dashboard UI.
 
 Do not let customers configure a scope while any ingest instance can ignore it.

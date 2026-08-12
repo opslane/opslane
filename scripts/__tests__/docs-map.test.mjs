@@ -127,6 +127,7 @@ test('manual contract mappings cover direct wire, replay, and lease implementati
     'docs/contracts/C4-amendments.md',
   ]);
   assert.deepEqual(manualDocsForChangedPaths(['packages/ingestion/db/queries.go']), [
+    'docs/contracts/action-scope.md',
     'docs/contracts/reliability.md',
   ]);
   assert.deepEqual(manualDocsForChangedPaths(['packages/worker/src/setup-pr.ts']), [

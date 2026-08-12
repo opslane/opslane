@@ -413,7 +413,15 @@ function buildLedgerLines(input: PRInput): string[] | null {
 
 export function buildVerificationSection(input: PRInput): string {
   const ledgerLines = buildLedgerLines(input);
-  if (ledgerLines) return `${VERIFICATION_START}\n${ledgerLines.join('\n')}\n${VERIFICATION_END}`;
+  if (ledgerLines) {
+    // The ledger proves the code change; for friction it cannot prove the
+    // customer-visible friction is gone, so the suggestion caveat survives
+    // above the executed-check lines.
+    const lines = input.kind === 'friction'
+      ? ['**Confidence:** Suggestion · ⚠️ The friction itself was not re-verified — review before merging', ...ledgerLines]
+      : ledgerLines;
+    return `${VERIFICATION_START}\n${lines.join('\n')}\n${VERIFICATION_END}`;
+  }
   let content: string;
   if (input.kind === 'friction') {
     const lines = [

@@ -241,6 +241,9 @@ describe('event-to-pr reliability system tracer', () => {
     expect(jobs.rows).toEqual([
       { job_type: 'investigate', status: 'completed' },
       { job_type: 'fix', status: 'completed' },
+      // C2: automated PRs open as drafts, and a draft delivery enqueues the CI
+      // watcher that will report the draft's checks back onto the incident.
+      { job_type: 'ci_watch', status: 'pending' },
     ]);
 
     // Reading an incident needs a signed-in user, not the ingest key. The
@@ -254,23 +257,28 @@ describe('event-to-pr reliability system tracer', () => {
     expect(incident).toMatchObject({
       id: accepted.group_id,
       project_id: tenant.projectId,
-      status: 'pr_created',
+      // C2 terminal posture: automated PRs are drafts, always.
+      status: 'pr_draft',
       confidence: 'high',
       pr_url: `https://github.test/${githubRepo}/pull/42`,
     });
     expect(await scanReliabilityInvariants(db)).toEqual([]);
 
-    // 8 calls under the citation + fail-first contracts: investigation
+    // 9 calls under the citation + fail-first + judge contracts: investigation
     // read_file + submit_diagnosis, fix edit/test/declare_failing_test/finish,
-    // judge, and narrative. Anchor the judge call by content rather than
-    // hard-coding every position.
-    expect(providers.anthropicJournal).toHaveLength(8);
+    // the diff judge, C2's instrument judge (its own session), and narrative.
+    // Anchor the judge calls by content rather than hard-coding positions.
+    expect(providers.anthropicJournal).toHaveLength(9);
     expect(toolNames(providers.anthropicJournal[0]!.body)).toContain('submit_diagnosis');
     const judgeCalls = providers.anthropicJournal.filter(
       (entry) => toolNames(entry.body).includes('score_diff'),
     );
     expect(judgeCalls).toHaveLength(1);
     expect(toolNames(judgeCalls[0]!.body)).toEqual(['score_diff']);
+    const instrumentJudgeCalls = providers.anthropicJournal.filter(
+      (entry) => toolNames(entry.body).includes('submit_judge_verdict'),
+    );
+    expect(instrumentJudgeCalls).toHaveLength(1);
     // Durable delivery reconciles before it creates: the pipeline looks for an
     // existing open PR on the stable branch, probes the branch head (absent →
     // push), and createPR runs its own idempotency lookup before the one POST.

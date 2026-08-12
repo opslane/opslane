@@ -3,6 +3,7 @@ package priority
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sort"
 	"time"
@@ -27,6 +28,11 @@ const sweepAdvisoryLockKey int64 = 0x7072696F7269
 // grow without limit inside the process that also serves all HTTP traffic.
 // The winner is by far the most frequent URL, so a deep tail cannot change it.
 const maxURLsPerGroup = 20
+
+const (
+	impactWindowDays = 30
+	impactRecoveryMs = 60_000
+)
 
 // Raw URLs for open error groups, capped per group. Ranking happens in SQL so
 // the tail never reaches this process.
@@ -165,6 +171,95 @@ FROM (
 ) sub
 WHERE eg.id = sub.id`
 
+// ImpactRollupSelectSQL is shared with the planner regression test so the
+// measured query is exactly the query production materializes. Occurrence
+// time and chunk bounds are both client-clock values; created_at is not a
+// valid substitute for this arithmetic.
+var ImpactRollupSelectSQL = fmt.Sprintf(`
+WITH open_groups AS (
+  SELECT id, project_id, kind
+  FROM error_groups
+  WHERE status NOT IN ('resolved','merged','archived')
+), err_sess AS (
+  SELECT g.id AS group_id, e.project_id, e.session_id,
+         (max(extract(epoch FROM e."timestamp")) * 1000)::bigint AS last_hit_ms
+  FROM open_groups g
+  JOIN error_events e ON e.error_group_id = g.id AND e.project_id = g.project_id
+  WHERE g.kind = 'error'
+    AND e.session_id IS NOT NULL
+    AND e."timestamp" > now() - interval '%d days'
+  GROUP BY 1, 2, 3
+), fric_sess AS (
+  SELECT g.id AS group_id, fs.project_id, fs.session_id,
+         (max(extract(epoch FROM fs.occurred_at)) * 1000)::bigint AS last_hit_ms
+  FROM open_groups g
+  JOIN friction_signals fs ON fs.incident_id = g.id AND fs.project_id = g.project_id
+  WHERE g.kind = 'friction'
+    AND fs.adjudication_status = 'accepted'
+    AND fs.retracted_at IS NULL
+    AND fs.superseded_by IS NULL
+    AND fs.occurred_at > now() - interval '%d days'
+  GROUP BY 1, 2, 3
+), sess AS (
+  SELECT * FROM err_sess
+  UNION ALL
+  SELECT * FROM fric_sess
+), chunks AS (
+  -- Per-session LATERAL against the (session_id, seq) PK: the rollup's chunk
+  -- reads stay proportional to the in-window session set, never a scan of the
+  -- always-on-recording chunk table (the semi-join form left the planner free
+  -- to hash-join a full scan of scrubbed chunks every sweep).
+  SELECT sk.project_id, sk.session_id, agg.last_activity_ms
+  FROM (SELECT DISTINCT project_id, session_id FROM sess) sk
+  CROSS JOIN LATERAL (
+    SELECT max(c.last_event_ms) AS last_activity_ms
+    FROM session_chunks c
+    WHERE c.session_id = sk.session_id AND c.project_id = sk.project_id
+      AND c.scrubbed_at IS NOT NULL
+      AND c.first_event_ms IS NOT NULL
+      AND c.last_event_ms IS NOT NULL
+  ) agg
+  WHERE agg.last_activity_ms IS NOT NULL
+)
+SELECT sess.group_id,
+       count(*)::bigint AS visits,
+       (count(*) FILTER (
+          WHERE chunks.last_activity_ms >= sess.last_hit_ms + %d
+       ))::bigint AS recovered
+FROM sess
+JOIN chunks ON chunks.project_id = sess.project_id
+           AND chunks.session_id = sess.session_id
+GROUP BY 1`, impactWindowDays, impactWindowDays, impactRecoveryMs)
+
+const stampImpactSQL = `
+UPDATE error_groups g SET
+  impact_visits = r.visits,
+  impact_visits_recovered = r.recovered,
+  impact_class = CASE
+    WHEN r.recovered = 0 THEN 'blocked'
+    WHEN r.recovered < r.visits THEN 'degraded'
+    ELSE 'invisible'
+  END,
+  impact_computed_at = now()
+FROM impact_rollup r
+WHERE g.id = r.group_id
+  AND g.status NOT IN ('resolved','merged','archived')`
+
+const clearStaleImpactSQL = `
+UPDATE error_groups g SET
+  impact_class = NULL,
+  impact_visits = NULL,
+  impact_visits_recovered = NULL,
+  impact_computed_at = NULL
+WHERE g.status NOT IN ('resolved','merged','archived')
+  AND (g.impact_class IS NOT NULL
+       OR g.impact_visits IS NOT NULL
+       OR g.impact_visits_recovered IS NOT NULL
+       OR g.impact_computed_at IS NOT NULL)
+  AND NOT EXISTS (
+    SELECT 1 FROM impact_rollup r WHERE r.group_id = g.id
+  )`
+
 const enqueueRouteMapJobsSQL = `
 INSERT INTO error_group_jobs (project_id, job_type)
 SELECT p.id, 'route_map' FROM projects p
@@ -260,10 +355,40 @@ func (s *Sweeper) RunOnce(ctx context.Context) (int, error) {
 		}
 		updated += int(tag.RowsAffected())
 	}
+	if err := s.stampImpact(ctx, conn); err != nil {
+		return updated, fmt.Errorf("impact: %w", err)
+	}
 	if _, err := conn.Exec(ctx, enqueueRouteMapJobsSQL); err != nil {
 		return updated, err
 	}
 	return updated, nil
+}
+
+// stampImpact materializes both occurrence lanes and applies the stamp and
+// stale clear atomically on the advisory-lock connection held by RunOnce.
+func (s *Sweeper) stampImpact(ctx context.Context, conn *pgxpool.Conn) error {
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+
+	if _, err := tx.Exec(ctx, `CREATE TEMPORARY TABLE impact_rollup ON COMMIT DROP AS `+ImpactRollupSelectSQL); err != nil {
+		return fmt.Errorf("rollup: %w", err)
+	}
+	stamped, err := tx.Exec(ctx, stampImpactSQL)
+	if err != nil {
+		return fmt.Errorf("stamp: %w", err)
+	}
+	cleared, err := tx.Exec(ctx, clearStaleImpactSQL)
+	if err != nil {
+		return fmt.Errorf("clear stale: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	slog.Debug("priority impact pass", "groups_stamped", stamped.RowsAffected(), "groups_cleared", cleared.RowsAffected())
+	return nil
 }
 
 type routeTally struct {

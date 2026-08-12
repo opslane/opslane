@@ -1,4 +1,4 @@
--- 046: jobs anchor their evidence to the triggering event.
+-- 048: jobs anchor their evidence to the triggering event.
 -- ON DELETE SET NULL lets retention remove old events without breaking job
 -- history; workers fall back to sample_event_id for historical jobs.
 ALTER TABLE error_group_jobs
