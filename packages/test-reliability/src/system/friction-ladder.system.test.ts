@@ -110,6 +110,35 @@ describe('friction ladder system tracer (provider twins)', () => {
       [tenant.projectId],
     );
     const groupId = group.rows[0]!.id;
+
+    // C3: the friction auto-fix rung reads the live signal-session impact bar
+    // (>=1 identified user or >=3 anon sessions in the last 7 days) instead of
+    // the model's confidence, so the incident needs recorded reach before any
+    // automated attempt is authorized.
+    const environment = await db.query<{ id: string }>(
+      `SELECT id FROM environments WHERE project_id = $1 LIMIT 1`,
+      [tenant.projectId],
+    );
+    const environmentId = environment.rows[0]!.id;
+    await db.query(
+      `INSERT INTO sessions (id, project_id, environment_id, started_at, status)
+       VALUES ('friction-ladder-session', $1, $2, now() - interval '5 minutes', 'closed')`,
+      [tenant.projectId, environmentId],
+    );
+    const endUser = await db.query<{ id: string }>(
+      `INSERT INTO end_users (project_id, external_user_id, email)
+       VALUES ($1, 'friction-ladder-user', 'ladder@fixture.invalid') RETURNING id`,
+      [tenant.projectId],
+    );
+    await db.query(
+      `INSERT INTO friction_signals
+         (session_id, project_id, environment_id, end_user_id, rule_version, signal_type,
+          fingerprint, page_url_normalized, occurred_at, adjudication_status, incident_id)
+       VALUES ('friction-ladder-session', $1, $2, $3, 3, 'rage_click',
+               'fp-friction-ladder-signal', '/settings', now() - interval '5 minutes', 'accepted', $4)`,
+      [tenant.projectId, environmentId, endUser.rows[0]!.id, groupId],
+    );
+
     await db.query(
       `INSERT INTO error_group_jobs (error_group_id, project_id, job_type) VALUES ($1, $2, 'investigate')`,
       [groupId, tenant.projectId],
@@ -176,7 +205,8 @@ describe('friction ladder system tracer (provider twins)', () => {
       [groupId],
     );
     expect(afterFix.rows[0]).toEqual({
-      status: 'pr_created',
+      // C2 terminal posture: automated PRs are drafts, always.
+      status: 'pr_draft',
       pr_number: pull.number,
       pr_fix_job_id: fixJob!.id,
     });

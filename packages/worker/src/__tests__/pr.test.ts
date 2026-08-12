@@ -345,6 +345,25 @@ describe('buildPRBody', () => {
     expect(body).not.toContain('**Confidence:** High · ✅ Tests passing');
   });
 
+  it('keeps the friction caveat above a ledger-rendered verification section', () => {
+    const common = {
+      jobId: 'job-1', projectId: 'proj-1', runId: 'run-1',
+      workdirDirty: false, discovered: 1, passed: 1, failed: 0, skipped: 0,
+      truncated: false, timedOut: false, notRun: [] as string[],
+    };
+    const body = buildPRBody(makeInput({
+      kind: 'friction',
+      tierRecord: { tier: 'attempted', declaredTest: null, reproductionImpossibleReason: null },
+      ledger: [{ ...common, entrySeq: 1, command: 'vitest run', commitSha: 'fix1234567890' }],
+      ledgerRoles: [{ entrySeq: 1, role: 'suite_post_patch' }],
+    }));
+
+    // The ledger proves the code change; it cannot prove the friction is gone.
+    expect(body).toContain('friction itself was not re-verified');
+    expect(body).toContain('suite: 1 passed');
+    expect(body.indexOf('friction itself was not re-verified')).toBeLessThan(body.indexOf('suite: 1 passed'));
+  });
+
   it('renders the typed narrative in context-first order', () => {
     const body = buildPRBody(makeInput({
       narrative: {
