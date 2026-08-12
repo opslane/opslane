@@ -21,7 +21,9 @@ describe.skipIf(!process.env['DATABASE_URL'])('fix job source attribution', () =
 
   afterAll(async () => {
     await getPool().query('DELETE FROM error_group_jobs WHERE project_id = $1', [projectId]);
+    await getPool().query('DELETE FROM error_events WHERE project_id = $1', [projectId]);
     await getPool().query('DELETE FROM error_groups WHERE project_id = $1', [projectId]);
+    await getPool().query('DELETE FROM environments WHERE project_id = $1', [projectId]);
     await getPool().query('DELETE FROM projects WHERE id = $1', [projectId]);
     await getPool().query('DELETE FROM orgs WHERE id = $1', [orgId]);
     await closePool();
@@ -99,6 +101,29 @@ describe.skipIf(!process.env['DATABASE_URL'])('fix job source attribution', () =
 
   it('repoints a reused pending automated fix to the newest investigation', async () => {
     const data = await fixture(true);
+    // Anchor each investigation to its own event: the repoint must move the
+    // evidence anchor WITH the source, never leave decision B reading event A.
+    const environment = await getPool().query<{ id: string }>(
+      `INSERT INTO environments (project_id, name)
+       VALUES ($1, 'repoint-test')
+       ON CONFLICT (project_id, name) DO UPDATE SET name = EXCLUDED.name
+       RETURNING id`,
+      [projectId],
+    );
+    const eventIds: string[] = [];
+    for (const message of ['A', 'B']) {
+      const event = await getPool().query<{ id: string }>(
+        `INSERT INTO error_events
+           (project_id, environment_id, error_group_id, timestamp, error_type, error_message, stack_trace_raw)
+         VALUES ($1, $2, $3, now(), 'TypeError', $4, 'at app.js:1:1')
+         RETURNING id`,
+        [projectId, environment.rows[0]!.id, data.groupId, message],
+      );
+      eventIds.push(event.rows[0]!.id);
+    }
+    await getPool().query(`UPDATE error_group_jobs SET event_id = $2 WHERE id = $1`, [data.sourceJobId, eventIds[0]]);
+    await getPool().query(`UPDATE error_group_jobs SET event_id = $2 WHERE id = $1`, [data.otherSourceJobId, eventIds[1]]);
+
     const first = await updateGroupAndCreateFixJob(
       data.groupId,
       projectId,
@@ -113,11 +138,12 @@ describe.skipIf(!process.env['DATABASE_URL'])('fix job source attribution', () =
       { rootCause: 'x', confidence: 'high', sourceJobId: data.otherSourceJobId },
       data.lease,
     );
-    const row = await getPool().query<{ source_job_id: string | null }>(
-      'SELECT source_job_id FROM error_group_jobs WHERE id = $1',
+    const row = await getPool().query<{ source_job_id: string | null; event_id: string | null }>(
+      'SELECT source_job_id, event_id FROM error_group_jobs WHERE id = $1',
       [data.existingFixJobId],
     );
     expect(row.rows[0]?.source_job_id).toBe(data.otherSourceJobId);
+    expect(row.rows[0]?.event_id).toBe(eventIds[1]);
   });
 
   it('does not repoint a fix job after it has been claimed', async () => {

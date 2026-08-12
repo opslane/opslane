@@ -58,6 +58,17 @@ The environment used when telemetry omits a label or supplies an invalid one.
 Every project begins with `production` as its default.
 _Avoid_: "key environment", "production fallback"
 
+**Action scope** (decided 2026-08-12; `docs/contracts/action-scope.md`):
+A per-project limit on which environments may trigger automatic error
+investigation. It gates job creation and `issue.created` only — events,
+rollups, affected users, and the sample always record. Enabled with an empty
+selection it fails closed; guided/human fix jobs bypass it. Environments
+themselves are never allowlisted: ingestion and environment creation are
+unaffected, which is why "environment allowlist" stays an avoided term for
+the Environment concept — the scoped thing is automation, not the environment.
+_Avoid_: "approved environment"; "environment allowlist" as a standalone term
+(say "action scope")
+
 **Usage ledger** (decided 2026-08-08; ADR-0001):
 The insert-only Postgres record of what a job spent: one row per
 (job, execution, phase, model) carrying provider-returned token counts and

@@ -382,6 +382,7 @@ export interface ClaimedJob {
   id: string;
   workerId: string;
   errorGroupId: string | null;
+  eventId: string | null;
   sourceId: string | null;
   sourceJobId?: string | null;
   projectId: string;
@@ -485,6 +486,7 @@ export async function claimJob(
   let result: pg.QueryResult<{
     id: string;
     error_group_id: string | null;
+    event_id: string | null;
     source_id: string | null;
     source_job_id: string | null;
     project_id: string;
@@ -538,7 +540,7 @@ export async function claimJob(
        LIMIT 1
        FOR UPDATE SKIP LOCKED
      )
-     RETURNING id, error_group_id, source_id, source_job_id, project_id, job_type, attempts, max_attempts, guidance,
+     RETURNING id, error_group_id, event_id, source_id, source_job_id, project_id, job_type, attempts, max_attempts, guidance,
                worker_id, lease_generation::text AS lease_generation,
                triggered_by, session_id, platform, payload`,
       [workerId, leaseDurationMs / 1000, sessionAnalysisCap]
@@ -558,6 +560,7 @@ export async function claimJob(
     id: row.id,
     workerId: row.worker_id,
     errorGroupId: row.error_group_id,
+    eventId: row.event_id ?? null,
     sourceId: row.source_id,
     sourceJobId: row.source_job_id,
     projectId: row.project_id,
@@ -573,6 +576,13 @@ export async function claimJob(
       : row.platform === 'javascript' ? 'javascript' : null,
     payload: row.payload,
   };
+}
+
+export function resolveEvidenceEventId(
+  job: { eventId: string | null },
+  group: { sample_event_id: string | null },
+): string | null {
+  return job.eventId ?? group.sample_event_id ?? null;
 }
 
 export interface QueueDepthRow {
@@ -2199,10 +2209,16 @@ export async function updateGroupAndCreateFixJob(
         // group's kind fixes which lane creates AND repoints it, so the values
         // written here always match what the create branch wrote.
         await client.query(
+          // event_id repoints with source_job_id: the fix must load evidence
+          // from the SAME investigation that authorizes it, never event A's
+          // stack under decision B's diagnosis. NULL source falls back to the
+          // sample, matching the create branch.
           `UPDATE error_group_jobs
            SET platform = $2,
                payload = $3::jsonb,
                source_job_id = $4,
+               event_id = (SELECT j.event_id FROM error_group_jobs j
+                           WHERE j.id = $4 AND j.project_id = $5),
                updated_at = now()
            WHERE id = $1`,
           [
@@ -2210,6 +2226,7 @@ export async function updateGroupAndCreateFixJob(
             fields.platform ?? 'javascript',
             fields.diagnosis === undefined ? null : JSON.stringify({ diagnosis: fields.diagnosis }),
             fields.sourceJobId ?? null,
+            projectId,
           ],
         );
       }
@@ -2251,9 +2268,15 @@ export async function updateGroupAndCreateFixJob(
       );
     }
     const result = await client.query<{ id: string }>(
+      // The fix inherits the investigate job's evidence anchor via
+      // source_job_id, keeping the contract that every automatically enqueued
+      // job stores its triggering event (docs/contracts/action-scope.md);
+      // without it a later out-of-scope occurrence could move sample_event_id
+      // under the fix. NULL source (historical jobs) falls back to the sample.
       `INSERT INTO error_group_jobs
-         (error_group_id, project_id, job_type, triggered_by, platform, payload, source_job_id)
-       VALUES ($1, $2, 'fix', 'auto', $3, $4::jsonb, $5)
+         (error_group_id, project_id, job_type, triggered_by, platform, payload, source_job_id, event_id)
+       VALUES ($1, $2, 'fix', 'auto', $3, $4::jsonb, $5,
+               (SELECT event_id FROM error_group_jobs WHERE id = $5 AND project_id = $2))
        RETURNING id`,
       [
         errorGroupId,

@@ -94,7 +94,7 @@ func (d *Dependencies) OnboardingSetup(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(map[string]any{
-		"project":     toProjectJSON(*project),
+		"project":     toProjectJSON(*project, false, []string{}),
 		"environment": environmentJSON{ID: env.ID, ProjectID: env.ProjectID, Name: env.Name, CreatedAt: env.CreatedAt.Format(time.RFC3339)},
 		"api_key": map[string]any{
 			"id":      apiKey.ID,

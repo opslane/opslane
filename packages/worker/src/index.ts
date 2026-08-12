@@ -15,6 +15,7 @@ import {
   updateJobTraceUrl,
   getQueueDepth,
   recordJobUsage,
+  resolveEvidenceEventId,
 } from './db.js';
 import { buildReason, reasonCodeForDecision, reproductionRemediation } from './reason-codes.js';
 import { logger, safeErrorMessage, setWorkerId } from './logger.js';
@@ -451,6 +452,26 @@ export async function processJobInner(job: ClaimedJob, signal: AbortSignal): Pro
 }
 
 /**
+ * Loads the evidence event for a job: the anchored triggering event when it
+ * still exists, else the group's mutable sample. Retention can delete the
+ * anchor between claim and read (the FK's SET NULL lands after the claim
+ * snapshot), and analyzing with the sample beats analyzing with no event.
+ */
+async function loadEvidenceEvent(
+  job: { eventId: string | null; projectId: string },
+  group: { sample_event_id: string | null },
+) {
+  const anchorEventId = resolveEvidenceEventId(job, group);
+  let event = anchorEventId
+    ? await db.getErrorEvent(anchorEventId, job.projectId)
+    : null;
+  if (!event && group.sample_event_id && group.sample_event_id !== anchorEventId) {
+    event = await db.getErrorEvent(group.sample_event_id, job.projectId);
+  }
+  return event;
+}
+
+/**
  * Investigation job: runs codebase-aware investigation, stores results,
  * and routes based on confidence (high → auto-fix, medium/low → investigated).
  */
@@ -482,9 +503,7 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
     return;
   }
 
-  const event = group.sample_event_id
-    ? await db.getErrorEvent(group.sample_event_id, job.projectId)
-    : null;
+  const event = await loadEvidenceEvent(job, group);
   const customerRuntime = parseRuntimeInfo(event?.context ?? '');
 
   // Pre-clone guard: errors with no application stack frames (cross-origin
@@ -1157,9 +1176,7 @@ export async function processFixJob(job: ClaimedJob & { errorGroupId: string }, 
     }
   }
 
-  const event = group.sample_event_id
-    ? await db.getErrorEvent(group.sample_event_id, job.projectId)
-    : null;
+  const event = await loadEvidenceEvent(job, group);
   const customerRuntime = parseRuntimeInfo(event?.context ?? '');
   const resolvedStack = event
     ? await resolveStackForEvent(event, job.projectId, platform)

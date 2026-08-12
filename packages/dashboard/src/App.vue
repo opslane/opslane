@@ -16,6 +16,9 @@ const user = ref<AuthUser | null>(null);
 const projectName = ref(localStorage.getItem('opslane_project_name') ?? '');
 const projects = ref<Project[]>([]);
 const activeProjectId = ref(getProjectId());
+const activeProject = computed(() =>
+  projects.value.find((project) => project.id === activeProjectId.value) ?? null,
+);
 const mobileNavOpen = ref(false);
 // Session hint, not profile state: getMe() can fail while the local auth flag
 // persists, and the user still needs a way to sign out of that stale session.
@@ -185,7 +188,13 @@ watch(
       :class="!isFullPage ? 'px-4 py-6 sm:px-6 md:ml-56 md:px-8 md:py-8' : ''"
     >
       <div :class="!isFullPage ? 'mx-auto w-full max-w-7xl' : ''">
-        <router-view :key="`${activeProjectId}:${$route.fullPath}`" />
+        <router-view v-slot="{ Component }">
+          <component
+            :is="Component"
+            :key="`${activeProjectId}:${$route.fullPath}`"
+            :default-environment-id="activeProject?.default_environment_id"
+          />
+        </router-view>
       </div>
     </main>
   </div>

@@ -4,6 +4,38 @@ Deferred work with enough context to pick up cold. Add items with What / Why / P
 
 ---
 
+## Polish the action-scope settings section to match the page's idiom
+
+**What:** Five review findings on the new "Limit automatic error investigation" section in `packages/dashboard/src/views/Settings.vue` and one copy issue elsewhere: (1) the enable control is a bare checkbox while the page's enable/disable idiom is the styled `role="switch"` used by "Draft PRs for unverified fixes"; (2) the section has no `<h3>` heading, so its title lives inside the checkbox label and is invisible to screen-reader heading navigation; (3) non-admins see disabled controls with no "Only admins and owners can change this" hint, unlike sibling sections; (4) the section requires an explicit "Save automation scope" click while every sibling setting saves on change, with no dirty-state indicator; (5) `IncidentLifecycle.vue:13` says "Ready for investigation." for status `new`, which is now misleading for dormant out-of-scope groups that will not be investigated until an in-scope event arrives.
+
+**Why:** All cosmetic or copy-level; none block the feature. Left as-is the section works but reads inconsistent, and the lifecycle copy can mislead scoped-project users into waiting for an investigation that is deliberately not coming.
+
+**Pros:** Each item is small and independent; (1)–(3) are direct pattern copies from the same file.
+
+**Cons:** (4) is a real interaction-model decision (auto-save vs deferred save for a multi-checkbox control); (5) needs project scope state threaded into a component that today only knows the status string.
+
+**Context:** Found during `/review` of the environment-scoping branch on 2026-08-12 (design specialist findings). The unsaved-edits-wiped-by-sibling-saves bug from the same review was already fixed in that branch (`actionScopeServerState` guard in Settings.vue).
+
+**Depends on:** Nothing.
+
+---
+
+## Gate session automation by environment (action scope follow-up)
+
+**What:** `session_analysis` enqueue sites (`packages/ingestion/db/sessions.go:381` and `:609`, `packages/ingestion/db/sessions_read.go:205`) do not consult `project_action_environments`, so scoped projects still get session analysis — and, under `auto_fix`/`auto_fix_ux` friction autonomy, potentially auto-PRs — from out-of-scope environments.
+
+**Why:** A customer who scopes automation to `production` reasonably expects staging sessions to stop spending LLM budget. V1 deliberately narrows the promise instead (Settings copy says "automatic error investigation"; `docs/contracts/action-scope.md` § "What the scope does not cover" documents the exclusion), but the cost leak is real.
+
+**Pros:** Closes the gap between the intuitive reading of the setting and its behavior; sessions already carry `environment_id`, so the gate is a join against the allowlist mirroring `eventInActionScope`.
+
+**Cons:** Session-close paths are batch UPDATE...INSERT statements, so the gate must be folded into set-based SQL, not a per-row helper; needs its own dormant/activation semantics decision (probably none — just skip enqueue).
+
+**Context:** Red-team finding from `/review` on 2026-08-12. The error-pipeline gate (S3) landed in the environment-scoping branch; this is the S4-adjacent follow-up. A cross-model merge review added a second reason to prioritize S4: C2's auto-fix policy gate (`getGroupImpactBar`) reads affected-user counts that include out-of-scope occurrences, so a staging identified user can help an in-scope production incident clear the impact bar (`docs/contracts/action-scope.md` § "What the scope does not cover" documents this).
+
+**Depends on:** Environment-scoping branch landing (migration 049 provides the allowlist table).
+
+---
+
 ## Update Sonnet 5 pricing when the introductory rate expires on 2026-08-31
 
 **What:** Change `claude-sonnet-5` from the introductory `{ input: 2, output: 10, cacheWrite: 2.50, cacheRead: 0.20 }` to list `{ input: 3, output: 15, cacheWrite: 3.75, cacheRead: 0.30 }` in BOTH pricing tables: `packages/worker/src/harness/agent-loop.ts` (`MODEL_PRICING`) and `packages/worker/src/investigate.ts` (`MODEL_PRICING`). Optionally collapse the two tables onto the exported `pricingFor()` so the next rate change is a one-file edit.

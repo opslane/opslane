@@ -28,6 +28,7 @@ const job: ClaimedJob = {
   id: 'job-1',
   workerId: 'worker-1',
   errorGroupId: null,
+  eventId: null,
   sourceId: null,
   projectId: 'project-1',
   jobType: 'route_map',

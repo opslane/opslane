@@ -17,6 +17,7 @@ export const PUBLISHED_DOCS_POLICY = Object.freeze({
   deterministic: Object.freeze(['docs/reference/**/*.md']),
   manual: Object.freeze([
     'docs/contracts/C4-amendments.md',
+    'docs/contracts/action-scope.md',
     'docs/contracts/events.md',
     'docs/contracts/reliability.md',
   ]),
@@ -27,6 +28,15 @@ export const PUBLISHED_DOCS_POLICY = Object.freeze({
 // mappings never send a contract to the LLM; they only surface a deterministic
 // review reminder when code that can change the promise moves.
 export const MANUAL_DOC_COVERS = Object.freeze({
+  'docs/contracts/action-scope.md': Object.freeze([
+    'packages/ingestion/db/queries.go',
+    'packages/ingestion/db/environments.go',
+    'packages/ingestion/db/migrations/048_job_event_anchor.sql',
+    'packages/ingestion/db/migrations/049_action_scope.sql',
+    'packages/ingestion/handler/read_api.go',
+    'packages/worker/src/db.ts',
+    'packages/worker/src/index.ts',
+  ]),
   'docs/contracts/C4-amendments.md': Object.freeze([
     'packages/sdk/package.json',
     'packages/sdk/src/replay.ts',
