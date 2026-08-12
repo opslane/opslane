@@ -26,6 +26,7 @@ import {
   loadDiagnosisDecision,
   loadDiagnosisDecisionForSource,
   getGroupImpactBar,
+  getFrictionGroupImpactBar,
   insertFixRunLedger,
 } from '../db.js';
 import { createLedgerRecorder } from '../verification-ledger.js';
@@ -455,6 +456,75 @@ describeDb('db.ts integration tests', () => {
       expect(await getGroupImpactBar(errorGroupId, testProjectId)).toMatchObject({
         identifiedUsers: 1,
         eligible: true,
+      });
+    });
+
+    it('uses accepted active friction sessions and the server-observed seven-day window', async () => {
+      const environment = await testPool.query<{ id: string }>(
+        `INSERT INTO environments (project_id, name) VALUES ($1, $2) RETURNING id`,
+        [testProjectId, `friction-impact-${crypto.randomUUID()}`],
+      );
+      const user = await testPool.query<{ id: string }>(
+        `INSERT INTO end_users (project_id, external_user_id) VALUES ($1, $2) RETURNING id`,
+        [testProjectId, `friction-impact-user-${crypto.randomUUID()}`],
+      );
+      const seedGroup = async (label: string): Promise<string> => {
+        const result = await testPool.query<{ id: string }>(
+          `INSERT INTO error_groups
+             (project_id, environment_id, fingerprint, title, first_seen, last_seen, status, kind)
+           VALUES ($1, $2, $3, $3, now(), now(), 'insight', 'friction') RETURNING id`,
+          [testProjectId, environment.rows[0]!.id, `${label}-${crypto.randomUUID()}`],
+        );
+        return result.rows[0]!.id;
+      };
+      const seedSignal = async (options: {
+        groupId: string; sessionId: string; fingerprint: string;
+        endUserId?: string; status?: string; retracted?: boolean; old?: boolean;
+      }): Promise<void> => {
+        await testPool.query(
+          `INSERT INTO sessions (id, project_id, environment_id, started_at)
+           VALUES ($1, $2, $3, now()) ON CONFLICT (id) DO NOTHING`,
+          [options.sessionId, testProjectId, environment.rows[0]!.id],
+        );
+        await testPool.query(
+          `INSERT INTO friction_signals
+             (session_id, project_id, environment_id, end_user_id, rule_version, signal_type,
+              fingerprint, page_url_normalized, occurred_at, adjudication_status, incident_id,
+              retracted_at, created_at)
+           VALUES ($1,$2,$3,$4,1,'dead_click',$5,'/impact',now(),$6,$7,
+                   CASE WHEN $8 THEN now() ELSE NULL END,
+                   CASE WHEN $9 THEN now()-interval '8 days' ELSE now() END)`,
+          [options.sessionId, testProjectId, environment.rows[0]!.id, options.endUserId ?? null,
+            options.fingerprint, options.status ?? 'accepted', options.groupId,
+            options.retracted ?? false, options.old ?? false],
+        );
+      };
+
+      const identified = await seedGroup('identified');
+      const mixedSession = `mixed-${crypto.randomUUID()}`;
+      await seedSignal({ groupId: identified, sessionId: mixedSession, fingerprint: 'identified', endUserId: user.rows[0]!.id });
+      await seedSignal({ groupId: identified, sessionId: mixedSession, fingerprint: 'anonymous-in-mixed' });
+      await expect(getFrictionGroupImpactBar(identified, testProjectId)).resolves.toEqual({
+        identifiedUsers: 1, recentAnonSessions: 0, eligible: true,
+      });
+
+      const anonymous = await seedGroup('anonymous');
+      for (let i = 0; i < 3; i++) {
+        await seedSignal({ groupId: anonymous, sessionId: `anon-${i}-${crypto.randomUUID()}`, fingerprint: `anon-${i}` });
+      }
+      await expect(getFrictionGroupImpactBar(anonymous, testProjectId)).resolves.toEqual({
+        identifiedUsers: 0, recentAnonSessions: 3, eligible: true,
+      });
+
+      const below = await seedGroup('below');
+      for (let i = 0; i < 2; i++) {
+        await seedSignal({ groupId: below, sessionId: `below-${i}-${crypto.randomUUID()}`, fingerprint: `below-${i}` });
+      }
+      await seedSignal({ groupId: below, sessionId: `retracted-${crypto.randomUUID()}`, fingerprint: 'retracted', retracted: true });
+      await seedSignal({ groupId: below, sessionId: `pending-${crypto.randomUUID()}`, fingerprint: 'pending', status: 'pending' });
+      await seedSignal({ groupId: below, sessionId: `old-${crypto.randomUUID()}`, fingerprint: 'old', old: true });
+      await expect(getFrictionGroupImpactBar(below, testProjectId)).resolves.toEqual({
+        identifiedUsers: 0, recentAnonSessions: 2, eligible: false,
       });
     });
   });

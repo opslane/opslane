@@ -325,19 +325,124 @@ func (q *Queries) GetPlayableChunk(ctx context.Context, projectID, sessionID str
 	return &chunk, nil
 }
 
-// SessionPointerForGroup resolves pointer identity independently of chunk
-// readiness. The newest ingested occurrence wins, while errorAt comes from the
-// event-time column so #27 can improve accuracy without changing this contract.
-func (q *Queries) SessionPointerForGroup(ctx context.Context, errorGroupID, projectID string) (sessionID string, errorAt time.Time, ok bool, err error) {
+const (
+	watchWindowMs         = 15_000
+	watchCandidateEvents  = 50
+	watchCandidateSignals = 50
+)
+
+// watchCoverageSQL is the single source of the watchability contract, applied
+// to a candidate row exposing session_id + anchor_ms: the session's scrubbed,
+// bounded chunks must stitch across the full ±15s window around the anchor,
+// and a full-snapshot chunk must start at-or-before the window. Shared by the
+// error and friction watchable queries so the two lanes cannot drift.
+var watchCoverageSQL = fmt.Sprintf(`
+WHERE EXISTS (
+  SELECT 1 FROM session_chunks c
+   WHERE c.session_id = cand.session_id AND c.project_id = $2
+     AND c.scrubbed_at IS NOT NULL
+     AND c.first_event_ms IS NOT NULL AND c.last_event_ms IS NOT NULL
+  HAVING min(c.first_event_ms) <= cand.anchor_ms - %d
+     AND max(c.last_event_ms) >= cand.anchor_ms + %d
+)
+AND EXISTS (
+  SELECT 1 FROM session_chunks c
+   WHERE c.session_id = cand.session_id AND c.project_id = $2
+     AND c.scrubbed_at IS NOT NULL AND c.has_full_snapshot
+     AND c.first_event_ms IS NOT NULL AND c.last_event_ms IS NOT NULL
+     AND c.first_event_ms <= cand.anchor_ms - %d
+)`, watchWindowMs, watchWindowMs, watchWindowMs)
+
+// frictionCandidateSQL is the single source of "the incident's live signals,
+// representative first, then earliest accepted": shared by the incident-page
+// pointer and the digest watchable query so retraction/supersession semantics
+// stay identical on both surfaces.
+const frictionCandidateSQL = `
+  SELECT fs.session_id,
+         (extract(epoch FROM fs.occurred_at) * 1000)::bigint AS anchor_ms,
+         fs.occurred_at,
+         (fs.id = g.representative_signal_id) AS representative,
+         fs.id
+    FROM friction_signals fs
+    JOIN sessions s ON s.id = fs.session_id AND s.project_id = fs.project_id
+    JOIN error_groups g ON g.id = $1 AND g.project_id = $2
+   WHERE fs.incident_id = $1 AND fs.project_id = $2
+     AND fs.adjudication_status = 'accepted'
+     AND fs.retracted_at IS NULL AND fs.superseded_by IS NULL
+     AND s.status <> 'deleting'
+   ORDER BY (fs.id = g.representative_signal_id) DESC, fs.occurred_at ASC, fs.id ASC`
+
+// One candidate per session (a looping session cannot evict every covered
+// sibling from the pool), newest sessions first, pool bounded before the
+// coverage probes run.
+var watchableErrorSessionSQL = fmt.Sprintf(`
+SELECT cand.session_id, cand.anchor_ms FROM (
+  SELECT per_session.* FROM (
+    SELECT DISTINCT ON (e.session_id)
+           e.session_id,
+           (extract(epoch FROM e."timestamp") * 1000)::bigint AS anchor_ms,
+           e.created_at, e.id
+      FROM error_events e
+      JOIN sessions s ON s.id = e.session_id AND s.project_id = e.project_id
+     WHERE e.error_group_id = $1 AND e.project_id = $2
+       AND e.session_id IS NOT NULL AND s.status <> 'deleting'
+     ORDER BY e.session_id, e.created_at DESC, e.id DESC
+  ) per_session
+  ORDER BY per_session.created_at DESC, per_session.id DESC
+  LIMIT %d
+) cand
+%s
+ORDER BY cand.created_at DESC, cand.id DESC
+LIMIT 1`, watchCandidateEvents, watchCoverageSQL)
+
+var watchableFrictionSessionSQL = fmt.Sprintf(`
+SELECT cand.session_id, cand.anchor_ms FROM (%s
+   LIMIT %d
+) cand
+%s
+ORDER BY cand.representative DESC, cand.occurred_at ASC, cand.id ASC
+LIMIT 1`, frictionCandidateSQL, watchCandidateSignals, watchCoverageSQL)
+
+// groupKind resolves an incident's lane; found=false when the group does not
+// exist in the tenant.
+func (q *Queries) groupKind(ctx context.Context, errorGroupID, projectID string) (kind string, found bool, err error) {
 	err = q.pool.QueryRow(ctx,
-		`SELECT ee.session_id, ee.timestamp
+		`SELECT kind FROM error_groups WHERE id=$1 AND project_id=$2`, errorGroupID, projectID).Scan(&kind)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return kind, true, nil
+}
+
+// SessionPointerForGroup resolves pointer identity independently of chunk
+// readiness. Error incidents use their newest ingested occurrence; friction
+// incidents prefer the live representative signal and otherwise use their
+// earliest accepted, active signal.
+func (q *Queries) SessionPointerForGroup(ctx context.Context, errorGroupID, projectID string) (sessionID string, errorAt time.Time, ok bool, err error) {
+	kind, found, err := q.groupKind(ctx, errorGroupID, projectID)
+	if err != nil {
+		return "", time.Time{}, false, fmt.Errorf("session pointer group kind: %w", err)
+	}
+	if !found {
+		return "", time.Time{}, false, nil
+	}
+
+	query := `SELECT ee.session_id, ee.timestamp
 		   FROM error_events ee
 		   JOIN sessions s ON s.id = ee.session_id AND s.project_id = $2
 		  WHERE ee.error_group_id = $1 AND ee.project_id = $2
 		    AND ee.session_id IS NOT NULL
 		    AND s.status <> 'deleting'
 		  ORDER BY ee.created_at DESC, ee.id DESC
-		  LIMIT 1`, errorGroupID, projectID).Scan(&sessionID, &errorAt)
+		  LIMIT 1`
+	if kind == "friction" {
+		query = `SELECT cand.session_id, cand.occurred_at FROM (` + frictionCandidateSQL + `
+		   LIMIT 1) cand`
+	}
+	err = q.pool.QueryRow(ctx, query, errorGroupID, projectID).Scan(&sessionID, &errorAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", time.Time{}, false, nil
 	}
@@ -345,4 +450,31 @@ func (q *Queries) SessionPointerForGroup(ctx context.Context, errorGroupID, proj
 		return "", time.Time{}, false, fmt.Errorf("session pointer for group: %w", err)
 	}
 	return sessionID, errorAt, true, nil
+}
+
+// WatchableSessionForGroup returns a pointer whose scrubbed, bounded chunks
+// span the full +/-15 second playback window and whose opening side has a full
+// snapshot. The span may contain gaps in v1. anchorMs is absolute client-clock
+// epoch milliseconds, matching the dashboard's ?t= contract.
+func (q *Queries) WatchableSessionForGroup(ctx context.Context, errorGroupID, projectID string) (sessionID string, anchorMs int64, ok bool, err error) {
+	kind, found, err := q.groupKind(ctx, errorGroupID, projectID)
+	if err != nil {
+		return "", 0, false, fmt.Errorf("watchable session group kind: %w", err)
+	}
+	if !found {
+		return "", 0, false, nil
+	}
+
+	query := watchableErrorSessionSQL
+	if kind == "friction" {
+		query = watchableFrictionSessionSQL
+	}
+	err = q.pool.QueryRow(ctx, query, errorGroupID, projectID).Scan(&sessionID, &anchorMs)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", 0, false, nil
+	}
+	if err != nil {
+		return "", 0, false, fmt.Errorf("watchable session for group: %w", err)
+	}
+	return sessionID, anchorMs, true, nil
 }

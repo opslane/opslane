@@ -204,6 +204,27 @@ export interface ImpactBar {
   eligible: boolean;
 }
 
+export function impactBarEligible(identifiedUsers: number, recentAnonSessions: number): boolean {
+  return identifiedUsers >= 1 || recentAnonSessions >= 3;
+}
+
+/** The one place the persisted policy stamp is shaped: both lanes' decision
+ * rows must serialize the same policy_basis record or per-lane consumers of
+ * the versioned shape silently diverge. */
+export function policyFields(bar: ImpactBar | null): { policyEligible: boolean | null; policyBasis: { v: 1; identified_users: number; recent_anon_sessions: number } | null } {
+  if (!bar) {
+    return { policyEligible: null, policyBasis: null };
+  }
+  return {
+    policyEligible: bar.eligible,
+    policyBasis: {
+      v: 1,
+      identified_users: bar.identifiedUsers,
+      recent_anon_sessions: bar.recentAnonSessions,
+    },
+  };
+}
+
 export async function getGroupImpactBar(errorGroupId: string, projectId: string): Promise<ImpactBar> {
   const { rows } = await getPool().query<{
     identified_users: string;
@@ -227,7 +248,41 @@ export async function getGroupImpactBar(errorGroupId: string, projectId: string)
   return {
     identifiedUsers,
     recentAnonSessions,
-    eligible: identifiedUsers >= 1 || recentAnonSessions >= 3,
+    eligible: impactBarEligible(identifiedUsers, recentAnonSessions),
+  };
+}
+
+/** Live impact bar over accepted, active sessions for a friction incident.
+ * The authorization window uses server-observed created_at; occurred_at is a
+ * client clock and is reserved for playback arithmetic. */
+export async function getFrictionGroupImpactBar(errorGroupId: string, projectId: string): Promise<ImpactBar> {
+  const { rows } = await getPool().query<{
+    identified_users: string;
+    recent_anon_sessions: string;
+  }>(
+    `WITH active AS (
+       -- One definition of "the incident's live reach": both aggregates below
+       -- must count over the same signal population.
+       SELECT fs.session_id, fs.end_user_id
+         FROM friction_signals fs
+        WHERE fs.incident_id = $1 AND fs.project_id = $2
+          AND fs.adjudication_status = 'accepted'
+          AND fs.retracted_at IS NULL AND fs.superseded_by IS NULL
+          AND fs.created_at > now() - interval '7 days'
+     )
+     SELECT
+       (SELECT count(DISTINCT end_user_id) FROM active WHERE end_user_id IS NOT NULL) AS identified_users,
+       (SELECT count(*) FROM (
+          SELECT session_id FROM active GROUP BY session_id HAVING bool_and(end_user_id IS NULL)
+        ) anon) AS recent_anon_sessions`,
+    [errorGroupId, projectId],
+  );
+  const identifiedUsers = Number(rows[0]?.identified_users ?? 0);
+  const recentAnonSessions = Number(rows[0]?.recent_anon_sessions ?? 0);
+  return {
+    identifiedUsers,
+    recentAnonSessions,
+    eligible: impactBarEligible(identifiedUsers, recentAnonSessions),
   };
 }
 
@@ -1731,22 +1786,42 @@ export interface SessionPointer {
   error_at: string;
 }
 
-/** Resolves pointer identity independently from chunk readiness. */
+/** Resolves pointer identity independently from chunk readiness. This mirror
+ * serves both error and friction fix evidence, so it matches the Go reader's
+ * representative-first friction fallback. */
 export async function getSessionPointerForGroup(
   errorGroupId: string,
   projectId: string,
 ): Promise<SessionPointer | null> {
   const pool = getPool();
+  const kindResult = await pool.query<{ kind: 'error' | 'friction' }>(
+    `SELECT kind FROM error_groups WHERE id = $1 AND project_id = $2`,
+    [errorGroupId, projectId],
+  );
+  const kind = kindResult.rows[0]?.kind;
+  if (!kind) return null;
+  const query = kind === 'friction'
+    ? `SELECT fs.session_id, fs.occurred_at AS error_at
+         FROM friction_signals fs
+         JOIN sessions s ON s.id = fs.session_id AND s.project_id = fs.project_id
+         JOIN error_groups g ON g.id = $1 AND g.project_id = $2
+        WHERE fs.incident_id = $1 AND fs.project_id = $2
+          AND fs.adjudication_status = 'accepted'
+          AND fs.retracted_at IS NULL AND fs.superseded_by IS NULL
+          AND s.status <> 'deleting'
+        ORDER BY (fs.id = g.representative_signal_id) DESC, fs.occurred_at ASC, fs.id ASC
+        LIMIT 1`
+    : `SELECT ee.session_id, ee.timestamp AS error_at
+         FROM error_events ee
+         JOIN sessions s ON s.id = ee.session_id AND s.project_id = $2
+        WHERE ee.error_group_id = $1
+          AND ee.project_id = $2
+          AND ee.session_id IS NOT NULL
+          AND s.status <> 'deleting'
+        ORDER BY ee.created_at DESC, ee.id DESC
+        LIMIT 1`;
   const { rows } = await pool.query<{ session_id: string; error_at: Date | string }>(
-    `SELECT ee.session_id, ee.timestamp AS error_at
-       FROM error_events ee
-       JOIN sessions s ON s.id = ee.session_id AND s.project_id = $2
-      WHERE ee.error_group_id = $1
-        AND ee.project_id = $2
-        AND ee.session_id IS NOT NULL
-        AND s.status <> 'deleting'
-      ORDER BY ee.created_at DESC, ee.id DESC
-      LIMIT 1`,
+    query,
     [errorGroupId, projectId],
   );
   const row = rows[0];
