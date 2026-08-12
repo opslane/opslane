@@ -2,40 +2,44 @@
 
 # Opslane
 
-Every error tracker has the same output: an alert. Opslane's output is a pull request.
+Error trackers see stack traces. Opslane knows your product.
 
-Opslane watches your app's browser errors, investigates them against your repository, verifies the fix in a sandbox, and opens the PR. When it can't fix something, it tells you why it stopped instead of paging you. Sentry tells you what broke; Opslane has already fixed it.
-
-**Scope today:** browser JavaScript errors and GitHub repositories, end to end. The services run on your infrastructure; the fix pipeline calls three external services: Anthropic for investigation, E2B for sandboxed verification, and GitHub for clones and PRs. A Python SDK (alpha) captures and triages server-side errors, with its fix pipeline off by default.
+It learns where users get stuck from errors and session recordings. You get a daily digest of what matters, and pull requests with tested fixes. When it can't fix something, it says why.
 
 ## See it work
 
 ### Error to pull request
 
-<!-- PLACEHOLDER: full product tour — video or GIF. One uninterrupted path: browser error → grouped incident → investigation evidence → pull request. -->
+<!-- PLACEHOLDER: full product tour — video or GIF. One uninterrupted path: error → grouped issue → investigation evidence → pull request. -->
 
 ### A merged production fix
 
 <!-- PLACEHOLDER: screenshot of a real merged Opslane PR (e.g. #1232) — title, root-cause explanation, evidence section, diff. Scrub anything private; link the PR here. -->
 
-In two weeks on one production app (July to August 2026), Opslane captured 7,415 events, suppressed the 78% that were browser noise, and opened one pull request: a fix for a crash users had hit 614 times. A human reviewed and merged it.
+In two weeks on one production app (July to August 2026), Opslane captured 7,415 events, suppressed the 78% that were noise, and opened one pull request: a fix for a crash users had hit 614 times. A human reviewed and merged it.
 
-## What each outcome means
+## What it does
 
-Every investigation ends in one of four visible outcomes:
-
-- **A ready-for-review PR.** Three things held: the fix built, the build and test commands Opslane detected (or the project configured) ran in a fresh sandbox, and no test that passed on the baseline fails with the fix applied. The PR records which commands ran and their results.
-- **A draft PR.** The fix passed Opslane's reviewing model but lacks that executed proof. Drafts are clearly labeled and only open if the project opts in.
-- **An `investigated` analysis.** Opslane found the likely cause but did not attempt a change; the analysis waits for a human to read and, if they choose, trigger the fix.
-- **A `needs_human` incident.** Opslane stopped, with a reason code and a suggested next action. In our review of the 125 incidents it declined on that same production app, we agreed with the routing on 114.
-
-The exact gates, their limits, and what they do not guarantee: [precision](docs/architecture/precision.md).
+- **Know what's broken without reading 7,000 alerts.** Errors group into causes, noise is suppressed, and issues are ranked by how many users they hit. One Slack digest a day.
+- **Get bugs fixed without losing the afternoon.** Opslane investigates in your repo and sends the fix as a pull request that built and passed your tests. You review and merge.
+- **See what the user saw.** Every error links to the session replay behind it: the clicks, pages, and requests that led up to it.
+- **Catch failures that never throw.** Dead buttons and abandoned forms surface from session recordings, even when the console is clean.
+- **Stay in control.** It never merges its own PRs, it says why whenever it stops, and the whole thing self-hosts on your infrastructure.
 
 ## How it works
 
+1. **Capture.** The SDK sends errors and session recordings to the ingestion server. Two lines of code to install.
+2. **Group.** The same bug hitting 500 users becomes one issue, not 500 alerts. Errors that come from browser extensions, cross-origin scripts, or known-harmless browser warnings get dropped.
+3. **Investigate.** The worker clones the repository and reads the code until it finds the cause. The cause has to name the exact files involved; guesses get thrown out.
+4. **Verify.** The fix is applied in an isolated sandbox, where the build and tests run. Whatever passed before has to pass after.
+5. **Deliver.** A verified fix opens as a pull request on the repository, ready for review. A fix that could not be verified opens as a draft, marked as such, and only if the project allows drafts. When there is no fix, the issue shows the reason instead.
+6. **Digest.** Once a day, Slack gets the summary: what broke, what got fixed, what needs a human.
+
+The pipeline calls three outside services: Anthropic to investigate, E2B to run the sandbox, and GitHub for clones and pull requests. Everything else runs on the self-hosted stack, on Postgres. There is no Redis or queue service to operate. JavaScript apps are supported end to end today; a Python SDK (alpha) captures and triages server-side errors, with its fix pipeline off by default.
+
 ```mermaid
 flowchart LR
-    A[Browser SDK] -->|errors + session replays| B[Ingestion and grouping]
+    A[SDK] -->|errors + session recordings| B[Ingestion and grouping]
     B --> C[(Postgres job queue)]
     C --> D[Worker: investigate]
     D -->|candidate fix| E[Fix + sandbox verification]
@@ -48,18 +52,18 @@ flowchart LR
 
 | Component | What it does | Where |
 | --- | --- | --- |
-| Browser SDK | Captures errors and session replays, with input masking on by default | [`packages/sdk`](packages/sdk) |
+| Browser SDK | Captures errors and session recordings, with input masking on by default | [`packages/sdk`](packages/sdk) |
 | Ingestion API | Go service that receives events, groups errors, and serves the dashboard | [`packages/ingestion`](packages/ingestion) |
-| Worker | Investigates error groups and proposes changes; for candidate fixes, runs the build and tests in an [E2B](https://e2b.dev) sandbox, records the results, and opens the PR | [`packages/worker`](packages/worker) |
-| Dashboard | Vue app for incidents, replays, and project settings | [`packages/dashboard`](packages/dashboard) |
-| CLI | Lists and inspects projects and incidents from the command line | [`cli`](cli) |
+| Worker | Investigates issues and proposes changes; for candidate fixes, runs the build and tests in an [E2B](https://e2b.dev) sandbox, records the results, and opens the PR | [`packages/worker`](packages/worker) |
+| Dashboard | Vue app for issues, replays, and project settings | [`packages/dashboard`](packages/dashboard) |
+| CLI | Lists and inspects projects and issues from the command line | [`cli`](cli) |
 | Python SDK (alpha) | Captures server-side Python errors, with a Flask integration | [`packages/sdk-python`](packages/sdk-python) |
 
-Postgres is both the system of record and the job queue. There is no Redis or external queue to run.
+The exact evidence gates, their limits, and what they do not guarantee: [precision](docs/architecture/precision.md).
 
 ## Run it locally
 
-The smoke test needs no accounts and no API keys. It proves events are ingested, grouped, and always driven to an explicit final status. It does not run the AI investigation or open a PR. Prerequisites: Docker with Compose.
+Prerequisites: Docker with Compose. No accounts or API keys needed for this first run.
 
 ```bash
 git clone https://github.com/opslane/opslane-oss.git
@@ -80,7 +84,7 @@ curl -X POST http://localhost:8082/api/v1/events \
   -d '{"timestamp":"2026-01-01T00:00:00Z","error":{"type":"ReferenceError","message":"demo is not defined","stack":"ReferenceError: demo is not defined\n  at app.js:1:1"},"breadcrumbs":[],"context":{"url":"https://example.com","user_agent":"smoke test"},"sdk_version":"0.0.1"}'
 ```
 
-The `opslane_pk_...` value is the test project's seeded public ingest key; real deployments mint their own. Give the worker a few seconds to claim the job, then check the result (re-run if the row hasn't appeared yet):
+The `opslane_pk_...` value is the test project's seeded public ingest key; real deployments mint their own. Give the worker a few seconds, then check the result (re-run if the row hasn't appeared yet):
 
 ```bash
 docker compose exec -T postgres psql -U opslane -d opslane \
@@ -93,9 +97,7 @@ docker compose exec -T postgres psql -U opslane -d opslane \
  needs_human | missing_llm_key | ANTHROPIC_API_KEY environment variable is not set
 ```
 
-The worker has no AI credentials, so it stopped and said why. With the required integrations configured, processing ends in one of the four outcomes above instead.
-
-Additional paths need external-service configuration:
+The worker stopped because it has no AI credentials, and it said so. To go further:
 
 - **Dashboard sign-in:** a GitHub App, or WorkOS for cloud deployments.
 - **Investigation:** `ANTHROPIC_API_KEY`.
@@ -108,7 +110,7 @@ Exact permissions and environment variables are in the [self-host quickstart](do
 
 - **Not an APM or metrics backend.** Opslane ingests application errors and the session context around them: breadcrumbs, network timing, and optional replays. It does not do latency percentiles, distributed tracing, or infrastructure monitoring.
 - **Not autopilot.** Opslane opens pull requests but never merges them. Review and merge stay with the repository owner.
-- **Not a dashboard to babysit.** Conclusions ship as PRs and incidents; the dashboard exists for replays and settings, not triage duty.
+- **Not a dashboard to babysit.** Conclusions ship as PRs and issues; the dashboard exists for replays and settings, not triage duty.
 - **Pre-1.0.** The [`POST /api/v1/events` wire contract](docs/contracts/events.md) is append-only and backward-compatible. Other interfaces may still change before 1.0.
 
 ## What leaves your host
@@ -126,7 +128,7 @@ The full data-flow and trust model, including what each destination receives: [t
 
 ## Documentation
 
-- [Self-host quickstart](docs/quickstart/self-host.md): the smoke test and the full error-to-PR path, in detail
+- [Self-host quickstart](docs/quickstart/self-host.md): the local run and the full error-to-PR path, in detail
 - [Install guide](docs/install.md): add the SDK to your app
 - [Guides](docs/guides): React, Vue, vanilla JS, source maps, GitHub App, Slack notifications, replay privacy
 - [Architecture](docs/architecture/overview.md): components, trust boundaries, life of an error
