@@ -30,7 +30,7 @@ Deferred work with enough context to pick up cold. Add items with What / Why / P
 
 **Cons:** Session-close paths are batch UPDATE...INSERT statements, so the gate must be folded into set-based SQL, not a per-row helper; needs its own dormant/activation semantics decision (probably none — just skip enqueue).
 
-**Context:** Red-team finding from `/review` on 2026-08-12. The error-pipeline gate (S3) landed in the environment-scoping branch; this is the S4-adjacent follow-up.
+**Context:** Red-team finding from `/review` on 2026-08-12. The error-pipeline gate (S3) landed in the environment-scoping branch; this is the S4-adjacent follow-up. A cross-model merge review added a second reason to prioritize S4: C2's auto-fix policy gate (`getGroupImpactBar`) reads affected-user counts that include out-of-scope occurrences, so a staging identified user can help an in-scope production incident clear the impact bar (`docs/contracts/action-scope.md` § "What the scope does not cover" documents this).
 
 **Depends on:** Environment-scoping branch landing (migration 049 provides the allowlist table).
 

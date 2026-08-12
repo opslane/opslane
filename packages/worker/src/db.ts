@@ -2209,10 +2209,16 @@ export async function updateGroupAndCreateFixJob(
         // group's kind fixes which lane creates AND repoints it, so the values
         // written here always match what the create branch wrote.
         await client.query(
+          // event_id repoints with source_job_id: the fix must load evidence
+          // from the SAME investigation that authorizes it, never event A's
+          // stack under decision B's diagnosis. NULL source falls back to the
+          // sample, matching the create branch.
           `UPDATE error_group_jobs
            SET platform = $2,
                payload = $3::jsonb,
                source_job_id = $4,
+               event_id = (SELECT j.event_id FROM error_group_jobs j
+                           WHERE j.id = $4 AND j.project_id = $5),
                updated_at = now()
            WHERE id = $1`,
           [
@@ -2220,6 +2226,7 @@ export async function updateGroupAndCreateFixJob(
             fields.platform ?? 'javascript',
             fields.diagnosis === undefined ? null : JSON.stringify({ diagnosis: fields.diagnosis }),
             fields.sourceJobId ?? null,
+            projectId,
           ],
         );
       }

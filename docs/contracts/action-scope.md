@@ -56,6 +56,13 @@ and fix PRs the friction pipeline produces under the project's autonomy setting
 environment is follow-up work; until then the settings surface says "automatic
 error investigation", not "automation", deliberately.
 
+Affected-user counts are likewise not environment-scoped (the S4 deferral):
+out-of-scope occurrences still record identified users, and the auto-fix
+policy's impact bar reads those counts. An out-of-scope occurrence therefore
+cannot start or restart automation, but it can contribute to the impact
+evidence an in-scope investigation's fix policy consults. Scoping the impact
+dimension by environment is part of the S4 follow-up.
+
 The dashboard's `sample_event_id` display semantics are unchanged. A filtered
 incident read can therefore still show a sample from another environment; this
 is a known first-version limitation.
