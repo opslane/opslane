@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, onMounted, ref, toRef, watch } from 'vue';
 import { listSessions } from '../api';
 import type { SessionFilters, SessionSummary } from '../types/api';
 import { getProjectId } from '../utils';
@@ -12,6 +12,10 @@ import InlineAlert from '../components/ui/InlineAlert.vue';
 import SelectField from '../components/ui/SelectField.vue';
 import SkeletonBlock from '../components/ui/SkeletonBlock.vue';
 import TextInput from '../components/ui/TextInput.vue';
+
+const props = defineProps<{
+  defaultEnvironmentId?: string | null;
+}>();
 
 type DatePreset = '24h' | '7d' | '30d' | 'custom';
 
@@ -34,10 +38,12 @@ const appliedFilters = ref<SessionFilters>({});
 let fetchGeneration = 0;
 
 const {
+  clear: clearEnvironment,
   environments,
   filterAvailable,
+  resetToDefault: resetEnvironmentToDefault,
   selectedEnvironmentId,
-} = useEnvironmentFilter(projectId, 'sessions');
+} = useEnvironmentFilter(projectId, 'sessions', toRef(props, 'defaultEnvironmentId'));
 
 const environmentOptions = computed(() => [
   { value: '', label: 'All environments' },
@@ -135,7 +141,8 @@ function applyFilters(): void {
 }
 
 function selectEnvironment(value: string): void {
-  selectedEnvironmentId.value = value;
+  if (value) selectedEnvironmentId.value = value;
+  else clearEnvironment();
   applyFilters();
 }
 
@@ -154,11 +161,14 @@ function clearFilters(): void {
   datePreset.value = '24h';
   customFrom.value = '';
   customTo.value = '';
-  selectedEnvironmentId.value = '';
+  resetEnvironmentToDefault();
   withSignals.value = false;
   applyFilters();
 }
 
+// The project default re-applies asynchronously (resetEnvironmentToDefault,
+// project load); the list must follow the selection it displays.
+watch(selectedEnvironmentId, () => applyFilters());
 watch(filterAvailable, (ready) => {
   if (ready && selectedEnvironmentId.value) applyFilters();
 });

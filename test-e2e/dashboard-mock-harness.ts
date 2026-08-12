@@ -111,7 +111,7 @@ function defaultBody(method: string, pathname: string): unknown {
     return { id: 'user-1', org_id: 'org-1', email: 'mock@example.test', name: 'Mock Operator', is_admin: true, active_role: 'owner', memberships: [] };
   }
   if (pathname === '/api/v1/projects') {
-    return [{ id: 'project-1', name: 'Acme (mock)', github_repo: 'example/mock', friction_autonomy: 'ask_first', pr_posture: 'verified_only', default_environment_id: 'env-production', created_at: '2026-01-01T00:00:00Z' }];
+    return [{ id: 'project-1', name: 'Acme (mock)', github_repo: 'example/mock', friction_autonomy: 'ask_first', pr_posture: 'verified_only', default_environment_id: 'env-production', action_scope_enabled: false, action_environment_ids: [], digest_timezone: 'UTC', created_at: '2026-01-01T00:00:00Z' }];
   }
   if (/\/incidents$/.test(pathname) && method === 'GET') return [mockIncident()];
   if (/\/incidents\/[^/]+$/.test(pathname) && method === 'GET') return mockIncident();
