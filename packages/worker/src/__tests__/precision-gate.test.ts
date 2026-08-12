@@ -29,7 +29,7 @@ beforeEach(() => {
 });
 
 describe('precision gate — directional invariants (C3)', () => {
-  it('ABOVE floor: high confidence fix → PR opens', async () => {
+  it('ABOVE floor: verified automated fix → draft PR opens', async () => {
     mockRunAgentFix.mockResolvedValue({
       status: 'fix_ready',
       diff: '--- a/f\n+++ b/f\n@@ -1 +1 @@\n-a\n+b\n',
@@ -38,8 +38,9 @@ describe('precision gate — directional invariants (C3)', () => {
       affectedFiles: ['f'],
     });
     const r = await runPipeline(input());
-    expect(r.status).toBe('pr_created');
+    expect(r.status).toBe('pr_draft');
     expect(mockCreatePR).toHaveBeenCalledTimes(1);
+    expect(mockCreatePR).toHaveBeenCalledWith(expect.objectContaining({ draft: true }), expect.any(Function));
   });
 
   for (const c of ['medium', 'low'] as const) {
@@ -62,7 +63,7 @@ describe('precision gate — directional invariants (C3)', () => {
     });
   }
 
-  it('GUARD: a fix_ready that slips through with non-high confidence still never opens a PR', async () => {
+  it('confidence does not override the fix_ready authorization result', async () => {
     mockRunAgentFix.mockResolvedValue({
       status: 'fix_ready',
       diff: '--- a/f\n+++ b/f\n@@ -1 +1 @@\n-a\n+b\n',
@@ -71,8 +72,8 @@ describe('precision gate — directional invariants (C3)', () => {
       affectedFiles: ['f'],
     });
     const r = await runPipeline(input());
-    expect(r.status).toBe('needs_human');
-    expect(mockCreatePR).not.toHaveBeenCalled();
+    expect(r.status).toBe('pr_draft');
+    expect(mockCreatePR).toHaveBeenCalledTimes(1);
   });
 
   it('needs_human preserves the candidate diff and evidence for persistence', async () => {
@@ -91,7 +92,7 @@ describe('precision gate — directional invariants (C3)', () => {
     expect(r.evidence?.tier).toBe('E0');
   });
 
-  it('the hard precision guard also preserves diff + evidence', async () => {
+  it('a draft delivery preserves diff + evidence', async () => {
     mockRunAgentFix.mockResolvedValue({
       status: 'fix_ready',
       diff: '--- a/f\n+++ b/f\n@@ -1 +1 @@\n-a\n+b\n',
@@ -100,7 +101,7 @@ describe('precision gate — directional invariants (C3)', () => {
       evidence: { version: 1, tier: 'E1', checks: [] },
     });
     const r = await runPipeline(input());
-    expect(r.status).toBe('needs_human');
+    expect(r.status).toBe('pr_draft');
     expect(r.candidateDiff).toBeTruthy();
     expect(r.evidence?.tier).toBe('E1');
   });

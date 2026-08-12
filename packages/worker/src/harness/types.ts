@@ -52,6 +52,8 @@ export interface AgentState {
   scopeReviewDone: boolean;
   /** Accumulated tool calls for cascade context forwarding. */
   toolHistoryEntries: ToolHistoryEntry[];
+  declaredTest?: { testFiles: string[]; identifier: string; expectedAssertion: string };
+  reproductionImpossibleReason?: string;
 }
 
 export type AgentEventHandler = (event: AgentHarnessEvent) => void;

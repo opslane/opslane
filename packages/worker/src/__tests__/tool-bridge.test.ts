@@ -53,7 +53,43 @@ describe('createToolBridge', () => {
     const sandbox = makeMockSandbox();
     const tools = createToolBridge(sandbox as unknown as SandboxRuntime, makeState());
     const names = tools.map(t => t.name).sort();
-    expect(names).toEqual(['bash', 'edit', 'patch', 'read', 'read_many', 'search', 'submit_diagnosis', 'write']);
+    expect(names).toEqual([
+      'bash',
+      'declare_failing_test',
+      'declare_reproduction_impossible',
+      'edit',
+      'patch',
+      'read',
+      'read_many',
+      'search',
+      'submit_diagnosis',
+      'write',
+    ]);
+  });
+
+  it('stores the last declared reproduction contract without executing commands', async () => {
+    const sandbox = makeMockSandbox();
+    const state = makeState();
+    const tools = createToolBridge(sandbox as unknown as SandboxRuntime, state);
+    const failing = tools.find((tool) => tool.name === 'declare_failing_test')!;
+    const impossible = tools.find((tool) => tool.name === 'declare_reproduction_impossible')!;
+
+    await failing.execute({
+      test_files: ['src/select.test.ts'],
+      identifier: 'keeps selection',
+      expected_assertion: 'selection remains',
+    });
+    expect(state.declaredTest).toEqual({
+      testFiles: ['src/select.test.ts'],
+      identifier: 'keeps selection',
+      expectedAssertion: 'selection remains',
+    });
+    expect(state.reproductionImpossibleReason).toBeUndefined();
+
+    await impossible.execute({ reason: 'browser event loop unavailable' });
+    expect(state.declaredTest).toBeUndefined();
+    expect(state.reproductionImpossibleReason).toBe('browser event loop unavailable');
+    expect(sandbox.commands.run).not.toHaveBeenCalled();
   });
 
   it('read tool returns file contents from sandbox', async () => {

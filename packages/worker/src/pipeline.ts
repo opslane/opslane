@@ -17,6 +17,8 @@ import {
   renderCommitMessage,
   type FixNarrative,
 } from './narrative.js';
+import { createLedgerRecorder } from './verification-ledger.js';
+import { insertFixRunLedger } from './db.js';
 
 export interface PipelineInput {
   platform?: Platform;
@@ -48,6 +50,7 @@ export interface PipelineInput {
   kind?: 'error' | 'friction';
   /** Who created the fix job. `human` authorises it past the persisted-decision gate. */
   triggeredBy?: 'auto' | 'human' | null;
+  sourceJobId?: string | null;
   frictionEvidence?: string;
   /** Pre-computed investigation results. When set, agent skips internal triage. */
   investigation?: {
@@ -102,7 +105,10 @@ function boundDiff(diff: string | undefined): string | undefined {
 
 export async function runPipeline(input: PipelineInput): Promise<PipelineResult> {
   // Stage 1: Agent fix (E2B sandbox + LLM tool loop)
-  const fixResult = await runAgentFix({
+  const ledgerRecorder = createLedgerRecorder(input.jobId, input.projectId);
+  let fixResult;
+  try {
+    fixResult = await runAgentFix({
     errorGroupId: input.errorGroupId,
     projectId: input.projectId,
     title: input.title,
@@ -125,17 +131,31 @@ export async function runPipeline(input: PipelineInput): Promise<PipelineResult>
     frictionEvidence: input.frictionEvidence,
     kind: input.kind,
     triggeredBy: input.triggeredBy,
+    sourceJobId: input.sourceJobId ?? null,
     platform: input.platform,
     customerRuntime: input.customerRuntime,
     usageContext: input.usageContext,
-  });
+    ledgerRecorder,
+    });
+  } finally {
+    try {
+      await insertFixRunLedger(ledgerRecorder.entries());
+    } catch (error: unknown) {
+      logger.error('fix_run_ledger persistence failed', {
+        job_id: input.jobId,
+        run_id: ledgerRecorder.runId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
 
-  const publishDraft = fixResult.status === 'needs_human'
+  const draftCandidate = fixResult.status === 'needs_human'
     && fixResult.draftEligible === true
     && input.prPosture === 'draft_when_unverified'
     && input.platform !== 'python';
+  const opensPR = fixResult.status === 'fix_ready' || draftCandidate;
 
-  if (fixResult.status === 'needs_human' && !publishDraft) {
+  if (!opensPR) {
     return {
       status: 'needs_human',
       reason: fixResult.reason,
@@ -145,24 +165,10 @@ export async function runPipeline(input: PipelineInput): Promise<PipelineResult>
     };
   }
 
-  // Ready-for-review PRs require the high-confidence local gate. A separate,
-  // explicit candidate disposition may publish a medium-confidence draft when
-  // project policy opts in; judge-rejected and negative-evidence fixes never do.
-  if (!publishDraft && fixResult.confidence !== 'high') {
-    return {
-      status: 'needs_human',
-      confidence: fixResult.confidence,
-      reason: buildReason(
-        'low_confidence_fix',
-        'A candidate fix was generated but did not clear the confidence bar for an automatic PR.',
-      ),
-      candidateDiff: boundDiff(fixResult.diff),
-      evidence: fixResult.evidence,
-    };
-  }
-
   let diff = fixResult.diff!;
-  let deliveryPosture: 'ready' | 'draft' = publishDraft ? 'draft' : 'ready';
+  let deliveryPosture: 'ready' | 'draft' = input.triggeredBy !== 'human'
+    ? 'draft'
+    : draftCandidate ? 'draft' : 'ready';
 
   logger.info('Agent fix complete', {
     error_group_id: input.errorGroupId,
@@ -227,7 +233,9 @@ export async function runPipeline(input: PipelineInput): Promise<PipelineResult>
       };
     }
     branchName = reservation.reservation.branchName;
-    deliveryPosture = reservation.reservation.posture;
+    deliveryPosture = reservation.reservation.state === 'open'
+      ? reservation.reservation.posture
+      : input.triggeredBy !== 'human' ? 'draft' : reservation.reservation.posture;
     diff = reservation.reservation.candidateDiff;
     if (
       reservation.reservation.state === 'open'
@@ -240,7 +248,7 @@ export async function runPipeline(input: PipelineInput): Promise<PipelineResult>
         pr_url: reservation.reservation.prUrl,
         pr_number: reservation.reservation.prNumber,
         head_sha: reservation.reservation.headSha,
-        confidence: deliveryPosture === 'draft' ? 'medium' : fixResult.confidence,
+        confidence: fixResult.confidence,
         reason: deliveryPosture === 'draft' ? fixResult.reason : undefined,
         candidateDiff: deliveryPosture === 'draft' ? boundDiff(diff) : undefined,
         evidence: fixResult.evidence,
@@ -269,7 +277,7 @@ export async function runPipeline(input: PipelineInput): Promise<PipelineResult>
       pr_url: existingPR.url,
       pr_number: existingPR.number,
       head_sha: existingPR.headSha,
-      confidence: deliveryPosture === 'draft' ? 'medium' : fixResult.confidence,
+      confidence: fixResult.confidence,
       reason: deliveryPosture === 'draft' ? fixResult.reason : undefined,
       candidateDiff: deliveryPosture === 'draft' ? boundDiff(diff) : undefined,
       evidence: fixResult.evidence,
@@ -330,6 +338,10 @@ export async function runPipeline(input: PipelineInput): Promise<PipelineResult>
       environmentTotal: input.environmentTotal,
       kind: input.kind,
       evidence: fixResult.evidence ?? null,
+      ledger: fixResult.ledger,
+      ledgerRoles: fixResult.ledgerRoles,
+      tierRecord: fixResult.tierRecord,
+      judge: fixResult.evidence?.judge,
       draft: deliveryPosture === 'draft',
       customerRuntime: input.customerRuntime,
       sandboxRuntime: fixResult.sandboxRuntime,
@@ -350,7 +362,7 @@ export async function runPipeline(input: PipelineInput): Promise<PipelineResult>
     pr_url: prResult.prUrl,
     pr_number: prResult.prNumber,
     head_sha: headSha,
-    confidence: deliveryPosture === 'draft' ? 'medium' : fixResult.confidence,
+    confidence: fixResult.confidence,
     reason: deliveryPosture === 'draft' ? fixResult.reason : undefined,
     candidateDiff: deliveryPosture === 'draft' ? boundDiff(diff) : undefined,
     evidence: fixResult.evidence,

@@ -243,6 +243,27 @@ export interface EvidenceRecord {
   };
   /** GitHub CI observed for the exact commit published by Opslane. */
   external_ci?: ExternalCIEvidence;
+  /** Mechanical C2 verification grade. */
+  tier_record?: {
+    tier: 'reproduced' | 'checked' | 'attempted';
+    declared_test: { identifier: string; expected_assertion: string } | null;
+    reproduction_impossible_reason: string | null;
+  };
+  /** Diagnosis decision that authorized this attempt. */
+  authorization?: {
+    decision_id: string | null;
+    source: 'source_job' | 'newest_fallback' | 'human_bypass';
+    policy_eligible: boolean | null;
+  };
+  /** Developer-facing verification judge report. */
+  judge?: {
+    approved: boolean;
+    assessment: string;
+    veto_reason: string | null;
+    session_id: string;
+    probes_used: number;
+    decision_id: string | null;
+  };
 }
 
 export type ExternalCIOutcome =

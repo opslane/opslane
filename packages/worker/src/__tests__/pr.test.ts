@@ -7,6 +7,7 @@ import {
   sanitize,
   buildPRBody,
   getGitHubClientOptions,
+  replaceCIStatusSection,
 } from '../pr.js';
 import type { FixNarrative } from '../narrative.js';
 
@@ -431,6 +432,57 @@ describe('buildPRBody', () => {
     expect(body).toContain('Pre-existing baseline failures were excluded from the gate');
     expect(body).not.toContain('1 test(s)');
     expect(body).not.toContain('Tests passing');
+  });
+
+  it('renders the harness ledger and keeps the judge report outside its mutable CI sub-block', () => {
+    const common = {
+      jobId: 'job-1', projectId: 'proj-1', runId: 'run-1',
+      workdirDirty: false, discovered: 1, passed: 0, failed: 1, skipped: 0,
+      truncated: false, timedOut: false, notRun: [] as string[],
+    };
+    const body = buildPRBody(makeInput({
+      draft: true,
+      tierRecord: {
+        tier: 'reproduced',
+        declaredTest: { identifier: 'regresses', expectedAssertion: 'expected failure' },
+        reproductionImpossibleReason: null,
+      },
+      ledger: [
+        { ...common, entrySeq: 1, command: 'vitest -t regresses', commitSha: 'base123456789', passed: 0, failed: 1 },
+        { ...common, entrySeq: 2, command: 'vitest -t regresses', commitSha: 'fix1234567890', passed: 1, failed: 0 },
+        { ...common, entrySeq: 3, command: 'vitest run', commitSha: 'fix1234567890', passed: 8, failed: 0 },
+        { ...common, entrySeq: 4, command: 'pnpm build', commitSha: 'fix1234567890', passed: 1, failed: 0 },
+      ],
+      ledgerRoles: [
+        { entrySeq: 1, role: 'repro_red', assertionMatched: true },
+        { entrySeq: 2, role: 'repro_green' },
+        { entrySeq: 3, role: 'suite_post_patch' },
+        { entrySeq: 4, role: 'build' },
+      ],
+      judge: {
+        approved: true,
+        assessment: 'The test is distinctive and the patch is narrow.',
+        veto_reason: null,
+        session_id: 'judge-1',
+        probes_used: 0,
+        decision_id: 'decision-1',
+      },
+    }));
+
+    expect(body).toContain('Tier: reproduced');
+    expect(body).toContain('failed as declared on base');
+    expect(body).toContain('declared test green with the fix');
+    expect(body).toContain('Not run: (none)');
+    expect(body).toContain('### Judge review');
+
+    const updated = replaceCIStatusSection(body, [
+      '<!-- opslane-ci-status:start -->',
+      'External CI: passed for the exact published commit.',
+      '<!-- opslane-ci-status:end -->',
+    ].join('\n'));
+    expect(updated).toContain('External CI: passed for the exact published commit.');
+    expect(updated).toContain('failed as declared on base');
+    expect(updated).toContain('The test is distinctive and the patch is narrow.');
   });
 
   it('includes exactly one dashboard link when DASHBOARD_URL is set', () => {

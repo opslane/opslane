@@ -4,6 +4,7 @@ import {
   compareSuiteRuns,
   parseSuiteJson,
   planTests,
+  runDeclaredTest,
   runSuite,
   selectTestCommand,
   type SuiteRun,
@@ -325,6 +326,58 @@ describe('runSuite taxonomy', () => {
       { kind: 'npm-script', command: 'npm test' },
     );
     expect(run.outcome).toBe('infra_error');
+  });
+});
+
+describe('runDeclaredTest', () => {
+  it('runs one Vitest identifier and returns its assertion failure', async () => {
+    const report = JSON.stringify({
+      numTotalTests: 1,
+      testResults: [{
+        name: '/home/user/repo/src/a.test.ts',
+        assertionResults: [{
+          fullName: 'selection remains stable',
+          status: 'failed',
+          failureMessages: ['expected selection to remain stable'],
+        }],
+      }],
+    });
+    const commands: string[] = [];
+    const result = await runDeclaredTest(fakeSandbox({
+      files: { [SUITE_RESULTS_PATH]: report },
+      onRun: (command) => {
+        commands.push(command);
+        return command.includes('vitest') ? { exitCode: 1 } : {};
+      },
+    }), {
+      kind: 'vitest',
+      command: `./node_modules/.bin/vitest run --reporter=json --outputFile=${SUITE_RESULTS_PATH}`,
+    }, ['src/a.test.ts'], 'selection remains stable');
+
+    expect(result).toMatchObject({
+      runnable: true,
+      failureMessage: 'expected selection to remain stable',
+      run: { outcome: 'failed' },
+    });
+    expect(commands.some((command) => command.includes("'src/a.test.ts'") && command.includes("-t 'selection remains stable'"))).toBe(true);
+  });
+
+  it('refuses an unfilterable package script', async () => {
+    await expect(runDeclaredTest(
+      fakeSandbox({}),
+      { kind: 'npm-script', command: 'npm test' },
+      ['test/a.test.js'],
+      'regression',
+    )).resolves.toEqual({ runnable: false, reason: 'npm_script_not_filterable' });
+  });
+
+  it('requires a pytest node id', async () => {
+    await expect(runDeclaredTest(
+      fakeSandbox({}),
+      { kind: 'pytest', command: 'python -m pytest' },
+      ['tests/test_a.py'],
+      'test_regression',
+    )).resolves.toEqual({ runnable: false, reason: 'pytest_identifier_not_node_id' });
   });
 });
 

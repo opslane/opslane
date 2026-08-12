@@ -282,6 +282,56 @@ describe('Core Error Capture', () => {
     expect(elapsed).toBeLessThan(250);
   });
 
+  it('prefers err.name over the constructor name for the error type', () => {
+    installGlobalHandlers();
+
+    // A minified bundle renames the class identifier (FetchError -> Nu) but
+    // cannot touch the string assigned to this.name.
+    class Nu extends Error {
+      constructor(message: string) {
+        super(message);
+        this.name = 'FetchError';
+      }
+    }
+
+    window.dispatchEvent(
+      new ErrorEvent('error', { message: 'Error deleting Assets', error: new Nu('Error deleting Assets') })
+    );
+
+    const payload = (transport.enqueueEvent as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(payload.error.type).toBe('FetchError');
+  });
+
+  it('reports the inherited "Error" name for subclasses that never set one', () => {
+    installGlobalHandlers();
+
+    // err.name is inherited from Error.prototype here. Reporting "Error"
+    // matches Sentry and PostHog and stays stable across minified builds,
+    // where the constructor name would churn every release.
+    class Xy extends Error {}
+
+    window.dispatchEvent(new ErrorEvent('error', { message: 'boom', error: new Xy('boom') }));
+
+    const payload = (transport.enqueueEvent as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(payload.error.type).toBe('Error');
+  });
+
+  it('falls back to the constructor name when err.name is emptied', () => {
+    installGlobalHandlers();
+
+    class NamedError extends Error {
+      constructor(message: string) {
+        super(message);
+        this.name = '';
+      }
+    }
+
+    window.dispatchEvent(new ErrorEvent('error', { message: 'boom', error: new NamedError('boom') }));
+
+    const payload = (transport.enqueueEvent as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(payload.error.type).toBe('NamedError');
+  });
+
   it('should never throw even if internal processing fails', () => {
     // Make enqueueEvent throw
     (transport.enqueueEvent as ReturnType<typeof vi.fn>).mockImplementation(() => {

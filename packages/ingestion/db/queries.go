@@ -1324,7 +1324,7 @@ func (q *Queries) TriggerFixJob(ctx context.Context, projectID, groupID, guidanc
 	var id string
 	err = tx.QueryRow(ctx,
 		`UPDATE error_groups
-		 SET status = 'fixing', updated_at = now()
+			 SET status = 'fixing', terminal_fix_job_id = NULL, updated_at = now()
 		 WHERE id = $1 AND project_id = $2
 		   AND (
 		     (kind = 'error' AND status = 'investigated')

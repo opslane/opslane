@@ -4,9 +4,9 @@ import * as db from './db.js';
 import { getInstallationToken } from './github-app.js';
 import {
   createGitHubClient,
-  replaceVerificationSection,
-  VERIFICATION_END,
-  VERIFICATION_START,
+  replaceCIStatusSection,
+  CI_STATUS_END,
+  CI_STATUS_START,
   type GitHubClient,
 } from './pr.js';
 import { logger } from './logger.js';
@@ -121,10 +121,10 @@ function externalEvidence(
 
 function promotedVerification(names: string[]): string {
   return [
-    VERIFICATION_START,
-    '**Verification: external CI passed.** Opslane observed successful repository checks for the exact commit published on this PR.',
+    CI_STATUS_START,
+    'External CI: passed for the exact commit published on this PR.',
     ...names.map((name) => `- ✅ ${name.replace(/[<>]/g, '').slice(0, 100)}`),
-    VERIFICATION_END,
+    CI_STATUS_END,
   ].join('\n');
 }
 
@@ -208,12 +208,13 @@ export async function processCIWatchJob(
   if (state.state === 'green') {
     const external = externalEvidence(payload, 'passed', state.checkNames);
     const evidence = withExternalCI(group.verification_evidence, external);
-    const body = replaceVerificationSection(pull.body, promotedVerification(state.checkNames));
+    const body = replaceCIStatusSection(pull.body, promotedVerification(state.checkNames));
     await client.updatePullRequestBody?.({ owner, repo, number: payload.prNumber, body });
-    if (pull.draft) await client.markPullRequestReady?.({ nodeId: pull.nodeId });
+    const humanTriggered = group.pr_fix_triggered_by === 'human';
+    if (pull.draft && humanTriggered) await client.markPullRequestReady?.({ nodeId: pull.nodeId });
     const promoted = await db.saveExternalCIResult(job.errorGroupId, job.projectId, {
       evidence,
-      promote: true,
+      promote: humanTriggered,
     }, job);
     if (promoted) {
       logger.info('Draft PR promoted after external CI', {

@@ -645,6 +645,9 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
         investigatedCommit: triage.investigatedCommit,
       }
       : null;
+    const impactBar = triage.outcome === 'code_fix'
+      ? await db.getGroupImpactBar(job.errorGroupId, job.projectId)
+      : null;
     const decision = {
       outcome: triage.outcome,
       decisionReason: triage.decisionReason,
@@ -657,6 +660,14 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
       // run at all, and outcome alone cannot answer that.
       basis: triage.decisionBasis,
       confidence: triage.confidence,
+      ...(impactBar ? {
+        policyEligible: impactBar.eligible,
+        policyBasis: {
+          v: 1 as const,
+          identified_users: impactBar.identifiedUsers,
+          recent_anon_sessions: impactBar.recentAnonSessions,
+        },
+      } : {}),
     };
 
     /** Set when the result is held for a human instead of opening a fix job. */
@@ -694,7 +705,7 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
           remediation: 'Review the error manually; the investigation could not establish a cause.',
         },
         decision,
-        readiness: { status: 'pending', reason: 'reinvestigating' },
+        readiness: { status: 'ineligible', reason: 'no_usable_diagnosis' },
       }, job);
       jobsFailed++;
       logger.warn('Investigation: needs_human (no usable diagnosis)', {
@@ -721,7 +732,7 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
       jobsProcessed++;
       logger.info('Investigation: conclusion', { job_id: job.id, duration_ms: durationMs });
 
-    } else if (triage.confidence === 'high' && job.triggeredBy !== 'reinvestigate_report_only') {
+    } else if (impactBar?.eligible && job.triggeredBy !== 'reinvestigate_report_only') {
       const fixResult = await updateGroupAndCreateFixJob(job.errorGroupId, job.projectId, {
         rootCause: triage.diagnosis?.one_line_description ?? triage.decisionReason,
         diagnosis: triage.diagnosis,
@@ -937,6 +948,8 @@ export async function processFrictionInvestigateJob(
       // fixes exist; insights remain terminal and never produce a PR.
       const autonomyAllowsFix = project.friction_autonomy === 'auto_fix'
         || project.friction_autonomy === 'auto_fix_ux';
+      // C3 replaces this confidence check with the signal-session impact bar
+      // (program plan §C3); frozen, not endorsed — see C2 plan Task 3.
       if (verdict.confidence === 'high' && autonomyAllowsFix && job.triggeredBy !== 'reinvestigate_report_only') {
         // allowFriction is the ladder's explicit opt-in past the kind gate;
         // refuse-by-default stays intact for every other caller (issue #56).
@@ -1136,9 +1149,18 @@ export async function processFixJob(job: ClaimedJob & { errorGroupId: string }, 
   if (!group) throw new Error(`Error group ${job.errorGroupId} not found`);
   const platform = job.platform ?? effectivePlatform(group.platform, pythonPipelineEnabled());
 
-  if (group.status === 'pr_created' || group.status === 'pr_draft') {
+  if (group.terminal_fix_job_id === job.id) {
     logger.info('Fix delivery already committed; adopting existing state', {
       job_id: job.id,
+      error_group_id: job.errorGroupId,
+      status: group.status,
+    });
+    return;
+  }
+  if (group.status === 'pr_created' || group.status === 'pr_draft' || group.status === 'needs_human') {
+    logger.warn('Refused terminal state owned by another fix job', {
+      job_id: job.id,
+      terminal_fix_job_id: group.terminal_fix_job_id ?? null,
       error_group_id: job.errorGroupId,
       status: group.status,
     });
@@ -1214,6 +1236,8 @@ export async function processFixJob(job: ClaimedJob & { errorGroupId: string }, 
   } catch (err: unknown) {
     await updateGroupStatus(job.errorGroupId, job.projectId, 'needs_human', {
       reason: cloneFailureReason(err),
+      terminalFixJobId: job.id,
+      readiness: { status: 'eligible', reason: 'fix_attempt_failed_no_diff' },
     }, job);
     jobsFailed++;
     lastJobAt = new Date().toISOString();
@@ -1328,6 +1352,7 @@ export async function processFixJob(job: ClaimedJob & { errorGroupId: string }, 
       assertLeaseOwned: () => db.assertJobLease(job),
       kind: group.kind,
       triggeredBy: job.triggeredBy,
+      sourceJobId: job.sourceJobId ?? null,
       frictionEvidence: frictionEvidence
         ? JSON.stringify({
             signals: frictionEvidence.signals,
@@ -1387,6 +1412,8 @@ export async function processFixJob(job: ClaimedJob & { errorGroupId: string }, 
           pr_number: result.pr_number,
           pr_fix_job_id: job.id,
           evidence: result.evidence,
+          terminalFixJobId: job.id,
+          readiness: { status: 'eligible', reason: 'fix_pr_opened' },
         }, job);
       } else {
         if (!result.head_sha) throw new Error('Draft delivery result is missing head SHA');
@@ -1400,6 +1427,7 @@ export async function processFixJob(job: ClaimedJob & { errorGroupId: string }, 
           reason: result.reason,
           candidateDiff: result.candidateDiff,
           evidence: result.evidence,
+          readiness: { status: 'eligible', reason: 'fix_pr_opened' },
         }, job);
       }
       jobsProcessed++;
@@ -1414,6 +1442,13 @@ export async function processFixJob(job: ClaimedJob & { errorGroupId: string }, 
         confidence: result.confidence,
         candidate_diff: result.candidateDiff,
         evidence: result.evidence,
+        terminalFixJobId: job.id,
+        readiness: {
+          status: 'eligible',
+          reason: result.candidateDiff
+            ? 'fix_attempt_failed_with_diff'
+            : 'fix_attempt_failed_no_diff',
+        },
       }, job);
       jobsFailed++;
       logger.warn('Fix job completed: needs_human (writeup preserved)', {

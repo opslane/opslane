@@ -238,5 +238,46 @@ export function createToolBridge(
         return 'Acknowledged. Ending agent loop.';
       },
     },
+    {
+      name: 'declare_failing_test',
+      description: 'Declare the regression test that proves this bug: it must FAIL on the unmodified base commit and PASS with your fix. The harness will verify both mechanically; a test that passes on base voids the attempt.',
+      inputSchema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          test_files: {
+            type: 'array', minItems: 1, maxItems: 5, items: { type: 'string' },
+            description: 'Repo-relative paths of every file the test needs that you added or modified.',
+          },
+          identifier: { type: 'string', maxLength: 300 },
+          expected_assertion: { type: 'string', maxLength: 500 },
+        },
+        required: ['test_files', 'identifier', 'expected_assertion'],
+      },
+      execute: async (input) => {
+        state.declaredTest = {
+          testFiles: [...(input.test_files as string[])],
+          identifier: input.identifier as string,
+          expectedAssertion: input.expected_assertion as string,
+        };
+        state.reproductionImpossibleReason = undefined;
+        return 'Failing-test declaration recorded for harness verification.';
+      },
+    },
+    {
+      name: 'declare_reproduction_impossible',
+      description: 'Declare that a failing regression test cannot be written, with the concrete reason. This caps the attempt at tier "checked".',
+      inputSchema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: { reason: { type: 'string', maxLength: 600 } },
+        required: ['reason'],
+      },
+      execute: async (input) => {
+        state.declaredTest = undefined;
+        state.reproductionImpossibleReason = input.reason as string;
+        return 'Reproduction-impossible declaration recorded for harness verification.';
+      },
+    },
   ];
 }
