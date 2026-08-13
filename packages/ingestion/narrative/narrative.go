@@ -27,7 +27,7 @@ type Impact struct {
 func Story(nounSingular, nounPlural string, occurrences int64, impact Impact) string {
 	occurrenceNoun := plural(occurrences, nounSingular, nounPlural)
 	prefix := fmt.Sprintf("%d %s", occurrences, occurrenceNoun)
-	if !validImpact(impact) {
+	if !impact.Valid() {
 		return prefix + "; recording impact unavailable"
 	}
 
@@ -44,14 +44,47 @@ func Story(nounSingular, nounPlural string, occurrences int64, impact Impact) st
 	}
 }
 
-func validImpact(impact Impact) bool {
+// Valid reports whether the impact tuple is complete, arithmetically sound,
+// and consistent with the class stamped by the impact sweeper.
+func (impact Impact) Valid() bool {
+	if impact.Visits == nil || impact.Recovered == nil {
+		return false
+	}
+	visits, recovered := *impact.Visits, *impact.Recovered
+	if visits < 0 || recovered < 0 || recovered > visits {
+		return false
+	}
 	switch impact.Class {
-	case "blocked", "degraded", "invisible":
+	case "blocked":
+		return recovered == 0
+	case "degraded":
+		return recovered > 0 && recovered < visits
+	case "invisible":
+		return visits > 0 && recovered == visits
 	default:
 		return false
 	}
-	return impact.Visits != nil && impact.Recovered != nil &&
-		*impact.Visits >= 0 && *impact.Recovered >= 0 && *impact.Recovered <= *impact.Visits
+}
+
+// PageReceiptLine returns the incident page's location-free receipt sentence.
+// "pr_open_draft" is a page-line key, not a receipt state: the API's
+// receipt_state stays 'pr_open' (the frozen vocabulary), but a draft PR's
+// page line must not claim ready-for-review next to the draft warning card.
+func PageReceiptLine(state string) (string, bool) {
+	switch state {
+	case "pr_open":
+		return "Fix PR ready for review.", true
+	case "pr_open_draft":
+		return "Draft fix PR opened; verification is pending review.", true
+	case "attempt_failed_with_diff":
+		return "Fix attempt failed its checks; the working diff was saved.", true
+	case "attempt_failed_no_diff":
+		return "Fix attempt failed before producing a change.", true
+	case "report_ready":
+		return "Investigation report ready.", true
+	default:
+		return "", false
+	}
 }
 
 // ReceiptLine returns the fixed sentence for a known receipt state.

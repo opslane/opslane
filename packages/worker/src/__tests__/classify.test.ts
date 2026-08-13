@@ -1,9 +1,16 @@
 import type { Adjudication, EvidenceStrength } from '@opslane/shared';
 import { describe, expect, it } from 'vitest';
-import { deriveOutcome } from '../classify.js';
+import { deriveOutcome as deriveOutcomeWithGrounding } from '../classify.js';
+import { quoteWithinWindow } from '../quote-at.js';
 
 /** Identity resolver: every cited path resolves to itself. */
 const resolvesToItself = (cited: string): string | null => cited;
+const derivesLegacy = () => false;
+const deriveOutcome = (
+  adjudication: Adjudication | null,
+  resolvePath: (cited: string) => string | null,
+  quoteAt: (resolvedPath: string, line: number, quote: string) => boolean = derivesLegacy,
+) => deriveOutcomeWithGrounding(adjudication, resolvePath, quoteAt);
 
 function adjudication(overrides: Partial<Adjudication> = {}): Adjudication {
   return {
@@ -343,5 +350,123 @@ describe('external conclusions must reject every local candidate', () => {
     }, () => null);
 
     expect(d.outcome).toBe('not_actionable');
+  });
+});
+
+const cite = (line: number, quote: string) => ({ path: 'src/app.ts', line, quote });
+const resolveAll = (cited: string) => cited;
+const fileHas = (text: string) => (_path: string, line: number, quote: string) =>
+  quoteWithinWindow(text, line, quote);
+const appFile = 'a\nb\nconst hook = true\nd\ne';
+
+function groundedExternal(patch: Partial<Adjudication>): Adjudication {
+  return {
+    best_supported: 'External platform code',
+    evidence_check: 'checked',
+    candidates_considered: [],
+    rejected: [],
+    rejected_candidates: [],
+    evidence_strength: 'suggestive',
+    cause_kind: 'external_system',
+    // External conclusions may cite no location; reason falls back to best_supported.
+    cause_locations: [],
+    reasoning: 'r',
+    why_chain: [],
+    reproduction_steps: [],
+    ...patch,
+  };
+}
+
+describe('deriveOutcome grounding', () => {
+  it('AC-A.2: fabricated candidate (quote absent from window) cannot veto — ungrounded', () => {
+    const decision = deriveOutcome(groundedExternal({
+      candidates_considered: [{
+        statement: 'phantom hook',
+        kind: 'local_code',
+        id: 'c1',
+        citation: cite(3, 'router.afterEach(sendTitle)'),
+      }],
+    }), resolveAll, fileHas(appFile));
+    expect(decision.outcome).toBe('not_actionable');
+    expect(decision.basis).toBe('cause_outside_codebase');
+    expect(decision.dispositions).toEqual([{ id: 'c1', disposition: 'ungrounded' }]);
+  });
+
+  it('AC-A.2 variant: quote exists elsewhere in the file but outside ±5 of the anchor → ungrounded', () => {
+    const longFile = ['const hook = true', ...Array.from({ length: 20 }, (_value, index) => `filler ${index}`)].join('\n');
+    const decision = deriveOutcome(groundedExternal({
+      candidates_considered: [{
+        statement: 's',
+        kind: 'local_code',
+        id: 'c1',
+        citation: cite(20, 'const hook = true'),
+      }],
+    }), resolveAll, fileHas(longFile));
+    expect(decision.dispositions?.[0]?.disposition).toBe('ungrounded');
+  });
+
+  it('AC-A.3: grounded, unrejected candidate still gates', () => {
+    const decision = deriveOutcome(groundedExternal({
+      candidates_considered: [{
+        statement: 'real hook',
+        kind: 'local_code',
+        id: 'c1',
+        citation: cite(3, 'const hook = true'),
+      }],
+    }), resolveAll, fileHas(appFile));
+    expect(decision.outcome).toBe('needs_more_context');
+    expect(decision.basis).toBe('unrejected_local_candidates');
+  });
+
+  it('AC-A.3 variant: rejection whose own citation fails grounding converts nothing', () => {
+    const decision = deriveOutcome(groundedExternal({
+      candidates_considered: [{
+        statement: 'real hook',
+        kind: 'local_code',
+        id: 'c1',
+        citation: cite(3, 'const hook = true'),
+      }],
+      rejected_candidates: [{ id: 'c1', evidence: 'not it', citation: cite(3, 'no such text') }],
+    }), resolveAll, fileHas(appFile));
+    expect(decision.basis).toBe('unrejected_local_candidates');
+  });
+
+  it('AC-A.4: grounded candidate + grounded rejection by id, rephrased prose → external accepted', () => {
+    const decision = deriveOutcome(groundedExternal({
+      candidates_considered: [{
+        statement: 'real hook',
+        kind: 'local_code',
+        id: 'c1',
+        citation: cite(3, 'const hook = true'),
+      }],
+      rejected_candidates: [{
+        id: 'c1',
+        evidence: 'entirely different words than the statement',
+        citation: cite(3, 'const hook = true'),
+      }],
+    }), resolveAll, fileHas(appFile));
+    expect(decision.outcome).toBe('not_actionable');
+  });
+
+  it('AC-A.8: fabricated candidate that is also "rejected" records ungrounded, not rejected', () => {
+    const decision = deriveOutcome(groundedExternal({
+      candidates_considered: [{
+        statement: 'phantom',
+        kind: 'local_code',
+        id: 'c1',
+        citation: cite(3, 'nonexistent text'),
+      }],
+      rejected_candidates: [{ id: 'c1', evidence: 'e', citation: cite(3, 'const hook = true') }],
+    }), resolveAll, fileHas(appFile));
+    expect(decision.dispositions).toEqual([{ id: 'c1', disposition: 'ungrounded' }]);
+  });
+
+  it('legacy shape (no rejected_candidates, prose rejected only) keeps the old substring behavior', () => {
+    const decision = deriveOutcome(groundedExternal({
+      rejected_candidates: undefined,
+      candidates_considered: [{ statement: 'real hook', kind: 'local_code' }],
+      rejected: ['real hook: ruled out because …'],
+    }), resolveAll, fileHas(appFile));
+    expect(decision.outcome).toBe('not_actionable');
   });
 });

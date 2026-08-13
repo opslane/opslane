@@ -14,7 +14,9 @@ import type { PersistedDecision } from './db.js';
  */
 export function reasonCodeForDecision(decision: PersistedDecision | null): ReasonCode {
   if (!decision) return 'insufficient_context';
-  if (decision.outcome === 'not_actionable') return 'unfixable_infra';
+  if (decision.outcome === 'not_actionable') {
+    return decision.causeKind === 'external_system' ? 'unfixable_third_party' : 'unfixable_infra';
+  }
   if (decision.outcome === 'code_fix') return 'low_confidence_fix';
   return 'insufficient_context';
 }

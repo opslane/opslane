@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -15,6 +17,7 @@ import (
 
 	"github.com/opslane/opslane/packages/ingestion/db"
 	"github.com/opslane/opslane/packages/ingestion/masking"
+	"github.com/opslane/opslane/packages/ingestion/narrative"
 )
 
 // incidentJSON is the JSON representation of an incident, matching the
@@ -44,6 +47,13 @@ type incidentJSON struct {
 	AgentTaskBrief         *string                   `json:"agent_task_brief,omitempty"`
 	VerificationEvidence   json.RawMessage           `json:"verification_evidence,omitempty"`
 	CandidateDiff          *string                   `json:"candidate_diff,omitempty"`
+	ImpactClass            *string                   `json:"impact_class,omitempty"`
+	ImpactVisits           *int64                    `json:"impact_visits,omitempty"`
+	ImpactRecovered        *int64                    `json:"impact_visits_recovered,omitempty"`
+	Story                  string                    `json:"story"`
+	ReceiptState           *string                   `json:"receipt_state,omitempty"`
+	ReceiptLine            *string                   `json:"receipt_line,omitempty"`
+	Recordings             []incidentRecordingJSON   `json:"recordings,omitempty"`
 	PriorityScore          *float64                  `json:"priority_score,omitempty"`
 	PriorityInputs         json.RawMessage           `json:"priority_inputs,omitempty"`
 	PriorityScoredAt       *time.Time                `json:"priority_scored_at,omitempty"`
@@ -52,6 +62,14 @@ type incidentJSON struct {
 	ArchivedAt             *string                   `json:"archived_at,omitempty"`
 	TraceURL               *string                   `json:"trace_url,omitempty"`
 	Environments           []incidentEnvironmentJSON `json:"environments,omitempty"`
+}
+
+type incidentRecordingJSON struct {
+	SessionID  string `json:"session_id"`
+	StartedAt  string `json:"started_at"`
+	DurationMs int64  `json:"duration_ms"`
+	CrashCount int64  `json:"crash_count"`
+	AnchorMs   int64  `json:"anchor_ms"`
 }
 
 type incidentEnvironmentJSON struct {
@@ -126,6 +144,20 @@ func toIncidentJSON(g db.ErrorGroup) incidentJSON {
 		(*g.InvestigationReadiness == "ineligible" || *g.InvestigationReadiness == "pending") {
 		inc.RootCause = nil
 		inc.SuggestedMitigation = nil
+	}
+	impact := narrative.Impact{Visits: g.ImpactVisits, Recovered: g.ImpactVisitsRecovered}
+	if g.ImpactClass != nil {
+		impact.Class = *g.ImpactClass
+	}
+	noun, nouns := "crash", "crashes"
+	if g.Kind == "friction" {
+		noun, nouns = "friction signal", "friction signals"
+	}
+	inc.Story = narrative.Story(noun, nouns, int64(g.OccurrenceCount), impact)
+	if impact.Valid() {
+		inc.ImpactClass = g.ImpactClass
+		inc.ImpactVisits = g.ImpactVisits
+		inc.ImpactRecovered = g.ImpactVisitsRecovered
 	}
 	if len(g.VerificationEvidence) > 0 {
 		inc.VerificationEvidence = json.RawMessage(g.VerificationEvidence)
@@ -331,6 +363,7 @@ func (d *Dependencies) GetIncident(w http.ResponseWriter, r *http.Request) {
 			inc.AgentTaskBrief = brief
 		}
 	}
+	d.attachReceiptAndRecordings(r.Context(), projectID, incidentID, *group, &inc)
 	environments, err := d.Queries.ListGroupEnvironments(r.Context(), projectID, incidentID)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "failed to get incident environments")
@@ -363,9 +396,75 @@ func (d *Dependencies) GetIncident(w http.ResponseWriter, r *http.Request) {
 	if sessionID, errorAt, ok, err := d.Queries.SessionPointerForGroup(r.Context(), incidentID, projectID); err == nil && ok {
 		inc.SessionPointer = &sessionPointerJSON{SessionID: sessionID, ErrorAt: errorAt.Format(time.RFC3339)}
 	}
-
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(inc)
+}
+
+// attachReceiptAndRecordings adds the detail-only receipt framing and the
+// coverage-proven recordings list to an incident response. Every endpoint
+// that returns a single incident (GET and the lifecycle actions, whose
+// response the dashboard assigns straight back into its page state) must
+// attach these, or the sections vanish from the page after the action.
+// Both surfaces are best-effort: a failure costs the section, never the
+// response.
+func (d *Dependencies) attachReceiptAndRecordings(ctx context.Context, projectID, incidentID string, g db.ErrorGroup, inc *incidentJSON) {
+	if state, ok := receiptStateFor(g, *inc); ok {
+		lineKey := state
+		if state == "pr_open" && g.Status == "pr_draft" {
+			lineKey = "pr_open_draft"
+		}
+		if line, lineOK := narrative.PageReceiptLine(lineKey); lineOK {
+			inc.ReceiptState = &state
+			inc.ReceiptLine = &line
+		}
+	}
+	if recordings, err := d.Queries.RecordingsForGroup(ctx, incidentID, projectID); err != nil {
+		slog.Warn("failed to attach incident recordings", "project_id", projectID, "incident_id", incidentID, "error", err)
+	} else if len(recordings) > 0 {
+		inc.Recordings = make([]incidentRecordingJSON, 0, len(recordings))
+		for _, recording := range recordings {
+			inc.Recordings = append(inc.Recordings, incidentRecordingJSON{
+				SessionID:  recording.SessionID,
+				StartedAt:  recording.StartedAt.Format(time.RFC3339),
+				DurationMs: recording.DurationMs,
+				CrashCount: recording.CrashCount,
+				AnchorMs:   recording.AnchorMs,
+			})
+		}
+	}
+}
+
+func receiptStateFor(g db.ErrorGroup, inc incidentJSON) (string, bool) {
+	if g.InvestigationReadiness == nil || *g.InvestigationReadiness != "eligible" {
+		return "", false
+	}
+	present := func(value *string) bool {
+		return value != nil && strings.TrimSpace(*value) != ""
+	}
+	hasReport := present(inc.RootCause) || present(inc.AgentTaskBrief)
+	switch g.Status {
+	case "pr_created", "pr_draft":
+		if present(g.PrURL) && isHTTPURL(strings.TrimSpace(*g.PrURL)) {
+			return "pr_open", true
+		}
+	case "needs_human":
+		if g.HasSavedDiff {
+			return "attempt_failed_with_diff", true
+		}
+		if hasReport {
+			return "attempt_failed_no_diff", true
+		}
+	case "investigated", "insight", "awaiting_approval":
+		if hasReport {
+			return "report_ready", true
+		}
+	}
+	return "", false
+}
+
+func isHTTPURL(value string) bool {
+	parsed, err := url.Parse(value)
+	return err == nil && parsed.Host != "" && (parsed.Scheme == "http" || parsed.Scheme == "https")
 }
 
 func filterSensitiveHeaders(headers map[string]json.RawMessage) map[string]json.RawMessage {
@@ -955,8 +1054,13 @@ func (d *Dependencies) respondWithIncident(w http.ResponseWriter, r *http.Reques
 		writeJSONError(w, http.StatusInternalServerError, "failed to fetch updated incident")
 		return
 	}
+	inc := toIncidentJSON(*group)
+	// The dashboard assigns this response straight into its page state, so it
+	// must carry the same detail-only surfaces GET does or the receipt and
+	// recordings sections vanish after resolve/archive/unarchive.
+	d.attachReceiptAndRecordings(r.Context(), projectID, incidentID, *group, &inc)
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(toIncidentJSON(*group))
+	json.NewEncoder(w).Encode(inc)
 }
 
 // ResolveIncident manually marks an incident as resolved.
