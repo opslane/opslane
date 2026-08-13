@@ -12,19 +12,19 @@ Analysis turns a recording into counts and labels, never a transcript.
 
 ## When analysis runs
 
-A session closes after 30 idle minutes, and closing queues the analysis. A late chunk queues the analysis again, so the analyzer reads every chunk the session sent. The server scrubs each chunk on arrival, before the analyzer or any other reader sees it.
+A session closes after 30 idle minutes, on the next retention sweep, and closing queues the analysis. A late chunk queues the analysis again, so the analyzer reads every chunk the session sent. Raw chunks land in storage first and a server-side pass redacts them within seconds. No dashboard, API, or worker read path serves a chunk until that pass succeeds.
 
 ## What the analyzer extracts
 
 For each session:
 
-- The landing page and the number of pages after it.
+- The landing page and the number of page events in the session.
 - Clicks and typed inputs.
-- Failed requests, counted separately for 4xx and 5xx.
+- Failed same-origin requests, counted separately for 4xx and 5xx.
 - Successful and failed writes.
 - The time from first activity to last.
 
-Those numbers produce two labels. **Coverage** records how much of the session the recording holds: complete, partial, or none. **Activity** records the kind of visit: active, light touch, zero interaction, or idle tab. The analyzer labels an incomplete recording partial.
+Those numbers produce two labels. **Coverage** records how much of the session the recording holds: complete, partial, or no replay. **Activity** records the kind of visit: active, light touch, zero interaction, or idle tab. Activity is classified only from a complete recording; anything less is labelled unknown. The analyzer labels an incomplete recording partial.
 
 ## Where the facts go
 
