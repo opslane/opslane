@@ -1,3 +1,6 @@
+---
+description: Machine-checkable correctness properties of the event-to-resolution pipeline.
+---
 # Reliability contract
 
 This contract defines the machine-checkable correctness properties of Opslane's

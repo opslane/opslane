@@ -1,3 +1,6 @@
+---
+description: Every registered HTTP route with its authentication mode.
+---
 # HTTP routes
 
 All routes registered by the ingestion API (`packages/ingestion/handler/routes.go`). Auth column legend: **none** (public), **poll token** (`X-Opslane-Poll-Token` for one agent session), **SDK** (`X-API-Key` project-scoped public ingest key; rate-limited per project, and origin-gated — unconditionally on the browser-only endpoints, and on `/api/v1/events` only when the request presents `Origin` or `Referer`), and **session** (dashboard JWT cookie or CLI token).

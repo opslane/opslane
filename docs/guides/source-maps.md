@@ -4,7 +4,9 @@ covers:
   - packages/ingestion/handler/sourcemap_upload.go
   - packages/sdk/vite-plugin/**
   - packages/worker/src/resolve-stack.ts
+description: Upload Vite source maps so production stack traces point at your source.
 ---
+
 # Source maps
 
 Opslane's Vite plugin stamps each production chunk with a deterministic debug

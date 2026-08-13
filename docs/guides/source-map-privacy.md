@@ -4,7 +4,9 @@ covers:
   - packages/sdk/vite-plugin/**
   - packages/ingestion/handler/sourcemap.go
   - packages/worker/src/source-map.ts
+description: Where uploaded source maps are stored and who can read them.
 ---
+
 # Source-map privacy
 
 A source map is not harmless build metadata. When it includes `sourcesContent`,

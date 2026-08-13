@@ -1,53 +1,60 @@
 # Opslane
 
-> AI-powered production error-resolution engine for browser JavaScript apps: errors in, verified fix PRs (or explicit needs_human incidents) out. Self-hostable via Docker Compose. Server, agent-core, and CLI code AGPL-3.0-only; SDKs/shared types MIT.
+> Opslane watches errors and session recordings from a web app, investigates the ones worth fixing against the connected repository, and opens a pull request whose build and tests ran in a sandbox. When it cannot fix something it records a reason code. Self-hosted with Docker Compose. Server, worker, agent core, dashboard, and CLI are AGPL-3.0-only; the SDKs and shared types are MIT.
 
-This file indexes the agent-relevant documentation. All canonical content is plain Markdown in this repository. (Location decision: repo root, so it ships with every clone; recorded in issue #18.)
+Every page below is plain Markdown in this repository and is published at https://docs.opslane.com. Paths are repo-relative; the published URL drops the `docs/` prefix and the `.md` suffix.
 
 ## Start here
 
-- [README](README.md): what Opslane is, honest scope, architecture, licensing boundary, run-it-locally
-- [Self-host quickstart](docs/quickstart/self-host.md): two paths — no-credentials smoke test (ends needs_human) and full error-to-PR
-- [Install guide](docs/install.md): hosted setup and manual SDK fallback
+- [Introduction](docs-site/src/content/docs/index.mdx): what Opslane is, who it is for, what it is not
+- [Run Opslane locally](docs/quickstart/self-host.md): Docker Compose stack, a seeded project, and a first event that ends in `needs_human` without credentials
+- [Install the SDK](docs/install.md): React, Vue, and vanilla setup; `setUser` and why anonymous users cost you ranking and friction; environment labels; source-map pointer
+- [Connect GitHub](docs/guides/github-app.md): GitHub App or personal access token, permissions, webhook events
+- [Source maps](docs/guides/source-maps.md): the Vite plugin, `OPSLANE_SOURCEMAP_KEY`, build diagnostics, verification
 
-## Architecture and trust
+## How it works
 
-- [Architecture overview](docs/architecture/overview.md): components, trust boundaries, no-external-queue design
-- [Life of an error](docs/architecture/life-of-an-error.md): capture → group → claim → triage → fix → route by confidence
-- [Precision](docs/architecture/precision.md): exactly what "verified" guarantees and what it does not
-- [Trust and security model](docs/architecture/trust.md): GitHub permissions, data flow, credential storage, masking, and honest gaps
-- [Replay privacy](docs/guides/replay-privacy.md): what replay data may contain and how capture is controlled
+- [How issues work](docs/guides/issues.md): occurrences vs issues vs affected users, fingerprint inputs, dropped noise, the ranking formula, status groups
+- [Friction and session recordings](docs/guides/friction.md): rage clicks and dead clicks, what the analyzer extracts, the five-signed-in-user promotion bar, insight endings
+- [Investigation and fix pull requests](docs/guides/fix-prs.md): the three paths to a PR, the impact bar, what the investigator reads, citation validation, ready vs draft
+- [What "verified" means](docs/architecture/precision.md): evidence tiers, the ready and draft gates, and what verification does not guarantee
+- [Architecture overview](docs/architecture/overview.md): components, trust boundaries, Postgres as the queue
+- [Life of an error](docs/architecture/life-of-an-error.md): the pipeline stage by stage
 
-## Guides
+## Configure
 
-- [React](docs/guides/react.md): capture React 18/19 render errors with an error boundary
-- [Vue 3](docs/guides/vue.md): capture Vue component errors with component context
-- [Vanilla JavaScript](docs/guides/vanilla.md): initialize the browser SDK without a framework integration
-- [Source maps](docs/guides/source-maps.md): upload Vite source maps and troubleshoot resolution failures
-- [Connecting GitHub](docs/guides/github-app.md): configure a GitHub App or personal access token for investigations and fix PRs
-- [Slack notifications](docs/guides/slack-notifications.md): send new-issue notifications to Slack via incoming webhooks
-- [Replay privacy and masking](docs/guides/replay-privacy.md): understand replay capture, masking, storage, and controls
+- [Environments](docs/guides/environments.md): label resolution, the project default, and limiting automatic error investigation by environment
+- [API keys](docs/guides/api-keys.md): `opslane_pk_` ingest keys and `opslane_sk_` source-map keys, minting, rotation, 401 vs 403
+- [Slack notifications](docs/guides/slack-notifications.md): incoming webhooks, new-issue alerts, the daily digest
 
-## Reference (drift-checked against source by the pnpm test gate)
+## Trust and privacy
 
-- [SDK options](docs/reference/sdk-options.md): every init() option with defaults, from SdkInitOptions
-- [HTTP routes](docs/reference/http-routes.md): every registered route with auth mode
-- [Environment variables](docs/reference/environment-variables.md): every var each service reads, plus known dead config
-- [Reason codes](docs/reference/reason-codes.md): all 22 needs_human reason codes with remediations
-- [Drift check](scripts/check-docs-drift.mjs): run with `pnpm docs:check`
+- [Trust and security model](docs/architecture/trust.md): what each external service receives, credential storage, retention, honest gaps
+- [Replay privacy and masking](docs/guides/replay-privacy.md): capture defaults, masking classes, server-side scrubbing, retention
+- [Source-map privacy](docs/guides/source-map-privacy.md): where uploaded source lives and who can read it
+
+## Reference (checked against source in CI)
+
+- [SDK options](docs/reference/sdk-options.md): every `init()` option with type and default
+- [HTTP routes](docs/reference/http-routes.md): every registered route with its auth mode
+- [Environment variables](docs/reference/environment-variables.md): every variable each service reads, including known dead config
+- [Reason codes](docs/reference/reason-codes.md): every `needs_human` reason code with its remediation
+- [CLI agent contract](docs/reference/cli-agent-contract.md): the CLI's JSON status vocabulary for non-interactive callers
 
 ## Contracts
 
-- [Reliability contract](docs/contracts/reliability.md): machine-checkable correctness properties of the event-to-resolution pipeline
-- [Session replay contract](docs/contracts/C4-amendments.md): chunk, pointer, scrub, retention, and evidence-lifecycle invariants
+- [Event API contract](docs/contracts/events.md): the append-only wire rules for `POST /api/v1/events`
+- [Reliability contract](docs/contracts/reliability.md): machine-checkable properties of the event-to-resolution pipeline
+- [Session replay contract](docs/contracts/C4-amendments.md): chunk, pointer, scrub, and retention invariants
+- [Action scope contract](docs/contracts/action-scope.md): what environment scoping gates, and what it deliberately does not
 
 ## Contributing and agents
 
 - [AGENTS.md](AGENTS.md): repository conventions, verification requirements, guardrails
 - [SDK README](packages/sdk/README.md): install, framework integrations, config table, privacy defaults
-- Issue tracker: https://github.com/opslane/opslane-oss/issues (docs epic: #2)
+- Issue tracker: https://github.com/opslane/opslane-oss/issues
 
 ## Not yet written (tracked)
 
-- CLI reference: blocked on the CLI contract settling (issue #3, then #16)
-- Production self-hosting operations: blocked on retention/backup readiness (issue #23)
+- Production self-hosting operations: backups, scaling, upgrades (issue #23)
+- A hosted quickstart; Opslane is self-hosted today (issue #21)

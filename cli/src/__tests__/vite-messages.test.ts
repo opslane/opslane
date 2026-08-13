@@ -46,7 +46,7 @@ describe('Vite messages', () => {
       expect(rendered).not.toContain(MANUAL_PLUGIN_LINES);
       expect(rendered).toContain('Opslane still catches and groups errors');
     }
-    expect(legacy).toContain('https://docs.opslane.com/guides/source-maps-migration');
+    expect(legacy).toContain('https://docs.opslane.com/guides/source-maps');
   });
 
   it('renders a moved, structurally-valid suggestion at its new line', () => {
