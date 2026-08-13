@@ -5,7 +5,7 @@ covers:
 ---
 # API keys
 
-A project has two kinds of keys. Each has one permitted action, enforced by the server.
+A project has two kinds of keys. The server enforces what each can do.
 
 | | Ingest key | Source-map key |
 | --- | --- | --- |
@@ -14,7 +14,7 @@ A project has two kinds of keys. Each has one permitted action, enforced by the 
 | Where it lives | Inside your browser bundle | In CI |
 | If it leaks | Nothing to do; it is public by construction | Revoke it and mint a new one |
 
-Neither key can read anything. Reading data takes a signed-in user; no key of any scope has read access.
+No key can read data. Reading requires a signed-in user.
 
 ## The ingest key
 
@@ -28,13 +28,13 @@ The key ships inside the browser bundle, so a new key takes effect on your next 
 
 ## The source-map key
 
-The source-map key is a secret for CI. It carries its own upload destination inside the key, so this one variable is the whole configuration; there is no endpoint variable.
+The source-map key is a secret for CI. It carries its upload destination, so there is nothing else to configure.
 
 ```bash
 OPSLANE_SOURCEMAP_KEY=opslane_sk_...
 ```
 
-Never give it a `VITE_` prefix or your framework's equivalent: that would bundle the secret into the browser. The [source maps guide](source-maps.md) covers the Vite plugin that uses it.
+Never give it a `VITE_`-style public prefix; that bundles the secret into the browser. The [source maps guide](source-maps.md) covers the Vite plugin that uses it.
 
 ## Minting keys on a self-host
 
@@ -45,7 +45,7 @@ docker compose exec ingestion mint-key -project <project-uuid> -scope ingest
 docker compose exec ingestion mint-key -project <project-uuid> -scope sourcemaps
 ```
 
-It prints the key once, plus the key ID and the exact SQL to revoke it. For source-map keys, the upload destination is sealed into the key at mint time from the server's `OPSLANE_PUBLIC_INGEST_URL`; pass `-endpoint` to seal a different one. To find a project's UUID:
+It prints the key once, plus the key ID and the SQL to revoke it. Source-map keys take their upload destination from the server's `OPSLANE_PUBLIC_INGEST_URL`; pass `-endpoint` to override. To find a project's UUID:
 
 ```bash
 docker compose exec -T postgres psql -U opslane -d opslane -c "SELECT id, name FROM projects;"
@@ -53,7 +53,7 @@ docker compose exec -T postgres psql -U opslane -d opslane -c "SELECT id, name F
 
 ## Rotating a key
 
-Minting never revokes, and a project can hold any number of active keys per scope. Rotate by overlap: mint the new key, deploy it, then revoke the old one with the SQL that `mint-key` printed. Revocation is always exact; revoking one key never touches the others.
+Minting never revokes, so old and new keys can overlap. Mint the new key, deploy it, then revoke the old one with the SQL `mint-key` printed. Revoking one key never touches the others.
 
 ## When a key is rejected
 
