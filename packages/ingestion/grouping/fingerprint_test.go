@@ -179,3 +179,131 @@ func TestFingerprint_EmptyPlatformDefaultsToJavascript(t *testing.T) {
 		t.Fatal("empty platform did not default to javascript")
 	}
 }
+
+func TestFingerprintWithImages_CollapsesPerLoadBundleURLs(t *testing.T) {
+	const debugID = "afa8111b-3697-ce9d-b9e5-4e52afdb3b57"
+	urlA := "https://59n3u0-20bxmx2og5-2q8nlicgda--dchjri.cdn.prod.atlassian-dev.net/a/b/c/global-page/_ctx_H4sIAAAAAAACA8VVy27bMBD8Fx4NiwF8Keqb"
+	urlB := "https://abcrz-1lafkb263s-gn3d6f7yf--dchjri.cdn.prod.atlassian-dev.net/a/b/c/global-page/_ctx_H4sIAAAAAAACA8VVXW-bMBT9L36MwJX6mDdG"
+
+	stackA := "Error: the window title wasn't changed due to error.\n    at Object.h [as changeWindowTitle] (" + urlA + ":1:2345)"
+	stackB := "Error: the window title wasn't changed due to error.\n    at Object.h [as changeWindowTitle] (" + urlB + ":1:2345)"
+
+	fpA, okA := FingerprintWithImages("javascript", "e", "the window title wasn't changed due to error.", stackA,
+		[]SourceImage{{CodeFile: urlA, DebugID: debugID}})
+	fpB, okB := FingerprintWithImages("javascript", "e", "the window title wasn't changed due to error.", stackB,
+		[]SourceImage{{CodeFile: urlB, DebugID: debugID}})
+
+	if !okA || !okB {
+		t.Fatalf("substitution must report that it fired: okA=%v okB=%v", okA, okB)
+	}
+	if fpA != fpB {
+		t.Errorf("same bug across two page loads must share a fingerprint: %s != %s", fpA, fpB)
+	}
+}
+
+// Distinct bugs must stay distinct even when EVERYTHING else is identical --
+// same bundle, same debug ID, same message shape. Only the frame position and
+// function differ. A weaker test (different messages AND different frames)
+// would pass even if substitution flattened frames entirely.
+func TestFingerprintWithImages_SameBundleDistinctFramesDiffer(t *testing.T) {
+	const debugID = "afa8111b-3697-ce9d-b9e5-4e52afdb3b57"
+	url := "https://cdn.example.net/a/b/_ctx_XYZ"
+	images := []SourceImage{{CodeFile: url, DebugID: debugID}}
+
+	fp1, _ := FingerprintWithImages("javascript", "e", "boom", "e: boom\n    at Object.h ("+url+":1:10)", images)
+	fp2, _ := FingerprintWithImages("javascript", "e", "boom", "e: boom\n    at Object.q ("+url+":9:99)", images)
+
+	if fp1 == fp2 {
+		t.Error("two different frames in one bundle must not collapse onto one fingerprint")
+	}
+}
+
+func TestFingerprintWithImages_NoImagesMatchesLegacyFingerprint(t *testing.T) {
+	stack := "TypeError: boom\n    at foo (https://cdn.example.net/app.js:1:2)"
+	legacy := Fingerprint("javascript", "TypeError", "boom", stack)
+
+	for name, images := range map[string][]SourceImage{"nil": nil, "empty": {}} {
+		got, ok := FingerprintWithImages("javascript", "TypeError", "boom", stack, images)
+		if got != legacy {
+			t.Errorf("%s images must reproduce the legacy fingerprint: %s != %s", name, got, legacy)
+		}
+		if ok {
+			t.Errorf("%s images must report that no substitution fired", name)
+		}
+	}
+}
+
+// A per-request query string must not survive substitution and re-fragment the
+// group. code_file is cut at '?' before matching; the residual query on the
+// substituted token is then removed.
+func TestApplyDebugIDs_StripsPerRequestQueryStrings(t *testing.T) {
+	images := []SourceImage{{CodeFile: "https://cdn.example.net/app.js?build=1", DebugID: "abcd"}}
+	got1, ok1 := applyDebugIDs("Error: x\n    at f (https://cdn.example.net/app.js?session=111:1:2)", images)
+	got2, ok2 := applyDebugIDs("Error: x\n    at f (https://cdn.example.net/app.js?session=222:1:2)", images)
+
+	if !ok1 || !ok2 {
+		t.Fatalf("substitution must fire on both: %v %v", ok1, ok2)
+	}
+	if got1 != got2 {
+		t.Errorf("per-request query strings must not survive: %q != %q", got1, got2)
+	}
+	if !strings.Contains(got1, ":1:2") {
+		t.Errorf("line:col must survive query stripping, got %q", got1)
+	}
+}
+
+func TestApplyDebugIDs_LongestCodeFileWins(t *testing.T) {
+	images := []SourceImage{
+		{CodeFile: "https://cdn.example.net/a", DebugID: "1111"},
+		{CodeFile: "https://cdn.example.net/a/b/vendor.js", DebugID: "2222"},
+	}
+	got, ok := applyDebugIDs("Error: x\n    at f (https://cdn.example.net/a/b/vendor.js:1:2)", images)
+
+	if !ok {
+		t.Fatal("substitution must fire")
+	}
+	if !strings.Contains(got, "<debug:2222>") {
+		t.Errorf("longest matching code_file must win, got %q", got)
+	}
+	if strings.Contains(got, "<debug:1111>") {
+		t.Errorf("shorter prefix must not also substitute, got %q", got)
+	}
+}
+
+func TestApplyDebugIDs_SkipsUnusableImages(t *testing.T) {
+	stack := "Error: x\n    at f (https://cdn.example.net/app.js:1:2)"
+	images := []SourceImage{
+		{CodeFile: "", DebugID: "1111"},
+		{CodeFile: "https://cdn.example.net/app.js", DebugID: ""},
+		// A newline in code_file would let one image rewrite across frame
+		// boundaries and change which lines topFrames selects.
+		{CodeFile: "https://cdn.example.net/\napp.js", DebugID: "3333"},
+	}
+	got, ok := applyDebugIDs(stack, images)
+	if ok || got != stack {
+		t.Errorf("unusable images must be ignored, got %q (ok=%v)", got, ok)
+	}
+}
+
+// Documents the out-of-scope cases from the plan's scope boundary. The
+// mechanism under test is literal containment, NOT scheme awareness: each case
+// is a code_file that does not appear verbatim in the frame. If a code_file
+// ever DID equal a relative or webpack:// frame string, substitution would fire
+// and that is fine -- the identity would still be stable.
+func TestApplyDebugIDs_CodeFileAbsentFromFrame(t *testing.T) {
+	cases := map[string]struct{ stack, codeFile string }{
+		"frame relative, code_file absolute": {"Error: x\n    at f (/static/app.js:1:2)", "https://cdn.example.net/static/app.js"},
+		"frame webpack, code_file http":      {"Error: x\n    at f (webpack:///src/app.ts:1:2)", "https://cdn.example.net/app.js"},
+		"frame blob, code_file http":         {"Error: x\n    at f (blob:https://cdn.example.net/abc-123:1:2)", "https://cdn.example.net/app.js"},
+		"code_file is the map, frame the js": {"Error: x\n    at f (https://cdn.example.net/app.js:1:2)", "https://cdn.example.net/app.js.map"},
+		"percent-encoding differs":           {"Error: x\n    at f (https://cdn.example.net/a%20b.js:1:2)", "https://cdn.example.net/a b.js"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			got, ok := applyDebugIDs(tc.stack, []SourceImage{{CodeFile: tc.codeFile, DebugID: "9999"}})
+			if ok || got != tc.stack {
+				t.Errorf("out-of-scope case must fall back unchanged, got %q (ok=%v)", got, ok)
+			}
+		})
+	}
+}

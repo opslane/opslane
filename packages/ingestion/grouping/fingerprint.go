@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -17,6 +18,9 @@ var (
 	reSpaces     = regexp.MustCompile(`\s+`)
 	reURL        = regexp.MustCompile(`https?://[^/\s]+`)
 	reAssetToken = regexp.MustCompile(`([A-Za-z0-9_.]+)-([A-Za-z0-9_]+)\.(js|mjs|cjs|css|map)(\?[^\s:'")]*)?(:\d+:\d+)?`)
+	// reDebugQuery strips a query string left dangling on a substituted token.
+	// The token delimits the match, so this cannot eat the trailing :line:col.
+	reDebugQuery = regexp.MustCompile(`(<debug:[^>]*>)\?[^\s:)]*`)
 )
 
 // Fingerprint generates a stable fingerprint for error grouping.
@@ -95,4 +99,70 @@ func topFrames(stack string, n int) []string {
 		lines[i] = normalizeVolatile(line)
 	}
 	return lines
+}
+
+// SourceImage is one validated debug_meta image: the bundle URL the SDK saw
+// and the content-derived debug ID for its source map.
+type SourceImage struct {
+	CodeFile string
+	DebugID  string
+}
+
+// cutQuery drops a URL query string. A per-request query on code_file would
+// otherwise make the literal match fail for every other request.
+func cutQuery(s string) string {
+	if i := strings.IndexByte(s, '?'); i >= 0 {
+		return s[:i]
+	}
+	return s
+}
+
+// applyDebugIDs rewrites every occurrence of a known bundle URL in the stack to
+// its debug ID, and reports whether any substitution actually fired.
+//
+// It must run BEFORE normalizeVolatile: normalizeVolatile strips scheme+host,
+// which is part of code_file, so afterwards there is nothing left to match.
+//
+// Longest code_file first, so a short URL that prefixes a longer one cannot
+// shadow it. Images carrying a newline are rejected: a multi-line replacement
+// would rewrite across frame boundaries and change which lines topFrames picks.
+func applyDebugIDs(stackTrace string, images []SourceImage) (string, bool) {
+	if stackTrace == "" || len(images) == 0 {
+		return stackTrace, false
+	}
+	usable := make([]SourceImage, 0, len(images))
+	for _, image := range images {
+		codeFile := cutQuery(image.CodeFile)
+		if codeFile == "" || image.DebugID == "" ||
+			strings.ContainsAny(codeFile, "\n\r") || strings.ContainsAny(image.DebugID, "\n\r>") {
+			continue
+		}
+		usable = append(usable, SourceImage{CodeFile: codeFile, DebugID: image.DebugID})
+	}
+	if len(usable) == 0 {
+		return stackTrace, false
+	}
+	sort.SliceStable(usable, func(i, j int) bool {
+		return len(usable[i].CodeFile) > len(usable[j].CodeFile)
+	})
+
+	substituted := stackTrace
+	for _, image := range usable {
+		substituted = strings.ReplaceAll(substituted, image.CodeFile, "<debug:"+image.DebugID+">")
+	}
+	if substituted == stackTrace {
+		return stackTrace, false
+	}
+	return reDebugQuery.ReplaceAllString(substituted, "$1"), true
+}
+
+// FingerprintWithImages is Fingerprint with the SDK's debug_meta images applied
+// to the stack first, giving frames an identity that survives bundle URLs that
+// vary per page load. It returns the fingerprint and whether debug IDs were
+// actually applied — callers use the flag for metrics, not for control flow.
+//
+// When nothing matches it returns exactly what Fingerprint would have returned.
+func FingerprintWithImages(platform, errorType, errorMessage, stackTrace string, images []SourceImage) (string, bool) {
+	substituted, applied := applyDebugIDs(stackTrace, images)
+	return Fingerprint(platform, errorType, errorMessage, substituted), applied
 }
