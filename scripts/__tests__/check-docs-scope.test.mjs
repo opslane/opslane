@@ -24,14 +24,14 @@ test('parses the loader allowlist and sidebar from their authoritative sources',
     files: ['install.md'],
     directories: ['quickstart', 'guides', 'reference', 'architecture', 'contracts'],
   });
-  assert.ok(parseSidebarSlugs(SIDEBAR_SOURCE).includes('contracts/c4-amendments'));
+  assert.ok(parseSidebarSlugs(SIDEBAR_SOURCE).includes('guides/issues'));
 });
 
 test('real docs tree has explicit policy coverage', () => {
   const result = checkDocsScope({ root: ROOT });
 
   assert.deepEqual(result.problems, []);
-  assert.equal(result.published.length, 32);
+  assert.equal(result.published.length, 31);
   assert.equal(result.navigable.length, parseSidebarSlugs(SIDEBAR_SOURCE).length);
   assert.equal(result.policies.get('docs/contracts/events.md'), 'manual');
 });

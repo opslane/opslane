@@ -46,7 +46,7 @@ export function renderViteOutcome(file: string, result: ViteEditResult): string 
   if (result.outcome === 'legacy_opslane_plugin') {
     return `${file}\n\nThis config imports the legacy Opslane source-map plugin. Do not paste a second registration.\n\n`
       + 'Options:\n'
-      + '1. Follow https://docs.opslane.com/guides/source-maps-migration, remove the legacy plugin, and re-run.\n'
+      + '1. Follow https://docs.opslane.com/guides/source-maps, remove the legacy plugin, and re-run.\n'
       + '2. Migrate by hand and watch the first build before removing the old setup.\n'
       + '3. Skip source maps. Opslane still catches and groups errors; only original file and line numbers stay unreadable.';
   }

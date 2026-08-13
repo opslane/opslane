@@ -51,9 +51,8 @@ export default defineConfig({
             { label: 'React', slug: 'guides/react' },
             { label: 'Vue 3', slug: 'guides/vue' },
             { label: 'Vanilla JavaScript', slug: 'guides/vanilla' },
-            { label: 'Connect GitHub', slug: 'guides/github-app' },
             { label: 'Source maps', slug: 'guides/source-maps' },
-            { label: 'Upgrading source-map keys', slug: 'guides/source-maps-migration' },
+            { label: 'Connect GitHub', slug: 'guides/github-app' },
           ],
         },
         {

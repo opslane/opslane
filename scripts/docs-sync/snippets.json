@@ -113,9 +113,6 @@
     "docs/guides/source-map-privacy.md": {
       "fences": []
     },
-    "docs/guides/source-maps-migration.md": {
-      "fences": []
-    },
     "docs/guides/source-maps.md": {
       "fences": [
         {
