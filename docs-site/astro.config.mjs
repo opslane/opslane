@@ -45,54 +45,33 @@ export default defineConfig({
           label: 'Get started',
           items: [
             { label: 'Introduction', link: '/' },
-            // Hosted quickstart (#21) goes first when it ships.
-            { label: 'Self-host Opslane', slug: 'quickstart/self-host' },
+            { label: 'Run Opslane locally', slug: 'quickstart/self-host' },
             { label: 'Install the SDK', slug: 'install' },
-            { label: 'React', slug: 'guides/react' },
-            { label: 'Vue 3', slug: 'guides/vue' },
-            { label: 'Vanilla JavaScript', slug: 'guides/vanilla' },
-            { label: 'Source maps', slug: 'guides/source-maps' },
             { label: 'Connect GitHub', slug: 'guides/github-app' },
+            { label: 'Source maps', slug: 'guides/source-maps' },
           ],
         },
         {
-          label: 'How Opslane works',
-          items: [
-            { label: 'Architecture overview', slug: 'architecture/overview' },
-            { label: 'Life of an error', slug: 'architecture/life-of-an-error' },
-            { label: 'What "verified" means', slug: 'architecture/precision' },
-          ],
-        },
-        {
-          label: 'Issues',
+          label: 'How it works',
           items: [
             { label: 'How issues work', slug: 'guides/issues' },
-            { label: 'Friction', slug: 'guides/friction' },
-            { label: 'How sessions are analyzed', slug: 'guides/session-analysis' },
+            { label: 'Friction and session recordings', slug: 'guides/friction' },
+            { label: 'Investigation and fix pull requests', slug: 'guides/fix-prs' },
+            { label: 'What "verified" means', slug: 'architecture/precision' },
+            { label: 'Architecture overview', slug: 'architecture/overview' },
+            { label: 'Life of an error', slug: 'architecture/life-of-an-error' },
           ],
         },
         {
-          label: 'Fixes',
-          items: [
-            { label: 'How investigation works', slug: 'guides/investigation' },
-            { label: 'When Opslane opens a pull request', slug: 'guides/fix-prs' },
-          ],
-        },
-        {
-          label: 'Projects and keys',
+          label: 'Configure',
           items: [
             { label: 'Environments', slug: 'guides/environments' },
             { label: 'API keys', slug: 'guides/api-keys' },
-          ],
-        },
-        {
-          label: 'Notifications',
-          items: [
             { label: 'Slack notifications', slug: 'guides/slack-notifications' },
           ],
         },
         {
-          label: 'Privacy and trust',
+          label: 'Trust and privacy',
           items: [
             { label: 'Trust and security model', slug: 'architecture/trust' },
             { label: 'Replay privacy and masking', slug: 'guides/replay-privacy' },

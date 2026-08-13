@@ -51,33 +51,8 @@
         }
       ]
     },
-    "docs/guides/investigation.md": {
-      "fences": []
-    },
     "docs/guides/issues.md": {
       "fences": []
-    },
-    "docs/guides/react.md": {
-      "fences": [
-        {
-          "language": "bash",
-          "classification": "illustrative"
-        },
-        {
-          "language": "tsx",
-          "classification": "runnable",
-          "fixture": "test-fixtures/react-app",
-          "target": "src/main.tsx",
-          "command": [
-            "pnpm",
-            "build"
-          ]
-        },
-        {
-          "language": "tsx",
-          "classification": "fragment"
-        }
-      ]
     },
     "docs/guides/replay-privacy.md": {
       "fences": [
@@ -98,9 +73,6 @@
           "classification": "fragment"
         }
       ]
-    },
-    "docs/guides/session-analysis.md": {
-      "fences": []
     },
     "docs/guides/slack-notifications.md": {
       "fences": [
@@ -157,31 +129,27 @@
         }
       ]
     },
-    "docs/guides/vanilla.md": {
+    "docs/install.md": {
       "fences": [
         {
           "language": "bash",
           "classification": "illustrative"
         },
         {
-          "language": "ts",
-          "classification": "runnable",
-          "fixture": "test-fixtures/react-app",
-          "target": "src/main.tsx",
-          "command": [
-            "pnpm",
-            "build"
-          ]
+          "language": "tsx",
+          "classification": "fragment"
         },
         {
           "language": "ts",
-          "classification": "runnable",
-          "fixture": "test-fixtures/react-app",
-          "target": "src/main.tsx",
-          "command": [
-            "pnpm",
-            "build"
-          ]
+          "classification": "fragment"
+        },
+        {
+          "language": "ts",
+          "classification": "fragment"
+        },
+        {
+          "language": "bash",
+          "classification": "config-template"
         },
         {
           "language": "ts",
@@ -190,68 +158,6 @@
         {
           "language": "html",
           "classification": "fragment"
-        }
-      ]
-    },
-    "docs/guides/vue.md": {
-      "fences": [
-        {
-          "language": "bash",
-          "classification": "illustrative"
-        },
-        {
-          "language": "ts",
-          "classification": "runnable",
-          "fixture": "test-fixtures/vue-app",
-          "target": "src/main.ts",
-          "command": [
-            "pnpm",
-            "build"
-          ]
-        },
-        {
-          "language": "bash",
-          "classification": "config-template"
-        },
-        {
-          "language": "ts",
-          "classification": "fragment"
-        }
-      ]
-    },
-    "docs/install.md": {
-      "fences": [
-        {
-          "language": "bash",
-          "classification": "config-template"
-        },
-        {
-          "language": "bash",
-          "classification": "config-template"
-        },
-        {
-          "language": "bash",
-          "classification": "illustrative"
-        },
-        {
-          "language": "ts",
-          "classification": "runnable",
-          "fixture": "test-fixtures/react-app",
-          "target": "src/main.tsx",
-          "command": [
-            "pnpm",
-            "build"
-          ]
-        },
-        {
-          "language": "ts",
-          "classification": "runnable",
-          "fixture": "test-fixtures/vue-app",
-          "target": "src/main.ts",
-          "command": [
-            "pnpm",
-            "build"
-          ]
         }
       ]
     },

@@ -20,9 +20,7 @@ This file indexes the agent-relevant documentation. All canonical content is pla
 
 ## Guides
 
-- [React](docs/guides/react.md): capture React 18/19 render errors with an error boundary
-- [Vue 3](docs/guides/vue.md): capture Vue component errors with component context
-- [Vanilla JavaScript](docs/guides/vanilla.md): initialize the browser SDK without a framework integration
+- [Install the SDK](docs/install.md): React, Vue, and vanilla setup, identity, and environment labels
 - [Source maps](docs/guides/source-maps.md): upload Vite source maps and troubleshoot resolution failures
 - [Connecting GitHub](docs/guides/github-app.md): configure a GitHub App or personal access token for investigations and fix PRs
 - [Slack notifications](docs/guides/slack-notifications.md): send new-issue notifications to Slack via incoming webhooks
