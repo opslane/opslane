@@ -98,6 +98,87 @@ func TestIncidentJSON_IncludesVerificationEvidenceAndCandidateDiff(t *testing.T)
 	}
 }
 
+func TestIncidentJSON_ImpactAndStory(t *testing.T) {
+	stringPtr := func(value string) *string { return &value }
+	intPtr := func(value int64) *int64 { return &value }
+	tests := []struct {
+		name       string
+		group      db.ErrorGroup
+		wantStory  string
+		wantImpact bool
+	}{
+		{
+			name:      "valid error impact",
+			group:     db.ErrorGroup{Kind: "error", OccurrenceCount: 12, ImpactClass: stringPtr("degraded"), ImpactVisits: intPtr(3), ImpactVisitsRecovered: intPtr(1)},
+			wantStory: "12 crashes across 3 visits, 1 of 3 visits recovered", wantImpact: true,
+		},
+		{name: "unknown impact", group: db.ErrorGroup{Kind: "error", OccurrenceCount: 12}, wantStory: "12 crashes; recording impact unavailable"},
+		{
+			name:      "corrupt impact",
+			group:     db.ErrorGroup{Kind: "error", OccurrenceCount: 12, ImpactClass: stringPtr("degraded"), ImpactVisits: intPtr(3), ImpactVisitsRecovered: intPtr(5)},
+			wantStory: "12 crashes; recording impact unavailable",
+		},
+		{name: "friction nouns", group: db.ErrorGroup{Kind: "friction", OccurrenceCount: 2}, wantStory: "2 friction signals; recording impact unavailable"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body, err := json.Marshal(toIncidentJSON(tt.group))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got map[string]any
+			if err := json.Unmarshal(body, &got); err != nil {
+				t.Fatal(err)
+			}
+			if got["story"] != tt.wantStory {
+				t.Fatalf("story = %#v, want %q", got["story"], tt.wantStory)
+			}
+			_, hasClass := got["impact_class"]
+			_, hasVisits := got["impact_visits"]
+			_, hasRecovered := got["impact_visits_recovered"]
+			if hasClass != tt.wantImpact || hasVisits != tt.wantImpact || hasRecovered != tt.wantImpact {
+				t.Fatalf("impact presence = %v/%v/%v, want %v: %s", hasClass, hasVisits, hasRecovered, tt.wantImpact, body)
+			}
+		})
+	}
+}
+
+func TestReceiptStateFor(t *testing.T) {
+	ptr := func(value string) *string { return &value }
+	eligible, pending, ineligible := ptr("eligible"), ptr("pending"), ptr("ineligible")
+	tests := []struct {
+		name  string
+		group db.ErrorGroup
+		inc   incidentJSON
+		want  string
+	}{
+		{"draft PR", db.ErrorGroup{Status: "pr_draft", PrURL: ptr("https://github.com/o/r/pull/1"), InvestigationReadiness: eligible}, incidentJSON{}, "pr_open"},
+		{"ineligible PR", db.ErrorGroup{Status: "pr_draft", PrURL: ptr("https://github.com/o/r/pull/1"), InvestigationReadiness: ineligible}, incidentJSON{}, ""},
+		{"missing PR URL", db.ErrorGroup{Status: "pr_created", InvestigationReadiness: eligible}, incidentJSON{}, ""},
+		{"blank PR URL", db.ErrorGroup{Status: "pr_created", PrURL: ptr("   "), InvestigationReadiness: eligible}, incidentJSON{}, ""},
+		{"unsafe PR URL", db.ErrorGroup{Status: "pr_created", PrURL: ptr("javascript:x"), InvestigationReadiness: eligible}, incidentJSON{}, ""},
+		{"failed with diff", db.ErrorGroup{Status: "needs_human", HasSavedDiff: true, InvestigationReadiness: eligible}, incidentJSON{}, "attempt_failed_with_diff"},
+		{"failed with report", db.ErrorGroup{Status: "needs_human", InvestigationReadiness: eligible}, incidentJSON{RootCause: ptr("cause")}, "attempt_failed_no_diff"},
+		{"blank report", db.ErrorGroup{Status: "needs_human", InvestigationReadiness: eligible}, incidentJSON{RootCause: ptr(" \n ")}, ""},
+		{"failed no report", db.ErrorGroup{Status: "needs_human", InvestigationReadiness: eligible}, incidentJSON{}, ""},
+		{"pending with diff", db.ErrorGroup{Status: "needs_human", HasSavedDiff: true, InvestigationReadiness: pending}, incidentJSON{}, ""},
+		{"investigated brief", db.ErrorGroup{Status: "investigated", InvestigationReadiness: eligible}, incidentJSON{AgentTaskBrief: ptr("brief")}, "report_ready"},
+		{"investigated no report", db.ErrorGroup{Status: "investigated", InvestigationReadiness: eligible}, incidentJSON{}, ""},
+		{"approval cause", db.ErrorGroup{Status: "awaiting_approval", InvestigationReadiness: eligible}, incidentJSON{RootCause: ptr("cause")}, "report_ready"},
+		{"fixing", db.ErrorGroup{Status: "fixing", InvestigationReadiness: eligible}, incidentJSON{RootCause: ptr("cause")}, ""},
+		{"resolved", db.ErrorGroup{Status: "resolved", InvestigationReadiness: eligible}, incidentJSON{RootCause: ptr("cause")}, ""},
+		{"unknown", db.ErrorGroup{Status: "future", InvestigationReadiness: eligible}, incidentJSON{RootCause: ptr("cause")}, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := receiptStateFor(tt.group, tt.inc)
+			if got != tt.want || ok != (tt.want != "") {
+				t.Fatalf("receipt = %q/%v, want %q", got, ok, tt.want)
+			}
+		})
+	}
+}
+
 func TestIncidentJSON_SessionPointer(t *testing.T) {
 	inc := incidentJSON{
 		ID: "g1",

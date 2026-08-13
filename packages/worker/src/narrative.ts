@@ -200,12 +200,7 @@ function isLoopback(hostname: string): boolean {
   );
 }
 
-/** Build the reader-facing incident URL from explicit HTTP(S) configuration only. */
-export function buildIncidentUrl(
-  dashboardUrl: string | undefined,
-  errorGroupId: string,
-  projectId: string,
-): string | null {
+function dashboardBaseUrl(dashboardUrl: string | undefined): URL | null {
   if (!dashboardUrl?.trim()) return null;
   try {
     const url = new URL(dashboardUrl.trim());
@@ -213,14 +208,81 @@ export function buildIncidentUrl(
     if (url.username || url.password) return null;
     url.search = '';
     url.hash = '';
-    let basePath = url.pathname;
-    while (basePath.endsWith('/')) basePath = basePath.slice(0, -1);
-    url.pathname = `${basePath}/incidents/${encodeURIComponent(errorGroupId)}`;
-    url.search = `?project_id=${encodeURIComponent(projectId)}`;
-    return url.toString();
+    while (url.pathname.length > 1 && url.pathname.endsWith('/')) {
+      url.pathname = url.pathname.slice(0, -1);
+    }
+    return url;
   } catch {
     return null;
   }
+}
+
+/** Build the reader-facing incident URL from explicit HTTP(S) configuration only. */
+export function buildIncidentUrl(
+  dashboardUrl: string | undefined,
+  errorGroupId: string,
+  projectId: string,
+): string | null {
+  const url = dashboardBaseUrl(dashboardUrl);
+  if (!url) return null;
+  const basePath = url.pathname === '/' ? '' : url.pathname;
+  url.pathname = `${basePath}/incidents/${encodeURIComponent(errorGroupId)}`;
+  url.search = `?project_id=${encodeURIComponent(projectId)}`;
+  return url.toString();
+}
+
+export interface StoryImpact {
+  class: string | null;
+  visits: number | null;
+  recovered: number | null;
+}
+
+function validStoryImpact(impact: StoryImpact): boolean {
+  const { visits, recovered } = impact;
+  if (!Number.isSafeInteger(visits) || !Number.isSafeInteger(recovered)) return false;
+  if (visits === null || recovered === null || visits < 0 || recovered < 0 || recovered > visits) return false;
+  if (impact.class === 'blocked') return recovered === 0;
+  if (impact.class === 'degraded') return recovered > 0 && recovered < visits;
+  if (impact.class === 'invisible') return visits > 0 && recovered === visits;
+  return false;
+}
+
+/** TS mirror of ingestion narrative.Story, pinned by story-vectors.json. */
+export function storyLine(
+  nounSingular: string,
+  nounPlural: string,
+  occurrences: number,
+  impact: StoryImpact,
+): string {
+  const noun = occurrences === 1 ? nounSingular : nounPlural;
+  const prefix = `${occurrences} ${noun}`;
+  if (!validStoryImpact(impact)) return `${prefix}; recording impact unavailable`;
+  const visits = impact.visits!;
+  const recovered = impact.recovered!;
+  const line = `${prefix} across ${visits} ${visits === 1 ? 'visit' : 'visits'}, `;
+  if (recovered === 0) return `${line}no visit recovered`;
+  if (recovered === visits) return `${line}all ${visits} ${visits === 1 ? 'visit' : 'visits'} recovered`;
+  return `${line}${recovered} of ${visits} visits recovered`;
+}
+
+/** Build a coverage-proven recording URL using the dashboard URL policy.
+ * project_id is required: the session page resolves its project from the
+ * query (or localStorage, which an external PR reviewer will not have), so a
+ * link without it opens a player that cannot load. */
+export function buildSessionUrl(
+  dashboardUrl: string | undefined,
+  sessionId: string,
+  anchorMs: number,
+  projectId: string,
+): string | null {
+  if (!Number.isSafeInteger(anchorMs) || anchorMs < 0) return null;
+  if (!projectId) return null;
+  const url = dashboardBaseUrl(dashboardUrl);
+  if (!url) return null;
+  const basePath = url.pathname === '/' ? '' : url.pathname;
+  url.pathname = `${basePath}/sessions/${encodeURIComponent(sessionId)}`;
+  url.search = `?t=${anchorMs}&project_id=${encodeURIComponent(projectId)}`;
+  return url.toString();
 }
 
 function latestChecks(evidence: EvidenceRecord): Map<string, EvidenceRecord['checks'][number]> {

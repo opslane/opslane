@@ -3,7 +3,7 @@ import { computed, defineAsyncComponent, ref, onMounted, onUnmounted, watch } fr
 import { useRoute } from 'vue-router';
 import type { Incident, AffectedUser, SampleEvent } from '../types/api';
 import { APIError, getIncident, getSampleEvent, getReplay, listAffectedUsers, triggerFix, resolveIncident, archiveIncident, unarchiveIncident, type ReplayRecording } from '../api';
-import { GITHUB_PR_URL_OPTIONS, getProjectId, safeUrl, formatDate, formatAbsolute } from '../utils';
+import { getProjectId, safeUrl, formatDate, formatAbsolute } from '../utils';
 import { kindBadge, fixControlsVisible } from '../components/incident-kind';
 import EvidenceWell from '../components/evidence/EvidenceWell.vue';
 // rrweb is ~194 KB. Loading it eagerly put it in the entry chunk on every
@@ -15,6 +15,9 @@ import StatusLabel from '../components/ui/StatusLabel.vue';
 import TextareaField from '../components/ui/TextareaField.vue';
 import Button from '../components/ui/Button.vue';
 import IncidentConclusion from '../components/incidents/IncidentConclusion.vue';
+import PrLinkCard from '../components/incidents/PrLinkCard.vue';
+import AttemptReasonCard from '../components/incidents/AttemptReasonCard.vue';
+import CandidateDiffCard from '../components/incidents/CandidateDiffCard.vue';
 import IncidentLifecycle from '../components/incidents/IncidentLifecycle.vue';
 import { formatBreadcrumb, getRequestContext } from '../components/sample-event';
 import type { eventWithTime } from '@rrweb/types';
@@ -28,7 +31,6 @@ const causeHidden = computed(() =>
   incident.value?.investigation_readiness === 'ineligible'
   || incident.value?.investigation_readiness === 'pending',
 );
-const prHref = computed(() => safeUrl(incident.value?.pr_url, GITHUB_PR_URL_OPTIONS));
 const loading = ref(true);
 const error = ref<string | null>(null);
 const projectId = ref('');
@@ -271,6 +273,12 @@ onMounted(async () => {
             v-text="kindBadge(incident.kind, incident.adjudication_status).label"
           >
           </span>
+          <span
+            v-if="incident.impact_class"
+            data-testid="impact-badge"
+            class="inline-flex items-center rounded-full border border-accent/20 bg-accent/10 px-2.5 py-0.5 text-xs font-medium capitalize text-accent whitespace-nowrap mt-1"
+            v-text="incident.impact_class"
+          ></span>
           <StatusLabel
             :tone="incidentStatusRecipe(incident.status).tone"
             :label="incidentStatusRecipe(incident.status).label"
@@ -367,9 +375,15 @@ onMounted(async () => {
           class="[grid-area:conclusion] @min-[936px]:sticky @min-[936px]:top-6"
         />
         <div class="min-w-0 space-y-6 [grid-area:evidence]">
-        <!-- Replay -->
-        <div v-if="incident.session_pointer || incident.replay_id" class="p-4 bg-surface border border-border rounded-lg space-y-2">
-          <p class="text-xs font-medium text-muted uppercase tracking-wide">Session Replay</p>
+        <section class="p-4 bg-surface border border-border rounded-lg">
+          <h2 class="text-xs font-medium text-muted uppercase tracking-wide">What happened</h2>
+          <p data-testid="story" class="mt-2 text-base leading-6 text-text" v-text="incident.story"></p>
+        </section>
+
+        <!-- Coverage-proven recordings, with the existing inline replay first. -->
+        <section data-testid="recordings" class="p-4 bg-surface border border-border rounded-lg space-y-3">
+          <h2 class="text-xs font-medium text-muted uppercase tracking-wide">Recordings</h2>
+          <template v-if="incident.session_pointer || incident.replay_id">
           <template v-if="incident.session_pointer && !sessionTerminalUnavailable">
             <div v-if="sessionReplayState === 'loading'" class="text-sm text-muted">Loading replay...</div>
             <div v-else-if="sessionReplayState === 'processing'" class="rounded-md border border-warning/20 bg-warning/10 p-3 text-sm text-warning">
@@ -386,7 +400,7 @@ onMounted(async () => {
                 :to="{
                   name: 'session-detail',
                   params: { sessionId: incident.session_pointer.session_id },
-                  query: { t: Date.parse(incident.session_pointer.error_at) },
+                  query: { t: Date.parse(incident.session_pointer.error_at), project_id: projectId },
                 }"
                 class="inline-flex text-sm text-accent hover:underline"
               >Open full session &rarr;</router-link>
@@ -403,52 +417,128 @@ onMounted(async () => {
             <div v-else class="text-sm text-muted">Replay recorded but empty.</div>
           </template>
           <div v-else class="text-sm text-muted">Session recording is no longer available.</div>
-        </div>
-        <div v-else class="text-sm text-faint">No replay captured for this error.</div>
+          </template>
+          <p v-else-if="!incident.recordings?.length" class="text-sm text-faint">No replay captured for this error.</p>
+          <div v-if="incident.recordings?.length" class="divide-y divide-border border-t border-border">
+            <div
+              v-for="recording in incident.recordings"
+              :key="recording.session_id"
+              class="flex flex-wrap items-center justify-between gap-3 py-3 text-sm"
+            >
+              <div class="text-muted">
+                <span>{{ formatAbsolute(recording.started_at) }}</span>
+                <span class="mx-2" aria-hidden="true">·</span>
+                <span>{{ Math.round(recording.duration_ms / 1000) }}s recorded</span>
+                <span class="mx-2" aria-hidden="true">·</span>
+                <span>{{ recording.crash_count }} {{ recording.crash_count === 1 ? 'crash' : 'crashes' }}</span>
+              </div>
+              <router-link
+                :to="{
+                  name: 'session-detail',
+                  params: { sessionId: recording.session_id },
+                  query: { t: recording.anchor_ms, project_id: projectId },
+                }"
+                class="font-medium text-accent hover:underline"
+              >Watch</router-link>
+            </div>
+          </div>
+        </section>
 
-        <!-- PR link -->
+        <!-- Investigation results, including context preserved on drafts and needs_human -->
         <div
-          v-if="prHref"
-          class="p-4 border border-l-2 rounded-lg"
-          :class="incident.status === 'pr_draft'
-            ? 'bg-warning/10 border-warning/20 border-l-warning'
-            : 'bg-success/10 border-success/20 border-l-success'"
+          v-if="causeHidden"
+          class="p-4 bg-accent/10 border border-accent/20 border-l-2 border-l-accent rounded-lg space-y-3"
+          data-testid="honest-state"
         >
-          <p
-            class="text-sm font-medium"
-            :class="incident.status === 'pr_draft' ? 'text-warning' : 'text-success'"
-          >
-            {{ incident.status === 'pr_draft' ? 'Draft fix PR — verification pending' : 'Fix PR ready for review' }}
-          </p>
-          <p v-if="incident.status === 'pr_draft'" class="mt-1 text-xs text-warning">
-            Opslane did not reach the ready-for-review evidence bar locally. Review the repository CI results before marking this PR ready.
-          </p>
-          <a
-            :href="prHref"
-            target="_blank"
-            rel="noopener noreferrer"
-            class="mt-1 inline-flex items-center font-medium hover:underline text-sm"
-            :class="incident.status === 'pr_draft' ? 'text-warning' : 'text-success'"
-            v-text="prHref"
-          >
-          </a>
+          <h2 class="text-xs font-medium text-accent uppercase tracking-wide">Investigation</h2>
+          <p class="text-sm">Investigation has not verified a cause yet.</p>
+        </div>
+        <div
+          v-if="!causeHidden && (incident.status === 'investigated' || incident.status === 'insight' || incident.status === 'awaiting_approval' || incident.status === 'fixing' || incident.status === 'pr_draft' || incident.status === 'pr_created' || incident.status === 'needs_human') && (incident.root_cause || incident.agent_task_brief)"
+          data-testid="root-cause"
+          class="p-4 bg-accent/10 border border-accent/20 border-l-2 border-l-accent rounded-lg space-y-3"
+        >
+          <div v-if="incident.root_cause">
+            <p class="text-xs font-medium text-accent uppercase tracking-wide">
+              Root Cause
+            </p>
+            <pre
+              class="mt-1 text-sm bg-surface border border-border p-3 rounded overflow-x-auto whitespace-pre-wrap text-text"
+              v-text="incident.root_cause"
+            ></pre>
+          </div>
+          <div v-if="incident.agent_task_brief" class="mt-4">
+            <h3 class="text-xs font-medium text-accent uppercase tracking-wide">Investigation output — agent task brief</h3>
+            <pre class="mt-1 whitespace-pre-wrap text-sm" v-text="incident.agent_task_brief"></pre>
+          </div>
+          <div v-if="incident.suggested_mitigation">
+            <p class="text-xs font-medium text-accent uppercase tracking-wide">
+              Suggested Fix
+            </p>
+            <pre
+              class="mt-1 text-sm bg-surface border border-border p-3 rounded overflow-x-auto whitespace-pre-wrap text-text"
+              v-text="incident.suggested_mitigation"
+            ></pre>
+          </div>
         </div>
 
-        <!-- Representative error payload -->
+        <!-- The fix receipt is a projection of stored readiness and artifacts. -->
+        <section
+          v-if="incident.receipt_state"
+          data-testid="receipt"
+          class="p-4 bg-surface border border-border rounded-lg space-y-4"
+        >
+          <div>
+            <h2 class="text-xs font-medium text-muted uppercase tracking-wide">The fix</h2>
+            <p data-testid="receipt-line" class="mt-2 text-sm font-medium text-text" v-text="incident.receipt_line"></p>
+          </div>
+
+          <PrLinkCard
+            v-if="incident.receipt_state === 'pr_open' && incident.pr_url"
+            :status="incident.status"
+            :pr-url="incident.pr_url"
+          />
+
+          <CandidateDiffCard
+            v-if="incident.receipt_state === 'attempt_failed_with_diff' && incident.candidate_diff"
+            :diff="incident.candidate_diff"
+          />
+
+          <AttemptReasonCard
+            v-if="(incident.receipt_state === 'attempt_failed_with_diff' || incident.receipt_state === 'attempt_failed_no_diff') && incident.reason"
+            :reason="incident.reason"
+          />
+        </section>
+
+        <!-- Artifact facts remain visible when readiness withholds receipt framing. -->
+        <PrLinkCard
+          v-if="!incident.receipt_state && incident.pr_url"
+          :status="incident.status"
+          :pr-url="incident.pr_url"
+        />
+
+        <CandidateDiffCard
+          v-if="!incident.receipt_state && incident.status === 'needs_human' && incident.candidate_diff"
+          :diff="incident.candidate_diff"
+        />
+
+        <AttemptReasonCard
+          v-if="!incident.receipt_state && incident.status === 'needs_human' && incident.reason"
+          :reason="incident.reason"
+        />
+
+        <!-- Representative error payload is forensic detail, below the receipt. -->
         <section
           v-if="sampleEvent || sampleEventError"
           data-testid="sample-event"
           class="p-4 bg-surface border border-border rounded-lg space-y-4"
         >
-          <p v-if="sampleEventError" class="text-sm text-warning">
-            Couldn't load stack trace.
-          </p>
+          <p v-if="sampleEventError" class="text-sm text-warning">Couldn't load stack trace.</p>
           <template v-if="sampleEvent">
             <div>
               <h3 class="text-xs font-medium text-muted uppercase tracking-wide">Stack trace</h3>
               <CodeBlock class="mt-2" :code="sampleEvent.error.stack" />
             </div>
-
             <div v-if="requestContext" class="space-y-2">
               <h3 class="text-xs font-medium text-muted uppercase tracking-wide">Request</h3>
               <dl class="grid grid-cols-1 gap-2 text-sm sm:grid-cols-3">
@@ -479,7 +569,6 @@ onMounted(async () => {
                 </dl>
               </details>
             </div>
-
             <div v-if="breadcrumbs.length" class="space-y-2">
               <h3 class="text-xs font-medium text-muted uppercase tracking-wide">Breadcrumbs</h3>
               <ol class="space-y-2">
@@ -507,43 +596,6 @@ onMounted(async () => {
             </div>
           </template>
         </section>
-
-        <!-- Investigation results, including context preserved on drafts and needs_human -->
-        <div
-          v-if="causeHidden"
-          class="p-4 bg-accent/10 border border-accent/20 border-l-2 border-l-accent rounded-lg space-y-3"
-          data-testid="honest-state"
-        >
-          <h2 class="text-xs font-medium text-accent uppercase tracking-wide">Investigation</h2>
-          <p class="text-sm">Investigation has not verified a cause yet.</p>
-        </div>
-        <div
-          v-if="!causeHidden && (incident.status === 'investigated' || incident.status === 'awaiting_approval' || incident.status === 'fixing' || incident.status === 'pr_draft' || incident.status === 'needs_human') && incident.root_cause"
-          class="p-4 bg-accent/10 border border-accent/20 border-l-2 border-l-accent rounded-lg space-y-3"
-        >
-          <div>
-            <p class="text-xs font-medium text-accent uppercase tracking-wide">
-              Root Cause
-            </p>
-            <pre
-              class="mt-1 text-sm bg-surface border border-border p-3 rounded overflow-x-auto whitespace-pre-wrap text-text"
-              v-text="incident.root_cause"
-            ></pre>
-          </div>
-          <div v-if="incident.agent_task_brief" class="mt-4">
-            <h3 class="text-xs font-medium text-accent uppercase tracking-wide">Investigation output — agent task brief</h3>
-            <pre class="mt-1 whitespace-pre-wrap text-sm" v-text="incident.agent_task_brief"></pre>
-          </div>
-          <div v-if="incident.suggested_mitigation">
-            <p class="text-xs font-medium text-accent uppercase tracking-wide">
-              Suggested Fix
-            </p>
-            <pre
-              class="mt-1 text-sm bg-surface border border-border p-3 rounded overflow-x-auto whitespace-pre-wrap text-text"
-              v-text="incident.suggested_mitigation"
-            ></pre>
-          </div>
-        </div>
 
         <!-- Insight card (no code cause — terminal, never a PR; design v4-4).
              Errors reach this status too, not just friction: an investigation
@@ -634,52 +686,10 @@ onMounted(async () => {
           </div>
         </div>
 
-        <!-- Needs human reason -->
-        <div
-          v-if="incident.status === 'needs_human' && incident.reason"
-          class="p-4 bg-warning/10 border border-warning/20 border-l-2 border-l-warning rounded-lg space-y-3"
-        >
-          <div>
-            <p class="text-xs font-medium text-warning uppercase tracking-wide">
-              Reason
-            </p>
-            <p
-              class="mt-1 text-sm text-warning font-medium"
-              v-text="incident.reason.reason_message"
-            ></p>
-          </div>
-          <div>
-            <p class="text-xs font-medium text-warning uppercase tracking-wide">
-              Remediation
-            </p>
-            <pre
-              class="mt-1 text-sm bg-surface border border-border p-3 rounded overflow-x-auto whitespace-pre-wrap text-text"
-              v-text="incident.reason.remediation"
-            ></pre>
-          </div>
-          <div>
-            <p class="text-xs text-faint">
-              Code: <span v-text="incident.reason.reason_code"></span>
-            </p>
-          </div>
-        </div>
-
         <EvidenceWell
           v-if="incident.verification_evidence"
           :evidence="incident.verification_evidence"
         />
-
-        <!-- Candidate diff -->
-        <div
-          v-if="incident.status === 'needs_human' && incident.candidate_diff"
-          class="p-4 bg-surface border border-border rounded-lg space-y-2"
-        >
-          <p class="text-xs font-medium text-muted uppercase tracking-wide">Candidate diff</p>
-          <pre
-            class="text-xs bg-surface border border-border p-3 rounded overflow-x-auto whitespace-pre text-text max-h-96"
-            v-text="incident.candidate_diff"
-          ></pre>
-        </div>
 
         <!-- Metadata -->
         <div class="border-t border-border pt-4">

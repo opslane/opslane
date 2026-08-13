@@ -403,6 +403,54 @@ SELECT cand.session_id, cand.anchor_ms FROM (%s
 ORDER BY cand.representative DESC, cand.occurred_at ASC, cand.id ASC
 LIMIT 1`, frictionCandidateSQL, watchCandidateSignals, watchCoverageSQL)
 
+// GroupRecording is one coverage-proven recording for an error incident.
+// DurationMs is the recorded span of bounded chunks (gaps included), and
+// CrashCount is aggregated from error_events before chunk access.
+type GroupRecording struct {
+	SessionID  string
+	StartedAt  time.Time
+	DurationMs int64
+	CrashCount int64
+	AnchorMs   int64
+}
+
+const recordingsCap = 5
+
+var groupRecordingsSQL = fmt.Sprintf(`
+SELECT cand.session_id, cand.started_at, crashes.crash_count, cand.anchor_ms,
+       span.first_ms, span.last_ms
+  FROM (
+    SELECT per_session.* FROM (
+      SELECT DISTINCT ON (e.session_id)
+             e.session_id,
+             (extract(epoch FROM e."timestamp") * 1000)::bigint AS anchor_ms,
+             e.created_at, e.id, s.started_at
+        FROM error_events e
+        JOIN sessions s ON s.id = e.session_id AND s.project_id = e.project_id
+       WHERE e.error_group_id = $1 AND e.project_id = $2
+         AND e.session_id IS NOT NULL AND s.status <> 'deleting'
+       ORDER BY e.session_id, e.created_at DESC, e.id DESC
+    ) per_session
+    ORDER BY per_session.created_at DESC, per_session.id DESC
+    LIMIT %d
+  ) cand
+  CROSS JOIN LATERAL (
+    SELECT count(*)::bigint AS crash_count
+      FROM error_events e
+     WHERE e.error_group_id = $1 AND e.project_id = $2
+       AND e.session_id = cand.session_id
+  ) crashes
+  CROSS JOIN LATERAL (
+    SELECT min(c.first_event_ms) AS first_ms, max(c.last_event_ms) AS last_ms
+      FROM session_chunks c
+     WHERE c.session_id = cand.session_id AND c.project_id = $2
+       AND c.scrubbed_at IS NOT NULL
+       AND c.first_event_ms IS NOT NULL AND c.last_event_ms IS NOT NULL
+  ) span
+  %s
+  ORDER BY cand.anchor_ms DESC, cand.session_id DESC
+  LIMIT %d`, watchCandidateEvents, watchCoverageSQL, recordingsCap)
+
 // groupKind resolves an incident's lane; found=false when the group does not
 // exist in the tenant.
 func (q *Queries) groupKind(ctx context.Context, errorGroupID, projectID string) (kind string, found bool, err error) {
@@ -477,4 +525,38 @@ func (q *Queries) WatchableSessionForGroup(ctx context.Context, errorGroupID, pr
 		return "", 0, false, fmt.Errorf("watchable session for group: %w", err)
 	}
 	return sessionID, anchorMs, true, nil
+}
+
+// RecordingsForGroup lists coverage-proven sessions for an error incident,
+// newest client-time anchor first. Friction incidents keep the existing
+// identity-based session pointer and do not expose this list.
+func (q *Queries) RecordingsForGroup(ctx context.Context, errorGroupID, projectID string) ([]GroupRecording, error) {
+	kind, found, err := q.groupKind(ctx, errorGroupID, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("recordings group kind: %w", err)
+	}
+	if !found || kind == "friction" {
+		return nil, nil
+	}
+
+	rows, err := q.pool.Query(ctx, groupRecordingsSQL, errorGroupID, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("recordings for group: %w", err)
+	}
+	defer rows.Close()
+
+	recordings := make([]GroupRecording, 0)
+	for rows.Next() {
+		var rec GroupRecording
+		var firstMs, lastMs int64
+		if err := rows.Scan(&rec.SessionID, &rec.StartedAt, &rec.CrashCount, &rec.AnchorMs, &firstMs, &lastMs); err != nil {
+			return nil, fmt.Errorf("scan group recording: %w", err)
+		}
+		rec.DurationMs = lastMs - firstMs
+		recordings = append(recordings, rec)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("recordings for group rows: %w", err)
+	}
+	return recordings, nil
 }

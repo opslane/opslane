@@ -128,6 +128,39 @@ describe('group lifecycle timestamp queries', () => {
     expect(params).toContain('DIFF');
     expect(params).toContain(JSON.stringify({ version: 1, tier: 'E0', checks: [] }));
   });
+
+  it('persists cause kind and candidate dispositions with a diagnosis decision', async () => {
+    mockQuery
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ rowCount: 1, rows: [{ id: 'g1' }] })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({});
+
+    const dispositions = [
+      { id: 'c1', disposition: 'ungrounded' as const },
+      { id: 'c2', disposition: 'rejected' as const },
+    ];
+    await updateGroupInvestigation('g1', 'p1', 'insight', {
+      decision: {
+        outcome: 'not_actionable',
+        decisionReason: 'The cause is outside this codebase',
+        diagnosis: null,
+        model: 'test-model',
+        promptVersion: 'diagnosis-v1',
+        basis: 'cause_outside_codebase',
+        confidence: 'medium',
+        causeKind: 'external_system',
+        dispositions,
+      },
+    });
+
+    const insert = mockQuery.mock.calls.find(
+      (call) => String(call[0]).includes('INSERT INTO diagnosis_decisions'),
+    );
+    expect(String(insert?.[0])).toContain('candidate_dispositions, cause_kind');
+    expect(insert?.[1]?.[13]).toBe(JSON.stringify(dispositions));
+    expect(insert?.[1]?.[14]).toBe('external_system');
+  });
 });
 
 describe('getErrorGroup', () => {
@@ -306,7 +339,8 @@ describe('route-map persistence queries', () => {
     const [sql, params] = mockQuery.mock.calls[0] as [string, unknown[]];
     expect(sql).toContain('eg.project_id = $1');
     expect(sql).toContain("eg.status NOT IN ('resolved', 'merged', 'archived')");
-    expect(sql).toContain('rm.pattern = eg.page_url_normalized');
+    expect(sql).toContain("regexp_replace(rm.pattern, '^https?://[^/]*', '', 'i')");
+    expect(sql).toContain("regexp_replace(eg.page_url_normalized, '^https?://[^/]*', '', 'i')");
     // A pattern too large for route_map's btree key would abort the single
     // transaction that writes every other route for the project.
     expect(sql).toContain('octet_length(eg.page_url_normalized) <= $2');
@@ -362,6 +396,45 @@ describe('route-map persistence queries', () => {
 
     expect(mockQuery).toHaveBeenCalledTimes(3);
     expect(mockQuery.mock.calls[2]?.[0]).toBe('ROLLBACK');
+  });
+
+  it('canonicalizes and deterministically deduplicates route-map writes', async () => {
+    mockQuery.mockResolvedValueOnce({}); // BEGIN
+    mockQuery.mockResolvedValueOnce({ rowCount: 1, rows: [{ '?column?': 1 }] }); // lease
+    mockQuery.mockResolvedValueOnce({ rowCount: 1, rows: [] }); // checkout winner
+    mockQuery.mockResolvedValueOnce({ rowCount: 1, rows: [] }); // unresolved asset
+    mockQuery.mockResolvedValueOnce({}); // COMMIT
+
+    await expect(upsertRouteMapRows({
+      projectId: 'p1',
+      jobId: 'j1',
+      workerId: 'w1',
+      leaseGeneration: '7',
+      rows: [
+        {
+          pattern: 'https://a.cdn.test/checkout',
+          name: 'Checkout',
+          purpose: 'Buy',
+          tier: 'customer',
+        },
+        {
+          pattern: 'https://b.cdn.test/checkout',
+          name: 'Checkout v2',
+          purpose: 'Buy later',
+          tier: 'standard',
+        },
+      ],
+      unresolved: ['https://c.cdn.test/checkout', 'https://app.test/assets/:id'],
+    })).resolves.toBe(true);
+
+    expect(mockQuery).toHaveBeenCalledTimes(5);
+    expect(mockQuery.mock.calls[2]?.[1]).toEqual([
+      'p1', '/checkout', 'Checkout', 'Buy', 'customer', 'llm',
+    ]);
+    expect(mockQuery.mock.calls[3]?.[1]).toEqual([
+      'p1', '/assets/:id', '/assets/:id', 'unclassified', 'standard', 'llm-unresolved',
+    ]);
+    expect(mockQuery.mock.calls[4]?.[0]).toBe('COMMIT');
   });
 });
 

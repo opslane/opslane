@@ -1,15 +1,32 @@
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import type { EvidenceRecord } from '@opslane/shared';
 import {
   buildFallbackNarrative,
   buildIncidentUrl,
+  buildSessionUrl,
   escapeInlineCode,
   normalizeProse,
   normalizeSubject,
   parseFixNarrative,
   renderCommitMessage,
   renderPRSections,
+  storyLine,
 } from '../narrative.js';
+
+interface StoryVector {
+  name: string;
+  nounSingular: string;
+  nounPlural: string;
+  occurrences: number;
+  impact: { class: string | null; visits: number | null; recovered: number | null };
+  want: string;
+}
+
+const storyVectors = JSON.parse(readFileSync(fileURLToPath(
+  new URL('../../../../test-fixtures/story-vectors.json', import.meta.url),
+), 'utf8')) as StoryVector[];
 
 const fallbackInput = {
   errorType: 'TypeError',
@@ -81,6 +98,29 @@ describe('narrative validators', () => {
 });
 
 describe('narrative renderers', () => {
+  it.each(storyVectors)('mirrors the Go story vector: $name', (vector) => {
+    expect(storyLine(vector.nounSingular, vector.nounPlural, vector.occurrences, vector.impact)).toBe(vector.want);
+  });
+
+  it.each([3.5, Number.NaN])('fails closed for a non-integral visit count: %s', (visits) => {
+    expect(storyLine('crash', 'crashes', 12, { class: 'degraded', visits, recovered: 1 }))
+      .toBe('12 crashes; recording impact unavailable');
+  });
+
+  it('builds only validated session URLs', () => {
+    // project_id rides the link: the session page resolves its project from
+    // the query, and an external PR reviewer has no localStorage fallback.
+    expect(buildSessionUrl('https://app.opslane.com', 'a/b', 123, 'p-1'))
+      .toBe('https://app.opslane.com/sessions/a%2Fb?t=123&project_id=p-1');
+    for (const base of [undefined, 'http://localhost:5173', 'ftp://app.opslane.com']) {
+      expect(buildSessionUrl(base, 's1', 123, 'p-1')).toBeNull();
+    }
+    for (const anchor of [Number.NaN, -1, 1.5, Infinity, 2 ** 53]) {
+      expect(buildSessionUrl('https://app.opslane.com', 's1', anchor, 'p-1')).toBeNull();
+    }
+    expect(buildSessionUrl('https://app.opslane.com', 's1', 123, '')).toBeNull();
+  });
+
   it('renders one shared subject into PR sections', () => {
     expect(renderPRSections(narrative)).toEqual({
       title: '🛡️ Guard null profiles in UserCard',

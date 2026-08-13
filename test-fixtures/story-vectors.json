@@ -1,0 +1,17 @@
+[
+  {"name":"blocked","nounSingular":"crash","nounPlural":"crashes","occurrences":12,"impact":{"class":"blocked","visits":3,"recovered":0},"want":"12 crashes across 3 visits, no visit recovered"},
+  {"name":"degraded","nounSingular":"crash","nounPlural":"crashes","occurrences":12,"impact":{"class":"degraded","visits":3,"recovered":1},"want":"12 crashes across 3 visits, 1 of 3 visits recovered"},
+  {"name":"invisible","nounSingular":"crash","nounPlural":"crashes","occurrences":12,"impact":{"class":"invisible","visits":3,"recovered":3},"want":"12 crashes across 3 visits, all 3 visits recovered"},
+  {"name":"null impact","nounSingular":"crash","nounPlural":"crashes","occurrences":12,"impact":{"class":null,"visits":null,"recovered":null},"want":"12 crashes; recording impact unavailable"},
+  {"name":"singular","nounSingular":"crash","nounPlural":"crashes","occurrences":1,"impact":{"class":"blocked","visits":1,"recovered":0},"want":"1 crash across 1 visit, no visit recovered"},
+  {"name":"friction singular","nounSingular":"friction signal","nounPlural":"friction signals","occurrences":1,"impact":{"class":"degraded","visits":2,"recovered":1},"want":"1 friction signal across 2 visits, 1 of 2 visits recovered"},
+  {"name":"bad class","nounSingular":"crash","nounPlural":"crashes","occurrences":12,"impact":{"class":"bogus","visits":3,"recovered":0},"want":"12 crashes; recording impact unavailable"},
+  {"name":"too many recovered","nounSingular":"crash","nounPlural":"crashes","occurrences":12,"impact":{"class":"blocked","visits":3,"recovered":5},"want":"12 crashes; recording impact unavailable"},
+  {"name":"negative visits","nounSingular":"crash","nounPlural":"crashes","occurrences":12,"impact":{"class":"blocked","visits":-1,"recovered":0},"want":"12 crashes; recording impact unavailable"},
+  {"name":"missing recovered","nounSingular":"crash","nounPlural":"crashes","occurrences":12,"impact":{"class":"blocked","visits":3,"recovered":null},"want":"12 crashes; recording impact unavailable"},
+  {"name":"blocked class mismatch","nounSingular":"crash","nounPlural":"crashes","occurrences":12,"impact":{"class":"blocked","visits":3,"recovered":1},"want":"12 crashes; recording impact unavailable"},
+  {"name":"invisible class mismatch","nounSingular":"crash","nounPlural":"crashes","occurrences":12,"impact":{"class":"invisible","visits":3,"recovered":2},"want":"12 crashes; recording impact unavailable"},
+  {"name":"degraded zero recovered","nounSingular":"crash","nounPlural":"crashes","occurrences":12,"impact":{"class":"degraded","visits":3,"recovered":0},"want":"12 crashes; recording impact unavailable"},
+  {"name":"degraded all recovered","nounSingular":"crash","nounPlural":"crashes","occurrences":12,"impact":{"class":"degraded","visits":3,"recovered":3},"want":"12 crashes; recording impact unavailable"},
+  {"name":"blocked zero visits boundary","nounSingular":"crash","nounPlural":"crashes","occurrences":12,"impact":{"class":"blocked","visits":0,"recovered":0},"want":"12 crashes across 0 visits, no visit recovered"}
+]

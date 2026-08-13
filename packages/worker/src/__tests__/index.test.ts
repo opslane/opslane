@@ -349,7 +349,16 @@ describe('processInvestigateJob diagnosis routing', () => {
       fixable: false,
       confidence: 'medium',
       reason: 'The cause is outside this codebase: GET /api/assets/search (remote service)',
-      adjudication: null,
+      adjudication: {
+        best_supported: 'The remote search endpoint exceeded its response budget',
+        evidence_check: 'checked', candidates_considered: [], rejected: [], rejected_candidates: [],
+        evidence_strength: 'suggestive', cause_kind: 'external_system', cause_locations: [],
+        reasoning: 'remote failure', why_chain: [], reproduction_steps: [],
+      },
+      dispositions: [
+        { id: 'c1', disposition: 'ungrounded' },
+        { id: 'c2', disposition: 'rejected' },
+      ],
       costUsd: 0.12,
       usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       decisionReason: 'The cause is outside this codebase: GET /api/assets/search (remote service)',
@@ -377,7 +386,13 @@ describe('processInvestigateJob diagnosis routing', () => {
           outcome: 'not_actionable',
           causeLocation: 'GET /api/assets/search (remote service)',
           promptVersion: 'diagnosis-v1',
+          causeKind: 'external_system',
+          dispositions: [
+            { id: 'c1', disposition: 'ungrounded' },
+            { id: 'c2', disposition: 'rejected' },
+          ],
         }),
+        reason: expect.objectContaining({ reason_code: 'unfixable_third_party' }),
       }), makeJob(),
     );
     expect(db.updateGroupAndCreateFixJob).not.toHaveBeenCalled();
@@ -429,6 +444,37 @@ describe('processInvestigateJob diagnosis routing', () => {
         }),
       }), makeJob(),
     );
+  });
+
+  it('persists an invalid adjudication as terminal needs_human without creating a fix job', async () => {
+    mockInvestigateError.mockResolvedValue({
+      fixable: false,
+      confidence: 'low',
+      reason: 'duplicate_candidate_id: c1',
+      adjudication: null,
+      costUsd: 0.01,
+      usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+      decisionReason: 'duplicate_candidate_id: c1',
+      decisionBasis: 'invalid_verdict',
+      outcome: 'incomplete',
+      diagnosis: null,
+      filesRead: ['src/App.vue'],
+      findings: '', evidence: [], agentTaskBrief: null, investigatedCommit: 'abc123',
+      stop: 'terminal',
+    });
+
+    await processInvestigateJob(makeJob(), new AbortController().signal);
+
+    expect(db.updateGroupInvestigation).toHaveBeenCalledWith(
+      'grp-1', 'proj-1', 'needs_human', expect.objectContaining({
+        reason: expect.objectContaining({ reason_code: 'insufficient_context' }),
+        decision: expect.objectContaining({
+          outcome: 'incomplete', basis: 'invalid_verdict',
+          decisionReason: 'duplicate_candidate_id: c1',
+        }),
+      }), makeJob(),
+    );
+    expect(db.updateGroupAndCreateFixJob).not.toHaveBeenCalled();
   });
 
   it('creates a fix job from a high-confidence code diagnosis without suggested mitigation', async () => {

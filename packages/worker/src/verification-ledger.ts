@@ -137,3 +137,17 @@ export function detectLedgerAnomalies(args: {
   }
   return anomalies;
 }
+
+
+/**
+ * The repro checks absent from a run's recorded roles — the data-driven input
+ * to the final not-run list. A declared test whose contract was rejected (or
+ * whose red run never executed) must surface here rather than vanish from
+ * both the executed rows and the not-run list (#354).
+ */
+export function reproChecksNotRun(
+  roles: Array<{ entrySeq: number; role: LedgerRole; assertionMatched?: boolean }>,
+): string[] {
+  const ran = new Set(roles.map((entry) => entry.role));
+  return (['repro_red', 'repro_green'] as const).filter((check) => !ran.has(check));
+}

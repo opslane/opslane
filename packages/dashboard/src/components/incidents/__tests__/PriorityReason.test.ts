@@ -34,6 +34,7 @@ function incident(overrides: Partial<Incident> = {}): Incident {
     last_seen: '2026-08-07T00:00:00Z',
     occurrence_count: 20,
     affected_users_count: 14,
+    story: '20 crashes; recording impact unavailable',
     priority_score: 20,
     priority_scored_at: '2026-08-07T01:00:00Z',
     priority_inputs: inputs(),
