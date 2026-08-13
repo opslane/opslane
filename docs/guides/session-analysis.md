@@ -29,5 +29,5 @@ Those numbers produce two labels. **Coverage** records how much of the session t
 ## Where the facts go
 
 - **Into error investigations.** Each error from an analyzed session gets one line of context describing what the user was doing. See [how investigation works](investigation.md).
-- **Into friction issues.** Rage clicks, dead clicks, and form abandonment each open an issue by themselves. When a friction issue traces to your code, Opslane can open a pull request; see [when Opslane opens a pull request](fix-prs.md).
+- **Into friction issues.** Two detectors ship today: rage clicks and dead clicks. A repeated signal becomes its own issue once enough users hit it; see [friction](friction.md).
 - **Into the dashboard.** The session list shows the counts and labels for each visit.
