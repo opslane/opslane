@@ -29,6 +29,9 @@
         }
       ]
     },
+    "docs/guides/fix-prs.md": {
+      "fences": []
+    },
     "docs/guides/github-app.md": {
       "fences": [
         {
