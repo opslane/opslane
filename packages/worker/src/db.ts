@@ -1458,21 +1458,34 @@ export interface ErrorGroupData {
   verification_evidence?: EvidenceRecord | null;
   terminal_fix_job_id?: string | null;
   pr_fix_triggered_by?: 'auto' | 'human' | 'reinvestigate_report_only' | null;
+  impact_class?: 'blocked' | 'degraded' | 'invisible' | null;
+  impact_visits?: number | null;
+  impact_visits_recovered?: number | null;
 }
 
 export async function getErrorGroup(groupId: string, projectId: string): Promise<ErrorGroupData | null> {
   const pool = getPool();
-  const { rows } = await pool.query<ErrorGroupData>(
+  const { rows } = await pool.query<ErrorGroupData & {
+    impact_visits: string | number | null;
+    impact_visits_recovered: string | number | null;
+  }>(
     `SELECT id, title, fingerprint, sample_event_id, occurrence_count, status,
             kind, signal_type, element_selector, page_url_normalized, confidence, platform,
             pr_url, pr_number, reason_code, reason_message, remediation,
             verification_evidence, terminal_fix_job_id,
+            impact_class, impact_visits, impact_visits_recovered,
             (SELECT j.triggered_by FROM error_group_jobs j
              WHERE j.id = error_groups.pr_fix_job_id AND j.project_id = error_groups.project_id) AS pr_fix_triggered_by
      FROM error_groups WHERE id = $1 AND project_id = $2`,
     [groupId, projectId],
   );
-  return rows[0] ?? null;
+  const row = rows[0];
+  if (!row) return null;
+  return {
+    ...row,
+    impact_visits: toCount(row.impact_visits),
+    impact_visits_recovered: toCount(row.impact_visits_recovered),
+  };
 }
 
 export interface EnvironmentContext {
@@ -1839,6 +1852,92 @@ export interface SessionPointer {
   error_at: string;
 }
 
+export interface WatchableSession {
+  sessionId: string;
+  anchorMs: number;
+}
+
+/**
+ * Coverage-proven pointer. This mirrors WatchableSessionForGroup and
+ * watchCoverageSQL in packages/ingestion/db/sessions_read.go.
+ */
+export async function getWatchableSessionForGroup(
+  projectId: string,
+  groupId: string,
+): Promise<WatchableSession | null> {
+  const pool = getPool();
+  const kindResult = await pool.query<{ kind: 'error' | 'friction' }>(
+    `SELECT kind FROM error_groups WHERE id = $1 AND project_id = $2`,
+    [groupId, projectId],
+  );
+  const kind = kindResult.rows[0]?.kind;
+  if (!kind) return null;
+
+  const coverage = `
+    WHERE EXISTS (
+      SELECT 1 FROM session_chunks c
+       WHERE c.session_id = cand.session_id AND c.project_id = $2
+         AND c.scrubbed_at IS NOT NULL
+         AND c.first_event_ms IS NOT NULL AND c.last_event_ms IS NOT NULL
+      HAVING min(c.first_event_ms) <= cand.anchor_ms - 15000
+         AND max(c.last_event_ms) >= cand.anchor_ms + 15000
+    )
+    AND EXISTS (
+      SELECT 1 FROM session_chunks c
+       WHERE c.session_id = cand.session_id AND c.project_id = $2
+         AND c.scrubbed_at IS NOT NULL AND c.has_full_snapshot
+         AND c.first_event_ms IS NOT NULL AND c.last_event_ms IS NOT NULL
+         AND c.first_event_ms <= cand.anchor_ms - 15000
+    )`;
+  const query = kind === 'friction'
+    ? `SELECT cand.session_id, cand.anchor_ms FROM (
+         SELECT fs.session_id,
+                (extract(epoch FROM fs.occurred_at) * 1000)::bigint AS anchor_ms,
+                fs.occurred_at,
+                (fs.id = g.representative_signal_id) AS representative,
+                fs.id
+           FROM friction_signals fs
+           JOIN sessions s ON s.id = fs.session_id AND s.project_id = fs.project_id
+           JOIN error_groups g ON g.id = $1 AND g.project_id = $2
+          WHERE fs.incident_id = $1 AND fs.project_id = $2
+            AND fs.adjudication_status = 'accepted'
+            AND fs.retracted_at IS NULL AND fs.superseded_by IS NULL
+            AND s.status <> 'deleting'
+          ORDER BY (fs.id = g.representative_signal_id) DESC, fs.occurred_at ASC, fs.id ASC
+          LIMIT 50
+       ) cand
+       ${coverage}
+       ORDER BY cand.representative DESC, cand.occurred_at ASC, cand.id ASC
+       LIMIT 1`
+    : `SELECT cand.session_id, cand.anchor_ms FROM (
+         SELECT per_session.* FROM (
+           SELECT DISTINCT ON (e.session_id)
+                  e.session_id,
+                  (extract(epoch FROM e."timestamp") * 1000)::bigint AS anchor_ms,
+                  e.created_at, e.id
+             FROM error_events e
+             JOIN sessions s ON s.id = e.session_id AND s.project_id = e.project_id
+            WHERE e.error_group_id = $1 AND e.project_id = $2
+              AND e.session_id IS NOT NULL AND s.status <> 'deleting'
+            ORDER BY e.session_id, e.created_at DESC, e.id DESC
+         ) per_session
+         ORDER BY per_session.created_at DESC, per_session.id DESC
+         LIMIT 50
+       ) cand
+       ${coverage}
+       ORDER BY cand.created_at DESC, cand.id DESC
+       LIMIT 1`;
+  const { rows } = await pool.query<{ session_id: string; anchor_ms: unknown }>(query, [groupId, projectId]);
+  const row = rows[0];
+  if (!row) return null;
+  const anchorMs = toCount(row.anchor_ms);
+  if (anchorMs === null) {
+    logger.warn('Watchable session has an invalid anchor', { project_id: projectId, error_group_id: groupId });
+    return null;
+  }
+  return { sessionId: row.session_id, anchorMs };
+}
+
 /** Resolves pointer identity independently from chunk readiness. This mirror
  * serves both error and friction fix evidence, so it matches the Go reader's
  * representative-first friction fallback. */
@@ -1894,8 +1993,8 @@ export interface SessionChunkMeta {
   last_event_ms: number | null;
 }
 
-function nullableNumber(value: string | number | null): number | null {
-  if (value == null) return null;
+export function toCount(value: unknown): number | null {
+  if (value === null || value === undefined || value === '') return null;
   const parsed = typeof value === 'number' ? value : Number(value);
   return Number.isSafeInteger(parsed) ? parsed : null;
 }
@@ -1927,11 +2026,11 @@ export async function getPlayableChunkMetas(
   );
   return rows.map((row) => ({
     seq: row.seq,
-    size_bytes: nullableNumber(row.size_bytes),
-    decoded_size_bytes: nullableNumber(row.decoded_size_bytes),
+    size_bytes: toCount(row.size_bytes),
+    decoded_size_bytes: toCount(row.decoded_size_bytes),
     has_full_snapshot: row.has_full_snapshot,
-    first_event_ms: nullableNumber(row.first_event_ms),
-    last_event_ms: nullableNumber(row.last_event_ms),
+    first_event_ms: toCount(row.first_event_ms),
+    last_event_ms: toCount(row.last_event_ms),
   }));
 }
 

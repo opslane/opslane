@@ -55,6 +55,7 @@ function incident(id: string, overrides: Partial<Incident> = {}): Incident {
     last_seen: '2026-08-01T00:00:00Z',
     occurrence_count: 1,
     affected_users_count: 1,
+    story: '1 crash; recording impact unavailable',
     ...overrides,
   };
 }

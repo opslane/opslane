@@ -3,7 +3,9 @@ import {
   createLedgerRecorder,
   deriveTierRecord,
   detectLedgerAnomalies,
+  reproChecksNotRun,
 } from '../verification-ledger.js';
+import { validateDeclaration } from '../harness/fail-first.js';
 
 const tierInput = {
   declaredTest: { identifier: 'keeps selection', expectedAssertion: 'selection remains' },
@@ -82,5 +84,60 @@ describe('detectLedgerAnomalies', () => {
       'declared_test_identifier_not_found',
       'declared_file_not_test_material: src/helper.ts',
     ]));
+  });
+});
+
+// #354: the contract must accept vitest's native assertion text. Vitest prints
+// string-equality failures WITH single quotes ("expected 'a' to be 'b'"); the
+// assertion is matched in-process against captured output (never interpolated
+// into a shell command), so quotes are harmless there. Rejecting them made
+// tier `reproduced` unreachable for any real agent (CP5 verify, 3/3 runs).
+describe('validateDeclaration (#354)', () => {
+  const base = { testFiles: ['src/selection.test.ts'], identifier: 'preserves selection', expectedAssertion: 'x' };
+
+  it('accepts a vitest-style assertion containing single quotes', () => {
+    expect(validateDeclaration({ ...base, expectedAssertion: "AssertionError: expected 'a' to be 'b'" })).toBeNull();
+  });
+
+  it('accepts backslashes in the assertion (matched in-process, not shelled)', () => {
+    expect(validateDeclaration({ ...base, expectedAssertion: 'expected "C:\\tmp" to exist' })).toBeNull();
+  });
+
+  it('still rejects control characters in the assertion', () => {
+    expect(validateDeclaration({ ...base, expectedAssertion: 'boom\u0007' })).toMatch(/unsafe characters/);
+  });
+
+  it('still rejects unsafe identifiers (shell-adjacent field, rule unchanged)', () => {
+    expect(validateDeclaration({ ...base, identifier: "preserves 'selection'" })).toMatch(/identifier/);
+  });
+});
+
+// #354 secondary: a declared-but-never-run repro pair must land in the
+// not-run list — the final finalize must be computed from what actually
+// recorded, not from whether a declaration existed.
+describe('reproChecksNotRun (#354)', () => {
+  it('reports both repro checks when neither recorded', () => {
+    const recorder = createLedgerRecorder('job-1', 'project-1');
+    expect(reproChecksNotRun(recorder.roles())).toEqual(['repro_red', 'repro_green']);
+  });
+
+  it('reports only the missing half', () => {
+    const recorder = createLedgerRecorder('job-1', 'project-1');
+    recorder.record({
+      command: 'vitest -t x', commitSha: 'abc', workdirDirty: false,
+      discovered: 1, passed: 0, failed: 1, skipped: 0, truncated: false, timedOut: false,
+    }, 'repro_red');
+    expect(reproChecksNotRun(recorder.roles())).toEqual(['repro_green']);
+  });
+
+  it('reports nothing when red and green both ran', () => {
+    const recorder = createLedgerRecorder('job-1', 'project-1');
+    const row = {
+      command: 'vitest -t x', commitSha: 'abc', workdirDirty: false,
+      discovered: 1, passed: 0, failed: 1, skipped: 0, truncated: false, timedOut: false,
+    };
+    recorder.record(row, 'repro_red');
+    recorder.record({ ...row, failed: 0, passed: 1 }, 'repro_green');
+    expect(reproChecksNotRun(recorder.roles())).toEqual([]);
   });
 });

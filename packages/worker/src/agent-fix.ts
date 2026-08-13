@@ -39,7 +39,7 @@ import {
   type FixNarrative,
   type NarrativeFallbackInput,
 } from './narrative.js';
-import {
+import { reproChecksNotRun,
   createLedgerRecorder,
   detectLedgerAnomalies,
   deriveTierRecord,
@@ -167,12 +167,16 @@ function shellEscape(s: string): string {
 interface ModelTier {
   model: string;
   maxTurns: number;
-  budgetUsd: number;
+  /** Optional dollar backstop. Turns are the operating limit: the dollar caps
+   * were calibrated against small fixtures and were the binding constraint on
+   * real repositories (attempts died mid-setup), so the cascade no longer
+   * sets them. Callers may still cap via input.budgetUsd. */
+  budgetUsd?: number;
 }
 
 const MODEL_CASCADE: ModelTier[] = [
-  { model: 'claude-haiku-4-5-20251001', maxTurns: 15, budgetUsd: 0.25 },
-  { model: 'claude-sonnet-4-6',         maxTurns: 30, budgetUsd: 0.75 },
+  { model: 'claude-haiku-4-5-20251001', maxTurns: 15 },
+  { model: 'claude-sonnet-4-6',         maxTurns: 30 },
 ];
 
 const FIX_NARRATIVE_MODEL = 'claude-haiku-4-5-20251001';
@@ -777,7 +781,7 @@ async function runAgentFixCore(input: AgentFixInput): Promise<AgentFixResult> {
 
     // Determine model cascade. If caller specifies a model, use it alone (no cascade).
     const cascade: ModelTier[] = input.model
-      ? [{ model: input.model, maxTurns: input.maxTurns ?? 30, budgetUsd: input.budgetUsd ?? 0.75 }]
+      ? [{ model: input.model, maxTurns: input.maxTurns ?? 30, budgetUsd: input.budgetUsd }]
       : MODEL_CASCADE.map(t => ({
           model: t.model,
           maxTurns: input.maxTurns ?? t.maxTurns,
@@ -896,7 +900,7 @@ async function runAgentFixCore(input: AgentFixInput): Promise<AgentFixResult> {
 
         result = await traceSpan(
           'agent-loop',
-          { 'agent.max_turns': tier.maxTurns, 'agent.budget_usd': tier.budgetUsd, 'agent.model': tier.model, 'agent.tier': tierIdx, 'agent.attempt': attempt },
+          { 'agent.max_turns': tier.maxTurns, ...(tier.budgetUsd != null ? { 'agent.budget_usd': tier.budgetUsd } : {}), 'agent.model': tier.model, 'agent.tier': tierIdx, 'agent.attempt': attempt },
           () => runAgentLoop(
             {
               apiKey,
@@ -1299,7 +1303,7 @@ async function runAgentFixCore(input: AgentFixInput): Promise<AgentFixResult> {
       if (!baselineRun) notRun.push('suite_baseline');
       if (finalSuiteNewFailures === null) notRun.push('suite_post_patch');
       if (!buildGatePassed) notRun.push('build');
-      if (!agentState.declaredTest) notRun.push('repro_red', 'repro_green');
+      notRun.push(...reproChecksNotRun(recorder.roles()));
       recorder.finalizeNotRun([...new Set(notRun)]);
       let verificationJudge: EvidenceRecord['judge'];
       const tierEvidence = (): EvidenceRecord => ({
