@@ -30,6 +30,8 @@ import {
   insertFixRunLedger,
   getErrorGroup,
   getWatchableSessionForGroup,
+  listUnmappedPatterns,
+  upsertRouteMapRows,
 } from '../db.js';
 import { createLedgerRecorder } from '../verification-ledger.js';
 
@@ -113,6 +115,7 @@ async function cleanupTestData(): Promise<void> {
   await purgeDiagnosisDecisions(testPool, testProjectId);
   await purgeFixRunLedger(testPool, testProjectId);
   await testPool.query(`DELETE FROM error_group_jobs WHERE project_id = $1`, [testProjectId]);
+  await testPool.query(`DELETE FROM route_map WHERE project_id = $1`, [testProjectId]);
   await testPool.query(`DELETE FROM error_events WHERE project_id = $1`, [testProjectId]);
   await testPool.query(
     `DELETE FROM error_group_affected_users
@@ -187,6 +190,7 @@ describeDb('db.ts integration tests', () => {
     await purgeDiagnosisDecisions(testPool, testProjectId);
     await purgeFixRunLedger(testPool, testProjectId);
     await testPool.query(`DELETE FROM error_group_jobs WHERE project_id = $1`, [testProjectId]);
+    await testPool.query(`DELETE FROM route_map WHERE project_id = $1`, [testProjectId]);
     await testPool.query(`DELETE FROM error_events WHERE project_id = $1`, [testProjectId]);
     await testPool.query(
       `DELETE FROM error_group_affected_users
@@ -194,6 +198,83 @@ describeDb('db.ts integration tests', () => {
       [testProjectId],
     );
     await testPool.query(`DELETE FROM error_groups WHERE project_id = $1`, [testProjectId]);
+  });
+
+  describe('route-map identity cutover', () => {
+    it('treats origin-full and path-only patterns as the same mapped route', async () => {
+      await testPool.query(
+        `INSERT INTO error_groups
+           (project_id, fingerprint, title, first_seen, last_seen, page_url_normalized)
+         VALUES
+           ($1, $2, 'Mapped', now(), now(), 'https://app.test/orders/:id'),
+           ($1, $3, 'Unmapped', now(), now(), '/unknown')`,
+        [testProjectId, `mapped-${crypto.randomUUID()}`, `unmapped-${crypto.randomUUID()}`],
+      );
+      await testPool.query(
+        `INSERT INTO route_map (project_id,pattern,name,tier)
+         VALUES ($1,'/orders/:id','Orders','customer')`,
+        [testProjectId],
+      );
+
+      await expect(listUnmappedPatterns(testProjectId)).resolves.toEqual(['/unknown']);
+    });
+
+    it('stores canonical winners after origin collapse', async () => {
+      const job = await testPool.query<{ id: string }>(
+        `INSERT INTO error_group_jobs
+           (project_id,status,job_type,worker_id,lease_generation,lease_expires_at)
+         VALUES ($1,'claimed','route_map','route-worker',7,now()+interval '1 minute')
+         RETURNING id`,
+        [testProjectId],
+      );
+
+      await expect(upsertRouteMapRows({
+        projectId: testProjectId,
+        jobId: job.rows[0]!.id,
+        workerId: 'route-worker',
+        leaseGeneration: '7',
+        rows: [
+          {
+            pattern: 'https://a.cdn.test/checkout',
+            name: 'Checkout',
+            purpose: 'Buy',
+            tier: 'customer',
+          },
+          {
+            pattern: 'https://b.cdn.test/checkout',
+            name: 'Checkout v2',
+            purpose: 'Buy later',
+            tier: 'standard',
+          },
+        ],
+        unresolved: ['https://c.cdn.test/checkout', 'https://app.test/assets/:id'],
+      })).resolves.toBe(true);
+
+      const stored = await testPool.query<{
+        pattern: string;
+        name: string;
+        tier: string;
+        source: string;
+      }>(
+        `SELECT pattern,name,tier,source FROM route_map
+         WHERE project_id=$1 ORDER BY pattern`,
+        [testProjectId],
+      );
+      expect(stored.rows).toEqual([
+        {
+          pattern: '/assets/:id',
+          name: '/assets/:id',
+          tier: 'standard',
+          source: 'llm-unresolved',
+        },
+        {
+          pattern: '/checkout',
+          name: 'Checkout',
+          tier: 'customer',
+          source: 'llm',
+        },
+      ]);
+    });
   });
 
   describe('C5 impact and watchability reads', () => {

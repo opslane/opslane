@@ -1,21 +1,5 @@
 import { createHash } from 'node:crypto';
-
-/** Strip query/hash; template numeric and UUID/hash-like path segments. */
-export function normalizePageUrl(href: string): string {
-  try {
-    const url = new URL(href);
-    const path = url.pathname
-      .split('/')
-      .filter((segment) => !segment.startsWith('_ctx_'))
-      .map((segment) =>
-        /^\d+$/.test(segment) || /^[0-9a-f-]{8,}$/i.test(segment) ? ':id' : segment,
-      )
-      .join('/');
-    return `${url.origin}${path}`;
-  } catch {
-    return href.split(/[?#]/)[0] ?? href;
-  }
-}
+export { normalizePageUrl } from './urlnorm.js';
 
 /** Normalized pathname only for session entry attribution. */
 export function normalizeEntryPath(href: string): string | null {
