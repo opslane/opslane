@@ -51,6 +51,7 @@ vi.mock('../promotion-db.js', () => ({
   recordGenerationEvidence: (...a: unknown[]) => db.recordGenerationEvidence(...a),
 }));
 
+import { RULE_VERSION } from '../analyzer.js';
 import { processFrictionOutcomes } from '../promotion.js';
 
 const SESSION = {
@@ -133,6 +134,16 @@ beforeEach(() => {
 });
 
 describe('processFrictionOutcomes', () => {
+  it('selects pending signals only from the active rule version', async () => {
+    setPendingSignals([]);
+
+    await processFrictionOutcomes(SESSION, 'job-1', stubAdjudicator(), RUNTIME);
+
+    const [sql, params] = mockPoolQuery.mock.calls[0] as [string, unknown[]];
+    expect(sql).toContain('rule_version = $3');
+    expect(params).toEqual([SESSION.id, SESSION.project_id, RULE_VERSION]);
+  });
+
   it('leaves work pending and schedules tomorrow when the daily cap is spent', async () => {
     setPendingSignals([signalRow()]);
     db.findFoldTarget.mockResolvedValue({ errorGroupId: 'g1', status: 'queued', title: 'boom', secondsAway: 5 });

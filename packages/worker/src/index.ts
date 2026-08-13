@@ -22,6 +22,7 @@ import { logger, safeErrorMessage, setWorkerId } from './logger.js';
 import { fetchObject, getMinIOConfig } from './minio-client.js';
 import { INVESTIGATION_MODEL, investigateError } from './investigate.js';
 import { runPipeline } from './pipeline.js';
+import { buildSessionUrl } from './narrative.js';
 import { createPoller } from './poller.js';
 import { buildRepoUrl, cloneFailureReason, cloneRepo } from './repo-clone.js';
 import { getInstallationToken } from './github-app.js';
@@ -660,6 +661,8 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
       // run at all, and outcome alone cannot answer that.
       basis: triage.decisionBasis,
       confidence: triage.confidence,
+      causeKind: triage.adjudication?.cause_kind,
+      dispositions: triage.dispositions,
       ...db.policyFields(impactBar),
     };
 
@@ -1194,6 +1197,19 @@ export async function processFixJob(job: ClaimedJob & { errorGroupId: string }, 
     db.getSessionPointerForGroup(job.errorGroupId, job.projectId),
     db.getEnvironmentNamesForGroup(job.errorGroupId, job.projectId, group.kind),
   ]);
+  let watchUrl: string | null = null;
+  try {
+    const watchable = await db.getWatchableSessionForGroup(job.projectId, job.errorGroupId);
+    if (watchable) {
+      watchUrl = buildSessionUrl(process.env['DASHBOARD_URL'], watchable.sessionId, watchable.anchorMs, job.projectId);
+    }
+  } catch (err: unknown) {
+    logger.warn('Failed to load coverage-proven recording link', {
+      project_id: job.projectId,
+      error_group_id: job.errorGroupId,
+      error: String(err),
+    });
+  }
   const artifacts = replay ? await db.getReplayArtifacts(replay.id, job.projectId) : [];
 
   checkAbort(signal);
@@ -1389,6 +1405,13 @@ export async function processFixJob(job: ClaimedJob & { errorGroupId: string }, 
         headSha,
         job,
       ),
+      occurrenceCount: group.occurrence_count,
+      impact: {
+        class: group.impact_class ?? null,
+        visits: group.impact_visits ?? null,
+        recovered: group.impact_visits_recovered ?? null,
+      },
+      watchUrl,
     });
     checkAbort(signal);
 

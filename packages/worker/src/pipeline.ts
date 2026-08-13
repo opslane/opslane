@@ -16,6 +16,7 @@ import {
   buildIncidentUrl,
   renderCommitMessage,
   type FixNarrative,
+  type StoryImpact,
 } from './narrative.js';
 import { createLedgerRecorder } from './verification-ledger.js';
 import { insertFixRunLedger } from './db.js';
@@ -78,6 +79,9 @@ export interface PipelineInput {
       } }
   >;
   recordDeliveryPushed?: (headSha: string) => Promise<void>;
+  occurrenceCount?: number | null;
+  impact?: StoryImpact | null;
+  watchUrl?: string | null;
 }
 
 export interface PipelineResult {
@@ -345,6 +349,9 @@ export async function runPipeline(input: PipelineInput): Promise<PipelineResult>
       draft: deliveryPosture === 'draft',
       customerRuntime: input.customerRuntime,
       sandboxRuntime: fixResult.sandboxRuntime,
+      occurrenceCount: input.occurrenceCount,
+      impact: input.impact,
+      watchUrl: input.watchUrl,
     }, () => githubClient),
   );
 
