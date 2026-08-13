@@ -48,6 +48,9 @@
         }
       ]
     },
+    "docs/guides/investigation.md": {
+      "fences": []
+    },
     "docs/guides/react.md": {
       "fences": [
         {

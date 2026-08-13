@@ -60,6 +60,7 @@ export default defineConfig({
             { label: 'Environments', slug: 'guides/environments' },
             { label: 'API keys', slug: 'guides/api-keys' },
             { label: 'When Opslane opens a PR', slug: 'guides/fix-prs' },
+            { label: 'How investigation works', slug: 'guides/investigation' },
             { label: 'Slack notifications', slug: 'guides/slack-notifications' },
             { label: 'Replay privacy and masking', slug: 'guides/replay-privacy' },
           ],
