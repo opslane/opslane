@@ -3,7 +3,8 @@ covers:
   - packages/ingestion/notify/dispatcher.go
   - packages/ingestion/handler/notifications.go
   - packages/ingestion/db/notifications.go
-  - packages/dashboard/src/components/IntegrationsSettings.vuedescription: Send new-issue alerts and the daily digest to Slack with an incoming webhook.
+  - packages/dashboard/src/components/IntegrationsSettings.vue
+description: Send new-issue alerts and the daily digest to Slack with an incoming webhook.
 ---
 
 # Slack notifications

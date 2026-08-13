@@ -2,7 +2,8 @@
 covers:
   - packages/ingestion/grouping/fingerprint.go
   - packages/ingestion/grouping/suppress.go
-  - packages/ingestion/priority/sweeper.godescription: How events group into issues, how issues rank, and what each status means.
+  - packages/ingestion/priority/sweeper.go
+description: How events group into issues, how issues rank, and what each status means.
 ---
 
 # How issues work

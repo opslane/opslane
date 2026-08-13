@@ -1,7 +1,8 @@
 ---
 covers:
   - packages/ingestion/db/project_keys.go
-  - packages/ingestion/cmd/mint-key/main.godescription: The two project key scopes, how to mint them, and how to rotate them.
+  - packages/ingestion/cmd/mint-key/main.go
+description: The two project key scopes, how to mint them, and how to rotate them.
 ---
 
 # API keys

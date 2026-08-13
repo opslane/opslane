@@ -2,7 +2,8 @@
 covers:
   - packages/worker/src/friction/promotion.ts
   - packages/worker/src/friction/promotion-db.ts
-  - packages/worker/src/friction/analyzer.tsdescription: How Opslane finds users getting stuck without an error, and when that becomes an issue.
+  - packages/worker/src/friction/analyzer.ts
+description: How Opslane finds users getting stuck without an error, and when that becomes an issue.
 ---
 
 # Friction

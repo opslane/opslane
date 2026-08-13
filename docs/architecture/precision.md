@@ -3,7 +3,8 @@ covers:
   - packages/worker/src/pipeline.ts
   - packages/worker/src/investigate.ts
   - packages/worker/src/agent-fix.ts
-  - packages/worker/src/harness/**description: Exactly what a verified fix guarantees, and what it does not.
+  - packages/worker/src/harness/**
+description: Exactly what a verified fix guarantees, and what it does not.
 ---
 
 # Precision: what verification evidence means

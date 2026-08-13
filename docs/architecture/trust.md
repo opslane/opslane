@@ -2,7 +2,8 @@
 covers:
   - packages/sdk/**
   - packages/ingestion/handler/**
-  - packages/worker/src/**description: What each external service receives, how credentials are stored, and the known gaps.
+  - packages/worker/src/**
+description: What each external service receives, how credentials are stored, and the known gaps.
 ---
 
 # Trust and security model

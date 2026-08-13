@@ -2,7 +2,8 @@
 covers:
   - packages/sdk/**
   - packages/ingestion/**
-  - packages/worker/**description: One error from capture through investigation, verification, and delivery.
+  - packages/worker/**
+description: One error from capture through investigation, verification, and delivery.
 ---
 
 # Life of an error

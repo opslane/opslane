@@ -3,7 +3,8 @@ covers:
   - cli/src/codemods/vite-messages.ts
   - packages/sdk/vite-plugin/**
   - packages/ingestion/handler/sourcemap.go
-  - packages/worker/src/source-map.tsdescription: Where uploaded source maps are stored and who can read them.
+  - packages/worker/src/source-map.ts
+description: Where uploaded source maps are stored and who can read them.
 ---
 
 # Source-map privacy

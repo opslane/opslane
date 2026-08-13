@@ -3,7 +3,8 @@ covers:
   - packages/ingestion/cmd/mint-key/**
   - packages/ingestion/handler/sourcemap_upload.go
   - packages/sdk/vite-plugin/**
-  - packages/worker/src/resolve-stack.tsdescription: Upload Vite source maps so production stack traces point at your source.
+  - packages/worker/src/resolve-stack.ts
+description: Upload Vite source maps so production stack traces point at your source.
 ---
 
 # Source maps

@@ -3,7 +3,8 @@ covers:
   - packages/sdk/src/index.ts
   - packages/sdk/src/config.ts
   - packages/sdk/src/react.tsx
-  - packages/sdk/src/vue.tsdescription: Install the browser SDK in React, Vue, or vanilla JavaScript, identify users, and label environments.
+  - packages/sdk/src/vue.ts
+description: Install the browser SDK in React, Vue, or vanilla JavaScript, identify users, and label environments.
 ---
 
 # Install the SDK

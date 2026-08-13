@@ -3,7 +3,8 @@ covers:
   - packages/worker/src/pipeline.ts
   - packages/worker/src/agent-fix.ts
   - packages/worker/src/ci-watch.ts
-  - packages/worker/src/friction/promotion.tsdescription: When Opslane opens a pull request, how it investigates, and what verification proves.
+  - packages/worker/src/friction/promotion.ts
+description: When Opslane opens a pull request, how it investigates, and what verification proves.
 ---
 
 # When Opslane opens a pull request

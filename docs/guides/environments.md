@@ -2,7 +2,8 @@
 covers:
   - packages/ingestion/db/environments.go
   - packages/ingestion/db/migrations/032_project_default_environment.sql
-  - packages/sdk/src/config.tsdescription: Label telemetry by environment and limit automatic error investigation to chosen ones.
+  - packages/sdk/src/config.ts
+description: Label telemetry by environment and limit automatic error investigation to chosen ones.
 ---
 
 # Environments

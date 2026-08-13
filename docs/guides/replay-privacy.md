@@ -5,7 +5,8 @@ covers:
   - packages/sdk/src/replay.ts
   - packages/sdk/src/session.ts
   - packages/sdk/src/chunk-upload.ts
-  - packages/sdk/src/scrub.tsdescription: What session recordings capture, how masking works, and how long recordings live.
+  - packages/sdk/src/scrub.ts
+description: What session recordings capture, how masking works, and how long recordings live.
 ---
 
 # Replay privacy and masking

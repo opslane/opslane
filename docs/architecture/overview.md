@@ -3,7 +3,8 @@ covers:
   - packages/ingestion/**
   - packages/worker/**
   - packages/sdk/**
-  - packages/dashboard/**description: The components, the trust boundaries, and why there is no queue to operate.
+  - packages/dashboard/**
+description: The components, the trust boundaries, and why there is no queue to operate.
 ---
 
 # Architecture overview
