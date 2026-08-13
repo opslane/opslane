@@ -16,6 +16,7 @@ import {
   reconcileDeadLetteredSessionAnalysis,
   releaseUnfinishedGeneration,
 } from './friction/dead-letter.js';
+import { canonicalPattern } from './friction/urlnorm.js';
 import type { Platform } from './platform.js';
 import type { DerivedDecision } from './classify.js';
 import type { RouteMapRow } from './route-map.js';
@@ -1629,14 +1630,14 @@ export const MAX_ROUTE_PATTERN_BYTES = 512;
 
 /**
  * Normalized routes on open groups that do not yet have a classification.
- * Exact matching is intentional, and a row from any source (including
+ * During the identity cutover, an origin-full or path-only route row resolves
+ * either spelling of the same pattern. A row from any source (including
  * llm-unresolved) resolves a pattern permanently until an operator changes it.
  *
  * Both kinds are stamped onto error_groups by the ingestion sweeper, which
  * runs every URL through one normalizer, so an error and a friction incident
- * on the same page share a pattern. Do not assume the upstream values agree:
- * ./friction/fingerprint.ts still writes an origin-prefixed, less-templated
- * value onto friction_signals, and the sweeper re-normalizes it on the way in.
+ * on the same page share a pattern. The dual read remains necessary while old
+ * version-3 friction groups with origin-prefixed keys age out.
  *
  * The length filter is defence in depth for anything that reaches the column
  * by another route. An oversized pattern is unindexable by route_map's
@@ -1658,7 +1659,8 @@ export async function listUnmappedPatterns(projectId: string): Promise<string[]>
           SELECT 1
             FROM route_map rm
            WHERE rm.project_id = eg.project_id
-             AND rm.pattern = eg.page_url_normalized
+             AND COALESCE(NULLIF(regexp_replace(rm.pattern, '^https?://[^/]*', '', 'i'), ''), '/')
+               = COALESCE(NULLIF(regexp_replace(eg.page_url_normalized, '^https?://[^/]*', '', 'i'), ''), '/')
         )
       ORDER BY pattern`,
     [projectId, MAX_ROUTE_PATTERN_BYTES],
@@ -1720,14 +1722,40 @@ export async function upsertRouteMapRows(args: {
       );
     };
 
-    for (const row of args.rows) await write(row, 'llm');
+    const reach: Record<RouteMapRow['tier'], number> = {
+      customer: 2,
+      standard: 1,
+      admin: 0,
+    };
+    const byCanonical = new Map<
+      string,
+      { row: RouteMapRow; source: 'llm' | 'llm-unresolved' }
+    >();
+    // Classified rows first, so an unresolved entry can never displace one.
+    // Within the classified set, the widest reach wins a canonical collision.
+    for (const row of args.rows) {
+      const pattern = canonicalPattern(row.pattern);
+      const previous = byCanonical.get(pattern);
+      if (!previous || reach[row.tier] > reach[previous.row.tier]) {
+        byCanonical.set(pattern, { row: { ...row, pattern }, source: 'llm' });
+      }
+    }
     for (const pattern of args.unresolved) {
-      await write({
-        pattern,
-        name: pattern,
-        purpose: 'unclassified',
-        tier: 'standard',
-      }, 'llm-unresolved');
+      const canonical = canonicalPattern(pattern);
+      if (!byCanonical.has(canonical)) {
+        byCanonical.set(canonical, {
+          row: {
+            pattern: canonical,
+            name: canonical,
+            purpose: 'unclassified',
+            tier: 'standard',
+          },
+          source: 'llm-unresolved',
+        });
+      }
+    }
+    for (const entry of byCanonical.values()) {
+      await write(entry.row, entry.source);
     }
 
     await client.query('COMMIT');

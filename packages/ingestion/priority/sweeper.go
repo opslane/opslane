@@ -49,13 +49,9 @@ SELECT error_group_id, url, n, latest FROM (
 ) ranked WHERE rn <= $1`
 
 // Friction incidents carry their page URL on the signal rather than the event.
-// Those values were normalized by packages/worker/src/friction/fingerprint.ts,
-// which keeps the origin and templates fewer segment shapes. Re-normalizing
-// them here is what makes both kinds agree: NormalizePageURL strips the host
-// and leaves an already-templated ":id" untouched, so a friction incident and
-// an error incident on the same page land on the same pattern and therefore
-// join the same route_map row. Without this pass they never match, and every
-// customer-facing friction issue silently keeps the default weight of 1.
+// Version 4 writes the same host-free contract as ingestion. Re-normalization
+// stays defensive because version 3 rows retain origins and can still flow
+// through this seven-day tally during the cutover window.
 const frictionURLTalliesSQL = `
 SELECT error_group_id, url, n, latest FROM (
   SELECT fs.incident_id AS error_group_id, fs.page_url_normalized AS url,
@@ -99,7 +95,22 @@ WITH windows AS (
       GROUP BY ee.session_id HAVING bool_and(ee.end_user_id IS NULL)
     ) a24) AS anon_24h
   FROM error_groups eg
-  LEFT JOIN route_map rm ON rm.project_id = eg.project_id AND rm.pattern = eg.page_url_normalized
+  LEFT JOIN LATERAL (
+    SELECT rm.pattern, rm.name, rm.tier
+    FROM route_map rm
+    WHERE rm.project_id = eg.project_id
+      -- A group with no page URL matches nothing. Without this guard the
+      -- COALESCE below turns NULL and '' into '/', so every URL-less group
+      -- would inherit the project's root route and its weight. The old
+      -- equality join could not do that: NULL = anything is never true.
+      AND eg.page_url_normalized IS NOT NULL AND eg.page_url_normalized <> ''
+      AND COALESCE(NULLIF(regexp_replace(rm.pattern, '^https?://[^/]*', '', 'i'), ''), '/')
+        = COALESCE(NULLIF(regexp_replace(eg.page_url_normalized, '^https?://[^/]*', '', 'i'), ''), '/')
+    ORDER BY (rm.pattern = eg.page_url_normalized) DESC,
+             (rm.pattern !~* '^https?://') DESC,
+             rm.created_at, rm.pattern
+    LIMIT 1
+  ) rm ON TRUE
   WHERE eg.kind = 'error' AND eg.status NOT IN ('resolved','merged','archived')
 )
 UPDATE error_groups eg SET
@@ -149,7 +160,22 @@ WITH windows AS (
       GROUP BY fs.session_id HAVING bool_and(fs.end_user_id IS NULL)
     ) a24) AS anon_24h
   FROM error_groups eg
-  LEFT JOIN route_map rm ON rm.project_id = eg.project_id AND rm.pattern = eg.page_url_normalized
+  LEFT JOIN LATERAL (
+    SELECT rm.pattern, rm.name, rm.tier
+    FROM route_map rm
+    WHERE rm.project_id = eg.project_id
+      -- A group with no page URL matches nothing. Without this guard the
+      -- COALESCE below turns NULL and '' into '/', so every URL-less group
+      -- would inherit the project's root route and its weight. The old
+      -- equality join could not do that: NULL = anything is never true.
+      AND eg.page_url_normalized IS NOT NULL AND eg.page_url_normalized <> ''
+      AND COALESCE(NULLIF(regexp_replace(rm.pattern, '^https?://[^/]*', '', 'i'), ''), '/')
+        = COALESCE(NULLIF(regexp_replace(eg.page_url_normalized, '^https?://[^/]*', '', 'i'), ''), '/')
+    ORDER BY (rm.pattern = eg.page_url_normalized) DESC,
+             (rm.pattern !~* '^https?://') DESC,
+             rm.created_at, rm.pattern
+    LIMIT 1
+  ) rm ON TRUE
   WHERE eg.kind = 'friction' AND eg.status NOT IN ('resolved','merged','archived')
 )
 UPDATE error_groups eg SET
@@ -267,10 +293,13 @@ WHERE p.github_repo IS NOT NULL AND p.github_repo <> ''
   AND EXISTS (
     SELECT 1 FROM error_groups eg
     WHERE eg.project_id = p.id AND eg.page_url_normalized IS NOT NULL
+      AND eg.page_url_normalized <> ''
       AND eg.status NOT IN ('resolved','merged','archived')
       AND NOT EXISTS (
         SELECT 1 FROM route_map rm
-        WHERE rm.project_id = p.id AND rm.pattern = eg.page_url_normalized
+        WHERE rm.project_id = p.id
+          AND COALESCE(NULLIF(regexp_replace(rm.pattern, '^https?://[^/]*', '', 'i'), ''), '/')
+            = COALESCE(NULLIF(regexp_replace(eg.page_url_normalized, '^https?://[^/]*', '', 'i'), ''), '/')
       )
   )
   AND NOT EXISTS (

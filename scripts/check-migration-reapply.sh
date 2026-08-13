@@ -32,6 +32,8 @@ DELETE FROM error_group_jobs
   WHERE project_id IN (SELECT id FROM projects WHERE name = 'reapply-check-project');
 DELETE FROM error_groups
   WHERE project_id IN (SELECT id FROM projects WHERE name = 'reapply-check-project');
+DELETE FROM route_map
+  WHERE project_id IN (SELECT id FROM projects WHERE name = 'reapply-check-project');
 DELETE FROM projects WHERE name = 'reapply-check-project';
 DELETE FROM orgs WHERE name = 'reapply-check-org';
 SQL
@@ -60,6 +62,10 @@ WITH org AS (
 ), project AS (
   INSERT INTO projects (org_id, name, github_repo)
   SELECT id, 'reapply-check-project', 'reapply-check/repo' FROM org RETURNING id
+), route AS (
+  INSERT INTO route_map (project_id, pattern, name, tier, source)
+  SELECT id, '/reapply-check', 'Reapply check', 'standard', 'llm' FROM project
+  RETURNING project_id
 ), grp AS (
   INSERT INTO error_groups (project_id, fingerprint, title, first_seen, last_seen)
   SELECT id, 'reapply-check-group', 'Reapply check group', now(), now() FROM project

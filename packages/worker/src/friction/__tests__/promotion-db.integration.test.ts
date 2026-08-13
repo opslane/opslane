@@ -16,6 +16,8 @@ import {
 } from '../promotion-db.js';
 import { writeFrictionSignals } from '../persist.js';
 import { releaseUnfinishedGeneration } from '../dead-letter.js';
+import { RULE_VERSION } from '../analyzer.js';
+import { processFrictionOutcomes } from '../promotion.js';
 
 const DATABASE_URL = process.env['DATABASE_URL'];
 const describeDb = DATABASE_URL ? describe : describe.skip;
@@ -223,6 +225,53 @@ describeDb('promotion-db integration', () => {
     } finally {
       client.release();
     }
+  });
+
+  it('leaves pending signals from the previous rule version untouched', async () => {
+    const sessionId = await seedSession();
+    const oldSignal = await pool.query<{ id: string }>(
+      `INSERT INTO friction_signals
+         (session_id, project_id, environment_id, rule_version, signal_type,
+          fingerprint, page_url_normalized, occurred_at, adjudication_status)
+       VALUES ($1,$2,$3,$4,'dead_click','old-version-pending',
+               'https://old.test/checkout',now(),'pending')
+       RETURNING id`,
+      [sessionId, projectId, environmentId, RULE_VERSION - 1],
+    );
+    const jobId = await seedAnalysisJob(sessionId);
+    const adjudicator = {
+      modelId: 'must-not-run',
+      promptVersion: 1,
+      adjudicate: async () => {
+        throw new Error('old-version signal was adjudicated');
+      },
+    };
+
+    await processFrictionOutcomes({
+      id: sessionId,
+      project_id: projectId,
+      environment_id: environmentId,
+      end_user_id: null,
+      status: 'analyzing',
+      started_at: new Date().toISOString(),
+      chunk_count: 1,
+    }, jobId, adjudicator, {
+      windowMode: 'off',
+      dailyCap: 500,
+      loadWindows: async () => [],
+    });
+
+    const status = await pool.query<{ adjudication_status: string }>(
+      `SELECT adjudication_status FROM friction_signals WHERE id=$1`,
+      [oldSignal.rows[0]!.id],
+    );
+    expect(status.rows[0]!.adjudication_status).toBe('pending');
+    const generations = await pool.query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM friction_adjudication_generations
+       WHERE project_id=$1 AND rule_version=$2`,
+      [projectId, RULE_VERSION - 1],
+    );
+    expect(generations.rows[0]!.count).toBe('0');
   });
 
   it('supersedes prior-version signals and persists occurrence timestamps', async () => {

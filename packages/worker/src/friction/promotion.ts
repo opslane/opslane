@@ -3,6 +3,7 @@ import { logger } from '../logger.js';
 import * as db from '../db.js';
 import type { Adjudicator, AdjudicationInput, AdjudicationVerdict, EvidenceWindowMode } from './adjudicator.js';
 import type { WindowEvent } from './evidence-window.js';
+import { RULE_VERSION } from './analyzer.js';
 import {
   findFoldTarget,
   claimSignalsForAdjudication,
@@ -77,11 +78,12 @@ export async function processFrictionOutcomes(
             element_selector, occurrence_count, rule_version, occurred_ats
      FROM friction_signals
      WHERE session_id = $1 AND project_id = $2
+       AND rule_version = $3
        AND adjudication_status = 'pending'
        AND incident_id IS NULL
        AND retracted_at IS NULL AND superseded_by IS NULL
      ORDER BY occurred_at ASC`,
-    [session.id, session.project_id],
+    [session.id, session.project_id, RULE_VERSION],
   );
 
   for (const signal of pending) {
