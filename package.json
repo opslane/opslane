@@ -14,7 +14,7 @@
     "db:migrate": "docker compose run --rm migrate",
     "services:restart": "./scripts/restart-services.sh",
     "services:restart:wipe-db": "./scripts/restart-services.sh --wipe-db",
-    "test:repo": "pnpm docs:map:test && pnpm docs:scope && node scripts/check-docs-drift.mjs && node scripts/check-action-pins.mjs && node scripts/check-compose-ports.mjs && node --test scripts/check-wire-fixtures.test.mjs scripts/check-compose-ports.test.mjs",
+    "test:repo": "pnpm docs:map:test && pnpm docs:scope && node scripts/check-docs-drift.mjs && node scripts/check-docs-voice.mjs && node scripts/check-action-pins.mjs && node scripts/check-compose-ports.mjs && node --test scripts/check-wire-fixtures.test.mjs scripts/check-compose-ports.test.mjs",
     "test:unit": "pnpm -r --filter '!@opslane/test-e2e' test",
     "test": "pnpm test:repo && pnpm test:unit",
     "test:e2e": "pnpm --filter @opslane/test-e2e test",
