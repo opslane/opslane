@@ -93,6 +93,9 @@
         }
       ]
     },
+    "docs/guides/session-analysis.md": {
+      "fences": []
+    },
     "docs/guides/slack-notifications.md": {
       "fences": [
         {
