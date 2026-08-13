@@ -6,7 +6,7 @@ covers:
 ---
 # Environments
 
-An environment splits a project's issues and sessions by where they came from: `production`, `staging`, a preview deployment. Environments are created from the data itself, not configured in advance. The first event or session recording that carries a new valid label creates the environment.
+An environment splits a project's issues and sessions by where they came from: `production`, `staging`, a preview deployment. The first event or session recording that carries a new valid label creates the environment; nothing is configured in advance.
 
 ## Set it in the SDK
 
@@ -37,7 +37,7 @@ Every project starts with `production` as its default. The default is where even
 
 ## Where environments show up
 
-The issue list filters by environment, and each issue carries per-environment counts, so a bug that only hits staging reads as exactly that. A fresh browser session opens the issue list filtered to the project's default environment; choosing "all environments" sticks across reloads.
+The issue list filters by environment, and each issue carries per-environment counts, so a staging-only bug shows up as staging-only. A fresh browser session opens the issue list filtered to the project's default environment; choosing "all environments" sticks across reloads.
 
 ## Scope automation by environment
 
@@ -45,12 +45,12 @@ By default, an issue in any environment can trigger an investigation, and invest
 
 - Events outside the scope still ingest, group, and show up in the per-environment counts. Scope controls automation, not data.
 - The scope fails closed: enabled with an empty list means no environment triggers automation.
-- Manually triggered fixes bypass the scope; clicking the button is the authorization.
+- Manually triggered fixes bypass the scope.
 - Projects that never enable scoping behave exactly as before.
 
 ## If staging traffic shows up as production
 
-That is the default doing its job with nothing to go on. An SDK with no `environment` option sends everything to the project default, which starts as `production`. Two things to check:
+An SDK with no `environment` option sends everything to the project default, which starts as `production`. Two things to check:
 
 - Every non-production build sets the `environment` option.
 - The label passes the format rules above. A value like `staging!` is invalid and falls back silently; the event still arrives, just in the wrong place.
