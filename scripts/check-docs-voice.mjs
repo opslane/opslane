@@ -71,18 +71,30 @@ export function scanContent(content, { jargon = false, file = '' } = {}) {
     }
     if (inFence) return;
 
-    let text = line;
-    if (inComment) {
-      const end = text.indexOf('-->');
-      if (end === -1) return;
-      text = text.slice(end + 3);
-      inComment = false;
-    }
-    // Strip single-line comments; detect a comment left open.
-    text = text.replace(/<!--[\s\S]*?-->/g, '');
-    const open = text.indexOf('<!--');
-    if (open !== -1) {
-      text = text.slice(0, open);
+    // Walk the line and drop every commented span. A single pass with a
+    // regex would leave a trailing unclosed `<!--` in the scanned text, so
+    // this consumes openers and closers explicitly and carries the open
+    // state to the next line.
+    let text = '';
+    let rest = line;
+    while (rest.length > 0) {
+      if (inComment) {
+        const close = rest.indexOf('-->');
+        if (close === -1) {
+          rest = '';
+          break;
+        }
+        rest = rest.slice(close + 3);
+        inComment = false;
+        continue;
+      }
+      const open = rest.indexOf('<!--');
+      if (open === -1) {
+        text += rest;
+        break;
+      }
+      text += rest.slice(0, open);
+      rest = rest.slice(open + 4);
       inComment = true;
     }
 
