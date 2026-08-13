@@ -27,6 +27,7 @@ export default defineConfig({
     mermaid({ enableLog: false }),
     starlight({
       title: 'Opslane',
+      customCss: ['./src/styles/theme.css'],
       description: 'Errors in, verified fix PRs out — or an explicit incident that says why not.',
       markdown: { processedDirs: ['../docs'] },
       social: [
