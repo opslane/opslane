@@ -41,5 +41,5 @@ test('jargon watchlist fires only when enabled', () => {
 
 test('the real tree passes and the exemption list only shrinks', () => {
   assert.deepEqual(checkDocsVoice({ root: '.' }), []);
-  assert.ok(LEGACY_EXEMPT.size <= 19, `exemption list grew to ${LEGACY_EXEMPT.size}; it may only shrink`);
+  assert.ok(LEGACY_EXEMPT.size <= 15, `exemption list grew to ${LEGACY_EXEMPT.size}; it may only shrink`);
 });

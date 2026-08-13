@@ -33,23 +33,19 @@ const LIST_SEPARATOR = /^\s*[-*]\s+(\*\*[^*]+\*\*|\[[^\]]+\]\([^)]*\))\s+—\s/;
 
 // Remove entries as their audit issues land (tracked on #345 / epic #2).
 export const LEGACY_EXEMPT = new Set([
-  // Measured on main, 2026-08-13. #357 removes self-host; #358 removes index.mdx.
+  // Measured on main, 2026-08-13. Each entry dies with its audit issue.
+  'docs/contracts/action-scope.md',
   'docs-site/src/content/docs/index.mdx',
   'docs/architecture/life-of-an-error.md',
   'docs/architecture/overview.md',
   'docs/architecture/precision.md',
   'docs/architecture/trust.md',
-  'docs/contracts/action-scope.md',
   'docs/contracts/events.md',
   'docs/contracts/reliability.md',
   'docs/guides/github-app.md',
-  'docs/guides/react.md',
   'docs/guides/replay-privacy.md',
   'docs/guides/slack-notifications.md',
   'docs/guides/source-maps.md',
-  'docs/guides/source-maps-migration.md',
-  'docs/guides/vanilla.md',
-  'docs/guides/vue.md',
   'docs/install.md',
   'docs/quickstart/agent.md',
   'docs/quickstart/self-host.md',
@@ -57,14 +53,19 @@ export const LEGACY_EXEMPT = new Set([
 
 export function scanContent(content, { jargon = false, file = '' } = {}) {
   const violations = [];
-  const lines = content.split('\n');
+  // Frontmatter is metadata for the site and for docs-sync, not body prose.
+  const body = content.startsWith('---\n')
+    ? content.slice(content.indexOf('\n---', 3) + 4)
+    : content;
+  const offset = content.slice(0, content.length - body.length).split('\n').length - 1;
+  const lines = body.split('\n');
   let inFence = false;
   let inComment = false;
   let prevAllows = false;
 
   lines.forEach((raw, i) => {
     const line = raw;
-    const n = i + 1;
+    const n = i + 1 + offset;
     if (/^\s*(```|~~~)/.test(line)) {
       inFence = !inFence;
       return;
