@@ -3,7 +3,9 @@ covers:
   - packages/sdk/**
   - packages/ingestion/handler/**
   - packages/worker/src/**
+description: What each external service receives, how credentials are stored, and the known gaps.
 ---
+
 # Trust and security model
 
 What Opslane can touch, what leaves your infrastructure, how credentials are handled, and what the current honest gaps are. Everything on this page describes the code as it is today — gaps are stated, not papered over.

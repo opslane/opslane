@@ -4,7 +4,9 @@ covers:
   - packages/worker/**
   - packages/sdk/**
   - packages/dashboard/**
+description: The components, the trust boundaries, and why there is no queue to operate.
 ---
+
 # Architecture overview
 
 Opslane's runtime is four services plus two stores, with three distinct trust boundaries.

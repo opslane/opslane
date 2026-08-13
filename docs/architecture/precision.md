@@ -4,7 +4,9 @@ covers:
   - packages/worker/src/investigate.ts
   - packages/worker/src/agent-fix.ts
   - packages/worker/src/harness/**
+description: Exactly what a verified fix guarantees, and what it does not.
 ---
+
 # Precision: what verification evidence means
 
 Opslane opens pull requests automatically. That is only tolerable if a ready-for-review fix and an actionable draft cannot be confused. This page states both bars exactly — including what they do **not** guarantee.

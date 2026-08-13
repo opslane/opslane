@@ -24,28 +24,28 @@ test('parses the loader allowlist and sidebar from their authoritative sources',
     files: ['install.md'],
     directories: ['quickstart', 'guides', 'reference', 'architecture', 'contracts'],
   });
-  assert.ok(parseSidebarSlugs(SIDEBAR_SOURCE).includes('contracts/c4-amendments'));
+  assert.ok(parseSidebarSlugs(SIDEBAR_SOURCE).includes('guides/issues'));
 });
 
 test('real docs tree has explicit policy coverage', () => {
   const result = checkDocsScope({ root: ROOT });
 
   assert.deepEqual(result.problems, []);
-  assert.equal(result.published.length, 25);
+  assert.equal(result.published.length, 26);
   assert.equal(result.navigable.length, parseSidebarSlugs(SIDEBAR_SOURCE).length);
   assert.equal(result.policies.get('docs/contracts/events.md'), 'manual');
 });
 
 test('allows a published page to be intentionally absent from navigation', () => {
-  const sidebarWithoutEvents = SIDEBAR_SOURCE.replace(
-    /^.*slug: 'contracts\/events'.*\n/m,
+  const sidebarWithoutIssues = SIDEBAR_SOURCE.replace(
+    /^.*slug: 'guides\/issues'.*\n/m,
     '',
   );
-  const result = checkDocsScope({ root: ROOT, sidebarSource: sidebarWithoutEvents });
+  const result = checkDocsScope({ root: ROOT, sidebarSource: sidebarWithoutIssues });
 
   assert.deepEqual(result.problems, []);
-  assert.equal(result.published.includes('docs/contracts/events.md'), true);
-  assert.equal(result.navigable.includes('contracts/events'), false);
+  assert.equal(result.published.includes('docs/guides/issues.md'), true);
+  assert.equal(result.navigable.includes('guides/issues'), false);
 });
 
 test('fails when the published events contract loses its explicit policy', () => {

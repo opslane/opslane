@@ -1,134 +1,224 @@
 {
   "version": 1,
   "documents": {
-    "docs/install.md": {
+    "docs/guides/api-keys.md": {
       "fences": [
-        { "language": "bash", "classification": "config-template" },
-        { "language": "bash", "classification": "config-template" },
-        { "language": "bash", "classification": "illustrative" },
         {
-          "language": "ts",
-          "classification": "runnable",
-          "fixture": "test-fixtures/react-app",
-          "target": "src/main.tsx",
-          "command": ["pnpm", "build"]
+          "language": "bash",
+          "classification": "config-template"
         },
         {
-          "language": "ts",
-          "classification": "runnable",
-          "fixture": "test-fixtures/vue-app",
-          "target": "src/main.ts",
-          "command": ["pnpm", "build"]
+          "language": "bash",
+          "classification": "config-template"
+        },
+        {
+          "language": "bash",
+          "classification": "illustrative"
+        },
+        {
+          "language": "bash",
+          "classification": "illustrative"
         }
       ]
     },
-    "docs/quickstart/agent.md": {
+    "docs/guides/environments.md": {
       "fences": [
-        { "language": "bash", "classification": "illustrative" },
-        { "language": "json", "classification": "expected-output" },
-        { "language": "bash", "classification": "config-template" },
-        { "language": "bash", "classification": "illustrative" },
-        { "language": "bash", "classification": "illustrative" },
-        { "language": "bash", "classification": "config-template" }
+        {
+          "language": "ts",
+          "classification": "fragment"
+        }
       ]
     },
-    "docs/quickstart/self-host.md": {
-      "fences": [
-        { "language": "bash", "classification": "illustrative" },
-        { "language": "bash", "classification": "illustrative" },
-        { "language": "bash", "classification": "illustrative" },
-        { "language": "text", "classification": "expected-output" },
-        { "language": "bash", "classification": "config-template" },
-        { "language": "bash", "classification": "illustrative" },
-        { "language": "bash", "classification": "illustrative" }
-      ]
+    "docs/guides/fix-prs.md": {
+      "fences": []
+    },
+    "docs/guides/friction.md": {
+      "fences": []
     },
     "docs/guides/github-app.md": {
       "fences": [
-        { "language": "bash", "classification": "config-template" },
-        { "language": "bash", "classification": "config-template" },
-        { "language": "bash", "classification": "illustrative" }
+        {
+          "language": "bash",
+          "classification": "config-template"
+        },
+        {
+          "language": "bash",
+          "classification": "config-template"
+        },
+        {
+          "language": "bash",
+          "classification": "illustrative"
+        }
       ]
     },
-    "docs/guides/react.md": {
-      "fences": [
-        { "language": "bash", "classification": "illustrative" },
-        {
-          "language": "tsx",
-          "classification": "runnable",
-          "fixture": "test-fixtures/react-app",
-          "target": "src/main.tsx",
-          "command": ["pnpm", "build"]
-        },
-        { "language": "tsx", "classification": "fragment" }
-      ]
+    "docs/guides/issues.md": {
+      "fences": []
     },
     "docs/guides/replay-privacy.md": {
       "fences": [
-        { "language": "html", "classification": "fragment" },
-        { "language": "ts", "classification": "fragment" },
-        { "language": "ts", "classification": "fragment" },
-        { "language": "ts", "classification": "fragment" }
+        {
+          "language": "html",
+          "classification": "fragment"
+        },
+        {
+          "language": "ts",
+          "classification": "fragment"
+        },
+        {
+          "language": "ts",
+          "classification": "fragment"
+        },
+        {
+          "language": "ts",
+          "classification": "fragment"
+        }
       ]
     },
     "docs/guides/slack-notifications.md": {
       "fences": [
-        { "language": "bash", "classification": "config-template" }
+        {
+          "language": "bash",
+          "classification": "config-template"
+        }
       ]
     },
     "docs/guides/source-map-privacy.md": {
       "fences": []
     },
-    "docs/guides/source-maps-migration.md": {
-      "fences": []
-    },
     "docs/guides/source-maps.md": {
       "fences": [
-        { "language": "ts", "classification": "config-template" },
-        { "language": "bash", "classification": "config-template" },
-        { "language": "dotenv", "classification": "config-template" },
-        { "language": "bash", "classification": "config-template" },
-        { "language": "bash", "classification": "config-template" },
-        { "language": "sql", "classification": "config-template" },
-        { "language": "bash", "classification": "config-template" },
-        { "language": "bash", "classification": "config-template" },
-        { "language": "sql", "classification": "config-template" },
-        { "language": "sql", "classification": "config-template" }
+        {
+          "language": "ts",
+          "classification": "config-template"
+        },
+        {
+          "language": "bash",
+          "classification": "config-template"
+        },
+        {
+          "language": "dotenv",
+          "classification": "config-template"
+        },
+        {
+          "language": "bash",
+          "classification": "config-template"
+        },
+        {
+          "language": "bash",
+          "classification": "config-template"
+        },
+        {
+          "language": "sql",
+          "classification": "config-template"
+        },
+        {
+          "language": "bash",
+          "classification": "config-template"
+        },
+        {
+          "language": "bash",
+          "classification": "config-template"
+        },
+        {
+          "language": "sql",
+          "classification": "config-template"
+        },
+        {
+          "language": "sql",
+          "classification": "config-template"
+        }
       ]
     },
-    "docs/guides/vanilla.md": {
+    "docs/install.md": {
       "fences": [
-        { "language": "bash", "classification": "illustrative" },
         {
-          "language": "ts",
-          "classification": "runnable",
-          "fixture": "test-fixtures/react-app",
-          "target": "src/main.tsx",
-          "command": ["pnpm", "build"]
+          "language": "bash",
+          "classification": "illustrative"
+        },
+        {
+          "language": "tsx",
+          "classification": "fragment"
         },
         {
           "language": "ts",
-          "classification": "runnable",
-          "fixture": "test-fixtures/react-app",
-          "target": "src/main.tsx",
-          "command": ["pnpm", "build"]
+          "classification": "fragment"
         },
-        { "language": "ts", "classification": "fragment" },
-        { "language": "html", "classification": "fragment" }
+        {
+          "language": "ts",
+          "classification": "fragment"
+        },
+        {
+          "language": "bash",
+          "classification": "config-template"
+        },
+        {
+          "language": "ts",
+          "classification": "fragment"
+        },
+        {
+          "language": "html",
+          "classification": "fragment"
+        }
       ]
     },
-    "docs/guides/vue.md": {
+    "docs/quickstart/agent.md": {
       "fences": [
-        { "language": "bash", "classification": "illustrative" },
         {
-          "language": "ts",
-          "classification": "runnable",
-          "fixture": "test-fixtures/vue-app",
-          "target": "src/main.ts",
-          "command": ["pnpm", "build"]
+          "language": "bash",
+          "classification": "illustrative"
         },
-        { "language": "bash", "classification": "config-template" },
-        { "language": "ts", "classification": "fragment" }
+        {
+          "language": "json",
+          "classification": "expected-output"
+        },
+        {
+          "language": "bash",
+          "classification": "config-template"
+        },
+        {
+          "language": "bash",
+          "classification": "illustrative"
+        },
+        {
+          "language": "bash",
+          "classification": "illustrative"
+        },
+        {
+          "language": "bash",
+          "classification": "config-template"
+        }
+      ]
+    },
+    "docs/quickstart/self-host.md": {
+      "fences": [
+        {
+          "language": "bash",
+          "classification": "illustrative"
+        },
+        {
+          "language": "bash",
+          "classification": "illustrative"
+        },
+        {
+          "language": "bash",
+          "classification": "illustrative"
+        },
+        {
+          "language": "text",
+          "classification": "expected-output"
+        },
+        {
+          "language": "bash",
+          "classification": "config-template"
+        },
+        {
+          "language": "bash",
+          "classification": "illustrative"
+        },
+        {
+          "language": "bash",
+          "classification": "illustrative"
+        }
       ]
     }
   }

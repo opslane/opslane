@@ -1,3 +1,6 @@
+---
+description: The append-only wire contract for POST /api/v1/events.
+---
 # Event API contract
 
 `POST /api/v1/events` is **append-only and backward-compatible, forever.**
