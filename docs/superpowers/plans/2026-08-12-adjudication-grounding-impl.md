@@ -13,7 +13,7 @@
 
 - Postgres queue only; wire contract (`POST /api/v1/events`, `test-fixtures/wire/`) untouched.
 - Lease and terminal-status contracts preserved; every terminal `needs_human` keeps non-empty `reason_code`, `reason_message`, `remediation`.
-- Migrations append-only from `046`, guarded (`IF NOT EXISTS`), idempotent on re-run.
+- Migrations append-only from `050`, guarded (`IF NOT EXISTS`), idempotent on re-run.
 - No model prose in templated copy; `reason_message`/`root_cause` never enter notification payloads.
 - `unknown` + narrowing, never `any`; no type-escape casts (`as unknown as`) in contract tests.
 - Vitest tests colocated in `__tests__`; DB-gated suites skip (not fail) without `DATABASE_URL`.
@@ -647,13 +647,13 @@ Add `dispositions?: Array<{ id: string; disposition: CandidateDisposition }>` to
 
 **Files:**
 - Modify: `packages/worker/src/reason-codes.ts:15-20`, `packages/worker/src/db.ts` (`PersistedDecision`, `DecisionRow`, `insertDiagnosisDecision`), `packages/worker/src/index.ts` (~632, the `decision` literal — add `causeKind`, `dispositions`)
-- Create: `packages/ingestion/db/migrations/046_decision_dispositions.sql`
+- Create: `packages/ingestion/db/migrations/050_decision_dispositions.sql`
 - Test: `packages/worker/src/__tests__/reason-codes.test.ts` (append or create), `packages/worker/src/__tests__/c0-contracts.test.ts` (append the old-row parse case)
 
 - [ ] **Step 1: Migration**
 
 ```sql
--- 046_decision_dispositions.sql
+-- 050_decision_dispositions.sql
 -- Forensic candidate dispositions and the cause kind that drove routing.
 -- Both nullable: every existing row and every legacy-shape decision stays valid.
 ALTER TABLE diagnosis_decisions ADD COLUMN IF NOT EXISTS candidate_dispositions jsonb;
@@ -696,7 +696,7 @@ export function reasonCodeForDecision(decision: PersistedDecision | null): Reaso
 ```
 
 - [ ] **Step 4: Run worker suite + the c0 contract test with a dispositions-free old row** — PASS.
-- [ ] **Step 5: Commit** — `git commit -m "feat(worker): cause-kind-aware reason codes; persist candidate dispositions (migration 046)"`
+- [ ] **Step 5: Commit** — `git commit -m "feat(worker): cause-kind-aware reason codes; persist candidate dispositions (migration 050)"`
 
 ### Task 6: W-B pipeline fixture + sweeper cap proof (AC-A.5, AC-A.7)
 

@@ -1,5 +1,5 @@
 import type { Adjudication, Diagnosis, DiagnosisOutcome, EvidenceCitation } from '@opslane/shared';
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { deriveOutcome, type DerivedDecision } from './classify.js';
 import { parseAdjudication, submitDiagnosisTool } from './diagnose-schema.js';
@@ -25,6 +25,13 @@ import { quoteWithinWindow } from './quote-at.js';
  * different model ran than the one that did.
  */
 export const INVESTIGATION_MODEL = process.env['INVESTIGATION_MODEL'] ?? 'claude-sonnet-5';
+
+/**
+ * Files above this size are never quote-grounded. Mirrors executeReadFile's
+ * bounded-read rationale: the model picks the cited path, and a minified
+ * vendor bundle can be hundreds of megabytes.
+ */
+const QUOTE_CHECK_MAX_FILE_BYTES = 5 * 1024 * 1024;
 const MAX_TURNS = Number(process.env['INVESTIGATION_MAX_TURNS'] ?? 10);
 /**
  * Turns are the budget the agent works against, and the number is stated to it
@@ -303,19 +310,35 @@ export async function investigateError(
     });
   }
 
+  // One read per cited file per adjudication: a submission citing the same
+  // file across several candidates and rejections must not re-read it each
+  // time in the process that also owns lease heartbeats.
+  const quoteFileCache = new Map<string, string | null>();
   let decision = deriveOutcome(
     adjudication,
     (cited) => resolveInsideRepo(repoPath, cited),
     (resolved, line, quote) => {
-      try {
-        return quoteWithinWindow(readFileSync(join(repoPath, resolved), 'utf8'), line, quote);
-      } catch {
-        return false;
+      if (!quoteFileCache.has(resolved)) {
+        try {
+          // The model picks the path, so bound the read the same way
+          // executeReadFile does: a citation into a multi-megabyte vendored or
+          // minified file is not groundable evidence, and slurping it whole
+          // per candidate check would buy nothing but memory pressure.
+          const target = join(repoPath, resolved);
+          quoteFileCache.set(
+            resolved,
+            statSync(target).size > QUOTE_CHECK_MAX_FILE_BYTES ? null : readFileSync(target, 'utf8'),
+          );
+        } catch {
+          quoteFileCache.set(resolved, null);
+        }
       }
+      const text = quoteFileCache.get(resolved);
+      return text !== null && text !== undefined && quoteWithinWindow(text, line, quote);
     },
   );
   if (adjudication) {
-    const shape = validateAdjudicationShape(adjudication);
+    const shape = validateAdjudicationShape(adjudication, { requireStructuralShape: true });
     if (shape.status === 'incomplete') {
       decision = {
         outcome: 'incomplete',

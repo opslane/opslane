@@ -5,6 +5,9 @@ import type {
   GroundedQuote,
 } from '@opslane/shared';
 
+/** Length cap when a candidate statement stands in for a missing id. */
+const FALLBACK_ID_CHARS = 40;
+
 export interface DerivedDecision {
   outcome: DiagnosisOutcome;
   reason: string;
@@ -132,7 +135,11 @@ export function deriveOutcome(
       // Grounding is evaluated first: a fabricated candidate that is also
       // "rejected" must show as fabricated in the forensics.
       const dispositions = locals.map((candidate) => ({
-        id: candidate.id ?? candidate.statement.slice(0, 40),
+        // The truncated statement is a forensic label of last resort: id-less
+        // new-shape candidates only reach here from the decline adapter path
+        // (the live pipeline's shape validation rejects them), and the
+        // truncation bound keeps model prose in the persisted id short.
+        id: candidate.id ?? candidate.statement.slice(0, FALLBACK_ID_CHARS),
         disposition: !grounded(candidate.citation)
           ? ('ungrounded' as const)
           : candidate.id !== undefined && validRejections.has(candidate.id)

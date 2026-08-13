@@ -156,3 +156,34 @@ describe('validateAdjudicationShape', () => {
     }).status).toBe('valid');
   });
 });
+
+describe('requireStructuralShape (live-path strictness)', () => {
+  const legacy = {
+    best_supported: 'x', evidence_check: '',
+    candidates_considered: [{ statement: 's', kind: 'local_code' as const }],
+    rejected: ['s: ruled out'], evidence_strength: 'suggestive' as const,
+    cause_kind: 'external_system' as const, cause_locations: [], reasoning: '',
+    why_chain: [], reproduction_steps: [],
+  };
+
+  it('legacy shapes stay valid by default (decline adapter, stored rows)', () => {
+    expect(validateAdjudicationShape(legacy).status).toBe('valid');
+  });
+
+  it('legacy shapes are refused when the live path requires structure', () => {
+    const result = validateAdjudicationShape(legacy, { requireStructuralShape: true });
+    expect(result.status).toBe('incomplete');
+    expect(result.status === 'incomplete' && result.reason.startsWith('legacy_shape')).toBe(true);
+  });
+
+  it('ids without a rejected_candidates array are half a shape and refused', () => {
+    const halfShape = {
+      ...legacy,
+      candidates_considered: [{ statement: 's', kind: 'local_code' as const, id: 'c1',
+        citation: { path: 'src/a.ts', line: 3, quote: 'const alpha = 1' } }],
+    };
+    const result = validateAdjudicationShape(halfShape);
+    expect(result.status).toBe('incomplete');
+    expect(result.status === 'incomplete' && result.reason.startsWith('missing_rejected_candidates')).toBe(true);
+  });
+});

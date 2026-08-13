@@ -54,10 +54,12 @@ function diagnosisResponse(overrides: Record<string, unknown> = {}) {
         reproduction_steps: ['Load the panel with a null items default'],
         evidence_check: 'Opened src/App.vue and confirmed items defaults to null.',
         candidates_considered: [
-          { statement: 'items defaults to null and is mapped during render', kind: 'local_code' },
-          { statement: 'The assets endpoint is slow', kind: 'external_system' },
+          { statement: 'items defaults to null and is mapped during render', kind: 'local_code', id: 'c1',
+            citation: { path: 'src/App.vue', line: 42, quote: 'items.map(' } },
+          { statement: 'The assets endpoint is slow', kind: 'external_system', id: 'c2' },
         ],
         rejected: ['Slow endpoint: no fetch breadcrumb exists'],
+        rejected_candidates: [],
         evidence_strength: 'conclusive',
         cause_kind: 'local_code',
         cause_locations: [{ path: 'src/App.vue', line: 42 }],
@@ -183,8 +185,9 @@ describe('the agent never names an outcome', () => {
     happyPath({
       cause_kind: 'external_system',
       cause_locations: [{ path: 'GET /api/assets/search', note: 'remote service' }],
-      candidates_considered: [{ statement: 'The assets endpoint is slow', kind: 'external_system' }],
+      candidates_considered: [{ statement: 'The assets endpoint is slow', kind: 'external_system', id: 'c1' }],
       rejected: [],
+      rejected_candidates: [],
     });
 
     const result = await investigateError('key', makeInput(), tempDir);

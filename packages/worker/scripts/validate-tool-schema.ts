@@ -1,5 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { submitDiagnosisTool } from '../src/diagnose-schema.js';
+import { INVESTIGATION_MODEL } from '../src/investigate.js';
 
 const apiKey = process.env['ANTHROPIC_API_KEY'];
 if (!apiKey) {
@@ -9,7 +10,7 @@ if (!apiKey) {
   try {
     const client = new Anthropic({ apiKey });
     await client.messages.create({
-      model: process.env['INVESTIGATION_MODEL'] ?? 'claude-sonnet-5',
+      model: INVESTIGATION_MODEL,
       max_tokens: 1,
       messages: [{ role: 'user', content: 'Tool-schema validation canary.' }],
       tools: [submitDiagnosisTool()],
