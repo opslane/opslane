@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { DEFAULT_REMEDIATION, buildReason } from '../reason-codes.js';
+import type { PersistedDecision } from '../db.js';
+import { DEFAULT_REMEDIATION, buildReason, reasonCodeForDecision } from '../reason-codes.js';
 
 // Compile-time exhaustiveness is enforced by the Record<ReasonCode, string> type;
 // this asserts message quality at runtime.
@@ -32,5 +33,25 @@ describe('buildReason', () => {
     const r = buildReason('low_confidence_fix');
     expect(r.reason_message.length).toBeGreaterThanOrEqual(20);
     expect(r.remediation).toBe(DEFAULT_REMEDIATION.low_confidence_fix);
+  });
+});
+
+describe('reasonCodeForDecision cause kinds', () => {
+  const base = {
+    outcome: 'not_actionable',
+    basis: 'cause_outside_codebase',
+    confidence: 'low',
+  } as const satisfies PersistedDecision;
+
+  it('maps an external-system cause to unfixable_third_party', () => {
+    expect(reasonCodeForDecision({ ...base, causeKind: 'external_system' })).toBe('unfixable_third_party');
+  });
+
+  it('keeps a data-or-input cause mapped to unfixable_infra', () => {
+    expect(reasonCodeForDecision({ ...base, causeKind: 'data_or_input' })).toBe('unfixable_infra');
+  });
+
+  it('keeps a legacy row without causeKind mapped to unfixable_infra', () => {
+    expect(reasonCodeForDecision(base)).toBe('unfixable_infra');
   });
 });

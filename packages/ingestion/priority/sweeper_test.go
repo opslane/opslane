@@ -6,6 +6,8 @@ import (
 	"math"
 	"sort"
 	"testing"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func ptr(s string) *string { return &s }
@@ -153,6 +155,62 @@ func TestRunOnceScoresAcceptedFrictionAndRouteWeights(t *testing.T) {
 	}
 }
 
+func TestRunOnceCapsThirdPartyOutcomesWithNonzeroImpact(t *testing.T) {
+	pool := testPool(t)
+	_, projectID, envID := seedTenant(t, pool, nil)
+	groupID := seedGroup(t, pool, projectID, envID, "third-party-cap", "error")
+	mustExec(t, pool, `UPDATE error_groups SET reason_code='unfixable_third_party' WHERE id=$1`, groupID)
+
+	var user1, user2 string
+	if err := pool.QueryRow(context.Background(), `
+		INSERT INTO end_users (project_id, external_user_id, last_seen)
+		VALUES ($1, 'third-party-user-1', now()) RETURNING id`, projectID).Scan(&user1); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(context.Background(), `
+		INSERT INTO end_users (project_id, external_user_id, last_seen)
+		VALUES ($1, 'third-party-user-2', now()) RETURNING id`, projectID).Scan(&user2); err != nil {
+		t.Fatal(err)
+	}
+	mustExec(t, pool, `
+		INSERT INTO error_group_affected_users (error_group_id, end_user_id, last_seen)
+		VALUES ($1, $2, now()), ($1, $3, now())`, groupID, user1, user2)
+
+	if _, err := (&Sweeper{Pool: pool}).RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	var score, impact, routeWeight float64
+	var capped bool
+	var reasonCode string
+	if err := pool.QueryRow(context.Background(), `
+		SELECT priority_score,
+		       (priority_inputs->>'impact')::float8,
+		       (priority_inputs->>'route_weight')::float8,
+		       (priority_inputs->>'cap_applied')::boolean,
+		       priority_inputs->>'reason_code'
+		FROM error_groups WHERE id=$1`, groupID).Scan(
+		&score, &impact, &routeWeight, &capped, &reasonCode,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	// Both users are in both windows: 2 users_7d + 2*2 users_24h = 6.
+	approx(t, impact, 6, "impact")
+	uncapped := impact * routeWeight
+	if uncapped == 0 {
+		t.Fatal("uncapped score must be nonzero so the cap is observable")
+	}
+	approx(t, score, uncapped*0.1, "capped score")
+	approx(t, score*10, uncapped, "one-tenth cap")
+	if !capped {
+		t.Error("cap_applied = false, want true")
+	}
+	if reasonCode != "unfixable_third_party" {
+		t.Errorf("reason_code = %q, want unfixable_third_party", reasonCode)
+	}
+}
+
 func TestRunOnceEnqueuesRouteMapJobsWithDedupeAndCooldown(t *testing.T) {
 	pool := testPool(t)
 	_, projectID, envID := seedTenant(t, pool, ptr("owner/repo"))
@@ -246,6 +304,134 @@ func TestRunOnceConvergesFrictionAndErrorOnOneRoutePattern(t *testing.T) {
 		}
 		approx(t, weight, 3, c.label+" route weight")
 	}
+}
+
+// withLegacyRoutePatterns reproduces the expand-phase schema: migration 052
+// forbids origin-full route_map patterns, but the dual read exists precisely
+// for the window BEFORE that constraint lands, when route_map still holds the
+// dialect the worker used to write. Dropping the constraint for the duration
+// of a subtest is the only way to express that window against a migrated
+// database; it is restored before the subtest returns.
+func withLegacyRoutePatterns(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+	mustExec(t, pool, `ALTER TABLE route_map DROP CONSTRAINT IF EXISTS route_map_pattern_path_only`)
+	t.Cleanup(func() {
+		ctx := context.Background()
+		if _, err := pool.Exec(ctx, `DELETE FROM route_map WHERE pattern ~* '^https?://'`); err != nil {
+			t.Fatalf("clear legacy patterns: %v", err)
+		}
+		if _, err := pool.Exec(ctx, `ALTER TABLE route_map ADD CONSTRAINT route_map_pattern_path_only CHECK (pattern !~* '^https?://')`); err != nil {
+			t.Fatalf("restore constraint: %v", err)
+		}
+	})
+}
+
+func TestRouteLookupDualRead(t *testing.T) {
+	t.Run("origin-full route resolves path-only error group", func(t *testing.T) {
+		pool := testPool(t)
+		withLegacyRoutePatterns(t, pool)
+		_, projectID, envID := seedTenant(t, pool, nil)
+		groupID := seedGroup(t, pool, projectID, envID, "dual-error", "error")
+		mustExec(t, pool, `UPDATE error_groups SET page_url_normalized='/orders/:id' WHERE id=$1`, groupID)
+		mustExec(t, pool, `INSERT INTO route_map (project_id,pattern,name,tier) VALUES ($1,'https://app.test/orders/:id','Orders','customer')`, projectID)
+
+		mustExec(t, pool, scoreErrorGroupsSQL)
+		var name string
+		var weight float64
+		if err := pool.QueryRow(context.Background(), `SELECT priority_inputs->>'route_name', (priority_inputs->>'route_weight')::float8 FROM error_groups WHERE id=$1`, groupID).Scan(&name, &weight); err != nil {
+			t.Fatal(err)
+		}
+		if name != "Orders" {
+			t.Errorf("route_name = %q, want Orders", name)
+		}
+		approx(t, weight, 3, "origin-full route weight")
+	})
+
+	t.Run("path-only route resolves origin-full friction group", func(t *testing.T) {
+		pool := testPool(t)
+		_, projectID, envID := seedTenant(t, pool, nil)
+		groupID := seedGroup(t, pool, projectID, envID, "dual-friction", "friction")
+		mustExec(t, pool, `UPDATE error_groups SET page_url_normalized='https://x.cdn.test/checkout' WHERE id=$1`, groupID)
+		mustExec(t, pool, `INSERT INTO route_map (project_id,pattern,name,tier) VALUES ($1,'/checkout','Checkout','customer')`, projectID)
+
+		mustExec(t, pool, scoreFrictionGroupsSQL)
+		var name string
+		var weight float64
+		if err := pool.QueryRow(context.Background(), `SELECT priority_inputs->>'route_name', (priority_inputs->>'route_weight')::float8 FROM error_groups WHERE id=$1`, groupID).Scan(&name, &weight); err != nil {
+			t.Fatal(err)
+		}
+		if name != "Checkout" {
+			t.Errorf("route_name = %q, want Checkout", name)
+		}
+		approx(t, weight, 3, "path-only route weight")
+	})
+
+	t.Run("exact match wins when both dialects exist", func(t *testing.T) {
+		pool := testPool(t)
+		withLegacyRoutePatterns(t, pool)
+		_, projectID, envID := seedTenant(t, pool, nil)
+		groupID := seedGroup(t, pool, projectID, envID, "dual-twins", "error")
+		mustExec(t, pool, `UPDATE error_groups SET page_url_normalized='/orders/:id' WHERE id=$1`, groupID)
+		mustExec(t, pool, `INSERT INTO route_map (project_id,pattern,name,tier) VALUES ($1,'/orders/:id','PathOnly','standard'),($1,'https://app.test/orders/:id','OriginFull','customer')`, projectID)
+
+		mustExec(t, pool, scoreErrorGroupsSQL)
+		var name string
+		var weight float64
+		if err := pool.QueryRow(context.Background(), `SELECT priority_inputs->>'route_name', (priority_inputs->>'route_weight')::float8 FROM error_groups WHERE id=$1`, groupID).Scan(&name, &weight); err != nil {
+			t.Fatal(err)
+		}
+		if name != "PathOnly" {
+			t.Errorf("route_name = %q, want PathOnly", name)
+		}
+		approx(t, weight, 1, "exact route weight")
+	})
+
+	// The canonicalizing comparison folds NULL and '' onto '/'. A group with no
+	// page URL must still match nothing: otherwise every URL-less group inherits
+	// the project's root route and whatever weight that route carries.
+	t.Run("group without a page url matches no route", func(t *testing.T) {
+		pool := testPool(t)
+		_, projectID, envID := seedTenant(t, pool, nil)
+		nullGroup := seedGroup(t, pool, projectID, envID, "no-url", "error")
+		emptyGroup := seedGroup(t, pool, projectID, envID, "empty-url", "error")
+		mustExec(t, pool, `UPDATE error_groups SET page_url_normalized=NULL WHERE id=$1`, nullGroup)
+		mustExec(t, pool, `UPDATE error_groups SET page_url_normalized='' WHERE id=$1`, emptyGroup)
+		mustExec(t, pool, `INSERT INTO route_map (project_id,pattern,name,tier) VALUES ($1,'/','Root','customer')`, projectID)
+
+		mustExec(t, pool, scoreErrorGroupsSQL)
+		for _, c := range []struct {
+			label string
+			id    string
+		}{{"null page url", nullGroup}, {"empty page url", emptyGroup}} {
+			var name *string
+			var weight float64
+			if err := pool.QueryRow(context.Background(), `SELECT priority_inputs->>'route_name', (priority_inputs->>'route_weight')::float8 FROM error_groups WHERE id=$1`, c.id).Scan(&name, &weight); err != nil {
+				t.Fatal(err)
+			}
+			if name != nil {
+				t.Errorf("%s: route_name = %q, want no route", c.label, *name)
+			}
+			approx(t, weight, 1, c.label+" route weight")
+		}
+	})
+
+	t.Run("known alternate dialect does not enqueue", func(t *testing.T) {
+		pool := testPool(t)
+		repo := "example/repo"
+		_, projectID, envID := seedTenant(t, pool, &repo)
+		groupID := seedGroup(t, pool, projectID, envID, "dual-enqueue", "error")
+		mustExec(t, pool, `UPDATE error_groups SET page_url_normalized='https://app.test/orders/:id' WHERE id=$1`, groupID)
+		mustExec(t, pool, `INSERT INTO route_map (project_id,pattern,name,tier) VALUES ($1,'/orders/:id','Orders','customer')`, projectID)
+
+		mustExec(t, pool, enqueueRouteMapJobsSQL)
+		var count int
+		if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM error_group_jobs WHERE project_id=$1 AND job_type='route_map'`, projectID).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 0 {
+			t.Errorf("route_map jobs = %d, want 0", count)
+		}
+	})
 }
 
 // Two replicas tick at the same moment. The second must decline rather than

@@ -28,6 +28,10 @@ import {
   getGroupImpactBar,
   getFrictionGroupImpactBar,
   insertFixRunLedger,
+  getErrorGroup,
+  getWatchableSessionForGroup,
+  listUnmappedPatterns,
+  upsertRouteMapRows,
 } from '../db.js';
 import { createLedgerRecorder } from '../verification-ledger.js';
 
@@ -111,6 +115,7 @@ async function cleanupTestData(): Promise<void> {
   await purgeDiagnosisDecisions(testPool, testProjectId);
   await purgeFixRunLedger(testPool, testProjectId);
   await testPool.query(`DELETE FROM error_group_jobs WHERE project_id = $1`, [testProjectId]);
+  await testPool.query(`DELETE FROM route_map WHERE project_id = $1`, [testProjectId]);
   await testPool.query(`DELETE FROM error_events WHERE project_id = $1`, [testProjectId]);
   await testPool.query(
     `DELETE FROM error_group_affected_users
@@ -185,6 +190,7 @@ describeDb('db.ts integration tests', () => {
     await purgeDiagnosisDecisions(testPool, testProjectId);
     await purgeFixRunLedger(testPool, testProjectId);
     await testPool.query(`DELETE FROM error_group_jobs WHERE project_id = $1`, [testProjectId]);
+    await testPool.query(`DELETE FROM route_map WHERE project_id = $1`, [testProjectId]);
     await testPool.query(`DELETE FROM error_events WHERE project_id = $1`, [testProjectId]);
     await testPool.query(
       `DELETE FROM error_group_affected_users
@@ -192,6 +198,135 @@ describeDb('db.ts integration tests', () => {
       [testProjectId],
     );
     await testPool.query(`DELETE FROM error_groups WHERE project_id = $1`, [testProjectId]);
+  });
+
+  describe('route-map identity cutover', () => {
+    it('treats origin-full and path-only patterns as the same mapped route', async () => {
+      await testPool.query(
+        `INSERT INTO error_groups
+           (project_id, fingerprint, title, first_seen, last_seen, page_url_normalized)
+         VALUES
+           ($1, $2, 'Mapped', now(), now(), 'https://app.test/orders/:id'),
+           ($1, $3, 'Unmapped', now(), now(), '/unknown')`,
+        [testProjectId, `mapped-${crypto.randomUUID()}`, `unmapped-${crypto.randomUUID()}`],
+      );
+      await testPool.query(
+        `INSERT INTO route_map (project_id,pattern,name,tier)
+         VALUES ($1,'/orders/:id','Orders','customer')`,
+        [testProjectId],
+      );
+
+      await expect(listUnmappedPatterns(testProjectId)).resolves.toEqual(['/unknown']);
+    });
+
+    it('stores canonical winners after origin collapse', async () => {
+      const job = await testPool.query<{ id: string }>(
+        `INSERT INTO error_group_jobs
+           (project_id,status,job_type,worker_id,lease_generation,lease_expires_at)
+         VALUES ($1,'claimed','route_map','route-worker',7,now()+interval '1 minute')
+         RETURNING id`,
+        [testProjectId],
+      );
+
+      await expect(upsertRouteMapRows({
+        projectId: testProjectId,
+        jobId: job.rows[0]!.id,
+        workerId: 'route-worker',
+        leaseGeneration: '7',
+        rows: [
+          {
+            pattern: 'https://a.cdn.test/checkout',
+            name: 'Checkout',
+            purpose: 'Buy',
+            tier: 'customer',
+          },
+          {
+            pattern: 'https://b.cdn.test/checkout',
+            name: 'Checkout v2',
+            purpose: 'Buy later',
+            tier: 'standard',
+          },
+        ],
+        unresolved: ['https://c.cdn.test/checkout', 'https://app.test/assets/:id'],
+      })).resolves.toBe(true);
+
+      const stored = await testPool.query<{
+        pattern: string;
+        name: string;
+        tier: string;
+        source: string;
+      }>(
+        `SELECT pattern,name,tier,source FROM route_map
+         WHERE project_id=$1 ORDER BY pattern`,
+        [testProjectId],
+      );
+      expect(stored.rows).toEqual([
+        {
+          pattern: '/assets/:id',
+          name: '/assets/:id',
+          tier: 'standard',
+          source: 'llm-unresolved',
+        },
+        {
+          pattern: '/checkout',
+          name: 'Checkout',
+          tier: 'customer',
+          source: 'llm',
+        },
+      ]);
+    });
+  });
+
+  describe('C5 impact and watchability reads', () => {
+    it('parses impact BIGINTs and returns only a coverage-proven session', async () => {
+      const { errorGroupId } = await seedErrorGroupAndJob();
+      await testPool.query(
+        `UPDATE error_groups
+            SET impact_class='degraded', impact_visits=3, impact_visits_recovered=1
+          WHERE id=$1 AND project_id=$2`,
+        [errorGroupId, testProjectId],
+      );
+      const group = await getErrorGroup(errorGroupId, testProjectId);
+      expect(group).toMatchObject({
+        impact_class: 'degraded', impact_visits: 3, impact_visits_recovered: 1,
+      });
+      expect(typeof group?.impact_visits).toBe('number');
+
+      const env = await testPool.query<{ id: string }>(
+        `INSERT INTO environments (project_id, name) VALUES ($1,$2) RETURNING id`,
+        [testProjectId, `watch-${crypto.randomUUID()}`],
+      );
+      const sessionId = `sess-${crypto.randomUUID()}`;
+      const anchor = new Date(Date.now() - 60_000);
+      await testPool.query(
+        `INSERT INTO sessions (id, project_id, environment_id, started_at)
+         VALUES ($1,$2,$3,$4)`,
+        [sessionId, testProjectId, env.rows[0]!.id, anchor],
+      );
+      await testPool.query(
+        `INSERT INTO error_events
+          (project_id, environment_id, error_group_id, session_id, "timestamp", error_type, error_message, stack_trace_raw)
+         VALUES ($1,$2,$3,$4,$5,'TypeError','boom','at test')`,
+        [testProjectId, env.rows[0]!.id, errorGroupId, sessionId, anchor],
+      );
+      const spans = [[-20_000, -8_000], [-8_000, 2_000], [2_000, 16_000]];
+      for (const [index, span] of spans.entries()) {
+        await testPool.query(
+          `INSERT INTO session_chunks
+            (session_id,seq,project_id,object_key,has_full_snapshot,scrubbed_at,first_event_ms,last_event_ms)
+           VALUES ($1,$2,$3,$4,$5,now(),$6,$7)`,
+          [sessionId, index, testProjectId, `watch/${sessionId}/${index}`, index === 0,
+            anchor.getTime() + span[0]!, anchor.getTime() + span[1]!],
+        );
+      }
+
+      const watchable = await getWatchableSessionForGroup(testProjectId, errorGroupId);
+      expect(watchable).toEqual({ sessionId, anchorMs: anchor.getTime() });
+      expect(typeof watchable?.anchorMs).toBe('number');
+
+      await testPool.query(`UPDATE session_chunks SET has_full_snapshot=false WHERE session_id=$1`, [sessionId]);
+      expect(await getWatchableSessionForGroup(testProjectId, errorGroupId)).toBeNull();
+    });
   });
 
   describe('diagnosis decisions', () => {
@@ -216,6 +351,37 @@ describeDb('db.ts integration tests', () => {
 
         expect(await loadDiagnosisDecision(errorGroupId, testProjectId)).toMatchObject({
           outcome: 'not_actionable', basis: 'cause_outside_codebase', confidence: 'high',
+        });
+      });
+
+      it('loads forensic fields while accepting a legacy row without them', async () => {
+        const { errorGroupId } = await seedErrorGroupAndJob();
+        await recordDiagnosisDecision(errorGroupId, testProjectId, {
+          ...baseDecision,
+          outcome: 'not_actionable',
+          decisionReason: 'external',
+          basis: 'cause_outside_codebase',
+          confidence: 'medium',
+          causeKind: 'external_system',
+          dispositions: [{ id: 'c1', disposition: 'ungrounded' }],
+        });
+        expect(await loadDiagnosisDecision(errorGroupId, testProjectId)).toMatchObject({
+          causeKind: 'external_system',
+          dispositions: [{ id: 'c1', disposition: 'ungrounded' }],
+        });
+
+        await testPool.query(
+          `INSERT INTO diagnosis_decisions
+             (error_group_id, project_id, outcome, decision_reason, diagnosis,
+              model, prompt_version, basis, confidence, decided_at)
+           VALUES ($1, $2, 'code_fix', 'legacy decision', '{}'::jsonb,
+                   'legacy-model', 'diagnosis-v1', 'local_defect', 'high', now() + interval '1 second')`,
+          [errorGroupId, testProjectId],
+        );
+        expect(await loadDiagnosisDecision(errorGroupId, testProjectId)).toMatchObject({
+          outcome: 'code_fix',
+          causeKind: undefined,
+          dispositions: undefined,
         });
       });
 
