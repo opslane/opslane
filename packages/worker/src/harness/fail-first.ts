@@ -30,9 +30,17 @@ export interface FailFirstOutcome {
   declaredTestSource: string | null;
 }
 
-function invalidContract(input: FailFirstInput): string | null {
-  const declaration = input.declaredTest;
-  if (!declaration) return null;
+/**
+ * Validate a reproduction declaration. Exported for the #354 contract tests.
+ * The identifier is interpolated into a shell command (via shq) and keeps the
+ * conservative charset; the expected assertion is matched IN-PROCESS against
+ * captured test output and therefore accepts the characters real test runners
+ * emit — vitest's native failure text is `expected 'a' to be 'b'`, and
+ * rejecting single quotes made red-then-green unreachable for real agents.
+ */
+export function validateDeclaration(
+  declaration: { testFiles: string[]; identifier: string; expectedAssertion: string },
+): string | null {
   if (declaration.testFiles.length < 1 || declaration.testFiles.length > 5) {
     return 'contract_invalid: expected one to five declared files';
   }
@@ -55,9 +63,14 @@ function invalidContract(input: FailFirstInput): string | null {
   if (
     declaration.expectedAssertion.length === 0
     || declaration.expectedAssertion.length > 500
-    || /['\\\u0000-\u001f\u007f]/.test(declaration.expectedAssertion)
+    || /[\u0000-\u001f\u007f]/.test(declaration.expectedAssertion)
   ) return 'contract_invalid: expected assertion contains unsafe characters';
   return null;
+}
+
+function invalidContract(input: FailFirstInput): string | null {
+  if (!input.declaredTest) return null;
+  return validateDeclaration(input.declaredTest);
 }
 
 async function checkedRun(sandbox: SandboxRuntime, command: string, timeoutMs = 30_000): Promise<string> {

@@ -43,6 +43,7 @@ function incident(
     last_seen: '2026-07-19T00:00:00Z',
     occurrence_count: 1,
     affected_users_count: 1,
+    story: kind === 'friction' ? '1 friction signal; recording impact unavailable' : '1 crash; recording impact unavailable',
   };
 }
 

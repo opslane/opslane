@@ -51,6 +51,12 @@ async function loadWorkerPipeline(): Promise<void> {
 
 const RUN_ID = crypto.randomUUID().slice(0, 8);
 const PAGE = 'https://app.example.com/checkout';
+const FORGE_ORIGINS = [
+  'https://1a2b3c4d.cdn.forge.example',
+  'https://5e6f7a8b.cdn.forge.example',
+  'https://9c0d1e2f.cdn.forge.example',
+];
+const FORGE_PATH = '/9d4e2a71-77aa-4f83-b8f1-0123456789ab/f0e1d2c3-4b5a-6789-abcd-ef0123456789/12345/global-page';
 
 const stubAdjudicator = {
   modelId: 'e2e-deterministic-stub',
@@ -82,10 +88,10 @@ function telemetryClick(at: number, clickId: string, selector: string) {
 }
 
 /** Three unanswered clicks on one selector inside 1s gaps → one rage_click. */
-function rageChunk(t0: number, selector = `#buy-now-${RUN_ID}`) {
+function rageChunk(t0: number, selector = `#buy-now-${RUN_ID}`, pageUrl = PAGE) {
   return {
     events: [
-      { type: 4, timestamp: t0 - 50, data: { href: PAGE, width: 1280, height: 720 } },
+      { type: 4, timestamp: t0 - 50, data: { href: pageUrl, width: 1280, height: 720 } },
       { type: 2, timestamp: t0 - 50, data: {} },
       telemetryClick(t0, 'c1', selector),
       telemetryClick(t0 + 300, 'c2', selector),
@@ -145,11 +151,12 @@ async function driveRageSession(
   apiKey: string,
   projectId: string,
   userId: string,
-  opts: { selector?: string; environment?: string } = {}
+  opts: { selector?: string; environment?: string; pageUrl?: string } = {}
 ): Promise<string> {
   const sessionId = `e2e_fr_${RUN_ID}_${crypto.randomUUID().slice(0, 8)}`;
-  await initSession(apiKey, sessionId, { id: userId }, PAGE, opts.environment);
-  await uploadChunk(apiKey, sessionId, 0, rageChunk(Date.now() - 5_000, opts.selector));
+  const pageUrl = opts.pageUrl ?? PAGE;
+  await initSession(apiKey, sessionId, { id: userId }, pageUrl, opts.environment);
+  await uploadChunk(apiKey, sessionId, 0, rageChunk(Date.now() - 5_000, opts.selector, pageUrl));
   await makeChunksScrubbable(sessionId);
   await waitForScrubbedChunks(sessionId, 1);
   await analyzeSessionInProcess(sessionId, projectId);
@@ -338,6 +345,68 @@ describeLive('friction incidents — synthetic live-service gate', () => {
       );
       for (const row of finalRows.rows) expect(row.affected_users_count).toBe(5);
     }
+  );
+
+  it(
+    'rotated origins land in one bucket and promote once',
+    { timeout: 240_000 },
+    async () => {
+      const db = getPool();
+      const selector = `#forge-rotation-${RUN_ID}`;
+      const sessionIds: string[] = [];
+      for (let i = 0; i < 3; i++) {
+        sessionIds.push(await driveRageSession(
+          tenant.ingestKey,
+          tenant.projectId,
+          `rot-user-${RUN_ID}-${i}`,
+          { selector, pageUrl: `${FORGE_ORIGINS[i]}${FORGE_PATH}` },
+        ));
+      }
+
+      const bucketSql = `
+        SELECT count(*)::text AS signals,
+               count(DISTINCT fingerprint)::text AS keys,
+               min(fingerprint) AS fingerprint
+        FROM friction_signals
+        WHERE project_id = $1 AND session_id = ANY($2::text[])
+          AND signal_type = 'rage_click' AND rule_version = $3
+          AND element_selector = $4
+          AND retracted_at IS NULL AND superseded_by IS NULL`;
+      const buckets = await db.query<{
+        signals: string;
+        keys: string;
+        fingerprint: string;
+      }>(bucketSql, [tenant.projectId, sessionIds, RULE_VERSION, selector]);
+      expect(Number(buckets.rows[0]!.keys)).toBe(1);
+      expect(Number(buckets.rows[0]!.signals)).toBe(3);
+      const signalFingerprint = buckets.rows[0]!.fingerprint;
+
+      const before = await db.query(
+        `SELECT id FROM error_groups
+         WHERE project_id=$1 AND kind='friction' AND status <> 'candidate'
+           AND page_url_normalized='/:id/:id/:id/global-page'`,
+        [tenant.projectId],
+      );
+      expect(before.rows).toHaveLength(0);
+
+      for (let i = 3; i < 5; i++) {
+        sessionIds.push(await driveRageSession(
+          tenant.ingestKey,
+          tenant.projectId,
+          `rot-user-${RUN_ID}-${i}`,
+          { selector, pageUrl: `${FORGE_ORIGINS[i % FORGE_ORIGINS.length]}${FORGE_PATH}` },
+        ));
+      }
+
+      const incidents = await db.query<{ fingerprint: string; page_url_normalized: string }>(
+        `SELECT fingerprint,page_url_normalized FROM error_groups
+         WHERE project_id=$1 AND kind='friction' AND status <> 'candidate'
+           AND page_url_normalized='/:id/:id/:id/global-page'`,
+        [tenant.projectId],
+      );
+      expect(incidents.rows).toHaveLength(1);
+      expect(incidents.rows[0]!.fingerprint.endsWith(`:${signalFingerprint}`)).toBe(true);
+    },
   );
 
   it(
