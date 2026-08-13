@@ -1,3 +1,6 @@
+---
+description: Session replay chunk, pointer, scrub, and retention invariants.
+---
 # Session replay contract (amended 2026-07-15)
 
 The current SDK records replay data as an always-on stream of bounded session

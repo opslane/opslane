@@ -1,3 +1,6 @@
+---
+description: Every needs_human reason code with its remediation.
+---
 # Reason codes
 
 Every `needs_human` incident carries a `reason_code`, a `reason_message`, and a `remediation`. The catalog lives in `packages/worker/src/reason-codes.ts` as an exhaustive `Record<ReasonCode, string>` — adding a code to `shared/src/types.ts` without a remediation entry is a compile error, so this table cannot silently fall behind the type.

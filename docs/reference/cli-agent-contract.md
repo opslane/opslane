@@ -1,3 +1,6 @@
+---
+description: The CLI status vocabulary and exit codes for non-interactive callers.
+---
 # CLI agent contract
 
 This deterministic reference is sourced from `cli/src/contract.ts` and the setup protocol in `cli/src/setup.ts`. It covers the agent-facing `setup`, `snippet`, `verify`, `status`, and `sourcemaps install-plugin` commands, and `onboard` when invoked non-interactively.
