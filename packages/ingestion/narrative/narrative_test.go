@@ -1,6 +1,10 @@
 package narrative_test
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -9,28 +13,60 @@ import (
 )
 
 func TestStory(t *testing.T) {
-	i := func(v int64) *int64 { return &v }
-	tests := []struct {
-		name string
-		occ  int64
-		imp  narrative.Impact
-		want string
-	}{
-		{"blocked", 12, narrative.Impact{Class: "blocked", Visits: i(3), Recovered: i(0)}, "12 crashes across 3 visits, no visit recovered"},
-		{"degraded", 12, narrative.Impact{Class: "degraded", Visits: i(3), Recovered: i(1)}, "12 crashes across 3 visits, 1 of 3 visits recovered"},
-		{"invisible", 12, narrative.Impact{Class: "invisible", Visits: i(3), Recovered: i(3)}, "12 crashes across 3 visits, all 3 visits recovered"},
-		{"null impact", 12, narrative.Impact{}, "12 crashes; recording impact unavailable"},
-		{"singular", 1, narrative.Impact{Class: "blocked", Visits: i(1), Recovered: i(0)}, "1 crash across 1 visit, no visit recovered"},
-		{"bad class", 12, narrative.Impact{Class: "bogus", Visits: i(3), Recovered: i(0)}, "12 crashes; recording impact unavailable"},
-		{"too many recovered", 12, narrative.Impact{Class: "blocked", Visits: i(3), Recovered: i(5)}, "12 crashes; recording impact unavailable"},
-		{"negative visits", 12, narrative.Impact{Class: "blocked", Visits: i(-1), Recovered: i(0)}, "12 crashes; recording impact unavailable"},
+	type vector struct {
+		Name         string `json:"name"`
+		NounSingular string `json:"nounSingular"`
+		NounPlural   string `json:"nounPlural"`
+		Occurrences  int64  `json:"occurrences"`
+		Impact       struct {
+			Class     *string `json:"class"`
+			Visits    *int64  `json:"visits"`
+			Recovered *int64  `json:"recovered"`
+		} `json:"impact"`
+		Want string `json:"want"`
+	}
+	_, filename, _, _ := runtime.Caller(0)
+	body, err := os.ReadFile(filepath.Join(filepath.Dir(filename), "../../../test-fixtures/story-vectors.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tests []vector
+	if err := json.Unmarshal(body, &tests); err != nil {
+		t.Fatal(err)
 	}
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := narrative.Story("crash", "crashes", tt.occ, tt.imp); got != tt.want {
-				t.Fatalf("got %q, want %q", got, tt.want)
+		t.Run(tt.Name, func(t *testing.T) {
+			class := ""
+			if tt.Impact.Class != nil {
+				class = *tt.Impact.Class
+			}
+			impact := narrative.Impact{Class: class, Visits: tt.Impact.Visits, Recovered: tt.Impact.Recovered}
+			if got := narrative.Story(tt.NounSingular, tt.NounPlural, tt.Occurrences, impact); got != tt.Want {
+				t.Fatalf("got %q, want %q", got, tt.Want)
+			}
+			if strings.Contains(tt.Want, "unavailable") == impact.Valid() {
+				t.Fatalf("Valid()=%v disagrees with story %q", impact.Valid(), tt.Want)
 			}
 		})
+	}
+}
+
+func TestPageReceiptLine(t *testing.T) {
+	wants := map[string]string{
+		"pr_open":                  "Fix PR ready for review.",
+		"pr_open_draft":            "Draft fix PR opened; verification is pending review.",
+		"attempt_failed_with_diff": "Fix attempt failed its checks; the working diff was saved.",
+		"attempt_failed_no_diff":   "Fix attempt failed before producing a change.",
+		"report_ready":             "Investigation report ready.",
+	}
+	for state, want := range wants {
+		got, ok := narrative.PageReceiptLine(state)
+		if !ok || got != want || strings.Contains(got, "://") || strings.Contains(strings.ToLower(got), "below") || strings.Contains(strings.ToLower(got), "attached") {
+			t.Errorf("%s: got %q, %v", state, got, ok)
+		}
+	}
+	if _, ok := narrative.PageReceiptLine("future"); ok {
+		t.Fatal("unknown page receipt state accepted")
 	}
 }
 

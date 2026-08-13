@@ -84,12 +84,18 @@ describe('PR #1297: a slow backend never becomes a frontend code change', () => 
         reproduction_steps: ['Search a term matching many assets'],
         evidence_check: 'Confirmed constants.ts:1. The timeout bounds the failure but does not cause it.',
         candidates_considered: [
-          { statement: 'The search endpoint exceeds the 10 second client budget', kind: 'external_system' },
-          { statement: 'FETCH_TIMEOUT of 10000ms is too short for this endpoint', kind: 'configuration' },
+          { statement: 'The search endpoint exceeds the 10 second client budget', kind: 'external_system', id: 'c1' },
+          { statement: 'FETCH_TIMEOUT of 10000ms is too short for this endpoint', kind: 'configuration', id: 'c2',
+            citation: { path: 'packages/worker/src/investigate.ts', line: 27, quote: 'export const INVESTIGATION_MODEL' } },
         ],
         rejected: [
           'FETCH_TIMEOUT of 10000ms is too short for this endpoint: raising it hides the symptom ' +
           'and the server latency is unexplained',
+        ],
+        rejected_candidates: [
+          { id: 'c2',
+            evidence: 'raising the client budget hides the symptom and the server latency is unexplained',
+            citation: { path: 'packages/worker/src/investigate.ts', line: 27, quote: 'export const INVESTIGATION_MODEL' } },
         ],
         evidence_strength: 'suggestive',
         cause_kind: 'external_system',
@@ -118,9 +124,11 @@ describe('PR #1297: a slow backend never becomes a frontend code change', () => 
         reproduction_steps: ['Trigger a slow search'],
         evidence_check: 'The constant exists, but why the server was slow is unverified.',
         candidates_considered: [
-          { statement: 'FETCH_TIMEOUT of 10000ms is too short', kind: 'configuration' },
+          { statement: 'FETCH_TIMEOUT of 10000ms is too short', kind: 'configuration', id: 'c1',
+            citation: { path: 'packages/worker/src/investigate.ts', line: 27, quote: 'export const INVESTIGATION_MODEL' } },
         ],
         rejected: [],
+        rejected_candidates: [],
         evidence_strength: 'suggestive',
         cause_kind: 'configuration',
         cause_locations: [{ path: 'packages/worker/src/investigate.ts', line: 1 }],
