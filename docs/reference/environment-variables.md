@@ -1,3 +1,6 @@
+---
+description: Every environment variable each service reads.
+---
 # Environment variables
 
 Every variable each service actually reads, from `os.Getenv` (ingestion) and `process.env` (worker). The [drift check](../../scripts/check-docs-drift.mjs) fails the repository test gate (`pnpm test`, which CI runs) if code and this page disagree.

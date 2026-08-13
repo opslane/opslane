@@ -1,3 +1,6 @@
+---
+description: What environment action scoping gates, and what it deliberately does not.
+---
 # Environment action-scope contract
 
 Projects may limit automatic error investigation to selected environments. Error

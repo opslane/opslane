@@ -3,8 +3,9 @@ covers:
   - packages/worker/src/pipeline.ts
   - packages/worker/src/agent-fix.ts
   - packages/worker/src/ci-watch.ts
-  - packages/worker/src/friction/promotion.ts
+  - packages/worker/src/friction/promotion.tsdescription: When Opslane opens a pull request, how it investigates, and what verification proves.
 ---
+
 # When Opslane opens a pull request
 
 Three paths end in a pull request:
@@ -53,7 +54,7 @@ The result must name the cause and cite the files the investigator read at the r
 - **A fix attempt.** The cause is in your code and the issue reached the impact bar: at least one signed-in user, or three anonymous sessions in the last seven days. See the conditions above.
 - **An analysis for you.** The cause is in your code, but the issue has not reached enough users yet. The analysis appears on the issue with a fix button.
 - **A finding outside your code.** The user pain is real and the cause sits outside your code. The issue closes as an insight, not a pull request.
-- **A stop with a reason.** The evidence or credential Opslane needs is missing. The issue records a reason code and a suggested next step.
+- **A stop with a reason.** The evidence or credential Opslane needs is missing. The issue records a reason code and a suggested next step; see [reason codes](../reference/reason-codes.md).
 
 ### What leaves your host
 

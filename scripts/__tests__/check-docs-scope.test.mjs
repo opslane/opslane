@@ -37,15 +37,15 @@ test('real docs tree has explicit policy coverage', () => {
 });
 
 test('allows a published page to be intentionally absent from navigation', () => {
-  const sidebarWithoutEvents = SIDEBAR_SOURCE.replace(
-    /^.*slug: 'contracts\/events'.*\n/m,
+  const sidebarWithoutIssues = SIDEBAR_SOURCE.replace(
+    /^.*slug: 'guides\/issues'.*\n/m,
     '',
   );
-  const result = checkDocsScope({ root: ROOT, sidebarSource: sidebarWithoutEvents });
+  const result = checkDocsScope({ root: ROOT, sidebarSource: sidebarWithoutIssues });
 
   assert.deepEqual(result.problems, []);
-  assert.equal(result.published.includes('docs/contracts/events.md'), true);
-  assert.equal(result.navigable.includes('contracts/events'), false);
+  assert.equal(result.published.includes('docs/guides/issues.md'), true);
+  assert.equal(result.navigable.includes('guides/issues'), false);
 });
 
 test('fails when the published events contract loses its explicit policy', () => {

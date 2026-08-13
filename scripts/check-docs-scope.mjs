@@ -55,7 +55,25 @@ export function parseSidebarSlugs(source) {
   if (typeof source !== 'string') throw new TypeError('sidebar source must be a string');
   if (!/\bsidebar\s*:/.test(source)) throw new Error('could not find sidebar configuration');
 
-  return [...source.matchAll(/\bslug\s*:\s*(['"])(.*?)\1/g)].map((match) => match[2]);
+  // Only slugs inside the sidebar array count. Other integrations declare
+  // their own `slug:` keys (the llms-txt custom sets, for one), and treating
+  // those as navigation entries reports a page that was never claimed.
+  const start = source.search(/\bsidebar\s*:\s*\[/);
+  let depth = 0;
+  let end = start;
+  for (let i = source.indexOf('[', start); i < source.length; i += 1) {
+    if (source[i] === '[') depth += 1;
+    else if (source[i] === ']') {
+      depth -= 1;
+      if (depth === 0) {
+        end = i;
+        break;
+      }
+    }
+  }
+  const sidebarBlock = source.slice(start, end);
+
+  return [...sidebarBlock.matchAll(/\bslug\s*:\s*(['"])(.*?)\1/g)].map((match) => match[2]);
 }
 
 function* walkMarkdown(directory) {

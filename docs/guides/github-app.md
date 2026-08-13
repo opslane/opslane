@@ -7,8 +7,9 @@ covers:
   - packages/ingestion/auth/github_provider.go
   - packages/ingestion/handler/agent_setup.go
   - packages/ingestion/handler/routes.go
-  - packages/ingestion/main.go
+  - packages/ingestion/main.godescription: Give Opslane access to your repository with a GitHub App or a personal access token.
 ---
+
 # Connecting GitHub
 
 The worker needs GitHub access for cloning during investigation, publishing fix PRs, and reading repository CI for draft promotion. There are two credential modes; pick one.

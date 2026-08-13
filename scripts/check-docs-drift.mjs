@@ -278,6 +278,21 @@ for (const m of llms.matchAll(/\[[^\]]*\]\(([^)]+)\)/g)) {
   }
 }
 
+// ---------- 8. every published doc appears in llms.txt ----------
+// llms.txt is the machine entry point. A published page missing from it is
+// invisible to any agent that starts there, which is how it silently drifted
+// twelve pages behind the docs tree.
+const { checkDocsScope } = await import('./check-docs-scope.mjs');
+const publishedDocs = checkDocsScope({ root }).published.filter(
+  (docPath) => !read(docPath).startsWith('---\ndraft: true'),
+);
+const missingFromLlms = publishedDocs.filter((docPath) => !llms.includes(`(${docPath})`));
+if (missingFromLlms.length > 0) {
+  problems.push(
+    `llms.txt is missing ${missingFromLlms.length} published page(s): ${missingFromLlms.join(', ')}`,
+  );
+}
+
 // ---------- verdict ----------
 if (problems.length > 0) {
   console.error(`✗ docs drift detected (${problems.length}):`);

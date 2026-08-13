@@ -2,8 +2,9 @@
 covers:
   - packages/ingestion/db/environments.go
   - packages/ingestion/db/migrations/032_project_default_environment.sql
-  - packages/sdk/src/config.ts
+  - packages/sdk/src/config.tsdescription: Label telemetry by environment and limit automatic error investigation to chosen ones.
 ---
+
 # Environments
 
 An environment splits a project's issues and sessions by where they came from: `production`, `staging`, a preview deployment. The first event or session recording that carries a new valid label creates the environment; nothing is configured in advance.

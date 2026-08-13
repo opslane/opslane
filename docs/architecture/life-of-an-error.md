@@ -2,8 +2,9 @@
 covers:
   - packages/sdk/**
   - packages/ingestion/**
-  - packages/worker/**
+  - packages/worker/**description: One error from capture through investigation, verification, and delivery.
 ---
+
 # Life of an error
 
 What happens between an exception in a user's browser and a ready pull request, an actionable draft, or an honest reason there isn't one.

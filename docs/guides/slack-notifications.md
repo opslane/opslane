@@ -3,8 +3,9 @@ covers:
   - packages/ingestion/notify/dispatcher.go
   - packages/ingestion/handler/notifications.go
   - packages/ingestion/db/notifications.go
-  - packages/dashboard/src/components/IntegrationsSettings.vue
+  - packages/dashboard/src/components/IntegrationsSettings.vuedescription: Send new-issue alerts and the daily digest to Slack with an incoming webhook.
 ---
+
 # Slack notifications
 
 Opslane posts Slack messages for **new issue alerts** and **daily digests**. Issue alerts fire the first time an error groups into a fresh issue, not on every occurrence. Repeat events of the same issue raise its occurrence count without notifying again, so a noisy error is one message, not a flood.

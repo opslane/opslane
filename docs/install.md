@@ -3,8 +3,9 @@ covers:
   - packages/sdk/src/index.ts
   - packages/sdk/src/config.ts
   - packages/sdk/src/react.tsx
-  - packages/sdk/src/vue.ts
+  - packages/sdk/src/vue.tsdescription: Install the browser SDK in React, Vue, or vanilla JavaScript, identify users, and label environments.
 ---
+
 # Install the SDK
 
 The SDK sends your app's errors and session recordings to Opslane. Setup is one install command, one `init` call, and one `setUser` call.

@@ -1,8 +1,9 @@
 ---
 covers:
   - docker-compose.yml
-  - packages/ingestion/db/migrations/**
+  - packages/ingestion/db/migrations/**description: Run the Opslane stack locally with Docker Compose and send it a first error.
 ---
+
 # Self-host quickstart
 
 Run Opslane locally with Docker Compose. This is **developer self-hosting** — the default Compose file uses development credentials and is not a production deployment (production operations are tracked separately).

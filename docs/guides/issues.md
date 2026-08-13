@@ -2,8 +2,9 @@
 covers:
   - packages/ingestion/grouping/fingerprint.go
   - packages/ingestion/grouping/suppress.go
-  - packages/ingestion/priority/sweeper.go
+  - packages/ingestion/priority/sweeper.godescription: How events group into issues, how issues rank, and what each status means.
 ---
+
 # How issues work
 
 The list uses three terms:
@@ -41,7 +42,7 @@ Statuses group by meaning. An issue can move between the groups in any order.
 - **Working:** `new`, `queued`, `analyzing`, `fixing`.
 - **Waiting for you:** `investigated` (analysis posted, fix button ready), `awaiting_approval`.
 - **Delivered:** `pr_created`, `pr_draft`, `merged`.
-- **Stopped:** `needs_human` with a reason code, `insight` for a real problem with no code cause.
+- **Stopped:** `needs_human` with a reason code, `insight` for a real problem with no code cause. Every code and its remediation: [reason codes](../reference/reason-codes.md).
 - **Closed:** `resolved`, `archived`.
 
 For what reopens a closed issue, see [when Opslane opens a pull request](fix-prs.md).

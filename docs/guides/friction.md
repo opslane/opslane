@@ -2,8 +2,9 @@
 covers:
   - packages/worker/src/friction/promotion.ts
   - packages/worker/src/friction/promotion-db.ts
-  - packages/worker/src/friction/analyzer.ts
+  - packages/worker/src/friction/analyzer.tsdescription: How Opslane finds users getting stuck without an error, and when that becomes an issue.
 ---
+
 # Friction
 
 Friction is a user getting stuck while your app keeps working. Opslane finds it in session recordings.
