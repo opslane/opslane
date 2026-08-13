@@ -193,6 +193,68 @@ describe('the agent never names an outcome', () => {
     expect(result.fixable).toBe(false);
   });
 
+  it('routes a grounded external submission and preserves forensic dispositions', async () => {
+    happyPath({
+      best_supported: 'The platform bridge failed outside this repository',
+      cause_kind: 'external_system',
+      cause_locations: [],
+      candidates_considered: [
+        {
+          statement: 'A fabricated local router hook changes the title',
+          kind: 'local_code',
+          id: 'c1',
+          citation: { path: 'src/App.vue', line: 1, quote: 'router.afterEach(sendTitle)' },
+        },
+        {
+          statement: 'The render expression causes the failure',
+          kind: 'local_code',
+          id: 'c2',
+          citation: { path: 'src/App.vue', line: 1, quote: 'items.map(i => i.name)' },
+        },
+        { statement: 'The platform bridge rejected the title update', kind: 'external_system', id: 'c3', citation: null },
+      ],
+      rejected: [],
+      rejected_candidates: [{
+        id: 'c2',
+        evidence: 'The real render expression is unrelated to changing the browser title.',
+        citation: { path: 'src/App.vue', line: 1, quote: 'items.map(i => i.name)' },
+      }],
+      evidence_strength: 'suggestive',
+      reasoning: 'The cited local expression cannot produce the platform bridge error.',
+    });
+
+    const result = await investigateError('key', makeInput(), tempDir);
+
+    expect(result.outcome).toBe('not_actionable');
+    expect(result.decisionBasis).toBe('cause_outside_codebase');
+    expect(result.dispositions).toEqual([
+      { id: 'c1', disposition: 'ungrounded' },
+      { id: 'c2', disposition: 'rejected' },
+    ]);
+  });
+
+  it('turns duplicate candidate ids into an invalid-verdict incomplete result', async () => {
+    happyPath({
+      candidates_considered: [
+        {
+          statement: 'First local candidate', kind: 'local_code', id: 'c1',
+          citation: { path: 'src/App.vue', line: 1, quote: 'items.map(i => i.name)' },
+        },
+        {
+          statement: 'Second local candidate', kind: 'local_code', id: 'c1',
+          citation: { path: 'src/App.vue', line: 1, quote: 'items.map(i => i.name)' },
+        },
+      ],
+      rejected_candidates: [],
+    });
+
+    const result = await investigateError('key', makeInput(), tempDir);
+
+    expect(result.outcome).toBe('incomplete');
+    expect(result.decisionBasis).toBe('invalid_verdict');
+    expect(result.decisionReason).toMatch(/^duplicate_candidate_id:/);
+  });
+
   it('refuses to act when the agent says the evidence is insufficient', async () => {
     happyPath({ evidence_strength: 'insufficient' });
 

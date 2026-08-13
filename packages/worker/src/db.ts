@@ -1,5 +1,17 @@
 import pg from 'pg';
-import type { Diagnosis, DiagnosisOutcome, ErrorGroupStatus, NeedsHumanReason, ConfidenceLevel, JobType, SetupPrStatus, EvidenceRecord, PRPosture } from '@opslane/shared';
+import type {
+  CandidateDisposition,
+  ConfidenceLevel,
+  Diagnosis,
+  DiagnosisOutcome,
+  ErrorGroupStatus,
+  EvidenceRecord,
+  HypothesisKind,
+  JobType,
+  NeedsHumanReason,
+  PRPosture,
+  SetupPrStatus,
+} from '@opslane/shared';
 import {
   reconcileDeadLetteredSessionAnalysis,
   releaseUnfinishedGeneration,
@@ -45,6 +57,8 @@ export interface DecisionRow {
    */
   basis: DerivedDecision['basis'];
   confidence: ConfidenceLevel;
+  causeKind?: HypothesisKind;
+  dispositions?: Array<{ id: string; disposition: CandidateDisposition }>;
   policyEligible?: boolean | null;
   policyBasis?: { v: 1; identified_users: number; recent_anon_sessions: number } | null;
 }
@@ -60,6 +74,8 @@ export interface PersistedDecision {
   outcome: DiagnosisOutcome;
   basis: DerivedDecision['basis'];
   confidence: ConfidenceLevel;
+  causeKind?: HypothesisKind;
+  dispositions?: Array<{ id: string; disposition: CandidateDisposition }>;
 }
 
 export interface LoadedDecision extends PersistedDecision {
@@ -86,8 +102,10 @@ async function insertDiagnosisDecision(
   await queryable.query(
     `INSERT INTO diagnosis_decisions
        (error_group_id, project_id, job_id, outcome, decision_reason, cause_location, diagnosis,
-        model, prompt_version, basis, confidence, policy_eligible, policy_basis)
-     VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11, $12, $13::jsonb)`,
+        model, prompt_version, basis, confidence, policy_eligible, policy_basis,
+        candidate_dispositions, cause_kind)
+     VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11, $12, $13::jsonb,
+        $14::jsonb, $15)`,
     [
       errorGroupId,
       projectId,
@@ -102,6 +120,8 @@ async function insertDiagnosisDecision(
       row.confidence,
       row.policyEligible ?? null,
       row.policyBasis ? JSON.stringify(row.policyBasis) : null,
+      row.dispositions ? JSON.stringify(row.dispositions) : null,
+      row.causeKind ?? null,
     ],
   );
 }
@@ -150,8 +170,11 @@ export async function loadDiagnosisDecision(
     confidence: string | null;
     policy_eligible: boolean | null;
     policy_basis: LoadedDecision['policyBasis'];
+    candidate_dispositions: LoadedDecision['dispositions'] | null;
+    cause_kind: HypothesisKind | null;
   }>(
-    `SELECT id, outcome, basis, confidence, policy_eligible, policy_basis
+    `SELECT id, outcome, basis, confidence, policy_eligible, policy_basis,
+            candidate_dispositions, cause_kind
      FROM diagnosis_decisions
      WHERE error_group_id = $1 AND project_id = $2
      ORDER BY decided_at DESC, id DESC
@@ -165,6 +188,8 @@ export async function loadDiagnosisDecision(
     outcome: row.outcome,
     basis: row.basis as DerivedDecision['basis'],
     confidence: row.confidence as ConfidenceLevel,
+    causeKind: row.cause_kind ?? undefined,
+    dispositions: row.candidate_dispositions ?? undefined,
     policyEligible: row.policy_eligible,
     policyBasis: row.policy_basis,
   };
@@ -183,8 +208,11 @@ export async function loadDiagnosisDecisionForSource(
     confidence: string | null;
     policy_eligible: boolean | null;
     policy_basis: LoadedDecision['policyBasis'];
+    candidate_dispositions: LoadedDecision['dispositions'] | null;
+    cause_kind: HypothesisKind | null;
   }>(
-    `SELECT id, outcome, basis, confidence, policy_eligible, policy_basis
+    `SELECT id, outcome, basis, confidence, policy_eligible, policy_basis,
+            candidate_dispositions, cause_kind
      FROM diagnosis_decisions
      WHERE error_group_id = $1 AND project_id = $2 AND job_id = $3
      ORDER BY decided_at DESC, id DESC
@@ -198,6 +226,8 @@ export async function loadDiagnosisDecisionForSource(
     outcome: row.outcome,
     basis: row.basis as DerivedDecision['basis'],
     confidence: row.confidence as ConfidenceLevel,
+    causeKind: row.cause_kind ?? undefined,
+    dispositions: row.candidate_dispositions ?? undefined,
     policyEligible: row.policy_eligible,
     policyBasis: row.policy_basis,
   };

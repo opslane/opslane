@@ -959,6 +959,7 @@ async function runAgentFixCore(input: AgentFixInput): Promise<AgentFixResult> {
           const decision = deriveOutcome(
             declined,
             (cited) => (trackedFiles.has(cited) ? cited : null),
+            () => false,
           );
           agentState.giveUpReason = buildReason(
             reasonCodeForDecision(decision),

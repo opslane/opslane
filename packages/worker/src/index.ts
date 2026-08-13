@@ -660,6 +660,8 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
       // run at all, and outcome alone cannot answer that.
       basis: triage.decisionBasis,
       confidence: triage.confidence,
+      causeKind: triage.adjudication?.cause_kind,
+      dispositions: triage.dispositions,
       ...db.policyFields(impactBar),
     };
 

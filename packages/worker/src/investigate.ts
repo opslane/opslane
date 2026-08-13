@@ -1,4 +1,6 @@
 import type { Adjudication, Diagnosis, DiagnosisOutcome, EvidenceCitation } from '@opslane/shared';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { deriveOutcome, type DerivedDecision } from './classify.js';
 import { parseAdjudication, submitDiagnosisTool } from './diagnose-schema.js';
 import { resolveInsideRepo } from './repo-paths.js';
@@ -11,7 +13,8 @@ import type { RuntimeInfo } from './runtime-info.js';
 import { traceSpan } from './tracing.js';
 import type { TriageResult } from './agent-fix.js';
 import { calculateCost } from '@opslane/agent-core';
-import { validateVerdict } from './verdict-validation.js';
+import { validateAdjudicationShape, validateVerdict } from './verdict-validation.js';
+import { quoteWithinWindow } from './quote-at.js';
 
 /**
  * The model the investigation actually runs on.
@@ -77,6 +80,8 @@ export interface InvestigationResult extends TriageResult {
   decisionReason: string;
   /** Why the outcome was reached, as a value. Callers pick reason codes from it. */
   decisionBasis: DerivedDecision['basis'];
+  /** Grounded routing disposition for each local candidate, when using the new shape. */
+  dispositions?: DerivedDecision['dispositions'];
   /** Files the agent opened. May contain duplicates. */
   filesRead: string[];
   /** Last model text before the terminal call. Best-effort diagnostic. */
@@ -180,7 +185,8 @@ evidence you actually read. Rules:
 - Distinguish the cause from a code smell. Code that handles a failure badly is not the reason the failure occurred.
 - Rate the evidence honestly. Reserve "conclusive" for a conclusion whose every premise you verified from evidence you read. If a decisive premise rests on runtime state you cannot observe, such as a query plan, index, table size, deployed configuration or backend load, the most you may answer is "suggestive".
 - List every cause you weighed in candidates_considered, including the one you chose.
-- If you conclude the cause is outside this codebase, reject every local candidate by name in "rejected". A conclusion reached instead of the local candidates rather than against them will not be acted on.
+- Candidates and rejections are checked mechanically against the repository: cite the exact file, line, and a verbatim quote for every local candidate and every rejection, or the submission is discarded.
+- If you conclude the cause is outside this codebase, reject every grounded local candidate by ID in "rejected_candidates". A conclusion reached instead of the local candidates rather than against them will not be acted on. Keep "rejected" as a legacy prose summary only.
 - In cause_locations, the FIRST entry is your claim and the only one we act on. Put the file you are most confident about first. path is the bare repository path with no line numbers and no parentheses; put line numbers in the line field and any explanation in the note field. Extra entries do not improve your answer.
 - Your verdict is machine-checked: the evidence field must cite at least one file you actually read, with what you found there (detail) and how it links to the customer-visible symptom (symptomLink). A verdict with no citations is discarded as incomplete, whatever its prose says.
 - Only files you opened with read_file count as read. A file you have only seen in search results does not count — read it before citing it.
@@ -297,22 +303,42 @@ export async function investigateError(
     });
   }
 
-  let decision = deriveOutcome(adjudication, (cited) => resolveInsideRepo(repoPath, cited));
+  let decision = deriveOutcome(
+    adjudication,
+    (cited) => resolveInsideRepo(repoPath, cited),
+    (resolved, line, quote) => {
+      try {
+        return quoteWithinWindow(readFileSync(join(repoPath, resolved), 'utf8'), line, quote);
+      } catch {
+        return false;
+      }
+    },
+  );
   if (adjudication) {
-    const validation = validateVerdict({
-      causeText: adjudication.best_supported,
-      claimsCodeCause: decision.outcome === 'code_fix',
-      evidence: adjudication.evidence ?? [],
-      agentTaskBrief: adjudication.agent_task_brief ?? null,
-      filesRead,
-    }, (cited) => resolveInsideRepo(repoPath, cited));
-    if (validation.status === 'incomplete') {
+    const shape = validateAdjudicationShape(adjudication);
+    if (shape.status === 'incomplete') {
       decision = {
         outcome: 'incomplete',
         basis: 'invalid_verdict',
-        reason: validation.reason,
+        reason: shape.reason,
         confidence: 'low',
       };
+    } else {
+      const validation = validateVerdict({
+        causeText: adjudication.best_supported,
+        claimsCodeCause: decision.outcome === 'code_fix',
+        evidence: adjudication.evidence ?? [],
+        agentTaskBrief: adjudication.agent_task_brief ?? null,
+        filesRead,
+      }, (cited) => resolveInsideRepo(repoPath, cited));
+      if (validation.status === 'incomplete') {
+        decision = {
+          outcome: 'incomplete',
+          basis: 'invalid_verdict',
+          reason: validation.reason,
+          confidence: 'low',
+        };
+      }
     }
   }
 
@@ -356,6 +382,7 @@ export async function investigateError(
     outcome: decision.outcome,
     decisionReason: decision.reason,
     decisionBasis: decision.basis,
+    dispositions: decision.dispositions,
     filesRead,
     // Prefer the model's prose, but fall back to the structured reasoning: a
     // terminal tool call may carry no accompanying text at all.

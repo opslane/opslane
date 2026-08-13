@@ -1,4 +1,9 @@
-import type { Adjudication, DiagnosisOutcome } from '@opslane/shared';
+import type {
+  Adjudication,
+  CandidateDisposition,
+  DiagnosisOutcome,
+  GroundedQuote,
+} from '@opslane/shared';
 
 export interface DerivedDecision {
   outcome: DiagnosisOutcome;
@@ -29,6 +34,7 @@ export interface DerivedDecision {
    * the gate cosmetic.
    */
   confidence: 'high' | 'medium' | 'low';
+  dispositions?: Array<{ id: string; disposition: CandidateDisposition }>;
 }
 
 /**
@@ -67,6 +73,8 @@ export function deriveOutcome(
    * is not there.
    */
   resolvePath: (cited: string) => string | null,
+  /** Confirms that a cited quote occurs within the allowed window. */
+  quoteAt: (resolvedPath: string, line: number, quote: string) => boolean,
 ): DerivedDecision {
   if (!adjudication) {
     return {
@@ -103,15 +111,59 @@ export function deriveOutcome(
   }
 
   if (adjudication.cause_kind === 'external_system' || adjudication.cause_kind === 'data_or_input') {
-    // We cannot verify from the repository that a remote service was slow. What
-    // we can require is that the conclusion was reached against the local
-    // alternatives rather than instead of them.
-    //
-    // An earlier version only checked `rejected` was non-empty, so rejecting one
-    // irrelevant candidate satisfied it. Check each local candidate by name.
     const locals = adjudication.candidates_considered.filter(
       (candidate) => candidate.kind === 'local_code' || candidate.kind === 'configuration',
     );
+
+    // New-shape submissions (structural rejections present) get the grounded
+    // path. Legacy shapes keep the substring behavior verbatim — routing never
+    // re-runs on stored rows, but the decline adapter still produces them live.
+    if (adjudication.rejected_candidates !== undefined) {
+      const grounded = (quoteRef: GroundedQuote | undefined): boolean => {
+        if (!quoteRef) return false;
+        const resolved = resolvePath(quoteRef.path);
+        return resolved !== null && quoteAt(resolved, quoteRef.line, quoteRef.quote);
+      };
+      const validRejections = new Set(
+        adjudication.rejected_candidates
+          .filter((rejection) => rejection.evidence.trim() && grounded(rejection.citation))
+          .map((rejection) => rejection.id),
+      );
+      // Grounding is evaluated first: a fabricated candidate that is also
+      // "rejected" must show as fabricated in the forensics.
+      const dispositions = locals.map((candidate) => ({
+        id: candidate.id ?? candidate.statement.slice(0, 40),
+        disposition: !grounded(candidate.citation)
+          ? ('ungrounded' as const)
+          : candidate.id !== undefined && validRejections.has(candidate.id)
+            ? ('rejected' as const)
+            : ('live' as const),
+      }));
+      const live = dispositions.filter((entry) => entry.disposition === 'live');
+      if (live.length > 0) {
+        return {
+          outcome: 'needs_more_context',
+          reason:
+            `The investigation concluded the cause is external without rejecting ` +
+            `${live.map((entry) => JSON.stringify(entry.id)).join(', ')}`,
+          basis: 'unrejected_local_candidates',
+          confidence: 'low',
+          dispositions,
+        };
+      }
+      return {
+        outcome: 'not_actionable',
+        reason: `The cause is outside this codebase: ${adjudication.cause_locations[0]?.path ?? adjudication.best_supported}`,
+        basis: 'cause_outside_codebase',
+        confidence: confidenceFor(adjudication.evidence_strength),
+        dispositions,
+      };
+    }
+
+    // Legacy path. We cannot verify from the repository that a remote service
+    // was slow. What we can require is that the conclusion was reached against
+    // the local alternatives rather than instead of them. Keep the existing
+    // substring check for old producers and persisted shapes.
     const rejectedText = adjudication.rejected.join('\n').toLowerCase();
     const unrejected = locals.filter((candidate) => !rejectedText.includes(candidate.statement.toLowerCase()));
 

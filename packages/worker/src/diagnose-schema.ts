@@ -1,8 +1,17 @@
 import type Anthropic from '@anthropic-ai/sdk';
-import type { Adjudication, CauseLocation, EvidenceCitation, EvidenceStrength, HypothesisKind } from '@opslane/shared';
+import type {
+  Adjudication,
+  CauseLocation,
+  EvidenceCitation,
+  EvidenceStrength,
+  GroundedQuote,
+  HypothesisKind,
+} from '@opslane/shared';
 
 const KINDS: HypothesisKind[] = ['local_code', 'external_system', 'data_or_input', 'configuration', 'unknown'];
 const STRENGTHS: EvidenceStrength[] = ['conclusive', 'suggestive', 'insufficient'];
+export const QUOTE_MAX_CHARS = 300;
+export const CANDIDATE_ID = /^c[1-9]\d*$/;
 
 function isKind(value: unknown): value is HypothesisKind {
   return typeof value === 'string' && (KINDS as string[]).includes(value);
@@ -20,6 +29,20 @@ function clampWords(text: string, max: number): string {
   return words.length <= max ? text.trim() : `${words.slice(0, max).join(' ')}…`;
 }
 
+function groundedQuote(value: unknown): GroundedQuote | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  const path = typeof record['path'] === 'string' ? record['path'].trim() : '';
+  const line = typeof record['line'] === 'number' && record['line'] > 0 ? Math.trunc(record['line']) : 0;
+  const quote = typeof record['quote'] === 'string' ? record['quote'].trim() : '';
+  if (!path || !line || !quote || quote.length > QUOTE_MAX_CHARS) return undefined;
+  return { path, line, quote };
+}
+
+function candidateId(value: unknown): string | undefined {
+  return typeof value === 'string' && CANDIDATE_ID.test(value) ? value : undefined;
+}
+
 function candidates(value: unknown): Adjudication['candidates_considered'] {
   if (!Array.isArray(value)) return [];
   const out: Adjudication['candidates_considered'] = [];
@@ -28,7 +51,39 @@ function candidates(value: unknown): Adjudication['candidates_considered'] {
     const record = entry as Record<string, unknown>;
     const statement = typeof record['statement'] === 'string' ? record['statement'].trim() : '';
     if (!statement) continue;
-    out.push({ statement, kind: isKind(record['kind']) ? record['kind'] : 'unknown' });
+    const id = candidateId(record['id']);
+    const citation = groundedQuote(record['citation']);
+    out.push({
+      statement,
+      kind: isKind(record['kind']) ? record['kind'] : 'unknown',
+      ...(id ? { id } : {}),
+      ...(citation ? { citation } : {}),
+    });
+  }
+  return out;
+}
+
+const MALFORMED_REJECTION = { id: '', evidence: '', citation: { path: '', line: 1, quote: '' } };
+
+function rejectedCandidates(raw: Record<string, unknown>): Adjudication['rejected_candidates'] {
+  // An absent key marks a legacy row. Any present malformed shape stays
+  // visible to validation instead of becoming a valid empty rejection list.
+  if (!('rejected_candidates' in raw)) return undefined;
+  const value = raw['rejected_candidates'];
+  if (!Array.isArray(value)) return [MALFORMED_REJECTION];
+
+  const out: NonNullable<Adjudication['rejected_candidates']> = [];
+  for (const entry of value) {
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
+      out.push(MALFORMED_REJECTION);
+      continue;
+    }
+    const record = entry as Record<string, unknown>;
+    out.push({
+      id: candidateId(record['id']) ?? '',
+      evidence: typeof record['evidence'] === 'string' ? record['evidence'].trim() : '',
+      citation: groundedQuote(record['citation']) ?? { path: '', line: 1, quote: '' },
+    });
   }
   return out;
 }
@@ -41,11 +96,12 @@ function candidates(value: unknown): Adjudication['candidates_considered'] {
 export function seal<T>(node: T): T {
   if (!node || typeof node !== 'object') return node;
   const schema = node as unknown as Record<string, unknown>;
-  if (schema['type'] === 'object') {
+  const type = schema['type'];
+  if (type === 'object' || (Array.isArray(type) && type.includes('object'))) {
     schema['additionalProperties'] = false;
     Object.values((schema['properties'] ?? {}) as Record<string, unknown>).forEach(seal);
   }
-  if (schema['type'] === 'array') seal(schema['items']);
+  if (type === 'array') seal(schema['items']);
   return node;
 }
 
@@ -94,19 +150,58 @@ export function submitDiagnosisTool(): Anthropic.Tool {
         evidence_check: { type: 'string', description: 'Which files and evidence you checked.' },
         candidates_considered: {
           type: 'array',
-          description: 'Every cause you weighed, including the winner. Routing needs this.',
+          description:
+            'Every cause you weighed, including the winner. Give each candidate an id ("c1", "c2", …). ' +
+            'For local_code and configuration candidates, citation is MANDATORY and must be real: ' +
+            '{path, line, quote} with a verbatim quote from within 5 lines of `line` in that file. Pass ' +
+            'citation: null for other kinds. Candidates whose citation does not check out against the ' +
+            'repository are discarded as ungrounded.',
           items: {
             type: 'object',
-            properties: { statement: { type: 'string' }, kind: { type: 'string', enum: KINDS } },
-            required: ['statement', 'kind'],
+            properties: {
+              statement: { type: 'string' },
+              kind: { type: 'string', enum: KINDS },
+              id: { type: 'string' },
+              citation: {
+                type: ['object', 'null'],
+                properties: {
+                  path: { type: 'string' },
+                  line: { type: 'integer' },
+                  quote: { type: 'string', maxLength: QUOTE_MAX_CHARS },
+                },
+                required: ['path', 'line', 'quote'],
+              },
+            },
+            required: ['statement', 'kind', 'id', 'citation'],
           },
         },
         rejected: {
           type: 'array',
           items: { type: 'string' },
+          description: 'Legacy prose summary of candidates ruled out. Structural routing uses rejected_candidates.',
+        },
+        rejected_candidates: {
+          type: 'array',
           description:
-            'Each candidate you ruled out and what ruled it out. If you conclude the cause is ' +
-            'outside this codebase, you must reject every local candidate here by name.',
+            'Reject candidates BY ID. Each rejection needs its own citation {path, line, quote} anchoring ' +
+            'the evidence in a file you read — prose alone rejects nothing. Pass [] when you reject nothing.',
+          items: {
+            type: 'object',
+            properties: {
+              id: { type: 'string' },
+              evidence: { type: 'string' },
+              citation: {
+                type: 'object',
+                properties: {
+                  path: { type: 'string' },
+                  line: { type: 'integer' },
+                  quote: { type: 'string', maxLength: QUOTE_MAX_CHARS },
+                },
+                required: ['path', 'line', 'quote'],
+              },
+            },
+            required: ['id', 'evidence', 'citation'],
+          },
         },
         evidence_strength: {
           type: 'string',
@@ -131,10 +226,10 @@ export function submitDiagnosisTool(): Anthropic.Tool {
                   '"packages/ui/src/nav/nav-mobile.tsx". No line numbers, no ranges, no parentheses, ' +
                   'no explanation — put those in `line` and `note`.',
               },
-              line: { type: 'integer', description: '1-based line number, if you can name one.' },
-              note: { type: 'string', description: 'Why this location matters. Say it here, not in `path`.' },
+              line: { type: ['integer', 'null'], description: '1-based line number, or null.' },
+              note: { type: ['string', 'null'], description: 'Why this location matters, or null. Say it here, not in `path`.' },
             },
-            required: ['path'],
+            required: ['path', 'line', 'note'],
           },
         },
         reasoning: { type: 'string' },
@@ -147,9 +242,9 @@ export function submitDiagnosisTool(): Anthropic.Tool {
         },
       },
       required: [
-        'best_supported', 'evidence_check', 'candidates_considered', 'rejected',
+        'best_supported', 'evidence_check', 'candidates_considered', 'rejected', 'rejected_candidates',
         'evidence_strength', 'cause_kind', 'cause_locations', 'reasoning',
-        'evidence', 'agent_task_brief',
+        'why_chain', 'reproduction_steps', 'evidence', 'agent_task_brief',
       ],
     }),
   };
@@ -255,6 +350,7 @@ export function parseAdjudication(raw: Record<string, unknown>): Adjudication | 
     evidence_check: typeof raw['evidence_check'] === 'string' ? raw['evidence_check'].trim() : '',
     candidates_considered: candidates(raw['candidates_considered']),
     rejected: strings(raw['rejected']),
+    rejected_candidates: rejectedCandidates(raw),
     evidence_strength:
       typeof strength === 'string' && (STRENGTHS as string[]).includes(strength)
         ? (strength as EvidenceStrength)

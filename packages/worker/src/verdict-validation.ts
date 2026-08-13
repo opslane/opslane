@@ -1,4 +1,5 @@
-import type { EvidenceCitation } from '@opslane/shared';
+import type { Adjudication, EvidenceCitation } from '@opslane/shared';
+import { CANDIDATE_ID } from './diagnose-schema.js';
 
 // Anchored like migration 045's SQL regex: a verdict that OPENS with a
 // degenerate token is filler; one that merely mentions "placeholder" mid-prose
@@ -21,6 +22,50 @@ export interface VerdictForValidation {
 
 function incomplete(reason: string): VerdictValidation {
   return { status: 'incomplete', reason };
+}
+
+/**
+ * Cross-field rules the submission JSON schema cannot express. Local candidates
+ * must be identifiable and grounded; rejections must reference real candidates.
+ * Non-local candidates and legacy shapes (no ids) pass untouched.
+ */
+export function validateAdjudicationShape(adjudication: Adjudication): VerdictValidation {
+  const isNewShape =
+    adjudication.rejected_candidates !== undefined ||
+    adjudication.candidates_considered.some((candidate) =>
+      candidate.id !== undefined || candidate.citation !== undefined);
+  if (!isNewShape) return { status: 'valid' };
+
+  const ids = new Set<string>();
+  for (const candidate of adjudication.candidates_considered) {
+    if (!candidate.id || !CANDIDATE_ID.test(candidate.id)) {
+      return incomplete(`candidate_missing_id: ${candidate.statement.slice(0, 80)}`);
+    }
+    if (ids.has(candidate.id)) return incomplete(`duplicate_candidate_id: ${candidate.id}`);
+    ids.add(candidate.id);
+
+    const local = candidate.kind === 'local_code' || candidate.kind === 'configuration';
+    if (local && !candidate.citation) {
+      return incomplete(`candidate_missing_citation: ${candidate.id}`);
+    }
+  }
+
+  const seenRejections = new Set<string>();
+  for (const rejection of adjudication.rejected_candidates ?? []) {
+    if (!rejection.id || !rejection.citation.path || !rejection.citation.quote) {
+      return incomplete('rejection_malformed: entry with empty id or citation');
+    }
+    if (!ids.has(rejection.id)) return incomplete(`rejection_unknown_id: ${rejection.id}`);
+    if (seenRejections.has(rejection.id)) {
+      return incomplete(`duplicate_rejection_id: ${rejection.id}`);
+    }
+    seenRejections.add(rejection.id);
+    if (!rejection.evidence.trim()) {
+      return incomplete(`empty_rejection_evidence: ${rejection.id}`);
+    }
+  }
+
+  return { status: 'valid' };
 }
 
 export function validateVerdict(

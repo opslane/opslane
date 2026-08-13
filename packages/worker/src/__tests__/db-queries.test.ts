@@ -128,6 +128,39 @@ describe('group lifecycle timestamp queries', () => {
     expect(params).toContain('DIFF');
     expect(params).toContain(JSON.stringify({ version: 1, tier: 'E0', checks: [] }));
   });
+
+  it('persists cause kind and candidate dispositions with a diagnosis decision', async () => {
+    mockQuery
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ rowCount: 1, rows: [{ id: 'g1' }] })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({});
+
+    const dispositions = [
+      { id: 'c1', disposition: 'ungrounded' as const },
+      { id: 'c2', disposition: 'rejected' as const },
+    ];
+    await updateGroupInvestigation('g1', 'p1', 'insight', {
+      decision: {
+        outcome: 'not_actionable',
+        decisionReason: 'The cause is outside this codebase',
+        diagnosis: null,
+        model: 'test-model',
+        promptVersion: 'diagnosis-v1',
+        basis: 'cause_outside_codebase',
+        confidence: 'medium',
+        causeKind: 'external_system',
+        dispositions,
+      },
+    });
+
+    const insert = mockQuery.mock.calls.find(
+      (call) => String(call[0]).includes('INSERT INTO diagnosis_decisions'),
+    );
+    expect(String(insert?.[0])).toContain('candidate_dispositions, cause_kind');
+    expect(insert?.[1]?.[13]).toBe(JSON.stringify(dispositions));
+    expect(insert?.[1]?.[14]).toBe('external_system');
+  });
 });
 
 describe('getErrorGroup', () => {
