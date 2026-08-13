@@ -213,6 +213,130 @@ describe('createPR', () => {
   });
 });
 
+describe('C5 impact-first PR body', () => {
+  it('leads with What users hit and includes a coverage-proven watch link', () => {
+    const body = buildPRBody(makeInput({
+      occurrenceCount: 12,
+      impact: { class: 'degraded', visits: 3, recovered: 1 },
+      watchUrl: 'https://app.opslane.com/sessions/s-1?t=1712345',
+      environmentNames: ['production'],
+      environmentTotal: 1,
+    }));
+    expect(body).toContain('### What users hit\n12 crashes across 3 visits, 1 of 3 visits recovered');
+    expect(body.match(/Watch a recording of the failure/g)).toHaveLength(1);
+    expect(body.indexOf('### What users hit')).toBeLessThan(body.indexOf('Environments:'));
+    expect(body.indexOf('Environments:')).toBeLessThan(body.indexOf('### What happened'));
+  });
+
+  it('fails closed for NULL impact without inventing visit counts', () => {
+    const body = buildPRBody(makeInput({
+      occurrenceCount: 12,
+      impact: { class: null, visits: null, recovered: null },
+      watchUrl: null,
+    }));
+    expect(body).toContain('12 crashes; recording impact unavailable');
+    expect(body).not.toMatch(/across \d+ visits/);
+    expect(body).not.toContain('Watch a recording');
+  });
+
+  it('omits the impact section for legacy callers', () => {
+    expect(buildPRBody(makeInput())).not.toContain('### What users hit');
+  });
+
+  it('renders every executed ledger entry in entry sequence order with flags', () => {
+    const common = {
+      jobId: 'job-1', projectId: 'proj-1', runId: 'run-1', workdirDirty: false,
+      discovered: 1, passed: 1 as number | null, failed: 0 as number | null,
+      skipped: 0 as number | null, truncated: false, timedOut: false,
+      notRun: ['browser smoke'], commitSha: 'fix1234567890',
+    };
+    const body = buildPRBody(makeInput({
+      tierRecord: { tier: 'checked', declaredTest: null, reproductionImpossibleReason: 'No stable local reproduction.' },
+      ledger: [
+        { ...common, entrySeq: 6, command: 'scripts/check-output', passed: null, failed: null, skipped: 2, truncated: true, timedOut: true, workdirDirty: true },
+        { ...common, entrySeq: 4, command: 'pnpm build' },
+        { ...common, entrySeq: 5, command: 'pnpm lint' },
+        { ...common, entrySeq: 3, command: 'pnpm test' },
+        { ...common, entrySeq: 2, command: 'vitest green' },
+        { ...common, entrySeq: 1, command: 'vitest red', passed: 0, failed: 1 },
+      ],
+      ledgerRoles: [
+        { entrySeq: 1, role: 'repro_red', assertionMatched: true },
+        { entrySeq: 2, role: 'repro_green' },
+        { entrySeq: 3, role: 'suite_post_patch' },
+        { entrySeq: 4, role: 'build' },
+      ],
+    }));
+    expect(body).toContain('`pnpm lint` — 1 passed, 0 failed');
+    expect(body).toContain('⚠️ `scripts/check-output` — 2 skipped');
+    expect(body).toContain('output truncated — timed out (dirty worktree)');
+    expect(body.indexOf('pnpm lint')).toBeLessThan(body.indexOf('scripts/check-output'));
+    expect(body).toContain('Not run: browser smoke');
+  });
+
+  it('renders the baseline suite as an observation, never a red mark', () => {
+    const common = {
+      jobId: 'job-1', projectId: 'proj-1', runId: 'run-1', workdirDirty: false,
+      discovered: 5, passed: 3 as number | null, failed: 2 as number | null,
+      skipped: 0 as number | null, truncated: false, timedOut: false,
+      notRun: [] as string[], commitSha: 'base123456789',
+    };
+    const body = buildPRBody(makeInput({
+      tierRecord: { tier: 'checked', declaredTest: null, reproductionImpossibleReason: 'No stable local reproduction.' },
+      ledger: [
+        { ...common, entrySeq: 1, command: 'pnpm test' },
+        { ...common, entrySeq: 2, command: 'pnpm test', passed: 5, failed: 0, commitSha: 'fix1234567890' },
+      ],
+      ledgerRoles: [
+        { entrySeq: 1, role: 'suite_baseline' },
+        { entrySeq: 2, role: 'suite_post_patch' },
+      ],
+    }));
+    // Pre-existing baseline failures are the comparison point, not a failure
+    // of this attempt: no ❌ line for the baseline run.
+    expect(body).toContain('✅ baseline suite: 3 passed, 2 pre-existing failures on `base12345678` (compared below)');
+    expect(body).not.toContain('❌ `pnpm test`');
+  });
+
+  it('gives role phrasing only to the last entry of an infra-retried role', () => {
+    const common = {
+      jobId: 'job-1', projectId: 'proj-1', runId: 'run-1', workdirDirty: false,
+      discovered: 1, passed: 1 as number | null, failed: 0 as number | null,
+      skipped: 0 as number | null, truncated: false, timedOut: false,
+      notRun: [] as string[], commitSha: 'fix1234567890',
+    };
+    const body = buildPRBody(makeInput({
+      tierRecord: { tier: 'checked', declaredTest: null, reproductionImpossibleReason: 'No stable local reproduction.' },
+      ledger: [
+        { ...common, entrySeq: 1, command: 'pnpm build', passed: null, failed: null, timedOut: true },
+        { ...common, entrySeq: 2, command: 'pnpm build' },
+      ],
+      ledgerRoles: [
+        { entrySeq: 1, role: 'build' },
+        { entrySeq: 2, role: 'build' },
+      ],
+    }));
+    // The first attempt renders generically with a supersede note; exactly one
+    // role-phrased build verdict survives — never a contradictory pair.
+    expect(body).toContain('superseded by the retry below');
+    expect(body).toContain('✅ build passed');
+    expect(body).not.toContain('❌ build failed');
+  });
+
+  it('uses completed only for a clean count-less executed entry', () => {
+    const body = buildPRBody(makeInput({
+      tierRecord: { tier: 'attempted', declaredTest: null, reproductionImpossibleReason: null },
+      ledger: [{
+        jobId: 'j', projectId: 'p', runId: 'r', entrySeq: 1, command: 'custom check',
+        commitSha: 'abc123456789', workdirDirty: false, discovered: null, passed: null,
+        failed: null, skipped: null, truncated: false, timedOut: false, notRun: [],
+      }],
+      ledgerRoles: [],
+    }));
+    expect(body).toContain('✅ `custom check` — completed on `abc123456789`');
+  });
+});
+
 describe('GitHub client configuration', () => {
   const originalBaseUrl = process.env['OPSLANE_GITHUB_API_URL'];
 
