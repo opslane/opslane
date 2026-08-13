@@ -32,6 +32,9 @@
     "docs/guides/fix-prs.md": {
       "fences": []
     },
+    "docs/guides/friction.md": {
+      "fences": []
+    },
     "docs/guides/github-app.md": {
       "fences": [
         {
@@ -49,6 +52,9 @@
       ]
     },
     "docs/guides/investigation.md": {
+      "fences": []
+    },
+    "docs/guides/issues.md": {
       "fences": []
     },
     "docs/guides/react.md": {
