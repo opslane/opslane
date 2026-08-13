@@ -219,6 +219,37 @@ describeDb('db.ts integration tests', () => {
         });
       });
 
+      it('loads forensic fields while accepting a legacy row without them', async () => {
+        const { errorGroupId } = await seedErrorGroupAndJob();
+        await recordDiagnosisDecision(errorGroupId, testProjectId, {
+          ...baseDecision,
+          outcome: 'not_actionable',
+          decisionReason: 'external',
+          basis: 'cause_outside_codebase',
+          confidence: 'medium',
+          causeKind: 'external_system',
+          dispositions: [{ id: 'c1', disposition: 'ungrounded' }],
+        });
+        expect(await loadDiagnosisDecision(errorGroupId, testProjectId)).toMatchObject({
+          causeKind: 'external_system',
+          dispositions: [{ id: 'c1', disposition: 'ungrounded' }],
+        });
+
+        await testPool.query(
+          `INSERT INTO diagnosis_decisions
+             (error_group_id, project_id, outcome, decision_reason, diagnosis,
+              model, prompt_version, basis, confidence, decided_at)
+           VALUES ($1, $2, 'code_fix', 'legacy decision', '{}'::jsonb,
+                   'legacy-model', 'diagnosis-v1', 'local_defect', 'high', now() + interval '1 second')`,
+          [errorGroupId, testProjectId],
+        );
+        expect(await loadDiagnosisDecision(errorGroupId, testProjectId)).toMatchObject({
+          outcome: 'code_fix',
+          causeKind: undefined,
+          dispositions: undefined,
+        });
+      });
+
       // requeueStaleJobs updates error_group_jobs in place, so a retried job keeps
       // its id. A partial unique index on job_id plus ON CONFLICT DO NOTHING
       // therefore dropped every retry's conclusion: attempt 1 concluded

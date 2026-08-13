@@ -153,6 +153,62 @@ func TestRunOnceScoresAcceptedFrictionAndRouteWeights(t *testing.T) {
 	}
 }
 
+func TestRunOnceCapsThirdPartyOutcomesWithNonzeroImpact(t *testing.T) {
+	pool := testPool(t)
+	_, projectID, envID := seedTenant(t, pool, nil)
+	groupID := seedGroup(t, pool, projectID, envID, "third-party-cap", "error")
+	mustExec(t, pool, `UPDATE error_groups SET reason_code='unfixable_third_party' WHERE id=$1`, groupID)
+
+	var user1, user2 string
+	if err := pool.QueryRow(context.Background(), `
+		INSERT INTO end_users (project_id, external_user_id, last_seen)
+		VALUES ($1, 'third-party-user-1', now()) RETURNING id`, projectID).Scan(&user1); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(context.Background(), `
+		INSERT INTO end_users (project_id, external_user_id, last_seen)
+		VALUES ($1, 'third-party-user-2', now()) RETURNING id`, projectID).Scan(&user2); err != nil {
+		t.Fatal(err)
+	}
+	mustExec(t, pool, `
+		INSERT INTO error_group_affected_users (error_group_id, end_user_id, last_seen)
+		VALUES ($1, $2, now()), ($1, $3, now())`, groupID, user1, user2)
+
+	if _, err := (&Sweeper{Pool: pool}).RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	var score, impact, routeWeight float64
+	var capped bool
+	var reasonCode string
+	if err := pool.QueryRow(context.Background(), `
+		SELECT priority_score,
+		       (priority_inputs->>'impact')::float8,
+		       (priority_inputs->>'route_weight')::float8,
+		       (priority_inputs->>'cap_applied')::boolean,
+		       priority_inputs->>'reason_code'
+		FROM error_groups WHERE id=$1`, groupID).Scan(
+		&score, &impact, &routeWeight, &capped, &reasonCode,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	// Both users are in both windows: 2 users_7d + 2*2 users_24h = 6.
+	approx(t, impact, 6, "impact")
+	uncapped := impact * routeWeight
+	if uncapped == 0 {
+		t.Fatal("uncapped score must be nonzero so the cap is observable")
+	}
+	approx(t, score, uncapped*0.1, "capped score")
+	approx(t, score*10, uncapped, "one-tenth cap")
+	if !capped {
+		t.Error("cap_applied = false, want true")
+	}
+	if reasonCode != "unfixable_third_party" {
+		t.Errorf("reason_code = %q, want unfixable_third_party", reasonCode)
+	}
+}
+
 func TestRunOnceEnqueuesRouteMapJobsWithDedupeAndCooldown(t *testing.T) {
 	pool := testPool(t)
 	_, projectID, envID := seedTenant(t, pool, ptr("owner/repo"))

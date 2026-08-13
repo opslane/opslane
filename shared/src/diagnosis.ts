@@ -41,6 +41,28 @@ export interface EvidenceCitation {
   symptomLink: string;
 }
 
+/**
+ * A quote anchored to a place in the repository. The grounding predicate is:
+ * `path` resolves inside the clone AND `quote` appears within ±5 lines of
+ * `line` at the investigated commit. Quote-anywhere-in-file is NOT grounding —
+ * a fabricated hypothesis can quote an unrelated real line.
+ *
+ * The submission parser may temporarily create an empty sentinel for a
+ * malformed rejection. It is rejected by `validateAdjudicationShape` before
+ * persistence and is not a valid stored `GroundedQuote`.
+ */
+export interface GroundedQuote {
+  /** Repository-relative path, undecorated (same rule as CauseLocation.path). */
+  path: string;
+  /** 1-based line the quote lives at. */
+  line: number;
+  /** Verbatim excerpt, 1–300 chars after trim, non-whitespace. */
+  quote: string;
+}
+
+/** How routing disposed of one local candidate. Persisted for forensics. */
+export type CandidateDisposition = 'rejected' | 'ungrounded' | 'live';
+
 /** What the investigation submits after checking its own citations. */
 export interface Adjudication {
   /** The statement of the hypothesis the evidence best supports. */
@@ -54,9 +76,21 @@ export interface Adjudication {
    * reached *against* the local candidates rather than instead of them. The
    * submission is the only record that the alternatives were considered.
    */
-  candidates_considered: Array<{ statement: string; kind: HypothesisKind }>;
-  /** Other hypotheses with the specific evidence that rules each one out. */
+  candidates_considered: Array<{
+    statement: string;
+    kind: HypothesisKind;
+    /** Unique within this adjudication, format `c<n>`. Required at submission. */
+    id?: string;
+    /** Required at submission for kinds local_code/configuration. */
+    citation?: GroundedQuote;
+  }>;
+  /** Other hypotheses with the specific evidence that rules each one out. Legacy prose; display-only. */
   rejected: string[];
+  /**
+   * Structural rejections. A rejection converts a candidate only if its own
+   * citation passes the grounding predicate — prose alone converts nothing.
+   */
+  rejected_candidates?: Array<{ id: string; evidence: string; citation: GroundedQuote }>;
   evidence_strength: EvidenceStrength;
   /**
    * Where the winning cause lives, as a typed value rather than prose.

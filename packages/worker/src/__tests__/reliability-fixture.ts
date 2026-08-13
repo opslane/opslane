@@ -274,11 +274,17 @@ export async function startProviderRecorders(options: ProviderTwinOptions = {}):
         input: {
           best_supported: 'A nullable production value is dereferenced without a guard.',
           evidence_check: 'Read src/value.js and the failing test.',
+          // Structural shape: the live investigation refuses legacy submissions
+          // (verdict-validation requireStructuralShape), so the twin carries
+          // ids and a citation groundable against the fixture clone's
+          // src/value.js line 1.
           candidates_considered: [
-            { statement: 'The value renderer dereferences a nullable input', kind: 'local_code' },
-            { statement: 'The upstream service returned an unexpected payload', kind: 'external_system' },
+            { statement: 'The value renderer dereferences a nullable input', kind: 'local_code', id: 'c1',
+              citation: { path: 'src/value.js', line: 1, quote: 'return input.value.toUpperCase()' } },
+            { statement: 'The upstream service returned an unexpected payload', kind: 'external_system', id: 'c2' },
           ],
           rejected: ['The upstream service returned an unexpected payload — the crash reproduces offline.'],
+          rejected_candidates: [],
           evidence_strength: 'conclusive',
           cause_kind: 'local_code',
           // Must resolve inside the fixture clone, or routing scores it

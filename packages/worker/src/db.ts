@@ -1,5 +1,17 @@
 import pg from 'pg';
-import type { Diagnosis, DiagnosisOutcome, ErrorGroupStatus, NeedsHumanReason, ConfidenceLevel, JobType, SetupPrStatus, EvidenceRecord, PRPosture } from '@opslane/shared';
+import type {
+  CandidateDisposition,
+  ConfidenceLevel,
+  Diagnosis,
+  DiagnosisOutcome,
+  ErrorGroupStatus,
+  EvidenceRecord,
+  HypothesisKind,
+  JobType,
+  NeedsHumanReason,
+  PRPosture,
+  SetupPrStatus,
+} from '@opslane/shared';
 import {
   reconcileDeadLetteredSessionAnalysis,
   releaseUnfinishedGeneration,
@@ -45,6 +57,8 @@ export interface DecisionRow {
    */
   basis: DerivedDecision['basis'];
   confidence: ConfidenceLevel;
+  causeKind?: HypothesisKind;
+  dispositions?: Array<{ id: string; disposition: CandidateDisposition }>;
   policyEligible?: boolean | null;
   policyBasis?: { v: 1; identified_users: number; recent_anon_sessions: number } | null;
 }
@@ -60,6 +74,8 @@ export interface PersistedDecision {
   outcome: DiagnosisOutcome;
   basis: DerivedDecision['basis'];
   confidence: ConfidenceLevel;
+  causeKind?: HypothesisKind;
+  dispositions?: Array<{ id: string; disposition: CandidateDisposition }>;
 }
 
 export interface LoadedDecision extends PersistedDecision {
@@ -86,8 +102,10 @@ async function insertDiagnosisDecision(
   await queryable.query(
     `INSERT INTO diagnosis_decisions
        (error_group_id, project_id, job_id, outcome, decision_reason, cause_location, diagnosis,
-        model, prompt_version, basis, confidence, policy_eligible, policy_basis)
-     VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11, $12, $13::jsonb)`,
+        model, prompt_version, basis, confidence, policy_eligible, policy_basis,
+        candidate_dispositions, cause_kind)
+     VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11, $12, $13::jsonb,
+        $14::jsonb, $15)`,
     [
       errorGroupId,
       projectId,
@@ -102,6 +120,8 @@ async function insertDiagnosisDecision(
       row.confidence,
       row.policyEligible ?? null,
       row.policyBasis ? JSON.stringify(row.policyBasis) : null,
+      row.dispositions ? JSON.stringify(row.dispositions) : null,
+      row.causeKind ?? null,
     ],
   );
 }
@@ -139,35 +159,69 @@ async function upsertDigestReadiness(
  * A row missing `basis` or `confidence` predates migration 035 and cannot
  * answer whether a fix is authorised, so it reads as no decision at all.
  */
+interface DecisionQueryRow {
+  id: string;
+  outcome: DiagnosisOutcome;
+  basis: string | null;
+  confidence: string | null;
+  policy_eligible: boolean | null;
+  policy_basis: LoadedDecision['policyBasis'];
+  candidate_dispositions: unknown;
+  cause_kind: string | null;
+}
+
+const DECISION_COLUMNS =
+  'id, outcome, basis, confidence, policy_eligible, policy_basis, candidate_dispositions, cause_kind';
+
+const HYPOTHESIS_KINDS: readonly string[] = [
+  'local_code', 'external_system', 'data_or_input', 'configuration', 'unknown',
+];
+const DISPOSITIONS: readonly string[] = ['rejected', 'ungrounded', 'live'];
+
+/**
+ * One row-to-decision mapping for both loaders. The jsonb and text columns are
+ * narrowed at the boundary rather than cast: diagnosis_decisions is insert-only,
+ * so a malformed historical row can never be corrected in place and must not
+ * flow into fix routing looking validated.
+ */
+function rowToLoadedDecision(row: DecisionQueryRow | undefined): LoadedDecision | null {
+  if (!row || !row.basis || !row.confidence) return null;
+  const causeKind = row.cause_kind !== null && HYPOTHESIS_KINDS.includes(row.cause_kind)
+    ? (row.cause_kind as HypothesisKind)
+    : undefined;
+  const dispositions = Array.isArray(row.candidate_dispositions)
+    ? (row.candidate_dispositions.filter(
+        (entry): entry is { id: string; disposition: CandidateDisposition } =>
+          typeof entry === 'object' && entry !== null &&
+          typeof (entry as { id?: unknown }).id === 'string' &&
+          DISPOSITIONS.includes((entry as { disposition?: unknown }).disposition as string),
+      ))
+    : undefined;
+  return {
+    id: row.id,
+    outcome: row.outcome,
+    basis: row.basis as DerivedDecision['basis'],
+    confidence: row.confidence as ConfidenceLevel,
+    causeKind,
+    dispositions: dispositions && dispositions.length > 0 ? dispositions : undefined,
+    policyEligible: row.policy_eligible,
+    policyBasis: row.policy_basis,
+  };
+}
+
 export async function loadDiagnosisDecision(
   errorGroupId: string,
   projectId: string,
 ): Promise<LoadedDecision | null> {
-  const { rows } = await getPool().query<{
-    id: string;
-    outcome: DiagnosisOutcome;
-    basis: string | null;
-    confidence: string | null;
-    policy_eligible: boolean | null;
-    policy_basis: LoadedDecision['policyBasis'];
-  }>(
-    `SELECT id, outcome, basis, confidence, policy_eligible, policy_basis
+  const { rows } = await getPool().query<DecisionQueryRow>(
+    `SELECT ${DECISION_COLUMNS}
      FROM diagnosis_decisions
      WHERE error_group_id = $1 AND project_id = $2
      ORDER BY decided_at DESC, id DESC
      LIMIT 1`,
     [errorGroupId, projectId],
   );
-  const row = rows[0];
-  if (!row || !row.basis || !row.confidence) return null;
-  return {
-    id: row.id,
-    outcome: row.outcome,
-    basis: row.basis as DerivedDecision['basis'],
-    confidence: row.confidence as ConfidenceLevel,
-    policyEligible: row.policy_eligible,
-    policyBasis: row.policy_basis,
-  };
+  return rowToLoadedDecision(rows[0]);
 }
 
 export async function loadDiagnosisDecisionForSource(
@@ -176,31 +230,15 @@ export async function loadDiagnosisDecisionForSource(
   sourceJobId: string | null,
 ): Promise<LoadedDecision | null> {
   if (sourceJobId === null) return loadDiagnosisDecision(errorGroupId, projectId);
-  const { rows } = await getPool().query<{
-    id: string;
-    outcome: DiagnosisOutcome;
-    basis: string | null;
-    confidence: string | null;
-    policy_eligible: boolean | null;
-    policy_basis: LoadedDecision['policyBasis'];
-  }>(
-    `SELECT id, outcome, basis, confidence, policy_eligible, policy_basis
+  const { rows } = await getPool().query<DecisionQueryRow>(
+    `SELECT ${DECISION_COLUMNS}
      FROM diagnosis_decisions
      WHERE error_group_id = $1 AND project_id = $2 AND job_id = $3
      ORDER BY decided_at DESC, id DESC
      LIMIT 1`,
     [errorGroupId, projectId, sourceJobId],
   );
-  const row = rows[0];
-  if (!row || !row.basis || !row.confidence) return null;
-  return {
-    id: row.id,
-    outcome: row.outcome,
-    basis: row.basis as DerivedDecision['basis'],
-    confidence: row.confidence as ConfidenceLevel,
-    policyEligible: row.policy_eligible,
-    policyBasis: row.policy_basis,
-  };
+  return rowToLoadedDecision(rows[0]);
 }
 
 export interface ImpactBar {

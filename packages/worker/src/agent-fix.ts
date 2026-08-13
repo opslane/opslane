@@ -545,6 +545,10 @@ async function runAgentFixCore(input: AgentFixInput): Promise<AgentFixResult> {
           outcome: investigation.outcome,
           basis: investigation.decisionBasis,
           confidence: investigation.confidence,
+          // Without this, an external_system conclusion reached through the
+          // inline-investigation path labels unfixable_infra while the same
+          // verdict through processInvestigateJob labels unfixable_third_party.
+          causeKind: investigation.adjudication?.cause_kind,
         });
         return {
           status: 'needs_human',
@@ -959,6 +963,11 @@ async function runAgentFixCore(input: AgentFixInput): Promise<AgentFixResult> {
           const decision = deriveOutcome(
             declined,
             (cited) => (trackedFiles.has(cited) ? cited : null),
+            // The decline adapter has no repository checkout to ground quotes
+            // against, and adjudicationFromDecline emits the legacy shape
+            // (no rejected_candidates), so this predicate is unreachable —
+            // it exists to satisfy the signature, not to route.
+            () => false,
           );
           agentState.giveUpReason = buildReason(
             reasonCodeForDecision(decision),
