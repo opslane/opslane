@@ -43,7 +43,7 @@ The issue list filters by environment, and each issue carries per-environment co
 
 By default, an issue in any environment can trigger an investigation, and investigations cost real money and can open pull requests. If you don't want staging errors doing that, enable the action scope under **Settings → Environments** and pick the environments that may trigger automation.
 
-- Events outside the scope still ingest, group, and count in the rollups. Scope controls automation, not data.
+- Events outside the scope still ingest, group, and show up in the per-environment counts. Scope controls automation, not data.
 - The scope fails closed: enabled with an empty list means no environment triggers automation.
 - Manually triggered fixes bypass the scope; clicking the button is the authorization.
 - Projects that never enable scoping behave exactly as before.
