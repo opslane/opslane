@@ -5,7 +5,7 @@ covers:
 ---
 # API keys
 
-A project has two kinds of keys, and they can't do each other's jobs.
+A project has two kinds of keys. Each has one permitted action, enforced by the server.
 
 | | Ingest key | Source-map key |
 | --- | --- | --- |
@@ -58,4 +58,4 @@ Minting never revokes, and a project can hold any number of active keys per scop
 ## When a key is rejected
 
 - `401`: the key doesn't parse or was revoked. Copy the full value; a truncated key can't parse.
-- `403 insufficient_scope`: a real key doing the other key's job, usually a source-map key sent with events.
+- `403 insufficient_scope`: a valid key with the wrong scope, usually a source-map key sent with events.
