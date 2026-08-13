@@ -58,6 +58,7 @@ export default defineConfig({
             { label: 'Source maps', slug: 'guides/source-maps' },
             { label: 'Connecting GitHub', slug: 'guides/github-app' },
             { label: 'Environments', slug: 'guides/environments' },
+            { label: 'API keys', slug: 'guides/api-keys' },
             { label: 'Slack notifications', slug: 'guides/slack-notifications' },
             { label: 'Replay privacy and masking', slug: 'guides/replay-privacy' },
           ],

@@ -1,6 +1,26 @@
 {
   "version": 1,
   "documents": {
+    "docs/guides/api-keys.md": {
+      "fences": [
+        {
+          "language": "bash",
+          "classification": "config-template"
+        },
+        {
+          "language": "bash",
+          "classification": "config-template"
+        },
+        {
+          "language": "bash",
+          "classification": "illustrative"
+        },
+        {
+          "language": "bash",
+          "classification": "illustrative"
+        }
+      ]
+    },
     "docs/guides/environments.md": {
       "fences": [
         {
