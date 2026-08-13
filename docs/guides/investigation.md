@@ -20,12 +20,12 @@ The investigator reads files; it executes nothing. Code runs later, in the sandb
 
 ## The evidence bar
 
-The result must name the cause and cite the files the investigator read at the recorded commit. Opslane checks every citation. A citation fails when the file is missing at that commit, when the agent never opened it, or when the quoted text is boilerplate. When a check fails, Opslane hides the analysis and shows a plain reason on the issue.
+The result must name the cause and cite the files the investigator read at the recorded commit. Opslane checks every citation. A citation fails when the file does not resolve at that commit, or when the agent never opened it. A cause statement that reads as placeholder text is rejected outright. When a check fails, Opslane hides the analysis and shows a plain reason on the issue.
 
 ## The four outcomes
 
-- **A fix attempt.** The cause is in your code and confidence is high. See [When Opslane opens a pull request](fix-prs.md).
-- **An analysis for you.** The cause is in your code and confidence is medium. The analysis appears on the issue with a fix button.
+- **A fix attempt.** The cause is in your code and the issue reached the impact bar: at least one signed-in user, or three anonymous sessions in the last seven days. See [When Opslane opens a pull request](fix-prs.md).
+- **An analysis for you.** The cause is in your code, but the issue has not reached enough users yet. The analysis appears on the issue with a fix button.
 - **A finding outside your code.** The user pain is real and the cause sits outside your code. The issue closes as an insight, not a pull request.
 - **A stop with a reason.** The evidence or credential Opslane needs is missing. The issue records a reason code and a suggested next step.
 

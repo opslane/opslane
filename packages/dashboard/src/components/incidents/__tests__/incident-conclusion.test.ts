@@ -9,6 +9,7 @@ const base: Incident = {
   id: 'i1', project_id: 'p1', kind: 'error', fingerprint: 'fp', title: 'Crash',
   status: 'investigated', first_seen: '2026-08-11T00:00:00Z', last_seen: '2026-08-11T00:00:00Z',
   occurrence_count: 1, affected_users_count: 1, confidence: 'high',
+  story: '1 crash; recording impact unavailable',
   root_cause: 'placeholder', suggested_mitigation: 'change it',
 };
 

@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 import type { Incident } from '../../types/api';
-import { GITHUB_PR_URL_OPTIONS, safeUrl } from '../../utils';
 
 const props = defineProps<{ incident: Incident }>();
 
@@ -17,7 +16,6 @@ const title = computed(() => {
   }
 });
 
-const prUrl = computed(() => safeUrl(props.incident.pr_url, GITHUB_PR_URL_OPTIONS));
 const causeHidden = computed(() =>
   props.incident.investigation_readiness === 'ineligible'
   || props.incident.investigation_readiness === 'pending',
@@ -53,14 +51,6 @@ const causeHidden = computed(() =>
       <p class="mt-2 whitespace-pre-wrap text-sm leading-6 text-text" v-text="incident.reason.remediation"></p>
       <p class="mt-2 font-mono text-xs text-muted">{{ incident.reason.reason_code }}</p>
     </div>
-
-    <a
-      v-if="prUrl"
-      :href="prUrl"
-      target="_blank"
-      rel="noopener noreferrer"
-      class="mt-5 inline-flex min-h-10 items-center border-b-2 border-accent text-sm font-semibold text-text hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
-    >Open pull request <span aria-hidden="true" class="ml-2">↗</span></a>
 
     <div class="mt-5 border-t border-border pt-4">
       <slot name="actions" />

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { frictionFingerprint } from '../fingerprint.js';
+import { frictionFingerprint, normalizePageUrl } from '../fingerprint.js';
 
 describe('frictionFingerprint positional normalization', () => {
   it('collapses nth-of-type variants of the same element into one bucket', () => {
@@ -50,5 +50,26 @@ describe('frictionFingerprint positional normalization', () => {
   it('treats a null selector as an empty selector', () => {
     expect(frictionFingerprint('dead_click', null, '/x'))
       .toBe(frictionFingerprint('dead_click', '', '/x'));
+  });
+
+  it('keeps one identity across origin rotations but separates pages', () => {
+    const first = frictionFingerprint(
+      'dead_click',
+      '#save',
+      normalizePageUrl('https://a.cdn.test/checkout'),
+    );
+    const rotated = frictionFingerprint(
+      'dead_click',
+      '#save',
+      normalizePageUrl('https://b.cdn.test/checkout'),
+    );
+    const otherPage = frictionFingerprint(
+      'dead_click',
+      '#save',
+      normalizePageUrl('https://b.cdn.test/orders'),
+    );
+
+    expect(first).toBe(rotated);
+    expect(first).not.toBe(otherPage);
   });
 });

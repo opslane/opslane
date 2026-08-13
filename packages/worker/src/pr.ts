@@ -14,7 +14,9 @@ import {
   escapeInlineCode,
   normalizeProse,
   renderPRSections,
+  storyLine,
   type FixNarrative,
+  type StoryImpact,
 } from './narrative.js';
 import { formatRuntime, type RuntimeInfo } from './runtime-info.js';
 import type { LedgerEntry, LedgerRecorder, TierRecord } from './verification-ledger.js';
@@ -102,6 +104,9 @@ export interface PRInput {
   ledgerRoles?: ReturnType<LedgerRecorder['roles']>;
   tierRecord?: TierRecord;
   judge?: EvidenceRecord['judge'];
+  occurrenceCount?: number | null;
+  impact?: StoryImpact | null;
+  watchUrl?: string | null;
 }
 
 export type PRResult =
@@ -383,32 +388,87 @@ function tierLine(record: TierRecord): string {
 function buildLedgerLines(input: PRInput): string[] | null {
   if (!input.ledger || !input.ledgerRoles || !input.tierRecord) return null;
   const roles = new Map(input.ledgerRoles.map((role) => [role.entrySeq, role]));
-  const byRole = (role: string) => input.ledger!.filter((entry) => roles.get(entry.entrySeq)?.role === role);
-  const latest = (role: string) => byRole(role).at(-1);
-  const red = latest('repro_red');
-  const green = latest('repro_green');
-  const suite = latest('suite_post_patch');
-  const build = latest('build');
+  const entries = [...input.ledger].sort((left, right) => left.entrySeq - right.entrySeq);
+  // The role phrasing describes an attempt's FINAL state, so it applies only
+  // to the last entry recorded for each role: an infra-retried role records
+  // twice, and rendering both with role phrasing would print contradictory
+  // red/green claims for the same check.
+  const lastSeqByRole = new Map<string, number>();
+  for (const entry of entries) {
+    const role = roles.get(entry.entrySeq);
+    if (role) lastSeqByRole.set(role.role, entry.entrySeq);
+  }
   const lines = ['### Verification (executed)', tierLine(input.tierRecord)];
   if (input.tierRecord.tier === 'checked' && input.tierRecord.reproductionImpossibleReason) {
     lines.push(`Agent declaration: “${sanitizeInline(input.tierRecord.reproductionImpossibleReason, 600)}”`);
   }
-  if (red) {
-    const matched = roles.get(red.entrySeq)?.assertionMatched === true;
-    lines.push(`- ${red.failed && matched ? '✅' : '❌'} \`${sanitizeInline(red.command, 500)}\` — failed as declared on base \`${sanitizeInline(red.commitSha.slice(0, 12), 12)}\`${matched ? ' (assertion matched)' : ''}`);
+  for (const entry of entries) {
+    const roleEntry = roles.get(entry.entrySeq);
+    const superseded = roleEntry !== undefined && lastSeqByRole.get(roleEntry.role) !== entry.entrySeq;
+    const role = superseded ? undefined : roleEntry;
+    if (role?.role === 'suite_baseline') {
+      // The baseline is an observation, never a gate: pre-existing failures
+      // are the comparison point for the post-patch run, not a red mark.
+      const failedPart = (entry.failed ?? 0) > 0 ? `${entry.failed} pre-existing failures` : 'no failures';
+      lines.push(`- ✅ baseline suite: ${entry.passed ?? 0} passed, ${failedPart} on \`${sanitizeInline(entry.commitSha.slice(0, 12), 12)}\` (compared below)`);
+      continue;
+    }
+    if (role?.role === 'repro_red') {
+      const matched = role.assertionMatched === true;
+      lines.push(`- ${entry.failed && matched ? '✅' : '❌'} \`${sanitizeInline(entry.command, 500)}\` — failed as declared on base \`${sanitizeInline(entry.commitSha.slice(0, 12), 12)}\`${matched ? ' (assertion matched)' : ''}`);
+      continue;
+    }
+    if (role?.role === 'repro_green') {
+      lines.push(`- ${entry.failed === 0 ? '✅' : '❌'} declared test green with the fix on \`${sanitizeInline(entry.commitSha.slice(0, 12), 12)}\``);
+      continue;
+    }
+    if (role?.role === 'suite_post_patch') {
+      const newFailures = input.evidence?.suite?.new_failures.length ?? entry.failed ?? 0;
+      lines.push(`- ${newFailures === 0 ? '✅' : '❌'} suite: ${entry.passed ?? 0} passed, ${newFailures} new failures (baseline compared)`);
+      continue;
+    }
+    if (role?.role === 'build') {
+      lines.push(`- ${entry.failed === 0 ? '✅' : '❌'} build ${entry.failed === 0 ? 'passed' : 'failed'}`);
+      continue;
+    }
+
+    const mark = entry.timedOut || entry.truncated ? '⚠️' : (entry.failed ?? 0) === 0 ? '✅' : '❌';
+    const counts = [
+      entry.passed === null ? null : `${entry.passed} passed`,
+      entry.failed === null ? null : `${entry.failed} failed`,
+      entry.skipped !== null && entry.skipped > 0 ? `${entry.skipped} skipped` : null,
+    ].filter((part): part is string => part !== null);
+    const countSummary = counts.length > 0
+      ? counts.join(', ')
+      : entry.timedOut || entry.truncated ? 'counts unavailable' : 'completed';
+    let line = `- ${mark} \`${sanitizeInline(entry.command, 500)}\` — ${countSummary} on \`${sanitizeInline(entry.commitSha.slice(0, 12), 12)}\``;
+    if (entry.truncated) line += ' — output truncated';
+    if (entry.timedOut) line += ' — timed out';
+    if (entry.workdirDirty) line += ' (dirty worktree)';
+    if (superseded) line += ' — superseded by the retry below';
+    lines.push(line);
   }
-  if (green) {
-    lines.push(`- ${green.failed === 0 ? '✅' : '❌'} declared test green with the fix on \`${sanitizeInline(green.commitSha.slice(0, 12), 12)}\``);
-  }
-  if (suite) {
-    const newFailures = input.evidence?.suite?.new_failures.length ?? suite.failed ?? 0;
-    lines.push(`- ${newFailures === 0 ? '✅' : '❌'} suite: ${suite.passed ?? 0} passed, ${newFailures} new failures (baseline compared)`);
-  }
-  if (build) lines.push(`- ${build.failed === 0 ? '✅' : '❌'} build ${build.failed === 0 ? 'passed' : 'failed'}`);
-  const notRun = [...new Set(input.ledger.flatMap((entry) => entry.notRun))];
+  const notRun = [...new Set(entries.flatMap((entry) => entry.notRun))];
   lines.push(`Not run: ${notRun.length > 0 ? notRun.join(', ') : '(none)'}`);
   lines.push(...ciStatusLines(input.evidence));
   return lines;
+}
+
+function buildImpactSection(input: PRInput): string | null {
+  if (input.occurrenceCount == null) return null;
+  const [noun, nouns] = input.kind === 'friction'
+    ? ['friction signal', 'friction signals']
+    : ['crash', 'crashes'];
+  const story = storyLine(
+    noun,
+    nouns,
+    input.occurrenceCount,
+    input.impact ?? { class: null, visits: null, recovered: null },
+  );
+  const watch = input.watchUrl
+    ? `\n▶ [Watch a recording of the failure →](${input.watchUrl})`
+    : '';
+  return `### What users hit\n${story}${watch}`;
 }
 
 export function buildVerificationSection(input: PRInput): string {
@@ -480,6 +540,7 @@ export function buildPRBody(input: PRInput): string {
     const sections = renderPRSections(narrative);
     return [
       `## ${sections.title}`,
+      buildImpactSection(input),
       buildEnvironmentLine(input.environmentNames, input.environmentTotal),
       '### What happened',
       sections.whatHappened,
@@ -504,6 +565,7 @@ export function buildPRBody(input: PRInput): string {
 
   return [
     `## 💡 Opslane suggestion: ${sanitizeInline(input.title, 120)}`,
+    buildImpactSection(input),
     buildEnvironmentLine(input.environmentNames, input.environmentTotal),
     buildHumanSummary(input),
     '### The fix',
