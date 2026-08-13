@@ -363,10 +363,26 @@ export interface Incident {
   verification_evidence?: EvidenceRecord;
   /** Candidate diff preserved on needs_human for manual review. */
   candidate_diff?: string;
+  impact_class?: 'blocked' | 'degraded' | 'invisible';
+  impact_visits?: number;
+  impact_visits_recovered?: number;
+  story: string;
+  receipt_state?: 'pr_open' | 'attempt_failed_with_diff' | 'attempt_failed_no_diff' | 'report_ready';
+  receipt_line?: string;
+  recordings?: IncidentRecording[];
   visual_summary?: string;
   merged_at?: string;
   resolved_at?: string;
   archived_at?: string;
+}
+
+export interface IncidentRecording {
+  session_id: string;
+  started_at: string;
+  /** Recorded span in ms, gaps included. */
+  duration_ms: number;
+  crash_count: number;
+  anchor_ms: number;
 }
 
 /** Sample event for an error group, served by

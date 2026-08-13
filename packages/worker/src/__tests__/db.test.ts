@@ -28,6 +28,8 @@ import {
   getGroupImpactBar,
   getFrictionGroupImpactBar,
   insertFixRunLedger,
+  getErrorGroup,
+  getWatchableSessionForGroup,
 } from '../db.js';
 import { createLedgerRecorder } from '../verification-ledger.js';
 
@@ -192,6 +194,58 @@ describeDb('db.ts integration tests', () => {
       [testProjectId],
     );
     await testPool.query(`DELETE FROM error_groups WHERE project_id = $1`, [testProjectId]);
+  });
+
+  describe('C5 impact and watchability reads', () => {
+    it('parses impact BIGINTs and returns only a coverage-proven session', async () => {
+      const { errorGroupId } = await seedErrorGroupAndJob();
+      await testPool.query(
+        `UPDATE error_groups
+            SET impact_class='degraded', impact_visits=3, impact_visits_recovered=1
+          WHERE id=$1 AND project_id=$2`,
+        [errorGroupId, testProjectId],
+      );
+      const group = await getErrorGroup(errorGroupId, testProjectId);
+      expect(group).toMatchObject({
+        impact_class: 'degraded', impact_visits: 3, impact_visits_recovered: 1,
+      });
+      expect(typeof group?.impact_visits).toBe('number');
+
+      const env = await testPool.query<{ id: string }>(
+        `INSERT INTO environments (project_id, name) VALUES ($1,$2) RETURNING id`,
+        [testProjectId, `watch-${crypto.randomUUID()}`],
+      );
+      const sessionId = `sess-${crypto.randomUUID()}`;
+      const anchor = new Date(Date.now() - 60_000);
+      await testPool.query(
+        `INSERT INTO sessions (id, project_id, environment_id, started_at)
+         VALUES ($1,$2,$3,$4)`,
+        [sessionId, testProjectId, env.rows[0]!.id, anchor],
+      );
+      await testPool.query(
+        `INSERT INTO error_events
+          (project_id, environment_id, error_group_id, session_id, "timestamp", error_type, error_message, stack_trace_raw)
+         VALUES ($1,$2,$3,$4,$5,'TypeError','boom','at test')`,
+        [testProjectId, env.rows[0]!.id, errorGroupId, sessionId, anchor],
+      );
+      const spans = [[-20_000, -8_000], [-8_000, 2_000], [2_000, 16_000]];
+      for (const [index, span] of spans.entries()) {
+        await testPool.query(
+          `INSERT INTO session_chunks
+            (session_id,seq,project_id,object_key,has_full_snapshot,scrubbed_at,first_event_ms,last_event_ms)
+           VALUES ($1,$2,$3,$4,$5,now(),$6,$7)`,
+          [sessionId, index, testProjectId, `watch/${sessionId}/${index}`, index === 0,
+            anchor.getTime() + span[0]!, anchor.getTime() + span[1]!],
+        );
+      }
+
+      const watchable = await getWatchableSessionForGroup(testProjectId, errorGroupId);
+      expect(watchable).toEqual({ sessionId, anchorMs: anchor.getTime() });
+      expect(typeof watchable?.anchorMs).toBe('number');
+
+      await testPool.query(`UPDATE session_chunks SET has_full_snapshot=false WHERE session_id=$1`, [sessionId]);
+      expect(await getWatchableSessionForGroup(testProjectId, errorGroupId)).toBeNull();
+    });
   });
 
   describe('diagnosis decisions', () => {
