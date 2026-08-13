@@ -79,7 +79,7 @@ See [replay privacy and masking](../guides/replay-privacy.md) for what replay da
 - **User sessions** are JWTs signed with `JWT_SECRET`, mated with rotating refresh-token families (token hashes only in the database).
 - **Passwords** (when password authentication is enabled) are not stored locally — registration, authentication, and reset are handled by the configured identity provider (WorkOS).
 - **GitHub App private key**, **Langfuse credentials** (`LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_BASE_URL`), and other worker credentials are environment variables — supplied by your deployment, never written to the database.
-- **Internal read token** (`INTERNAL_READ_TOKEN`) is an environment variable — supplied by your deployment, never written to the database.
+- **Internal read token** (`INTERNAL_READ_TOKEN`) is an environment variable — supplied by your deployment, never written to the database. Authenticates internal operational endpoints.
 - **Notification webhook URLs** are encrypted at rest in the database; the encryption key is supplied as an environment variable.
 - **Agent onboarding sessions** store poll tokens as hashes and API keys sealed with ephemeral agent public keys (24-hour expiry); raw values are shown once at provisioning. Provisioning requires admin role.
 - **Pending OAuth verification tokens** from identity providers are sealed and stored temporarily (10-minute TTL) during email verification flows; the encryption key is supplied as an environment variable.
