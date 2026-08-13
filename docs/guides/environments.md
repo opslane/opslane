@@ -39,14 +39,16 @@ Every project starts with `production` as its default. The default is where even
 
 The issue list filters by environment, and each issue carries per-environment counts, so a staging-only bug shows up as staging-only. A fresh browser session opens the issue list filtered to the project's default environment; choosing "all environments" sticks across reloads.
 
-## Scope automation by environment
+## Limit automatic error investigation by environment
 
-By default, an issue in any environment can trigger an investigation, and investigations cost real money and can open pull requests. If you don't want staging errors doing that, enable the action scope under **Settings → Environments** and pick the environments that may trigger automation.
+By default, an error in any environment can trigger an investigation, and investigations cost real money and can open pull requests. If you don't want staging errors doing that, enable the scope under **Settings → Environments** and pick the environments allowed to trigger error investigation.
 
-- Events outside the scope still ingest, group, and show up in the per-environment counts. Scope controls automation, not data.
-- The scope fails closed: enabled with an empty list means no environment triggers automation.
+- Events outside the scope still ingest, group, and show up in the per-environment counts. The scope controls investigation, not data.
+- The scope fails closed: enabled with an empty list means no environment triggers an error investigation.
 - Manually triggered fixes bypass the scope.
-- Projects that never enable scoping behave exactly as before.
+- Projects that never enable the scope behave exactly as before.
+
+The scope covers error investigation only. Session recording, session analysis, friction issues, and the fix pull requests the friction pipeline opens under your autonomy setting run in every environment regardless of the scope.
 
 ## If staging traffic shows up as production
 

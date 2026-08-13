@@ -54,7 +54,7 @@ Honesty requires the other side of the ledger:
 - **Green repository CI varies in strength.** A lint-only workflow can promote a draft. The evidence names the checks observed so reviewers can judge what actually ran.
 - **The root cause may be deeper.** The fix addresses the error as observed; an underlying design issue can produce the same class of error elsewhere.
 - **No performance or security review.** The gate checks behavior via tests, not resource usage, latency, or vulnerability introduction. Review PRs as you would a human contractor's.
-- **Reproduction is not always possible.** Errors without app stack frames, without source maps, or originating in third-party code are declared unfixable rather than guessed at; investigations that read no repository files or provide no evidence citations are rejected as incomplete — that is the gate working, not failing.
+- **Reproduction is not always possible.** Errors without app stack frames, without source maps, or originating in third-party code are declared unfixable rather than guessed at; investigations that read no repository files or cite code not found at the claimed location are rejected as incomplete — that is the gate working, not failing.
 
 ## Why the gate is strict
 
