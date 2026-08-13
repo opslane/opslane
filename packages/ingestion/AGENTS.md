@@ -15,3 +15,14 @@ The ingestion service is the Go API and owns grouping, persistence, migrations, 
 - For focused database or handler work, run `go test ./db ./handler` while iterating.
 - Apply migration SQL to a disposable clean database and a representative existing database, then reapply it to verify idempotency.
 - Build the ingestion Compose image after Dockerfile changes.
+
+## Grouping
+
+- `GROUPING_DEBUG_ID_FRAMES` (default `false`, read once at start-up) keys
+  JavaScript stack frames on `debug_meta` debug IDs instead of bundle URLs.
+  Roll it out to every ingestion task BEFORE flipping it: flag-on and flag-off
+  instances key the same event differently. Enabling it re-keys every JS group
+  carrying `debug_meta` and each re-keyed group alerts once as new. A bug whose
+  events do not all carry matching `debug_meta` will split permanently between
+  the two keys. It does not address per-deploy splintering — debug IDs change
+  per deploy (see #77).
