@@ -1,11 +1,11 @@
 ---
 title: Opslane documentation
-description: Set up Opslane and understand how it turns browser errors into verified fix pull requests or explicit incidents.
+description: What Opslane is, how to set it up, and how it investigates errors and opens tested fix pull requests.
 template: splash
 hero:
-  tagline: Errors in, verified fix PRs out — or an explicit incident that says why not.
+  tagline: Error trackers see stack traces. Opslane knows your product.
   actions:
-    - text: Self-host quickstart
+    - text: Self-host Opslane
       link: /quickstart/self-host/
       icon: right-arrow
     - text: Install the SDK
@@ -15,27 +15,50 @@ hero:
 
 import { CardGrid, LinkCard } from '@astrojs/starlight/components';
 
+## What Opslane is
+
+Opslane watches errors and session recordings from your app and turns them into a short list of issues. It picks the issues worth fixing and investigates them against your repository. A fix that builds and passes your tests in a sandbox opens as a pull request. When it can't fix something, it says why. A daily digest keeps you out of the dashboard.
+
+## Where to start
+
+Setting it up: the [self-host quickstart](/quickstart/self-host/) runs the stack with Docker Compose, then the [install guide](/install/) adds the SDK to your app and [connecting GitHub](/guides/github-app/) unlocks pull requests.
+
+Evaluating it: the [architecture overview](/architecture/overview/) shows the pieces and the trust boundaries, [life of an error](/architecture/life-of-an-error/) follows one error through the pipeline, and [trust and security](/architecture/trust/) lists exactly what leaves your host.
+
 <CardGrid>
   <LinkCard
     title="Self-host quickstart"
-    description="Run Opslane locally, connect the required services, and send a first error."
+    description="Run the stack locally and send it a first error. No accounts or API keys for the first run."
     href="/quickstart/self-host/"
   />
   <LinkCard
     title="Install the SDK"
-    description="Capture browser errors from React, Vue, or vanilla JavaScript."
+    description="Capture errors from React, Vue, or vanilla JavaScript."
     href="/install/"
   />
   <LinkCard
-    title="How it works"
-    description="Follow an error from ingestion through investigation, verification, and resolution."
-    href="/architecture/life-of-an-error/"
+    title="Architecture overview"
+    description="The components, the trust boundaries, and why there is no queue to operate."
+    href="/architecture/overview/"
   />
   <LinkCard
-    title="Reference"
-    description="Use contracts and reference tables that are drift-checked against source in CI."
-    href="/reference/sdk-options/"
+    title="Trust and security"
+    description="What each external service receives, and what never leaves your host."
+    href="/architecture/trust/"
   />
 </CardGrid>
 
-The browser and Python SDKs and shared types are MIT licensed. Server, worker, agent-core, dashboard, CLI, eval, and test code are AGPL-3.0-only.
+## How the docs are organized
+
+**Start here** covers setup: self-hosting the stack and installing the SDK. **Guides** each cover one task, from uploading source maps to Slack notifications. **Architecture** explains the system for someone deciding whether to trust it. **Reference** tables (SDK options, HTTP routes, environment variables, reason codes) are checked against source on every CI run. **Contracts** are the promises that hold across versions.
+
+## What Opslane is not
+
+- **Not an APM or metrics backend.** Opslane ingests application errors and the session context around them: breadcrumbs, network timing, and optional replays. It does not do latency percentiles, distributed tracing, or infrastructure monitoring.
+- **Not autopilot.** Opslane opens pull requests but never merges them. Review and merge stay with the repository owner.
+- **Not a dashboard to babysit.** Conclusions ship as PRs and issues; the dashboard exists for replays and settings, not triage duty.
+- **Pre-1.0.** The [`POST /api/v1/events` wire contract](/contracts/events/) is append-only and backward-compatible. Other interfaces may still change before 1.0.
+
+## Licensing
+
+The SDKs and shared types that run in *your* application are MIT. The rest of Opslane, including the server, worker, agent core, dashboard, CLI, and this docs site, is AGPL-3.0-only.
