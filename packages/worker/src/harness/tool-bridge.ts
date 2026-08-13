@@ -249,8 +249,14 @@ export function createToolBridge(
             type: 'array', minItems: 1, maxItems: 5, items: { type: 'string' },
             description: 'Repo-relative paths of every file the test needs that you added or modified.',
           },
-          identifier: { type: 'string', maxLength: 300 },
-          expected_assertion: { type: 'string', maxLength: 500 },
+          identifier: {
+            type: 'string', maxLength: 300,
+            description: 'The EXACT test title as written in the test file — the it()/test() name string (or the pytest node id path::test_name). The harness passes this verbatim to the runner\'s test-name filter (vitest -t or the pytest node id); a function-style or paraphrased name matches nothing and voids the attempt. No single quotes or backslashes.',
+          },
+          expected_assertion: {
+            type: 'string', maxLength: 500,
+            description: 'A distinctive substring of the runner\'s FAILURE OUTPUT when this test fails on the unfixed code — the assertion message itself, e.g.: expected \'a\' to be \'b\'. The harness checks that the base run\'s failure text contains this string verbatim. A prose description of the bug will never match and voids the attempt.',
+          },
         },
         required: ['test_files', 'identifier', 'expected_assertion'],
       },

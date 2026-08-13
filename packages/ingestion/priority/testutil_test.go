@@ -48,6 +48,7 @@ func seedTenant(t *testing.T, pool *pgxpool.Pool, repo *string) (orgID, projectI
 	t.Cleanup(func() {
 		queries := []string{
 			`DELETE FROM error_group_jobs WHERE project_id = $1`,
+			`DELETE FROM route_map_migration_conflicts WHERE project_id = $1`,
 			`DELETE FROM route_map WHERE project_id = $1`,
 			`DELETE FROM friction_signals WHERE project_id = $1`,
 			`DELETE FROM sessions WHERE project_id = $1`,

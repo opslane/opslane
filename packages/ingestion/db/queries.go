@@ -420,6 +420,10 @@ type ErrorGroup struct {
 	InvestigationReadiness *string
 	VerificationEvidence   []byte
 	CandidateDiff          *string
+	ImpactClass            *string
+	ImpactVisits           *int64
+	ImpactVisitsRecovered  *int64
+	HasSavedDiff           bool
 	SignalType             *string
 	ElementSelector        *string
 	PageURLNormalized      *string
@@ -884,6 +888,8 @@ func (q *Queries) ListErrorGroups(ctx context.Context, projectID string, filters
 		               eg.environment_id, eg.adjudication_status,
 		               eg.reason_code, eg.reason_message, eg.remediation,
 		               eg.confidence, eg.pr_url, eg.root_cause, eg.suggested_mitigation, dr.status,
+		               eg.impact_class, eg.impact_visits, eg.impact_visits_recovered,
+		               NULLIF(btrim(eg.candidate_diff), '') IS NOT NULL AS has_saved_diff,
 		               eg.signal_type, eg.element_selector, eg.page_url_normalized,
 		               eg.priority_score, eg.priority_inputs, eg.priority_scored_at,
 		               eg.created_at, eg.updated_at,
@@ -974,6 +980,8 @@ func (q *Queries) ListErrorGroups(ctx context.Context, projectID string, filters
 		       eg.environment_id, eg.adjudication_status,
 		       eg.reason_code, eg.reason_message, eg.remediation,
 		       eg.confidence, eg.pr_url, eg.root_cause, eg.suggested_mitigation, dr.status,
+		       eg.impact_class, eg.impact_visits, eg.impact_visits_recovered,
+		       NULLIF(btrim(eg.candidate_diff), '') IS NOT NULL AS has_saved_diff,
 		       eg.signal_type, eg.element_selector, eg.page_url_normalized,
 		       candidates.priority_score, candidates.priority_inputs, candidates.priority_scored_at,
 		       eg.created_at, eg.updated_at,
@@ -1000,6 +1008,7 @@ func (q *Queries) ListErrorGroups(ctx context.Context, projectID string, filters
 			&g.EnvironmentID, &g.AdjudicationStatus,
 			&g.ReasonCode, &g.ReasonMessage, &g.Remediation,
 			&g.Confidence, &g.PrURL, &g.RootCause, &g.SuggestedMitigation, &g.InvestigationReadiness,
+			&g.ImpactClass, &g.ImpactVisits, &g.ImpactVisitsRecovered, &g.HasSavedDiff,
 			&g.SignalType, &g.ElementSelector, &g.PageURLNormalized,
 			&g.PriorityScore, &g.PriorityInputs, &g.PriorityScoredAt,
 			&g.CreatedAt, &g.UpdatedAt,
@@ -1158,6 +1167,8 @@ func (q *Queries) GetErrorGroup(ctx context.Context, projectID, groupID string) 
 		        g.reason_code, g.reason_message, g.remediation,
 		        g.confidence, g.pr_url, g.root_cause, g.suggested_mitigation, dr.status,
 		        g.verification_evidence, g.candidate_diff,
+		        g.impact_class, g.impact_visits, g.impact_visits_recovered,
+		        NULLIF(btrim(g.candidate_diff), '') IS NOT NULL AS has_saved_diff,
 		        g.signal_type, g.element_selector, g.page_url_normalized,
 		        g.priority_score, g.priority_inputs, g.priority_scored_at,
 		        g.created_at, g.updated_at,
@@ -1174,6 +1185,7 @@ func (q *Queries) GetErrorGroup(ctx context.Context, projectID, groupID string) 
 		&g.ReasonCode, &g.ReasonMessage, &g.Remediation,
 		&g.Confidence, &g.PrURL, &g.RootCause, &g.SuggestedMitigation, &g.InvestigationReadiness,
 		&g.VerificationEvidence, &g.CandidateDiff,
+		&g.ImpactClass, &g.ImpactVisits, &g.ImpactVisitsRecovered, &g.HasSavedDiff,
 		&g.SignalType, &g.ElementSelector, &g.PageURLNormalized,
 		&g.PriorityScore, &g.PriorityInputs, &g.PriorityScoredAt,
 		&g.CreatedAt, &g.UpdatedAt,
