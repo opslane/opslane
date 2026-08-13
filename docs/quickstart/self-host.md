@@ -76,7 +76,7 @@ One note on keys: a project has two key scopes. The seeded `opslane_pk_` **inges
 
 ## Path 2: full error-to-PR
 
-**What this proves:** the complete loop: error in, investigated, fix written, evidence collected in a sandbox, pull request out with its verification posture stated explicitly.
+**What this proves:** the complete loop: error in, investigated, fix written, evidence collected in a sandbox, pull request out, labeled ready or draft to match its evidence.
 
 Requires all of the following set in your environment **before** `docker compose up`:
 
@@ -93,7 +93,7 @@ You also need a **target repository the worker may open PRs against**. Use a for
 docker compose up -d --wait
 ```
 
-Then send an error that originates from code in that repository (install [`@opslane/sdk`](../../packages/sdk/README.md) in the fixture app, or replay a stack trace that matches its files). Watch the job:
+Then send an error that originates from code in that repository (install [`@opslane/sdk`](../../packages/sdk/README.md) in the fixture app, or resend a stack trace that matches its files). Watch the job:
 
 ```bash
 docker compose logs -f worker
