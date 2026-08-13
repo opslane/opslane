@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { parseAdjudication, parseLocations, seal, submitDiagnosisTool } from '../diagnose-schema.js';
+import { adjudicationFromDecline, parseAdjudication, parseLocations, seal, submitDiagnosisTool } from '../diagnose-schema.js';
+import { validateAdjudicationShape } from '../verdict-validation.js';
 
 const valid = {
   best_supported: 'The retry loop never resets its counter',
@@ -36,30 +37,97 @@ describe('submitDiagnosisTool', () => {
     const walk = (node: unknown): void => {
       if (!node || typeof node !== 'object') return;
       const schema = node as Record<string, unknown>;
-      if (schema['type'] === 'object') {
+      const type = schema['type'];
+      if (type === 'object' || (Array.isArray(type) && type.includes('object'))) {
         objects.push(schema);
         Object.values((schema['properties'] ?? {}) as Record<string, unknown>).forEach(walk);
       }
-      if (schema['type'] === 'array') walk(schema['items']);
+      if (type === 'array') walk(schema['items']);
     };
     walk(submitDiagnosisTool().input_schema);
 
-    // Root, candidates_considered items, cause_locations items, evidence items.
-    expect(objects.length).toBe(4);
-    for (const schema of objects) expect(schema['additionalProperties']).toBe(false);
+    expect(objects.length).toBeGreaterThan(4);
+    for (const schema of objects) {
+      expect(schema['additionalProperties']).toBe(false);
+      const keys = Object.keys((schema['properties'] ?? {}) as Record<string, unknown>);
+      expect(schema['required']).toEqual(expect.arrayContaining(keys));
+    }
   });
 
   it('requires every field routing depends on', () => {
     const required = (submitDiagnosisTool().input_schema as { required?: string[] }).required ?? [];
     expect(required).toEqual(expect.arrayContaining([
       'best_supported', 'evidence_strength', 'cause_kind', 'cause_locations',
-      'candidates_considered', 'rejected',
+      'candidates_considered', 'rejected', 'rejected_candidates',
       'evidence', 'agent_task_brief',
     ]));
   });
 
   it('exports the recursive strict-schema sealer', () => {
     expect(seal({ type: 'object', properties: {} })).toMatchObject({ additionalProperties: false });
+  });
+});
+
+describe('grounded candidate parsing', () => {
+  it('carries id, citation, and rejected_candidates through', () => {
+    const adj = parseAdjudication({
+      best_supported: 'x', evidence_check: '', cause_kind: 'external_system',
+      candidates_considered: [{ statement: 's', kind: 'local_code', id: 'c1',
+        citation: { path: 'src/a.ts', line: 3, quote: 'const alpha = 1' } }],
+      rejected: [],
+      rejected_candidates: [{ id: 'c1', evidence: 'not the cause',
+        citation: { path: 'src/a.ts', line: 3, quote: 'const alpha = 1' } }],
+      evidence_strength: 'suggestive', cause_locations: [], reasoning: '',
+      evidence: [{ path: 'src/a.ts', detail: 'd', symptomLink: 'l' }], agent_task_brief: '',
+    });
+    expect(adj?.candidates_considered[0]).toMatchObject({ id: 'c1', citation: { line: 3 } });
+    expect(adj?.rejected_candidates).toHaveLength(1);
+  });
+
+  it('normalizes malformed candidate grounding to undefined (validator judges sufficiency)', () => {
+    const adj = parseAdjudication({
+      best_supported: 'x', evidence_check: '', cause_kind: 'unknown',
+      candidates_considered: [{ statement: 's', kind: 'local_code', id: 42,
+        citation: { path: 'src/a.ts', line: 'three', quote: '' } }],
+      rejected: [], rejected_candidates: [], evidence_strength: 'insufficient', cause_locations: [], reasoning: '',
+      why_chain: [], reproduction_steps: [], evidence: [], agent_task_brief: '',
+    });
+    expect(adj?.candidates_considered[0]?.id).toBeUndefined();
+    expect(adj?.candidates_considered[0]?.citation).toBeUndefined();
+    expect(adj && validateAdjudicationShape(adj)).toMatchObject({
+      status: 'incomplete', reason: expect.stringMatching(/^candidate_missing_id:/),
+    });
+  });
+
+  it.each([
+    ['whitespace-only quote', '   '],
+    ['quote over 300 characters', 'x'.repeat(301)],
+  ])('rejects a local candidate with a %s at the submission boundary', (_name, quote) => {
+    const adj = parseAdjudication({
+      best_supported: 'x', evidence_check: '', cause_kind: 'external_system',
+      candidates_considered: [{ statement: 's', kind: 'local_code', id: 'c1',
+        citation: { path: 'src/a.ts', line: 3, quote } }],
+      rejected: [], rejected_candidates: [], evidence_strength: 'suggestive', cause_locations: [], reasoning: '',
+      why_chain: [], reproduction_steps: [], evidence: [], agent_task_brief: '',
+    });
+    expect(adj && validateAdjudicationShape(adj)).toMatchObject({
+      status: 'incomplete', reason: expect.stringMatching(/^candidate_missing_citation:/),
+    });
+  });
+
+  it('preserves malformed rejections as empty-field entries the validator can reject', () => {
+    const adj = parseAdjudication({
+      best_supported: 'x', evidence_check: '', cause_kind: 'external_system',
+      candidates_considered: [{ statement: 's', kind: 'local_code', id: 'c1',
+        citation: { path: 'src/a.ts', line: 3, quote: 'const alpha = 1' } }],
+      rejected: [], rejected_candidates: [{ id: 'not-an-id', evidence: 'e', citation: null }],
+      evidence_strength: 'suggestive', cause_locations: [], reasoning: '',
+      why_chain: [], reproduction_steps: [], evidence: [], agent_task_brief: '',
+    });
+    expect(adj?.rejected_candidates).toHaveLength(1);
+    expect(adj?.rejected_candidates?.[0]).toEqual({
+      id: '', evidence: 'e', citation: { path: '', line: 1, quote: '' },
+    });
   });
 });
 
@@ -165,5 +233,47 @@ describe('parseAdjudication', () => {
   it('falls back to unknown and insufficient on unrecognised enums', () => {
     expect(parseAdjudication({ ...valid, cause_kind: 'gremlins' })?.cause_kind).toBe('unknown');
     expect(parseAdjudication({ ...valid, evidence_strength: 'certain' })?.evidence_strength).toBe('insufficient');
+  });
+});
+
+describe('structural-shape hardening (review round)', () => {
+  const cite = { path: 'src/a.ts', line: 3, quote: 'const alpha = 1' };
+
+  it('a non-array rejected_candidates fails closed as a malformed sentinel', () => {
+    const adj = parseAdjudication({
+      best_supported: 'x', evidence_check: '', cause_kind: 'external_system',
+      candidates_considered: [{ statement: 's', kind: 'local_code', id: 'c1', citation: cite }],
+      rejected: [], rejected_candidates: 'none',
+      evidence_strength: 'suggestive', cause_locations: [], reasoning: '',
+      why_chain: [], reproduction_steps: [], evidence: [], agent_task_brief: '',
+    });
+    expect(adj?.rejected_candidates).toHaveLength(1);
+    expect(validateAdjudicationShape(adj!).status).toBe('incomplete');
+  });
+
+  it('quotes below the minimum length are dropped by the parser', () => {
+    const adj = parseAdjudication({
+      best_supported: 'x', evidence_check: '', cause_kind: 'unknown',
+      candidates_considered: [{ statement: 's', kind: 'local_code', id: 'c1',
+        citation: { path: 'src/a.ts', line: 3, quote: ';' } }],
+      rejected: [], rejected_candidates: [],
+      evidence_strength: 'insufficient', cause_locations: [], reasoning: '',
+      why_chain: [], reproduction_steps: [], evidence: [], agent_task_brief: '',
+    });
+    expect(adj?.candidates_considered[0]?.citation).toBeUndefined();
+  });
+
+  it('the decline adapter keeps emitting the legacy shape (grounding gate unaffected)', () => {
+    // If this ever changes, agent-fix's `() => false` quoteAt would turn every
+    // local candidate ungrounded and silently disable the unrejected-local
+    // gate on the decline path.
+    const declined = adjudicationFromDecline({
+      one_line_description: 'Cannot reproduce the failure',
+      cause_kind: 'external_system',
+      cause_locations: [],
+      why_chain: [], reproduction_steps: [], unknowns: [],
+    });
+    expect(declined?.rejected_candidates).toBeUndefined();
+    expect(declined?.candidates_considered).toEqual([]);
   });
 });

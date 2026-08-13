@@ -576,6 +576,220 @@ func TestWatchableSessionForGroup_CoverageAndCandidateFallback(t *testing.T) {
 	}
 }
 
+func TestRecordingsForGroup(t *testing.T) {
+	q, pool := sessionTestQueries(t)
+	ctx := context.Background()
+	projectID, envID := seedSessionProject(t, pool)
+	otherProjectID, _ := seedSessionProject(t, pool)
+	groupID := seedPointerGroup(t, pool, projectID, envID, "recordings-error", "error")
+	frictionID := seedPointerGroup(t, pool, projectID, envID, "recordings-friction", "friction")
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM error_events WHERE error_group_id=$1`, groupID)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM error_groups WHERE id IN ($1,$2)`, groupID, frictionID)
+	})
+
+	anchor := time.Now().UTC().Truncate(time.Millisecond).Add(-time.Minute)
+	insertEvent := func(sessionID string, at, createdAt time.Time) {
+		t.Helper()
+		if _, err := pool.Exec(ctx, `INSERT INTO error_events
+			(project_id, environment_id, error_group_id, session_id, "timestamp", error_type, error_message, stack_trace_raw, created_at)
+			VALUES ($1,$2,$3,$4,$5,'TypeError','boom','at test',$6)`,
+			projectID, envID, groupID, sessionID, at, createdAt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	coverSix := func(sessionID string) {
+		t.Helper()
+		for i := 0; i < 6; i++ {
+			first, last := anchor.Add(-20*time.Second).UnixMilli(), anchor.Add(20*time.Second).UnixMilli()
+			seedPointerChunk(t, pool, projectID, sessionID, i, &first, &last, i == 0, true)
+		}
+	}
+
+	sixChunkSession := newSessionID(t)
+	insertReadSession(t, q, pool, projectID, envID, nil, sixChunkSession, anchor)
+	coverSix(sixChunkSession)
+	insertEvent(sixChunkSession, anchor, anchor)
+
+	multiCrashSession := newSessionID(t)
+	insertReadSession(t, q, pool, projectID, envID, nil, multiCrashSession, anchor.Add(time.Second))
+	for seq, bounds := range [][2]time.Duration{
+		{-20 * time.Second, -8 * time.Second},
+		{-8 * time.Second, 2 * time.Second},
+		{2 * time.Second, 16 * time.Second},
+	} {
+		first, last := anchor.Add(bounds[0]).UnixMilli(), anchor.Add(bounds[1]).UnixMilli()
+		seedPointerChunk(t, pool, projectID, multiCrashSession, seq, &first, &last, seq == 0, true)
+	}
+	for i := 0; i < 3; i++ {
+		insertEvent(multiCrashSession, anchor.Add(time.Duration(i)*time.Millisecond), anchor.Add(time.Duration(i+1)*time.Second))
+	}
+
+	uncoveredSession := newSessionID(t)
+	insertReadSession(t, q, pool, projectID, envID, nil, uncoveredSession, anchor.Add(2*time.Second))
+	oneFirst, oneLast := anchor.UnixMilli(), anchor.UnixMilli()+1
+	seedPointerChunk(t, pool, projectID, uncoveredSession, 0, &oneFirst, &oneLast, true, true)
+	insertEvent(uncoveredSession, anchor, anchor.Add(10*time.Second))
+
+	noSnapshotSession := newSessionID(t)
+	insertReadSession(t, q, pool, projectID, envID, nil, noSnapshotSession, anchor.Add(3*time.Second))
+	first, last := anchor.Add(-20*time.Second).UnixMilli(), anchor.Add(20*time.Second).UnixMilli()
+	seedPointerChunk(t, pool, projectID, noSnapshotSession, 0, &first, &last, false, true)
+	insertEvent(noSnapshotSession, anchor, anchor.Add(11*time.Second))
+
+	recordings, err := q.RecordingsForGroup(ctx, groupID, projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recordings) != 2 {
+		t.Fatalf("recordings = %+v, want two covered sessions", recordings)
+	}
+	bySession := make(map[string]db.GroupRecording, len(recordings))
+	for _, recording := range recordings {
+		bySession[recording.SessionID] = recording
+	}
+	if got := bySession[sixChunkSession]; got.CrashCount != 1 || got.AnchorMs != anchor.UnixMilli() || got.DurationMs != 40_000 {
+		t.Fatalf("six-chunk recording = %+v", got)
+	}
+	if got := bySession[multiCrashSession]; got.CrashCount != 3 {
+		t.Fatalf("multi-crash recording = %+v", got)
+	}
+	if recordings[0].AnchorMs < recordings[1].AnchorMs {
+		t.Fatalf("recordings not anchor-descending: %+v", recordings)
+	}
+	if other, err := q.RecordingsForGroup(ctx, groupID, otherProjectID); err != nil || len(other) != 0 {
+		t.Fatalf("cross-project recordings = %+v, err=%v", other, err)
+	}
+	if friction, err := q.RecordingsForGroup(ctx, frictionID, projectID); err != nil || friction != nil {
+		t.Fatalf("friction recordings = %+v, err=%v", friction, err)
+	}
+}
+
+func TestRecordingsForGroupExcludesUnboundedAndDeletingSessions(t *testing.T) {
+	q, pool := sessionTestQueries(t)
+	ctx := context.Background()
+	projectID, envID := seedSessionProject(t, pool)
+	groupID := seedPointerGroup(t, pool, projectID, envID, "recordings-exclusions", "error")
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM error_events WHERE error_group_id=$1`, groupID)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM error_groups WHERE id=$1`, groupID)
+	})
+
+	anchor := time.Now().UTC().Truncate(time.Millisecond).Add(-time.Minute)
+	insertEvent := func(sessionID string) {
+		t.Helper()
+		if _, err := pool.Exec(ctx, `INSERT INTO error_events
+			(project_id, environment_id, error_group_id, session_id, "timestamp", error_type, error_message, stack_trace_raw)
+			VALUES ($1,$2,$3,$4,$5,'TypeError','boom','at test')`,
+			projectID, envID, groupID, sessionID, anchor); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	unbounded := newSessionID(t)
+	insertReadSession(t, q, pool, projectID, envID, nil, unbounded, anchor)
+	seedPointerChunk(t, pool, projectID, unbounded, 0, nil, nil, true, true)
+	insertEvent(unbounded)
+
+	deleting := newSessionID(t)
+	insertReadSession(t, q, pool, projectID, envID, nil, deleting, anchor)
+	first, last := anchor.Add(-20*time.Second).UnixMilli(), anchor.Add(20*time.Second).UnixMilli()
+	seedPointerChunk(t, pool, projectID, deleting, 0, &first, &last, true, true)
+	insertEvent(deleting)
+	if _, err := pool.Exec(ctx, `UPDATE sessions SET status='deleting' WHERE id=$1`, deleting); err != nil {
+		t.Fatal(err)
+	}
+
+	recordings, err := q.RecordingsForGroup(ctx, groupID, projectID)
+	if err != nil || len(recordings) != 0 {
+		t.Fatalf("excluded recordings = %+v, err=%v", recordings, err)
+	}
+}
+
+func TestRecordingsForGroupCapsAfterTheBoundedCandidatePool(t *testing.T) {
+	t.Run("result cap", func(t *testing.T) {
+		const resultCap = 5
+		q, pool := sessionTestQueries(t)
+		ctx := context.Background()
+		projectID, envID := seedSessionProject(t, pool)
+		groupID := seedPointerGroup(t, pool, projectID, envID, "recordings-cap", "error")
+		t.Cleanup(func() {
+			_, _ = pool.Exec(context.Background(), `DELETE FROM error_events WHERE error_group_id=$1`, groupID)
+			_, _ = pool.Exec(context.Background(), `DELETE FROM error_groups WHERE id=$1`, groupID)
+		})
+
+		base := time.Now().UTC().Truncate(time.Millisecond).Add(-time.Minute)
+		var oldestSession string
+		for index := range resultCap + 1 {
+			sessionID := newSessionID(t)
+			if index == 0 {
+				oldestSession = sessionID
+			}
+			anchor := base.Add(time.Duration(index) * time.Second)
+			insertReadSession(t, q, pool, projectID, envID, nil, sessionID, anchor)
+			first, last := anchor.Add(-20*time.Second).UnixMilli(), anchor.Add(20*time.Second).UnixMilli()
+			seedPointerChunk(t, pool, projectID, sessionID, 0, &first, &last, true, true)
+			if _, err := pool.Exec(ctx, `INSERT INTO error_events
+				(project_id, environment_id, error_group_id, session_id, "timestamp", error_type, error_message, stack_trace_raw, created_at)
+				VALUES ($1,$2,$3,$4,$5,'TypeError','boom','at test',$5)`,
+				projectID, envID, groupID, sessionID, anchor); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		recordings, err := q.RecordingsForGroup(ctx, groupID, projectID)
+		if err != nil || len(recordings) != resultCap {
+			t.Fatalf("capped recordings = %+v, err=%v", recordings, err)
+		}
+		if slices.ContainsFunc(recordings, func(recording db.GroupRecording) bool {
+			return recording.SessionID == oldestSession
+		}) {
+			t.Fatalf("oldest recording survived cap: %+v", recordings)
+		}
+	})
+
+	t.Run("candidate pool", func(t *testing.T) {
+		const candidateCap = 50
+		q, pool := sessionTestQueries(t)
+		ctx := context.Background()
+		projectID, envID := seedSessionProject(t, pool)
+		groupID := seedPointerGroup(t, pool, projectID, envID, "recordings-candidate-bound", "error")
+		t.Cleanup(func() {
+			_, _ = pool.Exec(context.Background(), `DELETE FROM error_events WHERE error_group_id=$1`, groupID)
+			_, _ = pool.Exec(context.Background(), `DELETE FROM error_groups WHERE id=$1`, groupID)
+		})
+
+		base := time.Now().UTC().Truncate(time.Millisecond).Add(-time.Hour)
+		insertCandidate := func(sessionID string, anchor, createdAt time.Time) {
+			t.Helper()
+			if _, err := pool.Exec(ctx, `INSERT INTO error_events
+				(project_id, environment_id, error_group_id, session_id, "timestamp", error_type, error_message, stack_trace_raw, created_at)
+				VALUES ($1,$2,$3,$4,$5,'TypeError','boom','at test',$6)`,
+				projectID, envID, groupID, sessionID, anchor, createdAt); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		covered := newSessionID(t)
+		insertReadSession(t, q, pool, projectID, envID, nil, covered, base)
+		first, last := base.Add(-20*time.Second).UnixMilli(), base.Add(20*time.Second).UnixMilli()
+		seedPointerChunk(t, pool, projectID, covered, 0, &first, &last, true, true)
+		insertCandidate(covered, base, base)
+
+		for index := range candidateCap {
+			sessionID := newSessionID(t)
+			at := base.Add(time.Duration(index+1) * time.Second)
+			insertReadSession(t, q, pool, projectID, envID, nil, sessionID, at)
+			insertCandidate(sessionID, at, at)
+		}
+
+		recordings, err := q.RecordingsForGroup(ctx, groupID, projectID)
+		if err != nil || len(recordings) != 0 {
+			t.Fatalf("candidate-bounded recordings = %+v, err=%v", recordings, err)
+		}
+	})
+}
+
 func TestInsertErrorEventAndGroup_PinsSessionWithoutLoweringLaterRetention(t *testing.T) {
 	q, pool := sessionTestQueries(t)
 	ctx := context.Background()

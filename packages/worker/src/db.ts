@@ -1,9 +1,22 @@
 import pg from 'pg';
-import type { Diagnosis, DiagnosisOutcome, ErrorGroupStatus, NeedsHumanReason, ConfidenceLevel, JobType, SetupPrStatus, EvidenceRecord, PRPosture } from '@opslane/shared';
+import type {
+  CandidateDisposition,
+  ConfidenceLevel,
+  Diagnosis,
+  DiagnosisOutcome,
+  ErrorGroupStatus,
+  EvidenceRecord,
+  HypothesisKind,
+  JobType,
+  NeedsHumanReason,
+  PRPosture,
+  SetupPrStatus,
+} from '@opslane/shared';
 import {
   reconcileDeadLetteredSessionAnalysis,
   releaseUnfinishedGeneration,
 } from './friction/dead-letter.js';
+import { canonicalPattern } from './friction/urlnorm.js';
 import type { Platform } from './platform.js';
 import type { DerivedDecision } from './classify.js';
 import type { RouteMapRow } from './route-map.js';
@@ -45,6 +58,8 @@ export interface DecisionRow {
    */
   basis: DerivedDecision['basis'];
   confidence: ConfidenceLevel;
+  causeKind?: HypothesisKind;
+  dispositions?: Array<{ id: string; disposition: CandidateDisposition }>;
   policyEligible?: boolean | null;
   policyBasis?: { v: 1; identified_users: number; recent_anon_sessions: number } | null;
 }
@@ -60,6 +75,8 @@ export interface PersistedDecision {
   outcome: DiagnosisOutcome;
   basis: DerivedDecision['basis'];
   confidence: ConfidenceLevel;
+  causeKind?: HypothesisKind;
+  dispositions?: Array<{ id: string; disposition: CandidateDisposition }>;
 }
 
 export interface LoadedDecision extends PersistedDecision {
@@ -86,8 +103,10 @@ async function insertDiagnosisDecision(
   await queryable.query(
     `INSERT INTO diagnosis_decisions
        (error_group_id, project_id, job_id, outcome, decision_reason, cause_location, diagnosis,
-        model, prompt_version, basis, confidence, policy_eligible, policy_basis)
-     VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11, $12, $13::jsonb)`,
+        model, prompt_version, basis, confidence, policy_eligible, policy_basis,
+        candidate_dispositions, cause_kind)
+     VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11, $12, $13::jsonb,
+        $14::jsonb, $15)`,
     [
       errorGroupId,
       projectId,
@@ -102,6 +121,8 @@ async function insertDiagnosisDecision(
       row.confidence,
       row.policyEligible ?? null,
       row.policyBasis ? JSON.stringify(row.policyBasis) : null,
+      row.dispositions ? JSON.stringify(row.dispositions) : null,
+      row.causeKind ?? null,
     ],
   );
 }
@@ -139,35 +160,69 @@ async function upsertDigestReadiness(
  * A row missing `basis` or `confidence` predates migration 035 and cannot
  * answer whether a fix is authorised, so it reads as no decision at all.
  */
+interface DecisionQueryRow {
+  id: string;
+  outcome: DiagnosisOutcome;
+  basis: string | null;
+  confidence: string | null;
+  policy_eligible: boolean | null;
+  policy_basis: LoadedDecision['policyBasis'];
+  candidate_dispositions: unknown;
+  cause_kind: string | null;
+}
+
+const DECISION_COLUMNS =
+  'id, outcome, basis, confidence, policy_eligible, policy_basis, candidate_dispositions, cause_kind';
+
+const HYPOTHESIS_KINDS: readonly string[] = [
+  'local_code', 'external_system', 'data_or_input', 'configuration', 'unknown',
+];
+const DISPOSITIONS: readonly string[] = ['rejected', 'ungrounded', 'live'];
+
+/**
+ * One row-to-decision mapping for both loaders. The jsonb and text columns are
+ * narrowed at the boundary rather than cast: diagnosis_decisions is insert-only,
+ * so a malformed historical row can never be corrected in place and must not
+ * flow into fix routing looking validated.
+ */
+function rowToLoadedDecision(row: DecisionQueryRow | undefined): LoadedDecision | null {
+  if (!row || !row.basis || !row.confidence) return null;
+  const causeKind = row.cause_kind !== null && HYPOTHESIS_KINDS.includes(row.cause_kind)
+    ? (row.cause_kind as HypothesisKind)
+    : undefined;
+  const dispositions = Array.isArray(row.candidate_dispositions)
+    ? (row.candidate_dispositions.filter(
+        (entry): entry is { id: string; disposition: CandidateDisposition } =>
+          typeof entry === 'object' && entry !== null &&
+          typeof (entry as { id?: unknown }).id === 'string' &&
+          DISPOSITIONS.includes((entry as { disposition?: unknown }).disposition as string),
+      ))
+    : undefined;
+  return {
+    id: row.id,
+    outcome: row.outcome,
+    basis: row.basis as DerivedDecision['basis'],
+    confidence: row.confidence as ConfidenceLevel,
+    causeKind,
+    dispositions: dispositions && dispositions.length > 0 ? dispositions : undefined,
+    policyEligible: row.policy_eligible,
+    policyBasis: row.policy_basis,
+  };
+}
+
 export async function loadDiagnosisDecision(
   errorGroupId: string,
   projectId: string,
 ): Promise<LoadedDecision | null> {
-  const { rows } = await getPool().query<{
-    id: string;
-    outcome: DiagnosisOutcome;
-    basis: string | null;
-    confidence: string | null;
-    policy_eligible: boolean | null;
-    policy_basis: LoadedDecision['policyBasis'];
-  }>(
-    `SELECT id, outcome, basis, confidence, policy_eligible, policy_basis
+  const { rows } = await getPool().query<DecisionQueryRow>(
+    `SELECT ${DECISION_COLUMNS}
      FROM diagnosis_decisions
      WHERE error_group_id = $1 AND project_id = $2
      ORDER BY decided_at DESC, id DESC
      LIMIT 1`,
     [errorGroupId, projectId],
   );
-  const row = rows[0];
-  if (!row || !row.basis || !row.confidence) return null;
-  return {
-    id: row.id,
-    outcome: row.outcome,
-    basis: row.basis as DerivedDecision['basis'],
-    confidence: row.confidence as ConfidenceLevel,
-    policyEligible: row.policy_eligible,
-    policyBasis: row.policy_basis,
-  };
+  return rowToLoadedDecision(rows[0]);
 }
 
 export async function loadDiagnosisDecisionForSource(
@@ -176,31 +231,15 @@ export async function loadDiagnosisDecisionForSource(
   sourceJobId: string | null,
 ): Promise<LoadedDecision | null> {
   if (sourceJobId === null) return loadDiagnosisDecision(errorGroupId, projectId);
-  const { rows } = await getPool().query<{
-    id: string;
-    outcome: DiagnosisOutcome;
-    basis: string | null;
-    confidence: string | null;
-    policy_eligible: boolean | null;
-    policy_basis: LoadedDecision['policyBasis'];
-  }>(
-    `SELECT id, outcome, basis, confidence, policy_eligible, policy_basis
+  const { rows } = await getPool().query<DecisionQueryRow>(
+    `SELECT ${DECISION_COLUMNS}
      FROM diagnosis_decisions
      WHERE error_group_id = $1 AND project_id = $2 AND job_id = $3
      ORDER BY decided_at DESC, id DESC
      LIMIT 1`,
     [errorGroupId, projectId, sourceJobId],
   );
-  const row = rows[0];
-  if (!row || !row.basis || !row.confidence) return null;
-  return {
-    id: row.id,
-    outcome: row.outcome,
-    basis: row.basis as DerivedDecision['basis'],
-    confidence: row.confidence as ConfidenceLevel,
-    policyEligible: row.policy_eligible,
-    policyBasis: row.policy_basis,
-  };
+  return rowToLoadedDecision(rows[0]);
 }
 
 export interface ImpactBar {
@@ -1420,21 +1459,34 @@ export interface ErrorGroupData {
   verification_evidence?: EvidenceRecord | null;
   terminal_fix_job_id?: string | null;
   pr_fix_triggered_by?: 'auto' | 'human' | 'reinvestigate_report_only' | null;
+  impact_class?: 'blocked' | 'degraded' | 'invisible' | null;
+  impact_visits?: number | null;
+  impact_visits_recovered?: number | null;
 }
 
 export async function getErrorGroup(groupId: string, projectId: string): Promise<ErrorGroupData | null> {
   const pool = getPool();
-  const { rows } = await pool.query<ErrorGroupData>(
+  const { rows } = await pool.query<ErrorGroupData & {
+    impact_visits: string | number | null;
+    impact_visits_recovered: string | number | null;
+  }>(
     `SELECT id, title, fingerprint, sample_event_id, occurrence_count, status,
             kind, signal_type, element_selector, page_url_normalized, confidence, platform,
             pr_url, pr_number, reason_code, reason_message, remediation,
             verification_evidence, terminal_fix_job_id,
+            impact_class, impact_visits, impact_visits_recovered,
             (SELECT j.triggered_by FROM error_group_jobs j
              WHERE j.id = error_groups.pr_fix_job_id AND j.project_id = error_groups.project_id) AS pr_fix_triggered_by
      FROM error_groups WHERE id = $1 AND project_id = $2`,
     [groupId, projectId],
   );
-  return rows[0] ?? null;
+  const row = rows[0];
+  if (!row) return null;
+  return {
+    ...row,
+    impact_visits: toCount(row.impact_visits),
+    impact_visits_recovered: toCount(row.impact_visits_recovered),
+  };
 }
 
 export interface EnvironmentContext {
@@ -1578,14 +1630,14 @@ export const MAX_ROUTE_PATTERN_BYTES = 512;
 
 /**
  * Normalized routes on open groups that do not yet have a classification.
- * Exact matching is intentional, and a row from any source (including
+ * During the identity cutover, an origin-full or path-only route row resolves
+ * either spelling of the same pattern. A row from any source (including
  * llm-unresolved) resolves a pattern permanently until an operator changes it.
  *
  * Both kinds are stamped onto error_groups by the ingestion sweeper, which
  * runs every URL through one normalizer, so an error and a friction incident
- * on the same page share a pattern. Do not assume the upstream values agree:
- * ./friction/fingerprint.ts still writes an origin-prefixed, less-templated
- * value onto friction_signals, and the sweeper re-normalizes it on the way in.
+ * on the same page share a pattern. The dual read remains necessary while old
+ * version-3 friction groups with origin-prefixed keys age out.
  *
  * The length filter is defence in depth for anything that reaches the column
  * by another route. An oversized pattern is unindexable by route_map's
@@ -1607,7 +1659,8 @@ export async function listUnmappedPatterns(projectId: string): Promise<string[]>
           SELECT 1
             FROM route_map rm
            WHERE rm.project_id = eg.project_id
-             AND rm.pattern = eg.page_url_normalized
+             AND COALESCE(NULLIF(regexp_replace(rm.pattern, '^https?://[^/]*', '', 'i'), ''), '/')
+               = COALESCE(NULLIF(regexp_replace(eg.page_url_normalized, '^https?://[^/]*', '', 'i'), ''), '/')
         )
       ORDER BY pattern`,
     [projectId, MAX_ROUTE_PATTERN_BYTES],
@@ -1669,14 +1722,40 @@ export async function upsertRouteMapRows(args: {
       );
     };
 
-    for (const row of args.rows) await write(row, 'llm');
+    const reach: Record<RouteMapRow['tier'], number> = {
+      customer: 2,
+      standard: 1,
+      admin: 0,
+    };
+    const byCanonical = new Map<
+      string,
+      { row: RouteMapRow; source: 'llm' | 'llm-unresolved' }
+    >();
+    // Classified rows first, so an unresolved entry can never displace one.
+    // Within the classified set, the widest reach wins a canonical collision.
+    for (const row of args.rows) {
+      const pattern = canonicalPattern(row.pattern);
+      const previous = byCanonical.get(pattern);
+      if (!previous || reach[row.tier] > reach[previous.row.tier]) {
+        byCanonical.set(pattern, { row: { ...row, pattern }, source: 'llm' });
+      }
+    }
     for (const pattern of args.unresolved) {
-      await write({
-        pattern,
-        name: pattern,
-        purpose: 'unclassified',
-        tier: 'standard',
-      }, 'llm-unresolved');
+      const canonical = canonicalPattern(pattern);
+      if (!byCanonical.has(canonical)) {
+        byCanonical.set(canonical, {
+          row: {
+            pattern: canonical,
+            name: canonical,
+            purpose: 'unclassified',
+            tier: 'standard',
+          },
+          source: 'llm-unresolved',
+        });
+      }
+    }
+    for (const entry of byCanonical.values()) {
+      await write(entry.row, entry.source);
     }
 
     await client.query('COMMIT');
@@ -1801,6 +1880,92 @@ export interface SessionPointer {
   error_at: string;
 }
 
+export interface WatchableSession {
+  sessionId: string;
+  anchorMs: number;
+}
+
+/**
+ * Coverage-proven pointer. This mirrors WatchableSessionForGroup and
+ * watchCoverageSQL in packages/ingestion/db/sessions_read.go.
+ */
+export async function getWatchableSessionForGroup(
+  projectId: string,
+  groupId: string,
+): Promise<WatchableSession | null> {
+  const pool = getPool();
+  const kindResult = await pool.query<{ kind: 'error' | 'friction' }>(
+    `SELECT kind FROM error_groups WHERE id = $1 AND project_id = $2`,
+    [groupId, projectId],
+  );
+  const kind = kindResult.rows[0]?.kind;
+  if (!kind) return null;
+
+  const coverage = `
+    WHERE EXISTS (
+      SELECT 1 FROM session_chunks c
+       WHERE c.session_id = cand.session_id AND c.project_id = $2
+         AND c.scrubbed_at IS NOT NULL
+         AND c.first_event_ms IS NOT NULL AND c.last_event_ms IS NOT NULL
+      HAVING min(c.first_event_ms) <= cand.anchor_ms - 15000
+         AND max(c.last_event_ms) >= cand.anchor_ms + 15000
+    )
+    AND EXISTS (
+      SELECT 1 FROM session_chunks c
+       WHERE c.session_id = cand.session_id AND c.project_id = $2
+         AND c.scrubbed_at IS NOT NULL AND c.has_full_snapshot
+         AND c.first_event_ms IS NOT NULL AND c.last_event_ms IS NOT NULL
+         AND c.first_event_ms <= cand.anchor_ms - 15000
+    )`;
+  const query = kind === 'friction'
+    ? `SELECT cand.session_id, cand.anchor_ms FROM (
+         SELECT fs.session_id,
+                (extract(epoch FROM fs.occurred_at) * 1000)::bigint AS anchor_ms,
+                fs.occurred_at,
+                (fs.id = g.representative_signal_id) AS representative,
+                fs.id
+           FROM friction_signals fs
+           JOIN sessions s ON s.id = fs.session_id AND s.project_id = fs.project_id
+           JOIN error_groups g ON g.id = $1 AND g.project_id = $2
+          WHERE fs.incident_id = $1 AND fs.project_id = $2
+            AND fs.adjudication_status = 'accepted'
+            AND fs.retracted_at IS NULL AND fs.superseded_by IS NULL
+            AND s.status <> 'deleting'
+          ORDER BY (fs.id = g.representative_signal_id) DESC, fs.occurred_at ASC, fs.id ASC
+          LIMIT 50
+       ) cand
+       ${coverage}
+       ORDER BY cand.representative DESC, cand.occurred_at ASC, cand.id ASC
+       LIMIT 1`
+    : `SELECT cand.session_id, cand.anchor_ms FROM (
+         SELECT per_session.* FROM (
+           SELECT DISTINCT ON (e.session_id)
+                  e.session_id,
+                  (extract(epoch FROM e."timestamp") * 1000)::bigint AS anchor_ms,
+                  e.created_at, e.id
+             FROM error_events e
+             JOIN sessions s ON s.id = e.session_id AND s.project_id = e.project_id
+            WHERE e.error_group_id = $1 AND e.project_id = $2
+              AND e.session_id IS NOT NULL AND s.status <> 'deleting'
+            ORDER BY e.session_id, e.created_at DESC, e.id DESC
+         ) per_session
+         ORDER BY per_session.created_at DESC, per_session.id DESC
+         LIMIT 50
+       ) cand
+       ${coverage}
+       ORDER BY cand.created_at DESC, cand.id DESC
+       LIMIT 1`;
+  const { rows } = await pool.query<{ session_id: string; anchor_ms: unknown }>(query, [groupId, projectId]);
+  const row = rows[0];
+  if (!row) return null;
+  const anchorMs = toCount(row.anchor_ms);
+  if (anchorMs === null) {
+    logger.warn('Watchable session has an invalid anchor', { project_id: projectId, error_group_id: groupId });
+    return null;
+  }
+  return { sessionId: row.session_id, anchorMs };
+}
+
 /** Resolves pointer identity independently from chunk readiness. This mirror
  * serves both error and friction fix evidence, so it matches the Go reader's
  * representative-first friction fallback. */
@@ -1856,8 +2021,8 @@ export interface SessionChunkMeta {
   last_event_ms: number | null;
 }
 
-function nullableNumber(value: string | number | null): number | null {
-  if (value == null) return null;
+export function toCount(value: unknown): number | null {
+  if (value === null || value === undefined || value === '') return null;
   const parsed = typeof value === 'number' ? value : Number(value);
   return Number.isSafeInteger(parsed) ? parsed : null;
 }
@@ -1889,11 +2054,11 @@ export async function getPlayableChunkMetas(
   );
   return rows.map((row) => ({
     seq: row.seq,
-    size_bytes: nullableNumber(row.size_bytes),
-    decoded_size_bytes: nullableNumber(row.decoded_size_bytes),
+    size_bytes: toCount(row.size_bytes),
+    decoded_size_bytes: toCount(row.decoded_size_bytes),
     has_full_snapshot: row.has_full_snapshot,
-    first_event_ms: nullableNumber(row.first_event_ms),
-    last_event_ms: nullableNumber(row.last_event_ms),
+    first_event_ms: toCount(row.first_event_ms),
+    last_event_ms: toCount(row.last_event_ms),
   }));
 }
 

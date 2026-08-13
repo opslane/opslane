@@ -32,7 +32,7 @@ describe('friction analyzer v2', () => {
     expect(signals[0]).toMatchObject({
       signalType: 'rage_click',
       elementSelector: '[data-testid="save"]',
-      pageUrlNormalized: 'https://app.example.com/checkout/:id',
+      pageUrlNormalized: '/checkout/:id',
       occurredAt: 1720000001800,
       occurrenceCount: 1,
       ruleVersion: RULE_VERSION,
@@ -190,14 +190,18 @@ describe('friction analyzer trust-boundary bounds', () => {
 });
 
 describe('friction fingerprinting', () => {
+  it('uses rule version 4 for the host-free identity contract', () => {
+    expect(RULE_VERSION).toBe(4);
+  });
+
   it('normalizes variable URL portions without retaining query or hash', () => {
     expect(normalizePageUrl('https://app.example.com/orders/123?token=secret#detail')).toBe(
-      'https://app.example.com/orders/:id',
+      '/orders/:id',
     );
     expect(normalizePageUrl('https://app.example.com/orders/550e8400-e29b-41d4-a716-446655440000')).toBe(
-      'https://app.example.com/orders/:id',
+      '/orders/:id',
     );
-    expect(normalizePageUrl('/orders/123?token=secret')).toBe('/orders/123');
+    expect(normalizePageUrl('/orders/123?token=secret')).toBe('/orders/:id');
   });
 
   it('makes a stable bounded fingerprint from the normalized dimensions', () => {
@@ -210,7 +214,7 @@ describe('friction fingerprinting', () => {
   });
 
   it('normalizes Forge context segments and react-select indexed ids', () => {
-    expect(normalizePageUrl('https://x.test/foo/_ctx_H4sIAAAA/bar')).toBe('https://x.test/foo/bar');
+    expect(normalizePageUrl('https://x.test/foo/_ctx_H4sIAAAA/bar')).toBe('/foo/bar');
     expect(frictionFingerprint('dead_click', '#react-select-8-selected-value-3-remove', '/x'))
       .toBe(frictionFingerprint('dead_click', '#react-select-8-selected-value-7-remove', '/x'));
   });

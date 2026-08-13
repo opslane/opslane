@@ -170,6 +170,13 @@ export interface Incident {
   reason?: NeedsHumanReason;
   verification_evidence?: EvidenceRecord;
   candidate_diff?: string;
+  impact_class?: 'blocked' | 'degraded' | 'invisible';
+  impact_visits?: number;
+  impact_visits_recovered?: number;
+  story: string;
+  receipt_state?: 'pr_open' | 'attempt_failed_with_diff' | 'attempt_failed_no_diff' | 'report_ready';
+  receipt_line?: string;
+  recordings?: IncidentRecording[];
   root_cause?: string;
   suggested_mitigation?: string;
   investigation_readiness?: 'eligible' | 'ineligible' | 'pending';
@@ -185,6 +192,15 @@ export interface Incident {
     error_at: string;
   };
   environments?: IncidentEnvironment[];
+}
+
+export interface IncidentRecording {
+  session_id: string;
+  started_at: string;
+  /** Recorded span in ms, gaps included. */
+  duration_ms: number;
+  crash_count: number;
+  anchor_ms: number;
 }
 
 export interface IncidentEnvironment {

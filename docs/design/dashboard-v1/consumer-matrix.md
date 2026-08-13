@@ -27,6 +27,9 @@ new owned primitive or domain component is added.
 | `PriorityReason.vue` | `components/incidents/IssueRow.vue` | why an issue ranks where it does |
 | `IncidentConclusion.vue` | `views/IncidentDetail.vue` | outcome and next action |
 | `IncidentLifecycle.vue` | `views/IncidentDetail.vue` | truthful current-state summary |
+| `PrLinkCard.vue` | `views/IncidentDetail.vue` | fix PR artifact card (linked or plain-text URL) |
+| `AttemptReasonCard.vue` | `views/IncidentDetail.vue` | failed-attempt reason and remediation |
+| `CandidateDiffCard.vue` | `views/IncidentDetail.vue` | preserved working diff from a failed fix |
 | `SessionLedgerRow.vue` | `views/SessionsList.vue` | session list row |
 | `layout/navigation.ts` | `components/layout/AppNavigation.vue` | navigation model and active-route rule |
 | `session.ts` | `App.vue` | tenant-scoped client state teardown on sign-out |

@@ -1,4 +1,5 @@
-import type { EvidenceCitation } from '@opslane/shared';
+import type { Adjudication, EvidenceCitation } from '@opslane/shared';
+import { CANDIDATE_ID, isMalformedRejection } from './diagnose-schema.js';
 
 // Anchored like migration 045's SQL regex: a verdict that OPENS with a
 // degenerate token is filler; one that merely mentions "placeholder" mid-prose
@@ -21,6 +22,77 @@ export interface VerdictForValidation {
 
 function incomplete(reason: string): VerdictValidation {
   return { status: 'incomplete', reason };
+}
+
+/**
+ * Cross-field rules the submission JSON schema cannot express. Local candidates
+ * must be identifiable and grounded; rejections must reference real candidates.
+ * Non-local candidates and legacy shapes (no ids) pass untouched.
+ */
+export function validateAdjudicationShape(
+  adjudication: Adjudication,
+  options?: {
+    /**
+     * Refuse legacy shapes outright. The live investigation sets this: its
+     * strict tool schema always requires the structural fields, so a legacy
+     * shape arriving there means the submission dodged the schema — and
+     * letting it fall through to the weaker substring-rejection path would
+     * quietly disable the grounding gate. Legacy shapes stay valid for the
+     * decline adapter and for replaying stored rows.
+     */
+    requireStructuralShape?: boolean;
+  },
+): VerdictValidation {
+  const isNewShape =
+    adjudication.rejected_candidates !== undefined ||
+    adjudication.candidates_considered.some((candidate) =>
+      candidate.id !== undefined || candidate.citation !== undefined);
+  if (!isNewShape) {
+    if (options?.requireStructuralShape) {
+      return incomplete('legacy_shape: submission omitted rejected_candidates and candidate ids');
+    }
+    return { status: 'valid' };
+  }
+
+  const ids = new Set<string>();
+  for (const candidate of adjudication.candidates_considered) {
+    if (!candidate.id || !CANDIDATE_ID.test(candidate.id)) {
+      return incomplete(`candidate_missing_id: ${candidate.statement.slice(0, 80)}`);
+    }
+    if (ids.has(candidate.id)) return incomplete(`duplicate_candidate_id: ${candidate.id}`);
+    ids.add(candidate.id);
+
+    const local = candidate.kind === 'local_code' || candidate.kind === 'configuration';
+    if (local && !candidate.citation) {
+      return incomplete(`candidate_missing_citation: ${candidate.id}`);
+    }
+  }
+
+  const seenRejections = new Set<string>();
+  for (const rejection of adjudication.rejected_candidates ?? []) {
+    if (isMalformedRejection(rejection)) {
+      return incomplete('rejection_malformed: entry with empty id or citation');
+    }
+    if (!ids.has(rejection.id)) return incomplete(`rejection_unknown_id: ${rejection.id}`);
+    if (seenRejections.has(rejection.id)) {
+      return incomplete(`duplicate_rejection_id: ${rejection.id}`);
+    }
+    seenRejections.add(rejection.id);
+    if (!rejection.evidence.trim()) {
+      return incomplete(`empty_rejection_evidence: ${rejection.id}`);
+    }
+  }
+
+  // Checked after the per-candidate rules so the most specific defect reports
+  // first. A submission carrying ids/citations but no rejected_candidates
+  // array would otherwise pass here and still route down classify.ts's legacy
+  // substring path — quietly erasing the grounding gate. Half a new shape is
+  // not a shape.
+  if (adjudication.rejected_candidates === undefined) {
+    return incomplete('missing_rejected_candidates: structural candidates require a rejected_candidates array');
+  }
+
+  return { status: 'valid' };
 }
 
 export function validateVerdict(
