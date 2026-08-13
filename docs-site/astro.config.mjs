@@ -44,6 +44,7 @@ export default defineConfig({
         {
           label: 'Get started',
           items: [
+            { label: 'Introduction', slug: '' },
             // Hosted quickstart (#21) goes first when it ships.
             { label: 'Self-host quickstart', slug: 'quickstart/self-host' },
             { label: 'Install the SDK', slug: 'install' },
