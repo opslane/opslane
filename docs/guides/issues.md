@@ -22,7 +22,7 @@ Each row shows the title, the occurrence count, the affected-user count, the tim
 
 ## How error occurrences group
 
-Opslane fingerprints each error from four inputs: the platform, the error type, the normalized message, and at most five stack lines. When the SDK provides debug_meta images, Opslane substitutes debug IDs for bundle URLs before normalization, which stabilizes grouping when URLs vary per page load. Normalization replaces the parts that vary between users and deploys: numbers, hex values, UUIDs, double-quoted strings, URL origins, and hashed asset names. This reduces needless splitting. Because browsers emit different stack text, one bug can still surface as more than one issue.
+Opslane fingerprints each error from four inputs: the platform, the error type, the normalized message, and at most five stack lines. Where the operator has enabled `GROUPING_DEBUG_ID_FRAMES` and the SDK provides debug_meta images, Opslane substitutes debug IDs for bundle URLs before normalization, which stabilizes grouping when a bundle URL varies per page load. Normalization replaces the parts that vary between users and deploys: numbers, hex values, UUIDs, double-quoted strings, URL origins, and hashed asset names. This reduces needless splitting. Because browsers emit different stack text, one bug can still surface as more than one issue.
 
 Python errors group on their application frames instead. When Opslane cannot parse a traceback, it falls back to the raw text.
 
