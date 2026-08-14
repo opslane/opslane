@@ -838,6 +838,7 @@ type ErrorGroupFilters struct {
 	Status        string  // filter by error group status
 	EnvironmentID *string // filter by environment UUID; nil means all environments
 	Platform      string  // filter by platform; implies kind='error' (friction incidents have no platform)
+	Kind          string  // filter by incident kind: 'friction' or 'error'
 }
 
 // ListErrorGroups returns error groups for a project with optional filters. Tenant-scoped.
@@ -845,7 +846,7 @@ func (q *Queries) ListErrorGroups(ctx context.Context, projectID string, filters
 	args := []interface{}{projectID}
 	argIdx := 2
 
-	var environmentArg, statusArg, accountArg, endUserArg, platformArg int
+	var environmentArg, statusArg, accountArg, endUserArg, platformArg, kindArg int
 	if filters != nil && filters.EnvironmentID != nil && *filters.EnvironmentID != "" {
 		environmentArg = argIdx
 		args = append(args, *filters.EnvironmentID)
@@ -860,6 +861,11 @@ func (q *Queries) ListErrorGroups(ctx context.Context, projectID string, filters
 		if filters.Platform != "" {
 			platformArg = argIdx
 			args = append(args, filters.Platform)
+			argIdx++
+		}
+		if filters.Kind != "" {
+			kindArg = argIdx
+			args = append(args, filters.Kind)
 			argIdx++
 		}
 		if filters.AccountID != "" {
@@ -899,6 +905,9 @@ func (q *Queries) ListErrorGroups(ctx context.Context, projectID string, filters
 		}
 		if platformArg != 0 {
 			wheres = append(wheres, fmt.Sprintf("eg.platform = $%d AND eg.kind = 'error'", platformArg))
+		}
+		if kindArg != 0 {
+			wheres = append(wheres, fmt.Sprintf("eg.kind = $%d", kindArg))
 		}
 		if accountArg != 0 || endUserArg != 0 {
 			wheres = append(wheres, fmt.Sprintf(`EXISTS (
@@ -944,6 +953,14 @@ func (q *Queries) ListErrorGroups(ctx context.Context, projectID string, filters
 			statusClause := fmt.Sprintf("eg.status = $%d", statusArg)
 			errorWheres = append(errorWheres, statusClause)
 			frictionWheres = append(frictionWheres, statusClause)
+		}
+		if kindArg != 0 {
+			// Each arm already pins its own kind, so the arm that does not match
+			// contributes nothing. Applying this to both arms is what makes that
+			// true: adding it to only one would leave the other unfiltered.
+			kindClause := fmt.Sprintf("eg.kind = $%d", kindArg)
+			errorWheres = append(errorWheres, kindClause)
+			frictionWheres = append(frictionWheres, kindClause)
 		}
 		if platformArg != 0 {
 			// A platform filter implies kind='error'. Friction incidents carry

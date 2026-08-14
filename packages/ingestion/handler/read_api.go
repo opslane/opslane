@@ -32,6 +32,10 @@ type incidentJSON struct {
 	Platform               *string                   `json:"platform,omitempty"`
 	EnvironmentID          *string                   `json:"environment_id,omitempty"`
 	AdjudicationStatus     *string                   `json:"adjudication_status,omitempty"`
+	SignalType             *string                   `json:"signal_type,omitempty"`
+	ElementSelector        *string                   `json:"element_selector,omitempty"`
+	PageURLNormalized      *string                   `json:"page_url_normalized,omitempty"`
+	WatchableSession       *watchableSessionJSON     `json:"watchable_session,omitempty"`
 	FirstSeen              string                    `json:"first_seen"`
 	LastSeen               string                    `json:"last_seen"`
 	OccurrenceCount        int                       `json:"occurrence_count"`
@@ -76,6 +80,15 @@ type incidentRecordingJSON struct {
 	DurationMs int64  `json:"duration_ms"`
 	CrashCount int64  `json:"crash_count"`
 	AnchorMs   int64  `json:"anchor_ms"`
+}
+
+// watchableSessionJSON points at a session whose scrubbed chunks span the
+// playback window. AnchorMs is absolute client-clock epoch milliseconds, which
+// is the dashboard's ?t= contract. Unlike Recordings, this is populated for
+// friction incidents too.
+type watchableSessionJSON struct {
+	SessionID string `json:"session_id"`
+	AnchorMs  int64  `json:"anchor_ms"`
 }
 
 type incidentEnvironmentJSON struct {
@@ -130,6 +143,9 @@ func toIncidentJSON(g db.ErrorGroup) incidentJSON {
 		Platform:               g.Platform,
 		EnvironmentID:          g.EnvironmentID,
 		AdjudicationStatus:     g.AdjudicationStatus,
+		SignalType:             g.SignalType,
+		ElementSelector:        g.ElementSelector,
+		PageURLNormalized:      g.PageURLNormalized,
 		FirstSeen:              g.FirstSeen.Format(time.RFC3339),
 		LastSeen:               g.LastSeen.Format(time.RFC3339),
 		OccurrenceCount:        g.OccurrenceCount,
@@ -361,6 +377,11 @@ func (d *Dependencies) ListIncidents(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "invalid platform")
 		return
 	}
+	kind := r.URL.Query().Get("kind")
+	if kind != "" && kind != "friction" && kind != "error" {
+		writeJSONError(w, http.StatusBadRequest, "kind must be 'friction' or 'error'")
+		return
+	}
 	environmentID := r.URL.Query().Get("environment_id")
 	if environmentID != "" {
 		if _, err := uuid.Parse(environmentID); err != nil {
@@ -379,12 +400,13 @@ func (d *Dependencies) ListIncidents(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if accountID != "" || endUserID != "" || status != "" || environmentID != "" || platform != "" {
+	if accountID != "" || endUserID != "" || status != "" || environmentID != "" || platform != "" || kind != "" {
 		filters = &db.ErrorGroupFilters{
 			AccountID:     accountID,
 			EndUserID:     endUserID,
 			Status:        status,
 			Platform:      platform,
+			Kind:          kind,
 			EnvironmentID: nil,
 		}
 		if environmentID != "" {
@@ -500,6 +522,12 @@ func (d *Dependencies) GetIncident(w http.ResponseWriter, r *http.Request) {
 	// manifest readiness; the incident contract must not hide processing sessions.
 	if sessionID, errorAt, ok, err := d.Queries.SessionPointerForGroup(r.Context(), incidentID, projectID); err == nil && ok {
 		inc.SessionPointer = &sessionPointerJSON{SessionID: sessionID, ErrorAt: errorAt.Format(time.RFC3339)}
+	}
+	// Best-effort, exactly like the pointer above: missing playback evidence
+	// costs the field, never the response. RecordingsForGroup returns nil for
+	// friction by design, so this is the only friction recording pointer.
+	if sessionID, anchorMs, ok, err := d.Queries.WatchableSessionForGroup(r.Context(), incidentID, projectID); err == nil && ok {
+		inc.WatchableSession = &watchableSessionJSON{SessionID: sessionID, AnchorMs: anchorMs}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(inc)
