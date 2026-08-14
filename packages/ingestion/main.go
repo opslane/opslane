@@ -182,10 +182,23 @@ func main() {
 	r := handler.NewRouterWithPool(deps, pool)
 	dispatcher := notify.New(pool, configCipher, notify.Options{ExtraHosts: notifyExtraHosts})
 	go dispatcher.Run(ctx)
-	if os.Getenv("DIGEST_SWEEP_ENABLED") == "true" {
-		go digestSweeper.Start(ctx, 5*time.Minute)
-		slog.Info("digest sweep enabled")
-	}
+	// The sweep runs unconditionally; subscription is the gate. Both the
+	// candidate query and the publish insert require an enabled destination
+	// carrying 'digest.daily', and a tick that matches none is one cheap query.
+	//
+	// That default is deliberately broad, so read this before assuming it is a
+	// no-op: migration 038 backfilled 'digest.daily' onto every destination and
+	// made it the column default, which handler.createNotificationDestination
+	// mirrors for new ones. Any project with an enabled Slack destination that
+	// has not unticked the digest therefore starts receiving one. Unticking it
+	// is the off switch -- there is no global flag, per that migration's
+	// product decision that the digest is automatic with a per-destination
+	// unsubscribe.
+	go digestSweeper.Start(ctx, 5*time.Minute)
+	// Boot-time proof the loop exists. The sweep is otherwise silent on a day
+	// it publishes nothing, so without this line a sweep that never started is
+	// indistinguishable in the logs from a sweep that had nothing to send.
+	slog.Info("digest sweep started")
 
 	// Periodic cleanup of expired/revoked refresh tokens and auth codes
 	go func() {
