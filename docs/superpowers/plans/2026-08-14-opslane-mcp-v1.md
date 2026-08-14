@@ -569,6 +569,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -647,7 +648,7 @@ func TestLinkPRAcceptsAnyOpenStatus(t *testing.T) {
 			`UPDATE error_groups SET status = $1 WHERE id = $2`, status, groupID); err != nil {
 			t.Fatalf("set status %s: %v", status, err)
 		}
-		url := "https://github.com/acme/app/pull/" + string(rune('1'+i))
+		url := "https://github.com/acme/app/pull/" + strconv.Itoa(i+1)
 		if response := linkPR(t, router, orgID, projectID, groupID, url); response.Code != http.StatusOK {
 			t.Fatalf("status %s: got %d, body = %s", status, response.Code, response.Body.String())
 		}
