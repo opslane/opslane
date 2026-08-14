@@ -260,7 +260,13 @@ describe('notifications contract (Slack webhook delivery)', () => {
     // Ingest publishes only to the immediate destination.
     await waitForSinkHits(hookPath, immediateHitsBefore + 1);
     expect(sinkHits.filter((hit) => hit.path === hookPath)).toHaveLength(immediateHitsBefore + 1);
-    expect(sinkHits.filter((hit) => hit.path === postTriageHookPath)).toHaveLength(0);
+    const crossed = sinkHits
+      .filter((hit) => hit.path === postTriageHookPath)
+      .map((hit) => hit.body.slice(0, 300));
+    expect(
+      crossed,
+      `post-triage sink received ${crossed.length} body(ies) before any terminal transition: ${JSON.stringify(crossed)}`,
+    ).toHaveLength(0);
 
     const jobId = await createTerminalJob(groupId);
     await updateGroupStatus(groupId, tenant.projectId, 'needs_human', {
@@ -332,7 +338,16 @@ describe('notifications contract (Slack webhook delivery)', () => {
       },
       readiness: { status: 'eligible', reason: 'validated_cause' },
     });
-    expect(await countTriagedEvents(groupId)).toBe(0);
+    const insightRows = (await getPool().query<{ dedup_key: string; payload: unknown }>(
+      `SELECT dedup_key, payload FROM outbound_events
+       WHERE project_id = $1 AND event_type = 'issue.triaged'
+         AND payload->'issue'->>'id' = $2`,
+      [tenant.projectId, groupId],
+    )).rows;
+    expect(
+      insightRows,
+      `insight outcome emitted issue.triaged: ${JSON.stringify(insightRows)}`,
+    ).toHaveLength(0);
     expect(sinkHits.filter((hit) => hit.path === postTriageHookPath)).toHaveLength(
       postTriageHitsBefore,
     );
