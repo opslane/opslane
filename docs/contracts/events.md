@@ -92,7 +92,10 @@ page load (for example a Forge iframe's `_ctx_` segment) no longer splits one
 bug across many issues. It matches on the literal `code_file` string with the
 query stripped; relative, `webpack://`, `blob:`, and `.js.map`-vs-`.js` frames
 do not match and group exactly as before. Events without `debug_meta`, and all
-non-JavaScript platforms, are grouped exactly as before.
+non-JavaScript platforms, are grouped exactly as before. Frames whose bundle
+name already carries a content hash (`index-<hash>.js`) also keep their existing
+identity: that name is already collapsed to a deploy-stable form, so a per-build
+debug ID there would split one bug across deploys.
 
 An invalid `commit_sha` is discarded independently of otherwise valid debug
 images. Unknown fields remain tolerated under the append-only event contract.
