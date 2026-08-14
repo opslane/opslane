@@ -919,6 +919,10 @@ var (
 // duplicate GetProjectGitHubConfig (queries.go:3404), which needs an orgID this
 // handler does not carry.
 //
+// pr_created_at is set to match the invariant the worker maintains on every path
+// that reaches this status (packages/worker/src/db.ts:1280, :1555, :2213). Leaving
+// it null would make human-linked PRs invisible to anything measuring time-to-PR.
+//
 // Closing the PR without merging has a consequence worth knowing before you
 // build this. ProcessPRWebhook's close path clears pr_url and pr_number, which
 // is good because it makes the incident linkable again, but it also sets status
@@ -938,7 +942,9 @@ var (
 func (q *Queries) LinkPR(ctx context.Context, projectID, groupID, prURL string, prNumber int, repo string) error {
 	tag, err := q.pool.Exec(ctx,
 		`UPDATE error_groups eg
-		    SET pr_url = $3, pr_number = $4, status = 'pr_created', updated_at = now()
+		    SET pr_url = $3, pr_number = $4, status = 'pr_created',
+		        pr_created_at = COALESCE(eg.pr_created_at, now()),
+		        updated_at = now()
 		  FROM projects p
 		  WHERE eg.id = $1 AND eg.project_id = $2
 		    AND p.id = eg.project_id
