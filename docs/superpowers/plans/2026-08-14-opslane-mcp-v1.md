@@ -1526,6 +1526,23 @@ describe('formatIssue', () => {
     expect(output).not.toContain('bundle.min.js');
   });
 
+  // The negative side. With no resolved frames the raw stack is all there is, and
+  // on a Python or Node backend it is not minified at all. Suppressing it would
+  // blank the most useful field on every non-browser incident.
+  it('falls back to the raw stack when nothing was symbolicated', () => {
+    const error: McpIncident = {
+      id: 'e-3', kind: 'error', title: 'KeyError: asset_id', status: 'needs_human',
+      occurrence_count: 4, affected_users_count: 2,
+      first_seen: '2026-08-13T00:00:00Z', last_seen: '2026-08-14T00:00:00Z',
+      root_cause: 'asset_id missing from the payload',
+    };
+    const sample: SampleEvent = {
+      error: { type: 'KeyError', message: 'asset_id', stack: 'File "app/api/assets.py", line 91, in create' },
+    };
+    const output = formatIssue({ incident: error, sample, recording: null });
+    expect(output).toContain('app/api/assets.py');
+  });
+
   it('hands over what Opslane tried when a fix attempt failed', () => {
     const failed: McpIncident = {
       id: 'e-2', kind: 'error', title: 'TypeError: boom', status: 'needs_human',
@@ -1673,8 +1690,13 @@ export function formatIssue(input: {
     if (frames.length > 0) {
       lines.push('Stack, resolved against source:');
       lines.push(...frames);
-    } else if (sample) {
-      lines.push('No symbolicated stack for this incident. The raw stack is minified and is not reproduced here.');
+    } else if (sample?.error.stack) {
+      // Falling back to the raw stack rather than suppressing it. "Raw" only
+      // means minified on browser platforms; a Python or Node backend stack is
+      // already the real thing, and hiding it would throw away the most useful
+      // field on every non-browser incident.
+      lines.push('No symbolicated stack. The raw stack follows, which is minified on browser platforms:');
+      lines.push(fenced(truncate(sample.error.stack, FIELD_CAP)));
     }
   }
   lines.push('');
