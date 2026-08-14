@@ -25,6 +25,18 @@ func TestRecordStacklessAccepted_AppearsInMetrics(t *testing.T) {
 	}
 }
 
+func TestRecordDebugIDGrouping_AppearsInMetrics(t *testing.T) {
+	before := debugIDGroupingTotal.Load()
+	RecordDebugIDGrouping()
+
+	w := httptest.NewRecorder()
+	Metrics(w, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	want := fmt.Sprintf("opslane_ingest_debug_id_grouping_total %d", before+1)
+	if !strings.Contains(w.Body.String(), want) {
+		t.Fatalf("debug-ID grouping metric missing %q:\n%s", want, w.Body.String())
+	}
+}
+
 func TestRecordNetworkTimingDiscard_AppearsInMetrics(t *testing.T) {
 	RecordNetworkTimingDiscard("bad_url")
 	RecordNetworkTimingDiscard("unbounded_label")

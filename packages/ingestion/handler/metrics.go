@@ -30,6 +30,7 @@ var (
 	commitSHADiscardedTotal             atomic.Int64
 	eventsWithDebugImagesTotal          atomic.Int64
 	debugMetaRegistryZeroMatchedTotal   atomic.Int64
+	debugIDGroupingTotal                atomic.Int64
 	jobsEnqueuedTotal                   atomic.Int64
 	stacklessEventsTotal                atomic.Int64
 	suppressedResizeObserverTotal       atomic.Int64
@@ -126,6 +127,14 @@ func RecordEventWithDebugImages() { eventsWithDebugImagesTotal.Add(1) }
 
 func RecordDebugMetaRegistryZeroMatched() {
 	debugMetaRegistryZeroMatchedTotal.Add(1)
+}
+
+// RecordDebugIDGrouping counts events whose frames were actually rewritten
+// onto debug IDs. It is incremented only when a substitution fired, not merely
+// when images were present — during rollout the gap between "flag is on" and
+// this counter is exactly the population still grouping by URL.
+func RecordDebugIDGrouping() {
+	debugIDGroupingTotal.Add(1)
 }
 
 // RecordJobEnqueued increments the jobs enqueued counter.
@@ -276,6 +285,10 @@ func Metrics(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintln(w, "# HELP opslane_debug_meta_registry_present_zero_matched_total Instrumented events whose SDK registry matched no stack frame")
 	fmt.Fprintln(w, "# TYPE opslane_debug_meta_registry_present_zero_matched_total counter")
 	fmt.Fprintf(w, "opslane_debug_meta_registry_present_zero_matched_total %d\n\n", debugMetaRegistryZeroMatchedTotal.Load())
+
+	fmt.Fprintln(w, "# HELP opslane_ingest_debug_id_grouping_total Events whose JavaScript stack frames were rewritten onto debug IDs for grouping")
+	fmt.Fprintln(w, "# TYPE opslane_ingest_debug_id_grouping_total counter")
+	fmt.Fprintf(w, "opslane_ingest_debug_id_grouping_total %d\n\n", debugIDGroupingTotal.Load())
 
 	// opslane_jobs_enqueued_total
 	fmt.Fprintf(w, "# HELP opslane_jobs_enqueued_total Total jobs enqueued\n")

@@ -69,7 +69,7 @@ object at completion, so an upload interrupted before completion leaves the raw
 recording in storage. That path is retired once error replays resolve to chunk
 pointers.
 
-For error events, ingestion redacts breadcrumbs, context (sensitive headers, API-key prefixes, URL-embedded credentials), and network timings (query strings, URL-embedded credentials) before persistence. Events matching known-noise patterns (browser-internal errors like ResizeObserver loop warnings) are suppressed before persistence. Error messages and stack traces are stored verbatim to preserve grouping fingerprints, then redacted when served.
+For error events, ingestion redacts breadcrumbs, context (sensitive headers, API-key prefixes, URL-embedded credentials), and network timings (query strings, URL-embedded credentials) before persistence. Events matching known-noise patterns (browser-internal errors like ResizeObserver loop warnings) are suppressed before persistence. Error messages and stack traces are stored verbatim to preserve grouping fingerprints, then redacted when served. For JavaScript errors, grouping can use debug IDs from debug_meta instead of bundle URLs when `GROUPING_DEBUG_ID_FRAMES=true`.
 
 See [replay privacy and masking](../guides/replay-privacy.md) for what replay data may contain.
 

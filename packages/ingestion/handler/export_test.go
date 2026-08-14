@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"net/http"
+	"testing"
 )
 
 func RateLimitByProjectForTest(maxPerMinute int) func(http.Handler) http.Handler {
@@ -23,4 +24,11 @@ func WithAllowedOriginsForTest(ctx context.Context, origins []string) context.Co
 
 func SetAuthCookiesForTest(w http.ResponseWriter, r *http.Request, access, refresh string) {
 	setAuthCookies(w, r, access, refresh)
+}
+
+func SetDebugIDFramesForTest(t *testing.T, enabled bool) {
+	t.Helper()
+	previous := debugIDFramesEnabled
+	debugIDFramesEnabled = enabled
+	t.Cleanup(func() { debugIDFramesEnabled = previous })
 }

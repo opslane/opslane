@@ -85,6 +85,15 @@ Ingestion sanitizes it before storage:
 - if one `code_file` names multiple IDs, every image for that file is discarded;
 - at most 64 valid images are retained.
 
+`debug_meta.images[].debug_id` participates in error grouping. When
+`GROUPING_DEBUG_ID_FRAMES` is enabled, a JavaScript frame's bundle URL is
+replaced by its debug ID before fingerprinting, so a bundle URL that varies per
+page load (for example a Forge iframe's `_ctx_` segment) no longer splits one
+bug across many issues. It matches on the literal `code_file` string with the
+query stripped; relative, `webpack://`, `blob:`, and `.js.map`-vs-`.js` frames
+do not match and group exactly as before. Events without `debug_meta`, and all
+non-JavaScript platforms, are grouped exactly as before.
+
 An invalid `commit_sha` is discarded independently of otherwise valid debug
 images. Unknown fields remain tolerated under the append-only event contract.
 

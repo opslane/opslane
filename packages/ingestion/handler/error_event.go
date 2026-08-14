@@ -6,6 +6,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -33,10 +34,20 @@ func truncateTitle(title string, maxBytes int) string {
 	return title[:maxBytes]
 }
 
+// debugIDFramesEnabled keys stack frames on debug_meta debug IDs instead of
+// bundle URLs, so a bundle URL that varies per page load no longer fragments
+// one bug across many groups.
+//
+// Read once at start-up: this is the ingest hot path, and a value that could
+// change mid-process would splinter groups for no reason. Default off — the
+// switch re-keys every JS group carrying debug_meta, and each re-keyed group
+// alerts once as new.
+var debugIDFramesEnabled = os.Getenv("GROUPING_DEBUG_ID_FRAMES") == "true"
+
 // groupingDecision runs the rung-0/rung-1 ladder in front of the legacy
 // fingerprint. A non-empty suppressRule means the event is known noise and
 // should not produce a fingerprint or event row.
-func groupingDecision(platform, errorType, errorMessage, stackTrace string) (suppressRule, fingerprint, title string) {
+func groupingDecision(platform, errorType, errorMessage, stackTrace string, images []grouping.SourceImage) (suppressRule, fingerprint, title string) {
 	if rule, drop := grouping.Suppress(platform, errorMessage, stackTrace); drop {
 		return rule, "", ""
 	}
@@ -44,6 +55,13 @@ func groupingDecision(platform, errorType, errorMessage, stackTrace string) (sup
 	title = truncateTitle(errorType+": "+errorMessage, 200)
 	if familyFingerprint, ok := grouping.FamilyFingerprint(platform, errorMessage); ok {
 		return "", familyFingerprint, grouping.FamilyTitleStaleDeploy
+	}
+	if debugIDFramesEnabled && platform == "javascript" && len(images) > 0 {
+		fp, applied := grouping.FingerprintWithImages(platform, errorType, errorMessage, stackTrace, images)
+		if applied {
+			RecordDebugIDGrouping()
+		}
+		return "", fp, title
 	}
 	return "", grouping.Fingerprint(platform, errorType, errorMessage, stackTrace), title
 }
@@ -199,6 +217,7 @@ func (d *Dependencies) ingestErrorEvent(w http.ResponseWriter, r *http.Request, 
 
 	suppressRule, fingerprint, title := groupingDecision(
 		payload.Platform, payload.Error.Type, payload.Error.Message, payload.Error.Stack,
+		debugMeta.Images,
 	)
 	if suppressRule != "" {
 		RecordSuppressed(suppressRule)
@@ -294,6 +313,10 @@ type debugMetaValidation struct {
 	JSON                       string
 	ImageCount                 int
 	RegistryPresentZeroMatched bool
+	// Images are the validated (code_file, debug_id) pairs that also appear in
+	// JSON, used by grouping to give frames an identity that outlives a
+	// per-page-load bundle URL.
+	Images []grouping.SourceImage
 }
 
 func sanitizeCommitSHA(raw json.RawMessage) string {
@@ -403,6 +426,13 @@ func sanitizeDebugMeta(raw json.RawMessage) debugMetaValidation {
 		result.JSON = string(normalized)
 	}
 	result.ImageCount = len(retained)
+	result.Images = make([]grouping.SourceImage, 0, len(retained))
+	for _, image := range retained {
+		result.Images = append(result.Images, grouping.SourceImage{
+			CodeFile: image.CodeFile,
+			DebugID:  image.DebugID,
+		})
+	}
 	return result
 }
 

@@ -201,6 +201,65 @@ func postErrorPayloadAny(t *testing.T, deps *handler.Dependencies, rawKey, body 
 	return response
 }
 
+func insertDestination(t *testing.T, queries *db.Queries, orgID, projectID string) {
+	t.Helper()
+	_, err := queries.CreateNotificationDestination(context.Background(), orgID, projectID, db.NotificationDestination{
+		ID:                uuid.NewString(),
+		ProjectID:         projectID,
+		Type:              "slack",
+		Name:              "Debug-ID grouping alerts",
+		ConfigEncrypted:   []byte("sealed-config"),
+		ConfigFingerprint: "hooks.slack.com/…/****test",
+		EventTypes:        []string{"issue.created"},
+		Enabled:           true,
+	})
+	if err != nil {
+		t.Fatalf("create notification destination: %v", err)
+	}
+}
+
+func ingestReturningGroupID(t *testing.T, deps *handler.Dependencies, rawKey, body string) string {
+	t.Helper()
+	return postErrorPayload(t, deps, rawKey, body)["group_id"]
+}
+
+func TestIngestEvent_DebugIDCollapsesTwoPageLoadsIntoOneGroup(t *testing.T) {
+	handler.SetDebugIDFramesForTest(t, true)
+	deps, pool := testDeps(t)
+	orgID, projectID, _, rawKey := seedTenant(t, deps.Queries)
+	t.Cleanup(func() { cleanupTenantHandler(t, pool, orgID) })
+	insertDestination(t, deps.Queries, orgID, projectID)
+
+	const debugID = "afa8111b-3697-ce9d-b9e5-4e52afdb3b57"
+	post := func(bundleURL string) string {
+		body := fmt.Sprintf(`{
+			"timestamp": "2026-08-13T21:07:19Z",
+			"platform": "javascript",
+			"error": {"type": "e", "message": "the window title wasn't changed due to error.",
+			          "stack": "e: the window title wasn't changed due to error.\n    at Object.h (%s:1:2345)"},
+			"debug_meta": {"images": [{"type": "sourcemap", "code_file": "%s", "debug_id": "%s"}]}
+		}`, bundleURL, bundleURL, debugID)
+		return ingestReturningGroupID(t, deps, rawKey, body)
+	}
+
+	groupA := post("https://59n3u0-x.cdn.prod.atlassian-dev.net/a/global-page/_ctx_AAAA")
+	groupB := post("https://abcrz-y.cdn.prod.atlassian-dev.net/a/global-page/_ctx_BBBB")
+
+	if groupA != groupB {
+		t.Fatalf("two page loads of one bug must share a group: %s != %s", groupA, groupB)
+	}
+
+	var alerts int
+	if err := pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM outbound_events WHERE event_type = 'issue.created' AND payload->'issue'->>'id' = $1`,
+		groupA).Scan(&alerts); err != nil {
+		t.Fatalf("count alerts: %v", err)
+	}
+	if alerts != 1 {
+		t.Errorf("one bug must alert exactly once, got %d issue.created rows", alerts)
+	}
+}
+
 func TestIngest_SuppressionDropsEventAndJob(t *testing.T) {
 	deps, pool := testDeps(t)
 	_, projectID, _, rawKey := seedTenant(t, deps.Queries)
