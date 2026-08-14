@@ -324,9 +324,9 @@ what an empty day does to a session, is unknown.
 individual risks above are each survivable; multiplied, they are the thing a
 reviewer should attack. On 2026-08-14: seven items, four already carrying a pull
 request, and of the three left, one was worth acting on and it was a duplicate of
-another. Separately, 13 of 17 friction groups hold a `placeholder` root cause, so
-for most friction incidents R5 suppresses the leading field and the agent receives
-the positional CSS this document has already shown to be useless.
+another. Separately, 13 of 17 friction groups hold a `placeholder` root cause. For
+most friction incidents R5 therefore suppresses the leading field, and the agent
+receives the positional CSS this document has already shown to be useless.
 
 So the honest answer to "how many items does this make newly workable, with a
 payload an agent can act on, on the only day we can measure" is between zero and
