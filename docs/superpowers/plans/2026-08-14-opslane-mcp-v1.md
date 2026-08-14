@@ -1125,8 +1125,13 @@ import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 
 const authedFetch = vi.hoisted(() => vi.fn());
 vi.mock('../authed-fetch.js', () => ({ authedFetch }));
+// AgentCredentials has five required fields (cli/src/agent-credentials.ts:7).
+// The client reads only api_url and project_id, but returning a partial object
+// fails the type check at the mock boundary.
 vi.mock('../agent-credentials.js', () => ({
-  resolveCredentials: async () => ({ api_url: 'https://api.test', project_id: 'proj-1' }),
+  resolveCredentials: async () => ({
+    org_id: 'org-1', project_id: 'proj-1', api_key: 'k', repo: 'acme/app', api_url: 'https://api.test',
+  }),
 }));
 vi.mock('../config.js', () => ({ defaultApiUrl: () => 'https://api.test' }));
 
