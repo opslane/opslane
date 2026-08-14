@@ -1391,10 +1391,13 @@ import type { DigestItem } from './types.js';
  * receipts: worth a line at the end of a Slack message, worth nothing in a
  * session whose purpose is deciding what to do next.
  *
- * This closes the loop with Task 3. Linking a PR sets status = 'pr_created',
- * receiptState maps that to 'pr_open' (packages/ingestion/digest/build.go:187),
- * and pr_open is filtered here. So an incident the developer fixed today comes
- * back tomorrow as a one-line receipt rather than as work.
+ * Two mechanisms keep a linked incident out of tomorrow's work, and it is worth
+ * knowing which one actually fires. The digest inner-joins digest_readiness and
+ * windows on dr.updated_at (packages/ingestion/digest/build.go:27, :65). LinkPR
+ * does not touch that table, so a linked incident usually falls out of the window
+ * and never reaches the digest at all. This filter is the backstop for when it
+ * does: status 'pr_created' maps to receipt state 'pr_open' (build.go:187), which
+ * is filtered here. Belt and braces, and neither is load-bearing alone.
  *
  * Deliberately an allowlist of receipts rather than of decisions. An unrecognised
  * state reaches the developer, because a filter that hides what it does not
