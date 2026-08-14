@@ -45,12 +45,15 @@ func TestGroupingDecision_FlagCollapsesPerLoadURLs(t *testing.T) {
 	}
 }
 
-func TestGroupingDecision_DefaultsToOff(t *testing.T) {
-	if os.Getenv("GROUPING_DEBUG_ID_FRAMES") != "" {
-		t.Skip("env var set in this environment; default cannot be observed")
-	}
-	if debugIDFramesEnabled {
-		t.Error("GROUPING_DEBUG_ID_FRAMES must default to off")
+// The flag must be on only for the literal "true". Asserted unconditionally
+// against whatever the environment holds: skipping whenever the variable is
+// merely set would make this check vanish under the documented verification
+// lane, which runs GROUPING_DEBUG_ID_FRAMES=false.
+func TestGroupingDecision_EnabledOnlyByLiteralTrue(t *testing.T) {
+	want := os.Getenv("GROUPING_DEBUG_ID_FRAMES") == "true"
+	if debugIDFramesEnabled != want {
+		t.Errorf("debugIDFramesEnabled = %v, want %v for GROUPING_DEBUG_ID_FRAMES=%q",
+			debugIDFramesEnabled, want, os.Getenv("GROUPING_DEBUG_ID_FRAMES"))
 	}
 }
 

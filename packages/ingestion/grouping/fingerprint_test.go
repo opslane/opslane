@@ -1,6 +1,7 @@
 package grouping
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -305,5 +306,63 @@ func TestApplyDebugIDs_CodeFileAbsentFromFrame(t *testing.T) {
 				t.Errorf("out-of-scope case must fall back unchanged, got %q (ok=%v)", got, ok)
 			}
 		})
+	}
+}
+
+// A project's public key is embedded in the browser, so code_file is
+// attacker-controlled: validCodeFile accepts any 1..4096 printable bytes and
+// the handler retains up to 64 images. Unanchored substring replacement grew an
+// 839-byte stack to 471 KB on six single-character images, because the
+// substituted token is itself made of letters a later image matches again.
+func TestApplyDebugIDs_SingleCharacterCodeFilesCannotBlowUpTheStack(t *testing.T) {
+	stack := "e: boom\n    at Object.h (https://cdn.example.net/assets/app.js:1:2345)\n" +
+		strings.Repeat("    at Object.q (https://cdn.example.net/assets/vendor.js:9:99)\n", 12)
+
+	images := make([]SourceImage, 0, 6)
+	for i, character := range []string{"a", "b", "c", "d", "e", "s"} {
+		images = append(images, SourceImage{
+			CodeFile: character,
+			DebugID:  fmt.Sprintf("afa8111b-3697-ce9d-b9e5-4e52afdb3b%02d", i),
+		})
+	}
+
+	got, applied := applyDebugIDs(stack, images)
+	if len(got) > 2*len(stack)+4096 {
+		t.Errorf("stack grew from %d to %d bytes; substitution must stay bounded", len(stack), len(got))
+	}
+	if applied {
+		t.Errorf("single-character code_file values are not frame references and must not substitute, got %q", got)
+	}
+}
+
+// An image for one bundle must not rewrite the middle of another bundle's URL.
+func TestApplyDebugIDs_DoesNotRewriteUnrelatedFrames(t *testing.T) {
+	stack := "e: boom\n    at Object.h (https://cdn.example.net/vendor-app.js:1:2)"
+	got, applied := applyDebugIDs(stack, []SourceImage{{CodeFile: "app.js", DebugID: "abcd"}})
+	if applied || got != stack {
+		t.Errorf("code_file appearing mid-token must not substitute, got %q", got)
+	}
+}
+
+// The handler's ambiguity guard keys on the full code_file, so two images that
+// differ only by a per-request query string survive it and then collide here.
+// Keeping either one would make the fingerprint depend on the order the SDK
+// emitted them in, which splits one bug across two groups.
+func TestApplyDebugIDs_QueryStringCollisionWithDifferentIDsIsDropped(t *testing.T) {
+	stack := "e: boom\n    at Object.h (https://cdn.example.net/app.js?v=1:1:2)"
+	forward := []SourceImage{
+		{CodeFile: "https://cdn.example.net/app.js?v=1", DebugID: "AAAA"},
+		{CodeFile: "https://cdn.example.net/app.js?v=2", DebugID: "BBBB"},
+	}
+	reversed := []SourceImage{forward[1], forward[0]}
+
+	gotForward, appliedForward := applyDebugIDs(stack, forward)
+	gotReversed, appliedReversed := applyDebugIDs(stack, reversed)
+
+	if gotForward != gotReversed {
+		t.Errorf("image order must not reach the output: %q != %q", gotForward, gotReversed)
+	}
+	if appliedForward || appliedReversed {
+		t.Errorf("an ambiguous code_file must not substitute, got %q", gotForward)
 	}
 }

@@ -101,6 +101,12 @@ func topFrames(stack string, n int) []string {
 	return lines
 }
 
+// minCodeFileLen is the shortest string that can plausibly name a bundle
+// ("a.js" is four bytes). Anything shorter is not a file reference, and
+// matching it against a stack only creates ways to rewrite text that is not a
+// frame.
+const minCodeFileLen = 4
+
 // SourceImage is one validated debug_meta image: the bundle URL the SDK saw
 // and the content-derived debug ID for its source map.
 type SourceImage struct {
@@ -130,30 +136,132 @@ func applyDebugIDs(stackTrace string, images []SourceImage) (string, bool) {
 	if stackTrace == "" || len(images) == 0 {
 		return stackTrace, false
 	}
-	usable := make([]SourceImage, 0, len(images))
+
+	// Key on the query-stripped code_file, because that is what we match on.
+	// The handler's ambiguity guard keys on the FULL code_file, so two images
+	// that differ only by a per-request query string but disagree on debug ID
+	// both survive it. Once the query is gone they collide, and keeping either
+	// one would make the fingerprint depend on the order the SDK happened to
+	// emit them in. Drop both instead.
+	byFile := make(map[string]string, len(images))
+	ambiguous := make(map[string]struct{})
 	for _, image := range images {
 		codeFile := cutQuery(image.CodeFile)
-		if codeFile == "" || image.DebugID == "" ||
-			strings.ContainsAny(codeFile, "\n\r") || strings.ContainsAny(image.DebugID, "\n\r>") {
+		if !usableCodeFile(codeFile) || image.DebugID == "" ||
+			strings.ContainsAny(image.DebugID, "\n\r>") {
 			continue
 		}
-		usable = append(usable, SourceImage{CodeFile: codeFile, DebugID: image.DebugID})
+		if existing, seen := byFile[codeFile]; seen && existing != image.DebugID {
+			ambiguous[codeFile] = struct{}{}
+			continue
+		}
+		byFile[codeFile] = image.DebugID
 	}
-	if len(usable) == 0 {
+	for codeFile := range ambiguous {
+		delete(byFile, codeFile)
+	}
+	if len(byFile) == 0 {
 		return stackTrace, false
 	}
-	sort.SliceStable(usable, func(i, j int) bool {
-		return len(usable[i].CodeFile) > len(usable[j].CodeFile)
+
+	usable := make([]SourceImage, 0, len(byFile))
+	for codeFile, debugID := range byFile {
+		usable = append(usable, SourceImage{CodeFile: codeFile, DebugID: debugID})
+	}
+	// Longest first, so a short URL that prefixes a longer one cannot shadow it.
+	// Tie-break on the code file so Go's randomized map iteration can never
+	// reach the fingerprint.
+	sort.Slice(usable, func(i, j int) bool {
+		if len(usable[i].CodeFile) != len(usable[j].CodeFile) {
+			return len(usable[i].CodeFile) > len(usable[j].CodeFile)
+		}
+		return usable[i].CodeFile < usable[j].CodeFile
 	})
 
 	substituted := stackTrace
 	for _, image := range usable {
-		substituted = strings.ReplaceAll(substituted, image.CodeFile, "<debug:"+image.DebugID+">")
+		substituted = replaceFrameToken(substituted, image.CodeFile, "<debug:"+image.DebugID+">")
 	}
 	if substituted == stackTrace {
 		return stackTrace, false
 	}
+	// Defense in depth. Substitution swaps a URL for a ~44-byte token, so it
+	// should shrink the stack or barely grow it. Anything past this bound means
+	// the anchoring above failed, and handing an unbounded string to the hasher
+	// on the ingest hot path is worse than keeping the legacy identity.
+	if len(substituted) > 2*len(stackTrace)+4096 {
+		return stackTrace, false
+	}
 	return reDebugQuery.ReplaceAllString(substituted, "$1"), true
+}
+
+// usableCodeFile reports whether a code_file is plausibly a file reference and
+// therefore safe to match against a stack.
+//
+// The handler only requires 1 to 4096 printable bytes, so without this a
+// one-character value like "e" matches the error-type prefix on a stack's
+// header line ("e: boom"), which is a token boundary on both sides but is not a
+// frame. A real bundle reference always carries a path separator or an
+// extension dot, and is never one or two characters long.
+func usableCodeFile(codeFile string) bool {
+	if len(codeFile) < minCodeFileLen {
+		return false
+	}
+	if strings.ContainsAny(codeFile, "\n\r \t") {
+		return false
+	}
+	return strings.ContainsAny(codeFile, "/.")
+}
+
+// replaceFrameToken replaces codeFile with token, but only where codeFile
+// stands alone as a frame's file reference.
+//
+// Raw substring replacement is unsafe here. code_file is client-supplied and
+// only has to be 1 to 4096 printable bytes, so a one-character value would
+// rewrite every occurrence of that character in the stack, and the inserted
+// token is itself made of letters a later image could match again. Measured on
+// the unanchored version: six single-character images grew an 839-byte stack to
+// 471 KB, and a project's public key is embedded in the browser.
+//
+// Anchoring also stops an image for one bundle from rewriting the middle of an
+// unrelated frame's URL, which would make a bug's identity depend on the shape
+// of the SDK's image list.
+func replaceFrameToken(stack, codeFile, token string) string {
+	var builder strings.Builder
+	for index := 0; index < len(stack); {
+		offset := strings.Index(stack[index:], codeFile)
+		if offset < 0 {
+			builder.WriteString(stack[index:])
+			return builder.String()
+		}
+		start := index + offset
+		end := start + len(codeFile)
+		if frameTokenBoundary(stack, start-1) && frameTokenBoundary(stack, end) {
+			builder.WriteString(stack[index:start])
+			builder.WriteString(token)
+			index = end
+			continue
+		}
+		builder.WriteString(stack[index : start+1])
+		index = start + 1
+	}
+	return builder.String()
+}
+
+// frameTokenBoundary reports whether the byte at index delimits a file
+// reference in a stack frame, in either engine format: V8 "at fn (URL:1:2)"
+// and Gecko/JSC "fn@URL:1:2". An out-of-range index is the start or end of the
+// stack, which is also a boundary. '<' and '>' are deliberately absent, so a
+// substituted <debug:...> token can never be matched again by a later image.
+func frameTokenBoundary(stack string, index int) bool {
+	if index < 0 || index >= len(stack) {
+		return true
+	}
+	switch stack[index] {
+	case '(', ')', '@', '?', ':', ' ', '\t', '\n', '\r', '\'', '"', ',':
+		return true
+	}
+	return false
 }
 
 // FingerprintWithImages is Fingerprint with the SDK's debug_meta images applied
