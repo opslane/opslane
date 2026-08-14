@@ -2,12 +2,120 @@ package digest
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// seedPriorDigest writes a published digest whose stored window ends at
+// windowEnd, which is the watermark the next run must resume from.
+func seedPriorDigest(t *testing.T, pool *pgxpool.Pool, projectID string, windowEnd time.Time, dedupSuffix string) {
+	t.Helper()
+	payload := fmt.Sprintf(`{"digest":{"window":{"from":%q,"to":%q}}}`,
+		windowEnd.Add(-24*time.Hour).Format(time.RFC3339Nano),
+		windowEnd.Format(time.RFC3339Nano))
+	if _, err := pool.Exec(context.Background(),
+		`INSERT INTO outbound_events (project_id, event_type, dedup_key, payload)
+		 VALUES ($1,'digest.daily',$2,$3::jsonb)`,
+		projectID, "digest.daily:"+projectID+":"+dedupSuffix, payload); err != nil {
+		t.Fatalf("seed prior digest: %v", err)
+	}
+}
+
+func clearDigestEvents(t *testing.T, pool *pgxpool.Pool, projectID string) {
+	t.Helper()
+	if _, err := pool.Exec(context.Background(),
+		`DELETE FROM outbound_events WHERE project_id=$1 AND event_type='digest.daily'`, projectID); err != nil {
+		t.Fatalf("clear digest events: %v", err)
+	}
+}
+
+// The window must resume from the previous digest's end rather than a fixed
+// trailing 24h. Anchoring on run time both drops and repeats items whenever the
+// send time moves, which prod showed on 2026-08-13.
+func TestWindowForResumesFromPreviousDigest(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	f := seedDigestFixture(t, pool, now)
+	s := New(pool, "https://dash.example")
+
+	t.Run("first digest falls back to a trailing 24h", func(t *testing.T) {
+		from, to := s.windowFor(ctx, f.ProjectID, now)
+		if !to.Equal(now) || !from.Equal(now.Add(-24*time.Hour)) {
+			t.Fatalf("window = %s..%s; want %s..%s", from, to, now.Add(-24*time.Hour), now)
+		}
+	})
+
+	t.Run("closes the gap a late run would leave", func(t *testing.T) {
+		clearDigestEvents(t, pool, f.ProjectID)
+		// The real 2026-08-13 shape: previous digest ended 7h35m ago, so a
+		// trailing 24h would re-report 16h and a shorter window would drop time.
+		previousEnd := now.Add(-7*time.Hour - 35*time.Minute)
+		seedPriorDigest(t, pool, f.ProjectID, previousEnd, "gap-case")
+		from, to := s.windowFor(ctx, f.ProjectID, now)
+		if !from.Equal(previousEnd) || !to.Equal(now) {
+			t.Fatalf("window = %s..%s; want %s..%s", from, to, previousEnd, now)
+		}
+	})
+
+	t.Run("does not re-report an already covered span", func(t *testing.T) {
+		clearDigestEvents(t, pool, f.ProjectID)
+		// Previous digest ended 30h ago. A trailing 24h would start *after* it,
+		// silently skipping 6h; resuming from the watermark covers them.
+		previousEnd := now.Add(-30 * time.Hour)
+		seedPriorDigest(t, pool, f.ProjectID, previousEnd, "overlap-case")
+		from, _ := s.windowFor(ctx, f.ProjectID, now)
+		if !from.Equal(previousEnd) {
+			t.Fatalf("from = %s; want %s", from, previousEnd)
+		}
+	})
+
+	t.Run("caps an unbounded catch-up after a long outage", func(t *testing.T) {
+		clearDigestEvents(t, pool, f.ProjectID)
+		seedPriorDigest(t, pool, f.ProjectID, now.Add(-60*24*time.Hour), "cap-case")
+		from, _ := s.windowFor(ctx, f.ProjectID, now)
+		if want := now.Add(-maxWindowLookback); !from.Equal(want) {
+			t.Fatalf("from = %s; want the cap %s", from, want)
+		}
+	})
+
+	t.Run("ignores a watermark that is not in the past", func(t *testing.T) {
+		clearDigestEvents(t, pool, f.ProjectID)
+		seedPriorDigest(t, pool, f.ProjectID, now.Add(2*time.Hour), "future-case")
+		from, _ := s.windowFor(ctx, f.ProjectID, now)
+		if want := now.Add(-24 * time.Hour); !from.Equal(want) {
+			t.Fatalf("from = %s; want the 24h fallback %s", from, want)
+		}
+	})
+
+	t.Run("ignores an unparseable watermark", func(t *testing.T) {
+		clearDigestEvents(t, pool, f.ProjectID)
+		if _, err := pool.Exec(ctx,
+			`INSERT INTO outbound_events (project_id, event_type, dedup_key, payload)
+			 VALUES ($1,'digest.daily',$2,'{"digest":{"window":{"to":"not-a-time"}}}'::jsonb)`,
+			f.ProjectID, "digest.daily:"+f.ProjectID+":junk-case"); err != nil {
+			t.Fatal(err)
+		}
+		from, _ := s.windowFor(ctx, f.ProjectID, now)
+		if want := now.Add(-24 * time.Hour); !from.Equal(want) {
+			t.Fatalf("from = %s; want the 24h fallback %s", from, want)
+		}
+	})
+
+	t.Run("is scoped to the project", func(t *testing.T) {
+		clearDigestEvents(t, pool, f.ProjectID)
+		other := seedDigestFixture(t, pool, now)
+		seedPriorDigest(t, pool, other.ProjectID, now.Add(-3*time.Hour), "other-project")
+		from, _ := s.windowFor(ctx, f.ProjectID, now)
+		if want := now.Add(-24 * time.Hour); !from.Equal(want) {
+			t.Fatalf("from = %s; another project's watermark leaked in", from)
+		}
+	})
+}
 
 func seedDestination(t *testing.T, pool *pgxpool.Pool, projectID string, eventTypes []string) string {
 	t.Helper()

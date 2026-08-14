@@ -92,7 +92,7 @@ func (s *Sweeper) Build(ctx context.Context, projectID string, now time.Time) (n
 	if err != nil {
 		return notify.EventPayload{}, fmt.Errorf("digest timezone %q: %w", timezone, err)
 	}
-	from, to := digestWindow(now)
+	from, to := s.windowFor(ctx, projectID, now)
 	receiptItems, receiptOverflow, receiptBeltFailures, err := s.buildReceiptItems(ctx, projectID, from, to)
 	if err != nil {
 		return notify.EventPayload{}, err
