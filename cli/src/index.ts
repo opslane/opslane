@@ -182,4 +182,23 @@ program
     await startMcpServer(client);
   });
 
+program
+  .command('init-claude')
+  .description('Install the Opslane skill and MCP server into this repository for Claude Code')
+  .action(async () => {
+    const { SKILL_MD } = await import('./mcp/skill-source.js');
+    const { installClaudeIntegration } = await import('./init-claude.js');
+    const result = await installClaudeIntegration({ cwd: process.cwd(), skill: SKILL_MD });
+    console.log(`Wrote ${result.skillPath}`);
+    console.log(
+      result.mcpChanged
+        ? `Added the opslane server to ${result.mcpPath}`
+        : `${result.mcpPath} already had the opslane server`,
+    );
+    console.log(
+      '\nClaude Code will run "opslane mcp". If "opslane" is not on your PATH yet,\n' +
+        "change the command in .mcp.json to the absolute path of this CLI's dist/index.js.",
+    );
+  });
+
 await program.parseAsync(process.argv);

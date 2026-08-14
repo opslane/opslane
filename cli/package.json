@@ -23,7 +23,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "node scripts/embed-skill.mjs && tsc",
     "dev": "tsx src/index.ts",
     "test": "vitest run",
     "test:watch": "vitest"
