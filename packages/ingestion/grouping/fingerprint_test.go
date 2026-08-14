@@ -2,6 +2,7 @@ package grouping
 
 import (
 	"fmt"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -364,5 +365,88 @@ func TestApplyDebugIDs_QueryStringCollisionWithDifferentIDsIsDropped(t *testing.
 	}
 	if appliedForward || appliedReversed {
 		t.Errorf("an ambiguous code_file must not substitute, got %q", gotForward)
+	}
+}
+
+// A content-hashed bundle is already deploy-stable under the legacy asset-token
+// rule, which collapses index-<hash>.js and drops the :line:col. Substituting a
+// per-build debug ID there would re-splinter every group on every deploy, which
+// is worse than the per-page-load splinter this feature exists to fix.
+func TestFingerprintWithImages_ContentHashedBundleStaysDeployStable(t *testing.T) {
+	frame := func(hash string) string {
+		return "TypeError: boom\n    at pay (https://cdn.example.net/assets/index-" + hash + ".js:1:2345)"
+	}
+	images := func(hash, id string) []SourceImage {
+		return []SourceImage{{CodeFile: "https://cdn.example.net/assets/index-" + hash + ".js", DebugID: id}}
+	}
+	buildA, buildB := frame("Dlu29ZBh"), frame("Qw83ktLp")
+
+	legacy := Fingerprint("javascript", "TypeError", "boom", buildA)
+	gotA, appliedA := FingerprintWithImages("javascript", "TypeError", "boom", buildA,
+		images("Dlu29ZBh", "aaaaaaaa-1111-4111-8111-111111111111"))
+	gotB, appliedB := FingerprintWithImages("javascript", "TypeError", "boom", buildB,
+		images("Qw83ktLp", "bbbbbbbb-2222-4222-8222-222222222222"))
+
+	if gotA != gotB {
+		t.Errorf("two deploys of one content-hashed bundle must share a fingerprint: %s != %s", gotA, gotB)
+	}
+	if gotA != legacy {
+		t.Errorf("a legacy-stable frame must keep its legacy fingerprint: %s != %s", gotA, legacy)
+	}
+	if appliedA || appliedB {
+		t.Error("substitution must not fire where the asset-hash rule already stabilises the frame")
+	}
+}
+
+// Only the first hashedFrameCount lines reach the hash, so a match below the
+// window must neither change the fingerprint nor be counted as applied. The
+// counter is the rollout signal; counting invisible work overstates coverage.
+func TestApplyDebugIDs_IgnoresMatchesBelowTheHashedWindow(t *testing.T) {
+	url := "https://cdn.example.net/a/b/_ctx_XYZ"
+	stack := "e: boom"
+	for i := 0; i < hashedFrameCount; i++ {
+		stack += "\n    at inline (https://app.example.net/page.html:1:1)"
+	}
+	stack += "\n    at deep (" + url + ":9:9)"
+
+	images := []SourceImage{{CodeFile: url, DebugID: "afa8111b-3697-ce9d-b9e5-4e52afdb3b57"}}
+	got, applied := applyDebugIDs(stack, images)
+
+	if applied {
+		t.Error("a match below the hashed window must not report as applied")
+	}
+	if got != stack {
+		t.Errorf("a match below the hashed window must leave the stack alone, got %q", got)
+	}
+	withImages, _ := FingerprintWithImages("javascript", "e", "boom", stack, images)
+	if withImages != Fingerprint("javascript", "e", "boom", stack) {
+		t.Error("a match below the hashed window must not change the fingerprint")
+	}
+}
+
+// The bound must apply before the copying, not after. A 1 MB stack with the
+// maximum retained image count previously allocated ~1.8 GB and then discarded
+// the result. Substitution is now confined to the hashed window.
+func TestApplyDebugIDs_LargeStackIsBoundedBeforeSubstituting(t *testing.T) {
+	stack := "e: boom\n" + strings.Repeat("    at f (https://cdn.example.net/assets/chunk.js:1:2)\n", 20000)
+	images := make([]SourceImage, 0, 64)
+	for i := 0; i < 64; i++ {
+		images = append(images, SourceImage{
+			CodeFile: fmt.Sprintf("https://cdn.example.net/assets/c%02d.js", i),
+			DebugID:  fmt.Sprintf("afa8111b-3697-ce9d-b9e5-4e52afdb3b%02d", i),
+		})
+	}
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	got, _ := applyDebugIDs(stack, images)
+	runtime.ReadMemStats(&after)
+
+	if len(got) > 2*len(stack)+4096 {
+		t.Errorf("output must stay bounded, got %d bytes from %d", len(got), len(stack))
+	}
+	allocatedMB := float64(after.TotalAlloc-before.TotalAlloc) / (1 << 20)
+	if allocatedMB > 64 {
+		t.Errorf("substitution allocated %.0f MB on a %d byte stack; the bound must precede the work",
+			allocatedMB, len(stack))
 	}
 }

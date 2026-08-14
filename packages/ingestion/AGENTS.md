@@ -25,4 +25,7 @@ The ingestion service is the Go API and owns grouping, persistence, migrations, 
   carrying `debug_meta` and each re-keyed group alerts once as new. A bug whose
   events do not all carry matching `debug_meta` will split permanently between
   the two keys. It does not address per-deploy splintering — debug IDs change
-  per deploy (see #77).
+  per deploy (see #77) — and it deliberately does not substitute on frames the
+  asset-hash rule already collapses (`index-<hash>.js`), because those are
+  already deploy-stable and a per-build debug ID would re-splinter them.
+  Substitution is confined to the five leading stack lines that reach the hash.

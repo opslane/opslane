@@ -43,7 +43,7 @@ func Fingerprint(platform, errorType, errorMessage, stackTrace string) string {
 			frames = []string{stackTrace}
 		}
 	} else {
-		frames = topFrames(stackTrace, 5)
+		frames = topFrames(stackTrace, hashedFrameCount)
 	}
 
 	input := fmt.Sprintf("%s|%s|%s|%s", platform, errorType, template, strings.Join(frames, "|"))
@@ -100,6 +100,11 @@ func topFrames(stack string, n int) []string {
 	}
 	return lines
 }
+
+// hashedFrameCount is how many leading stack lines reach the fingerprint.
+// Substitution is bounded to the same window: a line past it cannot change the
+// hash, so rewriting it is pure cost on the ingest hot path.
+const hashedFrameCount = 5
 
 // minCodeFileLen is the shortest string that can plausibly name a bundle
 // ("a.js" is four bytes). Anything shorter is not a file reference, and
@@ -178,21 +183,58 @@ func applyDebugIDs(stackTrace string, images []SourceImage) (string, bool) {
 		return usable[i].CodeFile < usable[j].CodeFile
 	})
 
-	substituted := stackTrace
-	for _, image := range usable {
-		substituted = replaceFrameToken(substituted, image.CodeFile, "<debug:"+image.DebugID+">")
+	// Bound the work before doing it, not after. code_file is client-supplied
+	// and up to 64 images are retained, so substituting across a 1 MB stack
+	// copies the whole growing string once per image. Only the first
+	// hashedFrameCount lines reach the fingerprint, so that is the only region
+	// worth rewriting; the rest is passed through untouched.
+	lines := strings.SplitN(stackTrace, "\n", hashedFrameCount+1)
+	window := lines
+	var tail string
+	if len(lines) > hashedFrameCount {
+		window = lines[:hashedFrameCount]
+		tail = "\n" + lines[hashedFrameCount]
 	}
-	if substituted == stackTrace {
+
+	applied := false
+	for i, line := range window {
+		// Never make a frame LESS stable than the legacy normalizer would. For a
+		// content-hashed bundle, reAssetToken already collapses index-<hash>.js
+		// and drops the :line:col, so the frame is deploy-stable; substituting a
+		// per-build debug ID would re-splinter it on every deploy. Verified:
+		// legacy holds one fingerprint across two builds, substitution does not.
+		//
+		// This tests the asset-hash collapse specifically, NOT normalizeVolatile
+		// as a whole: that also strips scheme+host, which changes every absolute
+		// URL frame and would skip the per-page-load case this feature exists for.
+		if collapsesHashedAsset(line) {
+			continue
+		}
+		rewritten := line
+		for _, image := range usable {
+			rewritten = replaceFrameToken(rewritten, image.CodeFile, "<debug:"+image.DebugID+">")
+		}
+		if rewritten != line {
+			window[i] = reDebugQuery.ReplaceAllString(rewritten, "$1")
+			applied = true
+		}
+	}
+	if !applied {
 		return stackTrace, false
 	}
-	// Defense in depth. Substitution swaps a URL for a ~44-byte token, so it
-	// should shrink the stack or barely grow it. Anything past this bound means
-	// the anchoring above failed, and handing an unbounded string to the hasher
-	// on the ingest hot path is worse than keeping the legacy identity.
-	if len(substituted) > 2*len(stackTrace)+4096 {
-		return stackTrace, false
+	return strings.Join(window, "\n") + tail, true
+}
+
+// collapsesHashedAsset reports whether the legacy asset-token rule already
+// rewrites a content hash out of this line, which makes it deploy-stable
+// without any debug ID.
+func collapsesHashedAsset(line string) bool {
+	for _, match := range reAssetToken.FindAllStringSubmatch(line, -1) {
+		if looksLikeHash(match[2]) {
+			return true
+		}
 	}
-	return reDebugQuery.ReplaceAllString(substituted, "$1"), true
+	return false
 }
 
 // usableCodeFile reports whether a code_file is plausibly a file reference and
