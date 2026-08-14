@@ -34,6 +34,11 @@ import {
   closePool,
   type TestTenant,
 } from './helpers.js';
+import {
+  closePool as closeWorkerPool,
+  updateGroupInvestigation,
+  updateGroupStatus,
+} from '../packages/worker/src/db.js';
 
 const SINK_PORT = 9999;
 // The host:port the ingestion CONTAINER uses to reach this process. Must be
@@ -71,12 +76,14 @@ describe('notifications contract (Slack webhook delivery)', () => {
   let jwt: string;
   let projectName: string;
   let destinationId: string;
+  let postTriageDestinationId: string;
   let createFingerprint: string;
 
   const sinkHits: SinkHit[] = [];
   let sink: http.Server;
   // Unique per run so hits from other stacks/runs sharing the port never match.
   const hookPath = `/e2e-hook/${crypto.randomUUID()}`;
+  const postTriageHookPath = `/e2e-hook/${crypto.randomUUID()}`;
 
   function destinationsUrl(suffix = ''): string {
     const { ingestionUrl } = getConfig();
@@ -107,6 +114,38 @@ describe('notifications contract (Slack webhook delivery)', () => {
       `No delivered outbound_deliveries row for project ${tenant.projectId} within ${timeoutMs}ms: ` +
         JSON.stringify(await deliveryRows())
     );
+  }
+
+  async function waitForSinkHits(
+    path: string,
+    count: number,
+    timeoutMs = 30_000,
+  ): Promise<SinkHit[]> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const hits = sinkHits.filter((hit) => hit.path === path);
+      if (hits.length >= count) return hits;
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+    }
+    const actual = sinkHits.filter((hit) => hit.path === path).length;
+    throw new Error(`Expected ${count} sink hit(s) for ${path}, got ${actual}`);
+  }
+
+  async function createTerminalJob(groupId: string): Promise<string> {
+    return (await getPool().query<{ id: string }>(
+      `INSERT INTO error_group_jobs (error_group_id, project_id, job_type, available_at)
+       VALUES ($1, $2, 'fix', now() + interval '1 day') RETURNING id`,
+      [groupId, tenant.projectId],
+    )).rows[0]!.id;
+  }
+
+  async function countTriagedEvents(groupId: string): Promise<number> {
+    return Number((await getPool().query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM outbound_events
+       WHERE project_id = $1 AND event_type = 'issue.triaged'
+         AND payload->'issue'->>'id' = $2`,
+      [tenant.projectId, groupId],
+    )).rows[0]!.count);
   }
 
   beforeAll(async () => {
@@ -154,12 +193,29 @@ describe('notifications contract (Slack webhook delivery)', () => {
     const created = JSON.parse(createBody) as { id: string; config_fingerprint: string };
     destinationId = created.id;
     createFingerprint = created.config_fingerprint;
+
+    const postTriageResponse = await fetch(destinationsUrl(), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${jwt}` },
+      body: JSON.stringify({
+        name: 'e2e post-triage sink',
+        webhook_url: `http://${SINK_HOST}${postTriageHookPath}`,
+        event_types: ['issue.created'],
+        delivery_policy: 'post_triage',
+      }),
+    });
+    if (!postTriageResponse.ok) {
+      throw new Error(`Creating post-triage destination failed: ${await postTriageResponse.text()}`);
+    }
+    postTriageDestinationId = ((await postTriageResponse.json()) as { id: string }).id;
   });
 
   afterAll(async () => {
+    sink.closeAllConnections();
     await new Promise<void>((resolve) => sink.close(() => resolve()));
     if (tenant) await cleanupTenant(tenant.orgId);
     await closePool();
+    await closeWorkerPool();
   });
 
   it('delivers issue.created to the webhook as Block Kit', async () => {
@@ -195,6 +251,149 @@ describe('notifications contract (Slack webhook delivery)', () => {
     expect(sinkHits.filter((h) => h.path === hookPath)).toHaveLength(1);
   });
 
+  it('routes immediate and post-triage deliveries without crossing streams', async () => {
+    const immediateHitsBefore = sinkHits.filter((hit) => hit.path === hookPath).length;
+    const response = await postEvent(tenant.ingestKey, eventPayload('PostTriageContractError'));
+    expect(response.ok).toBe(true);
+    const { error_group_id: groupId } = (await response.json()) as { error_group_id: string };
+
+    // Ingest publishes only to the immediate destination.
+    await waitForSinkHits(hookPath, immediateHitsBefore + 1);
+    expect(sinkHits.filter((hit) => hit.path === hookPath)).toHaveLength(immediateHitsBefore + 1);
+    expect(sinkHits.filter((hit) => hit.path === postTriageHookPath)).toHaveLength(0);
+
+    const jobId = await createTerminalJob(groupId);
+    await updateGroupStatus(groupId, tenant.projectId, 'needs_human', {
+      reason: {
+        reason_code: 'insufficient_context',
+        reason_message: 'This model-written detail must not be delivered',
+        remediation: 'Review manually',
+      },
+      terminalFixJobId: jobId,
+    });
+
+    const deadline = Date.now() + 30_000;
+    while (
+      Date.now() < deadline
+      && sinkHits.filter((hit) => hit.path === postTriageHookPath).length === 0
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+    }
+    const postTriageHits = sinkHits.filter((hit) => hit.path === postTriageHookPath);
+    expect(postTriageHits).toHaveLength(1);
+    expect(postTriageHits[0]!.body).toContain('Needs review — no verified cause');
+    expect(postTriageHits[0]!.body).not.toContain('model-written detail');
+    // The immediate destination received only its ingest-time message.
+    expect(sinkHits.filter((hit) => hit.path === hookPath)).toHaveLength(immediateHitsBefore + 1);
+
+    const routed = await getPool().query<{ event_type: string; destination_id: string }>(
+      `SELECT e.event_type, d.destination_id
+       FROM outbound_events e JOIN outbound_deliveries d ON d.event_id = e.id
+       WHERE e.project_id = $1 AND e.payload->'issue'->>'id' = $2
+       ORDER BY e.event_type`,
+      [tenant.projectId, groupId],
+    );
+    expect(routed.rows).toEqual([
+      { event_type: 'issue.created', destination_id: destinationId },
+      { event_type: 'issue.triaged', destination_id: postTriageDestinationId },
+    ]);
+  });
+
+  it('keeps insight outcomes out of post-triage alerts and in the daily digest', async () => {
+    const immediateHitsBefore = sinkHits.filter((hit) => hit.path === hookPath).length;
+    const postTriageHitsBefore = sinkHits.filter((hit) => hit.path === postTriageHookPath).length;
+    const response = await postEvent(tenant.ingestKey, eventPayload('InsightDigestContractError'));
+    expect(response.ok).toBe(true);
+    const { error_group_id: groupId } = (await response.json()) as { error_group_id: string };
+    await waitForSinkHits(hookPath, immediateHitsBefore + 1);
+
+    const jobId = await createTerminalJob(groupId);
+    await updateGroupInvestigation(groupId, tenant.projectId, 'insight', {
+      rootCause: 'A third-party response explains the issue',
+      confidence: 'high',
+      decision: {
+        outcome: 'not_actionable',
+        decisionReason: 'The failure originates in a third-party service',
+        causeLocation: 'https://api.example.com/checkout',
+        diagnosis: {
+          evidence: [
+            {
+              path: 'src/checkout.ts',
+              detail: 'The local request is valid and the provider rejects it',
+              symptomLink: 'The provider response matches the reported checkout failure',
+            },
+          ],
+        },
+        model: 'e2e-fixture',
+        promptVersion: 'notifications-contract-v1',
+        jobId,
+        basis: 'cause_outside_codebase',
+        confidence: 'high',
+      },
+      readiness: { status: 'eligible', reason: 'validated_cause' },
+    });
+    expect(await countTriagedEvents(groupId)).toBe(0);
+    expect(sinkHits.filter((hit) => hit.path === postTriageHookPath)).toHaveLength(
+      postTriageHitsBefore,
+    );
+
+    const digestResponse = await fetch(destinationsUrl(`/${postTriageDestinationId}/test`), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${jwt}` },
+      body: JSON.stringify({ event_type: 'digest.daily' }),
+    });
+    expect(digestResponse.ok).toBe(true);
+    const digestHits = await waitForSinkHits(postTriageHookPath, postTriageHitsBefore + 1);
+    expect(digestHits.at(-1)!.body).toContain('InsightDigestContractError');
+  });
+
+  it('alerts once when a fix job dies with worker_runtime_error', async () => {
+    const immediateHitsBefore = sinkHits.filter((hit) => hit.path === hookPath).length;
+    const postTriageHitsBefore = sinkHits.filter((hit) => hit.path === postTriageHookPath).length;
+    const response = await postEvent(tenant.ingestKey, eventPayload('WorkerRuntimeContractError'));
+    expect(response.ok).toBe(true);
+    const { error_group_id: groupId } = (await response.json()) as { error_group_id: string };
+    await waitForSinkHits(hookPath, immediateHitsBefore + 1);
+
+    await updateGroupStatus(groupId, tenant.projectId, 'needs_human', {
+      reason: {
+        reason_code: 'worker_runtime_error',
+        reason_message: 'The worker process exited unexpectedly',
+        remediation: 'Inspect the worker logs and retry',
+      },
+      terminalFixJobId: await createTerminalJob(groupId),
+    });
+
+    const hits = await waitForSinkHits(postTriageHookPath, postTriageHitsBefore + 1);
+    expect(hits.at(-1)!.body).toContain('Needs review — investigation crashed');
+    expect(await countTriagedEvents(groupId)).toBe(1);
+  });
+
+  it('renders a PR-bearing outcome as Fix PR opened', async () => {
+    const immediateHitsBefore = sinkHits.filter((hit) => hit.path === hookPath).length;
+    const postTriageHitsBefore = sinkHits.filter((hit) => hit.path === postTriageHookPath).length;
+    const response = await postEvent(tenant.ingestKey, eventPayload('FixPRContractError'));
+    expect(response.ok).toBe(true);
+    const { error_group_id: groupId } = (await response.json()) as { error_group_id: string };
+    await waitForSinkHits(hookPath, immediateHitsBefore + 1);
+
+    await updateGroupStatus(groupId, tenant.projectId, 'pr_created', {
+      confidence: 'low',
+      pr_url: 'https://github.com/opslane/example/pull/42',
+      pr_number: 42,
+      reason: {
+        reason_code: 'low_confidence_fix',
+        reason_message: 'Model prose must not control the alert label',
+        remediation: 'Review the draft',
+      },
+      terminalFixJobId: await createTerminalJob(groupId),
+    });
+
+    const hits = await waitForSinkHits(postTriageHookPath, postTriageHitsBefore + 1);
+    expect(hits.at(-1)!.body).toContain('Fix PR opened');
+    expect(hits.at(-1)!.body).not.toContain('low confidence');
+  });
+
   it('never surfaces the webhook URL secret', async () => {
     const secretPathPart = hookPath.split('/').pop()!;
     expect(createFingerprint).not.toContain(secretPathPart);
@@ -208,11 +407,23 @@ describe('notifications contract (Slack webhook delivery)', () => {
   });
 
   it('stops delivering after the destination is deleted', async () => {
+    const immediateHitsBefore = sinkHits.filter((hit) => hit.path === hookPath).length;
+    const postTriageHitsBefore = sinkHits.filter((hit) => hit.path === postTriageHookPath).length;
     const deleteResponse = await fetch(destinationsUrl(`/${destinationId}`), {
       method: 'DELETE',
       headers: { Authorization: `Bearer ${jwt}` },
     });
     expect(deleteResponse.ok).toBe(true);
+    const deletePostTriageResponse = await fetch(destinationsUrl(`/${postTriageDestinationId}`), {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${jwt}` },
+    });
+    expect(deletePostTriageResponse.ok).toBe(true);
+
+    const eventsBefore = Number((await getPool().query<{ count: string }>(
+      `SELECT count(*) FROM outbound_events WHERE project_id = $1`,
+      [tenant.projectId],
+    )).rows[0]!.count);
 
     const response = await postEvent(tenant.ingestKey, eventPayload('PostDeleteError'));
     expect(response.ok).toBe(true);
@@ -223,8 +434,11 @@ describe('notifications contract (Slack webhook delivery)', () => {
       `SELECT count(*) FROM outbound_events WHERE project_id = $1`,
       [tenant.projectId]
     );
-    expect(Number(eventsResult.rows[0]!.count)).toBe(1);
+    expect(Number(eventsResult.rows[0]!.count)).toBe(eventsBefore);
     expect(await deliveryRows()).toHaveLength(0);
-    expect(sinkHits.filter((h) => h.path === hookPath)).toHaveLength(1);
+    expect(sinkHits.filter((hit) => hit.path === hookPath)).toHaveLength(immediateHitsBefore);
+    expect(sinkHits.filter((hit) => hit.path === postTriageHookPath)).toHaveLength(
+      postTriageHitsBefore,
+    );
   });
 });

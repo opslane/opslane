@@ -25,11 +25,24 @@ WHERE NOT ('digest.daily' = ANY(event_types))
 INSERT INTO applied_data_migrations (name) VALUES ('038_digest_backfill')
 ON CONFLICT (name) DO NOTHING;
 
-ALTER TABLE outbound_events
-  DROP CONSTRAINT IF EXISTS outbound_events_event_type_check;
-ALTER TABLE outbound_events
-  ADD CONSTRAINT outbound_events_event_type_check
-  CHECK (event_type IN ('issue.created','digest.daily'));
+-- Guarded rather than drop-and-recreate. Migrations replay in filename order on
+-- every run, and 053 widens this constraint to admit issue.triaged. An
+-- unconditional re-add here would re-narrow it on replay and then fail against
+-- the rows the wider version allows, aborting the run at this file and leaving
+-- outbound_events with no event_type constraint at all. Same shape as
+-- agent_sessions_status_check in 017/021.
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid = 'outbound_events'::regclass
+      AND conname = 'outbound_events_event_type_check'
+  ) THEN
+    ALTER TABLE outbound_events
+      ADD CONSTRAINT outbound_events_event_type_check
+      CHECK (event_type IN ('issue.created','digest.daily'));
+  END IF;
+END $$;
 
 ALTER TABLE projects
   ADD COLUMN IF NOT EXISTS digest_timezone TEXT NOT NULL DEFAULT 'UTC';

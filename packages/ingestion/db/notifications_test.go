@@ -71,7 +71,7 @@ func TestNotificationDestinationCRUDAndTenantScope(t *testing.T) {
 
 	name := "Renamed alerts"
 	enabled := false
-	if err := queries.UpdateNotificationDestination(ctx, orgA, projectA, fixture.ID, &name, nil, nil, &enabled, nil); err != nil {
+	if err := queries.UpdateNotificationDestination(ctx, orgA, projectA, fixture.ID, &name, nil, nil, &enabled, nil, nil); err != nil {
 		t.Fatalf("UpdateNotificationDestination: %v", err)
 	}
 	got, err := queries.GetNotificationDestination(ctx, orgA, projectA, fixture.ID)
@@ -85,7 +85,7 @@ func TestNotificationDestinationCRUDAndTenantScope(t *testing.T) {
 	if _, err := queries.GetNotificationDestination(ctx, orgB, projectA, fixture.ID); !errors.Is(err, pgx.ErrNoRows) {
 		t.Fatalf("cross-org get error = %v, want pgx.ErrNoRows", err)
 	}
-	if err := queries.UpdateNotificationDestination(ctx, orgB, projectA, fixture.ID, &name, nil, nil, nil, nil); !errors.Is(err, pgx.ErrNoRows) {
+	if err := queries.UpdateNotificationDestination(ctx, orgB, projectA, fixture.ID, &name, nil, nil, nil, nil, nil); !errors.Is(err, pgx.ErrNoRows) {
 		t.Fatalf("cross-org update error = %v, want pgx.ErrNoRows", err)
 	}
 	if err := queries.DeleteNotificationDestination(ctx, orgB, projectA, fixture.ID); !errors.Is(err, pgx.ErrNoRows) {
@@ -133,7 +133,7 @@ func TestUpdateNotificationDestinationEventTypes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := q.UpdateNotificationDestination(ctx, org.ID, project.ID, destID, nil, nil, nil, nil, nil); err != nil {
+	if err := q.UpdateNotificationDestination(ctx, org.ID, project.ID, destID, nil, nil, nil, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	var types []string
@@ -144,7 +144,7 @@ func TestUpdateNotificationDestinationEventTypes(t *testing.T) {
 		t.Fatalf("expected default 2 types, got %v", types)
 	}
 
-	if err := q.UpdateNotificationDestination(ctx, org.ID, project.ID, destID, nil, nil, nil, nil, []string{"issue.created"}); err != nil {
+	if err := q.UpdateNotificationDestination(ctx, org.ID, project.ID, destID, nil, nil, nil, nil, []string{"issue.created"}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := pool.QueryRow(ctx, `SELECT event_types FROM notification_destinations WHERE id=$1`, destID).Scan(&types); err != nil {

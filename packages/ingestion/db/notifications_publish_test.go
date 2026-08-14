@@ -88,10 +88,10 @@ func TestPublishIssueCreatedFanoutAndIncrementBehavior(t *testing.T) {
 	assertOutboundCounts(t, pool, projectID, 2, 3)
 
 	disabled := false
-	if err := queries.UpdateNotificationDestination(ctx, orgID, projectID, first.ID, nil, nil, nil, &disabled, nil); err != nil {
+	if err := queries.UpdateNotificationDestination(ctx, orgID, projectID, first.ID, nil, nil, nil, &disabled, nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := queries.UpdateNotificationDestination(ctx, orgID, projectID, second.ID, nil, nil, nil, &disabled, nil); err != nil {
+	if err := queries.UpdateNotificationDestination(ctx, orgID, projectID, second.ID, nil, nil, nil, &disabled, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	ingestNotificationIssue(t, queries, projectID, environmentID, "notify-fp-3", "no subscribers", when.Add(3*time.Minute))
@@ -105,6 +105,60 @@ func TestPublishIssueCreatedNoDestinationWritesNoEvent(t *testing.T) {
 	t.Cleanup(func() { cleanupTenant(t, pool, orgID) })
 
 	ingestNotificationIssue(t, queries, projectID, environmentID, "notify-none-fp", "quiet issue", time.Now())
+	assertOutboundCounts(t, pool, projectID, 0, 0)
+}
+
+func TestPublishIssueCreatedHonorsDeliveryPolicy(t *testing.T) {
+	pool := testPool(t)
+	queries := db.New(pool)
+	ctx := context.Background()
+	orgID, projectID, environmentID := seedNotificationProject(t, queries, "notify-policy")
+	t.Cleanup(func() { cleanupTenant(t, pool, orgID) })
+
+	immediate := destinationFixture(projectID, "Immediate")
+	postTriage := destinationFixture(projectID, "After triage")
+	postTriage.DeliveryPolicy = "post_triage"
+	for _, destination := range []db.NotificationDestination{immediate, postTriage} {
+		if _, err := queries.CreateNotificationDestination(ctx, orgID, projectID, destination); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result := ingestNotificationIssue(t, queries, projectID, environmentID, "notify-policy-fp", "policy issue", time.Now())
+
+	var destinationIDs []string
+	rows, err := pool.Query(ctx, `
+		SELECT d.destination_id
+		FROM outbound_deliveries d
+		JOIN outbound_events e ON e.id = d.event_id
+		WHERE e.event_type = 'issue.created' AND e.payload->'issue'->>'id' = $1`, result.GroupID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		destinationIDs = append(destinationIDs, id)
+	}
+	if len(destinationIDs) != 1 || destinationIDs[0] != immediate.ID {
+		t.Fatalf("issue.created deliveries = %v, want [%s]", destinationIDs, immediate.ID)
+	}
+}
+
+func TestPublishIssueCreatedSkipsEventWhenOnlyPostTriage(t *testing.T) {
+	pool := testPool(t)
+	queries := db.New(pool)
+	ctx := context.Background()
+	orgID, projectID, environmentID := seedNotificationProject(t, queries, "notify-policy-only")
+	t.Cleanup(func() { cleanupTenant(t, pool, orgID) })
+	destination := destinationFixture(projectID, "After triage")
+	destination.DeliveryPolicy = "post_triage"
+	if _, err := queries.CreateNotificationDestination(ctx, orgID, projectID, destination); err != nil {
+		t.Fatal(err)
+	}
+	ingestNotificationIssue(t, queries, projectID, environmentID, "notify-policy-only-fp", "quiet until triage", time.Now())
 	assertOutboundCounts(t, pool, projectID, 0, 0)
 }
 

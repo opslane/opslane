@@ -24,6 +24,11 @@ var knownNotificationEventTypes = map[string]struct{}{
 	"digest.daily":  {},
 }
 
+var supportedDeliveryPolicies = map[string]struct{}{
+	"immediate":   {},
+	"post_triage": {},
+}
+
 type DigestBuilder interface {
 	Build(ctx context.Context, projectID string, now time.Time) (notify.EventPayload, error)
 }
@@ -34,6 +39,7 @@ type notificationDestinationJSON struct {
 	Name              string                    `json:"name"`
 	ConfigFingerprint string                    `json:"config_fingerprint"`
 	EventTypes        []string                  `json:"event_types"`
+	DeliveryPolicy    string                    `json:"delivery_policy"`
 	Enabled           bool                      `json:"enabled"`
 	CreatedAt         time.Time                 `json:"created_at"`
 	LastDelivery      *notificationDeliveryJSON `json:"last_delivery"`
@@ -52,16 +58,18 @@ type notificationListJSON struct {
 }
 
 type createNotificationDestinationRequest struct {
-	Name       string   `json:"name"`
-	WebhookURL string   `json:"webhook_url"`
-	EventTypes []string `json:"event_types"`
+	Name           string   `json:"name"`
+	WebhookURL     string   `json:"webhook_url"`
+	EventTypes     []string `json:"event_types"`
+	DeliveryPolicy string   `json:"delivery_policy"`
 }
 
 type updateNotificationDestinationRequest struct {
-	Name       *string   `json:"name"`
-	WebhookURL *string   `json:"webhook_url"`
-	Enabled    *bool     `json:"enabled"`
-	EventTypes *[]string `json:"event_types"`
+	Name           *string   `json:"name"`
+	WebhookURL     *string   `json:"webhook_url"`
+	Enabled        *bool     `json:"enabled"`
+	EventTypes     *[]string `json:"event_types"`
+	DeliveryPolicy *string   `json:"delivery_policy"`
 }
 
 type notificationConfig struct {
@@ -75,6 +83,7 @@ func notificationDestinationResponse(destination db.NotificationDestination) not
 		Name:              destination.Name,
 		ConfigFingerprint: destination.ConfigFingerprint,
 		EventTypes:        destination.EventTypes,
+		DeliveryPolicy:    destination.DeliveryPolicy,
 		Enabled:           destination.Enabled,
 		CreatedAt:         destination.CreatedAt,
 		RecentFailures:    destination.RecentFailures,
@@ -151,6 +160,13 @@ func (d *Dependencies) CreateNotificationDestinationEndpoint(w http.ResponseWrit
 		writeJSONError(w, http.StatusBadRequest, "event_types contains an unsupported value")
 		return
 	}
+	if request.DeliveryPolicy == "" {
+		request.DeliveryPolicy = "immediate"
+	}
+	if _, ok := supportedDeliveryPolicies[request.DeliveryPolicy]; !ok {
+		writeJSONError(w, http.StatusBadRequest, "delivery_policy contains an unsupported value")
+		return
+	}
 
 	destinationID := uuid.NewString()
 	configJSON, err := json.Marshal(notificationConfig{WebhookURL: request.WebhookURL})
@@ -171,6 +187,7 @@ func (d *Dependencies) CreateNotificationDestinationEndpoint(w http.ResponseWrit
 		ConfigEncrypted:   sealed,
 		ConfigFingerprint: notify.FingerprintURL(request.WebhookURL),
 		EventTypes:        request.EventTypes,
+		DeliveryPolicy:    request.DeliveryPolicy,
 		Enabled:           true,
 	})
 	if err != nil {
@@ -190,9 +207,15 @@ func (d *Dependencies) UpdateNotificationDestinationEndpoint(w http.ResponseWrit
 		writeJSONError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	if request.Name == nil && request.WebhookURL == nil && request.Enabled == nil && request.EventTypes == nil {
+	if request.Name == nil && request.WebhookURL == nil && request.Enabled == nil && request.EventTypes == nil && request.DeliveryPolicy == nil {
 		writeJSONError(w, http.StatusBadRequest, "at least one field is required")
 		return
+	}
+	if request.DeliveryPolicy != nil {
+		if _, ok := supportedDeliveryPolicies[*request.DeliveryPolicy]; !ok {
+			writeJSONError(w, http.StatusBadRequest, "delivery_policy contains an unsupported value")
+			return
+		}
 	}
 	if request.Name != nil {
 		trimmed := strings.TrimSpace(*request.Name)
@@ -245,6 +268,7 @@ func (d *Dependencies) UpdateNotificationDestinationEndpoint(w http.ResponseWrit
 		fingerprint,
 		request.Enabled,
 		eventTypes,
+		request.DeliveryPolicy,
 	); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeJSONError(w, http.StatusNotFound, "notification destination not found")

@@ -695,7 +695,7 @@ export async function rescheduleJob(
       lease.errorGroupId,
       lease.sessionId,
       availableAt,
-      payload === undefined ? null : JSON.stringify(payload),
+      payload === undefined ? null : payload ? JSON.stringify(payload) : null,
     ],
   );
   if ((result.rowCount ?? 0) === 0) throw new LeaseLostError(lease.id);
@@ -931,6 +931,7 @@ export async function requeueStaleJobs(): Promise<number> {
           remediation:
             'Re-run the fix from the incident, or review manually — the worker could not hold a lease long enough to finish.',
         },
+        terminalFixJobId: row.id,
       }).catch(() => {});
     }
   }
@@ -957,6 +958,179 @@ export async function updateJobTraceUrl(
     [jobId, workerId, leaseGeneration, traceUrl]
   );
   return (result.rowCount ?? 0) > 0;
+}
+
+export function isTriageTerminalStatus(status: string): status is 'needs_human' | 'pr_created' {
+  return status === 'needs_human' || status === 'pr_created';
+}
+
+const TRIAGE_LABELS: Record<string, string> = {
+  'pr_created:*': 'Fix PR opened',
+  'needs_human:insufficient_context': 'Needs review — no verified cause',
+  'needs_human:unfixable_third_party': 'Needs review — cause is third-party code',
+  'needs_human:unfixable_infra': 'Needs review — infrastructure cause',
+  'needs_human:unfixable_no_app_frames': 'Needs review — no application code in the stack',
+  'needs_human:worker_runtime_error': 'Needs review — investigation crashed',
+  'needs_human:verification_failed': 'Needs review — fix failed verification',
+  'needs_human:budget_exhausted': 'Needs review — investigation budget exhausted',
+  'needs_human:*': 'Needs review',
+};
+
+export function triageLabel(
+  status: 'needs_human' | 'pr_created',
+  reasonCode: string | null,
+): string {
+  if (status === 'pr_created') return TRIAGE_LABELS['pr_created:*']!;
+  return TRIAGE_LABELS[`needs_human:${reasonCode ?? ''}`] ?? TRIAGE_LABELS['needs_human:*']!;
+}
+
+export function triagedDedupKey(groupId: string, terminalJobId: string): string {
+  return `issue.triaged:${groupId}:${terminalJobId}`;
+}
+
+function isLoopbackHostname(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  if (host === 'localhost' || host.endsWith('.localhost') || host === '0.0.0.0') return true;
+  if (host === '::' || host === '::1') return true;
+  const octets = host.split('.');
+  if (octets.length === 4 && octets.every((part) => /^\d+$/.test(part))) {
+    const numbers = octets.map(Number);
+    return numbers[0] === 127 || numbers.every((part) => part === 0);
+  }
+  return false;
+}
+
+/** Keep this in parity with ingestion/notify.BuildIncidentURL. */
+export function incidentURL(base: string | undefined, groupId: string, projectId: string): string {
+  if (!base?.trim()) return '';
+  try {
+    const parsed = new URL(base.trim());
+    if (!['http:', 'https:'].includes(parsed.protocol)) return '';
+    if (parsed.username || parsed.password || isLoopbackHostname(parsed.hostname)) return '';
+    parsed.search = '';
+    parsed.hash = '';
+    parsed.pathname = `${parsed.pathname.replace(/\/+$/, '')}/incidents/${encodeURIComponent(groupId)}`;
+    parsed.searchParams.set('project_id', projectId);
+    return parsed.toString();
+  } catch {
+    return '';
+  }
+}
+
+interface TriagedPayloadRow {
+  id: string;
+  title: string;
+  first_seen: string | Date;
+  project_id: string;
+  project_name: string;
+  environment: string;
+  identified_users: string | number;
+  recent_anon_sessions: string | number;
+}
+
+export function buildTriagedPayload(
+  row: TriagedPayloadRow,
+  status: 'needs_human' | 'pr_created',
+  reasonCode: string | null,
+): object {
+  const firstSeen = new Date(row.first_seen).toISOString().replace('.000Z', 'Z');
+  return {
+    version: 1,
+    event_type: 'issue.triaged',
+    issue: { id: row.id, title: row.title, first_seen: firstSeen },
+    project: { id: row.project_id, name: row.project_name },
+    environment: row.environment,
+    dashboard_url: incidentURL(process.env['DASHBOARD_URL'], row.id, row.project_id),
+    outcome: {
+      status,
+      reason_code: reasonCode,
+      label: triageLabel(status, reasonCode),
+      impact: {
+        users_7d: Number(row.identified_users),
+        anon_sessions_7d: Number(row.recent_anon_sessions),
+      },
+    },
+  };
+}
+
+async function loadTriagedPayload(
+  client: Pick<pg.Pool, 'query'> | Pick<pg.PoolClient, 'query'>,
+  errorGroupId: string,
+  projectId: string,
+  status: 'needs_human' | 'pr_created',
+  reasonCode: string | null,
+): Promise<object | null> {
+  const { rows } = await client.query<TriagedPayloadRow>(
+    `SELECT eg.id, eg.title, eg.first_seen, p.id AS project_id, p.name AS project_name,
+            COALESCE(
+              (SELECT e.name FROM environments e
+               WHERE e.id = eg.environment_id AND e.project_id = eg.project_id),
+              (SELECT e.name
+               FROM error_group_environments ege
+               JOIN environments e ON e.id = ege.environment_id AND e.project_id = eg.project_id
+               WHERE ege.error_group_id = eg.id
+               ORDER BY ege.last_seen DESC, e.id
+               LIMIT 1),
+              ''
+            ) AS environment,
+            (SELECT count(*) FROM error_group_affected_users u
+             WHERE u.error_group_id = eg.id
+               AND u.last_seen > now() - interval '7 days') AS identified_users,
+            (SELECT count(*) FROM (
+               SELECT ee.session_id FROM error_events ee
+               WHERE ee.project_id = eg.project_id AND ee.error_group_id = eg.id
+                 AND ee.session_id IS NOT NULL
+                 AND ee.timestamp > now() - interval '7 days'
+               GROUP BY ee.session_id HAVING bool_and(ee.end_user_id IS NULL)
+             ) anon) AS recent_anon_sessions
+     FROM error_groups eg
+     JOIN projects p ON p.id = eg.project_id
+     WHERE eg.id = $1 AND eg.project_id = $2 AND eg.kind = 'error'`,
+    [errorGroupId, projectId],
+  );
+  const row = rows[0];
+  // Null, not a throw. publishIssueCreated has one caller, the error ingest
+  // path, so a friction incident never produces issue.created; emitting
+  // issue.triaged for one would make post_triage a different subscription
+  // rather than the same one delivered later. A missing row is likewise a
+  // no-op, not an error: saveExternalCIResult reads this before its lease and
+  // status gates and must stay able to return false.
+  if (!row) return null;
+  return buildTriagedPayload(row, status, reasonCode);
+}
+
+function triagedOutboxCte(params: {
+  statusParam: string;
+  projectParam: string;
+  payloadParam: string;
+  dedupParam: string;
+}): string {
+  return `, triaged_outbox AS (
+    INSERT INTO outbound_events (project_id, event_type, dedup_key, payload)
+    SELECT ${params.projectParam}, 'issue.triaged', ${params.dedupParam}, ${params.payloadParam}::jsonb
+    WHERE EXISTS (
+      SELECT 1 FROM updated_group
+      WHERE previous_status IS DISTINCT FROM ${params.statusParam}::error_group_status
+        AND ${params.statusParam}::error_group_status IN ('needs_human', 'pr_created')
+    )
+      AND EXISTS (
+        SELECT 1 FROM notification_destinations
+        WHERE project_id = ${params.projectParam} AND enabled
+          AND 'issue.created' = ANY(event_types)
+          AND delivery_policy = 'post_triage'
+      )
+      AND ${params.payloadParam}::jsonb IS NOT NULL
+    ON CONFLICT (project_id, dedup_key) DO NOTHING
+    RETURNING id
+  ), triaged_deliveries AS (
+    INSERT INTO outbound_deliveries (event_id, destination_id)
+    SELECT triaged_outbox.id, d.id
+    FROM triaged_outbox
+    CROSS JOIN notification_destinations d
+    WHERE d.project_id = ${params.projectParam} AND d.enabled
+      AND 'issue.created' = ANY(d.event_types)
+      AND d.delivery_policy = 'post_triage'
+  )`;
 }
 
 /**
@@ -994,10 +1168,17 @@ export async function updateGroupStatus(
     }
   }
 
+  const terminalJobId = fields?.terminalFixJobId ?? lease?.id;
+  if (isTriageTerminalStatus(status) && !terminalJobId) {
+    throw new Error(
+      `terminal job id is required to transition group ${errorGroupId} into ${status}`,
+    );
+  }
+
   const reason = fields?.reason;
   const client = await getPool().connect();
   const ownedCte = lease
-    ? `WITH owned AS (
+    ? `owned AS (
          SELECT id FROM error_group_jobs
          WHERE id = $14
            AND worker_id = $15
@@ -1007,13 +1188,48 @@ export async function updateGroupStatus(
            AND status = 'claimed'
            AND lease_expires_at > now()
          FOR UPDATE
-       )`
+       ),`
     : '';
   try {
     await client.query('BEGIN');
+    const payload = isTriageTerminalStatus(status)
+      ? await loadTriagedPayload(client, errorGroupId, projectId, status, reason?.reason_code ?? null)
+      : {};
+    const values: unknown[] = [
+      errorGroupId,
+      projectId,
+      status,
+      fields?.confidence ?? null,
+      fields?.pr_url ?? null,
+      fields?.pr_number ?? null,
+      fields?.pr_fix_job_id ?? null,
+      reason?.reason_code ?? null,
+      reason?.reason_message ?? null,
+      reason?.remediation ?? null,
+      fields?.candidate_diff ?? null,
+      fields?.evidence ? JSON.stringify(fields.evidence) : null,
+      // Deliberately NOT terminalJobId. That falls back to the lease id so the
+      // dedup key always has one, but terminal_fix_job_id is the fix-adoption
+      // marker: stamping it on a non-terminal write ('analyzing',
+      // 'awaiting_approval') makes a requeued job adopt its own earlier state on
+      // re-claim and skip the autonomy re-check.
+      fields?.terminalFixJobId ?? null,
+      ...(lease ? [lease.id, lease.workerId, lease.leaseGeneration] : []),
+    ];
+    const payloadParam = `$${values.length + 1}`;
+    const dedupParam = `$${values.length + 2}`;
+    values.push(payload ? JSON.stringify(payload) : null, triagedDedupKey(errorGroupId, terminalJobId ?? 'non-terminal'));
+
     const result = await client.query(
-    `${ownedCte}
-     UPDATE error_groups
+    `WITH ${ownedCte}
+     prior AS MATERIALIZED (
+       SELECT id, status AS previous_status
+       FROM error_groups
+       WHERE id = $1 AND project_id = $2
+         ${lease ? 'AND EXISTS (SELECT 1 FROM owned)' : ''}
+       FOR UPDATE
+     ), updated_group AS (
+     UPDATE error_groups AS g
      SET status = $3::error_group_status,
          confidence = $4,
          pr_url = $5,
@@ -1027,34 +1243,23 @@ export async function updateGroupStatus(
          terminal_fix_job_id = COALESCE($13, terminal_fix_job_id),
          pr_created_at = CASE
            WHEN $3::error_group_status = 'pr_created'
-                AND status IS DISTINCT FROM 'pr_created' THEN now()
+                AND g.status IS DISTINCT FROM 'pr_created' THEN now()
            ELSE pr_created_at
          END,
          needs_human_at = CASE
            WHEN $3::error_group_status = 'needs_human'
-                AND status IS DISTINCT FROM 'needs_human' THEN now()
+                AND g.status IS DISTINCT FROM 'needs_human' THEN now()
            ELSE needs_human_at
          END,
          updated_at = now()
-     WHERE id = $1 AND project_id = $2
-       ${lease ? 'AND EXISTS (SELECT 1 FROM owned)' : ''}
-     RETURNING id`,
-    [
-      errorGroupId,
-      projectId,
-      status,
-      fields?.confidence ?? null,
-      fields?.pr_url ?? null,
-      fields?.pr_number ?? null,
-      fields?.pr_fix_job_id ?? null,
-      reason?.reason_code ?? null,
-      reason?.reason_message ?? null,
-      reason?.remediation ?? null,
-      fields?.candidate_diff ?? null,
-      fields?.evidence ? JSON.stringify(fields.evidence) : null,
-      fields?.terminalFixJobId ?? null,
-      ...(lease ? [lease.id, lease.workerId, lease.leaseGeneration] : []),
-    ]
+     FROM prior
+     WHERE g.id = prior.id AND g.project_id = $2
+     RETURNING g.id, prior.previous_status
+     )${triagedOutboxCte({
+       statusParam: '$3', projectParam: '$2', payloadParam, dedupParam,
+     })}
+     SELECT id FROM updated_group`,
+    values,
     );
     if (lease && (result.rowCount ?? 0) === 0) throw new LeaseLostError(lease.id);
 
@@ -1270,33 +1475,50 @@ export async function finalizeDelivery(
     if ((owned.rowCount ?? 0) === 0) throw new LeaseLostError(lease.id);
 
     const reason = input.reason;
+    const payload = isTriageTerminalStatus(input.status)
+      ? await loadTriagedPayload(client, errorGroupId, projectId, input.status, reason?.reason_code ?? null)
+      : {};
+    const values: unknown[] = [
+      errorGroupId,
+      projectId,
+      input.status,
+      input.confidence,
+      input.prUrl,
+      input.prNumber,
+      input.fixJobId,
+      reason?.reason_code ?? null,
+      reason?.reason_message ?? null,
+      reason?.remediation ?? null,
+      input.candidateDiff ?? null,
+      input.evidence ? JSON.stringify(input.evidence) : null,
+    ];
+    const payloadParam = `$${values.length + 1}`;
+    const dedupParam = `$${values.length + 2}`;
+    values.push(payload ? JSON.stringify(payload) : null, triagedDedupKey(errorGroupId, input.fixJobId));
     const updated = await client.query(
-      `UPDATE error_groups
+      `WITH prior AS MATERIALIZED (
+         SELECT id, status AS previous_status
+         FROM error_groups
+         WHERE id = $1 AND project_id = $2
+         FOR UPDATE
+       ), updated_group AS (
+       UPDATE error_groups AS g
        SET status = $3::error_group_status, confidence = $4,
            pr_url = $5, pr_number = $6, pr_fix_job_id = $7,
            terminal_fix_job_id = $7,
            reason_code = $8, reason_message = $9, remediation = $10,
            candidate_diff = $11, verification_evidence = $12::jsonb,
-           pr_created_at = CASE WHEN $3::error_group_status = 'pr_created'
-                                THEN COALESCE(pr_created_at, now())
-                                ELSE pr_created_at END,
+           pr_created_at = COALESCE(pr_created_at, now()),
            updated_at = now()
-       WHERE id = $1 AND project_id = $2
-         AND status IN ('fixing', 'pr_draft', 'pr_created')`,
-      [
-        errorGroupId,
-        projectId,
-        input.status,
-        input.confidence,
-        input.prUrl,
-        input.prNumber,
-        input.fixJobId,
-        reason?.reason_code ?? null,
-        reason?.reason_message ?? null,
-        reason?.remediation ?? null,
-        input.candidateDiff ?? null,
-        input.evidence ? JSON.stringify(input.evidence) : null,
-      ],
+       FROM prior
+       WHERE g.id = prior.id AND g.project_id = $2
+         AND g.status IN ('fixing', 'pr_draft', 'pr_created')
+       RETURNING g.id, prior.previous_status
+       )${triagedOutboxCte({
+         statusParam: '$3', projectParam: '$2', payloadParam, dedupParam,
+       })}
+       SELECT id FROM updated_group`,
+      values,
     );
     if ((updated.rowCount ?? 0) === 0) {
       throw new Error(`Cannot finalize delivery for group ${errorGroupId}`);
@@ -1325,7 +1547,7 @@ export async function finalizeDelivery(
            WHERE error_group_id = $1 AND project_id = $2
              AND job_type = 'ci_watch' AND status IN ('pending', 'claimed')
          )`,
-        [errorGroupId, projectId, JSON.stringify(payload)],
+        [errorGroupId, projectId, payload ? JSON.stringify(payload) : null],
       );
     }
     if (input.readiness) {
@@ -1543,8 +1765,41 @@ export async function saveExternalCIResult(
   },
   lease: JobLease,
 ): Promise<boolean> {
-  const result = await getPool().query(
-    `UPDATE error_groups g
+  const db = getPool();
+  const nextStatus: ErrorGroupStatus = input.promote ? 'pr_created' : 'pr_draft';
+  const payload = input.promote
+    ? await loadTriagedPayload(db, errorGroupId, projectId, 'pr_created', null)
+    : {};
+  const values: unknown[] = [
+    errorGroupId,
+    projectId,
+    lease.id,
+    lease.workerId,
+    lease.leaseGeneration,
+    input.promote,
+    JSON.stringify(input.evidence),
+    input.remediation ?? null,
+    nextStatus,
+  ];
+  const payloadParam = `$${values.length + 1}`;
+  const dedupParam = `$${values.length + 2}`;
+  values.push(payload ? JSON.stringify(payload) : null, triagedDedupKey(errorGroupId, lease.id));
+  const result = await db.query(
+    `WITH owned AS MATERIALIZED (
+       SELECT id FROM error_group_jobs
+       WHERE id = $3 AND worker_id = $4
+         AND lease_generation = $5::bigint
+         AND project_id = $2 AND error_group_id = $1
+         AND status = 'claimed' AND lease_expires_at > now()
+       FOR UPDATE
+     ), prior AS MATERIALIZED (
+       SELECT id, status AS previous_status
+       FROM error_groups
+       WHERE id = $1 AND project_id = $2 AND status = 'pr_draft'
+         AND EXISTS (SELECT 1 FROM owned)
+       FOR UPDATE
+     ), updated_group AS (
+     UPDATE error_groups g
      SET status = CASE WHEN $6 THEN 'pr_created'::error_group_status ELSE status END,
          confidence = CASE WHEN $6 THEN 'medium' ELSE confidence END,
          verification_evidence = $7::jsonb,
@@ -1554,24 +1809,14 @@ export async function saveExternalCIResult(
          candidate_diff = CASE WHEN $6 THEN NULL ELSE candidate_diff END,
          pr_created_at = CASE WHEN $6 THEN COALESCE(pr_created_at, now()) ELSE pr_created_at END,
          updated_at = now()
-     WHERE g.id = $1 AND g.project_id = $2 AND g.status = 'pr_draft'
-       AND EXISTS (
-         SELECT 1 FROM error_group_jobs j
-         WHERE j.id = $3 AND j.worker_id = $4
-           AND j.lease_generation = $5::bigint
-           AND j.project_id = $2 AND j.error_group_id = $1
-           AND j.status = 'claimed' AND j.lease_expires_at > now()
-       )`,
-    [
-      errorGroupId,
-      projectId,
-      lease.id,
-      lease.workerId,
-      lease.leaseGeneration,
-      input.promote,
-      JSON.stringify(input.evidence),
-      input.remediation ?? null,
-    ],
+     FROM prior
+     WHERE g.id = prior.id AND g.project_id = $2
+     RETURNING g.id, prior.previous_status
+     )${triagedOutboxCte({
+       statusParam: '$9', projectParam: '$2', payloadParam, dedupParam,
+     })}
+     SELECT id FROM updated_group`,
+    values,
   );
   return (result.rowCount ?? 0) > 0;
 }
@@ -2171,6 +2416,7 @@ export async function updateGroupInvestigation(
     reason?: NeedsHumanReason;
     decision?: DecisionRow;
     readiness?: ReadinessWrite;
+    terminalJobId?: string;
   },
   lease?: JobLease,
 ): Promise<void> {
@@ -2183,9 +2429,15 @@ export async function updateGroupInvestigation(
     }
   }
   const reason = fields.reason;
+  const terminalJobId = fields.terminalJobId ?? lease?.id ?? fields.decision?.jobId ?? undefined;
+  if (isTriageTerminalStatus(status) && !terminalJobId) {
+    throw new Error(
+      `terminal job id is required to transition group ${errorGroupId} into ${status}`,
+    );
+  }
   const db = getPool();
   const ownedCte = lease
-    ? `WITH owned AS (
+    ? `owned AS (
          SELECT id FROM error_group_jobs
          WHERE id = $10
            AND worker_id = $11
@@ -2195,14 +2447,42 @@ export async function updateGroupInvestigation(
            AND status = 'claimed'
            AND lease_expires_at > now()
          FOR UPDATE
-       )`
+       ),`
     : '';
   const client = await db.connect();
   try {
     await client.query('BEGIN');
+    const payload = isTriageTerminalStatus(status)
+      ? await loadTriagedPayload(client, errorGroupId, projectId, status, reason?.reason_code ?? null)
+      : {};
+    const values: unknown[] = [
+      errorGroupId,
+      projectId,
+      status,
+      fields.rootCause ?? null,
+      fields.suggestedMitigation ?? null,
+      fields.confidence ?? null,
+      reason?.reason_code ?? null,
+      reason?.reason_message ?? null,
+      reason?.remediation ?? null,
+      ...(lease ? [lease.id, lease.workerId, lease.leaseGeneration] : []),
+    ];
+    const payloadParam = `$${values.length + 1}`;
+    const dedupParam = `$${values.length + 2}`;
+    values.push(
+      payload ? JSON.stringify(payload) : null,
+      triagedDedupKey(errorGroupId, terminalJobId ?? 'non-terminal'),
+    );
     const result = await client.query(
-      `${ownedCte}
-       UPDATE error_groups
+      `WITH ${ownedCte}
+       prior AS MATERIALIZED (
+         SELECT id, status AS previous_status
+         FROM error_groups
+         WHERE id = $1 AND project_id = $2
+           ${lease ? 'AND EXISTS (SELECT 1 FROM owned)' : ''}
+         FOR UPDATE
+       ), updated_group AS (
+       UPDATE error_groups AS g
      SET status = $3::error_group_status,
          root_cause = $4,
          suggested_mitigation = $5,
@@ -2212,30 +2492,23 @@ export async function updateGroupInvestigation(
          remediation = $9,
          pr_created_at = CASE
            WHEN $3::error_group_status = 'pr_created'
-                AND status IS DISTINCT FROM 'pr_created' THEN now()
+                AND g.status IS DISTINCT FROM 'pr_created' THEN now()
            ELSE pr_created_at
          END,
          needs_human_at = CASE
            WHEN $3::error_group_status = 'needs_human'
-                AND status IS DISTINCT FROM 'needs_human' THEN now()
+                AND g.status IS DISTINCT FROM 'needs_human' THEN now()
            ELSE needs_human_at
          END,
          updated_at = now()
-     WHERE id = $1 AND project_id = $2
-       ${lease ? 'AND EXISTS (SELECT 1 FROM owned)' : ''}
-       RETURNING id`,
-      [
-        errorGroupId,
-        projectId,
-        status,
-        fields.rootCause ?? null,
-        fields.suggestedMitigation ?? null,
-        fields.confidence ?? null,
-        reason?.reason_code ?? null,
-        reason?.reason_message ?? null,
-        reason?.remediation ?? null,
-        ...(lease ? [lease.id, lease.workerId, lease.leaseGeneration] : []),
-      ],
+     FROM prior
+     WHERE g.id = prior.id AND g.project_id = $2
+     RETURNING g.id, prior.previous_status
+     )${triagedOutboxCte({
+       statusParam: '$3', projectParam: '$2', payloadParam, dedupParam,
+     })}
+     SELECT id FROM updated_group`,
+      values,
     );
     if (lease && (result.rowCount ?? 0) === 0) {
       throw new LeaseLostError(lease.id);

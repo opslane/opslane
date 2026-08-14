@@ -962,6 +962,7 @@ describeDb('db.ts integration tests', () => {
           reason_message: 'clone failed',
           remediation: 'check repository credentials',
         },
+        terminalFixJobId: seeded.jobId,
       });
       const demoted = await testPool.query(
         `SELECT status, reason FROM digest_readiness WHERE incident_id = $1`,
@@ -977,6 +978,7 @@ describeDb('db.ts integration tests', () => {
           reason_message: 'clone failed',
           remediation: 'check repository credentials',
         },
+        terminalFixJobId: legacy.jobId,
       });
       const rows = await testPool.query(
         `SELECT count(*)::int AS n FROM digest_readiness WHERE incident_id = $1`,
@@ -1062,11 +1064,12 @@ describeDb('db.ts integration tests', () => {
     };
 
     it('stamps PR creation and retains it across later status changes', async () => {
-      const { errorGroupId } = await seedErrorGroupAndJob();
+      const { errorGroupId, jobId } = await seedErrorGroupAndJob();
 
       await updateGroupStatus(errorGroupId, testProjectId, 'pr_created', {
         pr_url: 'https://github.com/octocat/hello/pull/42',
         pr_number: 42,
+        terminalFixJobId: jobId,
       });
       const stamped = await testPool.query<{ pr_created_at: Date | null }>(
         `SELECT pr_created_at FROM error_groups WHERE id = $1`,
@@ -1083,9 +1086,12 @@ describeDb('db.ts integration tests', () => {
     });
 
     it('stamps needs-human status updates and retains the timestamp later', async () => {
-      const { errorGroupId } = await seedErrorGroupAndJob();
+      const { errorGroupId, jobId } = await seedErrorGroupAndJob();
 
-      await updateGroupStatus(errorGroupId, testProjectId, 'needs_human', { reason });
+      await updateGroupStatus(errorGroupId, testProjectId, 'needs_human', {
+        reason,
+        terminalFixJobId: jobId,
+      });
       const stamped = await testPool.query<{ needs_human_at: Date | null }>(
         `SELECT needs_human_at FROM error_groups WHERE id = $1`,
         [errorGroupId],
@@ -1101,11 +1107,12 @@ describeDb('db.ts integration tests', () => {
     });
 
     it('stamps needs-human investigation results', async () => {
-      const { errorGroupId } = await seedErrorGroupAndJob();
+      const { errorGroupId, jobId } = await seedErrorGroupAndJob();
 
       await updateGroupInvestigation(errorGroupId, testProjectId, 'needs_human', {
         rootCause: 'External dependency failed',
         reason,
+        terminalJobId: jobId,
       });
 
       const result = await testPool.query<{
@@ -1120,11 +1127,12 @@ describeDb('db.ts integration tests', () => {
     });
 
     it('does not move pr_created_at when the same status is written again', async () => {
-      const { errorGroupId } = await seedErrorGroupAndJob();
+      const { errorGroupId, jobId } = await seedErrorGroupAndJob();
 
       await updateGroupStatus(errorGroupId, testProjectId, 'pr_created', {
         pr_url: 'https://github.com/octocat/hello/pull/43',
         pr_number: 43,
+        terminalFixJobId: jobId,
       });
       const first = await testPool.query<{ pr_created_at: Date | null }>(
         `SELECT pr_created_at FROM error_groups WHERE id = $1`,
@@ -1137,6 +1145,7 @@ describeDb('db.ts integration tests', () => {
       await updateGroupStatus(errorGroupId, testProjectId, 'pr_created', {
         pr_url: 'https://github.com/octocat/hello/pull/43',
         pr_number: 43,
+        terminalFixJobId: jobId,
       });
       const second = await testPool.query<{ pr_created_at: Date | null }>(
         `SELECT pr_created_at FROM error_groups WHERE id = $1`,
@@ -1146,10 +1155,11 @@ describeDb('db.ts integration tests', () => {
     });
 
     it('stamps pr_created_at through investigation updates', async () => {
-      const { errorGroupId } = await seedErrorGroupAndJob();
+      const { errorGroupId, jobId } = await seedErrorGroupAndJob();
 
       await updateGroupInvestigation(errorGroupId, testProjectId, 'pr_created', {
         rootCause: 'Fix PR opened after investigation',
+        terminalJobId: jobId,
       });
 
       const result = await testPool.query<{ status: string; pr_created_at: Date | null }>(

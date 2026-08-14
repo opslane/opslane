@@ -11,6 +11,7 @@ type EventPayload struct {
 	Environment  string         `json:"environment,omitempty"`
 	DashboardURL string         `json:"dashboard_url,omitempty"`
 	Digest       *DigestPayload `json:"digest,omitempty"`
+	Outcome      *TriagePayload `json:"outcome,omitempty"`
 }
 
 // Validate enforces the tagged-union contract: exactly one event body,
@@ -18,12 +19,16 @@ type EventPayload struct {
 func (p EventPayload) Validate() error {
 	switch p.EventType {
 	case "issue.created":
-		if p.Issue == nil || p.Digest != nil {
+		if p.Issue == nil || p.Digest != nil || p.Outcome != nil {
 			return fmt.Errorf("issue.created requires issue body only")
 		}
 	case "digest.daily":
-		if p.Digest == nil || p.Issue != nil {
+		if p.Digest == nil || p.Issue != nil || p.Outcome != nil {
 			return fmt.Errorf("digest.daily requires digest body only")
+		}
+	case "issue.triaged":
+		if p.Issue == nil || p.Outcome == nil || p.Digest != nil {
+			return fmt.Errorf("issue.triaged requires issue and outcome bodies only")
 		}
 	default:
 		return fmt.Errorf("unknown event_type %q", p.EventType)
@@ -40,6 +45,18 @@ type IssueRef struct {
 type ProjectRef struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
+}
+
+type TriagePayload struct {
+	Status     string       `json:"status"`
+	ReasonCode *string      `json:"reason_code"`
+	Label      string       `json:"label"`
+	Impact     TriageImpact `json:"impact"`
+}
+
+type TriageImpact struct {
+	Users7D        int `json:"users_7d"`
+	AnonSessions7D int `json:"anon_sessions_7d"`
 }
 
 type DigestPayload struct {

@@ -21,6 +21,7 @@ const destination = (id: string, name: string) => ({
   name,
   config_fingerprint: 'hooks.slack.com/…/****part',
   event_types: ['issue.created'],
+  delivery_policy: 'immediate' as const,
   enabled: true,
   created_at: '2026-07-19T00:00:00Z',
   last_delivery: null,
@@ -127,6 +128,28 @@ describe('IntegrationsSettings', () => {
       'project-a',
       'destination-1',
       { event_types: ['issue.created', 'digest.daily'] },
+    );
+  });
+
+  it('updates when a new issue alert is delivered', async () => {
+    api.listNotificationDestinations.mockResolvedValue({
+      can_manage: true,
+      destinations: [destination('destination-1', 'Production alerts')],
+    });
+    api.updateNotificationDestination.mockResolvedValue({
+      ...destination('destination-1', 'Production alerts'),
+      delivery_policy: 'post_triage',
+    });
+
+    const wrapper = mount(IntegrationsSettings, { props: { projectId: 'project-a' } });
+    await flushPromises();
+    await wrapper.get('input[aria-label="Alert after triage for Production alerts"]').setValue(true);
+    await flushPromises();
+
+    expect(api.updateNotificationDestination).toHaveBeenCalledWith(
+      'project-a',
+      'destination-1',
+      { delivery_policy: 'post_triage' },
     );
   });
 

@@ -98,7 +98,10 @@ describe('updateGroupStatus — terminal reason contract', () => {
     // which fails with a UUID format error (fake IDs). That's fine: we're testing
     // that the validation layer didn't reject it.
     try {
-      await updateGroupStatus('group-1', 'project-1', 'needs_human', { reason });
+      await updateGroupStatus('group-1', 'project-1', 'needs_human', {
+        reason,
+        terminalFixJobId: 'job-1',
+      });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       // Must NOT be a validation error

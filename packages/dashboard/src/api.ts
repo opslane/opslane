@@ -471,7 +471,7 @@ export function listNotificationDestinations(
 
 export function createNotificationDestination(
   projectId: string,
-  data: { name: string; webhook_url: string },
+  data: { name: string; webhook_url: string; delivery_policy?: NotificationDestination['delivery_policy'] },
 ): Promise<NotificationDestination> {
   return postJSON<NotificationDestination>(
     `/projects/${projectId}/notification-destinations`,
@@ -487,6 +487,7 @@ export function updateNotificationDestination(
     webhook_url?: string;
     enabled?: boolean;
     event_types?: NotificationDestination['event_types'];
+    delivery_policy?: NotificationDestination['delivery_policy'];
   },
 ): Promise<NotificationDestination> {
   return patchJSON<NotificationDestination>(

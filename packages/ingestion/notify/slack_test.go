@@ -2,6 +2,8 @@ package notify
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -15,6 +17,29 @@ func samplePayload(title, dashboardURL string) EventPayload {
 		Project:      ProjectRef{ID: "p1", Name: "storefront"},
 		Environment:  "production",
 		DashboardURL: dashboardURL,
+	}
+}
+
+func TestFormatSlackTriagedDecodesSharedFixture(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "test-fixtures", "wire", "issue-triaged-v1.json"))
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	var payload EventPayload
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("decode fixture: %v", err)
+	}
+	if err := payload.Validate(); err != nil {
+		t.Fatalf("validate fixture: %v", err)
+	}
+	body, _, err := FormatSlack(payload)
+	if err != nil {
+		t.Fatalf("format fixture: %v", err)
+	}
+	for _, expected := range []string{"Triaged in storefront", "Needs review — no verified cause", "2 users", "3 anonymous sessions"} {
+		if !strings.Contains(string(body), expected) {
+			t.Errorf("formatted message missing %q: %s", expected, body)
+		}
 	}
 }
 
@@ -80,6 +105,7 @@ func TestSlackFormatRejectsUnknownAndMissingIssueBody(t *testing.T) {
 	for _, payload := range []EventPayload{
 		{EventType: "bogus"},
 		{EventType: "issue.created"},
+		{EventType: "issue.triaged", Issue: &IssueRef{ID: "g"}},
 	} {
 		if _, _, err := FormatSlack(payload); err == nil {
 			t.Fatalf("FormatSlack(%q) unexpectedly succeeded", payload.EventType)

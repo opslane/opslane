@@ -310,6 +310,41 @@ func TestNotificationDestinationEventTypes(t *testing.T) {
 	}
 }
 
+func TestNotificationDestinationDeliveryPolicy(t *testing.T) {
+	_, router, orgID, projectID, _ := notificationRouter(t, false, nil)
+	token := notificationToken(t, "policy-user", orgID, "policy@example.com")
+	path := "/api/v1/projects/" + projectID + "/notification-destinations"
+
+	create := notificationHTTP(t, router, http.MethodPost, path, token, map[string]any{
+		"name": "After triage", "webhook_url": "https://hooks.slack.com/services/T/B/x",
+		"delivery_policy": "post_triage",
+	})
+	if create.Code != http.StatusCreated || !strings.Contains(create.Body.String(), `"delivery_policy":"post_triage"`) {
+		t.Fatalf("create status=%d body=%s", create.Code, create.Body.String())
+	}
+	var created struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(create.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	update := notificationHTTP(t, router, http.MethodPatch, path+"/"+created.ID, token, map[string]any{
+		"delivery_policy": "immediate",
+	})
+	if update.Code != http.StatusOK || !strings.Contains(update.Body.String(), `"delivery_policy":"immediate"`) {
+		t.Fatalf("update status=%d body=%s", update.Code, update.Body.String())
+	}
+	for _, body := range []map[string]any{
+		{"name": "Bad", "webhook_url": "https://hooks.slack.com/services/T/B/x", "delivery_policy": "whenever"},
+		{"name": "Bad event", "webhook_url": "https://hooks.slack.com/services/T/B/x", "event_types": []string{"issue.triaged"}},
+	} {
+		response := notificationHTTP(t, router, http.MethodPost, path, token, body)
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("invalid create status=%d body=%s", response.Code, response.Body.String())
+		}
+	}
+}
+
 func TestNotificationDestinationCloudAdminAuthorization(t *testing.T) {
 	deps, router, orgID, projectID, _ := notificationRouter(t, true, nil)
 	user, err := deps.Queries.CreateUserGitHub(
