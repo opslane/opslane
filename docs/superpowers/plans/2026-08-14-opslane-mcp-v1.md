@@ -690,6 +690,50 @@ func TestLinkedPRIsFoundByTheMergeWebhook(t *testing.T) {
 	}
 }
 
+// Closing a linked PR without merging does not restore the incident's original
+// status: the close path sets investigated for errors and awaiting_approval for
+// friction (queries.go:1861). This test records that rather than asserting it is
+// desirable. If the reviewer decides a linked-then-closed incident should return
+// to where it started, that is a change to ProcessPRWebhook and a separate issue,
+// not something to paper over here.
+func TestClosingALinkedPRLeavesTheIncidentFixTriggerable(t *testing.T) {
+	deps, pool := testDeps(t)
+	orgID, projectID, _, _ := seedTenant(t, deps.Queries)
+	t.Cleanup(func() { cleanupTenantHandler(t, pool, orgID) })
+	seedProjectRepo(t, pool, projectID, "acme/app")
+
+	groupID := insertGroup(t, pool, projectID, "error", "link-pr-closed", "boom", nil, nil, nil)
+	if _, err := pool.Exec(context.Background(),
+		`UPDATE error_groups SET status = 'needs_human', reason_code = 'unfixable_third_party'
+		  WHERE id = $1`, groupID); err != nil {
+		t.Fatalf("seed needs_human: %v", err)
+	}
+
+	router := handler.NewRouterWithPool(deps, pool)
+	if response := linkPR(t, router, orgID, projectID, groupID, "https://github.com/acme/app/pull/91"); response.Code != http.StatusOK {
+		t.Fatalf("link: %d", response.Code)
+	}
+	if _, err := deps.Queries.ProcessPRWebhook(
+		context.Background(), "acme/app", 91, false, "delivery-close-"+t.Name(), time.Now()); err != nil {
+		t.Fatalf("process close webhook: %v", err)
+	}
+
+	var status string
+	var prURL *string
+	if err := pool.QueryRow(context.Background(),
+		`SELECT status, pr_url FROM error_groups WHERE id = $1`, groupID).Scan(&status, &prURL); err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if status != "investigated" {
+		t.Fatalf("status after close = %q, want investigated (documenting queries.go:1861)", status)
+	}
+	// pr_url must be cleared, or the incident can never be linked again and the
+	// developer's second attempt returns 409 forever.
+	if prURL != nil {
+		t.Fatalf("pr_url = %q after close; the incident cannot be re-linked", *prURL)
+	}
+}
+
 // The shared-repository hole ProcessPRWebhook documents but does not close
 // (queries.go:1721). Three production projects share one repository, so a second
 // claim on the same PR number would make (repo, pr_number) ambiguous and let the
@@ -862,6 +906,17 @@ var (
 // there is no window between the check and the write, and so it does not
 // duplicate GetProjectGitHubConfig (queries.go:3404), which needs an orgID this
 // handler does not carry.
+//
+// Closing the PR without merging has a consequence worth knowing before you
+// build this. ProcessPRWebhook's close path clears pr_url and pr_number, which
+// is good because it makes the incident linkable again, but it also sets status
+// to 'investigated' for errors and 'awaiting_approval' for friction
+// (queries.go:1861-1868). So an incident that was needs_human with
+// unfixable_third_party, linked and then closed, comes back as investigated,
+// which asserts a validated diagnosis it never had and makes it fix-triggerable.
+// That is pre-existing behaviour for worker-opened PRs; linking widens the set
+// of incidents it can happen to. Task 3 covers it with a test so the behaviour is
+// recorded rather than discovered later.
 //
 // The NOT EXISTS clause covers the case the webhook itself documents as
 // unhandled: when several projects share a github_repo, (repo, pr_number) is not
@@ -1312,6 +1367,11 @@ import type { DigestItem } from './types.js';
 /** States where the work is done and a pull request is already open. These are
  * receipts: worth a line at the end of a Slack message, worth nothing in a
  * session whose purpose is deciding what to do next.
+ *
+ * This closes the loop with Task 3. Linking a PR sets status = 'pr_created',
+ * receiptState maps that to 'pr_open' (packages/ingestion/digest/build.go:187),
+ * and pr_open is filtered here. So an incident the developer fixed today comes
+ * back tomorrow as a one-line receipt rather than as work.
  *
  * Deliberately an allowlist of receipts rather than of decisions. An unrecognised
  * state reaches the developer, because a filter that hides what it does not
