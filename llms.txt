@@ -44,6 +44,7 @@ Every page below is plain Markdown in this repository and is published at https:
 ## Contracts
 
 - [Event API contract](docs/contracts/events.md): the append-only wire rules for `POST /api/v1/events`
+- [Notification contract](docs/contracts/notifications.md): subscriptions, delivery timing, and the internal post-triage payload
 - [Reliability contract](docs/contracts/reliability.md): machine-checkable properties of the event-to-resolution pipeline
 - [Session replay contract](docs/contracts/C4-amendments.md): chunk, pointer, scrub, and retention invariants
 - [Action scope contract](docs/contracts/action-scope.md): what environment scoping gates, and what it deliberately does not

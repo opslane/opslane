@@ -7,7 +7,11 @@ import {
   testNotificationDestination,
   updateNotificationDestination,
 } from '../api';
-import type { NotificationDestination, NotificationEventType } from '../types/api';
+import type {
+  NotificationDeliveryPolicy,
+  NotificationDestination,
+  NotificationEventType,
+} from '../types/api';
 import { formatDate } from '../utils';
 import Button from './ui/Button.vue';
 
@@ -20,6 +24,7 @@ const loading = ref(false);
 const loadError = ref('');
 const newName = ref('');
 const newWebhookURL = ref('');
+const newDeliveryPolicy = ref<NotificationDeliveryPolicy>('immediate');
 const creating = ref(false);
 const mutationPending = ref<Record<string, boolean>>({});
 const testResults = ref<Record<string, { ok: boolean; message: string }>>({});
@@ -82,9 +87,11 @@ async function createDestination(): Promise<void> {
     await createNotificationDestination(props.projectId, {
       name,
       webhook_url: webhookURL,
+      delivery_policy: newDeliveryPolicy.value,
     });
     newName.value = '';
     newWebhookURL.value = '';
+    newDeliveryPolicy.value = 'immediate';
     await refresh();
   } catch (error: unknown) {
     loadError.value = errorMessage(error, 'Failed to add Slack notification');
@@ -150,6 +157,31 @@ function onEventTypeChange(
 ): void {
   const checked = event.target instanceof HTMLInputElement && event.target.checked;
   void setEventType(destination, eventType, checked);
+}
+
+async function setDeliveryPolicy(
+  destination: NotificationDestination,
+  deliveryPolicy: NotificationDeliveryPolicy,
+): Promise<void> {
+  if (!canManage.value || mutationPending.value[destination.id]) return;
+
+  setMutationPending(destination.id, true);
+  loadError.value = '';
+  try {
+    await updateNotificationDestination(props.projectId, destination.id, {
+      delivery_policy: deliveryPolicy,
+    });
+    await refresh();
+  } catch (error: unknown) {
+    loadError.value = errorMessage(error, 'Failed to update alert timing');
+  } finally {
+    setMutationPending(destination.id, false);
+  }
+}
+
+function onDeliveryPolicyChange(destination: NotificationDestination, event: Event): void {
+  if (!(event.target instanceof HTMLInputElement)) return;
+  void setDeliveryPolicy(destination, event.target.value as NotificationDeliveryPolicy);
 }
 
 async function removeDestination(destination: NotificationDestination): Promise<void> {
@@ -297,6 +329,36 @@ watch(
             </div>
           </fieldset>
 
+          <fieldset v-if="canManage && destination.event_types.includes('issue.created')" class="mt-4">
+            <legend class="text-xs font-medium text-muted">New issue alert timing</legend>
+            <div class="mt-2 flex flex-wrap gap-x-5 gap-y-2">
+              <label class="inline-flex items-center gap-2 text-sm text-text">
+                <input
+                  type="radio"
+                  :name="`delivery-policy-${destination.id}`"
+                  :aria-label="`Alert immediately for ${destination.name}`"
+                  value="immediate"
+                  :checked="destination.delivery_policy === 'immediate'"
+                  :disabled="mutationPending[destination.id]"
+                  @change="onDeliveryPolicyChange(destination, $event)"
+                />
+                <span>Alert immediately</span>
+              </label>
+              <label class="inline-flex items-center gap-2 text-sm text-text">
+                <input
+                  type="radio"
+                  :name="`delivery-policy-${destination.id}`"
+                  :aria-label="`Alert after triage for ${destination.name}`"
+                  value="post_triage"
+                  :checked="destination.delivery_policy === 'post_triage'"
+                  :disabled="mutationPending[destination.id]"
+                  @change="onDeliveryPolicyChange(destination, $event)"
+                />
+                <span>Alert after triage</span>
+              </label>
+            </div>
+          </fieldset>
+
           <div class="mt-4 flex flex-wrap items-center gap-2 text-xs">
             <template v-if="destination.last_delivery">
               <span
@@ -362,6 +424,19 @@ watch(
             >Slack webhook guide</a>
           </p>
         </div>
+        <fieldset>
+          <legend class="block text-sm font-medium text-muted">New issue alert timing</legend>
+          <div class="mt-2 flex flex-wrap gap-x-5 gap-y-2">
+            <label class="inline-flex items-center gap-2 text-sm text-text">
+              <input v-model="newDeliveryPolicy" type="radio" name="delivery-policy-new" value="immediate" :disabled="creating" />
+              <span>Alert immediately</span>
+            </label>
+            <label class="inline-flex items-center gap-2 text-sm text-text">
+              <input v-model="newDeliveryPolicy" type="radio" name="delivery-policy-new" value="post_triage" :disabled="creating" />
+              <span>Alert after triage</span>
+            </label>
+          </div>
+        </fieldset>
         <div>
           <label for="notification-name" class="block text-sm font-medium text-muted">Name</label>
           <input

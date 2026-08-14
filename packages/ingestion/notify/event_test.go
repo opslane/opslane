@@ -47,6 +47,8 @@ func TestIssueEnvelopeUnchanged(t *testing.T) {
 }
 
 func TestValidateExactlyOneBody(t *testing.T) {
+	reason := "insufficient_context"
+	outcome := &TriagePayload{Status: "needs_human", ReasonCode: &reason, Label: "Needs review"}
 	cases := []struct {
 		name    string
 		payload EventPayload
@@ -54,9 +56,14 @@ func TestValidateExactlyOneBody(t *testing.T) {
 	}{
 		{"issue ok", EventPayload{EventType: "issue.created", Issue: &IssueRef{ID: "g"}}, false},
 		{"digest ok", EventPayload{EventType: "digest.daily", Digest: &DigestPayload{}}, false},
+		{"triaged ok", EventPayload{EventType: "issue.triaged", Issue: &IssueRef{ID: "g"}, Outcome: outcome}, false},
 		{"issue missing body", EventPayload{EventType: "issue.created"}, true},
 		{"digest missing body", EventPayload{EventType: "digest.daily"}, true},
 		{"issue with digest body", EventPayload{EventType: "issue.created", Issue: &IssueRef{ID: "g"}, Digest: &DigestPayload{}}, true},
+		{"issue with outcome body", EventPayload{EventType: "issue.created", Issue: &IssueRef{ID: "g"}, Outcome: outcome}, true},
+		{"digest with outcome body", EventPayload{EventType: "digest.daily", Digest: &DigestPayload{}, Outcome: outcome}, true},
+		{"triaged missing outcome", EventPayload{EventType: "issue.triaged", Issue: &IssueRef{ID: "g"}}, true},
+		{"triaged with digest", EventPayload{EventType: "issue.triaged", Issue: &IssueRef{ID: "g"}, Outcome: outcome, Digest: &DigestPayload{}}, true},
 		{"unknown type", EventPayload{EventType: "bogus", Issue: &IssueRef{ID: "g"}}, true},
 	}
 	for _, c := range cases {

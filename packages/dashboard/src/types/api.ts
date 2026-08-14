@@ -55,6 +55,7 @@ export interface OrgInvitation {
 }
 
 export type NotificationEventType = 'issue.created' | 'digest.daily';
+export type NotificationDeliveryPolicy = 'immediate' | 'post_triage';
 
 export interface NotificationDestination {
   id: string;
@@ -62,6 +63,7 @@ export interface NotificationDestination {
   name: string;
   config_fingerprint: string;
   event_types: NotificationEventType[];
+  delivery_policy: NotificationDeliveryPolicy;
   enabled: boolean;
   created_at: string;
   last_delivery: { status: string; at: string; error: string | null } | null;

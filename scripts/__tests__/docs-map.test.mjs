@@ -77,6 +77,7 @@ test('published policy keeps contracts manual and plans unpublished', () => {
   assert.equal(publishedPolicyOf('docs/reference/http-routes.md'), 'deterministic');
   assert.equal(publishedPolicyOf('docs/contracts/C4-amendments.md'), 'manual');
   assert.equal(publishedPolicyOf('docs/contracts/events.md'), 'manual');
+  assert.equal(publishedPolicyOf('docs/contracts/notifications.md'), 'manual');
   assert.equal(publishedPolicyOf('docs/contracts/reliability.md'), 'manual');
   assert.equal(publishedPolicyOf('docs/plans/internal.md'), null);
 });

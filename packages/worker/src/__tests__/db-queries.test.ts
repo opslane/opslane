@@ -49,16 +49,23 @@ describe('resolveEvidenceEventId', () => {
 describe('group lifecycle timestamp queries', () => {
   beforeEach(() => mockQuery.mockReset());
 
-  it('stamps PR-created and needs-human transitions without clearing prior timestamps', async () => {
-    mockQuery.mockResolvedValue({ rowCount: 1, rows: [{ id: 'g1' }] });
+  const payloadRow = {
+    id: 'g1', title: 'Boom', first_seen: '2026-08-13T00:00:00Z',
+    project_id: 'p1', project_name: 'Project', environment: 'production',
+    identified_users: '0', recent_anon_sessions: '0',
+  };
 
-    await updateGroupStatus('g1', 'p1', 'pr_created');
+  it('stamps PR-created and needs-human transitions without clearing prior timestamps', async () => {
+    mockQuery.mockResolvedValue({ rowCount: 1, rows: [payloadRow] });
+
+    await updateGroupStatus('g1', 'p1', 'pr_created', { terminalFixJobId: 'job-pr' });
     await updateGroupStatus('g1', 'p1', 'needs_human', {
       reason: {
         reason_code: 'missing_llm_key',
         reason_message: 'API key not configured',
         remediation: 'Configure the worker API key',
       },
+      terminalFixJobId: 'job-human',
     });
 
     // A needs_human transition also demotes a pending readiness row in a
@@ -70,10 +77,10 @@ describe('group lifecycle timestamp queries', () => {
     for (const call of groupUpdates) {
       const query = String(call[0]);
       expect(query).toContain("WHEN $3::error_group_status = 'pr_created'");
-      expect(query).toContain("AND status IS DISTINCT FROM 'pr_created' THEN now()");
+      expect(query).toContain("AND g.status IS DISTINCT FROM 'pr_created' THEN now()");
       expect(query).toContain('ELSE pr_created_at');
       expect(query).toContain("WHEN $3::error_group_status = 'needs_human'");
-      expect(query).toContain("AND status IS DISTINCT FROM 'needs_human' THEN now()");
+      expect(query).toContain("AND g.status IS DISTINCT FROM 'needs_human' THEN now()");
       expect(query).toContain('ELSE needs_human_at');
     }
     expect(groupUpdates[0]?.[1]?.[2]).toBe('pr_created');
@@ -88,6 +95,7 @@ describe('group lifecycle timestamp queries', () => {
   it('stamps needs-human investigation results without clearing lifecycle timestamps', async () => {
     mockQuery
       .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ rowCount: 1, rows: [payloadRow] })
       .mockResolvedValueOnce({ rowCount: 1, rows: [{ id: 'g1' }] })
       .mockResolvedValueOnce({});
 
@@ -98,24 +106,26 @@ describe('group lifecycle timestamp queries', () => {
         reason_message: 'The investigation could not complete',
         remediation: 'Review the incident manually',
       },
+      terminalJobId: 'job-human',
     });
 
-    const query = String(mockQuery.mock.calls[1]?.[0]);
+    const query = String(mockQuery.mock.calls[2]?.[0]);
     expect(query).toContain("WHEN $3::error_group_status = 'pr_created'");
-      expect(query).toContain("AND status IS DISTINCT FROM 'pr_created' THEN now()");
+      expect(query).toContain("AND g.status IS DISTINCT FROM 'pr_created' THEN now()");
     expect(query).toContain('ELSE pr_created_at');
     expect(query).toContain("WHEN $3::error_group_status = 'needs_human'");
-      expect(query).toContain("AND status IS DISTINCT FROM 'needs_human' THEN now()");
+      expect(query).toContain("AND g.status IS DISTINCT FROM 'needs_human' THEN now()");
     expect(query).toContain('ELSE needs_human_at');
-    expect(mockQuery.mock.calls[1]?.[1]?.[2]).toBe('needs_human');
+    expect(mockQuery.mock.calls[2]?.[1]?.[2]).toBe('needs_human');
   });
 
   it('persists candidate_diff and verification_evidence on needs_human', async () => {
-    mockQuery.mockResolvedValue({ rowCount: 1, rows: [{ id: 'g1' }] });
+    mockQuery.mockResolvedValue({ rowCount: 1, rows: [payloadRow] });
     await updateGroupStatus('g1', 'p1', 'needs_human', {
       reason: { reason_code: 'low_confidence_fix', reason_message: 'm', remediation: 'r' },
       candidate_diff: 'DIFF',
       evidence: { version: 1, tier: 'E0', checks: [] },
+      terminalFixJobId: 'job-human',
     });
     // The last call is the pending-readiness demotion; the group update is the
     // one carrying the diff and evidence.
@@ -646,6 +656,14 @@ describe('requeueStaleJobs — reconcile dead-lettered fix jobs', () => {
     mockQuery.mockResolvedValueOnce({
       rowCount: 1,
       rows: [{ id: 'j1', error_group_id: 'g1', project_id: 'p1', job_type: 'fix', status: 'dead_letter' }],
+    });
+    mockQuery.mockResolvedValue({
+      rowCount: 1,
+      rows: [{
+        id: 'g1', title: 'Boom', first_seen: '2026-08-13T00:00:00Z',
+        project_id: 'p1', project_name: 'Project', environment: 'production',
+        identified_users: '0', recent_anon_sessions: '0',
+      }],
     });
 
     const count = await requeueStaleJobs();

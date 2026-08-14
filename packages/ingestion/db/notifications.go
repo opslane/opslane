@@ -18,6 +18,7 @@ type NotificationDestination struct {
 	ConfigEncrypted    []byte
 	ConfigFingerprint  string
 	EventTypes         []string
+	DeliveryPolicy     string
 	Enabled            bool
 	CreatedAt          time.Time
 	UpdatedAt          time.Time
@@ -37,6 +38,7 @@ func scanNotificationDestination(row pgx.Row) (*NotificationDestination, error) 
 		&destination.ConfigEncrypted,
 		&destination.ConfigFingerprint,
 		&destination.EventTypes,
+		&destination.DeliveryPolicy,
 		&destination.Enabled,
 		&destination.CreatedAt,
 		&destination.UpdatedAt,
@@ -51,15 +53,18 @@ func (q *Queries) CreateNotificationDestination(
 	orgID, projectID string,
 	destination NotificationDestination,
 ) (*NotificationDestination, error) {
+	if destination.DeliveryPolicy == "" {
+		destination.DeliveryPolicy = "immediate"
+	}
 	created, err := scanNotificationDestination(q.pool.QueryRow(ctx, `
 		INSERT INTO notification_destinations (
-			id, project_id, type, name, config_encrypted, config_fingerprint, event_types, enabled
+			id, project_id, type, name, config_encrypted, config_fingerprint, event_types, delivery_policy, enabled
 		)
-		SELECT $3, p.id, $4, $5, $6, $7, $8, $9
+		SELECT $3, p.id, $4, $5, $6, $7, $8, $9, $10
 		FROM projects p
 		WHERE p.id = $2 AND p.org_id = $1
 		RETURNING id, project_id, type, name, config_encrypted,
-		          config_fingerprint, event_types, enabled, created_at, updated_at`,
+		          config_fingerprint, event_types, delivery_policy, enabled, created_at, updated_at`,
 		orgID,
 		projectID,
 		destination.ID,
@@ -68,6 +73,7 @@ func (q *Queries) CreateNotificationDestination(
 		destination.ConfigEncrypted,
 		destination.ConfigFingerprint,
 		destination.EventTypes,
+		destination.DeliveryPolicy,
 		destination.Enabled,
 	))
 	if err != nil {
@@ -79,7 +85,7 @@ func (q *Queries) CreateNotificationDestination(
 func (q *Queries) ListNotificationDestinations(ctx context.Context, orgID, projectID string) ([]NotificationDestination, error) {
 	rows, err := q.pool.Query(ctx, `
 		SELECT d.id, d.project_id, d.type, d.name, d.config_encrypted, d.config_fingerprint,
-		       d.event_types, d.enabled, d.created_at, d.updated_at,
+		       d.event_types, d.delivery_policy, d.enabled, d.created_at, d.updated_at,
 		       ld.status, ld.updated_at, ld.last_error, COALESCE(f.cnt, 0)
 		FROM notification_destinations d
 		JOIN projects p ON p.id = d.project_id AND p.org_id = $1
@@ -115,6 +121,7 @@ func (q *Queries) ListNotificationDestinations(ctx context.Context, orgID, proje
 			&destination.ConfigEncrypted,
 			&destination.ConfigFingerprint,
 			&destination.EventTypes,
+			&destination.DeliveryPolicy,
 			&destination.Enabled,
 			&destination.CreatedAt,
 			&destination.UpdatedAt,
@@ -136,7 +143,7 @@ func (q *Queries) ListNotificationDestinations(ctx context.Context, orgID, proje
 func (q *Queries) GetNotificationDestination(ctx context.Context, orgID, projectID, destinationID string) (*NotificationDestination, error) {
 	destination, err := scanNotificationDestination(q.pool.QueryRow(ctx, `
 		SELECT d.id, d.project_id, d.type, d.name, d.config_encrypted,
-		       d.config_fingerprint, d.event_types, d.enabled, d.created_at, d.updated_at
+		       d.config_fingerprint, d.event_types, d.delivery_policy, d.enabled, d.created_at, d.updated_at
 		FROM notification_destinations d
 		JOIN projects p ON p.id = d.project_id AND p.org_id = $1
 		WHERE d.project_id = $2 AND d.id = $3`, orgID, projectID, destinationID))
@@ -154,6 +161,7 @@ func (q *Queries) UpdateNotificationDestination(
 	configFingerprint *string,
 	enabled *bool,
 	eventTypes []string,
+	deliveryPolicy *string,
 ) error {
 	command, err := q.pool.Exec(ctx, `
 		UPDATE notification_destinations d
@@ -162,6 +170,7 @@ func (q *Queries) UpdateNotificationDestination(
 		    config_fingerprint = COALESCE($6, d.config_fingerprint),
 		    enabled = COALESCE($7, d.enabled),
 		    event_types = COALESCE($8, d.event_types),
+		    delivery_policy = COALESCE($9, d.delivery_policy),
 		    updated_at = now()
 		FROM projects p
 		WHERE d.id = $3 AND d.project_id = $2
@@ -174,6 +183,7 @@ func (q *Queries) UpdateNotificationDestination(
 		configFingerprint,
 		enabled,
 		eventTypes,
+		deliveryPolicy,
 	)
 	if err != nil {
 		return fmt.Errorf("update notification destination: %w", err)
@@ -213,6 +223,7 @@ func publishIssueCreated(
 		SELECT EXISTS(
 			SELECT 1 FROM notification_destinations
 			WHERE project_id = $1 AND enabled AND 'issue.created' = ANY(event_types)
+			  AND delivery_policy = 'immediate'
 		)`, projectID).Scan(&hasDestination); err != nil {
 		return fmt.Errorf("check destinations: %w", err)
 	}
@@ -248,6 +259,7 @@ func publishIssueCreated(
 		WITH destinations AS (
 			SELECT id FROM notification_destinations
 			WHERE project_id = $1 AND enabled AND $2 = ANY(event_types)
+			  AND delivery_policy = 'immediate'
 		), event AS (
 			INSERT INTO outbound_events (project_id, event_type, dedup_key, payload)
 			SELECT $1, $2, $3, $4::jsonb

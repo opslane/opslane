@@ -43,6 +43,7 @@ describe('notification destinations API', () => {
       name: 'Production alerts',
       config_fingerprint: 'hooks.slack.com/…/****part',
       event_types: ['issue.created'],
+      delivery_policy: 'immediate' as const,
       enabled: true,
       created_at: '2026-07-19T00:00:00Z',
       last_delivery: null,

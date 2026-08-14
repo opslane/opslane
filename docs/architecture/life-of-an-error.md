@@ -38,6 +38,8 @@ Investigation and fixing are separate stages:
 - **Fix stage** (automatic for above-threshold, human-triggered from `investigated`). The agent writes a fix and declares a failing regression test; fail-first verification runs the test on the base commit (must fail with the declared assertion) and with the fix (must pass). An independent judge reviews the diff, declared test, and verification ledger; the judge may probe the sandbox (up to three commands) and can veto but cannot override mechanical predicates. A `reproduced` fix (red-then-green proof, clean suite, build passed) approved by the judge becomes a draft pull request (`pr_draft`). The exact head SHA is observed in repository CI and promoted to ready on green for human-triggered fixes; automated fixes remain draft. A `checked` fix (reproduction impossible, suite and build clean, quality confirmed) or judge veto preserves the bounded candidate diff and evidence on `needs_human` for manual review.
 - **Anything the worker cannot progress** at either stage → **`needs_human`** with `reason_code`, `reason_message`, and `remediation` — always all three.
 
+Terminal outcomes (`needs_human` or `pr_created`) enqueue `issue.triaged` events for notification destinations configured for post-triage delivery.
+
 One known gap in this contract, stated honestly: if an **investigate** job repeatedly crashes or loses its lease until it dead-letters, its group can currently remain in `analyzing` without a terminal reason — dead-letter reconciliation covers fix jobs only. Tracked as [#25](https://github.com/opslane/opslane-oss/issues/25).
 
 ## 7. Human follow-up

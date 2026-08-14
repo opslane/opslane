@@ -28,6 +28,9 @@ DELETE FROM agent_sessions WHERE repo_url = 'reapply-check/repo';
 ALTER TABLE diagnosis_decisions DISABLE TRIGGER diagnosis_decisions_immutable_row;
 DELETE FROM diagnosis_decisions WHERE model = 'reapply-check';
 ALTER TABLE diagnosis_decisions ENABLE TRIGGER diagnosis_decisions_immutable_row;
+DELETE FROM outbound_deliveries
+  WHERE event_id IN (SELECT id FROM outbound_events WHERE dedup_key LIKE 'reapply-check-%');
+DELETE FROM outbound_events WHERE dedup_key LIKE 'reapply-check-%';
 DELETE FROM error_group_jobs
   WHERE project_id IN (SELECT id FROM projects WHERE name = 'reapply-check-project');
 DELETE FROM error_groups
@@ -42,10 +45,12 @@ SQL
 echo "[reapply-check] first application (fresh DB path)"
 MIGRATION_DIR="$MIGRATION_DIR" "$RUNNER" >/dev/null
 
-# Seed one agent_sessions row per lifecycle status, including the values added
-# by migration 021 (provisioned / key_ok / app_reporting). If any of these rows
-# would violate a constraint re-added by an earlier migration on replay, the
-# replay below fails — which is exactly what we want to catch in CI.
+# Seed one row per value of every CHECK constraint that more than one migration
+# defines: agent_sessions.status (017 then 021) and outbound_events.event_type
+# (038 then 053). If any of these rows would violate a constraint re-added by an
+# earlier migration on replay, the replay below fails — which is exactly what we
+# want to catch in CI. When a future migration widens either constraint, add its
+# new values here too, or this gate goes quiet.
 #
 # Also seed the boundary values migration 044 widened into two CHECK
 # constraints: diagnosis_decisions.outcome = 'incomplete' and
@@ -70,6 +75,14 @@ WITH org AS (
   INSERT INTO error_groups (project_id, fingerprint, title, first_seen, last_seen)
   SELECT id, 'reapply-check-group', 'Reapply check group', now(), now() FROM project
   RETURNING id, project_id
+), outbox AS (
+  -- One row per allowed event_type, including the value migration 053 added.
+  -- 038 re-asserts this constraint on replay; without an issue.triaged row here
+  -- that re-narrowing is invisible and CI passes on a broken migration.
+  INSERT INTO outbound_events (project_id, event_type, dedup_key, payload)
+  SELECT project.id, t, 'reapply-check-' || t, '{}'::jsonb
+  FROM project, unnest(ARRAY['issue.created','issue.triaged','digest.daily']) AS t
+  RETURNING id
 ), job AS (
   INSERT INTO error_group_jobs (error_group_id, project_id, triggered_by)
   SELECT id, project_id, 'reinvestigate_report_only' FROM grp RETURNING id
