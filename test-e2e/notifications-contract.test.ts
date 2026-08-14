@@ -309,17 +309,12 @@ describe('notifications contract (Slack webhook delivery)', () => {
       terminalFixJobId: jobId,
     });
 
-    const deadline = Date.now() + 30_000;
-    while (
-      Date.now() < deadline
-      && sinkHits.filter((hit) => hit.path === postTriageHookPath).length === 0
-    ) {
-      await new Promise((resolve) => setTimeout(resolve, 1_000));
-    }
-    const postTriageHits = sinkHits.filter((hit) => hit.path === postTriageHookPath);
-    expect(postTriageHits).toHaveLength(1);
-    expect(postTriageHits[0]!.body).toContain('Needs review — no verified cause');
-    expect(postTriageHits[0]!.body).not.toContain('model-written detail');
+    // Scoped to this group: the worker legitimately pages post_triage for the
+    // other groups in this file, so an absolute list can hold its messages too.
+    const hit = await waitForHitFor(postTriageHookPath, 'PostTriageContractError');
+    expect(hitsFor(postTriageHookPath, 'PostTriageContractError')).toHaveLength(1);
+    expect(hit.body).toContain('Needs review — no verified cause');
+    expect(hit.body).not.toContain('model-written detail');
     // The immediate destination received only its ingest-time message.
     expect(sinkHits.filter((hit) => hit.path === hookPath)).toHaveLength(immediateHitsBefore + 1);
 
