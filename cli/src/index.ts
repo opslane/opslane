@@ -172,4 +172,14 @@ errorsCmd
     await getError(id, opts);
   });
 
+program
+  .command('mcp')
+  .description('Run the Opslane MCP server over stdio for Claude Code')
+  .action(async () => {
+    const { createOpslaneClient } = await import('./mcp/client.js');
+    const { startMcpServer } = await import('./mcp/server.js');
+    const client = await createOpslaneClient({ cwd: process.cwd() });
+    await startMcpServer(client);
+  });
+
 await program.parseAsync(process.argv);

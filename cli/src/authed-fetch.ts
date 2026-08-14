@@ -8,6 +8,10 @@ export interface AuthedFetchOptions {
   fetchFn?: typeof fetch;
   tokenPath?: string;
   loadToken?: SessionTokenLoader;
+  /** Defaults to GET. Present so callers can POST through the same refresh path
+   * rather than hand-rolling an authenticated request. */
+  method?: string;
+  body?: string;
 }
 
 /**
@@ -37,6 +41,11 @@ export async function authedFetch(
   }
 
   return fetchFn(url, {
-    headers: { Authorization: `Bearer ${token.accessToken}` },
+    method: options.method,
+    body: options.body,
+    headers: {
+      Authorization: `Bearer ${token.accessToken}`,
+      ...(options.body === undefined ? {} : { 'Content-Type': 'application/json' }),
+    },
   });
 }
