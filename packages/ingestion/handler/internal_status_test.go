@@ -74,6 +74,9 @@ func TestIncidentStatusInternal_ReturnsStatusOnly(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("status read returned %d: %s", response.Code, response.Body.String())
 	}
+	if cc := response.Header().Get("Cache-Control"); cc != "no-store" {
+		t.Fatalf("Cache-Control = %q, want no-store", cc)
+	}
 	var body map[string]string
 	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
 		t.Fatalf("unmarshal: %v", err)
@@ -98,5 +101,18 @@ func TestIncidentStatusInternal_ReturnsStatusOnly(t *testing.T) {
 		"/internal/v1/projects/%s/incidents/not-a-uuid/status", projectID))
 	if response.Code != http.StatusNotFound {
 		t.Fatalf("malformed incident id returned %d", response.Code)
+	}
+	response = request(fmt.Sprintf(
+		"/internal/v1/projects/not-a-uuid/incidents/%s/status", result.GroupID))
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("malformed project id returned %d", response.Code)
+	}
+
+	// uuid.Parse accepts spellings Postgres's uuid cast does not; the handler
+	// canonicalizes, so these resolve instead of 500ing on the cast.
+	response = request(fmt.Sprintf(
+		"/internal/v1/projects/%s/incidents/urn:uuid:%s/status", projectID, result.GroupID))
+	if response.Code != http.StatusOK {
+		t.Fatalf("urn:uuid incident id returned %d: %s", response.Code, response.Body.String())
 	}
 }

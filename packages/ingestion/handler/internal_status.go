@@ -13,20 +13,22 @@ import (
 // and the status string is what it needs to confirm the worker finished. The
 // full incident (title, stack, diff, evidence) stays behind session auth.
 func (d *Dependencies) GetIncidentStatusInternal(w http.ResponseWriter, r *http.Request) {
-	projectID := chi.URLParam(r, "projectID")
-	incidentID := chi.URLParam(r, "incidentID")
 	// error_groups keys are uuid columns; a malformed id would fail the cast
-	// inside Postgres and surface as a 500 rather than a miss.
-	if _, err := uuid.Parse(projectID); err != nil {
+	// inside Postgres and surface as a 500 rather than a miss. Query with the
+	// canonical form: uuid.Parse also accepts urn:uuid: and braced spellings,
+	// which Postgres's cast does not.
+	projectID, err := uuid.Parse(chi.URLParam(r, "projectID"))
+	if err != nil {
 		writeJSONError(w, http.StatusNotFound, "incident not found")
 		return
 	}
-	if _, err := uuid.Parse(incidentID); err != nil {
+	incidentID, err := uuid.Parse(chi.URLParam(r, "incidentID"))
+	if err != nil {
 		writeJSONError(w, http.StatusNotFound, "incident not found")
 		return
 	}
 
-	group, err := d.Queries.GetErrorGroup(r.Context(), projectID, incidentID)
+	group, err := d.Queries.GetErrorGroup(r.Context(), projectID.String(), incidentID.String())
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "failed to get incident")
 		return
@@ -37,5 +39,9 @@ func (d *Dependencies) GetIncidentStatusInternal(w http.ResponseWriter, r *http.
 	}
 
 	w.Header().Set("Content-Type", "application/json")
+	// Custom-header auth means shared caches don't apply the Authorization
+	// heuristics; forbid caching so an edge rule can never serve a stale
+	// status or bypass the token check for a cached URL.
+	w.Header().Set("Cache-Control", "no-store")
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": group.Status})
 }
