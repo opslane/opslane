@@ -2178,4 +2178,25 @@ Expected: green, with **zero skips** in the Go suite. Export `DATABASE_URL` and 
 
 **Type consistency.** `DigestItem.receipt_state` is used identically in `digest.ts`, `format.ts`, and the tests, and matches `notify.ReceiptItem`'s `json:"receipt_state"` tag (`packages/ingestion/notify/event.go:77`). An earlier draft of this work used `state`, which silently returns empty. `SampleEvent.resolved.frames[].original_file` matches the `stack_trace_resolved` envelope, whose only top-level keys are `version` and `frames`.
 
+**What two review iterations changed.** Worth recording, because the defects were
+not in the parts that looked risky.
+
+| found | severity |
+| --- | --- |
+| `LinkPR` did not set a status, so `ProcessPRWebhook`'s `status IN ('pr_created','pr_draft')` filter never matched and no linked PR would ever resolve. The original tests passed anyway. | critical |
+| A closed-unmerged PR promotes the incident to `investigated`, asserting a validated diagnosis it may never have had | behavioural, now tested |
+| `pr_created_at` was left null, breaking an invariant the worker maintains on every path to that status | consistency |
+| The claim that a linked incident returns as a receipt was wrong: the digest windows on `digest_readiness.updated_at`, which `LinkPR` does not touch, so it silently drops out instead | wrong claim |
+| The raw stack was suppressed whenever nothing was symbolicated, which blanks the real stack on every Python and Node backend incident | correctness |
+| The embedded export is `SKILL_MD`, not `SKILL_SOURCE` | would not compile |
+| Two digest fixtures relied on `now()` for ordering, which can tie | flaky test |
+| The client passed a `headers` option `authedFetch` does not accept | would not compile |
+| `ProjectRepo` duplicated `GetProjectGitHubConfig`; folding the check into the UPDATE removed both the duplication and a check-then-write window | design |
+
+A first Codex pass reviewed the GitHub mirror of `main` rather than the local
+branch, so it reported `insertGroup` and `authedFetch`'s method support as
+missing when both exist here. Its genuine contributions were the shared-repository
+ambiguity and the `source_snippet` disclosure risk. The critical status defect came
+from following up its webhook note rather than from the finding itself.
+
 **Not covered, deliberately.** Impact ordering inside the digest (#376), the fix gate (#377), and fingerprint splitting (#375) are upstream. The 13 friction groups already holding a `placeholder` root cause are not backfilled; Task 6 refuses to print them but nothing re-investigates them.
