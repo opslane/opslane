@@ -93,8 +93,8 @@ func digestWindow(now time.Time) (time.Time, time.Time) {
 	return now.Add(-24 * time.Hour), now
 }
 
-// Start runs the sweep until cancellation. The caller controls whether the
-// disabled-by-default rollout flag starts this loop.
+// Start runs the sweep until cancellation. It is safe to start unconditionally:
+// a tick with no subscribed destination selects no candidates and sends nothing.
 func (s *Sweeper) Start(ctx context.Context, interval time.Duration) {
 	if interval <= 0 {
 		interval = defaultInterval
