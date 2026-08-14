@@ -80,6 +80,11 @@ func NewRouterWithPool(deps *Dependencies, pool *pgxpool.Pool) *chi.Mux {
 		func(w http.ResponseWriter, r *http.Request) {
 			deps.serveChunk(w, r, chi.URLParam(r, "projectID"))
 		})
+	// Status-only incident read for the deployment smoke test, which holds the
+	// internal token but no user session (project API keys deliberately cannot
+	// read incidents; see the S1 project-keys design).
+	r.With(RequireInternalToken).Get("/internal/v1/projects/{projectID}/incidents/{incidentID}/status",
+		deps.GetIncidentStatusInternal)
 
 	r.Route("/api/v1", func(r chi.Router) {
 		// SDK endpoints (authenticated by ingest-scoped project key).

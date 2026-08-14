@@ -109,6 +109,7 @@ The agent callback requires `code`, `installation_id`, and UUID `state`; definit
 | Method | Path | Auth | Purpose |
 | --- | --- | --- | --- |
 | GET | `/internal/v1/projects/{projectID}/sessions/{sessionID}/chunks/{seq}` | `X-Internal-Token` | Worker fetch of one decoded, re-redacted scrubbed chunk |
+| GET | `/internal/v1/projects/{projectID}/incidents/{incidentID}/status` | `X-Internal-Token` | Status-only incident read for the deployment smoke test |
 
 ## Method mismatch
 
