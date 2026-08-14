@@ -553,7 +553,9 @@ git commit -m "feat(ingestion): serve the latest stored digest over HTTP"
 - Consumes: nothing.
 - Produces: `POST /api/v1/projects/{projectID}/incidents/{incidentID}/link-pr` with body `{"url": "https://github.com/owner/repo/pull/123"}`. Responds with the incident JSON, the same shape `ResolveIncident` returns. 400 on an unparseable URL, 409 when the incident already has a PR or is resolved or archived, 422 when the repository does not match the project's.
 
-Recording `pr_number` is what makes the existing webhook work: `ProcessPRWebhook` resolves a group from repository plus PR number (`webhook.go:93`), so merge then drives `merged` and the sweep resolves with `resolved_reason = 'merged'`. Nothing else has to change.
+Recording `pr_number` **and setting `status = 'pr_created'`** is what makes the existing webhook work. `ProcessPRWebhook` matches on `p.github_repo = $1 AND eg.pr_number = $2 AND eg.status IN ('pr_created','pr_draft')` (`packages/ingestion/db/queries.go:1766`). Record the PR without the status and the first two conditions hold, the third fails, the merge is dropped, and the incident never resolves. An earlier draft of this plan did exactly that and its tests still passed, which is why `TestLinkedPRIsFoundByTheMergeWebhook` drives the whole chain rather than asserting a 200.
+
+With the status set, merge drives `merged` and the sweep resolves with `resolved_reason = 'merged'`. A `NULL` `pr_fix_job_id` is handled: the webhook guards on `fixJobID != nil` before touching the job (`queries.go:1821`), so a human-linked PR with no fix job behind it merges cleanly.
 
 - [ ] **Step 1: Write the failing test**
 
