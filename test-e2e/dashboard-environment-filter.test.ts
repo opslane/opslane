@@ -165,7 +165,12 @@ describe.skipIf(!configured || !playwrightAvailable)('dashboard environment filt
         'staging',
       ]);
       // Unfiltered view: reach reads without the project-wide qualifier.
-      expect(await page.getByText('project-wide').count()).toBe(0);
+      // Select it explicitly. Since environment action scope (#349) the view
+      // applies the project's default environment after mount, so reading the
+      // count straight after reload races that: whichever render wins decides
+      // the result, and under CI load the filtered one does.
+      await incidentEnvironment.selectOption({ label: 'All environments' });
+      await expect.poll(() => page.getByText('project-wide').count(), { timeout: 10_000 }).toBe(0);
 
       await Promise.all([
         page.waitForResponse((response) => response.url().includes(`environment_id=${stagingEnvironmentId}`)),
