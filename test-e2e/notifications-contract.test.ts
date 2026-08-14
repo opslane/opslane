@@ -139,6 +139,36 @@ describe('notifications contract (Slack webhook delivery)', () => {
     )).rows[0]!.id;
   }
 
+  // The keyless CI lane runs a live worker. It claims the investigate job that
+  // ingestion enqueues on a new group and terminates it as needs_human
+  // (missing_llm_key), which correctly pages post_triage destinations. That is
+  // real product behaviour, but this suite drives its own terminals, so it
+  // takes the auto-enqueued job out of the worker's reach first. Without this
+  // the worker's alert lands before the test's and every assertion here races.
+  async function claimAutoJobs(groupId: string): Promise<void> {
+    await getPool().query(
+      `UPDATE error_group_jobs SET status = 'completed', updated_at = now()
+       WHERE error_group_id = $1 AND project_id = $2 AND status IN ('pending', 'claimed')`,
+      [groupId, tenant.projectId],
+    );
+  }
+
+  // Every test uses a distinct error type, so the body is a reliable marker for
+  // "this test's group" on a sink shared by both destinations.
+  function hitsFor(path: string, marker: string): SinkHit[] {
+    return sinkHits.filter((hit) => hit.path === path && hit.body.includes(marker));
+  }
+
+  async function waitForHitFor(path: string, marker: string, timeoutMs = 30_000): Promise<SinkHit> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const found = hitsFor(path, marker);
+      if (found.length > 0) return found.at(-1)!;
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    throw new Error(`No sink hit on ${path} containing ${marker} within ${timeoutMs}ms`);
+  }
+
   async function countTriagedEvents(groupId: string): Promise<number> {
     return Number((await getPool().query<{ count: string }>(
       `SELECT count(*)::text AS count FROM outbound_events
@@ -256,13 +286,14 @@ describe('notifications contract (Slack webhook delivery)', () => {
     const response = await postEvent(tenant.ingestKey, eventPayload('PostTriageContractError'));
     expect(response.ok).toBe(true);
     const { error_group_id: groupId } = (await response.json()) as { error_group_id: string };
+    await claimAutoJobs(groupId);
 
     // Ingest publishes only to the immediate destination.
     await waitForSinkHits(hookPath, immediateHitsBefore + 1);
     expect(sinkHits.filter((hit) => hit.path === hookPath)).toHaveLength(immediateHitsBefore + 1);
-    const crossed = sinkHits
-      .filter((hit) => hit.path === postTriageHookPath)
-      .map((hit) => hit.body.slice(0, 300));
+    const crossed = hitsFor(postTriageHookPath, 'PostTriageContractError').map((hit) =>
+      hit.body.slice(0, 300),
+    );
     expect(
       crossed,
       `post-triage sink received ${crossed.length} body(ies) before any terminal transition: ${JSON.stringify(crossed)}`,
@@ -311,6 +342,7 @@ describe('notifications contract (Slack webhook delivery)', () => {
     const response = await postEvent(tenant.ingestKey, eventPayload('InsightDigestContractError'));
     expect(response.ok).toBe(true);
     const { error_group_id: groupId } = (await response.json()) as { error_group_id: string };
+    await claimAutoJobs(groupId);
     await waitForSinkHits(hookPath, immediateHitsBefore + 1);
 
     const jobId = await createTerminalJob(groupId);
@@ -348,9 +380,7 @@ describe('notifications contract (Slack webhook delivery)', () => {
       insightRows,
       `insight outcome emitted issue.triaged: ${JSON.stringify(insightRows)}`,
     ).toHaveLength(0);
-    expect(sinkHits.filter((hit) => hit.path === postTriageHookPath)).toHaveLength(
-      postTriageHitsBefore,
-    );
+    expect(hitsFor(postTriageHookPath, 'InsightDigestContractError')).toHaveLength(0);
 
     const digestResponse = await fetch(destinationsUrl(`/${postTriageDestinationId}/test`), {
       method: 'POST',
@@ -358,8 +388,8 @@ describe('notifications contract (Slack webhook delivery)', () => {
       body: JSON.stringify({ event_type: 'digest.daily' }),
     });
     expect(digestResponse.ok).toBe(true);
-    const digestHits = await waitForSinkHits(postTriageHookPath, postTriageHitsBefore + 1);
-    expect(digestHits.at(-1)!.body).toContain('InsightDigestContractError');
+    const digestHit = await waitForHitFor(postTriageHookPath, 'InsightDigestContractError');
+    expect(digestHit.body).toContain('InsightDigestContractError');
   });
 
   it('alerts once when a fix job dies with worker_runtime_error', async () => {
@@ -368,6 +398,7 @@ describe('notifications contract (Slack webhook delivery)', () => {
     const response = await postEvent(tenant.ingestKey, eventPayload('WorkerRuntimeContractError'));
     expect(response.ok).toBe(true);
     const { error_group_id: groupId } = (await response.json()) as { error_group_id: string };
+    await claimAutoJobs(groupId);
     await waitForSinkHits(hookPath, immediateHitsBefore + 1);
 
     await updateGroupStatus(groupId, tenant.projectId, 'needs_human', {
@@ -379,8 +410,8 @@ describe('notifications contract (Slack webhook delivery)', () => {
       terminalFixJobId: await createTerminalJob(groupId),
     });
 
-    const hits = await waitForSinkHits(postTriageHookPath, postTriageHitsBefore + 1);
-    expect(hits.at(-1)!.body).toContain('Needs review — investigation crashed');
+    const hit = await waitForHitFor(postTriageHookPath, 'WorkerRuntimeContractError');
+    expect(hit.body).toContain('Needs review — investigation crashed');
     expect(await countTriagedEvents(groupId)).toBe(1);
   });
 
@@ -390,6 +421,7 @@ describe('notifications contract (Slack webhook delivery)', () => {
     const response = await postEvent(tenant.ingestKey, eventPayload('FixPRContractError'));
     expect(response.ok).toBe(true);
     const { error_group_id: groupId } = (await response.json()) as { error_group_id: string };
+    await claimAutoJobs(groupId);
     await waitForSinkHits(hookPath, immediateHitsBefore + 1);
 
     await updateGroupStatus(groupId, tenant.projectId, 'pr_created', {
@@ -404,9 +436,9 @@ describe('notifications contract (Slack webhook delivery)', () => {
       terminalFixJobId: await createTerminalJob(groupId),
     });
 
-    const hits = await waitForSinkHits(postTriageHookPath, postTriageHitsBefore + 1);
-    expect(hits.at(-1)!.body).toContain('Fix PR opened');
-    expect(hits.at(-1)!.body).not.toContain('low confidence');
+    const hit = await waitForHitFor(postTriageHookPath, 'FixPRContractError');
+    expect(hit.body).toContain('Fix PR opened');
+    expect(hit.body).not.toContain('low confidence');
   });
 
   it('never surfaces the webhook URL secret', async () => {
