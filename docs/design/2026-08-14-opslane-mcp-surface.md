@@ -320,6 +320,15 @@ these tools read. 2026-08-14 has schema v2 with seven receipt items; 08-13 throu
 08-10 have no schema version and zero receipt items. Whether seven is typical, and
 what an empty day does to a session, is unknown.
 
+**Most friction incidents currently have no diagnosis to deliver.** 13 of the 17
+friction groups holding a root cause say `placeholder`, and they carry 196 affected
+users against 24 for the four real ones, with 10 still active in the last seven
+days. R5 renders those as "the investigation did not complete", which is the
+correct behaviour and not a workaround: the surface reports what Opslane produced.
+It does mean the friction path is only useful for four groups on day one. Fixing it
+is upstream, like #375 through #377, and the guard that stops new filler verdicts
+already shipped, so this is a backlog rather than a growing problem.
+
 **The digest may not be worth reading, and the compound number is small.** The
 individual risks above are each survivable; multiplied, they are the thing a
 reviewer should attack. On 2026-08-14: seven items, four already carrying a pull
@@ -363,23 +372,15 @@ because it is the same list.
 
 ## Open questions
 
-Three questions are genuinely open. The second one blocks the friction half of the
-product, so this is not a list you can start without reading.
+Two questions are genuinely open, and neither blocks starting.
 
-**1. What happens to the 13 friction groups already holding a `placeholder` root
-cause?** This blocks. R5 refuses to print filler, so those incidents arrive with no
-diagnosis and a selector that cannot locate anything, which by this document's own
-argument makes them unworkable. That is most of the friction corpus. Either they
-get re-investigated, which is upstream work nobody has scheduled, or friction ships
-knowing it works for four groups out of seventeen.
-
-**2. Should linking a PR put the incident in tomorrow's digest as a receipt?**
+**1. Should linking a PR put the incident in tomorrow's digest as a receipt?**
 Today it silently disappears, because the digest windows on
 `digest_readiness.updated_at` and `LinkPR` does not touch it. Refreshing readiness
 would produce a "you fixed three things yesterday" line. Quiet is defensible; so is
 the receipt.
 
-**3. Should `opslane_digest` read older digests?** It returns only the latest, so a
+**2. Should `opslane_digest` read older digests?** It returns only the latest, so a
 developer picking up Friday's work on Monday gets Monday's digest. With one day of
 usable history in production this is untestable today, which is not the same as
 unimportant.
@@ -412,7 +413,7 @@ The selector evidence above makes the failure mode concrete rather than
 hypothetical: without a root cause, a friction incident gives a coding agent a
 route and eight levels of positional CSS. That is the state 13 of 17 friction
 groups are in right now, so the untested assumption and the known-bad data meet in
-the same place.
+the same place. The data half is upstream; the untested half is not.
 
 One session with one real incident would answer it, costs nothing, and needs none
 of the three endpoints. It should happen before Milestone 1, not after Milestone 5.
