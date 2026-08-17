@@ -1,0 +1,25 @@
+{
+  "version": 2,
+  "frames": [
+    {
+      "original_file": "src/modules/assets/AssetDetails.vue",
+      "original_function": "deleteAsset",
+      "original_line": 142,
+      "generated": { "line": 17, "column": 78242 }
+    },
+    {
+      "original_file": "node_modules/vue/dist/runtime-core.esm-bundler.js",
+      "original_function": "callWithErrorHandling",
+      "original_line": 158,
+      "generated": { "line": 17, "column": 41003 }
+    },
+    {
+      "original_file": "src/shared/http/client.ts",
+      "original_function": "<anonymous>",
+      "original_line": 61,
+      "generated": { "line": 17, "column": 9120 }
+    }
+  ],
+  "expected_canonical": "v2|src/modules/assets/AssetDetails.vue#deleteAsset|node_modules/vue/dist/runtime-core.esm-bundler.js#callWithErrorHandling|src/shared/http/client.ts#L61",
+  "expected_hash": "b829f635d173a2031fb42486d87034e3"
+}

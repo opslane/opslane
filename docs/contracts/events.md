@@ -24,6 +24,19 @@ outage we cannot hotfix.
   file. Everything under `test-fixtures/wire/` is append-only — including its
   README — so document fixture provenance here instead.
 
+## Response
+
+`POST /api/v1/events` returns:
+
+| Field | Meaning |
+| --- | --- |
+| `event_id` | Stable identifier for the stored observation. |
+| `group_id` | **Provisional capture handle.** It opens the processing item; it is not a stable issue identifier. Reads through it resolve or redirect to the canonical issue after identity settles. |
+| `error_group_id` | Deprecated alias for `group_id`, retained for compatibility. |
+
+Suppressed events return an empty `group_id`. Clients must accept an empty value
+and must not use either group field as a durable issue key.
+
 ## Enforcement
 
 - `packages/ingestion/handler/wire_compat_test.go` (`go` CI job) replays every
