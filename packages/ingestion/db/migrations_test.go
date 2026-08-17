@@ -216,6 +216,58 @@ func TestMigrations_RollForwardFromPreviousSchema(t *testing.T) {
 	}
 }
 
+func TestMigration054CreatesPipelineTables(t *testing.T) {
+	admin := testPool(t)
+	psql := findPsql(t)
+	pool, dsn := disposableDB(t, admin)
+	for _, file := range migrationFiles(t) {
+		if err := applyMigration(t, psql, dsn, file); err != nil {
+			t.Fatalf("migration %s: %v", file, err)
+		}
+	}
+
+	want := []string{
+		"error_capture_buckets", "error_event_resolutions", "sourcemap_position_cache",
+		"error_event_identities", "canonical_issue_fingerprints", "issue_episodes",
+		"issue_decisions", "issue_inquiry_decisions", "issue_evidence_anchors",
+		"issue_publications", "digest_runs", "digest_run_items",
+	}
+	for _, table := range want {
+		var exists bool
+		err := pool.QueryRow(context.Background(),
+			`SELECT EXISTS (SELECT 1 FROM information_schema.tables
+			  WHERE table_schema = 'public' AND table_name = $1)`, table).Scan(&exists)
+		if err != nil {
+			t.Fatalf("query %s: %v", table, err)
+		}
+		if !exists {
+			t.Errorf("table %s missing", table)
+		}
+	}
+}
+
+func TestMigration054IsReapplySafe(t *testing.T) {
+	admin := testPool(t)
+	psql := findPsql(t)
+	_, dsn := disposableDB(t, admin)
+	files := migrationFiles(t)
+	for _, file := range files {
+		if filepath.Base(file) == "054_pipeline_quality.sql" {
+			break
+		}
+		if err := applyMigration(t, psql, dsn, file); err != nil {
+			t.Fatalf("migration %s: %v", file, err)
+		}
+	}
+
+	path := "migrations/054_pipeline_quality.sql"
+	for i := 0; i < 2; i++ {
+		if err := applyMigration(t, psql, dsn, path); err != nil {
+			t.Fatalf("apply %d: %v", i+1, err)
+		}
+	}
+}
+
 func TestDefaultBranchNullableMigrationPreservesExistingRows(t *testing.T) {
 	admin := testPool(t)
 	files := migrationFiles(t)
