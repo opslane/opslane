@@ -241,7 +241,13 @@ describe('daily digest contract (Slack webhook delivery)', () => {
       'No fix PRs awaiting review, 1 issue needs a decision.',
     );
     expect(firstHits[0]!.body).toContain('Rage clicks in digest contract');
-    expect(firstHits[0]!.body).toContain('Investigation report ready.');
+    // The seeded issue carries a validated diagnosis, which is the only reason
+    // it is in the digest at all, so the card must say a cause was found. The
+    // old copy here was 'Investigation report ready.', which said nothing
+    // actionable; the copy it was briefly replaced with denied the cause the
+    // very next line goes on to state.
+    expect(firstHits[0]!.body).toContain('Cause found; no fix opened yet. Details in the issue.');
+    expect(firstHits[0]!.body).not.toContain('We could not establish a cause');
     expect(firstHits[0]!.body).not.toContain('older issues still awaiting your review');
 
     const patchResponse = await fetch(destinationsUrl(`/${destination.id}`), {
