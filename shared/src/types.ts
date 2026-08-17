@@ -33,6 +33,9 @@ export interface ReceiptItem {
   root_cause_excerpt?: string;
   mitigation_excerpt?: string;
   has_saved_diff?: boolean;
+  /** Whether the item's diagnosis was validated. Digest copy reads this
+   *  directly rather than inferring a cause from root_cause_excerpt. */
+  has_validated_diagnosis?: boolean;
   cluster_incident_ids?: string[];
 }
 

@@ -32,6 +32,15 @@ const (
 	// cannot stall the whole sweep. Due-ness is derived, so a timeout just
 	// means the next tick retries.
 	perProjectTimeout = 30 * time.Second
+	// Ceiling on the catch-up window after a missed run. See windowFor.
+	maxWindowLookback = 7 * 24 * time.Hour
+	// How recently a problem must have occurred to earn a digest card. This is
+	// about the problem still happening, not about the readiness bookkeeping in
+	// the reporting window. It equals maxWindowLookback today by coincidence of
+	// judgement, not by requirement: a catch-up window may legitimately reach
+	// back further than a problem stays worth reporting. Change them
+	// independently.
+	receiptLivenessWindow = 7 * 24 * time.Hour
 )
 
 type Sweeper struct {
@@ -89,8 +98,73 @@ func capped[T any](items []T) ([]T, bool) {
 	return items[:listCap], true
 }
 
-func digestWindow(now time.Time) (time.Time, time.Time) {
-	return now.Add(-24 * time.Hour), now
+// windowFor returns the reporting window: everything since the previous
+// digest's window end, so a late, early, or missed run neither drops nor
+// repeats items.
+//
+// A fixed trailing 24h anchored on run time cannot do this, because the run
+// time moves. Prod showed both failure modes: the 08-10 and 08-11 digests
+// overlapped by 8h25m (items reported twice), and the 08-13 sweep outage left
+// 09:00:01-16:35:54 on 08-13 covered by no digest at all.
+//
+// Falls back to a trailing 24h when there is no usable prior window: the first
+// digest for a project, or a stored value that cannot be trusted.
+func (s *Sweeper) windowFor(ctx context.Context, projectID string, now time.Time) (time.Time, time.Time) {
+	fallback := now.Add(-24 * time.Hour)
+	var stored *string
+	// Only a digest that actually reached a destination may move the watermark.
+	// outbound_events records the attempt; outbound_deliveries records the
+	// outcome. Resuming from an undelivered event would skip every issue in a
+	// message nobody received, and because the next window starts after it,
+	// those issues would never be reported again -- the same permanent gap this
+	// function exists to close, reintroduced through a Slack outage.
+	err := s.pool.QueryRow(ctx, `
+		SELECT e.payload->'digest'->'window'->>'to'
+		  FROM outbound_events e
+		 WHERE e.project_id = $1 AND e.event_type = 'digest.daily'
+		   AND EXISTS (
+		     SELECT 1 FROM outbound_deliveries d
+		      WHERE d.event_id = e.id AND d.status = 'delivered'
+		   )
+		 ORDER BY e.created_at DESC
+		 LIMIT 1`, projectID).Scan(&stored)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return fallback, now
+	}
+	if err != nil {
+		slog.Warn("digest: previous window lookup failed; using a trailing 24h", "project_id", projectID, "error", err)
+		return fallback, now
+	}
+	if stored == nil {
+		// A digest.daily row whose payload carries no window.to: written before
+		// the field existed, or by hand. Warn like the other fallbacks so a
+		// renamed json tag degrades loudly instead of silently reverting every
+		// project to a trailing 24h.
+		slog.Warn("digest: previous digest recorded no window end; using a trailing 24h", "project_id", projectID)
+		return fallback, now
+	}
+	previous, parseErr := time.Parse(time.RFC3339Nano, *stored)
+	if parseErr != nil {
+		slog.Warn("digest: previous window end is unparseable; using a trailing 24h", "project_id", projectID, "value", *stored)
+		return fallback, now
+	}
+	previous = previous.UTC()
+	// A stored end at or after now means a clock moved backwards. Reporting a
+	// negative window would silently emit an empty digest, so take the 24h.
+	if !previous.Before(now) {
+		slog.Warn("digest: previous window end is not in the past; using a trailing 24h", "project_id", projectID, "previous", previous, "now", now)
+		return fallback, now
+	}
+	// Bound the catch-up after a long outage. Without this, a sweep that has
+	// been down for weeks builds an unbounded window, and exceeding
+	// perProjectTimeout would make the digest fail every tick instead of
+	// publishing a large one -- turning a gap into a permanent outage.
+	if oldest := now.Add(-maxWindowLookback); previous.Before(oldest) {
+		slog.Warn("digest: previous window end is older than the lookback cap; truncating",
+			"project_id", projectID, "previous", previous, "capped_to", oldest)
+		return oldest, now
+	}
+	return previous, now
 }
 
 // Start runs the sweep until cancellation. It is safe to start unconditionally:

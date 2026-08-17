@@ -10,14 +10,26 @@ import (
 
 // Pre-compiled regexps for message normalization.
 var (
-	reHex        = regexp.MustCompile(`0x[0-9a-fA-F]+`)
-	reUUID       = regexp.MustCompile(`[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`)
-	rePathNum    = regexp.MustCompile(`/\d+`)
-	reNum        = regexp.MustCompile(`\b\d+\b`)
-	reQuoted     = regexp.MustCompile(`"[^"]*"`)
-	reSpaces     = regexp.MustCompile(`\s+`)
-	reURL        = regexp.MustCompile(`https?://[^/\s]+`)
-	reAssetToken = regexp.MustCompile(`([A-Za-z0-9_.]+)-([A-Za-z0-9_]+)\.(js|mjs|cjs|css|map)(\?[^\s:'")]*)?(:\d+:\d+)?`)
+	reHex     = regexp.MustCompile(`0x[0-9a-fA-F]+`)
+	reUUID    = regexp.MustCompile(`[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`)
+	rePathNum = regexp.MustCompile(`/\d+`)
+	reNum     = regexp.MustCompile(`\b\d+\b`)
+	reQuoted  = regexp.MustCompile(`"[^"]*"`)
+	reSpaces  = regexp.MustCompile(`\s+`)
+	reURL     = regexp.MustCompile(`https?://[^/\s]+`)
+	// The separator class covers both bundle spellings: webpack's
+	// index-<hash>.js and Vite's entry-index.<hash>.js. Both normalize to the
+	// dash form, so the same bundle keeps one identity across either.
+	//
+	// KNOWN LIMITATION. looksLikeHash below is the only thing separating a
+	// content hash from an ordinary name, and it cannot: app.polyfills_es2015.js
+	// and app.polyfills_es2018.js both offer an 8+ character token with a digit,
+	// so they collapse into one issue. The same already happens for the dash
+	// spelling (app-feature1.js), so widening did not introduce the class, only
+	// its reach. A filename cannot answer this question; resolving the frame to
+	// its original source can. Until then, prefer widening only when a real
+	// customer bundle needs it.
+	reAssetToken = regexp.MustCompile(`([A-Za-z0-9_.]+)[-.]([A-Za-z0-9_]+)\.(js|mjs|cjs|css|map)(\?[^\s:'")]*)?(:\d+:\d+)?`)
 	// reDebugQuery strips a query string left dangling on a substituted token.
 	// The token delimits the match, so this cannot eat the trailing :line:col.
 	reDebugQuery = regexp.MustCompile(`(<debug:[^>]*>)\?[^\s:)]*`)

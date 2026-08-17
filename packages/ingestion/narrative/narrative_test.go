@@ -73,18 +73,37 @@ func TestPageReceiptLine(t *testing.T) {
 func TestReceiptLine(t *testing.T) {
 	wants := map[string]string{
 		"pr_open":                  "Fix PR ready for review.",
+		"pr_draft":                 "A draft fix PR needs your review.",
+		"awaiting_approval":        "A fix is written and needs your approval.",
 		"attempt_failed_with_diff": "Fix attempt failed its checks; saved diff and report on the issue page.",
 		"attempt_failed_no_diff":   "Fix attempt failed before producing a change; investigation report on the issue page.",
-		"report_ready":             "Investigation report ready.",
+		"report_ready":             "We could not establish a cause. Details in the issue.",
 	}
 	for state, want := range wants {
-		got, ok := narrative.ReceiptLine(state)
+		got, ok := narrative.ReceiptLine(state, false)
 		if !ok || got != want || strings.Contains(got, "://") {
 			t.Errorf("%s: got %q, %v", state, got, ok)
 		}
 	}
-	if _, ok := narrative.ReceiptLine("future"); ok {
+	if _, ok := narrative.ReceiptLine("future", false); ok {
 		t.Fatal("unknown receipt state accepted")
+	}
+}
+
+// A report_ready card that states a cause must not also deny one. The digest
+// publishes report_ready only when the diagnosis was validated, so this is the
+// branch every published card of that state actually takes.
+func TestReceiptLineDoesNotDenyAnEstablishedCause(t *testing.T) {
+	got, ok := narrative.ReceiptLine("report_ready", true)
+	if !ok {
+		t.Fatal("report_ready with a cause must render")
+	}
+	const want = "Cause found; no fix opened yet. Details in the issue."
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+	if strings.Contains(strings.ToLower(got), "could not establish") {
+		t.Errorf("card states a cause and denies one in the same breath: %q", got)
 	}
 }
 

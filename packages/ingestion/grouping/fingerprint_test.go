@@ -54,6 +54,24 @@ func TestFingerprint_CollapsesContentHash(t *testing.T) {
 	}
 }
 
+func TestFingerprintCollapsesDotSeparatedHashes(t *testing.T) {
+	stack1 := "at handler (entry-index.CaWHNXv4.js:17:78242)"
+	stack2 := "at handler (entry-index.DXhxKZv7.js:17:78242)"
+	a := Fingerprint("javascript", "TypeError", "boom", stack1)
+	b := Fingerprint("javascript", "TypeError", "boom", stack2)
+	if a != b {
+		t.Errorf("dot-separated hashes must collapse: %s != %s", a, b)
+	}
+}
+
+func TestFingerprintKeepsLibraryNames(t *testing.T) {
+	a := Fingerprint("javascript", "TypeError", "boom", "at f (vue.runtime.esm.js:1:1)")
+	b := Fingerprint("javascript", "TypeError", "boom", "at f (vue.runtime.prod.js:1:1)")
+	if a == b {
+		t.Error("distinct library files must not collapse")
+	}
+}
+
 func TestFingerprint_StripsHost(t *testing.T) {
 	a := Fingerprint("javascript", "Error", "Unable to preload CSS for https://app.example.com/assets/main-AbC12345.css", "")
 	b := Fingerprint("javascript", "Error", "Unable to preload CSS for /assets/main-Zx9Yq077.css", "")

@@ -67,9 +67,16 @@ func (impact Impact) Valid() bool {
 }
 
 // PageReceiptLine returns the incident page's location-free receipt sentence.
-// "pr_open_draft" is a page-line key, not a receipt state: the API's
-// receipt_state stays 'pr_open' (the frozen vocabulary), but a draft PR's
-// page line must not claim ready-for-review next to the draft warning card.
+// "pr_open_draft" is a page-line key, not a receipt state: the incident API's
+// receipt_state stays 'pr_open', matching the four-value union pinned in
+// shared/src/types.ts, but a draft PR's page line must not claim
+// ready-for-review next to the draft warning card.
+//
+// This vocabulary is NOT the digest's. ReceiptLine below renders six states,
+// including pr_draft and awaiting_approval, which this function never sees
+// because read_api maps both back into the four-value set. The two surfaces
+// therefore word the same incident differently on purpose. Adding a state to
+// one does not add it to the other, and nothing in the compiler will say so.
 func PageReceiptLine(state string) (string, bool) {
 	switch state {
 	case "pr_open":
@@ -88,16 +95,36 @@ func PageReceiptLine(state string) (string, bool) {
 }
 
 // ReceiptLine returns the fixed sentence for a known receipt state.
-func ReceiptLine(state string) (string, bool) {
+//
+// hasValidatedDiagnosis is the same fact digest.publishable admits a
+// report_ready item on, carried on the item rather than re-derived here. Only
+// report_ready reads it, and it must: the digest admits a report_ready item
+// only when its diagnosis was validated, so an unconditional "we could not
+// establish a cause" lands precisely on the items that did establish one.
+//
+// Do not infer this from the rendered cause excerpt. A validated diagnosis
+// whose group carries no root_cause sanitizes to an empty excerpt, and the
+// card would then deny a cause the item was admitted for having.
+//
+// The page equivalent is PageReceiptLine above. The two deliberately differ in
+// vocabulary and wording; see the note there before changing either.
+func ReceiptLine(state string, hasValidatedDiagnosis bool) (string, bool) {
 	switch state {
 	case "pr_open":
 		return "Fix PR ready for review.", true
+	case "pr_draft":
+		return "A draft fix PR needs your review.", true
+	case "awaiting_approval":
+		return "A fix is written and needs your approval.", true
 	case "attempt_failed_with_diff":
 		return "Fix attempt failed its checks; saved diff and report on the issue page.", true
 	case "attempt_failed_no_diff":
 		return "Fix attempt failed before producing a change; investigation report on the issue page.", true
 	case "report_ready":
-		return "Investigation report ready.", true
+		if hasValidatedDiagnosis {
+			return "Cause found; no fix opened yet. Details in the issue.", true
+		}
+		return "We could not establish a cause. Details in the issue.", true
 	default:
 		return "", false
 	}
