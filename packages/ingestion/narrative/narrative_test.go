@@ -80,13 +80,29 @@ func TestReceiptLine(t *testing.T) {
 		"report_ready":             "We could not establish a cause. Details in the issue.",
 	}
 	for state, want := range wants {
-		got, ok := narrative.ReceiptLine(state)
+		got, ok := narrative.ReceiptLine(state, false)
 		if !ok || got != want || strings.Contains(got, "://") {
 			t.Errorf("%s: got %q, %v", state, got, ok)
 		}
 	}
-	if _, ok := narrative.ReceiptLine("future"); ok {
+	if _, ok := narrative.ReceiptLine("future", false); ok {
 		t.Fatal("unknown receipt state accepted")
+	}
+}
+
+// A report_ready card that states a cause must not also deny one. The digest
+// publishes report_ready only when the diagnosis was validated, so this is the
+// branch every published card of that state actually takes.
+func TestReceiptLineDoesNotDenyAnEstablishedCause(t *testing.T) {
+	got, ok := narrative.ReceiptLine("report_ready", true)
+	if !ok {
+		t.Fatal("report_ready with a cause must render")
+	}
+	if strings.Contains(strings.ToLower(got), "could not establish") {
+		t.Errorf("card states a cause and denies one in the same breath: %q", got)
+	}
+	if got == "" {
+		t.Error("empty receipt line")
 	}
 }
 

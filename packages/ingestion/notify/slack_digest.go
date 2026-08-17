@@ -106,7 +106,7 @@ func formatSlackDigestV2(payload EventPayload) ([]byte, string, error) {
 			slog.Warn("digest receipt kind is not renderable", "incident_id", item.IncidentID, "kind", item.Kind)
 			continue
 		}
-		line, ok := narrative.ReceiptLine(item.ReceiptState)
+		line, ok := narrative.ReceiptLine(item.ReceiptState, item.RootCauseExcerpt != "")
 		if !ok {
 			slog.Warn("digest receipt state is not renderable", "incident_id", item.IncidentID, "state", item.ReceiptState)
 			continue

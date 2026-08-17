@@ -88,7 +88,13 @@ func PageReceiptLine(state string) (string, bool) {
 }
 
 // ReceiptLine returns the fixed sentence for a known receipt state.
-func ReceiptLine(state string) (string, bool) {
+//
+// hasCause reports whether the same card also states an investigation cause.
+// Only report_ready reads it, and it must: the digest admits a report_ready
+// item only when its diagnosis was validated (digest.publishable), so an
+// unconditional "we could not establish a cause" lands precisely on the items
+// that did establish one, directly above the cause itself.
+func ReceiptLine(state string, hasCause bool) (string, bool) {
 	switch state {
 	case "pr_open":
 		return "Fix PR ready for review.", true
@@ -101,6 +107,9 @@ func ReceiptLine(state string) (string, bool) {
 	case "attempt_failed_no_diff":
 		return "Fix attempt failed before producing a change; investigation report on the issue page.", true
 	case "report_ready":
+		if hasCause {
+			return "Cause found; no fix opened yet. Details in the issue.", true
+		}
 		return "We could not establish a cause. Details in the issue.", true
 	default:
 		return "", false
