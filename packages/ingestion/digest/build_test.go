@@ -596,8 +596,12 @@ func TestBuildReceiptItemsExcludesStaleProblems(t *testing.T) {
 		return groupID
 	}
 
-	staleID := seedEligibleGroup(now.Add(-10 * 24 * time.Hour))
-	freshID := seedEligibleGroup(now.Add(-2 * time.Hour))
+	// Seeded either side of the boundary itself, not merely far from it: 10d
+	// vs 2h passes for any cutoff between them, so it would not notice the
+	// interval being retuned to 3 or 9 days.
+	staleID := seedEligibleGroup(now.Add(-receiptLivenessWindow - time.Hour))
+	freshID := seedEligibleGroup(now.Add(-receiptLivenessWindow + time.Hour))
+	longGoneID := seedEligibleGroup(now.Add(-30 * 24 * time.Hour))
 	payload, err := New(pool, "https://dash.example").Build(ctx, f.ProjectID, now)
 	if err != nil {
 		t.Fatal(err)
@@ -607,10 +611,13 @@ func TestBuildReceiptItemsExcludesStaleProblems(t *testing.T) {
 		ids[item.IncidentID] = true
 	}
 	if ids[staleID] {
-		t.Error("stale problem (last seen 10 days ago) must not appear")
+		t.Error("problem seen just outside the liveness window must not appear")
 	}
 	if !ids[freshID] {
-		t.Error("fresh problem must appear")
+		t.Error("problem seen just inside the liveness window must appear")
+	}
+	if ids[longGoneID] {
+		t.Error("problem seen 30 days ago must not appear")
 	}
 }
 
@@ -833,6 +840,7 @@ func TestReceiptStateSurfacesApproval(t *testing.T) {
 	cases := map[string]string{
 		"awaiting_approval": "awaiting_approval",
 		"pr_draft":          "pr_draft",
+		"pr_created":        "pr_open",
 		"investigated":      "report_ready",
 	}
 	for groupStatus, want := range cases {

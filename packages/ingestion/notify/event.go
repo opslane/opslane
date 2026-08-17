@@ -84,20 +84,26 @@ type DigestTriageCounts struct {
 
 // ReceiptItem is one digest card. Kind is error, friction, or cluster.
 type ReceiptItem struct {
-	Kind               string   `json:"kind"`
-	IncidentID         string   `json:"incident_id"`
-	Title              string   `json:"title"`
-	OccurrenceCount    int64    `json:"occurrence_count"`
-	ImpactClass        string   `json:"impact_class,omitempty"`
-	ImpactVisits       *int64   `json:"impact_visits,omitempty"`
-	ImpactRecovered    *int64   `json:"impact_visits_recovered,omitempty"`
-	ReceiptState       string   `json:"receipt_state"`
-	PRURL              string   `json:"pr_url,omitempty"`
-	SessionURL         string   `json:"session_url,omitempty"`
-	RootCauseExcerpt   string   `json:"root_cause_excerpt,omitempty"`
-	MitigationExcerpt  string   `json:"mitigation_excerpt,omitempty"`
-	HasSavedDiff       bool     `json:"has_saved_diff,omitempty"`
-	ClusterIncidentIDs []string `json:"cluster_incident_ids,omitempty"`
+	Kind              string `json:"kind"`
+	IncidentID        string `json:"incident_id"`
+	Title             string `json:"title"`
+	OccurrenceCount   int64  `json:"occurrence_count"`
+	ImpactClass       string `json:"impact_class,omitempty"`
+	ImpactVisits      *int64 `json:"impact_visits,omitempty"`
+	ImpactRecovered   *int64 `json:"impact_visits_recovered,omitempty"`
+	ReceiptState      string `json:"receipt_state"`
+	PRURL             string `json:"pr_url,omitempty"`
+	SessionURL        string `json:"session_url,omitempty"`
+	RootCauseExcerpt  string `json:"root_cause_excerpt,omitempty"`
+	MitigationExcerpt string `json:"mitigation_excerpt,omitempty"`
+	HasSavedDiff      bool   `json:"has_saved_diff,omitempty"`
+	// HasValidatedDiagnosis is the same fact digest.publishable admits the item
+	// on. Copy shows it directly rather than inferring it from
+	// RootCauseExcerpt: a validated diagnosis whose group carries no root_cause
+	// sanitizes to an empty excerpt, and the card would then deny a cause the
+	// item was admitted for having.
+	HasValidatedDiagnosis bool     `json:"has_validated_diagnosis,omitempty"`
+	ClusterIncidentIDs    []string `json:"cluster_incident_ids,omitempty"`
 }
 
 type DigestWindow struct {

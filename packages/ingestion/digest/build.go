@@ -62,7 +62,7 @@ var (
 		 WHERE g.project_id = $1
 		   AND dr.status = 'eligible'
 		   AND dr.updated_at >= $2 AND dr.updated_at < $3
-		   AND g.last_seen >= now() - interval '7 days'
+		   AND g.last_seen >= $4
 		   AND g.status IN ('pr_created','pr_draft','needs_human','investigated','insight','awaiting_approval')`
 
 	receiptCountsQuery = `
@@ -224,14 +224,15 @@ func (s *Sweeper) buildReceiptItems(ctx context.Context, projectID string, from,
 	// Counts run over every qualifying row, before the publishable filter and
 	// the LIMIT, so they stay exact even when nothing is renderable.
 	var total, sqlBeltFailures int
-	if err := s.pool.QueryRow(ctx, receiptCountsQuery, projectID, from, to).Scan(&total, &sqlBeltFailures); err != nil {
+	liveSince := to.Add(-receiptLivenessWindow)
+	if err := s.pool.QueryRow(ctx, receiptCountsQuery, projectID, from, to, liveSince).Scan(&total, &sqlBeltFailures); err != nil {
 		return nil, 0, 0, fmt.Errorf("digest receipt counts: %w", err)
 	}
 	if sqlBeltFailures > 0 {
 		slog.Warn("eligible digest receipts failed the artifact belt", "project_id", projectID, "count", sqlBeltFailures)
 	}
 
-	rows, err := s.pool.Query(ctx, receiptItemsQuery, projectID, from, to)
+	rows, err := s.pool.Query(ctx, receiptItemsQuery, projectID, from, to, liveSince)
 	if err != nil {
 		return nil, 0, 0, fmt.Errorf("digest receipt items: %w", err)
 	}
@@ -253,6 +254,7 @@ func (s *Sweeper) buildReceiptItems(ctx context.Context, projectID string, from,
 			row.item.ImpactClass = *impactClass
 		}
 		row.item.ReceiptState = receiptState(row.status, row.item.HasSavedDiff)
+		row.item.HasValidatedDiagnosis = row.hasValidatedDiagnosis
 		row.item.Title = narrative.SanitizeExcerpt(row.item.Title, excerptMax)
 		if row.hasValidatedDiagnosis {
 			row.item.RootCauseExcerpt = narrative.SanitizeExcerpt(row.rootCause, excerptMax)

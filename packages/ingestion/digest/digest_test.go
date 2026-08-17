@@ -10,18 +10,60 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// seedPriorDigest writes a published digest whose stored window ends at
-// windowEnd, which is the watermark the next run must resume from.
+// seedPriorDigest writes a DELIVERED digest whose stored window ends at
+// windowEnd, which is the watermark the next run must resume from. Delivery is
+// part of the fixture because only a delivered digest may move the watermark;
+// see seedUndeliveredDigest for the other half.
 func seedPriorDigest(t *testing.T, pool *pgxpool.Pool, projectID string, windowEnd time.Time, dedupSuffix string) {
 	t.Helper()
+	seedPriorDigestWithStatus(t, pool, projectID, windowEnd, dedupSuffix, "delivered")
+}
+
+// seedUndeliveredDigest writes a digest that was built and enqueued but never
+// reached a destination, e.g. a Slack outage that exhausted its retries.
+func seedUndeliveredDigest(t *testing.T, pool *pgxpool.Pool, projectID string, windowEnd time.Time, dedupSuffix string) {
+	t.Helper()
+	seedPriorDigestWithStatus(t, pool, projectID, windowEnd, dedupSuffix, "failed")
+}
+
+func seedPriorDigestWithStatus(t *testing.T, pool *pgxpool.Pool, projectID string, windowEnd time.Time, dedupSuffix, status string) {
+	t.Helper()
+	ctx := context.Background()
 	payload := fmt.Sprintf(`{"digest":{"window":{"from":%q,"to":%q}}}`,
 		windowEnd.Add(-24*time.Hour).Format(time.RFC3339Nano),
 		windowEnd.Format(time.RFC3339Nano))
-	if _, err := pool.Exec(context.Background(),
+	var eventID string
+	if err := pool.QueryRow(ctx,
 		`INSERT INTO outbound_events (project_id, event_type, dedup_key, payload)
-		 VALUES ($1,'digest.daily',$2,$3::jsonb)`,
-		projectID, "digest.daily:"+projectID+":"+dedupSuffix, payload); err != nil {
+		 VALUES ($1,'digest.daily',$2,$3::jsonb) RETURNING id`,
+		projectID, "digest.daily:"+projectID+":"+dedupSuffix, payload).Scan(&eventID); err != nil {
 		t.Fatalf("seed prior digest: %v", err)
+	}
+	destID := seedDestination(t, pool, projectID, []string{"digest.daily"})
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO outbound_deliveries (event_id, destination_id, status) VALUES ($1,$2,$3)`,
+		eventID, destID, status); err != nil {
+		t.Fatalf("seed delivery: %v", err)
+	}
+}
+
+// seedPriorDigestPayload writes a delivered digest carrying an arbitrary
+// payload, for the guard branches that never reach a parse.
+func seedPriorDigestPayload(t *testing.T, pool *pgxpool.Pool, projectID, payload, dedupSuffix string) {
+	t.Helper()
+	ctx := context.Background()
+	var eventID string
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO outbound_events (project_id, event_type, dedup_key, payload)
+		 VALUES ($1,'digest.daily',$2,$3::jsonb) RETURNING id`,
+		projectID, "digest.daily:"+projectID+":"+dedupSuffix, payload).Scan(&eventID); err != nil {
+		t.Fatalf("seed prior digest payload: %v", err)
+	}
+	destID := seedDestination(t, pool, projectID, []string{"digest.daily"})
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO outbound_deliveries (event_id, destination_id, status) VALUES ($1,$2,'delivered')`,
+		eventID, destID); err != nil {
+		t.Fatalf("seed delivery: %v", err)
 	}
 }
 
@@ -78,8 +120,53 @@ func TestWindowForResumesFromPreviousDigest(t *testing.T) {
 		clearDigestEvents(t, pool, f.ProjectID)
 		seedPriorDigest(t, pool, f.ProjectID, now.Add(-60*24*time.Hour), "cap-case")
 		from, _ := s.windowFor(ctx, f.ProjectID, now)
-		if want := now.Add(-maxWindowLookback); !from.Equal(want) {
+		// A literal, not maxWindowLookback: asserting against the same constant
+		// the code reads would keep this green if the cap were redefined.
+		if want := now.Add(-7 * 24 * time.Hour); !from.Equal(want) {
 			t.Fatalf("from = %s; want the cap %s", from, want)
+		}
+	})
+
+	t.Run("uses a watermark just inside the cap verbatim", func(t *testing.T) {
+		clearDigestEvents(t, pool, f.ProjectID)
+		previousEnd := now.Add(-7*24*time.Hour + time.Hour)
+		seedPriorDigest(t, pool, f.ProjectID, previousEnd, "just-inside-cap")
+		from, _ := s.windowFor(ctx, f.ProjectID, now)
+		if !from.Equal(previousEnd) {
+			t.Fatalf("from = %s; want the stored watermark %s untruncated", from, previousEnd)
+		}
+	})
+
+	t.Run("ignores a digest that recorded no window end", func(t *testing.T) {
+		clearDigestEvents(t, pool, f.ProjectID)
+		// payload->'digest'->>'to' is SQL NULL here. Reachable from any row
+		// written before the window field existed. The guard must not deref it.
+		seedPriorDigestPayload(t, pool, f.ProjectID, `{"digest":{}}`, "no-window-case")
+		from, to := s.windowFor(ctx, f.ProjectID, now)
+		if !from.Equal(now.Add(-24*time.Hour)) || !to.Equal(now) {
+			t.Fatalf("window = %s..%s; want the trailing 24h fallback", from, to)
+		}
+	})
+
+	t.Run("an undelivered digest does not move the watermark", func(t *testing.T) {
+		clearDigestEvents(t, pool, f.ProjectID)
+		// Slack was down and the deliveries exhausted their retries. Nobody read
+		// this digest, so resuming after it would bury every issue it covered.
+		seedUndeliveredDigest(t, pool, f.ProjectID, now.Add(-2*time.Hour), "undelivered-case")
+		from, _ := s.windowFor(ctx, f.ProjectID, now)
+		if !from.Equal(now.Add(-24 * time.Hour)) {
+			t.Fatalf("from = %s; an undelivered digest must not be treated as reported", from)
+		}
+	})
+
+	t.Run("prefers the newest delivered digest over a newer undelivered one", func(t *testing.T) {
+		clearDigestEvents(t, pool, f.ProjectID)
+		delivered := now.Add(-30 * time.Hour)
+		seedPriorDigest(t, pool, f.ProjectID, delivered, "delivered-older")
+		seedUndeliveredDigest(t, pool, f.ProjectID, now.Add(-2*time.Hour), "undelivered-newer")
+		from, _ := s.windowFor(ctx, f.ProjectID, now)
+		if !from.Equal(delivered) {
+			t.Fatalf("from = %s; want the last delivered watermark %s", from, delivered)
 		}
 	})
 

@@ -98,11 +98,12 @@ func TestReceiptLineDoesNotDenyAnEstablishedCause(t *testing.T) {
 	if !ok {
 		t.Fatal("report_ready with a cause must render")
 	}
+	const want = "Cause found; no fix opened yet. Details in the issue."
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
 	if strings.Contains(strings.ToLower(got), "could not establish") {
 		t.Errorf("card states a cause and denies one in the same breath: %q", got)
-	}
-	if got == "" {
-		t.Error("empty receipt line")
 	}
 }
 

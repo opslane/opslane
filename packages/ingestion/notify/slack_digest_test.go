@@ -217,6 +217,8 @@ func TestFormatSlackDigestV2Golden(t *testing.T) {
 				{Kind: "error", IncidentID: "no-diff", Title: "No diff", ReceiptState: "attempt_failed_no_diff"},
 				{Kind: "friction", IncidentID: "report", Title: "Checkout friction", OccurrenceCount: 2,
 					ReceiptState: "report_ready"},
+				{Kind: "error", IncidentID: "caused", Title: "Cause established", OccurrenceCount: 3,
+					ReceiptState: "report_ready", HasValidatedDiagnosis: true},
 			},
 			Watching: DigestWatching{Sessions: 20, Users: 7},
 		},
@@ -235,7 +237,11 @@ func TestFormatSlackDigestV2Golden(t *testing.T) {
 		"A fix is written and needs your approval.",
 		"Fix attempt failed its checks; saved diff and report on the issue page.",
 		"Fix attempt failed before producing a change; investigation report on the issue page.",
-		"We could not establish a cause. Details in the issue.", "Review fix PR", "https://github.example/pr/draft", "Watch recording", "Issue page", "Investigation: Cart was nil.",
+		"We could not establish a cause. Details in the issue.",
+		"Cause found; no fix opened yet. Details in the issue.",
+		"Review fix PR", "Review draft PR",
+		"<https://github.example/pr/draft|Review draft PR>",
+		"Watch recording", "Issue page", "Investigation: Cart was nil.",
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("v2 digest missing %q: %s", want, s)

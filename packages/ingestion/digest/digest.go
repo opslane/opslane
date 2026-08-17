@@ -34,6 +34,13 @@ const (
 	perProjectTimeout = 30 * time.Second
 	// Ceiling on the catch-up window after a missed run. See windowFor.
 	maxWindowLookback = 7 * 24 * time.Hour
+	// How recently a problem must have occurred to earn a digest card. This is
+	// about the problem still happening, not about the readiness bookkeeping in
+	// the reporting window. It equals maxWindowLookback today by coincidence of
+	// judgement, not by requirement: a catch-up window may legitimately reach
+	// back further than a problem stays worth reporting. Change them
+	// independently.
+	receiptLivenessWindow = 7 * 24 * time.Hour
 )
 
 type Sweeper struct {
@@ -105,11 +112,21 @@ func capped[T any](items []T) ([]T, bool) {
 func (s *Sweeper) windowFor(ctx context.Context, projectID string, now time.Time) (time.Time, time.Time) {
 	fallback := now.Add(-24 * time.Hour)
 	var stored *string
+	// Only a digest that actually reached a destination may move the watermark.
+	// outbound_events records the attempt; outbound_deliveries records the
+	// outcome. Resuming from an undelivered event would skip every issue in a
+	// message nobody received, and because the next window starts after it,
+	// those issues would never be reported again -- the same permanent gap this
+	// function exists to close, reintroduced through a Slack outage.
 	err := s.pool.QueryRow(ctx, `
-		SELECT payload->'digest'->'window'->>'to'
-		  FROM outbound_events
-		 WHERE project_id = $1 AND event_type = 'digest.daily'
-		 ORDER BY created_at DESC
+		SELECT e.payload->'digest'->'window'->>'to'
+		  FROM outbound_events e
+		 WHERE e.project_id = $1 AND e.event_type = 'digest.daily'
+		   AND EXISTS (
+		     SELECT 1 FROM outbound_deliveries d
+		      WHERE d.event_id = e.id AND d.status = 'delivered'
+		   )
+		 ORDER BY e.created_at DESC
 		 LIMIT 1`, projectID).Scan(&stored)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return fallback, now
@@ -119,6 +136,11 @@ func (s *Sweeper) windowFor(ctx context.Context, projectID string, now time.Time
 		return fallback, now
 	}
 	if stored == nil {
+		// A digest.daily row whose payload carries no window.to: written before
+		// the field existed, or by hand. Warn like the other fallbacks so a
+		// renamed json tag degrades loudly instead of silently reverting every
+		// project to a trailing 24h.
+		slog.Warn("digest: previous digest recorded no window end; using a trailing 24h", "project_id", projectID)
 		return fallback, now
 	}
 	previous, parseErr := time.Parse(time.RFC3339Nano, *stored)
