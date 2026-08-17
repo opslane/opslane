@@ -1,3 +1,8 @@
+// The v2 resolved-frame envelope: the cross-language identity contract.
+// Go (packages/ingestion/identity) alone canonicalizes and hashes envelopes;
+// this module is the only writer shape. Nothing persists v2 envelopes yet —
+// the v1 reader in resolve-stack.ts (framesFromEnvelope) cannot parse this
+// shape and is rewired when stack resolution moves to its own job (Slice 3).
 export const RESOLVER_VERSION = 2;
 
 export interface GeneratedPos {
@@ -5,7 +10,9 @@ export interface GeneratedPos {
   column: number;
 }
 
-export interface ResolvedFrame {
+// Named V2 to avoid colliding with the v1 ResolvedFrame in source-map.ts,
+// which uses camelCase fields and carries source snippets.
+export interface ResolvedFrameV2 {
   original_file: string;
   original_function: string;
   original_line: number;
@@ -14,10 +21,10 @@ export interface ResolvedFrame {
 
 export interface EnvelopeV2 {
   version: 2;
-  frames: ResolvedFrame[];
+  frames: ResolvedFrameV2[];
 }
 
-export function buildEnvelope(frames: ResolvedFrame[]): EnvelopeV2 {
+export function buildEnvelope(frames: ResolvedFrameV2[]): EnvelopeV2 {
   return {
     version: RESOLVER_VERSION,
     frames: frames.map((frame) => ({

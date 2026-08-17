@@ -2,14 +2,20 @@
 -- The runner has no ledger and autocommits per statement: each statement is
 -- guarded so any prefix of this file can re-run safely, forever.
 
+-- 054 later widens this constraint with the rewritten pipeline's terminal
+-- outcomes. The runner replays every file on every boot, so this guard must
+-- accept BOTH definitions or each boot would re-narrow what 054 widened (and
+-- fail outright once a row holds a new outcome).
 DO $$ BEGIN
   IF NOT EXISTS (
     SELECT 1 FROM pg_constraint
     WHERE conrelid = 'diagnosis_decisions'::regclass
       AND conname = 'diagnosis_decisions_outcome_check'
       AND convalidated
-      AND pg_get_constraintdef(oid) =
-        'CHECK ((outcome = ANY (ARRAY[''code_fix''::text, ''not_actionable''::text, ''needs_more_context''::text, ''incomplete''::text])))'
+      AND pg_get_constraintdef(oid) IN (
+        'CHECK ((outcome = ANY (ARRAY[''code_fix''::text, ''not_actionable''::text, ''needs_more_context''::text, ''incomplete''::text])))',
+        'CHECK ((outcome = ANY (ARRAY[''code_fix''::text, ''not_actionable''::text, ''needs_more_context''::text, ''incomplete''::text, ''verified_fix''::text, ''needs_human''::text, ''unable_to_establish_cause''::text])))'
+      )
   ) THEN
     ALTER TABLE diagnosis_decisions DROP CONSTRAINT IF EXISTS diagnosis_decisions_outcome_check;
     ALTER TABLE diagnosis_decisions ADD CONSTRAINT diagnosis_decisions_outcome_check

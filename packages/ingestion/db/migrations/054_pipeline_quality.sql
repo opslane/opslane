@@ -134,16 +134,18 @@ CREATE TABLE IF NOT EXISTS digest_runs (
   project_id  UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   window_from TIMESTAMPTZ NOT NULL,
   window_to   TIMESTAMPTZ NOT NULL,
-  run_date    DATE NOT NULL DEFAULT ((now() AT TIME ZONE 'utc')::date),
+  -- The project-local calendar date of the daily boundary. No default: the
+  -- freezer must stamp it explicitly, because the server's clock date and the
+  -- project's local date disagree across the UTC boundary.
+  run_date    DATE NOT NULL,
   status      TEXT NOT NULL CHECK (status IN ('frozen','written','validated','delivered','failed')),
   payload     JSONB,
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_one_run_per_window
   ON digest_runs (project_id, window_to);
--- The freezer stamps the project-local calendar date of the boundary; the
--- volatile default only covers rows that predate this column.
-ALTER TABLE digest_runs ADD COLUMN IF NOT EXISTS run_date DATE NOT NULL DEFAULT ((now() AT TIME ZONE 'utc')::date);
+-- One run per project and local date regardless of status: a failed run is
+-- retried by reclaiming the same frozen row, never by inserting a second run.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_one_run_per_local_date
   ON digest_runs (project_id, run_date);
 
@@ -174,41 +176,28 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_one_job_per_episode_type_version
 CREATE UNIQUE INDEX IF NOT EXISTS uq_one_inquiry_per_evidence
   ON issue_inquiry_decisions (project_id, episode_id, prompt_version, evidence_signature);
 
-ALTER TABLE route_map ADD COLUMN IF NOT EXISTS purpose TEXT;
+-- route_map already has purpose, source (DEFAULT 'llm'), created_at, and
+-- updated_at from migration 040; only the structured-understanding columns
+-- below are new.
 ALTER TABLE route_map ADD COLUMN IF NOT EXISTS actions TEXT[] NOT NULL DEFAULT '{}';
 ALTER TABLE route_map ADD COLUMN IF NOT EXISTS client_refs TEXT[] NOT NULL DEFAULT '{}';
 ALTER TABLE route_map ADD COLUMN IF NOT EXISTS server_refs TEXT[] NOT NULL DEFAULT '{}';
 ALTER TABLE route_map ADD COLUMN IF NOT EXISTS observed_requests TEXT[] NOT NULL DEFAULT '{}';
 ALTER TABLE route_map ADD COLUMN IF NOT EXISTS audience TEXT NOT NULL DEFAULT 'unknown';
 ALTER TABLE route_map ADD COLUMN IF NOT EXISTS confidence REAL NOT NULL DEFAULT 0;
--- Base insert semantics stay: name and tier remain NOT NULL with no default.
-ALTER TABLE route_map ALTER COLUMN tier DROP DEFAULT;
-ALTER TABLE route_map ALTER COLUMN name DROP DEFAULT;
 ALTER TABLE route_map ADD COLUMN IF NOT EXISTS commit_sha TEXT;
 ALTER TABLE route_map ADD COLUMN IF NOT EXISTS prompt_version INTEGER;
 ALTER TABLE route_map ADD COLUMN IF NOT EXISTS model TEXT;
-ALTER TABLE route_map ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'mechanical';
 
+-- error_group_id is already nullable (001_baseline: friction jobs), and
+-- project-scoped jobs (route_map, session_analysis, setup_pr) legitimately
+-- carry no group, episode, or run. No scope CHECK belongs here.
 ALTER TABLE error_group_jobs
   ADD COLUMN IF NOT EXISTS run_id UUID REFERENCES digest_runs(id) ON DELETE CASCADE;
-
-ALTER TABLE error_group_jobs ALTER COLUMN error_group_id DROP NOT NULL;
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_one_active_write_job_per_run
   ON error_group_jobs (project_id, run_id, job_type)
   WHERE run_id IS NOT NULL AND status IN ('pending','claimed');
-
--- error_group_id lost NOT NULL above; every job still needs at least one scope.
-DO $$ BEGIN
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_constraint
-    WHERE conrelid = 'error_group_jobs'::regclass
-      AND conname = 'error_group_jobs_scope_check'
-  ) THEN
-    ALTER TABLE error_group_jobs ADD CONSTRAINT error_group_jobs_scope_check
-      CHECK (error_group_id IS NOT NULL OR episode_id IS NOT NULL OR run_id IS NOT NULL);
-  END IF;
-END $$;
 
 ALTER TABLE diagnosis_decisions
   ADD COLUMN IF NOT EXISTS episode_id UUID REFERENCES issue_episodes(id) ON DELETE SET NULL;

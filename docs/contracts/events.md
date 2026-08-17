@@ -30,12 +30,13 @@ outage we cannot hotfix.
 
 | Field | Meaning |
 | --- | --- |
-| `event_id` | Stable identifier for the stored observation. |
-| `group_id` | **Provisional capture handle.** It opens the processing item; it is not a stable issue identifier. Reads through it resolve or redirect to the canonical issue after identity settles. |
-| `error_group_id` | Deprecated alias for `group_id`, retained for compatibility. |
+| `event_id` | Identifier for the stored observation. Empty when the event was suppressed. |
+| `group_id` | **Provisional capture handle.** It identifies the processing item the event landed in; clients must not treat it as a stable issue identifier. Today it carries the current grouping row's id; once the identity pipeline lands, reads through it will resolve or redirect to the canonical issue. |
+| `error_group_id` | Deprecated alias for `group_id`, retained for compatibility. The two fields always carry the same value. |
 
-Suppressed events return an empty `group_id`. Clients must accept an empty value
-and must not use either group field as a durable issue key.
+Suppressed events return all three identifier fields empty plus
+`"suppressed": true`. Clients must accept empty values and must not use either
+group field as a durable issue key.
 
 ## Enforcement
 
