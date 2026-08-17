@@ -571,6 +571,49 @@ func TestBuildDigestUsesProjectLocalDate(t *testing.T) {
 	}
 }
 
+func TestBuildReceiptItemsExcludesStaleProblems(t *testing.T) {
+	pool := testPool(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	f := seedDigestFixture(t, pool, now)
+	ctx := context.Background()
+
+	seedEligibleGroup := func(lastSeen time.Time) string {
+		t.Helper()
+		var groupID string
+		if err := pool.QueryRow(ctx, `INSERT INTO error_groups
+			(project_id,environment_id,fingerprint,title,kind,status,first_seen,last_seen,
+			 occurrence_count,affected_users_count,pr_created_at,pr_url)
+			VALUES ($1,$2,$3,'Receipt liveness','error','pr_created',$4,$4,1,1,$5,$6)
+			RETURNING id`, f.ProjectID, f.EnvID, "liveness-"+uuid.NewString(), lastSeen,
+			now.Add(-time.Hour), "https://github.example/pr/1").Scan(&groupID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, `INSERT INTO digest_readiness
+			(incident_id,project_id,status,reason,updated_at)
+			VALUES ($1,$2,'eligible','fix_pr_opened',$3)`, groupID, f.ProjectID, now.Add(-time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+		return groupID
+	}
+
+	staleID := seedEligibleGroup(now.Add(-10 * 24 * time.Hour))
+	freshID := seedEligibleGroup(now.Add(-2 * time.Hour))
+	payload, err := New(pool, "https://dash.example").Build(ctx, f.ProjectID, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := make(map[string]bool, len(payload.Digest.ReceiptItems))
+	for _, item := range payload.Digest.ReceiptItems {
+		ids[item.IncidentID] = true
+	}
+	if ids[staleID] {
+		t.Error("stale problem (last seen 10 days ago) must not appear")
+	}
+	if !ids[freshID] {
+		t.Error("fresh problem must appear")
+	}
+}
+
 func TestBuildReceiptItemsPriorityWindowCapAndGate(t *testing.T) {
 	pool := testPool(t)
 	now := time.Now().UTC().Truncate(time.Second)
@@ -709,7 +752,8 @@ func TestBuildReceiptItemsStatesAndValidatedProse(t *testing.T) {
 		prURL              string
 	}
 	seeds := []receiptSeed{
-		{status: "pr_draft", wantState: "pr_open", prURL: "https://github.example/pr/1"},
+		{status: "pr_draft", wantState: "pr_draft", prURL: "https://github.example/pr/1"},
+		{status: "awaiting_approval", wantState: "awaiting_approval", decision: true},
 		{status: "needs_human", wantState: "attempt_failed_with_diff", withDiff: true, decision: true},
 		{status: "needs_human", wantState: "attempt_failed_no_diff", decision: true},
 		{status: "investigated", wantState: "report_ready", decision: true},
@@ -769,18 +813,31 @@ func TestBuildReceiptItemsStatesAndValidatedProse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(payload.Digest.ReceiptItems) != 4 || payload.Digest.HeldBackCount != 2 {
+	if len(payload.Digest.ReceiptItems) != 5 || payload.Digest.HeldBackCount != 2 {
 		t.Fatalf("items/held = %d/%d", len(payload.Digest.ReceiptItems), payload.Digest.HeldBackCount)
 	}
 	for _, item := range payload.Digest.ReceiptItems {
 		if item.ReceiptState != wants[item.IncidentID] {
 			t.Errorf("%s state = %s, want %s", item.IncidentID, item.ReceiptState, wants[item.IncidentID])
 		}
-		if item.ReceiptState == "pr_open" && item.RootCauseExcerpt != "" {
+		if (item.ReceiptState == "pr_open" || item.ReceiptState == "pr_draft") && item.RootCauseExcerpt != "" {
 			t.Errorf("unvalidated PR prose rendered: %q", item.RootCauseExcerpt)
 		}
-		if item.ReceiptState != "pr_open" && (item.RootCauseExcerpt == "" || strings.Contains(item.RootCauseExcerpt, "https://") || strings.ContainsAny(item.RootCauseExcerpt, "*`")) {
+		if item.ReceiptState != "pr_open" && item.ReceiptState != "pr_draft" && (item.RootCauseExcerpt == "" || strings.Contains(item.RootCauseExcerpt, "https://") || strings.ContainsAny(item.RootCauseExcerpt, "*`")) {
 			t.Errorf("validated prose missing or dirty: %q", item.RootCauseExcerpt)
+		}
+	}
+}
+
+func TestReceiptStateSurfacesApproval(t *testing.T) {
+	cases := map[string]string{
+		"awaiting_approval": "awaiting_approval",
+		"pr_draft":          "pr_draft",
+		"investigated":      "report_ready",
+	}
+	for groupStatus, want := range cases {
+		if got := receiptState(groupStatus, false); got != want {
+			t.Errorf("receiptState(%q) = %q, want %q", groupStatus, got, want)
 		}
 	}
 }

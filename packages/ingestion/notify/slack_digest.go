@@ -154,8 +154,12 @@ func digestReceiptCardBlocks(payload EventPayload, item ReceiptItem, receiptLine
 	}
 
 	links := make([]string, 0, 3)
-	if item.ReceiptState == "pr_open" && item.PRURL != "" {
-		links = append(links, slackDigestLink(item.PRURL, "Review fix PR"))
+	if (item.ReceiptState == "pr_open" || item.ReceiptState == "pr_draft") && item.PRURL != "" {
+		label := "Review fix PR"
+		if item.ReceiptState == "pr_draft" {
+			label = "Review draft PR"
+		}
+		links = append(links, slackDigestLink(item.PRURL, label))
 	}
 	if item.SessionURL != "" {
 		links = append(links, slackDigestLink(item.SessionURL, "Watch recording"))

@@ -73,9 +73,11 @@ func TestPageReceiptLine(t *testing.T) {
 func TestReceiptLine(t *testing.T) {
 	wants := map[string]string{
 		"pr_open":                  "Fix PR ready for review.",
+		"pr_draft":                 "A draft fix PR needs your review.",
+		"awaiting_approval":        "A fix is written and needs your approval.",
 		"attempt_failed_with_diff": "Fix attempt failed its checks; saved diff and report on the issue page.",
 		"attempt_failed_no_diff":   "Fix attempt failed before producing a change; investigation report on the issue page.",
-		"report_ready":             "Investigation report ready.",
+		"report_ready":             "We could not establish a cause. Details in the issue.",
 	}
 	for state, want := range wants {
 		got, ok := narrative.ReceiptLine(state)

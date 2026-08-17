@@ -92,12 +92,16 @@ func ReceiptLine(state string) (string, bool) {
 	switch state {
 	case "pr_open":
 		return "Fix PR ready for review.", true
+	case "pr_draft":
+		return "A draft fix PR needs your review.", true
+	case "awaiting_approval":
+		return "A fix is written and needs your approval.", true
 	case "attempt_failed_with_diff":
 		return "Fix attempt failed its checks; saved diff and report on the issue page.", true
 	case "attempt_failed_no_diff":
 		return "Fix attempt failed before producing a change; investigation report on the issue page.", true
 	case "report_ready":
-		return "Investigation report ready.", true
+		return "We could not establish a cause. Details in the issue.", true
 	default:
 		return "", false
 	}

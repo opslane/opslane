@@ -17,7 +17,7 @@ var (
 	reQuoted     = regexp.MustCompile(`"[^"]*"`)
 	reSpaces     = regexp.MustCompile(`\s+`)
 	reURL        = regexp.MustCompile(`https?://[^/\s]+`)
-	reAssetToken = regexp.MustCompile(`([A-Za-z0-9_.]+)-([A-Za-z0-9_]+)\.(js|mjs|cjs|css|map)(\?[^\s:'")]*)?(:\d+:\d+)?`)
+	reAssetToken = regexp.MustCompile(`([A-Za-z0-9_.]+)[-.]([A-Za-z0-9_]+)\.(js|mjs|cjs|css|map)(\?[^\s:'")]*)?(:\d+:\d+)?`)
 	// reDebugQuery strips a query string left dangling on a substituted token.
 	// The token delimits the match, so this cannot eat the trailing :line:col.
 	reDebugQuery = regexp.MustCompile(`(<debug:[^>]*>)\?[^\s:)]*`)

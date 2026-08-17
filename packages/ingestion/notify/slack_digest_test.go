@@ -210,6 +210,9 @@ func TestFormatSlackDigestV2Golden(t *testing.T) {
 					ImpactClass: "blocked", ImpactVisits: &visits, ImpactRecovered: &recovered,
 					ReceiptState: "pr_open", PRURL: "https://github.example/pr/1",
 					SessionURL: "https://dash.example/sessions/s1", RootCauseExcerpt: "Cart was nil."},
+				{Kind: "error", IncidentID: "draft", Title: "Draft fix", ReceiptState: "pr_draft",
+					PRURL: "https://github.example/pr/draft"},
+				{Kind: "friction", IncidentID: "approval", Title: "Approval needed", ReceiptState: "awaiting_approval"},
 				{Kind: "error", IncidentID: "diff", Title: "Saved diff", ReceiptState: "attempt_failed_with_diff"},
 				{Kind: "error", IncidentID: "no-diff", Title: "No diff", ReceiptState: "attempt_failed_no_diff"},
 				{Kind: "friction", IncidentID: "report", Title: "Checkout friction", OccurrenceCount: 2,
@@ -228,9 +231,11 @@ func TestFormatSlackDigestV2Golden(t *testing.T) {
 		"12 crashes across 3 visits, no visit recovered",
 		"2 friction signals; recording impact unavailable",
 		"Fix PR ready for review.",
+		"A draft fix PR needs your review.",
+		"A fix is written and needs your approval.",
 		"Fix attempt failed its checks; saved diff and report on the issue page.",
 		"Fix attempt failed before producing a change; investigation report on the issue page.",
-		"Investigation report ready.", "Review fix PR", "Watch recording", "Issue page", "Investigation: Cart was nil.",
+		"We could not establish a cause. Details in the issue.", "Review fix PR", "https://github.example/pr/draft", "Watch recording", "Issue page", "Investigation: Cart was nil.",
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("v2 digest missing %q: %s", want, s)

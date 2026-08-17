@@ -62,6 +62,7 @@ var (
 		 WHERE g.project_id = $1
 		   AND dr.status = 'eligible'
 		   AND dr.updated_at >= $2 AND dr.updated_at < $3
+		   AND g.last_seen >= now() - interval '7 days'
 		   AND g.status IN ('pr_created','pr_draft','needs_human','investigated','insight','awaiting_approval')`
 
 	receiptCountsQuery = `
@@ -185,8 +186,12 @@ type receiptQueryRow struct {
 
 func receiptState(status string, hasSavedDiff bool) string {
 	switch status {
-	case "pr_created", "pr_draft":
+	case "pr_created":
 		return "pr_open"
+	case "pr_draft":
+		return "pr_draft"
+	case "awaiting_approval":
+		return "awaiting_approval"
 	case "needs_human":
 		if hasSavedDiff {
 			return "attempt_failed_with_diff"
@@ -204,11 +209,11 @@ func publishable(item notify.ReceiptItem, hasValidatedDiagnosis bool) bool {
 		return false
 	}
 	switch item.ReceiptState {
-	case "pr_open":
+	case "pr_open", "pr_draft":
 		return item.PRURL != ""
 	case "attempt_failed_with_diff":
 		return item.HasSavedDiff
-	case "attempt_failed_no_diff", "report_ready":
+	case "attempt_failed_no_diff", "report_ready", "awaiting_approval":
 		return hasValidatedDiagnosis
 	default:
 		return false
