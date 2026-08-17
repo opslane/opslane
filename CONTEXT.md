@@ -89,6 +89,34 @@ confidence at decision time, and the PR outcome (merged/closed) later via
 the job queue when the GitHub webhook lands.
 _Avoid_: "eval" (scores record what happened; evals judge it)
 
+**Product context**:
+A project-owned, evolving account of what its routes and actions do, grounded in
+repository code and observed sessions. Every claim carries its evidence and
+confidence; missing context means unknown, never unimportant.
+_Avoid_: "route weight" (one ranking input), "product truth" (the account is partial)
+
+**Observation**:
+One captured error or friction signal. It is evidence that exists before Opslane
+has necessarily decided which problem it belongs to.
+_Avoid_: "issue" (identity may still be unsettled), "occurrence" (a count of observations)
+
+**Capture bucket**:
+A provisional collection of observations that share an immediately available raw
+fingerprint. It may appear as processing, but owns no impact or lifecycle decision.
+_Avoid_: "issue", "canonical group"
+
+**Canonical issue**:
+The durable identity of one customer problem. It owns impact, admission,
+investigation, lifecycle, and publication; many observations and fingerprints may
+belong to it.
+_Avoid_: "capture bucket", "error group" when canonical identity is intended
+
+**Fingerprint alias**:
+A versioned association from one exact fingerprint to a canonical issue. Raw,
+resolved, and component fingerprints may alias the same issue without being
+rewritten.
+_Avoid_: "canonical fingerprint" (an issue may have several equally valid aliases)
+
 ## Relationships
 
 - A **Project** has any number of active keys per **Scope**; minting never
@@ -103,6 +131,10 @@ _Avoid_: "eval" (scores record what happened; evals judge it)
   time; the URL routes uploads, the keyid+secret authenticate them.
 - Reads require a **User session**; writes require a key whose **Scope**
   matches the route.
+- An **Observation** belongs to one **Capture bucket** while identity is being
+  settled and to one **Canonical issue** after settlement.
+- A **Canonical issue** may have many **Fingerprint aliases**; each alias identifies
+  at most one canonical issue within a project and identity version.
 
 ## Flagged ambiguities
 
