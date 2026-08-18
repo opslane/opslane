@@ -1594,6 +1594,15 @@ export async function resolveSilentMergedGroups(): Promise<string[]> {
          updated_at = now()
      WHERE g.status = 'merged'
        AND g.merged_at < now() - interval '24 hours'
+       -- Canonical-identity merge losers (issue_merges receipt) stay 'merged'
+       -- forever: that status is the audited merge's idempotency anchor and
+       -- their events already moved to the winner. This sweep only tidies
+       -- legacy pre-identity merges.
+       AND NOT EXISTS (
+         SELECT 1 FROM issue_merges m
+         WHERE m.project_id = g.project_id
+           AND m.loser_id = g.id
+       )
        AND NOT EXISTS (
          SELECT 1
          FROM error_events

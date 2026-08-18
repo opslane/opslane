@@ -229,6 +229,7 @@ func TestMigration054CreatesPipelineTables(t *testing.T) {
 	want := []string{
 		"error_capture_buckets", "error_event_resolutions", "sourcemap_position_cache",
 		"error_event_identities", "canonical_issue_fingerprints", "issue_episodes",
+		"issue_alias_conflicts", "issue_merges",
 		"issue_decisions", "issue_inquiry_decisions", "issue_evidence_anchors",
 		"issue_publications", "digest_runs", "digest_run_items",
 		"session_request_failures", "session_write_rollups",

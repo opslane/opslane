@@ -142,7 +142,7 @@ func TestWatchdogSettlesStaleUnresolvedEventsInDatabase(t *testing.T) {
 }
 
 func TestWatchdogSettlesStaleUnresolvedEventsOnRaw(t *testing.T) {
-	db := &fakeWatchdogDB{execs: []fakeExec{{rows: 1}, {rows: 0}}}
+	db := &fakeWatchdogDB{execs: []fakeExec{{rows: 1}, {rows: 0}, {rows: 0}}}
 	w := &Watchdog{pool: db, boundary: 24 * time.Hour}
 
 	settled, stuck, err := w.Sweep(context.Background())
@@ -155,8 +155,8 @@ func TestWatchdogSettlesStaleUnresolvedEventsOnRaw(t *testing.T) {
 	if stuck != 0 {
 		t.Errorf("stuck = %d, want 0", stuck)
 	}
-	if len(db.calls) != 2 {
-		t.Fatalf("exec calls = %d, want 2", len(db.calls))
+	if len(db.calls) != 3 {
+		t.Fatalf("exec calls = %d, want 3", len(db.calls))
 	}
 	for i, call := range db.calls {
 		if len(call.args) != 1 || call.args[0] != "24h0m0s" {
@@ -169,10 +169,13 @@ func TestWatchdogSettlesStaleUnresolvedEventsOnRaw(t *testing.T) {
 	if !strings.Contains(db.calls[1].sql, "'failed'") {
 		t.Errorf("second exec should settle failed rows, got: %s", db.calls[1].sql)
 	}
+	if !strings.Contains(db.calls[2].sql, "INSERT INTO error_event_resolutions") {
+		t.Errorf("third exec should materialize resolutions for orphaned identities, got: %s", db.calls[2].sql)
+	}
 }
 
 func TestWatchdogSettlesAndReportsFailedResolutions(t *testing.T) {
-	db := &fakeWatchdogDB{execs: []fakeExec{{rows: 0}, {rows: 2}}}
+	db := &fakeWatchdogDB{execs: []fakeExec{{rows: 0}, {rows: 2}, {rows: 0}}}
 	w := &Watchdog{pool: db, boundary: 24 * time.Hour}
 
 	settled, stuck, err := w.Sweep(context.Background())
