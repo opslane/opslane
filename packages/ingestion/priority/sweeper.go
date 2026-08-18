@@ -286,6 +286,10 @@ WHERE g.status NOT IN ('resolved','merged','archived')
     SELECT 1 FROM impact_rollup r WHERE r.group_id = g.id
   )`
 
+// Reads error_groups rows that the identity settlement loop (Slice 4) creates
+// from captured observations and that stampPatternsSQL above annotates with a
+// normalized page URL. A session revealing an unknown route therefore reaches
+// this trigger only after settlement has attached its event to an issue.
 const enqueueRouteMapJobsSQL = `
 INSERT INTO error_group_jobs (project_id, job_type)
 SELECT p.id, 'route_map' FROM projects p

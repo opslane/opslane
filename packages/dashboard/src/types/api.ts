@@ -363,6 +363,7 @@ export type AdminJobType =
   | 'ci_watch'
   | 'session_analysis'
   | 'route_map'
+  | 'product_context'
   | 'score_sync'
   | 'stack_resolve';
 

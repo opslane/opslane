@@ -15,6 +15,11 @@ The worker polls Postgres and owns investigation, fix verification, lease handli
   horizontal scaling stops paying off past two workers until it is raised. It also counts
   zombie leases for up to `LEASE_DURATION_MS`, so at the default two crashed workers can
   block the whole fleet's analysis lane for five minutes.
+- Product-context discovery's "routes observed in sessions" input and the
+  unknown-route sweeper both read `error_groups.page_url_normalized`, which is
+  fed by the settlement chain (capture → identity settlement → priority
+  sweeper URL stamping), not by ingest directly. Do not bridge them from raw
+  `error_events`; that would create a second URL-normalization contract.
 - `POLL_INTERVAL_MS` is the empty-queue wait, not a claim cadence: the poller drains
   continuously while work exists. It no longer throttles throughput under load.
 - Retry spacing lives in `available_at`, not in the poll tick. `failJob` and the reaper

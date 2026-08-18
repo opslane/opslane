@@ -49,6 +49,9 @@ func TestAdminOverviewHourlyBucketsAreZeroFilledAndBoundarySafe(t *testing.T) {
 	if _, ok := before.Jobs.ByType["route_map"]; !ok {
 		t.Fatal("admin job overview omitted route_map")
 	}
+	if _, ok := before.Jobs.ByType["product_context"]; !ok {
+		t.Fatal("admin job overview omitted product_context")
+	}
 	if _, ok := before.Jobs.ByType["score_sync"]; !ok {
 		t.Fatal("admin job overview omitted score_sync")
 	}

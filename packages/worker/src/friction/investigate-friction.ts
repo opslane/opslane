@@ -59,7 +59,7 @@ export type FrictionInvestigationResult =
     rejected?: { evidence: EvidenceCitation[]; agentTaskBrief: string | null };
   };
 
-const CLASSIFY_TOOL: Anthropic.Tool = {
+export const CLASSIFY_TOOL: Anthropic.Tool = {
   name: 'classify_friction',
   description: 'Classify whether the observed friction has a concrete code cause in this repository.',
   strict: true,

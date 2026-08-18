@@ -28,8 +28,10 @@ import {
   claimJob,
   resolveEvidenceEventId,
   listUnmappedPatterns,
+  listProductContextPatterns,
   MAX_ROUTE_PATTERN_BYTES,
   upsertRouteMapRows,
+  upsertProductContextClaims,
   updateGroupStatus,
   updateGroupInvestigation,
 } from '../db.js';
@@ -316,8 +318,8 @@ describe('claimJob friction scheduling fields', () => {
     // Scheduling policy: error_fix first, capped analysis, lane alternation.
     const claimSql = mockQuery.mock.calls[2][0] as string;
     expect(claimSql).toContain("WHEN job_type = 'error_fix' THEN 0");
-    expect(claimSql).toContain("WHEN job_type = 'route_map' THEN 4");
-    expect(claimSql.indexOf("WHEN job_type = 'route_map' THEN 4"))
+    expect(claimSql).toContain("WHEN job_type IN ('route_map','product_context') THEN 4");
+    expect(claimSql.indexOf("WHEN job_type IN ('route_map','product_context') THEN 4"))
       .toBeLessThan(claimSql.indexOf("WHEN job_type <> 'session_analysis' THEN 2"));
     expect(claimSql).toContain("AND job_type = 'session_analysis'");
     expect(claimSql).toContain('< $3');
@@ -405,6 +407,65 @@ describe('route-map persistence queries', () => {
 
     expect(mockQuery).toHaveBeenCalledTimes(3);
     expect(mockQuery.mock.calls[2]?.[0]).toBe('ROLLBACK');
+  });
+
+  it('persists structured product context without overwriting human claims', async () => {
+    mockQuery.mockResolvedValueOnce({}); // BEGIN
+    mockQuery.mockResolvedValueOnce({ rowCount: 1, rows: [{ '?column?': 1 }] }); // lease
+    mockQuery.mockResolvedValueOnce({ rowCount: 1, rows: [] }); // claim
+    mockQuery.mockResolvedValueOnce({ rowCount: 1, rows: [] }); // run record
+    mockQuery.mockResolvedValueOnce({}); // COMMIT
+
+    await expect(upsertProductContextClaims({
+      projectId: 'p1', jobId: 'j1', workerId: 'w1', leaseGeneration: '8',
+      commitSha: 'abc123', promptVersion: 1, model: 'test-model',
+      declaredRequests: { '/assets/:id/edit': ['PUT /api/assets/:id'] },
+      run: {
+        execution: 0, usage: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0 },
+        costUsd: 0.001, latencyMs: 250, humanRouteCount: 0,
+      },
+      claims: [{
+        route: '/assets/:id/edit', purpose: 'Edit an asset', actions: ['save'],
+        clientRefs: ['src/assets.ts'], serverRefs: ['server/assets.ts'],
+        audience: 'standard', confidence: 0.9, evidenceConflicts: ['unreconciled'],
+      }],
+    })).resolves.toBe(true);
+
+    const [sql, params] = mockQuery.mock.calls[2] as [string, unknown[]];
+    expect(sql).toContain('actions, client_refs, server_refs');
+    expect(sql).toContain('audience, confidence, commit_sha, prompt_version, model, source');
+    expect(sql).toContain('evidence_conflicts, review_status, declared_requests');
+    expect(sql).toContain("WHERE route_map.source <> 'human'");
+    expect(params).toEqual([
+      'p1', '/assets/:id/edit', 'Edit an asset', ['save'], ['src/assets.ts'],
+      ['server/assets.ts'], 'standard', 0.9, 'abc123', 1, 'test-model', 'model',
+      ['unreconciled'], ['PUT /api/assets/:id'],
+    ]);
+
+    // The run record joins the same transaction, with counts derived from the claims.
+    const [runSql, runParams] = mockQuery.mock.calls[3] as [string, unknown[]];
+    expect(runSql).toContain('INSERT INTO product_context_runs');
+    expect(runParams.slice(0, 11)).toEqual([
+      'j1', 0, 'p1', 'abc123', 'test-model', 1, 1, 0, 1, 0, 1,
+    ]);
+    expect(mockQuery.mock.calls[4]?.[0]).toBe('COMMIT');
+  });
+
+  it('discovers unmapped routes and only changed model claims on a deploy', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [
+      { pattern: '/assets/:id/edit' }, { pattern: '/new' },
+    ] });
+
+    await expect(listProductContextPatterns('p1', 'abc123', ['src/assets.ts']))
+      .resolves.toEqual(['/assets/:id/edit', '/new']);
+
+    const [sql, params] = mockQuery.mock.calls[0] as [string, unknown[]];
+    expect(sql).toContain('eg.project_id = $1');
+    expect(sql).toContain("rm.source <> 'human'");
+    expect(sql).toContain('rm.commit_sha IS DISTINCT FROM $2');
+    expect(sql).toContain('rm.client_refs && $3::text[]');
+    expect(sql).toContain('rm.server_refs && $3::text[]');
+    expect(params).toEqual(['p1', 'abc123', ['src/assets.ts'], MAX_ROUTE_PATTERN_BYTES]);
   });
 
   it('canonicalizes and deterministically deduplicates route-map writes', async () => {
