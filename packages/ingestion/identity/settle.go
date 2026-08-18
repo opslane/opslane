@@ -152,15 +152,19 @@ func Settle(ctx context.Context, pool *pgxpool.Pool, projectID, eventID string) 
 }
 
 func createIssue(ctx context.Context, tx pgx.Tx, projectID, eventID string) (string, error) {
+	// sample_event_id is a stable display anchor for the dashboard's
+	// sample-event view and human-triggered fix jobs: set once here, kept if
+	// already present on attach, and never rewritten. Identity decisions never
+	// read it (see the canary test).
 	var issueID string
 	if err := tx.QueryRow(ctx,
 		`WITH new_issue AS (SELECT gen_random_uuid() AS id)
 		 INSERT INTO error_groups
 		   (id,project_id,environment_id,fingerprint,title,platform,first_seen,last_seen,
-		    occurrence_count,affected_users_count,status)
+		    occurrence_count,affected_users_count,status,sample_event_id)
 		 SELECT n.id,e.project_id,e.environment_id,'canonical:' || n.id::text,
 		        concat(e.error_type, ': ', e.error_message),e.platform,e.timestamp,e.timestamp,
-		        0,0,'new'
+		        0,0,'new',e.id
 		   FROM error_events e CROSS JOIN new_issue n
 		  WHERE e.project_id=$1 AND e.id=$2
 		 RETURNING id::text`, projectID, eventID).Scan(&issueID); err != nil {
@@ -209,8 +213,9 @@ func attachObservation(ctx context.Context, tx pgx.Tx, projectID, eventID, issue
 		`UPDATE error_groups
 		    SET occurrence_count=occurrence_count+1,
 		        first_seen=LEAST(first_seen,$3), last_seen=GREATEST(last_seen,$3),
+		        sample_event_id=COALESCE(sample_event_id,$4),
 		        updated_at=now()
-		  WHERE project_id=$1 AND id=$2`, projectID, issueID, timestamp); err != nil {
+		  WHERE project_id=$1 AND id=$2`, projectID, issueID, timestamp, eventID); err != nil {
 		return fmt.Errorf("update issue counters: %w", err)
 	}
 	if _, err := tx.Exec(ctx,

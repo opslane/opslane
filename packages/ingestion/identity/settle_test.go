@@ -129,8 +129,17 @@ func TestSettleNeverReadsSampleEventID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read settle.go: %v", err)
 	}
-	if bytes.Contains(src, []byte("sample_event_id")) {
-		t.Error("settle.go must not reference the mutable representative event")
+	// Settlement may WRITE the display anchor (set once at creation, kept on
+	// attach), but no identity decision may read it: any SELECT touching the
+	// column would make attachment depend on arrival order.
+	for _, statement := range bytes.Split(src, []byte(";")) {
+		if !bytes.Contains(statement, []byte("sample_event_id")) {
+			continue
+		}
+		if bytes.Contains(statement, []byte("SELECT")) &&
+			!bytes.Contains(statement, []byte("INSERT INTO error_groups")) {
+			t.Errorf("settle.go reads sample_event_id in a query: %s", statement)
+		}
 	}
 }
 
@@ -164,5 +173,41 @@ func TestSettleUsesRawAliasForNoMapResolution(t *testing.T) {
 	}
 	if aliases != 1 || resolved != nil {
 		t.Errorf("raw fallback aliases=%d resolved=%v, want 1 and nil", aliases, resolved)
+	}
+}
+
+// The canonical issue keeps a stable display anchor: the dashboard's sample
+// endpoint and human-triggered fix jobs read sample_event_id, so it is set at
+// creation and never rewritten by later attachments.
+func TestSettleAnchorsSampleEventOnceAtCreation(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	f := seedProject(t, pool)
+	fingerprint := uniqueFingerprint("sample")
+	first := seedResolvedEvent(t, pool, f, fingerprint, "src/sample.ts", "sampleFn")
+	result, err := Settle(ctx, pool, f.ProjectID, first)
+	if err != nil {
+		t.Fatalf("settle first: %v", err)
+	}
+	var sample *string
+	if err := pool.QueryRow(ctx,
+		`SELECT sample_event_id::text FROM error_groups WHERE project_id=$1 AND id=$2`,
+		f.ProjectID, result.CanonicalIssueID).Scan(&sample); err != nil {
+		t.Fatal(err)
+	}
+	if sample == nil || *sample != first {
+		t.Fatalf("sample_event_id = %v, want the creating event %s", sample, first)
+	}
+	second := seedResolvedEvent(t, pool, f, fingerprint, "src/sample.ts", "sampleFn")
+	if _, err := Settle(ctx, pool, f.ProjectID, second); err != nil {
+		t.Fatalf("settle second: %v", err)
+	}
+	if err := pool.QueryRow(ctx,
+		`SELECT sample_event_id::text FROM error_groups WHERE project_id=$1 AND id=$2`,
+		f.ProjectID, result.CanonicalIssueID).Scan(&sample); err != nil {
+		t.Fatal(err)
+	}
+	if sample == nil || *sample != first {
+		t.Errorf("sample_event_id changed to %v; the anchor must not follow arrival order", sample)
 	}
 }

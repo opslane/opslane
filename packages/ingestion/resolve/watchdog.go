@@ -74,8 +74,34 @@ func (w *Watchdog) Sweep(ctx context.Context) (settledRaw int, stuck int, err er
 		return 0, 0, fmt.Errorf("settle stuck resolutions: %w", err)
 	}
 	stuck = int(failedTag.RowsAffected())
+
+	// A resolve job that dead-letters before its first write leaves an event
+	// with a pending identity and NO resolution row: invisible to the wake
+	// path, the settle claim, and the updates above, so identity would wait
+	// forever. Past the boundary, materialize the explicit raw fallback.
+	orphanTag, err := w.pool.Exec(ctx,
+		`INSERT INTO error_event_resolutions
+		   (project_id, event_id, status, resolver_version)
+		 SELECT i.project_id, i.event_id, 'no_map', i.identity_version
+		   FROM error_event_identities i
+		   JOIN error_events e
+		     ON e.project_id = i.project_id AND e.id = i.event_id
+		  WHERE i.status = 'pending'
+		    AND e.created_at < now() - $1::interval
+		    AND NOT EXISTS (
+		      SELECT 1 FROM error_event_resolutions r
+		      WHERE r.project_id = i.project_id AND r.event_id = i.event_id)
+		 ON CONFLICT (project_id, event_id) DO NOTHING`,
+		w.boundary.String())
+	if err != nil {
+		return 0, 0, fmt.Errorf("settle resolution-less identities: %w", err)
+	}
+	if n := orphanTag.RowsAffected(); n > 0 {
+		slog.Warn("resolutions materialized for orphaned identities", "count", n)
+	}
 	if stuck > 0 {
 		slog.Warn("resolution jobs stuck", "count", stuck)
 	}
-	return int(tag.RowsAffected()), stuck, nil
+	settledRaw = int(tag.RowsAffected()) + int(orphanTag.RowsAffected())
+	return settledRaw, stuck, nil
 }

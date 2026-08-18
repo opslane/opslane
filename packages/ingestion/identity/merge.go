@@ -30,18 +30,49 @@ func ConfirmMerge(ctx context.Context, pool *pgxpool.Pool, projectID, winnerID, 
 	if err != nil {
 		return err
 	}
+	// Idempotency keys off the receipt, not the loser's status: the worker's
+	// silent-merged sweep relabels quiet losers 'resolved' after a day, and a
+	// retried merge must still recognize its own earlier run.
+	var existingWinner string
+	switch err := tx.QueryRow(ctx,
+		`SELECT winner_id::text FROM issue_merges
+		  WHERE project_id=$1 AND loser_id=$2`, projectID, loserID).Scan(&existingWinner); {
+	case err == nil:
+		if existingWinner == winnerID {
+			return tx.Commit(ctx)
+		}
+		return errors.New("merge loser is already merged into another issue")
+	case !errors.Is(err, pgx.ErrNoRows):
+		return fmt.Errorf("check existing merge receipt: %w", err)
+	}
 	if statuses[winnerID] == "merged" {
 		return errors.New("merge winner is already merged")
 	}
 	if statuses[loserID] == "merged" {
-		var existingWinner string
-		err := tx.QueryRow(ctx,
-			`SELECT winner_id::text FROM issue_merges
-			  WHERE project_id=$1 AND loser_id=$2`, projectID, loserID).Scan(&existingWinner)
-		if err == nil && existingWinner == winnerID {
-			return tx.Commit(ctx)
-		}
 		return errors.New("merge loser is already merged into another issue")
+	}
+
+	// The rebuild below recomputes counts from settled identities. An issue
+	// carrying observations outside that world (friction signals, or events
+	// captured before identity settlement existed) would have its rollups
+	// silently zeroed, so refuse loudly; the cutover backfill adopts those
+	// populations first.
+	var unmergeable bool
+	if err := tx.QueryRow(ctx,
+		`SELECT EXISTS (
+		   SELECT 1 FROM error_groups g
+		    WHERE g.project_id=$1 AND g.id IN ($2,$3) AND g.kind <> 'error')
+		 OR EXISTS (
+		   SELECT 1 FROM error_events e
+		   LEFT JOIN error_event_identities i
+		     ON i.project_id=e.project_id AND i.event_id=e.id
+		   WHERE e.project_id=$1 AND e.error_group_id IN ($2,$3)
+		     AND (i.event_id IS NULL OR i.status <> 'settled'))`,
+		projectID, winnerID, loserID).Scan(&unmergeable); err != nil {
+		return fmt.Errorf("check merge population: %w", err)
+	}
+	if unmergeable {
+		return errors.New("merge refused: an issue carries observations without settled identity (friction or pre-settlement events)")
 	}
 
 	var blocked bool
@@ -64,9 +95,34 @@ func ConfirmMerge(ctx context.Context, pool *pgxpool.Pool, projectID, winnerID, 
 		return errors.New("automatic merge refused: an issue was investigated or published")
 	}
 
-	winnerEpisodeID, err := OpenOrGetEpisode(ctx, tx, projectID, winnerID)
-	if err != nil {
-		return fmt.Errorf("open winner episode: %w", err)
+	// A resolved winner must not gain an open round from bookkeeping: merged-in
+	// observations belong to its already-told story, exactly like a
+	// late-settling old observation. Only a genuinely new occurrence reopens.
+	var winnerEpisodeID string
+	if statuses[winnerID] == "resolved" {
+		switch err := tx.QueryRow(ctx,
+			`SELECT id::text FROM issue_episodes
+			  WHERE project_id=$1 AND canonical_issue_id=$2
+			  ORDER BY sequence DESC LIMIT 1`, projectID, winnerID).Scan(&winnerEpisodeID); {
+		case errors.Is(err, pgx.ErrNoRows):
+			if winnerEpisodeID, err = OpenOrGetEpisode(ctx, tx, projectID, winnerID); err != nil {
+				return fmt.Errorf("open winner episode: %w", err)
+			}
+			if _, err := tx.Exec(ctx,
+				`UPDATE issue_episodes ep SET closed_at=COALESCE(g.resolved_at,now())
+				   FROM error_groups g
+				  WHERE g.id=ep.canonical_issue_id AND ep.project_id=$1 AND ep.id=$2`,
+				projectID, winnerEpisodeID); err != nil {
+				return fmt.Errorf("close resolved winner episode: %w", err)
+			}
+		case err != nil:
+			return fmt.Errorf("read resolved winner episode: %w", err)
+		}
+	} else {
+		var err error
+		if winnerEpisodeID, err = OpenOrGetEpisode(ctx, tx, projectID, winnerID); err != nil {
+			return fmt.Errorf("open winner episode: %w", err)
+		}
 	}
 	aliasTag, err := tx.Exec(ctx,
 		`UPDATE canonical_issue_fingerprints
@@ -178,6 +234,19 @@ func ConfirmMerge(ctx context.Context, pool *pgxpool.Pool, projectID, winnerID, 
 		    AND left_issue_id IN ($2,$3) AND right_issue_id IN ($2,$3)`,
 		projectID, winnerID, loserID); err != nil {
 		return fmt.Errorf("resolve alias conflict: %w", err)
+	}
+	// The merge just mooted the disagreement, so the observations it parked
+	// re-enter settlement and attach to the surviving issue.
+	if _, err := tx.Exec(ctx,
+		`UPDATE error_event_identities i
+		    SET status='pending', claimed_at=NULL
+		   FROM issue_alias_conflicts c
+		  WHERE c.project_id=i.project_id AND c.event_id=i.event_id
+		    AND c.project_id=$1 AND c.status='resolved'
+		    AND c.left_issue_id IN ($2,$3) AND c.right_issue_id IN ($2,$3)
+		    AND i.status='conflict'`,
+		projectID, winnerID, loserID); err != nil {
+		return fmt.Errorf("requeue conflicted observations: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit confirmed merge: %w", err)

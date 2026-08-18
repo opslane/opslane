@@ -40,3 +40,8 @@ UPDATE issue_episodes ep
    AND g.id = ep.canonical_issue_id
    AND g.status = 'resolved'
    AND ep.closed_at IS NULL;
+
+-- ConfirmMerge scans settled identities by canonical issue five times per
+-- merge; give it an index instead of sequential scans.
+CREATE INDEX IF NOT EXISTS idx_identities_by_issue
+  ON error_event_identities (project_id, canonical_issue_id);
