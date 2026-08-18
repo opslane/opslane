@@ -20,7 +20,6 @@ import {
   getPlayableChunkMetas,
   getReplayArtifacts,
   getSourceMapRows,
-  setEventResolution,
   requeueStaleJobs,
   getFrictionSignalsForGroup,
   getScrubbedChunksForSession,
@@ -605,41 +604,6 @@ describe('source-map resolution queries', () => {
       'p1',
       ['aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'],
     ]);
-  });
-
-  it('persists status and the pinned envelope with event and project scope', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [] });
-    await setEventResolution('e1', 'p1', 'resolved', {
-      version: 1,
-      frames: [{
-        original_file: 'src/a.ts', original_line: 1, original_column: 0,
-        source_snippet: 'source', generated_file: 'app.js',
-        generated_line: 1, generated_column: 1,
-        debug_id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
-      }],
-    });
-    expect(mockQuery.mock.calls[0]?.[0]).toContain(
-      'WHERE id = $1 AND project_id = $2',
-    );
-    expect(mockQuery.mock.calls[0]?.[1]?.slice(0, 3)).toEqual([
-      'e1', 'p1', 'resolved',
-    ]);
-  });
-
-  // Investigate and fix both resolve the same sample event, so a fix job
-  // running during a storage blip must not erase the frames investigate stored.
-  it('never overwrites a stored envelope with a failed re-resolution', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [] });
-    await setEventResolution('e1', 'p1', 'resolution_failed', null);
-    const sql = mockQuery.mock.calls[0]?.[0] as string;
-    expect(sql).toContain(
-      'stack_trace_resolved = COALESCE($4::jsonb, stack_trace_resolved)',
-    );
-    // The status has to move with the envelope or the pair can disagree.
-    expect(sql).toContain(
-      'WHEN $4::jsonb IS NULL AND stack_trace_resolved IS NOT NULL',
-    );
-    expect(mockQuery.mock.calls[0]?.[1]?.[3]).toBeNull();
   });
 });
 

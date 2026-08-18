@@ -29,6 +29,7 @@ import { getInstallationToken } from './github-app.js';
 import { type ReplaySignals } from './pr.js';
 import { processSetupPrJob } from './setup-pr.js';
 
+import type { ResolvedFrame } from './source-map.js';
 import { framesFromEnvelope } from './resolve-stack.js';
 import { runStackResolve } from './resolve/job.js';
 import { initTracing, shutdownTracing, withJobTrace, getActiveTraceId, buildLangfuseTraceUrl } from './tracing.js';
@@ -268,6 +269,18 @@ function checkAbort(signal: AbortSignal): void {
   if (signal.aborted) {
     throw new Error('Pipeline aborted: lease lost');
   }
+}
+
+// Investigate and fix prompts read the resolution the stack_resolve job
+// persisted; events resolved before that job existed fall back to the legacy
+// column on the event row.
+async function resolvedFramesForEvent(
+  event: ErrorEventData | null,
+  projectId: string,
+): Promise<ResolvedFrame[] | null> {
+  if (!event) return null;
+  return framesFromEnvelope(await db.getResolvedEnvelope(event.id, projectId))
+    ?? framesFromEnvelope(event.stack_trace_resolved);
 }
 
 export async function processJob(job: ClaimedJob, signal: AbortSignal): Promise<void> {
@@ -585,7 +598,7 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
       title: group.title,
       errorMessage: event?.error_message ?? '',
       stackTrace: event?.stack_trace_raw ?? '',
-      resolvedStackTrace: framesFromEnvelope(event?.stack_trace_resolved) ?? null,
+      resolvedStackTrace: await resolvedFramesForEvent(event, job.projectId),
       breadcrumbs: event?.breadcrumbs ?? '[]',
       sessionContext,
     }, repoDir, investigatedCommit);
@@ -1312,7 +1325,7 @@ export async function processFixJob(job: ClaimedJob & { errorGroupId: string }, 
       errorType: event?.error_type ?? 'Unknown',
       errorMessage: event?.error_message ?? '',
       stackTrace: event?.stack_trace_raw ?? '',
-      resolvedStackTrace: framesFromEnvelope(event?.stack_trace_resolved) ?? null,
+      resolvedStackTrace: await resolvedFramesForEvent(event, job.projectId),
       breadcrumbs: event?.breadcrumbs ?? '[]',
       context: event?.context ?? '{}',
       environmentNames: environmentContext.names,

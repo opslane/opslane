@@ -5,41 +5,41 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-type fakeRow struct {
-	count int
-	err   error
-}
-
-func (r fakeRow) Scan(dest ...any) error {
-	if r.err != nil {
-		return r.err
-	}
-	*(dest[0].(*int)) = r.count
-	return nil
+type fakeExec struct {
+	rows int64
+	err  error
 }
 
 type fakeWatchdogDB struct {
-	settled int64
-	stuck   int
-	execErr error
-	rowErr  error
-	args    []any
+	execs []fakeExec
+	calls []struct {
+		sql  string
+		args []any
+	}
 }
 
-func (db *fakeWatchdogDB) Exec(_ context.Context, _ string, args ...any) (pgconn.CommandTag, error) {
-	db.args = args
-	if db.execErr != nil {
-		return pgconn.CommandTag{}, db.execErr
+func (db *fakeWatchdogDB) Exec(_ context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+	call := struct {
+		sql  string
+		args []any
+	}{sql, args}
+	db.calls = append(db.calls, call)
+	idx := len(db.calls) - 1
+	if idx >= len(db.execs) {
+		return pgconn.NewCommandTag("UPDATE 0"), nil
 	}
-	return pgconn.NewCommandTag(fmt.Sprintf("UPDATE %d", db.settled)), nil
+	if db.execs[idx].err != nil {
+		return pgconn.CommandTag{}, db.execs[idx].err
+	}
+	return pgconn.NewCommandTag(fmt.Sprintf("UPDATE %d", db.execs[idx].rows)), nil
 }
 
 func TestWatchdogSettlesStaleUnresolvedEventsInDatabase(t *testing.T) {
@@ -58,7 +58,7 @@ func TestWatchdogSettlesStaleUnresolvedEventsInDatabase(t *testing.T) {
 	t.Cleanup(pool.Close)
 
 	ctx := context.Background()
-	var orgID, projectID, environmentID, eventID string
+	var orgID, projectID, environmentID string
 	if err := pool.QueryRow(ctx,
 		`INSERT INTO orgs (name) VALUES ($1) RETURNING id`,
 		"resolve-watchdog-"+time.Now().UTC().Format("20060102150405.000000000"),
@@ -84,49 +84,65 @@ func TestWatchdogSettlesStaleUnresolvedEventsInDatabase(t *testing.T) {
 	).Scan(&environmentID); err != nil {
 		t.Fatal(err)
 	}
-	if err := pool.QueryRow(ctx,
-		`INSERT INTO error_events
-		   (project_id, environment_id, timestamp, error_type, error_message, stack_trace_raw)
-		 VALUES ($1, $2, now(), 'TypeError', 'boom', 'at app.js:1:1')
-		 RETURNING id`,
-		projectID, environmentID,
-	).Scan(&eventID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx,
-		`INSERT INTO error_event_resolutions
-		   (project_id, event_id, status, resolver_version, resolved_at)
-		 VALUES ($1, $2, 'pending', 2, now() - interval '30 hours')`,
-		projectID, eventID,
-	); err != nil {
-		t.Fatal(err)
-	}
 
-	settled, _, err := NewWatchdog(pool, 24*time.Hour).Sweep(ctx)
+	insertEvent := func(status string, age string) string {
+		var eventID string
+		if err := pool.QueryRow(ctx,
+			`INSERT INTO error_events
+			   (project_id, environment_id, timestamp, error_type, error_message, stack_trace_raw)
+			 VALUES ($1, $2, now(), 'TypeError', 'boom', 'at app.js:1:1')
+			 RETURNING id`,
+			projectID, environmentID,
+		).Scan(&eventID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx,
+			`INSERT INTO error_event_resolutions
+			   (project_id, event_id, status, resolver_version, resolved_at)
+			 VALUES ($1, $2, $3, 2, now() - $4::interval)`,
+			projectID, eventID, status, age,
+		); err != nil {
+			t.Fatal(err)
+		}
+		return eventID
+	}
+	agedPending := insertEvent("pending", "30 hours")
+	agedFailed := insertEvent("failed", "30 hours")
+	freshPending := insertEvent("pending", "1 hour")
+
+	settled, stuck, err := NewWatchdog(pool, 24*time.Hour).Sweep(ctx)
 	if err != nil {
 		t.Fatalf("Sweep: %v", err)
 	}
 	if settled < 1 {
 		t.Errorf("settled = %d, want at least 1", settled)
 	}
-	var status string
-	if err := pool.QueryRow(ctx,
-		`SELECT status FROM error_event_resolutions WHERE project_id=$1 AND event_id=$2`,
-		projectID, eventID,
-	).Scan(&status); err != nil {
-		t.Fatal(err)
+	if stuck < 1 {
+		t.Errorf("stuck = %d, want at least 1", stuck)
 	}
-	if status != "no_map" {
-		t.Errorf("status = %q, want no_map", status)
+	status := func(eventID string) string {
+		var s string
+		if err := pool.QueryRow(ctx,
+			`SELECT status FROM error_event_resolutions WHERE project_id=$1 AND event_id=$2`,
+			projectID, eventID,
+		).Scan(&s); err != nil {
+			t.Fatal(err)
+		}
+		return s
 	}
-}
-
-func (db *fakeWatchdogDB) QueryRow(_ context.Context, _ string, _ ...any) pgx.Row {
-	return fakeRow{count: db.stuck, err: db.rowErr}
+	if s := status(agedPending); s != "no_map" {
+		t.Errorf("aged pending status = %q, want no_map", s)
+	}
+	if s := status(agedFailed); s != "no_map" {
+		t.Errorf("aged failed status = %q, want no_map", s)
+	}
+	if s := status(freshPending); s != "pending" {
+		t.Errorf("fresh pending status = %q, want pending", s)
+	}
 }
 
 func TestWatchdogSettlesStaleUnresolvedEventsOnRaw(t *testing.T) {
-	db := &fakeWatchdogDB{settled: 1}
+	db := &fakeWatchdogDB{execs: []fakeExec{{rows: 1}, {rows: 0}}}
 	w := &Watchdog{pool: db, boundary: 24 * time.Hour}
 
 	settled, stuck, err := w.Sweep(context.Background())
@@ -139,13 +155,24 @@ func TestWatchdogSettlesStaleUnresolvedEventsOnRaw(t *testing.T) {
 	if stuck != 0 {
 		t.Errorf("stuck = %d, want 0", stuck)
 	}
-	if len(db.args) != 1 || db.args[0] != "24h0m0s" {
-		t.Errorf("boundary args = %#v, want [24h0m0s]", db.args)
+	if len(db.calls) != 2 {
+		t.Fatalf("exec calls = %d, want 2", len(db.calls))
+	}
+	for i, call := range db.calls {
+		if len(call.args) != 1 || call.args[0] != "24h0m0s" {
+			t.Errorf("call %d boundary args = %#v, want [24h0m0s]", i, call.args)
+		}
+	}
+	if !strings.Contains(db.calls[0].sql, "'pending'") {
+		t.Errorf("first exec should settle pending rows, got: %s", db.calls[0].sql)
+	}
+	if !strings.Contains(db.calls[1].sql, "'failed'") {
+		t.Errorf("second exec should settle failed rows, got: %s", db.calls[1].sql)
 	}
 }
 
-func TestWatchdogReportsFailedResolutions(t *testing.T) {
-	db := &fakeWatchdogDB{stuck: 2}
+func TestWatchdogSettlesAndReportsFailedResolutions(t *testing.T) {
+	db := &fakeWatchdogDB{execs: []fakeExec{{rows: 0}, {rows: 2}}}
 	w := &Watchdog{pool: db, boundary: 24 * time.Hour}
 
 	settled, stuck, err := w.Sweep(context.Background())
@@ -158,17 +185,23 @@ func TestWatchdogReportsFailedResolutions(t *testing.T) {
 }
 
 func TestWatchdogReturnsDatabaseErrors(t *testing.T) {
-	t.Run("settle", func(t *testing.T) {
-		w := &Watchdog{pool: &fakeWatchdogDB{execErr: errors.New("down")}, boundary: time.Hour}
+	t.Run("settle pending", func(t *testing.T) {
+		w := &Watchdog{
+			pool:     &fakeWatchdogDB{execs: []fakeExec{{err: errors.New("down")}}},
+			boundary: time.Hour,
+		}
 		if _, _, err := w.Sweep(context.Background()); err == nil {
 			t.Fatal("Sweep accepted settle failure")
 		}
 	})
 
-	t.Run("count", func(t *testing.T) {
-		w := &Watchdog{pool: &fakeWatchdogDB{rowErr: errors.New("down")}, boundary: time.Hour}
+	t.Run("settle failed", func(t *testing.T) {
+		w := &Watchdog{
+			pool:     &fakeWatchdogDB{execs: []fakeExec{{rows: 1}, {err: errors.New("down")}}},
+			boundary: time.Hour,
+		}
 		if _, _, err := w.Sweep(context.Background()); err == nil {
-			t.Fatal("Sweep accepted count failure")
+			t.Fatal("Sweep accepted stuck-settle failure")
 		}
 	})
 }

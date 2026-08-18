@@ -6,14 +6,12 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type watchdogDB interface {
 	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
-	QueryRow(context.Context, string, ...any) pgx.Row
 }
 
 // Watchdog settles resolution work that cannot wait indefinitely and reports
@@ -49,6 +47,12 @@ func (w *Watchdog) Start(ctx context.Context, interval time.Duration) {
 
 // Sweep settles events whose source map never arrived. Waiting forever would
 // let a bug fragment indefinitely while looking smaller than it is.
+//
+// Stale 'failed' rows settle the same way: a resolution can freeze at
+// 'failed' when the job's final attempt never runs its handler (a lease
+// expiry dead-letters it in the reaper), and nothing else would ever move
+// the row. Settling is the explicit raw fallback the architecture requires;
+// the warning keeps the exhaustion visible to the operator.
 func (w *Watchdog) Sweep(ctx context.Context) (settledRaw int, stuck int, err error) {
 	tag, err := w.pool.Exec(ctx,
 		`UPDATE error_event_resolutions
@@ -60,14 +64,16 @@ func (w *Watchdog) Sweep(ctx context.Context) (settledRaw int, stuck int, err er
 		return 0, 0, fmt.Errorf("settle stale resolutions: %w", err)
 	}
 
-	if err := w.pool.QueryRow(ctx,
-		`SELECT count(*)
-		   FROM error_event_resolutions
+	failedTag, err := w.pool.Exec(ctx,
+		`UPDATE error_event_resolutions
+		    SET status = 'no_map', resolved_at = now()
 		  WHERE status = 'failed'
 		    AND resolved_at < now() - $1::interval`,
-		w.boundary.String()).Scan(&stuck); err != nil {
-		return 0, 0, fmt.Errorf("count stuck resolutions: %w", err)
+		w.boundary.String())
+	if err != nil {
+		return 0, 0, fmt.Errorf("settle stuck resolutions: %w", err)
 	}
+	stuck = int(failedTag.RowsAffected())
 	if stuck > 0 {
 		slog.Warn("resolution jobs stuck", "count", stuck)
 	}

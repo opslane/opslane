@@ -24,7 +24,7 @@ vi.mock('../db.js', async () => ({
   getPlayableChunkMetas: vi.fn(),
   getReplayArtifacts: vi.fn(),
   getSourceMapRows: vi.fn(async () => []),
-  setEventResolution: vi.fn(),
+  getResolvedEnvelope: vi.fn(async () => null),
   requeueStaleJobs: vi.fn(),
   resolveInactiveGroups: vi.fn(),
   resolveSilentMergedGroups: vi.fn(),
