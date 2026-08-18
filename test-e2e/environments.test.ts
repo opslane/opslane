@@ -97,7 +97,7 @@ describe.skipIf(!configured)('first-class environment ingestion', () => {
     await closePool();
   });
 
-  it('keeps one group across payload environments with exact per-environment counts', async () => {
+  it('keeps one capture bucket across payload environments with exact per-environment counts', async () => {
     const project = await getPool().query<{ default_environment_id: string }>(
       `SELECT default_environment_id FROM projects WHERE id = $1`, [tenant.projectId],
     );
@@ -115,12 +115,26 @@ describe.skipIf(!configured)('first-class environment ingestion', () => {
     stagingEnvironmentId = stagingEvent.environmentId;
 
     expect(stagingEvent.groupId).toBe(productionEvent.groupId);
-    const all = await listIncidents(tenant.userSession, tenant.projectId);
-    const production = await listIncidents(tenant.userSession, tenant.projectId, tenant.environmentId);
-    const stagingOnly = await listIncidents(tenant.userSession, tenant.projectId, stagingEnvironmentId);
-    expect(all.find((incident) => incident.id === productionEvent.groupId)?.occurrence_count).toBe(2);
-    expect(production.find((incident) => incident.id === productionEvent.groupId)?.occurrence_count).toBe(1);
-    expect(stagingOnly.find((incident) => incident.id === productionEvent.groupId)?.occurrence_count).toBe(1);
+    // Capture boundary (Slice 2): ingestion stores observations without
+    // creating incidents, so the per-environment proof reads stored capture
+    // state. Incident-level occurrence filtering returns with identity
+    // settlement in Slice 4.
+    const bucket = await getPool().query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM error_capture_buckets
+        WHERE project_id = $1 AND raw_fingerprint = $2`,
+      [tenant.projectId, productionEvent.groupId],
+    );
+    expect(bucket.rows[0]?.n).toBe(1);
+    const perEnvironment = await getPool().query<{ environment_id: string; n: number }>(
+      `SELECT environment_id, count(*)::int AS n FROM error_events
+        WHERE project_id = $1 AND error_message = $2
+        GROUP BY environment_id`,
+      [tenant.projectId, marker],
+    );
+    const counts = new Map(perEnvironment.rows.map((row) => [row.environment_id, row.n]));
+    expect(counts.get(tenant.environmentId)).toBe(1);
+    expect(counts.get(stagingEvent.environmentId)).toBe(1);
+    expect(counts.size).toBe(2);
   });
 
   it('uses exact labels, discovers valid names, and falls back invalid labels to the default', async () => {
@@ -217,10 +231,16 @@ describe.skipIf(!configured)('first-class environment ingestion', () => {
       }),
     });
     expect(sessionOnlyInit.status).toBe(200);
-    const incidentEnvironments = await listObservedEnvironments('incidents');
+    // Capture boundary (Slice 2): used_by=incidents derives from settled
+    // issues (error_group_environments), which repopulate in Slice 4. The
+    // stored observations still prove staging errors landed in staging.
+    const stagingEvents = await getPool().query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM error_events
+        WHERE project_id = $1 AND environment_id = $2`,
+      [tenant.projectId, stagingEnvironmentId],
+    );
+    expect(stagingEvents.rows[0]!.n).toBeGreaterThan(0);
     const sessionEnvironments = await listObservedEnvironments('sessions');
-    expect(incidentEnvironments.map(({ id }) => id)).toContain(stagingEnvironmentId);
-    expect(incidentEnvironments.map(({ name }) => name)).not.toContain(sessionOnlyLabel);
     expect(sessionEnvironments.map(({ id }) => id)).toContain(tenant.environmentId);
     expect(sessionEnvironments.map(({ name }) => name)).toContain(sessionOnlyLabel);
     expect(sessionEnvironments.map(({ id }) => id)).not.toContain(stagingEnvironmentId);

@@ -204,8 +204,11 @@ describe('needs_human contract (read API)', () => {
 const hasLLMKey = !!process.env['ANTHROPIC_API_KEY'];
 const keylessWorkerRunning = process.env['E2E_WORKER_NO_KEY'] === '1';
 
-describe.skipIf(hasLLMKey || !keylessWorkerRunning)(
-  'needs_human pipeline (missing LLM key)',
+// Capture boundary (Slice 2): ingest no longer creates incidents or
+// investigation jobs, so the keyless pipeline cannot produce needs_human until
+// settlement (Slice 4) and the investigation handoff (Slice 9) land.
+describe.skip(
+  'needs_human pipeline (missing LLM key) [suspended until Slice 9]',
   () => {
     let tenant: TestTenant;
 

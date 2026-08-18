@@ -248,7 +248,10 @@ describe('notifications contract (Slack webhook delivery)', () => {
     await closeWorkerPool();
   });
 
-  it('delivers issue.created to the webhook as Block Kit', async () => {
+  // Capture boundary (Slice 2): at-ingest issue creation and its outbox
+  // deliveries are removed; issues return with settlement (Slice 4) and
+  // customer delivery moves to the daily publication path (Slice 10).
+  it.skip('delivers issue.created to the webhook as Block Kit [suspended until Slice 10]', async () => {
     const response = await postEvent(tenant.ingestKey, eventPayload('NotifyContractError'));
     expect(response.ok).toBe(true);
 
@@ -265,7 +268,7 @@ describe('notifications contract (Slack webhook delivery)', () => {
     expect(blocks.length).toBeGreaterThan(0);
   });
 
-  it('does not deliver again for a repeat occurrence of the same group', async () => {
+  it.skip('does not deliver again for a repeat occurrence of the same group [suspended until Slice 10]', async () => {
     const response = await postEvent(tenant.ingestKey, eventPayload('NotifyContractError'));
     expect(response.ok).toBe(true);
     const { error_group_id } = (await response.json()) as { error_group_id: string };
@@ -281,7 +284,7 @@ describe('notifications contract (Slack webhook delivery)', () => {
     expect(sinkHits.filter((h) => h.path === hookPath)).toHaveLength(1);
   });
 
-  it('routes immediate and post-triage deliveries without crossing streams', async () => {
+  it.skip('routes immediate and post-triage deliveries without crossing streams [suspended until Slice 10]', async () => {
     const immediateHitsBefore = sinkHits.filter((hit) => hit.path === hookPath).length;
     const response = await postEvent(tenant.ingestKey, eventPayload('PostTriageContractError'));
     expect(response.ok).toBe(true);
@@ -331,7 +334,7 @@ describe('notifications contract (Slack webhook delivery)', () => {
     ]);
   });
 
-  it('keeps insight outcomes out of post-triage alerts and in the daily digest', async () => {
+  it.skip('keeps insight outcomes out of post-triage alerts and in the daily digest [suspended until Slice 10]', async () => {
     const immediateHitsBefore = sinkHits.filter((hit) => hit.path === hookPath).length;
     const postTriageHitsBefore = sinkHits.filter((hit) => hit.path === postTriageHookPath).length;
     const response = await postEvent(tenant.ingestKey, eventPayload('InsightDigestContractError'));
@@ -387,7 +390,7 @@ describe('notifications contract (Slack webhook delivery)', () => {
     expect(digestHit.body).toContain('InsightDigestContractError');
   });
 
-  it('alerts once when a fix job dies with worker_runtime_error', async () => {
+  it.skip('alerts once when a fix job dies with worker_runtime_error [suspended until Slice 10]', async () => {
     const immediateHitsBefore = sinkHits.filter((hit) => hit.path === hookPath).length;
     const postTriageHitsBefore = sinkHits.filter((hit) => hit.path === postTriageHookPath).length;
     const response = await postEvent(tenant.ingestKey, eventPayload('WorkerRuntimeContractError'));
@@ -410,7 +413,7 @@ describe('notifications contract (Slack webhook delivery)', () => {
     expect(await countTriagedEvents(groupId)).toBe(1);
   });
 
-  it('renders a PR-bearing outcome as Fix PR opened', async () => {
+  it.skip('renders a PR-bearing outcome as Fix PR opened [suspended until Slice 10]', async () => {
     const immediateHitsBefore = sinkHits.filter((hit) => hit.path === hookPath).length;
     const postTriageHitsBefore = sinkHits.filter((hit) => hit.path === postTriageHookPath).length;
     const response = await postEvent(tenant.ingestKey, eventPayload('FixPRContractError'));

@@ -87,7 +87,9 @@ async function pollScored(
   }
 }
 
-describe.skipIf(!fastTick)('priority score pipeline (event → sweeper → feed)', () => {
+// Capture boundary (Slice 2): the sweeper scores settled issues, which exist
+// again after Slice 4; the cheap filter (Slice 7A) replaces priority gating.
+describe.skip('priority score pipeline (event → sweeper → feed) [suspended until Slice 7A]', () => {
   let tenant: TestTenant;
   let incidents: Incident[];
 

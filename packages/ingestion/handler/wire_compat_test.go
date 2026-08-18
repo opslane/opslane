@@ -174,8 +174,8 @@ func TestWireFixtures_AcceptedAndStored(t *testing.T) {
 				timestamp                                                         time.Time
 				errorType, errorMessage, stack, release, sessionID, eventPlatform string
 				breadcrumbsText, contextText, debugMetaText, networkTimingsText   string
-				commitSHA, groupID                                                string
-				endUserID                                                         *string
+				commitSHA                                                         string
+				groupID, endUserID                                                *string
 			)
 			if err := pool.QueryRow(context.Background(), `
 				SELECT "timestamp", error_type, error_message, stack_trace_raw,
@@ -216,8 +216,8 @@ func TestWireFixtures_AcceptedAndStored(t *testing.T) {
 			if sessionID != fixture.SessionID {
 				t.Errorf("session_id = %q, want %q", sessionID, fixture.SessionID)
 			}
-			if groupID != response["group_id"] {
-				t.Errorf("stored error_group_id %q != response group_id %q", groupID, response["group_id"])
+			if groupID != nil {
+				t.Errorf("captured event already has stable error_group_id %q", *groupID)
 			}
 			semanticJSONEqual(t, "breadcrumbs", breadcrumbsText, fixture.Breadcrumbs)
 			semanticJSONEqual(t, "context", contextText, expectedStoredContext(t, fixture))
@@ -242,12 +242,14 @@ func TestWireFixtures_AcceptedAndStored(t *testing.T) {
 			if eventPlatform != wantPlatform {
 				t.Errorf("event platform = %q, want %q", eventPlatform, wantPlatform)
 			}
-			var groupPlatform *string
-			if err := pool.QueryRow(context.Background(), `SELECT platform FROM error_groups WHERE id = $1`, groupID).Scan(&groupPlatform); err != nil {
-				t.Fatalf("query group platform: %v", err)
+			var rawFingerprint, identityStatus string
+			if err := pool.QueryRow(context.Background(), `
+				SELECT raw_fingerprint, status FROM error_event_identities
+				WHERE event_id=$1`, eventID).Scan(&rawFingerprint, &identityStatus); err != nil {
+				t.Fatalf("query pending identity: %v", err)
 			}
-			if groupPlatform == nil || *groupPlatform != wantPlatform {
-				t.Errorf("group platform = %v, want %q", groupPlatform, wantPlatform)
+			if rawFingerprint != response["group_id"] || identityStatus != "pending" {
+				t.Errorf("pending identity = fingerprint:%q status:%q, response handle:%q", rawFingerprint, identityStatus, response["group_id"])
 			}
 
 			if fixture.ContextUser == nil {

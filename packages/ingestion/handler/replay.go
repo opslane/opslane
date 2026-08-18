@@ -133,12 +133,15 @@ func (d *Dependencies) ReplayInit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.ErrorEventID != nil && *req.ErrorEventID != "" {
-		gid, err := d.Queries.GroupIDForEvent(r.Context(), *req.ErrorEventID, projectID)
-		if err != nil || gid == "" {
+		gid, found, err := d.Queries.GroupIDForEvent(r.Context(), *req.ErrorEventID, projectID)
+		if err != nil || !found {
+			// Unknown or cross-tenant event: drop the link entirely.
 			req.ErrorEventID = nil
-		} else {
+		} else if gid != "" {
 			req.ErrorGroupID = &gid
 		}
+		// A known event with no group yet is a captured observation awaiting
+		// identity settlement: keep the event link, invent no group.
 	}
 
 	replayID := uuid.New().String()

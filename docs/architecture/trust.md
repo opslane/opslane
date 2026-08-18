@@ -32,7 +32,7 @@ The worker pushes only to a reserved Opslane fix branch (`opslane/fix-<group-id>
 | Configured webhooks | Issue events (issue ID, title, first-seen timestamp, environment; destinations with `post_triage` delivery policy receive `issue.triaged` adding triage outcome, dashboard URL, 7-day user and session counts) and digest events (date, session and user counts, triage counts, held-back count, overflow count); both include project ID and name | When enabled notification destinations are triggered by subscribed events |
 | WorkOS (ingestion) | Email addresses, passwords, verification codes, reset tokens | Only when password authentication is enabled; during sign-in, signup, email verification, and password reset |
 
-With no credentials configured, **nothing leaves your host** — the stack ingests, groups, and files `needs_human` incidents entirely locally.
+With no credentials configured, **nothing leaves your host** — the stack ingests and captures error events entirely locally.
 
 Secrets hygiene in the sandbox: before the agent loop runs, well-known secret variables (`GITHUB_TOKEN`, `ANTHROPIC_API_KEY`, `DATABASE_URL`, storage and app secrets) are scrubbed from the environment the agent can observe (`packages/worker/src/repo-clone.ts`).
 
@@ -91,6 +91,7 @@ These are known, tracked, and stated here so you can make an informed deployment
 - **Replay and session retention.** Chunked session recordings are deleted on a per-project clock (default 30 days, `projects.session_retention_days`), removing both the database rows and the entire stored-object prefix. Sessions pinned as incident evidence survive the normal window but are hard-capped at 90 days. Deleted session ids are tombstoned and their prefixes are re-swept continuously, so an ingestion-owned storage write already in flight during deletion cannot permanently recreate the data.
 - **The older one-shot replay path still has no retention.** `session_replays` rows from the error-triggered path have no expiry or cleanup job and persist until you delete them. See [#29](https://github.com/opslane/opslane-oss/issues/29).
 - **`github_token_encrypted` is unused.** The schema has an encrypted-token column, but no code path writes or reads it; GitHub credentials come from the environment (PAT or App key). Envelope-encrypted at-rest token storage is not implemented yet.
+- **`stack_resolve` jobs are enqueued but not handled.** Ingestion captures error events (`CaptureError` in `packages/ingestion/handler/error_event.go`) and enqueues settlement jobs, but the worker's claim query in `packages/worker/src/db.ts` excludes `stack_resolve` from the job-type filter. The inline comment states the handler arrives in a later slice. Captured events remain in pending identity status until settlement ships.
 - **The bundled Compose file is a development deployment.** Development credentials, no backups, no upgrade/rollback procedure. A production operations guide is tracked separately and blocked on that work.
 
 ## Why the prompts are public

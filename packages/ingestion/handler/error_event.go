@@ -247,7 +247,7 @@ func (d *Dependencies) ingestErrorEvent(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	result, err := d.Queries.InsertErrorEventAndGroup(r.Context(), db.IngestParams{
+	receipt, err := d.Queries.CaptureError(r.Context(), db.IngestParams{
 		ProjectID:            projectID,
 		DefaultEnvironmentID: environmentID,
 		EnvironmentLabel:     payload.Environment,
@@ -275,8 +275,8 @@ func (d *Dependencies) ingestErrorEvent(w http.ResponseWriter, r *http.Request, 
 		writeJSONError(w, http.StatusInternalServerError, "failed to process event")
 		return
 	}
-	RecordEnvironmentResolution(result.EnvironmentOutcome)
-	if result.EnvironmentDiverged {
+	RecordEnvironmentResolution(receipt.EnvironmentOutcome)
+	if receipt.EnvironmentDiverged {
 		RecordEnvironmentSessionDivergence()
 	}
 
@@ -287,19 +287,15 @@ func (d *Dependencies) ingestErrorEvent(w http.ResponseWriter, r *http.Request, 
 	if debugMeta.RegistryPresentZeroMatched {
 		RecordDebugMetaRegistryZeroMatched()
 	}
-	// A dormant out-of-scope group can be new without a job, and a dormant
-	// activation enqueues without IsNew or Requeued — count actual job creation.
-	if result.JobID != "" {
-		RecordJobEnqueued()
-	}
+	RecordJobEnqueued()
 	RecordIngestDuration(time.Since(start).Seconds())
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
 	json.NewEncoder(w).Encode(map[string]string{
-		"event_id":       result.EventID,
-		"group_id":       result.GroupID,
-		"error_group_id": result.GroupID,
+		"event_id":       receipt.EventID,
+		"group_id":       receipt.CaptureHandle,
+		"error_group_id": receipt.CaptureHandle,
 	})
 }
 
