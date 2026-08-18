@@ -1487,24 +1487,27 @@ func (q *Queries) InsertReplay(ctx context.Context, id, projectID string, errorG
 	return err
 }
 
-// GroupIDForEvent returns the error_group_id for an error event within a project,
-// or "" if the event is unknown or not yet grouped. Used by ReplayInit to derive
-// the group when the SDK only sends an error_event_id (contract C1).
-func (q *Queries) GroupIDForEvent(ctx context.Context, eventID, projectID string) (string, error) {
-	var gid *string
-	err := q.pool.QueryRow(ctx,
+// GroupIDForEvent returns the error_group_id for an error event within a
+// project, plus whether the event exists there at all. A captured event awaits
+// identity settlement with a NULL group, so "known event, empty group" is a
+// normal state the caller must distinguish from "unknown event". Used by
+// ReplayInit to derive the group when the SDK only sends an error_event_id
+// (contract C1).
+func (q *Queries) GroupIDForEvent(ctx context.Context, eventID, projectID string) (gid string, found bool, err error) {
+	var stored *string
+	err = q.pool.QueryRow(ctx,
 		`SELECT error_group_id FROM error_events WHERE id = $1 AND project_id = $2`,
-		eventID, projectID).Scan(&gid)
+		eventID, projectID).Scan(&stored)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", nil
+		return "", false, nil
 	}
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
-	if gid == nil {
-		return "", nil
+	if stored == nil {
+		return "", true, nil
 	}
-	return *gid, nil
+	return *stored, true, nil
 }
 
 // GetReplayObjectKey returns the recording object key for a completed replay within a

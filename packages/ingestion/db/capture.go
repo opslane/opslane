@@ -57,20 +57,16 @@ func (q *Queries) CaptureError(ctx context.Context, p IngestParams) (*CaptureRec
 		eventTime = time.Now()
 	}
 
-	rawFingerprint := grouping.Fingerprint(p.Platform, p.ErrorType, p.ErrorMessage, p.StackTraceRaw)
-	if p.Fingerprint != "" {
-		rawFingerprint = p.Fingerprint
-	} else if familyFingerprint, ok := grouping.FamilyFingerprint(p.Platform, p.ErrorMessage); ok {
-		rawFingerprint = familyFingerprint
-	}
-	if _, err := tx.Exec(ctx,
-		`INSERT INTO error_capture_buckets (project_id, raw_fingerprint, identity_version)
-		 VALUES ($1, $2, $3)
-		 ON CONFLICT (project_id, identity_version, raw_fingerprint)
-		 DO UPDATE SET last_seen = now()`,
-		p.ProjectID, rawFingerprint, identity.IdentityVersion,
-	); err != nil {
-		return nil, fmt.Errorf("upsert capture bucket: %w", err)
+	// The HTTP handler always selects a fingerprint (curated family, debug-ID,
+	// or the legacy raw key); compute the raw fallback only for direct callers
+	// that did not, so the hot path never hashes a stack it will discard.
+	rawFingerprint := p.Fingerprint
+	if rawFingerprint == "" {
+		if familyFingerprint, ok := grouping.FamilyFingerprint(p.Platform, p.ErrorMessage); ok {
+			rawFingerprint = familyFingerprint
+		} else {
+			rawFingerprint = grouping.Fingerprint(p.Platform, p.ErrorType, p.ErrorMessage, p.StackTraceRaw)
+		}
 	}
 
 	endUserID, err := captureEndUser(ctx, tx, p)
@@ -122,6 +118,19 @@ func (q *Queries) CaptureError(ctx context.Context, p IngestParams) (*CaptureRec
 		); err != nil {
 			return nil, fmt.Errorf("pin session for evidence: %w", err)
 		}
+	}
+
+	// Upsert the shared bucket last: ON CONFLICT takes a row lock that
+	// serializes every same-fingerprint capture until commit, so the lock
+	// window must cover one statement, not the whole transaction.
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO error_capture_buckets (project_id, raw_fingerprint, identity_version)
+		 VALUES ($1, $2, $3)
+		 ON CONFLICT (project_id, identity_version, raw_fingerprint)
+		 DO UPDATE SET last_seen = now()`,
+		p.ProjectID, rawFingerprint, identity.IdentityVersion,
+	); err != nil {
+		return nil, fmt.Errorf("upsert capture bucket: %w", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {

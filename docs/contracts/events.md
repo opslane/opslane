@@ -31,7 +31,7 @@ outage we cannot hotfix.
 | Field | Meaning |
 | --- | --- |
 | `event_id` | Identifier for the stored observation. Empty when the event was suppressed. |
-| `group_id` | **Provisional capture handle.** It identifies the processing item the event landed in; clients must not treat it as a stable issue identifier. Today it carries the current grouping row's id; once the identity pipeline lands, reads through it will resolve or redirect to the canonical issue. |
+| `group_id` | **Provisional capture handle.** It identifies the processing item the event landed in; clients must not treat it as a stable issue identifier and must make no assumption about its representation, which may change between releases. Once identity settlement lands, reads through it will resolve or redirect to the canonical issue. |
 | `error_group_id` | Deprecated alias for `group_id`, retained for compatibility. The two fields always carry the same value. |
 
 Suppressed events return all three identifier fields empty plus

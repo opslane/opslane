@@ -562,6 +562,13 @@ export async function claimJob(
        SELECT id FROM error_group_jobs
        WHERE status = 'pending'
          AND available_at <= now()
+         -- Claim only job types this worker can dispatch. Capture enqueues
+         -- 'stack_resolve' rows whose handler arrives in a later slice;
+         -- claiming an unknown type here would only crash it through
+         -- retries into the dead-letter set. New types stay pending until
+         -- a handler ships and joins this list.
+         AND job_type IN ('setup_pr','session_analysis','ci_watch','route_map',
+                          'score_sync','fix','investigate','error_fix')
          AND (job_type <> 'session_analysis'
               OR (SELECT COUNT(*) FROM error_group_jobs
                    WHERE status = 'claimed'
