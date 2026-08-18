@@ -46,6 +46,7 @@ import { FRICTION_INVESTIGATION_MODEL, investigateFriction } from './friction/in
 import { readChunksBounded } from './friction/chunk-reader.js';
 import { analyzeSession, RULE_VERSION } from './friction/analyzer.js';
 import { classifyActivity, deriveCoverage, extractSessionFacts, formatSessionContext } from './friction/facts.js';
+import { replaceSessionFacts } from './facts/persist.js';
 import { writeFrictionSignals } from './friction/persist.js';
 import { processFrictionOutcomes } from './friction/promotion.js';
 import {
@@ -1019,6 +1020,10 @@ export async function processSessionAnalysisJob(
       totalChunkCount: session.chunk_count,
       envelopeCount: read.envelopes.length,
       truncated: read.truncated,
+    });
+    await replaceSessionFacts(session.project_id, session.id, {
+      ...facts,
+      ruleVersion: RULE_VERSION,
     });
     await db.upsertSessionAnalysis({
       sessionId: session.id,

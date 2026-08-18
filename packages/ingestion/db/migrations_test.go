@@ -231,6 +231,7 @@ func TestMigration054CreatesPipelineTables(t *testing.T) {
 		"error_event_identities", "canonical_issue_fingerprints", "issue_episodes",
 		"issue_decisions", "issue_inquiry_decisions", "issue_evidence_anchors",
 		"issue_publications", "digest_runs", "digest_run_items",
+		"session_request_failures", "session_write_rollups",
 	}
 	for _, table := range want {
 		var exists bool

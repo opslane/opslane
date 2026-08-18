@@ -202,6 +202,39 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_one_active_write_job_per_run
 ALTER TABLE diagnosis_decisions
   ADD COLUMN IF NOT EXISTS episode_id UUID REFERENCES issue_episodes(id) ON DELETE SET NULL;
 
+-- Compact facts derived from scrubbed recordings. Failures stay exact enough
+-- to investigate; successful writes are rolled up. Query strings, hosts,
+-- bodies, input values, and DOM text do not belong in either table. Retention
+-- deletes the owning session and cascades these facts with it.
+CREATE TABLE IF NOT EXISTS session_request_failures (
+  project_id       UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  session_id       TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  request_id_hash  TEXT NOT NULL,
+  page_route       TEXT NOT NULL,
+  method           TEXT NOT NULL,
+  endpoint_pattern TEXT NOT NULL,
+  status           INTEGER NOT NULL,
+  action_kind      TEXT CHECK (action_kind IS NULL OR action_kind IN ('click','form_submit')),
+  action_selector  TEXT,
+  action_link      TEXT NOT NULL CHECK (action_link IN ('direct','none')),
+  occurred_at      TIMESTAMPTZ NOT NULL,
+  rule_version     INTEGER NOT NULL,
+  PRIMARY KEY (project_id, session_id, request_id_hash, rule_version)
+);
+
+CREATE TABLE IF NOT EXISTS session_write_rollups (
+  project_id       UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  session_id       TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  page_route       TEXT NOT NULL,
+  method           TEXT NOT NULL,
+  endpoint_pattern TEXT NOT NULL,
+  status_class     INTEGER NOT NULL,
+  occurrence_count INTEGER NOT NULL,
+  rule_version     INTEGER NOT NULL,
+  PRIMARY KEY (project_id, session_id, page_route, method,
+               endpoint_pattern, status_class, rule_version)
+);
+
 -- outcome predates this migration. Preserve legacy values for existing rows and
 -- old binaries while admitting the rewritten pipeline's terminal outcomes.
 DO $$ BEGIN
@@ -219,4 +252,3 @@ DO $$ BEGIN
                          'verified_fix','needs_human','unable_to_establish_cause'));
   END IF;
 END $$;
-
