@@ -59,6 +59,7 @@ systems use it for a branch name.
 | `RETENTION_SWEEP_INTERVAL_SECONDS` | no (3600) | How often the retention sweeper runs (session close + expiry pass) |
 | `PRIORITY_SCORE_INTERVAL_SECONDS` | no (1800) | How often ingestion recomputes priority scores for open incidents and discovers missing route-map classifications. Must be a positive integer number of seconds; invalid values use the default. |
 | `SCRUB_INTERVAL_SECONDS` | no (15) | How often the chunk scrubber looks for committed chunks to redact. Test lanes shorten it to cut e2e wall-clock. Separate from the retained fixed 30s eligibility grace; chunk uploads are no longer presigned, so shortening that grace is now a separate privacy-timing decision. |
+| `RESOLVE_SWEEP_INTERVAL_SECONDS` | no (300) | How often the stack-resolution watchdog sweeps: resolutions still pending past the 24h daily boundary settle to the explicit `no_map` raw fallback, and resolutions stuck in `failed` past that boundary are counted and logged. Only the tick rate is tunable; the boundary itself is fixed by the pipeline design. |
 | `ADMIN_EMAILS` | no | Comma-separated operator email allowlist for the cross-tenant admin dashboard. Empty disables the admin API. Docker Compose maps it from the host-side `OPSLANE_ADMIN_EMAILS`. |
 | `VERSION` | no | Reported by `/health` |
 

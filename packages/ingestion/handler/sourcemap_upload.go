@@ -27,6 +27,11 @@ type objectStore interface {
 	StatObject(ctx context.Context, objectKey string) (int64, error)
 }
 
+func (d *Dependencies) wakePendingStackResolutions(ctx context.Context, projectID, debugID string) error {
+	_, err := d.Queries.WakePendingStackResolutions(ctx, projectID, debugID)
+	return err
+}
+
 func (d *Dependencies) sourcemapStore() objectStore {
 	if d.SourcemapStore != nil {
 		return d.SourcemapStore
@@ -136,6 +141,10 @@ func (d *Dependencies) UploadSourceMap(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		if err := d.wakePendingStackResolutions(r.Context(), projectID, urlID); err != nil {
+			writeJSONErrorCode(w, http.StatusInternalServerError, "internal error", "internal_error")
+			return
+		}
 		writeJSONStatus(w, http.StatusOK, "exists")
 		return
 	}
@@ -153,6 +162,10 @@ func (d *Dependencies) UploadSourceMap(w http.ResponseWriter, r *http.Request) {
 	if !inserted && stored.ContentSHA256 != computed.ContentSHA256 {
 		writeJSONErrorCode(w, http.StatusConflict,
 			"a different map is already stored under this debug ID", "debug_id_conflict")
+		return
+	}
+	if err := d.wakePendingStackResolutions(r.Context(), projectID, urlID); err != nil {
+		writeJSONErrorCode(w, http.StatusInternalServerError, "internal error", "internal_error")
 		return
 	}
 	if inserted {

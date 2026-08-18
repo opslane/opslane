@@ -29,8 +29,8 @@ import { getInstallationToken } from './github-app.js';
 import { type ReplaySignals } from './pr.js';
 import { processSetupPrJob } from './setup-pr.js';
 
-import type { ResolvedFrame } from './source-map.js';
-import { framesFromEnvelope, resolveEventStack } from './resolve-stack.js';
+import { framesFromEnvelope } from './resolve-stack.js';
+import { runStackResolve } from './resolve/job.js';
 import { initTracing, shutdownTracing, withJobTrace, getActiveTraceId, buildLangfuseTraceUrl } from './tracing.js';
 import { runVisualAnalysis, type VisualAnalysisOutput } from './visual-analysis.js';
 import {
@@ -270,36 +270,6 @@ function checkAbort(signal: AbortSignal): void {
   }
 }
 
-async function resolveStackForEvent(
-  event: ErrorEventData,
-  projectId: string,
-  platform: string,
-): Promise<ResolvedFrame[] | null> {
-  if (platform !== 'javascript') return null;
-  const minioConfig = getMinIOConfig();
-  const resolution = await resolveEventStack(
-    {
-      stackTraceRaw: event.stack_trace_raw,
-      debugMeta: event.debug_meta,
-      projectId,
-    },
-    {
-      getMapRows: db.getSourceMapRows,
-      fetchMap: async (objectKey) => {
-        if (!minioConfig) return null;
-        return (await fetchObject(objectKey, minioConfig)).toString('utf-8');
-      },
-    },
-  );
-  await db.setEventResolution(
-    event.id,
-    projectId,
-    resolution.status,
-    resolution.envelope,
-  );
-  return resolution.frames;
-}
-
 export async function processJob(job: ClaimedJob, signal: AbortSignal): Promise<void> {
   jobsInFlight += 1;
   try {
@@ -371,6 +341,11 @@ export async function processJobInner(job: ClaimedJob, signal: AbortSignal): Pro
 
   if (job.jobType === 'score_sync') {
     await processScoreSyncJob(job);
+    return;
+  }
+
+  if (job.jobType === 'stack_resolve') {
+    await runStackResolve(job);
     return;
   }
 
@@ -532,12 +507,6 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
     return;
   }
 
-  // Debug-ID resolution depends only on Postgres and object storage. Persist
-  // it before LLM credentials or repository access can terminate the job.
-  const resolvedStack = event
-    ? await resolveStackForEvent(event, job.projectId, platform)
-    : null;
-
   const project = await db.getProject(job.projectId);
   if (!project) throw new Error(`Project ${job.projectId} not found`);
 
@@ -616,7 +585,7 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
       title: group.title,
       errorMessage: event?.error_message ?? '',
       stackTrace: event?.stack_trace_raw ?? '',
-      resolvedStackTrace: resolvedStack ?? framesFromEnvelope(event?.stack_trace_resolved) ?? null,
+      resolvedStackTrace: framesFromEnvelope(event?.stack_trace_resolved) ?? null,
       breadcrumbs: event?.breadcrumbs ?? '[]',
       sessionContext,
     }, repoDir, investigatedCommit);
@@ -1181,10 +1150,6 @@ export async function processFixJob(job: ClaimedJob & { errorGroupId: string }, 
 
   const event = await loadEvidenceEvent(job, group);
   const customerRuntime = parseRuntimeInfo(event?.context ?? '');
-  const resolvedStack = event
-    ? await resolveStackForEvent(event, job.projectId, platform)
-    : null;
-
   const project = await db.getProject(job.projectId);
   if (!project) throw new Error(`Project ${job.projectId} not found`);
 
@@ -1347,7 +1312,7 @@ export async function processFixJob(job: ClaimedJob & { errorGroupId: string }, 
       errorType: event?.error_type ?? 'Unknown',
       errorMessage: event?.error_message ?? '',
       stackTrace: event?.stack_trace_raw ?? '',
-      resolvedStackTrace: resolvedStack ?? framesFromEnvelope(event?.stack_trace_resolved) ?? null,
+      resolvedStackTrace: framesFromEnvelope(event?.stack_trace_resolved) ?? null,
       breadcrumbs: event?.breadcrumbs ?? '[]',
       context: event?.context ?? '{}',
       environmentNames: environmentContext.names,

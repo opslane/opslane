@@ -9,6 +9,7 @@ import { TraceMap, originalPositionFor, sourceContentFor } from '@jridgewell/tra
 
 export interface ResolvedFrame {
   originalFile: string;
+  originalFunction?: string;
   originalLine: number;
   originalColumn: number;
   sourceSnippet: string | null;
@@ -88,6 +89,7 @@ export function resolveFrame(
 
     return {
       originalFile: pos.source,
+      originalFunction: pos.name ?? '',
       originalLine: pos.line,
       originalColumn: pos.column ?? 0,
       sourceSnippet: snippet,

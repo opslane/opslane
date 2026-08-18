@@ -1,5 +1,7 @@
 import { computeDebugId } from '@opslane/sdk/build/debug-id';
 import type { ResolvedStackEnvelope } from './db.js';
+import type { CachedPosition, PositionKey } from './resolve/position-cache.js';
+import type { ResolvedFrameV2 } from './resolve/envelope.js';
 import {
   isParseableMap,
   parseStackFrames,
@@ -23,6 +25,7 @@ export interface StackResolution {
   status: ResolutionStatus;
   frames: ResolvedFrame[] | null;
   envelope: ResolvedStackEnvelope | null;
+  identityFrames: ResolvedFrameV2[] | null;
 }
 
 export interface SourceMapRow {
@@ -34,6 +37,8 @@ export interface SourceMapRow {
 export interface ResolveDeps {
   getMapRows(projectId: string, debugIds: string[]): Promise<SourceMapRow[]>;
   fetchMap(objectKey: string): Promise<string | null>;
+  lookupPosition?(key: PositionKey): Promise<CachedPosition | null>;
+  storePosition?(key: PositionKey, value: CachedPosition): Promise<void>;
 }
 
 interface DebugImage {
@@ -107,7 +112,7 @@ export async function resolveEventStack(
   try {
     const images = parseImages(input.debugMeta);
     if (images.length === 0) {
-      return { status: 'no_debug_ids', frames: null, envelope: null };
+      return { status: 'no_debug_ids', frames: null, envelope: null, identityFrames: null };
     }
 
     const byCodeFile = new Map(
@@ -121,7 +126,7 @@ export async function resolveEventStack(
       )
       .slice(0, MAX_FRAMES);
     if (matched.length === 0) {
-      return { status: 'no_debug_ids', frames: null, envelope: null };
+      return { status: 'no_debug_ids', frames: null, envelope: null, identityFrames: null };
     }
 
     const rows = await deps.getMapRows(
@@ -129,18 +134,43 @@ export async function resolveEventStack(
       [...new Set(matched.map(({ debugId }) => debugId))],
     );
     if (rows.length === 0) {
-      return { status: 'map_not_found', frames: null, envelope: null };
+      return { status: 'map_not_found', frames: null, envelope: null, identityFrames: null };
     }
     const rowByDebugID = new Map(rows.map((row) => [row.debug_id, row]));
     const mapCache = new Map<string, string | null>();
     const resolved: ResolvedFrame[] = [];
     const envelopeFrames: ResolvedStackEnvelope['frames'] = [];
+    const identityFrames: ResolvedFrameV2[] = [];
     let fetchedAny = false;
     let sawValidMap = false;
 
     for (const { frame, debugId } of matched) {
       const row = rowByDebugID.get(debugId);
       if (!row) continue;
+
+      const positionKey: PositionKey = {
+        projectId: input.projectId,
+        debugId,
+        mapContentSha: row.content_sha256,
+        line: frame.line,
+        column: frame.column,
+      };
+      const cached = await deps.lookupPosition?.(positionKey) ?? null;
+      if (cached) {
+        resolved.push({
+          originalFile: cached.originalFile,
+          originalLine: cached.originalLine,
+          originalColumn: 0,
+          sourceSnippet: null,
+        });
+        identityFrames.push({
+          original_file: cached.originalFile,
+          original_function: cached.originalFunction,
+          original_line: cached.originalLine,
+          generated: { line: frame.line, column: frame.column },
+        });
+        continue;
+      }
 
       let mapContent = mapCache.get(row.object_key);
       if (mapContent === undefined) {
@@ -173,7 +203,24 @@ export async function resolveEventStack(
       );
       if (result) {
         sawValidMap = true;
-        resolved.push(result);
+        resolved.push({
+          originalFile: result.originalFile,
+          originalLine: result.originalLine,
+          originalColumn: result.originalColumn,
+          sourceSnippet: result.sourceSnippet,
+        });
+        const cachedValue: CachedPosition = {
+          originalFile: result.originalFile,
+          originalFunction: result.originalFunction ?? '',
+          originalLine: result.originalLine,
+        };
+        await deps.storePosition?.(positionKey, cachedValue);
+        identityFrames.push({
+          original_file: cachedValue.originalFile,
+          original_function: cachedValue.originalFunction,
+          original_line: cachedValue.originalLine,
+          generated: { line: frame.line, column: frame.column },
+        });
         envelopeFrames.push({
           original_file: result.originalFile,
           original_line: result.originalLine,
@@ -193,16 +240,16 @@ export async function resolveEventStack(
       ? { version: 1, frames: envelopeFrames }
       : null;
     if (resolved.length === matched.length) {
-      return { status: 'resolved', frames: resolved, envelope };
+      return { status: 'resolved', frames: resolved, envelope, identityFrames };
     }
     if (resolved.length > 0) {
-      return { status: 'partial', frames: resolved, envelope };
+      return { status: 'partial', frames: resolved, envelope, identityFrames };
     }
     if (fetchedAny && !sawValidMap) {
-      return { status: 'invalid_map', frames: null, envelope: null };
+      return { status: 'invalid_map', frames: null, envelope: null, identityFrames: null };
     }
-    return { status: 'resolution_failed', frames: null, envelope: null };
+    return { status: 'resolution_failed', frames: null, envelope: null, identityFrames: null };
   } catch {
-    return { status: 'resolution_failed', frames: null, envelope: null };
+    return { status: 'resolution_failed', frames: null, envelope: null, identityFrames: null };
   }
 }

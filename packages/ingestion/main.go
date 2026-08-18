@@ -18,6 +18,7 @@ import (
 	minioPkg "github.com/opslane/opslane/packages/ingestion/minio"
 	"github.com/opslane/opslane/packages/ingestion/notify"
 	"github.com/opslane/opslane/packages/ingestion/priority"
+	"github.com/opslane/opslane/packages/ingestion/resolve"
 	"github.com/opslane/opslane/packages/ingestion/retention"
 	"github.com/opslane/opslane/packages/ingestion/scrubber"
 )
@@ -220,6 +221,20 @@ func main() {
 			}
 		}
 	}()
+
+	// Settle stack resolutions whose source map never arrived (pending past the
+	// daily boundary -> explicit no_map fallback) and report resolutions stuck
+	// in 'failed'. The boundary is the architecture's daily boundary, not a
+	// tunable retry knob; only the tick rate is env-adjustable.
+	resolveWatchdog := resolve.NewWatchdog(pool, 24*time.Hour)
+	resolveSweepInterval := 5 * time.Minute
+	if v := os.Getenv("RESOLVE_SWEEP_INTERVAL_SECONDS"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil && parsed > 0 {
+			resolveSweepInterval = time.Duration(parsed) * time.Second
+		}
+	}
+	go resolveWatchdog.Start(context.Background(), resolveSweepInterval)
+	slog.Info("resolve watchdog started", "interval", resolveSweepInterval.String())
 
 	prioritySweeper := &priority.Sweeper{Pool: pool}
 	priorityInterval := 30 * time.Minute

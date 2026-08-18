@@ -1,8 +1,7 @@
 // The v2 resolved-frame envelope: the cross-language identity contract.
 // Go (packages/ingestion/identity) alone canonicalizes and hashes envelopes;
-// this module is the only writer shape. Nothing persists v2 envelopes yet —
-// the v1 reader in resolve-stack.ts (framesFromEnvelope) cannot parse this
-// shape and is rewired when stack resolution moves to its own job (Slice 3).
+// this module is the only writer shape. The stack_resolve job persists this
+// shape; Go consumes it later when observation identity settles.
 export const RESOLVER_VERSION = 2;
 
 export interface GeneratedPos {

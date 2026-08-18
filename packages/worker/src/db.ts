@@ -427,6 +427,8 @@ export interface ClaimedJob {
   workerId: string;
   errorGroupId: string | null;
   eventId: string | null;
+  episodeId?: string | null;
+  runId?: string | null;
   sourceId: string | null;
   sourceJobId?: string | null;
   projectId: string;
@@ -531,6 +533,8 @@ export async function claimJob(
     id: string;
     error_group_id: string | null;
     event_id: string | null;
+    episode_id: string | null;
+    run_id: string | null;
     source_id: string | null;
     source_job_id: string | null;
     project_id: string;
@@ -562,13 +566,10 @@ export async function claimJob(
        SELECT id FROM error_group_jobs
        WHERE status = 'pending'
          AND available_at <= now()
-         -- Claim only job types this worker can dispatch. Capture enqueues
-         -- 'stack_resolve' rows whose handler arrives in a later slice;
-         -- claiming an unknown type here would only crash it through
-         -- retries into the dead-letter set. New types stay pending until
-         -- a handler ships and joins this list.
+         -- Claim only job types this worker can dispatch. New types stay
+         -- pending until a handler ships and joins this list.
          AND job_type IN ('setup_pr','session_analysis','ci_watch','route_map',
-                          'score_sync','fix','investigate','error_fix')
+                          'score_sync','stack_resolve','fix','investigate','error_fix')
          AND (job_type <> 'session_analysis'
               OR (SELECT COUNT(*) FROM error_group_jobs
                    WHERE status = 'claimed'
@@ -591,7 +592,8 @@ export async function claimJob(
        LIMIT 1
        FOR UPDATE SKIP LOCKED
      )
-     RETURNING id, error_group_id, event_id, source_id, source_job_id, project_id, job_type, attempts, max_attempts, guidance,
+     RETURNING id, error_group_id, event_id, episode_id, run_id,
+               source_id, source_job_id, project_id, job_type, attempts, max_attempts, guidance,
                worker_id, lease_generation::text AS lease_generation,
                triggered_by, session_id, platform, payload`,
       [workerId, leaseDurationMs / 1000, sessionAnalysisCap]
@@ -612,6 +614,8 @@ export async function claimJob(
     workerId: row.worker_id,
     errorGroupId: row.error_group_id,
     eventId: row.event_id ?? null,
+    episodeId: row.episode_id,
+    runId: row.run_id,
     sourceId: row.source_id,
     sourceJobId: row.source_job_id,
     projectId: row.project_id,
