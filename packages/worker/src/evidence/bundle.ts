@@ -274,9 +274,7 @@ export async function loadEvidence(projectId: string, episodeId: string): Promis
                 observed_requests, audience, confidence, commit_sha,
                 prompt_version, model, source
            FROM route_map
-          WHERE project_id=$1
-            AND COALESCE(NULLIF(regexp_replace(pattern, '^https?://[^/]*', '', 'i'), ''), '/')
-                =ANY($2::text[])
+          WHERE project_id=$1 AND pattern=ANY($2::text[])
           ORDER BY pattern`,
         [projectId, routes],
       );

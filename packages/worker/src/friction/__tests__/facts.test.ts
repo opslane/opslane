@@ -56,6 +56,50 @@ describe('session facts', () => {
     expect(facts.failedWriteCount).toBe(1);
   });
 
+  it('counts a slash-less document-relative request the way the browser resolves it', () => {
+    // The SDK records the raw string handed to fetch, so fetch('api/assets')
+    // arrives without a leading slash and still belongs to the page origin.
+    const facts = extractSessionFacts([envelope([
+      page(T0, 'https://app.example.com/assets'),
+      telemetry(T0 + 1, {
+        kind: 'request_start', requestId: 'rel-1', clickId: null,
+        method: 'POST', url: 'api/assets',
+      }),
+      telemetry(T0 + 2, { kind: 'request_end', requestId: 'rel-1', status: 500 }),
+    ])]);
+
+    expect(facts.failedWriteCount).toBe(1);
+    expect(facts.failures[0]?.endpointPattern).toBe('/api/assets');
+  });
+
+  it('resolves a protocol-relative URL to its host instead of counting it blindly', () => {
+    const facts = extractSessionFacts([envelope([
+      page(T0, 'https://app.example.com/assets'),
+      telemetry(T0 + 1, {
+        kind: 'request_start', requestId: 'proto-1', clickId: null,
+        method: 'POST', url: '//evil.example/api/steal',
+      }),
+      telemetry(T0 + 2, { kind: 'request_end', requestId: 'proto-1', status: 500 }),
+    ])]);
+
+    expect(facts.failedWriteCount).toBe(0);
+    expect(facts.failures).toHaveLength(0);
+  });
+
+  it('excludes nonstandard statuses past 599 as the pre-fact gate did', () => {
+    const facts = extractSessionFacts([envelope([
+      page(T0, 'https://app.example.com/assets'),
+      telemetry(T0 + 1, {
+        kind: 'request_start', requestId: 'junk-1', clickId: null,
+        method: 'PUT', url: '/api/assets/1',
+      }),
+      telemetry(T0 + 2, { kind: 'request_end', requestId: 'junk-1', status: 999 }),
+    ])]);
+
+    expect(facts.failedWriteCount).toBe(0);
+    expect(facts.failures).toHaveLength(0);
+  });
+
   it('does not treat an unparseable URL as same-origin', () => {
     const facts = extractSessionFacts([envelope([
       page(T0, 'https://app.example.com/assets'),

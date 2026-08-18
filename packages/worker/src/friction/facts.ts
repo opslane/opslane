@@ -66,8 +66,16 @@ function originOf(url: string): string | null {
 const WRITE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
 function isFailure(status: number): boolean {
-  return status === 0 || status >= 400;
+  // 0 is a transport-level refusal. Statuses past 599 are nonstandard junk
+  // (proxy 999 and friends) and stay excluded, as the pre-fact gate did.
+  return status === 0 || (status >= 400 && status < 600);
 }
+
+// Detailed failure facts are derived from browser-controlled telemetry, so a
+// hostile or broken client could otherwise write unbounded rows per session.
+// Counters stay exact past the cap; only the detailed rows are bounded, most
+// recent kept to match the read side's recency order.
+const MAX_STORED_FAILURE_FACTS = 1000;
 
 export function extractSessionFacts(chunks: SessionChunkEnvelope[]): SessionFacts {
   const facts: SessionFacts = {
@@ -116,10 +124,23 @@ export function extractSessionFacts(chunks: SessionChunkEnvelope[]): SessionFact
   }
   if (entryPageHref !== null) facts.entryPath = normalizeEntryPath(entryPageHref);
 
-  const sameOrigin = (url: string): boolean => {
-    if (url.startsWith('/') && !url.startsWith('//')) return true;
-    const origin = originOf(url);
-    return origin !== null && pageOrigins.has(origin);
+  // The SDK records the raw string handed to fetch, so requests arrive as
+  // absolute URLs, root-relative paths, slash-less document-relative paths
+  // ('api/assets'), or protocol-relative '//host/path'. Resolving against the
+  // page origin judges all of them the way the browser did; only a URL that
+  // cannot be resolved at all falls back to the root-relative check.
+  const basePageOrigin = (entryPageHref !== null ? originOf(entryPageHref) : null)
+    ?? pageOrigins.values().next().value ?? null;
+  const resolveRequestUrl = (url: string): URL | null => {
+    try { return new URL(url); } catch { /* not absolute */ }
+    if (basePageOrigin !== null) {
+      try { return new URL(url, basePageOrigin); } catch { /* unresolvable */ }
+    }
+    return null;
+  };
+  const sameOrigin = (resolved: URL | null, rawUrl: string): boolean => {
+    if (resolved !== null) return pageOrigins.has(resolved.origin);
+    return rawUrl.startsWith('/') && !rawUrl.startsWith('//');
   };
   pages.sort((left, right) => left.at - right.at);
   const routeAt = (at: number): string => {
@@ -168,9 +189,10 @@ export function extractSessionFacts(chunks: SessionChunkEnvelope[]): SessionFact
       }
       consumedRequests.add(event.requestId);
       startById.delete(event.requestId);
-      if (!sameOrigin(start.url)) continue;
+      const resolved = resolveRequestUrl(start.url);
+      if (!sameOrigin(resolved, start.url)) continue;
       const isWrite = WRITE_METHODS.has(start.method);
-      const endpointPattern = normalizePageUrl(start.url);
+      const endpointPattern = normalizePageUrl(resolved !== null ? resolved.href : start.url);
       if (event.status >= 200 && event.status < 300 && isWrite) {
         facts.successfulWriteCount += 1;
         const statusClass = Math.floor(event.status / 100);
@@ -209,6 +231,9 @@ export function extractSessionFacts(chunks: SessionChunkEnvelope[]): SessionFact
     }
   }
   facts.successes = [...successRollups.values()];
+  if (facts.failures.length > MAX_STORED_FAILURE_FACTS) {
+    facts.failures = facts.failures.slice(-MAX_STORED_FAILURE_FACTS);
+  }
   return facts;
 }
 
