@@ -406,7 +406,17 @@ jobs:
           # that fixture (or point E2E_ROUTE_MAP_REPO at a public one) and drop
           # this entry; until then the enqueue -> claim -> fenced-upsert path is
           # covered by unit and DB tests only.
-          E2E_ALLOWED_SKIP_PATTERN: '^(pr_created pipeline \(full flow\)|dashboard approved-fixture screenshot capture|route_map job pipeline \(stubbed model\))'
+          #
+          # The pipeline rewrite (Slices 1-11, docs/superpowers/specs/
+          # 2026-08-16-pipeline-implementation-plan.md) removes at-ingest
+          # grouping, investigation, and notification in Slice 2 and rebuilds
+          # them across Slices 3-10 without deploying the intermediate states.
+          # E2E suites that drive those removed flows are suspended in place
+          # with an explicit "[suspended until Slice N]" title marker; the
+          # pattern below allowlists exactly that marker so every other skip
+          # still fails the gate. Un-suspending a suite removes its marker and
+          # this entry stops matching it.
+          E2E_ALLOWED_SKIP_PATTERN: '^(pr_created pipeline \(full flow\)|dashboard approved-fixture screenshot capture|route_map job pipeline \(stubbed model\))|\[suspended until Slice [0-9]+A?\]'
           # The exact collected total, not a slack floor, so any silently
           # dropped test trips it. Re-derive from an actual run's
           # numTotalTests — NOT from `vitest list`, which does not expand
@@ -434,20 +444,21 @@ jobs:
           # threshold, environment isolation, and the ±30s error-fold window,
           # and it is the suite the scrub fast-forward makes cheap. Pinning stops
           # a future edit dropping one while E2E_MIN_TESTS still passes.
+          # Pins retired by the Slice 2 capture boundary (restored when the
+          # named slice un-suspends the suite): the Vue/React needs_human
+          # smokes (Slice 9), the python live smoke and wire adversarial
+          # suites (Slice 4), the dashboard environment filter and projects
+          # deep-link suites (Slice 4), and the friction ±30s error-fold case
+          # (Slice 4). The environments group-keeping pin now names the
+          # capture-bucket rewrite of the same proof.
           E2E_REQUIRED_PATTERNS: |
-            ^browser smoke: Vue error to needs_human >
-            ^browser smoke: React error to needs_human >
             ^browser smoke: rage click to friction signal >
             ^notifications contract
-            ^python SDK live smoke \(Flask fixture → ingestion\) >
-            ^python wire adversarial \(hostile non-SDK client\) >
-            ^first-class environment ingestion > keeps one group across payload environments
+            ^first-class environment ingestion > keeps one capture bucket across payload environments
             ^first-class environment ingestion > uses exact labels, discovers valid names, and falls back invalid labels to the default
             ^first-class environment ingestion > applies a changed default prospectively
             ^first-class environment ingestion > supports out-of-order events, makes the existing same-project session
             ^first-class environment ingestion > does not expose manual environment creation
-            ^dashboard environment filtering > gates readiness and filters incidents, detail chips, and sessions in real Chromium
-            ^first-class projects dashboard > switches safely from a deep link and provisions a usable project key
             ^SDK environment browser contract > sends the configured name through real Chromium
             ^origin allowlist with a server-side SDK > accepts a backend event that carries no Origin or Referer$
             ^origin allowlist with a server-side SDK > accepts a browser event from an allowlisted origin$
@@ -458,7 +469,6 @@ jobs:
             ^real Chromium always sends Origin to /events > accepts the same page once its origin is allowlisted$
             ^friction incidents — synthetic live-service gate > four users stay invisible
             ^friction incidents — synthetic live-service gate > environments never combine
-            ^friction incidents — synthetic live-service gate > a signal inside ±30s
             ^friction incidents — synthetic live-service gate > an error outside the ±30s window
             ^friction incidents — synthetic live-service gate > the stepper fixture produces no signal
             ^credential boundary >

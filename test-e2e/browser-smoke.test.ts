@@ -82,7 +82,10 @@ describe.skipIf(hasLLMKey || !keylessWorkerRunning || !playwrightAvailable)(
       await closePool();
     });
 
-    it('real Vue SDK error reaches needs_human with missing_llm_key', async () => {
+    // Capture boundary (Slice 2): ingest stores observations without creating
+    // incidents or investigations; this flow returns when settlement (Slice 4)
+    // hands accepted work to the investigator (Slice 9).
+    it.skip('real Vue SDK error reaches needs_human with missing_llm_key [suspended until Slice 9]', async () => {
       const page = await browser.newPage();
       try {
         await page.goto(fixture.url);
@@ -239,7 +242,8 @@ describe.skipIf(hasLLMKey || !keylessWorkerRunning || !playwrightAvailable)(
       await closePool();
     });
 
-    it('React error-boundary error reaches needs_human with missing_llm_key', async () => {
+    // Capture boundary (Slice 2): see the Vue smoke above.
+    it.skip('React error-boundary error reaches needs_human with missing_llm_key [suspended until Slice 9]', async () => {
       const page = await browser.newPage();
       try {
         await page.goto(fixture.url);
