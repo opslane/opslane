@@ -56,7 +56,12 @@ describe('event-to-pr reliability system tracer', () => {
     }
   });
 
-  it('persists one real event through investigate and fix jobs to a delivered PR', async () => {
+  // Capture boundary (Slice 2): ingest stores observations without creating
+  // an incident or investigate job, so the event-to-PR tracer has no path to
+  // walk until identity settlement (Slice 4) and the investigation handoff
+  // (Slice 9) land. The friction ladder tracer seeds its issue directly and
+  // keeps this lane's coverage of the worker's job, lease, and PR mechanics.
+  it.skip('persists one real event through investigate and fix jobs to a delivered PR [suspended until Slice 9]', async () => {
     for (const key of envKeys) savedEnv.set(key, process.env[key]);
 
     const health = await fetch(`${ingestionUrl}/health`);
