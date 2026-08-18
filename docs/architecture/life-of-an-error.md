@@ -28,7 +28,7 @@ A fast model call classifies the error: fixable in application code, or not? Hig
 
 ## 5. Investigate and fix
 
-For fixable errors, the worker clones the repository (GitHub token or App installation token), resolves the stack through uploaded source maps, and runs an agentic fix loop inside an **E2B sandbox**: read the referenced source, form a root cause, edit, install dependencies, and collect build/test evidence. The verdict is validated: candidate citations are verified against repository files (quoted code must appear within ±5 lines), evidence must cite files the investigation actually read, and filler text is rejected. Failed attempts escalate through model tiers before giving up.
+For fixable errors, the worker clones the repository (GitHub token or App installation token) and runs an agentic fix loop inside an **E2B sandbox**: read the referenced source, form a root cause, edit, install dependencies, and collect build/test evidence. The verdict is validated: candidate citations are verified against repository files (quoted code must appear within ±5 lines), evidence must cite files the investigation actually read, and filler text is rejected. Failed attempts escalate through model tiers before giving up.
 
 ## 6. Route by confidence — two stages
 

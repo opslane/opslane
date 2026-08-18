@@ -32,7 +32,7 @@ reader inside the service network.
 
 ## AI-assisted investigations
 
-Resolved source paths and snippets are used during investigations. The snippets
+Resolved source paths, functions, and snippets are used during investigations. The snippets
 sent to the fix agent therefore reach the configured AI model provider. This is
 the product working as intended, but it is a separate data flow from storing the
 map and should be included in your own security and privacy review.
