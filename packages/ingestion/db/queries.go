@@ -444,16 +444,20 @@ type IngestParams struct {
 	ErrorType            string
 	ErrorMessage         string
 	StackTraceRaw        string
-	Fingerprint          string
-	Title                string
-	Breadcrumbs          string // JSON, defaults to "[]"
-	Context              string // JSON, defaults to "{}"
-	Release              string // source map lookup
-	DebugMeta            string // JSON, defaults to {"images":[]}
-	NetworkTimings       string // JSON array, defaults to "[]"
-	CommitSHA            string // optional lowercase Git object ID
-	SessionID            string // links error event to replay
-	Platform             string // javascript | python | future wire token; empty defaults to javascript
+	// Fingerprint is the Go ingest path's explicit fingerprint selection. The
+	// legacy grouping path requires it; CaptureError uses it when the handler
+	// selected a curated family or debug-ID fingerprint and otherwise computes
+	// the raw fallback itself.
+	Fingerprint    string
+	Title          string
+	Breadcrumbs    string // JSON, defaults to "[]"
+	Context        string // JSON, defaults to "{}"
+	Release        string // source map lookup
+	DebugMeta      string // JSON, defaults to {"images":[]}
+	NetworkTimings string // JSON array, defaults to "[]"
+	CommitSHA      string // optional lowercase Git object ID
+	SessionID      string // links error event to replay
+	Platform       string // javascript | python | future wire token; empty defaults to javascript
 	// EventTime is the validated client-side event time (issue #27). Zero
 	// means "unknown" and falls back to server arrival time. It feeds
 	// error_events.timestamp and group/junction impact times; created_at
