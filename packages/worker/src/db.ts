@@ -427,6 +427,8 @@ export interface ClaimedJob {
   workerId: string;
   errorGroupId: string | null;
   eventId: string | null;
+  episodeId?: string | null;
+  runId?: string | null;
   sourceId: string | null;
   sourceJobId?: string | null;
   projectId: string;
@@ -531,6 +533,8 @@ export async function claimJob(
     id: string;
     error_group_id: string | null;
     event_id: string | null;
+    episode_id: string | null;
+    run_id: string | null;
     source_id: string | null;
     source_job_id: string | null;
     project_id: string;
@@ -562,13 +566,10 @@ export async function claimJob(
        SELECT id FROM error_group_jobs
        WHERE status = 'pending'
          AND available_at <= now()
-         -- Claim only job types this worker can dispatch. Capture enqueues
-         -- 'stack_resolve' rows whose handler arrives in a later slice;
-         -- claiming an unknown type here would only crash it through
-         -- retries into the dead-letter set. New types stay pending until
-         -- a handler ships and joins this list.
+         -- Claim only job types this worker can dispatch. New types stay
+         -- pending until a handler ships and joins this list.
          AND job_type IN ('setup_pr','session_analysis','ci_watch','route_map',
-                          'score_sync','fix','investigate','error_fix')
+                          'score_sync','stack_resolve','fix','investigate','error_fix')
          AND (job_type <> 'session_analysis'
               OR (SELECT COUNT(*) FROM error_group_jobs
                    WHERE status = 'claimed'
@@ -591,7 +592,8 @@ export async function claimJob(
        LIMIT 1
        FOR UPDATE SKIP LOCKED
      )
-     RETURNING id, error_group_id, event_id, source_id, source_job_id, project_id, job_type, attempts, max_attempts, guidance,
+     RETURNING id, error_group_id, event_id, episode_id, run_id,
+               source_id, source_job_id, project_id, job_type, attempts, max_attempts, guidance,
                worker_id, lease_generation::text AS lease_generation,
                triggered_by, session_id, platform, payload`,
       [workerId, leaseDurationMs / 1000, sessionAnalysisCap]
@@ -612,6 +614,8 @@ export async function claimJob(
     workerId: row.worker_id,
     errorGroupId: row.error_group_id,
     eventId: row.event_id ?? null,
+    episodeId: row.episode_id,
+    runId: row.run_id,
     sourceId: row.source_id,
     sourceJobId: row.source_job_id,
     projectId: row.project_id,
@@ -2354,56 +2358,22 @@ export async function getSourceMapRows(
   return rows;
 }
 
-export interface ResolvedStackEnvelope {
-  version: 1;
-  frames: {
-    original_file: string;
-    original_line: number;
-    original_column: number;
-    source_snippet: string | null;
-    generated_file: string;
-    generated_line: number;
-    generated_column: number;
-    debug_id: string;
-  }[];
-}
-
 /**
- * Record one resolution outcome, without ever destroying a better one.
- *
- * Both the investigate and the fix job resolve the same sample event, so this
- * runs more than once per event and the two runs can disagree. Resolution
- * depends on object storage, so the disagreement is usually a transient fetch
- * failure rather than new information: a fix job running while MinIO blinks
- * would otherwise overwrite a stored envelope with NULL and downgrade a
- * `resolved` event to `resolution_failed`, losing frames nothing recomputes.
- *
- * A run that produced no envelope therefore leaves a stored one alone, and the
- * status stays with it so the pair can never describe different outcomes.
+ * Reads the v2 envelope the stack_resolve job persisted for an event.
+ * Investigate and fix prompts consume this; the legacy
+ * error_events.stack_trace_resolved column remains only as a fallback for
+ * events resolved before the dedicated job existed.
  */
-export async function setEventResolution(
+export async function getResolvedEnvelope(
   eventId: string,
   projectId: string,
-  status: string,
-  envelope: ResolvedStackEnvelope | null,
-): Promise<void> {
-  const pool = getPool();
-  await pool.query(
-    `UPDATE error_events
-     SET resolution_status = CASE
-           WHEN $4::jsonb IS NULL AND stack_trace_resolved IS NOT NULL
-             THEN resolution_status
-           ELSE $3
-         END,
-         stack_trace_resolved = COALESCE($4::jsonb, stack_trace_resolved)
-     WHERE id = $1 AND project_id = $2`,
-    [
-      eventId,
-      projectId,
-      status,
-      envelope === null ? null : JSON.stringify(envelope),
-    ],
+): Promise<unknown | null> {
+  const result = await getPool().query<{ envelope: unknown }>(
+    `SELECT envelope FROM error_event_resolutions
+     WHERE project_id = $2 AND event_id = $1 AND status = 'resolved'`,
+    [eventId, projectId],
   );
+  return result.rows[0]?.envelope ?? null;
 }
 
 // === Investigation lifecycle queries ===

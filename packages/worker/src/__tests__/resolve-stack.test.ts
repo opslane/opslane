@@ -1,5 +1,6 @@
 import { computeDebugId } from '@opslane/sdk/build/debug-id';
 import { describe, expect, it } from 'vitest';
+import { buildEnvelope } from '../resolve/envelope.js';
 import {
   framesFromEnvelope,
   resolveEventStack,
@@ -108,15 +109,13 @@ describe('resolveEventStack', () => {
     );
     expect(result.status).toBe('resolved');
     expect(result.frames?.[0]?.originalFile).toBe('src/App.vue');
-    expect(result.envelope).toEqual({
-      version: 1,
-      frames: [expect.objectContaining({
+    expect(result.identityFrames).toEqual([
+      expect.objectContaining({
         original_file: 'src/App.vue',
         original_line: 1,
-        generated_column: 1,
-        debug_id: APP_ID,
-      })],
-    });
+        generated: { line: 1, column: 1 },
+      }),
+    ]);
   });
 
   it('returns partial when only one of two matched frames resolves', async () => {
@@ -174,7 +173,7 @@ describe('resolveEventStack', () => {
     );
     expect(result.status).toBe('partial');
     expect(result.frames).toHaveLength(1);
-    expect(result.envelope?.frames[0]?.debug_id).toBe(APP_ID);
+    expect(result.identityFrames?.[0]?.original_file).toBe('src/App.vue');
   });
 
   it('rejects a fetched map whose canonical digest changed', async () => {
@@ -216,7 +215,7 @@ describe('framesFromEnvelope', () => {
     }]);
   });
 
-  it('round-trips a resolver envelope so both prompt paths agree', async () => {
+  it('round-trips the persisted v2 envelope into prompt frames', async () => {
     const result = await resolveEventStack(
       {
         stackTraceRaw: STACK,
@@ -225,7 +224,10 @@ describe('framesFromEnvelope', () => {
       },
       await deps([await row()], { 'app.map': MAP }),
     );
-    expect(framesFromEnvelope(result.envelope)).toEqual(result.frames);
+    // What the stack_resolve job persists is what investigate/fix read back.
+    const readBack = framesFromEnvelope(buildEnvelope(result.identityFrames!));
+    expect(readBack?.map((f) => [f.originalFile, f.originalLine]))
+      .toEqual(result.frames?.map((f) => [f.originalFile, f.originalLine]));
   });
 
   it('returns null for absent, malformed, or empty stored values', () => {

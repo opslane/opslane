@@ -1,5 +1,6 @@
 import { computeDebugId } from '@opslane/sdk/build/debug-id';
-import type { ResolvedStackEnvelope } from './db.js';
+import type { CachedPosition, PositionKey } from './resolve/position-cache.js';
+import type { ResolvedFrameV2 } from './resolve/envelope.js';
 import {
   isParseableMap,
   parseStackFrames,
@@ -22,7 +23,7 @@ export type ResolutionStatus =
 export interface StackResolution {
   status: ResolutionStatus;
   frames: ResolvedFrame[] | null;
-  envelope: ResolvedStackEnvelope | null;
+  identityFrames: ResolvedFrameV2[] | null;
 }
 
 export interface SourceMapRow {
@@ -34,12 +35,20 @@ export interface SourceMapRow {
 export interface ResolveDeps {
   getMapRows(projectId: string, debugIds: string[]): Promise<SourceMapRow[]>;
   fetchMap(objectKey: string): Promise<string | null>;
+  lookupPosition?(key: PositionKey): Promise<CachedPosition | null>;
+  storePosition?(key: PositionKey, value: CachedPosition): Promise<void>;
 }
 
 interface DebugImage {
   type: 'sourcemap';
   code_file: string;
   debug_id: string;
+}
+
+/** Whether the event references any source map at all — events without debug
+ * images never need object storage to settle. */
+export function hasDebugImages(debugMeta: string | null): boolean {
+  return parseImages(debugMeta).length > 0;
 }
 
 function parseImages(debugMeta: string | null): DebugImage[] {
@@ -65,11 +74,12 @@ function parseImages(debugMeta: string | null): DebugImage[] {
 /**
  * Read frames a previous job stored, in the shape the prompts already use.
  *
- * `stack_trace_resolved` holds the pinned v1 envelope (snake_case, with the
- * generated position and debug ID for auditing); the prompt builders receive
- * `ResolvedFrame[]`. Both get serialized straight into the model's context, so
- * handing over the raw envelope would put two different schemas under the same
- * "Resolved Stack Trace" heading depending on which branch produced it.
+ * Accepts both stored shapes: the v2 envelope the stack_resolve job persists
+ * in error_event_resolutions, and the legacy v1 envelope older events carry in
+ * `stack_trace_resolved`. The prompt builders receive `ResolvedFrame[]`, which
+ * gets serialized straight into the model's context, so handing over a raw
+ * envelope would put two different schemas under the same "Resolved Stack
+ * Trace" heading depending on which row produced it.
  */
 export function framesFromEnvelope(stored: unknown): ResolvedFrame[] | null {
   if (typeof stored !== 'object' || stored === null) return null;
@@ -81,19 +91,20 @@ export function framesFromEnvelope(stored: unknown): ResolvedFrame[] | null {
     const candidate = frame as Record<string, unknown>;
     const file = candidate['original_file'];
     const line = candidate['original_line'];
+    // v1 frames carry original_column; v2 identity frames do not (identity
+    // never keys on columns), so a missing column reads as 0 rather than
+    // dropping the frame.
     const column = candidate['original_column'];
-    if (
-      typeof file !== 'string'
-      || typeof line !== 'number'
-      || typeof column !== 'number'
-    ) {
+    if (typeof file !== 'string' || typeof line !== 'number') {
       continue;
     }
+    const fn = candidate['original_function'];
     const snippet = candidate['source_snippet'];
     mapped.push({
       originalFile: file,
+      ...(typeof fn === 'string' && fn !== '' ? { originalFunction: fn } : {}),
       originalLine: line,
-      originalColumn: column,
+      originalColumn: typeof column === 'number' ? column : 0,
       sourceSnippet: typeof snippet === 'string' ? snippet : null,
     });
   }
@@ -107,7 +118,7 @@ export async function resolveEventStack(
   try {
     const images = parseImages(input.debugMeta);
     if (images.length === 0) {
-      return { status: 'no_debug_ids', frames: null, envelope: null };
+      return { status: 'no_debug_ids', frames: null, identityFrames: null };
     }
 
     const byCodeFile = new Map(
@@ -121,7 +132,7 @@ export async function resolveEventStack(
       )
       .slice(0, MAX_FRAMES);
     if (matched.length === 0) {
-      return { status: 'no_debug_ids', frames: null, envelope: null };
+      return { status: 'no_debug_ids', frames: null, identityFrames: null };
     }
 
     const rows = await deps.getMapRows(
@@ -129,18 +140,42 @@ export async function resolveEventStack(
       [...new Set(matched.map(({ debugId }) => debugId))],
     );
     if (rows.length === 0) {
-      return { status: 'map_not_found', frames: null, envelope: null };
+      return { status: 'map_not_found', frames: null, identityFrames: null };
     }
     const rowByDebugID = new Map(rows.map((row) => [row.debug_id, row]));
     const mapCache = new Map<string, string | null>();
     const resolved: ResolvedFrame[] = [];
-    const envelopeFrames: ResolvedStackEnvelope['frames'] = [];
+    const identityFrames: ResolvedFrameV2[] = [];
     let fetchedAny = false;
     let sawValidMap = false;
 
     for (const { frame, debugId } of matched) {
       const row = rowByDebugID.get(debugId);
       if (!row) continue;
+
+      const positionKey: PositionKey = {
+        projectId: input.projectId,
+        debugId,
+        mapContentSha: row.content_sha256,
+        line: frame.line,
+        column: frame.column,
+      };
+      const cached = await deps.lookupPosition?.(positionKey) ?? null;
+      if (cached) {
+        resolved.push({
+          originalFile: cached.originalFile,
+          originalLine: cached.originalLine,
+          originalColumn: 0,
+          sourceSnippet: null,
+        });
+        identityFrames.push({
+          original_file: cached.originalFile,
+          original_function: cached.originalFunction,
+          original_line: cached.originalLine,
+          generated: { line: frame.line, column: frame.column },
+        });
+        continue;
+      }
 
       let mapContent = mapCache.get(row.object_key);
       if (mapContent === undefined) {
@@ -173,36 +208,40 @@ export async function resolveEventStack(
       );
       if (result) {
         sawValidMap = true;
-        resolved.push(result);
-        envelopeFrames.push({
-          original_file: result.originalFile,
-          original_line: result.originalLine,
-          original_column: result.originalColumn,
-          source_snippet: result.sourceSnippet,
-          generated_file: frame.file,
-          generated_line: frame.line,
-          generated_column: frame.column,
-          debug_id: debugId,
+        resolved.push({
+          originalFile: result.originalFile,
+          originalLine: result.originalLine,
+          originalColumn: result.originalColumn,
+          sourceSnippet: result.sourceSnippet,
+        });
+        const cachedValue: CachedPosition = {
+          originalFile: result.originalFile,
+          originalFunction: result.originalFunction ?? '',
+          originalLine: result.originalLine,
+        };
+        await deps.storePosition?.(positionKey, cachedValue);
+        identityFrames.push({
+          original_file: cachedValue.originalFile,
+          original_function: cachedValue.originalFunction,
+          original_line: cachedValue.originalLine,
+          generated: { line: frame.line, column: frame.column },
         });
       } else if (isParseableMap(mapContent)) {
         sawValidMap = true;
       }
     }
 
-    const envelope: ResolvedStackEnvelope | null = envelopeFrames.length > 0
-      ? { version: 1, frames: envelopeFrames }
-      : null;
     if (resolved.length === matched.length) {
-      return { status: 'resolved', frames: resolved, envelope };
+      return { status: 'resolved', frames: resolved, identityFrames };
     }
     if (resolved.length > 0) {
-      return { status: 'partial', frames: resolved, envelope };
+      return { status: 'partial', frames: resolved, identityFrames };
     }
     if (fetchedAny && !sawValidMap) {
-      return { status: 'invalid_map', frames: null, envelope: null };
+      return { status: 'invalid_map', frames: null, identityFrames: null };
     }
-    return { status: 'resolution_failed', frames: null, envelope: null };
+    return { status: 'resolution_failed', frames: null, identityFrames: null };
   } catch {
-    return { status: 'resolution_failed', frames: null, envelope: null };
+    return { status: 'resolution_failed', frames: null, identityFrames: null };
   }
 }

@@ -139,6 +139,66 @@ func TestSourceMapUploadCreatesAndRetriesIdempotently(t *testing.T) {
 	}
 }
 
+func TestSourceMapUploadWakesPendingStackResolution(t *testing.T) {
+	router, q, projectID, _, sk, _ := setupSourceMapUpload(t)
+	mapSource := `{"version":3,"sources":["src/a.ts"],"names":[],"mappings":"AAAA"}`
+	computed, err := debugid.Compute([]byte(mapSource))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	var environmentID string
+	if err := q.Pool().QueryRow(ctx,
+		`SELECT default_environment_id FROM projects WHERE id=$1`, projectID,
+	).Scan(&environmentID); err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := q.CaptureError(ctx, db.IngestParams{
+		ProjectID: projectID, DefaultEnvironmentID: environmentID,
+		ErrorType: "TypeError", ErrorMessage: "late map", Platform: "javascript",
+		StackTraceRaw: "at f (https://app.test/a.js:1:1)",
+		DebugMeta:     `{"images":[{"type":"sourcemap","code_file":"https://app.test/a.js","debug_id":"` + computed.DebugID + `"}]}`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.Pool().Exec(ctx,
+		`UPDATE error_group_jobs
+		    SET status='claimed', worker_id='resolver-1', claimed_at=now(),
+		        lease_expires_at=now()+interval '5 minutes'
+		  WHERE project_id=$1 AND event_id=$2 AND job_type='stack_resolve'`,
+		projectID, receipt.EventID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.Pool().Exec(ctx,
+		`INSERT INTO error_event_resolutions
+		   (project_id, event_id, status, resolver_version)
+		 VALUES ($1,$2,'pending',2)`,
+		projectID, receipt.EventID,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	response := uploadRequest(router, sk, computed.DebugID, mapSource, nil)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("upload = %d %s, want 201", response.Code, response.Body.String())
+	}
+
+	var pending int
+	if err := q.Pool().QueryRow(ctx,
+		`SELECT count(*) FROM error_group_jobs
+		  WHERE project_id=$1 AND event_id=$2 AND job_type='stack_resolve' AND status='pending'`,
+		projectID, receipt.EventID,
+	).Scan(&pending); err != nil {
+		t.Fatal(err)
+	}
+	if pending != 1 {
+		t.Errorf("pending resolver jobs = %d, want 1", pending)
+	}
+}
+
 func TestSourceMapUploadAuthAndValidation(t *testing.T) {
 	router, _, _, pk, sk, _ := setupSourceMapUpload(t)
 	mapSource := `{"version":3,"sources":[],"names":[],"mappings":"","sourcesContent":[]}`

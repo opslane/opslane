@@ -363,7 +363,8 @@ export type AdminJobType =
   | 'ci_watch'
   | 'session_analysis'
   | 'route_map'
-  | 'score_sync';
+  | 'score_sync'
+  | 'stack_resolve';
 
 export interface AdminHourlyEventBucket {
   hour: string;

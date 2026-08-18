@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"regexp"
 
@@ -25,6 +26,18 @@ var (
 type objectStore interface {
 	PutObject(ctx context.Context, objectKey string, data []byte, contentType string) error
 	StatObject(ctx context.Context, objectKey string) (int64, error)
+}
+
+// wakePendingStackResolutions is a post-commit side effect: the map is already
+// durable when it runs, so a wake failure must not fail the upload. The shipped
+// Vite uploader does not retry a 500, which would turn a stored map into a
+// permanently failed deploy report. The wake is idempotent (re-uploading the
+// same bytes re-wakes) and the daily watchdog settles anything missed.
+func (d *Dependencies) wakePendingStackResolutions(ctx context.Context, projectID, debugID string) {
+	if _, err := d.Queries.WakePendingStackResolutions(ctx, projectID, debugID); err != nil {
+		slog.Error("waking pending stack resolutions failed",
+			"project_id", projectID, "debug_id", debugID, "error", err)
+	}
 }
 
 func (d *Dependencies) sourcemapStore() objectStore {
@@ -136,6 +149,7 @@ func (d *Dependencies) UploadSourceMap(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		d.wakePendingStackResolutions(r.Context(), projectID, urlID)
 		writeJSONStatus(w, http.StatusOK, "exists")
 		return
 	}
@@ -155,6 +169,7 @@ func (d *Dependencies) UploadSourceMap(w http.ResponseWriter, r *http.Request) {
 			"a different map is already stored under this debug ID", "debug_id_conflict")
 		return
 	}
+	d.wakePendingStackResolutions(r.Context(), projectID, urlID)
 	if inserted {
 		writeJSONStatus(w, http.StatusCreated, "created")
 		return
