@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -28,8 +29,23 @@ type pullRequestEvent struct {
 	} `json:"repository"`
 }
 
+type pushEvent struct {
+	Ref        string `json:"ref"`
+	After      string `json:"after"`
+	Size       int    `json:"size"`
+	Repository struct {
+		FullName      string `json:"full_name"`
+		DefaultBranch string `json:"default_branch"`
+	} `json:"repository"`
+	Commits []struct {
+		Added    []string `json:"added"`
+		Modified []string `json:"modified"`
+		Removed  []string `json:"removed"`
+	} `json:"commits"`
+}
+
 // HandleWebhook handles POST /api/v1/github/webhook.
-// Verifies the GitHub HMAC-SHA256 signature and processes pull_request events.
+// Verifies the GitHub HMAC-SHA256 signature and processes pull_request and push events.
 func (d *Dependencies) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 	secret := os.Getenv("GITHUB_WEBHOOK_SECRET")
 	if secret == "" {
@@ -52,9 +68,8 @@ func (d *Dependencies) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Only handle pull_request events
 	eventType := r.Header.Get("X-GitHub-Event")
-	if eventType != "pull_request" {
+	if eventType != "pull_request" && eventType != "push" {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "ignored", "event": eventType})
 		return
@@ -63,6 +78,10 @@ func (d *Dependencies) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 	deliveryID := strings.TrimSpace(r.Header.Get("X-GitHub-Delivery"))
 	if deliveryID == "" {
 		writeJSONError(w, http.StatusBadRequest, "missing X-GitHub-Delivery header")
+		return
+	}
+	if eventType == "push" {
+		d.handlePushWebhook(w, r, body, deliveryID)
 		return
 	}
 
@@ -127,6 +146,62 @@ func (d *Dependencies) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{
 		"status": status, "action": action, "group_id": result.GroupID,
 	})
+}
+
+func (d *Dependencies) handlePushWebhook(
+	w http.ResponseWriter,
+	r *http.Request,
+	body []byte,
+	deliveryID string,
+) {
+	var event pushEvent
+	if err := json.Unmarshal(body, &event); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid JSON payload")
+		return
+	}
+	defaultRef := "refs/heads/" + event.Repository.DefaultBranch
+	if event.Repository.DefaultBranch == "" || event.Ref != defaultRef || strings.Trim(event.After, "0") == "" {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "ignored", "event": "push"})
+		return
+	}
+	changedSet := make(map[string]struct{})
+	for _, commit := range event.Commits {
+		for _, paths := range [][]string{commit.Added, commit.Modified, commit.Removed} {
+			for _, path := range paths {
+				path = strings.TrimSpace(path)
+				if path != "" {
+					changedSet[path] = struct{}{}
+				}
+			}
+		}
+	}
+	changedPaths := make([]string, 0, len(changedSet))
+	for path := range changedSet {
+		changedPaths = append(changedPaths, path)
+	}
+	slices.Sort(changedPaths)
+	if event.Size > len(event.Commits) {
+		// GitHub truncates large push payloads. An empty list tells the worker
+		// to refresh all stale model claims rather than miss changed files.
+		changedPaths = nil
+	}
+	queued, err := d.Queries.EnqueueProductContextPush(
+		r.Context(), event.Repository.FullName, deliveryID, event.After, changedPaths,
+	)
+	if err != nil {
+		slog.Error("webhook: enqueue product context failed", "repo", event.Repository.FullName, "error", err)
+		writeJSONError(w, http.StatusInternalServerError, "failed to enqueue product context")
+		return
+	}
+	status := "queued"
+	if queued == 0 {
+		status = "no_match"
+	}
+	slog.Info("webhook: default-branch push", "repo", event.Repository.FullName,
+		"commit", event.After, "projects", queued, "delivery_id", deliveryID)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": status, "event": "push"})
 }
 
 func (d *Dependencies) deleteDraftBranch(repo, branch string, installationID *int64) error {

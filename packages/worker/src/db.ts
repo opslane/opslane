@@ -20,6 +20,7 @@ import { canonicalPattern } from './friction/urlnorm.js';
 import type { Platform } from './platform.js';
 import type { DerivedDecision } from './classify.js';
 import type { RouteMapRow } from './route-map.js';
+import type { RouteClaim } from './product-context/schema.js';
 import { logger, safeErrorMessage } from './logger.js';
 import type { LedgerEntry } from './verification-ledger.js';
 
@@ -339,7 +340,7 @@ export async function recordDiagnosisDecision(
   await insertDiagnosisDecision(getPool(), errorGroupId, projectId, row);
 }
 
-export type UsagePhase = 'investigation' | 'fix' | 'judge';
+export type UsagePhase = 'investigation' | 'fix' | 'judge' | 'product_context';
 
 export interface TokenUsage {
   input: number;
@@ -568,7 +569,7 @@ export async function claimJob(
          AND available_at <= now()
          -- Claim only job types this worker can dispatch. New types stay
          -- pending until a handler ships and joins this list.
-         AND job_type IN ('setup_pr','session_analysis','ci_watch','route_map',
+         AND job_type IN ('setup_pr','session_analysis','ci_watch','route_map','product_context',
                           'score_sync','stack_resolve','fix','investigate','error_fix')
          AND (job_type <> 'session_analysis'
               OR (SELECT COUNT(*) FROM error_group_jobs
@@ -585,7 +586,7 @@ export async function claimJob(
            THEN 1
          -- Route classification is background enrichment. Keep it behind every
          -- incident/session lane even when its rows are older.
-         WHEN job_type = 'route_map' THEN 4
+         WHEN job_type IN ('route_map','product_context') THEN 4
          WHEN job_type <> 'session_analysis' THEN 2
          ELSE 3
        END, created_at ASC
@@ -1934,6 +1935,58 @@ export async function listUnmappedPatterns(projectId: string): Promise<string[]>
 }
 
 /**
+ * Routes requiring product-context work at the inspected commit.
+ *
+ * Ordinary sweeps return only routes with no map. Deploy-triggered jobs also
+ * return non-human claims whose cited files changed. An unavailable changed
+ * path set fails open to refreshing stale model claims, never human ones.
+ *
+ * Session-observed routes come from error_groups.page_url_normalized, fed by
+ * the post-Slice-4 chain: capture stores the raw event, the identity
+ * settlement loop attaches it to a stable issue, and the priority sweeper
+ * normalizes the issue's observed URLs onto that column. Reading raw
+ * error_events here instead would create a second URL-normalization contract.
+ */
+export async function listProductContextPatterns(
+  projectId: string,
+  commitSha: string,
+  changedPaths: string[] | null,
+): Promise<string[]> {
+  const affectedPaths = changedPaths && changedPaths.length > 0 ? changedPaths : null;
+  const { rows } = await getPool().query<{ pattern: string }>(
+    `WITH unmapped AS (
+       SELECT DISTINCT eg.page_url_normalized AS pattern
+         FROM error_groups eg
+        WHERE eg.project_id = $1
+          AND eg.page_url_normalized IS NOT NULL
+          AND eg.page_url_normalized <> ''
+          AND octet_length(eg.page_url_normalized) <= $4
+          AND eg.status NOT IN ('resolved', 'merged', 'archived')
+          AND NOT EXISTS (
+            SELECT 1 FROM route_map current
+             WHERE current.project_id = eg.project_id
+               AND current.pattern = eg.page_url_normalized
+          )
+     ), affected AS (
+       SELECT rm.pattern
+         FROM route_map rm
+        WHERE rm.project_id = $1
+          AND rm.source <> 'human'
+          AND rm.commit_sha IS DISTINCT FROM $2
+          AND ($3::text[] IS NULL
+               OR rm.client_refs && $3::text[]
+               OR rm.server_refs && $3::text[])
+     )
+     SELECT pattern FROM unmapped
+     UNION
+     SELECT pattern FROM affected
+     ORDER BY pattern`,
+    [projectId, commitSha, affectedPaths, MAX_ROUTE_PATTERN_BYTES],
+  );
+  return [...new Set(rows.map((row) => canonicalPattern(row.pattern)))];
+}
+
+/**
  * Persist one route-classification result while holding the job row lock.
  *
  * The lease check and route writes share a transaction so an expired or
@@ -2026,6 +2079,174 @@ export async function upsertRouteMapRows(args: {
     await client.query('COMMIT');
     return true;
   } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+/** Human-owned rows among the patterns one discovery pass covered. */
+export async function countHumanRoutePatterns(
+  projectId: string,
+  patterns: string[],
+): Promise<number> {
+  if (patterns.length === 0) return 0;
+  const { rows } = await getPool().query<{ n: string }>(
+    `SELECT count(*)::text AS n FROM route_map
+      WHERE project_id = $1 AND source = 'human' AND pattern = ANY($2)`,
+    [projectId, patterns],
+  );
+  return Number(rows[0]?.n ?? 0);
+}
+
+/**
+ * Persist one product-context refresh under the route-map job lease.
+ *
+ * The run record is written inside the same lease-fenced transaction as the
+ * claims, so a completed pass always has its observability row and a rolled
+ * back write leaves neither. Run counts are derived from `args.claims` here
+ * rather than passed in, so they cannot drift from what was written.
+ */
+export async function upsertProductContextClaims(args: {
+  projectId: string;
+  jobId: string;
+  workerId: string;
+  leaseGeneration: string;
+  claims: RouteClaim[];
+  commitSha: string;
+  promptVersion: number;
+  model: string;
+  /** Route pattern -> requests the code could make (sorted). */
+  declaredRequests: Record<string, string[]>;
+  run: {
+    execution: number;
+    usage: TokenUsage;
+    costUsd: number;
+    latencyMs: number;
+    humanRouteCount: number;
+  };
+}): Promise<boolean> {
+  const client = await getPool().connect();
+  try {
+    await client.query('BEGIN');
+    const lease = await client.query(
+      `SELECT 1
+         FROM error_group_jobs
+        WHERE id = $1
+          AND project_id = $2
+          AND worker_id = $3
+          AND lease_generation = $4::bigint
+          AND status = 'claimed'
+          AND lease_expires_at > now()
+        FOR UPDATE`,
+      [args.jobId, args.projectId, args.workerId, args.leaseGeneration],
+    );
+    if ((lease.rowCount ?? 0) === 0) {
+      await client.query('ROLLBACK');
+      return false;
+    }
+
+    for (const claim of args.claims) {
+      await client.query(
+        `INSERT INTO route_map
+           (project_id, pattern, name, purpose, tier, actions, client_refs, server_refs,
+            observed_requests, audience, confidence, commit_sha, prompt_version, model, source,
+            evidence_conflicts, review_status, declared_requests)
+         VALUES ($1, $2, $3, $3,
+                 CASE $7 WHEN 'customer' THEN 'customer' WHEN 'admin' THEN 'admin' ELSE 'standard' END,
+                 $4, $5, $6, '{}'::text[], $7, $8, $9, $10, $11, $12,
+                 $13, CASE WHEN cardinality($13::text[]) > 0 THEN 'needs_review' ELSE 'clear' END, $14)
+         ON CONFLICT (project_id, pattern) DO UPDATE
+           SET name = EXCLUDED.name,
+               purpose = EXCLUDED.purpose,
+               tier = EXCLUDED.tier,
+               actions = EXCLUDED.actions,
+               client_refs = EXCLUDED.client_refs,
+               server_refs = EXCLUDED.server_refs,
+               -- observed_requests is deliberately absent: Slice 5 session
+               -- evidence owns that column, and a model refresh must never
+               -- clobber it back to '{}'.
+               audience = EXCLUDED.audience,
+               confidence = EXCLUDED.confidence,
+               commit_sha = EXCLUDED.commit_sha,
+               prompt_version = EXCLUDED.prompt_version,
+               model = EXCLUDED.model,
+               source = EXCLUDED.source,
+               evidence_conflicts = EXCLUDED.evidence_conflicts,
+               review_status = EXCLUDED.review_status,
+               declared_requests = EXCLUDED.declared_requests,
+               updated_at = now()
+         WHERE route_map.source <> 'human'`,
+        [
+          args.projectId,
+          claim.route,
+          claim.purpose,
+          claim.actions,
+          claim.clientRefs,
+          claim.serverRefs,
+          claim.audience,
+          claim.confidence,
+          args.commitSha,
+          args.promptVersion,
+          args.model,
+          'model',
+          claim.evidenceConflicts,
+          args.declaredRequests[claim.route] ?? [],
+        ],
+      );
+    }
+
+    const routeCount = args.claims.length;
+    const unknownCount = args.claims.filter((claim) => claim.confidence === 0).length;
+    const conflictCount = args.claims.filter((claim) => claim.evidenceConflicts.length > 0).length;
+    const coverage = routeCount === 0 ? 0 : (routeCount - unknownCount) / routeCount;
+    await client.query(
+      `INSERT INTO product_context_runs
+         (job_id, execution, project_id, commit_sha, model, prompt_version,
+          route_count, unknown_count, conflict_count, human_route_count, coverage,
+          input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
+          cost_usd, latency_ms)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+       ON CONFLICT (job_id, execution) DO UPDATE
+         SET commit_sha = EXCLUDED.commit_sha,
+             model = EXCLUDED.model,
+             prompt_version = EXCLUDED.prompt_version,
+             route_count = EXCLUDED.route_count,
+             unknown_count = EXCLUDED.unknown_count,
+             conflict_count = EXCLUDED.conflict_count,
+             human_route_count = EXCLUDED.human_route_count,
+             coverage = EXCLUDED.coverage,
+             input_tokens = EXCLUDED.input_tokens,
+             output_tokens = EXCLUDED.output_tokens,
+             cache_read_tokens = EXCLUDED.cache_read_tokens,
+             cache_write_tokens = EXCLUDED.cache_write_tokens,
+             cost_usd = EXCLUDED.cost_usd,
+             latency_ms = EXCLUDED.latency_ms,
+             created_at = now()`,
+      [
+        args.jobId,
+        args.run.execution,
+        args.projectId,
+        args.commitSha,
+        args.model,
+        args.promptVersion,
+        routeCount,
+        unknownCount,
+        conflictCount,
+        args.run.humanRouteCount,
+        coverage,
+        Math.round(args.run.usage.input),
+        Math.round(args.run.usage.output),
+        Math.round(args.run.usage.cacheRead),
+        Math.round(args.run.usage.cacheWrite),
+        Math.max(0, args.run.costUsd).toFixed(6),
+        Math.round(args.run.latencyMs),
+      ],
+    );
+    await client.query('COMMIT');
+    return true;
+  } catch (error: unknown) {
     await client.query('ROLLBACK').catch(() => {});
     throw error;
   } finally {

@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -192,13 +193,15 @@ func (q *Queries) provisionProjectTx(
 	}
 
 	var result ProjectProvisioning
+	var inserted bool
 	err := tx.QueryRow(ctx, `
 		INSERT INTO projects (org_id, name, github_repo, idempotency_token)
 		VALUES ($1, $2, $3, $4)
 		ON CONFLICT (org_id, idempotency_token) WHERE idempotency_token IS NOT NULL
 		DO UPDATE SET idempotency_token = EXCLUDED.idempotency_token
 		RETURNING id, org_id, name, github_repo, default_branch,
-		          friction_autonomy, pr_posture, default_environment_id, digest_timezone, created_at`,
+		          friction_autonomy, pr_posture, default_environment_id, digest_timezone, created_at,
+		          (xmax = 0) AS inserted`,
 		orgID, name, githubRepo, idempotencyToken,
 	).Scan(
 		&result.Project.ID,
@@ -211,9 +214,18 @@ func (q *Queries) provisionProjectTx(
 		&result.Project.DefaultEnvironmentID,
 		&result.Project.DigestTimezone,
 		&result.Project.CreatedAt,
+		&inserted,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("provision project: upsert project: %w", err)
+	}
+
+	// Gaining a repo at first provisioning is a connect transition (D4).
+	// Idempotent replays hit the conflict arm and must not re-enqueue.
+	if inserted && githubRepo != nil && strings.TrimSpace(*githubRepo) != "" {
+		if err := enqueueProductContextConnectTx(ctx, tx, result.Project.ID); err != nil {
+			return nil, fmt.Errorf("provision project: %w", err)
+		}
 	}
 
 	env, err := q.EnsureProjectDefaultEnvironmentTx(ctx, tx, result.Project.ID)
@@ -1673,6 +1685,54 @@ type PRWebhookResult struct {
 	Duplicate      bool // receipt for this github_delivery_id already existed; no transition performed
 	CleanupBranch  string
 	InstallationID *int64
+}
+
+// EnqueueProductContextPush schedules repository understanding for every
+// project connected to githubRepo. A newer push supersedes an active refresh;
+// an immutable receipt makes every delivery idempotent.
+func (q *Queries) EnqueueProductContextPush(
+	ctx context.Context,
+	githubRepo, deliveryID, commitSHA string,
+	changedPaths []string,
+) (int64, error) {
+	payload, err := json.Marshal(map[string]any{
+		"delivery_id":   deliveryID,
+		"commit_sha":    commitSHA,
+		"changed_paths": changedPaths,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("encode product-context push: %w", err)
+	}
+	tag, err := q.pool.Exec(ctx,
+		`WITH received AS (
+		   INSERT INTO product_context_push_receipts (project_id, delivery_id, commit_sha)
+		   SELECT p.id, $2, $4
+		     FROM projects p
+		    WHERE p.github_repo = $1
+		   ON CONFLICT DO NOTHING
+		   RETURNING project_id
+		 )
+		 INSERT INTO error_group_jobs (project_id, job_type, triggered_by, payload)
+		 SELECT received.project_id, 'product_context', 'auto', $3::jsonb
+		   FROM received
+		 ON CONFLICT (project_id, job_type)
+		   WHERE job_type = 'product_context' AND status IN ('pending','claimed')
+		 DO UPDATE SET
+		   status = 'pending',
+		   worker_id = NULL,
+		   claimed_at = NULL,
+		   lease_expires_at = NULL,
+		   available_at = now(),
+		   attempts = 0,
+		   last_error = NULL,
+		   payload = jsonb_set(EXCLUDED.payload, '{changed_paths}', 'null'::jsonb),
+		   updated_at = now()`,
+		githubRepo, deliveryID, string(payload), commitSHA,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("enqueue product context for push: %w", err)
+	}
+	return tag.RowsAffected(), nil
 }
 
 func loadDraftBranchCleanup(ctx context.Context, tx pgx.Tx, groupID string) (string, *int64, error) {
@@ -3349,27 +3409,90 @@ func (q *Queries) CreateProjectTx(ctx context.Context, tx pgx.Tx, orgID, name st
 	if err != nil {
 		return nil, fmt.Errorf("create project tx: %w", err)
 	}
+	// Creating a project with a usable repository is the same transition a
+	// later connect makes; schedule repository understanding once here.
+	if githubRepo != nil && strings.TrimSpace(*githubRepo) != "" {
+		if err := enqueueProductContextConnectTx(ctx, tx, p.ID); err != nil {
+			return nil, fmt.Errorf("create project tx: %w", err)
+		}
+	}
 	return &p, nil
 }
 
 // === GitHub config CRUD ===
 
+// enqueueProductContextConnectTx schedules repository understanding when a
+// project gains or switches its repo. A repo switch must supersede active
+// work exactly like a newer push does: a worker still cloning the OLD repo
+// is fenced by lease_generation, and this reset guarantees a fresh job runs
+// against the new repo. Mirrors EnqueueProductContextPush's conflict arm.
+func enqueueProductContextConnectTx(ctx context.Context, tx pgx.Tx, projectID string) error {
+	_, err := tx.Exec(ctx,
+		`INSERT INTO error_group_jobs (project_id, job_type, triggered_by, payload)
+		 VALUES ($1, 'product_context', 'auto', '{"trigger":"connect"}'::jsonb)
+		 ON CONFLICT (project_id, job_type)
+		   WHERE job_type = 'product_context' AND status IN ('pending','claimed')
+		 DO UPDATE SET
+		   status = 'pending',
+		   worker_id = NULL,
+		   claimed_at = NULL,
+		   lease_expires_at = NULL,
+		   available_at = now(),
+		   attempts = 0,
+		   last_error = NULL,
+		   payload = EXCLUDED.payload,
+		   updated_at = now()`,
+		projectID,
+	)
+	if err != nil {
+		return fmt.Errorf("enqueue product context on connect: %w", err)
+	}
+	return nil
+}
+
 // SetProjectGitHubConfig stores the GitHub repo and its resolved default branch.
-// Tenant-scoped by orgID.
+// Tenant-scoped by orgID. Gaining or switching a usable repository enqueues
+// repository understanding; re-saving the same repo is not a transition.
 func (q *Queries) SetProjectGitHubConfig(
 	ctx context.Context,
 	orgID, projectID, githubRepo, defaultBranch string,
 ) error {
-	ct, err := q.pool.Exec(ctx,
-		`UPDATE projects SET github_repo = $3, default_branch = $4
-		 WHERE id = $2 AND org_id = $1`,
-		orgID, projectID, githubRepo, defaultBranch,
-	)
+	tx, err := q.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("set project github config: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Read-then-write as two ordered statements under a row lock: sibling CTEs
+	// have no guaranteed execution order, so the previous value must be read
+	// before the update runs.
+	var previous *string
+	err = tx.QueryRow(ctx,
+		`SELECT github_repo FROM projects WHERE id = $2 AND org_id = $1 FOR UPDATE`,
+		orgID, projectID,
+	).Scan(&previous)
+	if err == pgx.ErrNoRows {
+		return fmt.Errorf("set project github config: no matching project %s in org %s", projectID, orgID)
+	}
 	if err != nil {
 		return fmt.Errorf("set project github config: %w", err)
 	}
-	if ct.RowsAffected() == 0 {
-		return fmt.Errorf("set project github config: no matching project %s in org %s", projectID, orgID)
+	if _, err := tx.Exec(ctx,
+		`UPDATE projects SET github_repo = $3, default_branch = $4
+		 WHERE id = $2 AND org_id = $1`,
+		orgID, projectID, githubRepo, defaultBranch,
+	); err != nil {
+		return fmt.Errorf("set project github config: %w", err)
+	}
+
+	next := strings.TrimSpace(githubRepo)
+	if next != "" && (previous == nil || strings.TrimSpace(*previous) != next) {
+		if err := enqueueProductContextConnectTx(ctx, tx, projectID); err != nil {
+			return fmt.Errorf("set project github config: %w", err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("set project github config: commit: %w", err)
 	}
 	return nil
 }

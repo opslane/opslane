@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -79,6 +80,134 @@ func TestHandleWebhook_MissingDeliveryHeaderRejected(t *testing.T) {
 	deps.HandleWebhook(response, request)
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400 (body: %s)", response.Code, response.Body.String())
+	}
+}
+
+func TestHandleWebhook_NonDefaultBranchPushIgnored(t *testing.T) {
+	t.Setenv("GITHUB_WEBHOOK_SECRET", "receipt-test-secret")
+	deps := &Dependencies{}
+	body := []byte(`{"ref":"refs/heads/feature","after":"abc123","repository":{"full_name":"org/x","default_branch":"main"}}`)
+	response := sendSignedGitHubEvent(t, deps, body, "push-non-default", "push")
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	assertWebhookStatus(t, response, "ignored")
+}
+
+func TestHandleWebhook_DefaultBranchPushEnqueuesProductContext(t *testing.T) {
+	pool := webhookTestPool(t)
+	queries := db.New(pool)
+	repo, projectID, _ := seedWebhookPR(t, pool, queries)
+	// Creating a project with a repository now enqueues a connect-time
+	// product_context job. Retire it so this test exercises the push enqueue
+	// itself and not the supersession arm, which deliberately nulls
+	// changed_paths for an already-active refresh.
+	if _, err := pool.Exec(context.Background(),
+		`UPDATE error_group_jobs SET status = 'completed'
+		  WHERE project_id = $1 AND job_type = 'product_context'`, projectID,
+	); err != nil {
+		t.Fatalf("retire connect job: %v", err)
+	}
+	deps := &Dependencies{Queries: queries}
+	t.Setenv("GITHUB_WEBHOOK_SECRET", "receipt-test-secret")
+	deliveryID := "push-" + uuid.NewString()
+	body := []byte(fmt.Sprintf(`{
+		"ref":"refs/heads/main",
+		"after":"abc123",
+		"repository":{"full_name":%q,"default_branch":"main"},
+		"commits":[{"added":["src/new.ts"],"modified":["src/assets.ts"],"removed":[]}]
+	}`, repo))
+
+	response := sendSignedGitHubEvent(t, deps, body, deliveryID, "push")
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	assertWebhookStatus(t, response, "queued")
+
+	var payload string
+	if err := pool.QueryRow(context.Background(),
+		`SELECT payload::text FROM error_group_jobs
+		  WHERE project_id=$1 AND job_type='product_context' AND status='pending'`, projectID,
+	).Scan(&payload); err != nil {
+		t.Fatalf("query product-context job: %v", err)
+	}
+	if !strings.Contains(payload, `"commit_sha": "abc123"`) ||
+		!strings.Contains(payload, `"delivery_id": "`+deliveryID+`"`) ||
+		!strings.Contains(payload, `"src/assets.ts"`) ||
+		!strings.Contains(payload, `"src/new.ts"`) {
+		t.Fatalf("unexpected product-context payload: %s", payload)
+	}
+
+	redelivery := sendSignedGitHubEvent(t, deps, body, deliveryID, "push")
+	if redelivery.Code != http.StatusOK {
+		t.Fatalf("redelivery status = %d, body = %s", redelivery.Code, redelivery.Body.String())
+	}
+	var count int
+	if err := pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM error_group_jobs
+		  WHERE project_id=$1 AND job_type='product_context' AND payload->>'delivery_id'=$2`,
+		projectID, deliveryID,
+	).Scan(&count); err != nil {
+		t.Fatalf("count product-context jobs: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("product-context jobs = %d, want 1", count)
+	}
+}
+
+func TestHandleWebhook_NewerPushSupersedesClaimedProductContext(t *testing.T) {
+	pool := webhookTestPool(t)
+	queries := db.New(pool)
+	repo, projectID, _ := seedWebhookPR(t, pool, queries)
+	deps := &Dependencies{Queries: queries}
+	t.Setenv("GITHUB_WEBHOOK_SECRET", "receipt-test-secret")
+
+	firstDelivery := "push-" + uuid.NewString()
+	firstBody := []byte(fmt.Sprintf(`{
+		"ref":"refs/heads/main","after":"commit-1",
+		"repository":{"full_name":%q,"default_branch":"main"},
+		"commits":[{"modified":["src/first.ts"]}]
+	}`, repo))
+	response := sendSignedGitHubEvent(t, deps, firstBody, firstDelivery, "push")
+	if response.Code != http.StatusOK {
+		t.Fatalf("first push status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if _, err := pool.Exec(context.Background(),
+		`UPDATE error_group_jobs
+		    SET status='claimed', worker_id='stale-worker', claimed_at=now(),
+		        lease_expires_at=now()+interval '5 minutes'
+		  WHERE project_id=$1 AND job_type='product_context'`, projectID,
+	); err != nil {
+		t.Fatalf("claim first product-context job: %v", err)
+	}
+
+	secondDelivery := "push-" + uuid.NewString()
+	secondBody := []byte(fmt.Sprintf(`{
+		"ref":"refs/heads/main","after":"commit-2",
+		"repository":{"full_name":%q,"default_branch":"main"},
+		"commits":[{"modified":["src/second.ts"]}]
+	}`, repo))
+	response = sendSignedGitHubEvent(t, deps, secondBody, secondDelivery, "push")
+	if response.Code != http.StatusOK {
+		t.Fatalf("second push status = %d, body = %s", response.Code, response.Body.String())
+	}
+
+	var status, commit string
+	var workerID *string
+	var fullRefresh bool
+	if err := pool.QueryRow(context.Background(),
+		`SELECT status::text, worker_id, payload->>'commit_sha',
+		        payload->'changed_paths' = 'null'::jsonb
+		   FROM error_group_jobs
+		  WHERE project_id=$1 AND job_type='product_context'`, projectID,
+	).Scan(&status, &workerID, &commit, &fullRefresh); err != nil {
+		t.Fatalf("query superseded product-context job: %v", err)
+	}
+	if status != "pending" || workerID != nil || commit != "commit-2" {
+		t.Fatalf("superseded job = status %q worker %v commit %q", status, workerID, commit)
+	}
+	if !fullRefresh {
+		t.Fatal("superseded job must request a full refresh")
 	}
 }
 
@@ -243,13 +372,17 @@ func seedWebhookPR(t *testing.T, pool *pgxpool.Pool, queries *db.Queries) (repo,
 }
 
 func sendSignedWebhook(t *testing.T, deps *Dependencies, body []byte, deliveryID string) *httptest.ResponseRecorder {
+	return sendSignedGitHubEvent(t, deps, body, deliveryID, "pull_request")
+}
+
+func sendSignedGitHubEvent(t *testing.T, deps *Dependencies, body []byte, deliveryID, eventType string) *httptest.ResponseRecorder {
 	t.Helper()
 	mac := hmac.New(sha256.New, []byte("receipt-test-secret"))
 	_, _ = mac.Write(body)
 
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/github/webhook", bytes.NewReader(body))
 	request.Header.Set("X-Hub-Signature-256", "sha256="+hex.EncodeToString(mac.Sum(nil)))
-	request.Header.Set("X-GitHub-Event", "pull_request")
+	request.Header.Set("X-GitHub-Event", eventType)
 	request.Header.Set("X-GitHub-Delivery", deliveryID)
 	response := httptest.NewRecorder()
 	deps.HandleWebhook(response, request)

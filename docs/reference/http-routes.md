@@ -31,7 +31,7 @@ These are curated tables, not a stability contract — the API is early-stage an
 | GET | `/api/v1/agent/poll/{sessionID}` | poll token (`X-Opslane-Poll-Token`) | Agent onboarding poll |
 | GET | `/agent/auth/{sessionID}` | none | Agent onboarding browser auth |
 | GET | `/agent/auth/callback` | none | Agent onboarding callback |
-| POST | `/api/v1/github/webhook` | HMAC | GitHub webhook receiver — requires `X-GitHub-Delivery` (400 without it); responds `processed`, `no_match`, or `duplicate` (idempotent on redelivery) |
+| POST | `/api/v1/github/webhook` | HMAC | GitHub pull-request and default-branch push receiver — requires `X-GitHub-Delivery` (400 without it); push events enqueue product-context refreshes |
 
 The agent callback requires `code`, `installation_id`, and UUID `state`; definitive failures are returned by polling as machine-readable reasons. `/auth/callback` dispatches UUID-state GitHub App installs to the agent flow and handles other states through the existing browser-login/install flow.
 

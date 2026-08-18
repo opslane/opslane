@@ -58,6 +58,7 @@ import { buildEvidenceWindows, EVIDENCE_WINDOW_MS } from './friction/evidence-wi
 import { VerificationInfraError } from './harness/errors.js';
 import { processCIWatchJob } from './ci-watch.js';
 import { processRouteMapJob } from './route-map.js';
+import { runProductContext } from './product-context/job.js';
 import { effectivePlatform, pythonPipelineEnabled } from './platform.js';
 import { parseRuntimeInfo } from './runtime-info.js';
 import { parseDiagnosis } from './diagnosis-schema.js';
@@ -350,6 +351,11 @@ export async function processJobInner(job: ClaimedJob, signal: AbortSignal): Pro
 
   if (job.jobType === 'route_map') {
     await processRouteMapJob(job, signal);
+    return;
+  }
+
+  if (job.jobType === 'product_context') {
+    await runProductContext(job, signal);
     return;
   }
 

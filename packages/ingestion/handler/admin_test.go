@@ -43,6 +43,9 @@ func TestAdminJobsAllowsCIWatchFilter(t *testing.T) {
 	if _, ok := adminJobTypes["route_map"]; !ok {
 		t.Fatal("route_map is missing from the admin job-type allowlist")
 	}
+	if _, ok := adminJobTypes["product_context"]; !ok {
+		t.Fatal("product_context is missing from the admin job-type allowlist")
+	}
 	if _, ok := adminJobTypes["score_sync"]; !ok {
 		t.Fatal("score_sync is missing from the admin job-type allowlist")
 	}

@@ -35,7 +35,7 @@ A GitHub App gives you short-lived installation tokens scoped to explicitly sele
 **Self-host** requires creating your own App once (GitHub → Settings → Developer settings → GitHub Apps):
 
 - Permissions: **Contents** read/write, **Pull requests** read/write, **Checks** read
-- Event subscriptions: **Pull request** — required; the webhook handler acts on `pull_request` `closed` events to transition merged/closed fix PRs, so without this subscription incidents stay in `pr_created` forever
+- Event subscriptions: **Pull request** and **Push**. Pull-request events close or merge fix PRs. Default-branch push events rebuild product context from the deployed code.
 - Callback URL: `https://your-instance/auth/github/callback`
 - Setup URL: `https://your-instance/api/v1/github/setup`
 - Webhook URL: `https://your-instance/api/v1/github/webhook` + a webhook secret

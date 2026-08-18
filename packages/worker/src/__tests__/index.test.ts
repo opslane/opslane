@@ -84,6 +84,7 @@ vi.mock('../poller.js', () => ({ createPoller: vi.fn(() => ({ start: vi.fn(), st
 vi.mock('../github-app.js', () => ({ getInstallationToken: vi.fn() }));
 vi.mock('../setup-pr.js', () => ({ processSetupPrJob: vi.fn() }));
 vi.mock('../route-map.js', () => ({ processRouteMapJob: vi.fn() }));
+vi.mock('../product-context/job.js', () => ({ runProductContext: vi.fn() }));
 vi.mock('../score-sync.js', () => ({ processScoreSyncJob: vi.fn() }));
 vi.mock('../resolve/job.js', () => ({ runStackResolve: vi.fn() }));
 vi.mock('../scores.js', () => ({ pushScore: vi.fn() }));
@@ -147,6 +148,7 @@ const { replaceSessionFacts } = await import('../facts/persist.js');
 const { writeFrictionSignals } = await import('../friction/persist.js');
 const { processFrictionOutcomes } = await import('../friction/promotion.js');
 const { processRouteMapJob } = await import('../route-map.js');
+const { runProductContext } = await import('../product-context/job.js');
 const { processScoreSyncJob } = await import('../score-sync.js');
 const { runStackResolve } = await import('../resolve/job.js');
 const { pushScore } = await import('../scores.js');
@@ -1125,6 +1127,21 @@ describe('route_map dispatch', () => {
     await expect(processJobInner(job, signal)).resolves.toBeUndefined();
 
     expect(processRouteMapJob).toHaveBeenCalledWith(job, signal);
+  });
+});
+
+describe('product_context dispatch', () => {
+  it('dispatches project-scoped jobs before the error-group-required guard', async () => {
+    const job: ClaimedJob = {
+      id: 'product-context-1', workerId: 'worker-1', leaseGeneration: '1',
+      errorGroupId: null, eventId: null, sourceId: null, projectId: 'proj-1',
+      jobType: 'product_context', attempts: 0, guidance: null, triggeredBy: 'auto', sessionId: null,
+    };
+    const signal = new AbortController().signal;
+
+    await expect(processJobInner(job, signal)).resolves.toBeUndefined();
+
+    expect(runProductContext).toHaveBeenCalledWith(job, signal);
   });
 });
 
