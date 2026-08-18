@@ -147,6 +147,25 @@ describe('session facts', () => {
     expect(new Set(facts.failures.map((failure) => failure.requestIdHash)).size).toBe(2);
   });
 
+  it('ignores a duplicate request_end instead of emitting a colliding fact row', () => {
+    // Telemetry is browser-controlled: a repeated end for one start must not
+    // double-count or produce two failure rows with one request hash, which
+    // would poison the persistence transaction on its primary key.
+    const facts = extractSessionFacts([envelope([
+      page(T0, 'https://app.example.com/assets'),
+      telemetry(T0 + 1, {
+        kind: 'request_start', requestId: 'dup-1', clickId: null,
+        method: 'POST', url: '/api/assets',
+      }),
+      telemetry(T0 + 2, { kind: 'request_end', requestId: 'dup-1', status: 500 }),
+      telemetry(T0 + 3, { kind: 'request_end', requestId: 'dup-1', status: 500 }),
+    ])]);
+
+    expect(facts.failures).toHaveLength(1);
+    expect(facts.failedWriteCount).toBe(1);
+    expect(facts.unattributedFailedRequestCount).toBe(0);
+  });
+
   it('uses the earliest normalized entry path', () => {
     const facts = extractSessionFacts([envelope([
       page(T0 + 10, 'https://x.test/other'),

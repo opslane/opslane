@@ -190,8 +190,10 @@ describe('friction analyzer trust-boundary bounds', () => {
 });
 
 describe('friction fingerprinting', () => {
-  it('uses rule version 4 for the host-free identity contract', () => {
-    expect(RULE_VERSION).toBe(4);
+  it('uses rule version 5 for the detailed-fact counting rules', () => {
+    // v4 was the host-free identity contract; v5 adds DELETE as a write
+    // method, status 0 as a failure, and strict same-origin matching.
+    expect(RULE_VERSION).toBe(5);
   });
 
   it('normalizes variable URL portions without retaining query or hash', () => {

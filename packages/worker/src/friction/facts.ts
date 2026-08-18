@@ -139,6 +139,7 @@ export function extractSessionFacts(chunks: SessionChunkEnvelope[]): SessionFact
     startedAt: number;
   }>();
   const successRollups = new Map<string, SuccessfulWriteRollup>();
+  const consumedRequests = new Set<string>();
   for (const { event } of extractTelemetryEvents(chunks)) {
     if (event.kind === 'click') {
       facts.clickCount += 1;
@@ -156,9 +157,17 @@ export function extractSessionFacts(chunks: SessionChunkEnvelope[]): SessionFact
     if (event.kind === 'request_end') {
       const start = startById.get(event.requestId);
       if (!start) {
-        if (isFailure(event.status)) facts.unattributedFailedRequestCount += 1;
+        // Either the start never arrived or a duplicate end already consumed
+        // it. Only the never-started case is a countable unattributed failure;
+        // a duplicate end is telemetry noise and must not double-count or
+        // produce a second fact row with the same request hash.
+        if (!consumedRequests.has(event.requestId) && isFailure(event.status)) {
+          facts.unattributedFailedRequestCount += 1;
+        }
         continue;
       }
+      consumedRequests.add(event.requestId);
+      startById.delete(event.requestId);
       if (!sameOrigin(start.url)) continue;
       const isWrite = WRITE_METHODS.has(start.method);
       const endpointPattern = normalizePageUrl(start.url);

@@ -53,7 +53,9 @@ describeDb('session fact persistence', () => {
     return sessionId;
   }
 
-  function factsWith(overrides: Partial<SessionFacts> = {}): SessionFacts & { ruleVersion: number } {
+  function factsWith(
+    overrides: Partial<SessionFacts & { ruleVersion: number }> = {},
+  ): SessionFacts & { ruleVersion: number } {
     return {
       entryPath: '/assets', clickCount: 0, inputEventCount: 0, pageEventCount: 1,
       failedRequest4xxCount: 0, failedRequest5xxCount: 0,
@@ -114,21 +116,41 @@ describeDb('session fact persistence', () => {
     expect(stored.rows.map((row) => row.request_id_hash)).toEqual(['new-1', 'new-2']);
   });
 
-  it('never stores an endpoint host or query string', async () => {
+  it('rejects an endpoint carrying a host or query string instead of re-normalizing it', async () => {
+    // Persist trusts the extractor's normalization: re-normalizing here is not
+    // idempotent for every input and can collapse two distinct extractor keys
+    // onto one primary key. Un-normalized input is a caller bug and must fail
+    // loudly, and nothing may be written for the session.
     const sessionId = await seedSession();
-    await replaceSessionFacts(projectId, sessionId, factsWith({
+    await expect(replaceSessionFacts(projectId, sessionId, factsWith({
       failures: [{
         ...failure('secret'),
         endpointPattern: 'https://app.example.com/api/assets/42?token=secret',
       }],
+    }))).rejects.toThrow(/normalized path/);
+
+    const stored = await pool.query(
+      `SELECT 1 FROM session_request_failures WHERE project_id=$1 AND session_id=$2`,
+      [projectId, sessionId],
+    );
+    expect(stored.rowCount).toBe(0);
+  });
+
+  it('replaces rows left by an older rule version', async () => {
+    const sessionId = await seedSession();
+    await replaceSessionFacts(projectId, sessionId, factsWith({
+      failures: [failure('old-rules')], ruleVersion: 4,
+    }));
+    await replaceSessionFacts(projectId, sessionId, factsWith({
+      failures: [failure('new-rules')], ruleVersion: 5,
     }));
 
-    const stored = await pool.query<{ endpoint_pattern: string }>(
-      `SELECT endpoint_pattern FROM session_request_failures
+    const stored = await pool.query<{ request_id_hash: string; rule_version: number }>(
+      `SELECT request_id_hash, rule_version FROM session_request_failures
        WHERE project_id=$1 AND session_id=$2`,
       [projectId, sessionId],
     );
-    expect(stored.rows[0]?.endpoint_pattern).toBe('/api/assets/:id');
+    expect(stored.rows).toEqual([{ request_id_hash: 'new-rules', rule_version: 5 }]);
   });
 
   it('expires facts with the session', async () => {
