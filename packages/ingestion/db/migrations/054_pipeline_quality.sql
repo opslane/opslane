@@ -64,6 +64,8 @@ CREATE TABLE IF NOT EXISTS error_event_identities (
 );
 CREATE INDEX IF NOT EXISTS idx_identities_pending
   ON error_event_identities (project_id, status) WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS idx_identities_settling
+  ON error_event_identities (claimed_at) WHERE status = 'settling';
 
 CREATE TABLE IF NOT EXISTS canonical_issue_fingerprints (
   project_id         UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -77,6 +79,35 @@ CREATE TABLE IF NOT EXISTS canonical_issue_fingerprints (
 );
 CREATE INDEX IF NOT EXISTS idx_alias_by_issue
   ON canonical_issue_fingerprints (canonical_issue_id);
+
+CREATE TABLE IF NOT EXISTS issue_merges (
+  id            BIGSERIAL PRIMARY KEY,
+  project_id    UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  winner_id     UUID NOT NULL REFERENCES error_groups(id) ON DELETE CASCADE,
+  loser_id      UUID NOT NULL REFERENCES error_groups(id) ON DELETE CASCADE,
+  confirmed_by  TEXT NOT NULL CHECK (confirmed_by IN ('model','human')),
+  actor         TEXT,
+  aliases_moved INTEGER NOT NULL,
+  events_moved  INTEGER NOT NULL,
+  merged_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CHECK (winner_id <> loser_id),
+  UNIQUE (project_id, loser_id)
+);
+
+CREATE TABLE IF NOT EXISTS issue_alias_conflicts (
+  id             BIGSERIAL PRIMARY KEY,
+  project_id     UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  event_id       UUID NOT NULL REFERENCES error_events(id) ON DELETE CASCADE,
+  left_issue_id  UUID NOT NULL REFERENCES error_groups(id) ON DELETE CASCADE,
+  right_issue_id UUID NOT NULL REFERENCES error_groups(id) ON DELETE CASCADE,
+  status         TEXT NOT NULL DEFAULT 'open'
+                 CHECK (status IN ('open','resolved','dismissed')),
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CHECK (left_issue_id < right_issue_id),
+  UNIQUE (project_id, event_id, left_issue_id, right_issue_id)
+);
+CREATE INDEX IF NOT EXISTS idx_conflicts_open
+  ON issue_alias_conflicts (project_id, status) WHERE status = 'open';
 
 CREATE TABLE IF NOT EXISTS issue_decisions (
   id           BIGSERIAL PRIMARY KEY,

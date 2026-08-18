@@ -15,6 +15,7 @@ import (
 	"github.com/opslane/opslane/packages/ingestion/db"
 	"github.com/opslane/opslane/packages/ingestion/digest"
 	"github.com/opslane/opslane/packages/ingestion/handler"
+	"github.com/opslane/opslane/packages/ingestion/identity"
 	minioPkg "github.com/opslane/opslane/packages/ingestion/minio"
 	"github.com/opslane/opslane/packages/ingestion/notify"
 	"github.com/opslane/opslane/packages/ingestion/priority"
@@ -235,6 +236,15 @@ func main() {
 	}
 	go resolveWatchdog.Start(context.Background(), resolveSweepInterval)
 	slog.Info("resolve watchdog started", "interval", resolveSweepInterval.String())
+
+	identityInterval := 5 * time.Second
+	if v := os.Getenv("IDENTITY_SETTLE_INTERVAL_SECONDS"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil && parsed > 0 {
+			identityInterval = time.Duration(parsed) * time.Second
+		}
+	}
+	go identity.NewLoop(pool).Start(ctx, identityInterval)
+	slog.Info("identity settlement loop started", "interval", identityInterval.String())
 
 	prioritySweeper := &priority.Sweeper{Pool: pool}
 	priorityInterval := 30 * time.Minute
