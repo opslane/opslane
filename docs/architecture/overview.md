@@ -47,7 +47,7 @@ flowchart LR
 | Component | Runtime | Role |
 | --- | --- | --- |
 | **Browser SDK** (`packages/sdk`) | Your users' browsers | Captures errors, breadcrumbs, network timings, and default-on session recordings; masks in the browser before upload, with a server-side scrub gate before reads. MIT licensed — it runs in *your* product. |
-| **Ingestion API** (`packages/ingestion`) | Go service | Receives events, drops known noise, groups errors by fingerprint (family-based, debug-ID-based for JavaScript when configured, or platform + error type + message + stack), scores issue priority, enqueues investigation jobs, builds daily digests, delivers notifications, serves the dashboard SPA, and exposes the read/write API. |
+| **Ingestion API** (`packages/ingestion`) | Go service | Receives events, drops known noise, provisionally groups them by fingerprint (family-based, debug-ID-based for JavaScript when configured, or platform + error type + message + stack), serves the dashboard SPA, and exposes the read/write API. Stable issue creation, priority scoring, investigation, digests, and notifications happen after identity settlement. |
 | **Worker** (`packages/worker`) | Node service | Claims jobs from Postgres, analyzes sessions, investigates and adjudicates with Claude, classifies routes, writes candidate fixes, verifies them in an E2B sandbox, and opens GitHub PRs. |
 | **Dashboard** (`packages/dashboard`) | Vue SPA, served by ingestion | Issues, replays, project and GitHub settings. |
 | **Postgres** | Database | System of record, job queue, and verification ledger — jobs are claimed with `FOR UPDATE SKIP LOCKED` and lease-based ownership. There is no Redis or external queue. |
