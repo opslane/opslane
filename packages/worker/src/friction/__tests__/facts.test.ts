@@ -100,17 +100,21 @@ describe('session facts', () => {
     expect(facts.failures).toHaveLength(0);
   });
 
-  it('does not treat an unparseable URL as same-origin', () => {
+  it('excludes a request it cannot resolve when the session has no page origin', () => {
+    // With a page origin present, odd strings resolve exactly as the browser
+    // resolved them and count as same-origin. Without any page event there is
+    // no base to resolve against, so a slash-less string stays unjudgeable
+    // and must not count.
     const facts = extractSessionFacts([envelope([
-      page(T0, 'https://app.example.com/assets'),
       telemetry(T0 + 1, {
         kind: 'request_start', requestId: 'bad-url-1', clickId: null,
-        method: 'POST', url: '::::not-a-url',
+        method: 'POST', url: 'api/assets',
       }),
       telemetry(T0 + 2, { kind: 'request_end', requestId: 'bad-url-1', status: 500 }),
     ])]);
 
     expect(facts.failedWriteCount).toBe(0);
+    expect(facts.failures).toHaveLength(0);
   });
 
   it('extracts privacy-bounded request facts with only explicit click links', () => {
