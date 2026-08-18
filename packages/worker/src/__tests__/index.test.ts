@@ -117,11 +117,12 @@ vi.mock('../friction/facts.js', () => ({
     entryPath: null, clickCount: 0, inputEventCount: 0, pageEventCount: 0,
     failedRequest4xxCount: 0, failedRequest5xxCount: 0,
     unattributedFailedRequestCount: 0, successfulWriteCount: 0, failedWriteCount: 0,
-    firstEventMs: null, lastEventMs: null,
+    firstEventMs: null, lastEventMs: null, failures: [], successes: [],
   })),
   deriveCoverage: vi.fn(() => 'no_replay'),
   classifyActivity: vi.fn(() => 'unknown'),
 }));
+vi.mock('../facts/persist.js', () => ({ replaceSessionFacts: vi.fn() }));
 vi.mock('../friction/persist.js', () => ({ writeFrictionSignals: vi.fn() }));
 vi.mock('../friction/promotion.js', () => ({ processFrictionOutcomes: vi.fn() }));
 vi.mock('../friction/adjudicator.js', () => ({
@@ -141,6 +142,7 @@ const { gatherFrictionEvidence } = await import('../friction/friction-evidence.j
 const { investigateFriction } = await import('../friction/investigate-friction.js');
 const { readChunksBounded } = await import('../friction/chunk-reader.js');
 const { analyzeSession } = await import('../friction/analyzer.js');
+const { replaceSessionFacts } = await import('../facts/persist.js');
 const { writeFrictionSignals } = await import('../friction/persist.js');
 const { processFrictionOutcomes } = await import('../friction/promotion.js');
 const { processRouteMapJob } = await import('../route-map.js');
@@ -1191,6 +1193,12 @@ describe('session_analysis handler', () => {
     expect(db.upsertSessionAnalysis).toHaveBeenCalledWith(expect.objectContaining({
       sessionId: 'session-1', coverage: 'no_replay', activityClass: 'unknown', ruleVersion: 2,
     }));
+    expect(replaceSessionFacts).toHaveBeenCalledWith('proj-1', 'session-1', expect.objectContaining({
+      ruleVersion: 2, failures: [], successes: [],
+    }));
+    expect(vi.mocked(replaceSessionFacts).mock.invocationCallOrder[0]!).toBeLessThan(
+      vi.mocked(db.upsertSessionAnalysis).mock.invocationCallOrder[0]!,
+    );
     expect(writeFrictionSignals).toHaveBeenCalledWith(session, [], 2);
     expect(db.setSessionAnalysisStatus).toHaveBeenLastCalledWith('session-1', 'proj-1', 'analyzed', 2, job);
     expect(db.updateGroupAndCreateFixJob).not.toHaveBeenCalled();

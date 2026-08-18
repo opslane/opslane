@@ -1,9 +1,30 @@
+import { createHash } from 'node:crypto';
 import type { SessionChunkEnvelope } from '@opslane/shared';
 import { extractTelemetryEvents } from './analyzer.js';
-import { normalizeEntryPath } from './fingerprint.js';
+import { normalizeEntryPath, normalizePageUrl } from './fingerprint.js';
 
 export type Coverage = 'complete' | 'partial' | 'no_replay';
 export type ActivityClass = 'active' | 'light_touch' | 'zero_interaction' | 'idle_tab' | 'unknown';
+
+export interface FailedRequestFact {
+  requestIdHash: string;
+  pageRoute: string;
+  method: string;
+  endpointPattern: string;
+  status: number;
+  actionKind: 'click' | 'form_submit' | null;
+  actionSelector: string | null;
+  actionLink: 'direct' | 'none';
+  occurredAt: string;
+}
+
+export interface SuccessfulWriteRollup {
+  pageRoute: string;
+  method: string;
+  endpointPattern: string;
+  statusClass: number;
+  count: number;
+}
 
 export interface SessionFacts {
   entryPath: string | null;
@@ -17,6 +38,8 @@ export interface SessionFacts {
   failedWriteCount: number;
   firstEventMs: number | null;
   lastEventMs: number | null;
+  failures: FailedRequestFact[];
+  successes: SuccessfulWriteRollup[];
 }
 
 export interface SessionContextInput {
@@ -40,7 +63,11 @@ function originOf(url: string): string | null {
   }
 }
 
-const WRITE_METHODS = new Set(['POST', 'PUT', 'PATCH']);
+const WRITE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+
+function isFailure(status: number): boolean {
+  return status === 0 || status >= 400;
+}
 
 export function extractSessionFacts(chunks: SessionChunkEnvelope[]): SessionFacts {
   const facts: SessionFacts = {
@@ -55,8 +82,11 @@ export function extractSessionFacts(chunks: SessionChunkEnvelope[]): SessionFact
     failedWriteCount: 0,
     firstEventMs: null,
     lastEventMs: null,
+    failures: [],
+    successes: [],
   };
   const pageOrigins = new Set<string>();
+  const pages: Array<{ at: number; route: string }> = [];
   let entryPageHref: string | null = null;
   let entryPageTs = Number.POSITIVE_INFINITY;
   for (const chunk of chunks) {
@@ -73,6 +103,7 @@ export function extractSessionFacts(chunks: SessionChunkEnvelope[]): SessionFact
         facts.pageEventCount += 1;
         const origin = originOf(data['href']);
         if (origin) pageOrigins.add(origin);
+        pages.push({ at: ts, route: normalizePageUrl(data['href']) });
         if (ts < entryPageTs) {
           entryPageTs = ts;
           entryPageHref = data['href'];
@@ -86,31 +117,89 @@ export function extractSessionFacts(chunks: SessionChunkEnvelope[]): SessionFact
   if (entryPageHref !== null) facts.entryPath = normalizeEntryPath(entryPageHref);
 
   const sameOrigin = (url: string): boolean => {
+    if (url.startsWith('/') && !url.startsWith('//')) return true;
     const origin = originOf(url);
-    return origin === null || pageOrigins.has(origin);
+    return origin !== null && pageOrigins.has(origin);
   };
-  const startById = new Map<string, { method: string; url: string }>();
+  pages.sort((left, right) => left.at - right.at);
+  const routeAt = (at: number): string => {
+    let route = '';
+    for (const page of pages) {
+      if (page.at > at) break;
+      route = page.route;
+    }
+    return route;
+  };
+  const clicksById = new Map<string, string>();
+  const startById = new Map<string, {
+    method: string;
+    url: string;
+    clickId: string | null;
+    route: string;
+    startedAt: number;
+  }>();
+  const successRollups = new Map<string, SuccessfulWriteRollup>();
   for (const { event } of extractTelemetryEvents(chunks)) {
-    if (event.kind === 'click') facts.clickCount += 1;
+    if (event.kind === 'click') {
+      facts.clickCount += 1;
+      clicksById.set(event.clickId, event.selector);
+    }
     if (event.kind === 'request_start') {
-      startById.set(event.requestId, { method: event.method.toUpperCase(), url: event.url });
+      startById.set(event.requestId, {
+        method: event.method.toUpperCase(),
+        url: event.url,
+        clickId: event.clickId,
+        route: routeAt(event.at),
+        startedAt: event.at,
+      });
     }
     if (event.kind === 'request_end') {
       const start = startById.get(event.requestId);
       if (!start) {
-        if (event.status >= 400) facts.unattributedFailedRequestCount += 1;
+        if (isFailure(event.status)) facts.unattributedFailedRequestCount += 1;
         continue;
       }
       if (!sameOrigin(start.url)) continue;
       const isWrite = WRITE_METHODS.has(start.method);
-      if (event.status >= 200 && event.status < 300 && isWrite) facts.successfulWriteCount += 1;
-      if (event.status >= 400 && event.status < 600) {
+      const endpointPattern = normalizePageUrl(start.url);
+      if (event.status >= 200 && event.status < 300 && isWrite) {
+        facts.successfulWriteCount += 1;
+        const statusClass = Math.floor(event.status / 100);
+        const key = JSON.stringify([start.route, start.method, endpointPattern, statusClass]);
+        const current = successRollups.get(key);
+        if (current) current.count += 1;
+        else {
+          successRollups.set(key, {
+            pageRoute: start.route,
+            method: start.method,
+            endpointPattern,
+            statusClass,
+            count: 1,
+          });
+        }
+      }
+      if (isFailure(event.status)) {
         if (isWrite) facts.failedWriteCount += 1;
-        if (event.status < 500) facts.failedRequest4xxCount += 1;
-        else facts.failedRequest5xxCount += 1;
+        if (event.status >= 400 && event.status < 500) facts.failedRequest4xxCount += 1;
+        if (event.status >= 500 && event.status < 600) facts.failedRequest5xxCount += 1;
+        const actionSelector = start.clickId === null ? null : clicksById.get(start.clickId) ?? null;
+        facts.failures.push({
+          requestIdHash: createHash('sha256')
+            .update(`${event.requestId}:${start.startedAt}`)
+            .digest('hex'),
+          pageRoute: start.route,
+          method: start.method,
+          endpointPattern,
+          status: event.status,
+          actionKind: actionSelector === null ? null : 'click',
+          actionSelector,
+          actionLink: actionSelector === null ? 'none' : 'direct',
+          occurredAt: new Date(event.at).toISOString(),
+        });
       }
     }
   }
+  facts.successes = [...successRollups.values()];
   return facts;
 }
 
