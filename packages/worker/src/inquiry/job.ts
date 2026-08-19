@@ -18,14 +18,6 @@ export const INQUIRY_MODEL = process.env['INQUIRY_MODEL']
   ?? process.env['INVESTIGATION_MODEL']
   ?? 'claude-sonnet-5';
 
-/** Mirrors friction promotion. Without this, every new occurrence can buy another review. */
-export const INQUIRY_REGROWTH = 1.5;
-
-export function shouldReopenInquiry(units: number, lastEvaluated: number): boolean {
-  if (lastEvaluated <= 0) return true;
-  return units >= Math.ceil(lastEvaluated * INQUIRY_REGROWTH);
-}
-
 const MODEL_PRICING: Record<string, {
   input: number;
   output: number;

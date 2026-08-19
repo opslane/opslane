@@ -168,7 +168,7 @@ func (d *Dispatcher) inquiryCandidates(ctx context.Context) ([]episodeRef, error
 		SELECT ep.project_id::text,ep.id::text,COALESCE(jobs.max_input_version,0)+1
 		  FROM issue_episodes ep
 		  JOIN LATERAL (
-		    SELECT decision,users_7d+anon_7d AS affected_units
+		    SELECT decision,users_7d+anon_7d AS affected_units,decided_at
 		      FROM issue_decisions d
 		     WHERE d.project_id=ep.project_id AND d.episode_id=ep.id
 		     ORDER BY d.decided_at DESC,d.id DESC LIMIT 1
@@ -182,7 +182,8 @@ func (d *Dispatcher) inquiryCandidates(ctx context.Context) ([]episodeRef, error
 		  LEFT JOIN LATERAL (
 		    SELECT count(*) AS job_count,
 		           COALESCE(bool_or(status IN ('pending','claimed')),false) AS active,
-		           max(input_version) AS max_input_version
+		           max(input_version) AS max_input_version,
+		           max(updated_at) AS last_touched
 		      FROM error_group_jobs j
 		     WHERE j.project_id=ep.project_id AND j.episode_id=ep.id
 		       AND j.job_type='issue_inquiry'
@@ -196,6 +197,13 @@ func (d *Dispatcher) inquiryCandidates(ctx context.Context) ([]episodeRef, error
 		     (inquiry.decision IS NULL AND COALESCE(jobs.job_count,0)=0)
 		     OR (
 		       inquiry.decision IN ('wait_for_more_evidence','do_not_pursue')
+		       -- No-progress brake: a re-run that appends nothing (suppressed
+		       -- duplicate decision, dead-lettered attempt, one-sided prompt
+		       -- bump) leaves the predicate below true forever. Re-admission
+		       -- therefore also requires a factual decision newer than the last
+		       -- inquiry job activity, so each admission is paid for by real
+		       -- new evidence rather than by the sweep's own tick.
+		       AND (jobs.last_touched IS NULL OR factual.decided_at > jobs.last_touched)
 		       AND (
 		         inquiry.prompt_version < $2
 		         -- Integer form of units >= ceil(last * 1.5).

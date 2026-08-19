@@ -4,6 +4,7 @@ import { routeClaimsTerminalTool } from '../product-context/schema.js';
 import { routeMapTerminalTool } from '../route-map.js';
 import { submitDiagnosisTool } from '../diagnose-schema.js';
 import { CLASSIFY_TOOL } from '../friction/investigate-friction.js';
+import { inquiryDecisionTerminalTool } from '../inquiry/schema.js';
 
 // Anthropic strict tools reject minimum/maximum on numbers at request time
 // with invalid_request_error, which dead-letters every job using the tool
@@ -15,6 +16,7 @@ const STRICT_TOOLS: Anthropic.Tool[] = [
   routeMapTerminalTool(),
   submitDiagnosisTool(),
   CLASSIFY_TOOL,
+  inquiryDecisionTerminalTool(),
 ];
 
 function collectKeys(value: unknown, found: Set<string>): void {

@@ -2136,19 +2136,24 @@ export async function persistInquiryDecision(args: {
     if (effectiveDecision === 'investigate') {
       await client.query(
         `INSERT INTO error_group_jobs
-           (error_group_id,project_id,episode_id,job_type,status,input_version,triggered_by)
-         VALUES ($1,$2,$3,'investigate','pending',$4,'auto')
+           (error_group_id,project_id,episode_id,job_type,status,input_version,triggered_by,guidance)
+         VALUES ($1,$2,$3,'investigate','pending',$4,'auto',$5)
          ON CONFLICT DO NOTHING`,
-        [errorGroupId, args.projectId, args.episodeId, inputVersion],
+        [errorGroupId, args.projectId, args.episodeId, inputVersion, args.brief],
       );
       // The targetless conflict clause swallows every unique-index violation,
-      // so prove the invariant instead of assuming it: some investigate job
-      // must now exist for this round, whatever its version or status.
+      // so prove the invariant instead of assuming it: either this
+      // round-and-version's investigate job exists (any status — a
+      // dead-lettered attempt spent its budget visibly), or a live investigate
+      // job from an earlier version is still working this episode (it is what
+      // blocked the insert via the active-job index). A dead row from another
+      // version must not vouch for this one.
       const jobExists = await client.query(
         `SELECT 1 FROM error_group_jobs
           WHERE project_id=$1 AND episode_id=$2 AND job_type='investigate'
+            AND (input_version=$3 OR status IN ('pending','claimed'))
           LIMIT 1`,
-        [args.projectId, args.episodeId],
+        [args.projectId, args.episodeId, inputVersion],
       );
       if ((jobExists.rowCount ?? 0) === 0) {
         throw new Error(

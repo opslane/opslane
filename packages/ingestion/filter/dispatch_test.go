@@ -169,7 +169,7 @@ func TestDispatcherDoesNotReopenInquiryBelowGrowthGate(t *testing.T) {
 	}
 }
 
-func TestDispatcherReopensInquiryAfterPromptVersionChange(t *testing.T) {
+func TestDispatcherPromptVersionDrainRequiresNewEvidence(t *testing.T) {
 	pool := testPool(t)
 	f := seedEpisode(t, pool)
 	seedIdentifiedEvent(t, pool, f, time.Now())
@@ -192,11 +192,25 @@ func TestDispatcherReopensInquiryAfterPromptVersionChange(t *testing.T) {
 		t.Fatalf("seed old decision: %v", err)
 	}
 
+	// A stale prompt version alone must not reopen: without a factual
+	// decision newer than the last inquiry job, re-admission would re-run the
+	// same review every tick (and, on a one-sided prompt bump, forever).
 	_, enqueued, err := dispatcher.Tick(context.Background())
 	if err != nil {
 		t.Fatalf("second Tick: %v", err)
 	}
+	if enqueued != 0 {
+		t.Fatalf("second Tick enqueued = %d, want 0 (prompt bump alone must not reopen)", enqueued)
+	}
+
+	// New settled evidence appends a fresh factual decision, and that pays
+	// for one re-admission — which then reviews under the current prompt.
+	seedIdentifiedEvent(t, pool, f, time.Now())
+	_, enqueued, err = dispatcher.Tick(context.Background())
+	if err != nil {
+		t.Fatalf("third Tick: %v", err)
+	}
 	if enqueued != 1 {
-		t.Fatalf("second Tick enqueued = %d, want 1", enqueued)
+		t.Fatalf("third Tick enqueued = %d, want 1 (new evidence drains the stale prompt)", enqueued)
 	}
 }

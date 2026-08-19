@@ -357,8 +357,9 @@ describe('persistInquiryDecision', () => {
     const jobSql = String(mockQuery.mock.calls[3]?.[0]);
     expect(jobSql).toContain('INSERT INTO error_group_jobs');
     expect(jobSql).toContain("'investigate','pending'");
-    // The issue and round version come from the locked job row, not the caller.
-    expect(mockQuery.mock.calls[3]?.[1]).toEqual(['g1', 'p1', 'ep1', 4]);
+    // The issue and round version come from the locked job row, not the
+    // caller; the inquiry brief rides along as the investigator's guidance.
+    expect(mockQuery.mock.calls[3]?.[1]).toEqual(['g1', 'p1', 'ep1', 4, 'check delete']);
     expect(mockQuery.mock.calls[5]?.[0]).toBe('COMMIT');
   });
 
