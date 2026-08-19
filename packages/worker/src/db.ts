@@ -65,12 +65,6 @@ export interface DecisionRow {
   policyBasis?: { v: 1; identified_users: number; recent_anon_sessions: number } | null;
 }
 
-export type ReadinessStatus = 'eligible' | 'ineligible' | 'pending';
-export interface ReadinessWrite {
-  status: ReadinessStatus;
-  reason: string;
-}
-
 /** What a fix job needs from a persisted decision to know whether it may run. */
 export interface PersistedDecision {
   outcome: DiagnosisOutcome;
@@ -125,28 +119,6 @@ async function insertDiagnosisDecision(
       row.dispositions ? JSON.stringify(row.dispositions) : null,
       row.causeKind ?? null,
     ],
-  );
-}
-
-async function upsertDigestReadiness(
-  queryable: Pick<pg.PoolClient, 'query'>,
-  errorGroupId: string,
-  projectId: string,
-  readiness: ReadinessWrite,
-): Promise<void> {
-  await queryable.query(
-    `INSERT INTO digest_readiness (incident_id, project_id, status, reason, updated_at)
-     VALUES ($1, $2, $3, $4, now())
-     ON CONFLICT (incident_id) DO UPDATE
-     SET status = EXCLUDED.status,
-         reason = EXCLUDED.reason,
-         updated_at = CASE
-           WHEN digest_readiness.status IS DISTINCT FROM EXCLUDED.status
-             OR digest_readiness.reason IS DISTINCT FROM EXCLUDED.reason
-           THEN now()
-           ELSE digest_readiness.updated_at
-         END`,
-    [errorGroupId, projectId, readiness.status, readiness.reason],
   );
 }
 
@@ -1162,7 +1134,6 @@ export async function updateGroupStatus(
     candidate_diff?: string;
     evidence?: EvidenceRecord;
     terminalFixJobId?: string;
-    readiness?: ReadinessWrite;
   },
   lease?: JobLease,
 ): Promise<void> {
@@ -1275,23 +1246,6 @@ export async function updateGroupStatus(
     );
     if (lease && (result.rowCount ?? 0) === 0) throw new LeaseLostError(lease.id);
 
-  // A failure-path park must not leave the incident invisible forever: a
-  // requeue may have set digest_readiness to 'pending', and the terminal
-  // transitions that come through here (no-app-frames, clone failure,
-  // verification-infra exits) never reach the investigation-completion writes
-  // that would resolve it. Demote only an existing pending row — legacy
-  // absent-row groups stay absent-row (C1 interim policy), and completion
-  // paths go through updateGroupInvestigation, which writes readiness itself.
-    if ((result.rowCount ?? 0) > 0 && fields?.readiness) {
-      await upsertDigestReadiness(client, errorGroupId, projectId, fields.readiness);
-    } else if (status === 'needs_human' && (result.rowCount ?? 0) > 0) {
-      await client.query(
-        `UPDATE digest_readiness
-         SET status = 'ineligible', reason = $3, updated_at = now()
-         WHERE incident_id = $1 AND project_id = $2 AND status = 'pending'`,
-        [errorGroupId, projectId, fields?.reason?.reason_code ?? 'investigation_failed'],
-      );
-    }
     await client.query('COMMIT');
   } catch (error) {
     await client.query('ROLLBACK').catch(() => {});
@@ -1469,7 +1423,6 @@ export async function finalizeDelivery(
     reason?: NeedsHumanReason;
     candidateDiff?: string;
     evidence?: EvidenceRecord;
-    readiness?: ReadinessWrite;
   },
   lease: JobLease,
 ): Promise<void> {
@@ -1561,9 +1514,6 @@ export async function finalizeDelivery(
          )`,
         [errorGroupId, projectId, payload ? JSON.stringify(payload) : null],
       );
-    }
-    if (input.readiness) {
-      await upsertDigestReadiness(client, errorGroupId, projectId, input.readiness);
     }
     await client.query('COMMIT');
   } catch (error) {
@@ -2622,7 +2572,6 @@ export async function updateGroupInvestigation(
     confidence?: ConfidenceLevel;
     reason?: NeedsHumanReason;
     decision?: DecisionRow;
-    readiness?: ReadinessWrite;
     terminalJobId?: string;
   },
   lease?: JobLease,
@@ -2723,9 +2672,6 @@ export async function updateGroupInvestigation(
     if ((result.rowCount ?? 0) > 0 && fields.decision) {
       await insertDiagnosisDecision(client, errorGroupId, projectId, fields.decision);
     }
-    if ((result.rowCount ?? 0) > 0 && fields.readiness) {
-      await upsertDigestReadiness(client, errorGroupId, projectId, fields.readiness);
-    }
     await client.query('COMMIT');
   } catch (err: unknown) {
     await client.query('ROLLBACK');
@@ -2761,7 +2707,6 @@ export async function updateGroupAndCreateFixJob(
     platform?: Platform;
     decision?: DecisionRow;
     sourceJobId?: string;
-    readiness?: ReadinessWrite;
   },
   lease: JobLease,
   opts?: { allowFriction?: boolean },
@@ -2827,7 +2772,6 @@ export async function updateGroupAndCreateFixJob(
     );
     if (humanFix.rows[0]) {
       if (fields.decision) await insertDiagnosisDecision(client, errorGroupId, projectId, fields.decision);
-      if (fields.readiness) await upsertDigestReadiness(client, errorGroupId, projectId, fields.readiness);
       await client.query('COMMIT');
       return { created: false, reason: 'pending_human_job' };
     }
@@ -2889,9 +2833,6 @@ export async function updateGroupAndCreateFixJob(
       if (fields.decision) {
         await insertDiagnosisDecision(client, errorGroupId, projectId, fields.decision);
       }
-      if (fields.readiness) {
-        await upsertDigestReadiness(client, errorGroupId, projectId, fields.readiness);
-      }
       await client.query('COMMIT');
       return { created: true, fixJobId: existingFix.rows[0].id };
     }
@@ -2938,9 +2879,6 @@ export async function updateGroupAndCreateFixJob(
     );
     if (fields.decision) {
       await insertDiagnosisDecision(client, errorGroupId, projectId, fields.decision);
-    }
-    if (fields.readiness) {
-      await upsertDigestReadiness(client, errorGroupId, projectId, fields.readiness);
     }
     await client.query('COMMIT');
     return { created: true, fixJobId: result.rows[0]!.id };

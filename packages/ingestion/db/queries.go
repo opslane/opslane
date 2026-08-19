@@ -66,6 +66,31 @@ func nilIfEmpty(s string) *string {
 	return &s
 }
 
+// investigationReadinessSQL keeps the legacy API field derived from the
+// append-only pipeline decisions while callers migrate to the explicit states.
+func investigationReadinessSQL(groupAlias string) string {
+	return fmt.Sprintf(`(
+		SELECT CASE
+		         WHEN factual.decision='open_inquiry' AND inquiry.decision='investigate' THEN 'eligible'
+		         WHEN factual.decision='open_inquiry' AND inquiry.decision IS NULL THEN 'pending'
+		         WHEN factual.decision IS NOT NULL THEN 'ineligible'
+		       END
+		  FROM issue_episodes ep
+		  LEFT JOIN LATERAL (
+		    SELECT d.decision FROM issue_decisions d
+		     WHERE d.project_id=ep.project_id AND d.episode_id=ep.id
+		     ORDER BY d.decided_at DESC,d.id DESC LIMIT 1
+		  ) factual ON true
+		  LEFT JOIN LATERAL (
+		    SELECT d.decision FROM issue_inquiry_decisions d
+		     WHERE d.project_id=ep.project_id AND d.episode_id=ep.id
+		     ORDER BY d.decided_at DESC,d.id DESC LIMIT 1
+		  ) inquiry ON true
+		 WHERE ep.project_id=%[1]s.project_id AND ep.canonical_issue_id=%[1]s.id
+		 ORDER BY ep.sequence DESC LIMIT 1
+	)`, groupAlias)
+}
+
 // NormalizeEmail is the storage and lookup contract for user and invitation email.
 func NormalizeEmail(email string) string {
 	return strings.ToLower(strings.TrimSpace(email))
@@ -786,22 +811,6 @@ func (q *Queries) InsertErrorEventAndGroup(ctx context.Context, p IngestParams) 
 				if err != nil {
 					return nil, fmt.Errorf("update group status to queued on requeue: %w", err)
 				}
-				// Upsert, not UPDATE: an incident can lack a projection row (archived
-				// before the 047 backfill and unarchived later, or a pre-flight
-				// investigation failure that wrote no outcome). An UPDATE would match
-				// zero rows and leave the incident permanently invisible to the
-				// eligible-only digest gate.
-				_, err = tx.Exec(ctx,
-					`INSERT INTO digest_readiness (incident_id, project_id, status, reason, updated_at)
-					 SELECT id, project_id, 'pending', 'reinvestigating', now()
-					   FROM error_groups WHERE id = $1
-					 ON CONFLICT (incident_id) DO UPDATE
-					 SET status = 'pending', reason = 'reinvestigating', updated_at = now()`,
-					groupID,
-				)
-				if err != nil {
-					return nil, fmt.Errorf("reset digest readiness on requeue: %w", err)
-				}
 				requeued = true
 			}
 		}
@@ -903,7 +912,7 @@ func (q *Queries) ListErrorGroups(ctx context.Context, projectID string, filters
 		               eg.occurrence_count, eg.affected_users_count, eg.status, eg.kind, eg.platform,
 		               eg.environment_id, eg.adjudication_status,
 		               eg.reason_code, eg.reason_message, eg.remediation,
-		               eg.confidence, eg.pr_url, eg.root_cause, eg.suggested_mitigation, dr.status,
+		               eg.confidence, eg.pr_url, eg.root_cause, eg.suggested_mitigation, ` + investigationReadinessSQL("eg") + `,
 		               eg.impact_class, eg.impact_visits, eg.impact_visits_recovered,
 		               NULLIF(btrim(eg.candidate_diff), '') IS NOT NULL AS has_saved_diff,
 		               eg.signal_type, eg.element_selector, eg.page_url_normalized,
@@ -911,7 +920,6 @@ func (q *Queries) ListErrorGroups(ctx context.Context, projectID string, filters
 		               eg.created_at, eg.updated_at,
 		               eg.merged_at, eg.resolved_at, eg.archived_at
 		        FROM error_groups eg
-		        LEFT JOIN digest_readiness dr ON dr.incident_id = eg.id
 		        WHERE ` + strings.Join(wheres, " AND ") + `
 		        ORDER BY COALESCE(eg.priority_score, 0) DESC, eg.last_seen DESC, eg.id DESC
 		        LIMIT 100`
@@ -995,7 +1003,7 @@ func (q *Queries) ListErrorGroups(ctx context.Context, projectID string, filters
 		       candidates.occurrence_count, eg.affected_users_count, eg.status, eg.kind, eg.platform,
 		       eg.environment_id, eg.adjudication_status,
 		       eg.reason_code, eg.reason_message, eg.remediation,
-		       eg.confidence, eg.pr_url, eg.root_cause, eg.suggested_mitigation, dr.status,
+		       eg.confidence, eg.pr_url, eg.root_cause, eg.suggested_mitigation, `+investigationReadinessSQL("eg")+`,
 		       eg.impact_class, eg.impact_visits, eg.impact_visits_recovered,
 		       NULLIF(btrim(eg.candidate_diff), '') IS NOT NULL AS has_saved_diff,
 		       eg.signal_type, eg.element_selector, eg.page_url_normalized,
@@ -1004,7 +1012,6 @@ func (q *Queries) ListErrorGroups(ctx context.Context, projectID string, filters
 		       eg.merged_at, eg.resolved_at, eg.archived_at
 		FROM candidates
 		JOIN error_groups eg ON eg.id = candidates.id
-		LEFT JOIN digest_readiness dr ON dr.incident_id = eg.id
 		ORDER BY COALESCE(candidates.priority_score, 0) DESC, candidates.last_seen DESC, candidates.id DESC
 		LIMIT 100`, strings.Join(errorWheres, " AND "), strings.Join(frictionWheres, " AND "))
 	}
@@ -1181,7 +1188,7 @@ func (q *Queries) GetErrorGroup(ctx context.Context, projectID, groupID string) 
 		        g.occurrence_count, g.affected_users_count, g.status, g.kind, g.platform,
 		        g.environment_id, g.adjudication_status,
 		        g.reason_code, g.reason_message, g.remediation,
-		        g.confidence, g.pr_url, g.root_cause, g.suggested_mitigation, dr.status,
+		        g.confidence, g.pr_url, g.root_cause, g.suggested_mitigation, `+investigationReadinessSQL("g")+`,
 		        g.verification_evidence, g.candidate_diff,
 		        g.impact_class, g.impact_visits, g.impact_visits_recovered,
 		        NULLIF(btrim(g.candidate_diff), '') IS NOT NULL AS has_saved_diff,
@@ -1190,7 +1197,6 @@ func (q *Queries) GetErrorGroup(ctx context.Context, projectID, groupID string) 
 		        g.created_at, g.updated_at,
 		        g.merged_at, g.resolved_at, g.archived_at
 		 FROM error_groups g
-		 LEFT JOIN digest_readiness dr ON dr.incident_id = g.id
 		 WHERE g.id = $1 AND g.project_id = $2
 		   AND (g.status <> 'candidate' OR g.adjudication_status = 'unchecked')`,
 		groupID, projectID,

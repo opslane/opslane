@@ -43,6 +43,90 @@ type digestFixture struct {
 	SessOld                 string
 }
 
+func setPipelineState(t *testing.T, pool *pgxpool.Pool, projectID, groupID, state string, decidedAt time.Time) {
+	t.Helper()
+	ctx := context.Background()
+	if state == "absent" {
+		if _, err := pool.Exec(ctx,
+			`DELETE FROM issue_episodes WHERE project_id=$1 AND canonical_issue_id=$2`,
+			projectID, groupID); err != nil {
+			t.Fatalf("clear pipeline state: %v", err)
+		}
+		return
+	}
+	var episodeID string
+	if err := pool.QueryRow(ctx, `
+		WITH inserted AS (
+		  INSERT INTO issue_episodes (project_id,canonical_issue_id,sequence)
+		  SELECT $1,$2,COALESCE(max(sequence),0)+1
+		    FROM issue_episodes WHERE project_id=$1 AND canonical_issue_id=$2
+		  ON CONFLICT DO NOTHING RETURNING id
+		)
+		SELECT id::text FROM inserted
+		UNION ALL
+		SELECT id::text FROM issue_episodes
+		 WHERE project_id=$1 AND canonical_issue_id=$2
+		ORDER BY 1 LIMIT 1`, projectID, groupID).Scan(&episodeID); err != nil {
+		t.Fatalf("ensure episode: %v", err)
+	}
+	if _, err := pool.Exec(ctx,
+		`DELETE FROM issue_inquiry_decisions WHERE project_id=$1 AND episode_id=$2`,
+		projectID, episodeID); err != nil {
+		t.Fatalf("clear inquiry decisions: %v", err)
+	}
+	if _, err := pool.Exec(ctx,
+		`DELETE FROM issue_decisions WHERE project_id=$1 AND episode_id=$2`,
+		projectID, episodeID); err != nil {
+		t.Fatalf("clear factual decisions: %v", err)
+	}
+	decision := "watch"
+	if state == "eligible" || state == "pending" {
+		decision = "open_inquiry"
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO issue_decisions
+		  (project_id,episode_id,decision,reason,users_7d,anon_7d,rule_version,decided_at)
+		VALUES ($1,$2,$3,'test',2,0,1,$4)`, projectID, episodeID, decision, decidedAt); err != nil {
+		t.Fatalf("seed factual decision: %v", err)
+	}
+	if state == "eligible" {
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO issue_inquiry_decisions
+			  (project_id,episode_id,decision,reason,evaluated_units,evidence_signature,
+			   model,prompt_version,decided_at)
+			VALUES ($1,$2,'investigate','test',2,$3,'test',1,$4)`,
+			projectID, episodeID, "sig-"+uuid.NewString(), decidedAt); err != nil {
+			t.Fatalf("seed inquiry decision: %v", err)
+		}
+	}
+}
+
+func setAllPipelineStates(t *testing.T, pool *pgxpool.Pool, projectID, state string, decidedAt time.Time) {
+	t.Helper()
+	rows, err := pool.Query(context.Background(),
+		`SELECT id::text FROM error_groups WHERE project_id=$1`, projectID)
+	if err != nil {
+		t.Fatalf("list groups for pipeline state: %v", err)
+	}
+	var groupIDs []string
+	for rows.Next() {
+		var groupID string
+		if err := rows.Scan(&groupID); err != nil {
+			rows.Close()
+			t.Fatalf("scan group for pipeline state: %v", err)
+		}
+		groupIDs = append(groupIDs, groupID)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		t.Fatalf("list groups for pipeline state: %v", err)
+	}
+	rows.Close()
+	for _, groupID := range groupIDs {
+		setPipelineState(t, pool, projectID, groupID, state, decidedAt)
+	}
+}
+
 func seedDigestFixture(t *testing.T, pool *pgxpool.Pool, now time.Time) digestFixture {
 	return seedDigestFixtureWithSessionAge(t, pool, now, 30*time.Hour)
 }
@@ -169,13 +253,7 @@ func seedDigestFixtureWithSessionAge(t *testing.T, pool *pgxpool.Pool, now time.
 		 'external_cause','Old.','Review.')`,
 		projectID, envID, now.Add(-10*24*time.Hour))
 
-	// C3 backfills every open incident. Digest sections are eligible-only from
-	// C4 onward, so legacy-section fixtures must model that invariant.
-	exec(`INSERT INTO digest_readiness (incident_id, project_id, status, reason, updated_at)
-		SELECT id, project_id, 'eligible', 'backfill_receipt_state', $2
-		FROM error_groups
-		WHERE project_id=$1 AND status NOT IN ('resolved','merged','archived')`,
-		projectID, now.Add(-time.Hour))
+	setAllPipelineStates(t, pool, projectID, "eligible", now.Add(-time.Hour))
 
 	return f
 }
@@ -315,7 +393,7 @@ func TestBuildDigestReplayLinksRequireCoverage(t *testing.T) {
 	}
 }
 
-func TestBuildDigestSectionsAreEligibleOnlyExceptMerged(t *testing.T) {
+func TestBuildDigestSectionsRequirePipelineEligibility(t *testing.T) {
 	for _, status := range []string{"absent", "ineligible", "pending"} {
 		t.Run(status, func(t *testing.T) {
 			pool := testPool(t)
@@ -336,17 +414,7 @@ func TestBuildDigestSectionsAreEligibleOnlyExceptMerged(t *testing.T) {
 				VALUES ($1,$2,88,'merged',$3,$4)`, f.ProjectID, mergedID, "gate-"+uuid.NewString(), now.Add(-time.Hour)); err != nil {
 				t.Fatal(err)
 			}
-			if status == "absent" {
-				if _, err := pool.Exec(ctx, `DELETE FROM digest_readiness WHERE project_id=$1`, f.ProjectID); err != nil {
-					t.Fatal(err)
-				}
-			} else {
-				if _, err := pool.Exec(ctx, `INSERT INTO digest_readiness (incident_id, project_id, status, reason)
-					SELECT id, project_id, $2, 'test' FROM error_groups WHERE project_id=$1
-					ON CONFLICT (incident_id) DO UPDATE SET status=EXCLUDED.status, reason=EXCLUDED.reason`, f.ProjectID, status); err != nil {
-					t.Fatal(err)
-				}
-			}
+			setAllPipelineStates(t, pool, f.ProjectID, status, now.Add(-time.Hour))
 
 			payload, err := New(pool, "https://dash.example").Build(ctx, f.ProjectID, now)
 			if err != nil {
@@ -356,10 +424,7 @@ func TestBuildDigestSectionsAreEligibleOnlyExceptMerged(t *testing.T) {
 			if len(d.Insights) != 0 || len(d.TopNewIssues) != 0 || len(d.Outcomes.PRsOpened) != 0 || len(d.Outcomes.NeedsHuman) != 0 {
 				t.Fatalf("%s readiness leaked into digest: %+v", status, d)
 			}
-			if status == "absent" && len(d.Outcomes.PRsMerged) != 1 {
-				t.Fatalf("absent merged group should remain in transition-only section: %+v", d.Outcomes.PRsMerged)
-			}
-			if status != "absent" && len(d.Outcomes.PRsMerged) != 0 {
+			if len(d.Outcomes.PRsMerged) != 0 {
 				t.Fatalf("%s merged group leaked into digest: %+v", status, d.Outcomes.PRsMerged)
 			}
 		})
@@ -410,14 +475,7 @@ func TestBuildDigestCapsTopNewIssues(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := pool.Exec(context.Background(), `INSERT INTO digest_readiness
-		(incident_id,project_id,status,reason,updated_at)
-		SELECT id,project_id,'eligible','validated_cause',$2 FROM error_groups
-		WHERE project_id=$1 AND NOT EXISTS (
-			SELECT 1 FROM digest_readiness dr WHERE dr.incident_id=error_groups.id
-		)`, f.ProjectID, now.Add(-time.Hour)); err != nil {
-		t.Fatal(err)
-	}
+	setAllPipelineStates(t, pool, f.ProjectID, "eligible", now.Add(-time.Hour))
 	payload, err := New(pool, "https://dash.example").Build(context.Background(), f.ProjectID, now)
 	if err != nil {
 		t.Fatal(err)
@@ -529,6 +587,7 @@ func TestBuildDigestMergedReceiptsAreEventTimeTruth(t *testing.T) {
 		VALUES ($1,$2,77,'merged',$3,$4)`, f.ProjectID, mergedGroupID, "delivery-"+uuid.NewString(), now.Add(-time.Hour)); err != nil {
 		t.Fatal(err)
 	}
+	setPipelineState(t, pool, f.ProjectID, mergedGroupID, "eligible", now.Add(-time.Hour))
 	if err := pool.QueryRow(ctx, `INSERT INTO error_groups
 		(project_id, environment_id, fingerprint, title, kind, status, first_seen, last_seen,
 		 occurrence_count, affected_users_count, pr_created_at, pr_number, pr_url, merged_at)
@@ -588,11 +647,7 @@ func TestBuildReceiptItemsExcludesStaleProblems(t *testing.T) {
 			now.Add(-time.Hour), "https://github.example/pr/1").Scan(&groupID); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := pool.Exec(ctx, `INSERT INTO digest_readiness
-			(incident_id,project_id,status,reason,updated_at)
-			VALUES ($1,$2,'eligible','fix_pr_opened',$3)`, groupID, f.ProjectID, now.Add(-time.Hour)); err != nil {
-			t.Fatal(err)
-		}
+		setPipelineState(t, pool, f.ProjectID, groupID, "eligible", now.Add(-time.Hour))
 		return groupID
 	}
 
@@ -657,24 +712,18 @@ func TestBuildReceiptItemsPriorityWindowCapAndGate(t *testing.T) {
 		if i == 13 {
 			highestID = groupID
 		}
-		if _, err := pool.Exec(ctx, `INSERT INTO digest_readiness
-			(incident_id,project_id,status,reason,updated_at)
-			VALUES ($1,$2,'eligible','fix_pr_opened',$3)`, groupID, f.ProjectID, now.Add(-30*time.Minute)); err != nil {
-			t.Fatal(err)
-		}
+		setPipelineState(t, pool, f.ProjectID, groupID, "eligible", now.Add(-30*time.Minute))
 	}
-	if _, err := pool.Exec(ctx, `WITH group_row AS (
-		INSERT INTO error_groups
+	var heldGroupID string
+	if err := pool.QueryRow(ctx, `INSERT INTO error_groups
 		(project_id,environment_id,fingerprint,title,kind,status,first_seen,last_seen,
 		 occurrence_count,affected_users_count,needs_human_at,reason_code,reason_message,remediation)
 		VALUES ($1,$2,$3,'Held receipt','error','needs_human',$4,$4,1,1,$4,
-		 'no_usable_diagnosis','No usable diagnosis.','Review manually.') RETURNING id,project_id
-	)
-	INSERT INTO digest_readiness (incident_id,project_id,status,reason,updated_at)
-	SELECT id,project_id,'ineligible','no_usable_diagnosis',$4 FROM group_row`,
-		f.ProjectID, f.EnvID, "held-"+uuid.NewString(), now.Add(-20*time.Minute)); err != nil {
+		 'no_usable_diagnosis','No usable diagnosis.','Review manually.') RETURNING id`,
+		f.ProjectID, f.EnvID, "held-"+uuid.NewString(), now.Add(-20*time.Minute)).Scan(&heldGroupID); err != nil {
 		t.Fatal(err)
 	}
+	setPipelineState(t, pool, f.ProjectID, heldGroupID, "ineligible", now.Add(-20*time.Minute))
 
 	payload, err := New(pool, "https://dash.example").Build(ctx, f.ProjectID, now)
 	if err != nil {
@@ -775,13 +824,14 @@ func TestBuildReceiptItemsStatesAndValidatedProse(t *testing.T) {
 		if err := pool.QueryRow(ctx, `INSERT INTO error_groups
 			(project_id,environment_id,fingerprint,title,kind,status,first_seen,last_seen,
 			 occurrence_count,affected_users_count,pr_url,candidate_diff,root_cause,suggested_mitigation,
-			 reason_code,reason_message,remediation,needs_human_at)
+			 reason_code,reason_message,remediation,needs_human_at,pr_created_at)
 			VALUES ($1,$2,$3,$4,'error',$5,$6::timestamptz,$6::timestamptz,$7,1,NULLIF($8,''),NULLIF($9,''),
 			 'Cause at https://customer.example/pay\nwith *detail*.', 'Guard the value.',
 			 CASE WHEN $5::error_group_status='needs_human' THEN 'fix_failed' END,
 			 CASE WHEN $5::error_group_status='needs_human' THEN 'Fix failed.' END,
 			 CASE WHEN $5::error_group_status='needs_human' THEN 'Review the report.' END,
-			 CASE WHEN $5::error_group_status='needs_human' THEN $6::timestamptz END)
+			 CASE WHEN $5::error_group_status='needs_human' THEN $6::timestamptz END,
+			 CASE WHEN $5::error_group_status IN ('pr_created','pr_draft') THEN $6::timestamptz END)
 			RETURNING id`, f.ProjectID, f.EnvID, "state-"+uuid.NewString(),
 			fmt.Sprintf("State %d", i), seed.status, now.Add(-time.Hour), i+1, seed.prURL, candidateDiff,
 		).Scan(&groupID); err != nil {
@@ -790,30 +840,26 @@ func TestBuildReceiptItemsStatesAndValidatedProse(t *testing.T) {
 		wants[groupID] = seed.wantState
 		if seed.decision {
 			if _, err := pool.Exec(ctx, `INSERT INTO diagnosis_decisions
-				(error_group_id,project_id,outcome,decision_reason,diagnosis,model,prompt_version,basis,confidence)
-				VALUES ($1,$2,'not_actionable','test',$3::jsonb,'test','test','external','high')`,
-				groupID, f.ProjectID, `{"evidence":[{"path":"a.ts","detail":"d","symptomLink":"s"}]}`); err != nil {
+				(error_group_id,project_id,outcome,decision_reason,diagnosis,model,prompt_version,basis,confidence,decided_at)
+				VALUES ($1,$2,'not_actionable','test',$3::jsonb,'test','test','external','high',$4)`,
+				groupID, f.ProjectID, `{"evidence":[{"path":"a.ts","detail":"d","symptomLink":"s"}]}`,
+				now.Add(-30*time.Minute)); err != nil {
 				t.Fatal(err)
 			}
 		}
-		if _, err := pool.Exec(ctx, `INSERT INTO digest_readiness
-			(incident_id,project_id,status,reason,updated_at)
-			VALUES ($1,$2,'eligible','validated_cause',$3)`, groupID, f.ProjectID, now.Add(-30*time.Minute)); err != nil {
-			t.Fatal(err)
-		}
+		setPipelineState(t, pool, f.ProjectID, groupID, "eligible", now.Add(-30*time.Minute))
 	}
 	for i := 0; i < 2; i++ {
-		if _, err := pool.Exec(ctx, `WITH group_row AS (
-			INSERT INTO error_groups
+		var heldGroupID string
+		if err := pool.QueryRow(ctx, `INSERT INTO error_groups
 			(project_id,environment_id,fingerprint,title,kind,status,first_seen,last_seen,
 			 occurrence_count,affected_users_count,needs_human_at,reason_code,reason_message,remediation)
 			VALUES ($1,$2,$3,'Held','error','needs_human',$4,$4,1,1,$4,
-			 'no_usable_diagnosis','No diagnosis.','Review manually.') RETURNING id,project_id)
-			INSERT INTO digest_readiness (incident_id,project_id,status,reason,updated_at)
-			SELECT id,project_id,'ineligible','no_usable_diagnosis',$4 FROM group_row`,
-			f.ProjectID, f.EnvID, "held-state-"+uuid.NewString(), now.Add(-time.Hour)); err != nil {
+			 'no_usable_diagnosis','No diagnosis.','Review manually.') RETURNING id`,
+			f.ProjectID, f.EnvID, "held-state-"+uuid.NewString(), now.Add(-time.Hour)).Scan(&heldGroupID); err != nil {
 			t.Fatal(err)
 		}
+		setPipelineState(t, pool, f.ProjectID, heldGroupID, "ineligible", now.Add(-time.Hour))
 	}
 
 	payload, err := New(pool, "https://dash.example").Build(ctx, f.ProjectID, now)

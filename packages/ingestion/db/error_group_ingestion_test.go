@@ -515,8 +515,8 @@ func TestRequeueOnRecurrence_ResolvedGroup(t *testing.T) {
 		Scan(&readinessStatus, &readinessReason); err != nil {
 		t.Fatalf("read readiness: %v", err)
 	}
-	if readinessStatus != "pending" || readinessReason != "reinvestigating" {
-		t.Fatalf("readiness = %s/%s, want pending/reinvestigating", readinessStatus, readinessReason)
+	if readinessStatus != "eligible" || readinessReason != "validated_cause" {
+		t.Fatalf("legacy projection changed on requeue: %s/%s", readinessStatus, readinessReason)
 	}
 
 	// Total jobs for this group: 2 (original + requeue)
@@ -612,19 +612,16 @@ func TestRequeueOnRecurrence_NeedsHumanRetriable(t *testing.T) {
 	if group.CandidateDiff != nil {
 		t.Errorf("group.candidate_diff = %q, want nil (cleared on requeue)", *group.CandidateDiff)
 	}
-	// Requeue upserts the projection row (C4): an absent-row incident (skipped by
-	// the 047 backfill, or a pre-flight failure that wrote no outcome) must enter
-	// the projection as pending/reinvestigating rather than stay permanently
-	// invisible to the eligible-only digest gate. C1's absent-row rendering
-	// policy that the old zero-row pin protected was retired by migration 047.
-	var readinessStatus, readinessReason string
+	// The legacy projection is inert: requeueing an absent-row incident must not
+	// recreate ownership in the retired table.
+	var legacyRows int
 	if err := pool.QueryRow(ctx,
-		`SELECT status, reason FROM digest_readiness WHERE incident_id=$1`, r1.GroupID,
-	).Scan(&readinessStatus, &readinessReason); err != nil {
-		t.Fatalf("read readiness after requeue: %v", err)
+		`SELECT count(*) FROM digest_readiness WHERE incident_id=$1`, r1.GroupID,
+	).Scan(&legacyRows); err != nil {
+		t.Fatalf("count legacy projection rows after requeue: %v", err)
 	}
-	if readinessStatus != "pending" || readinessReason != "reinvestigating" {
-		t.Fatalf("requeued absent-row group readiness = (%q,%q), want (pending,reinvestigating)", readinessStatus, readinessReason)
+	if legacyRows != 0 {
+		t.Fatalf("requeue wrote %d legacy projection rows, want 0", legacyRows)
 	}
 
 	// Occurrence count must be 2

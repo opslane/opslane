@@ -366,7 +366,6 @@ describe('notifications contract (Slack webhook delivery)', () => {
         basis: 'cause_outside_codebase',
         confidence: 'high',
       },
-      readiness: { status: 'eligible', reason: 'validated_cause' },
     });
     const insightRows = (await getPool().query<{ dedup_key: string; payload: unknown }>(
       `SELECT dedup_key, payload FROM outbound_events

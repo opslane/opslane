@@ -649,7 +649,7 @@ describe('processInvestigateJob diagnosis routing', () => {
     expect(db.updateGroupAndCreateFixJob).not.toHaveBeenCalled();
     expect(db.updateGroupInvestigation).toHaveBeenCalledWith(
       'grp-1', 'proj-1', 'investigated', expect.objectContaining({
-        readiness: { status: 'eligible', reason: 'validated_cause' },
+        rootCause: 'Disconnected save handler',
       }), job,
     );
   });
@@ -1063,7 +1063,7 @@ describe('friction worker path', () => {
     expect(db.updateGroupAndCreateFixJob).not.toHaveBeenCalled();
     expect(db.updateGroupInvestigation).toHaveBeenCalledWith(
       'grp-1', 'proj-1', 'awaiting_approval', expect.objectContaining({
-        readiness: { status: 'eligible', reason: 'validated_cause' },
+        rootCause: 'disconnected handler',
       }), job,
     );
   });

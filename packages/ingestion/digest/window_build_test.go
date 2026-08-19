@@ -37,12 +37,7 @@ func TestBuildCoversTheGapLeftByALateRun(t *testing.T) {
 		"https://github.example/pr/gap").Scan(&groupID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pool.Exec(ctx, `INSERT INTO digest_readiness
-		(incident_id,project_id,status,reason,updated_at)
-		VALUES ($1,$2,'eligible','fix_pr_opened',$3)`,
-		groupID, f.ProjectID, now.Add(-28*time.Hour)); err != nil {
-		t.Fatal(err)
-	}
+	setPipelineState(t, pool, f.ProjectID, groupID, "eligible", now.Add(-28*time.Hour))
 
 	payload, err := New(pool, "https://dash.example").Build(ctx, f.ProjectID, now)
 	if err != nil {
