@@ -4,6 +4,7 @@ import { routeClaimsTerminalTool } from '../product-context/schema.js';
 import { routeMapTerminalTool } from '../route-map.js';
 import { submitDiagnosisTool } from '../diagnose-schema.js';
 import { CLASSIFY_TOOL } from '../friction/investigate-friction.js';
+import { inquiryDecisionTerminalTool } from '../inquiry/schema.js';
 
 const apiKey = process.env['ANTHROPIC_API_KEY'];
 
@@ -17,6 +18,7 @@ describe.skipIf(!apiKey)('strict tool schemas are accepted by the Anthropic API'
     routeMapTerminalTool(), // vestigial (route_map jobs run the product-context path) but still declared strict
     submitDiagnosisTool(),
     CLASSIFY_TOOL,
+    inquiryDecisionTerminalTool(),
   ];
 
   for (const tool of tools) {

@@ -297,11 +297,19 @@ export async function loadEvidence(projectId: string, episodeId: string): Promis
 
   const affectedResult = await pool.query<{ affected_units: string | number }>(
     `WITH episode_events AS (
+       -- Same affected-unit definition as the Go filter (evaluate.go): only
+       -- in-scope events count. A divergent count here feeds evaluated_units,
+       -- and the dispatcher's regrowth gate compares it against Go's in-scope
+       -- count, so a superset count silences re-reviews permanently.
        SELECT e.end_user_id, e.session_id
          FROM error_events e
          JOIN error_event_identities i
            ON i.event_id=e.id AND i.project_id=e.project_id
+         JOIN projects p ON p.id=i.project_id
+         LEFT JOIN project_action_environments pae
+           ON pae.project_id=e.project_id AND pae.environment_id=e.environment_id
         WHERE i.project_id=$1 AND i.episode_id=$2
+          AND (NOT p.action_scope_enabled OR pae.environment_id IS NOT NULL)
           AND e.created_at > now() - interval '7 days'
      ), anonymous_sessions AS (
        SELECT session_id FROM episode_events

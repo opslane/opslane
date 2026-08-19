@@ -32,6 +32,7 @@ import {
   MAX_ROUTE_PATTERN_BYTES,
   upsertRouteMapRows,
   upsertProductContextClaims,
+  persistInquiryDecision,
   updateGroupStatus,
   updateGroupInvestigation,
 } from '../db.js';
@@ -309,6 +310,7 @@ describe('claimJob friction scheduling fields', () => {
     // Scheduling policy: error_fix first, capped analysis, lane alternation.
     const claimSql = mockQuery.mock.calls[2][0] as string;
     expect(claimSql).toContain("WHEN job_type = 'error_fix' THEN 0");
+    expect(claimSql).toContain("'issue_inquiry'");
     expect(claimSql).toContain("WHEN job_type IN ('route_map','product_context') THEN 4");
     expect(claimSql.indexOf("WHEN job_type IN ('route_map','product_context') THEN 4"))
       .toBeLessThan(claimSql.indexOf("WHEN job_type <> 'session_analysis' THEN 2"));
@@ -327,6 +329,57 @@ describe('claimJob friction scheduling fields', () => {
     mockQuery.mockResolvedValueOnce({}); // COMMIT
     await claimJob('worker-1', 30_000, 0);
     expect(mockQuery.mock.calls[2][1]).toEqual(['worker-1', 30, 0]);
+  });
+});
+
+describe('persistInquiryDecision', () => {
+  beforeEach(() => mockQuery.mockReset());
+
+  it('lease-fences the append and creates the investigate job from the locked row', async () => {
+    mockQuery.mockResolvedValueOnce({}); // BEGIN
+    mockQuery.mockResolvedValueOnce({ rowCount: 1, rows: [{ error_group_id: 'g1', input_version: 4 }] });
+    mockQuery.mockResolvedValueOnce({ rowCount: 1, rows: [{ decision: 'investigate' }] });
+    mockQuery.mockResolvedValueOnce({ rowCount: 1 }); // investigate job insert
+    mockQuery.mockResolvedValueOnce({ rowCount: 1, rows: [{ '?column?': 1 }] }); // existence check
+    mockQuery.mockResolvedValueOnce({}); // COMMIT
+
+    await expect(persistInquiryDecision({
+      projectId: 'p1', episodeId: 'ep1', jobId: 'j1', workerId: 'worker-1',
+      leaseGeneration: '2', decision: 'investigate', reason: 'failed write', brief: 'check delete',
+      relatedIssues: [], affectedUnits: 3, evidenceSignature: 'sig',
+      productUnderstandingVersion: 1, model: 'test-model', promptVersion: 1,
+    })).resolves.toBe(true);
+
+    expect(String(mockQuery.mock.calls[1]?.[0])).toContain("job_type='issue_inquiry'");
+    const insertSql = String(mockQuery.mock.calls[2]?.[0]);
+    expect(insertSql).toContain('INSERT INTO issue_inquiry_decisions');
+    expect(insertSql).toContain('ON CONFLICT (project_id,episode_id,prompt_version,evidence_signature)');
+    const jobSql = String(mockQuery.mock.calls[3]?.[0]);
+    expect(jobSql).toContain('INSERT INTO error_group_jobs');
+    expect(jobSql).toContain("'investigate','pending'");
+    // The issue and round version come from the locked job row, not the
+    // caller; the inquiry brief rides along as the investigator's guidance.
+    expect(mockQuery.mock.calls[3]?.[1]).toEqual(['g1', 'p1', 'ep1', 4, 'check delete']);
+    expect(mockQuery.mock.calls[5]?.[0]).toBe('COMMIT');
+  });
+
+  it('defers to the stored decision when the append is suppressed', async () => {
+    mockQuery.mockResolvedValueOnce({}); // BEGIN
+    mockQuery.mockResolvedValueOnce({ rowCount: 1, rows: [{ error_group_id: 'g1', input_version: 4 }] });
+    mockQuery.mockResolvedValueOnce({ rowCount: 0, rows: [] }); // suppressed decision insert
+    mockQuery.mockResolvedValueOnce({ rowCount: 1, rows: [{ decision: 'wait_for_more_evidence' }] });
+    mockQuery.mockResolvedValueOnce({}); // COMMIT
+
+    await expect(persistInquiryDecision({
+      projectId: 'p1', episodeId: 'ep1', jobId: 'j1', workerId: 'worker-1',
+      leaseGeneration: '2', decision: 'investigate', reason: 'failed write', brief: 'check delete',
+      relatedIssues: [], affectedUnits: 3, evidenceSignature: 'sig',
+      productUnderstandingVersion: 1, model: 'test-model', promptVersion: 1,
+    })).resolves.toBe(true);
+
+    const sql = mockQuery.mock.calls.map((call) => String(call[0]));
+    expect(sql.some((query) => query.includes('INSERT INTO error_group_jobs'))).toBe(false);
+    expect(mockQuery.mock.calls[4]?.[0]).toBe('COMMIT');
   });
 });
 

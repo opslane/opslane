@@ -76,6 +76,7 @@ Ingestion reads **only** the `REPLAY_STORE_*` names; `MINIO_*` names appear in i
 | `INTERNAL_READ_TOKEN` | for session replay evidence | Shared secret sent to ingestion as `X-Internal-Token` |
 | `ANTHROPIC_API_KEY` | for investigation | Claude API access; missing → `missing_llm_key` outcomes |
 | `INVESTIGATION_MODEL` | no (`claude-sonnet-5`) | Anthropic model used by the codebase-aware diagnosis pass. Unknown model names use the default pricing estimate for budget enforcement. |
+| `INQUIRY_MODEL` | no (`INVESTIGATION_MODEL`, then `claude-sonnet-5`) | Anthropic model used by the read-only inquiry pass that decides whether an admitted issue warrants investigation. |
 | `PRODUCT_CONTEXT_MODEL` | no (`INVESTIGATION_MODEL`, then `claude-sonnet-5`) | Anthropic model used to build grounded route and action understanding after a default-branch push. |
 | `FIX_JUDGE_MODEL` | no (`claude-sonnet-5`) | Anthropic model used by the independent post-verification fix judge. Automated fixes fail closed when this judge does not approve them. |
 | `INVESTIGATION_MAX_TURNS` | no (10) | Maximum tool-use turns allowed for one diagnosis pass. |

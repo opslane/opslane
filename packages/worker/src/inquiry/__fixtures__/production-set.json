@@ -1,0 +1,292 @@
+{
+  "version": 1,
+  "source": "Anonymized production evidence snapshots from the pipeline design audit",
+  "cases": [
+    {
+      "name": "asset-deletion-cluster",
+      "issueType": "failed_product_action",
+      "expected": "investigate",
+      "notes": "Seven fragments, 28 occurrences, nine identified users.",
+      "evidence": {
+        "frames": {
+          "sourceEventId": "10000000-0000-4000-8000-000000000001",
+          "status": "resolved",
+          "resolverVersion": 2,
+          "envelope": {
+            "version": 2,
+            "frames": [{
+              "original_file": "src/features/assets/delete.ts",
+              "original_function": "deleteAssets",
+              "original_line": 84,
+              "generated": { "line": 17, "column": 78242 }
+            }]
+          },
+          "commitSha": "production-snapshot-asset-delete"
+        },
+        "failedRequests": [{
+          "sessionId": "session-asset-delete",
+          "requestIdHash": "request-asset-delete",
+          "pageRoute": "/assets",
+          "method": "DELETE",
+          "endpointPattern": "/api/assets/:id",
+          "status": 500,
+          "actionKind": "click",
+          "actionSelector": "[data-action=delete]",
+          "actionLink": "direct",
+          "occurredAt": "2026-08-15T10:00:00.000Z",
+          "ruleVersion": 1
+        }],
+        "writeRollups": [],
+        "productContext": [{
+          "route": "/assets",
+          "name": "Assets",
+          "purpose": "Manage uploaded assets",
+          "tier": "customer",
+          "actions": ["delete selected assets"],
+          "clientRefs": ["src/features/assets/delete.ts"],
+          "serverRefs": ["server/assets/delete.ts"],
+          "observedRequests": ["DELETE /api/assets/:id"],
+          "audience": "customer",
+          "confidence": 0.96,
+          "commitSha": "production-snapshot-asset-delete",
+          "promptVersion": 1,
+          "model": "production-context-model",
+          "source": "model"
+        }],
+        "replayPointers": [],
+        "availability": { "recording": "available", "sourceMap": "resolved" },
+        "affectedUnits": 9,
+        "relatedCandidates": [
+          { "issueId": "10000000-0000-4000-8000-000000000011", "title": "Error deleting Assets", "route": "/assets" },
+          { "issueId": "10000000-0000-4000-8000-000000000012", "title": "Error deleting Assets", "route": "/assets" },
+          { "issueId": "10000000-0000-4000-8000-000000000013", "title": "Error deleting Assets", "route": "/assets" },
+          { "issueId": "10000000-0000-4000-8000-000000000014", "title": "Error deleting Assets", "route": "/assets" },
+          { "issueId": "10000000-0000-4000-8000-000000000015", "title": "Error deleting Assets", "route": "/assets" },
+          { "issueId": "10000000-0000-4000-8000-000000000016", "title": "Error deleting Assets", "route": "/assets" }
+        ]
+      }
+    },
+    {
+      "name": "assets-dead-click-cards",
+      "issueType": "recovered_interaction",
+      "expected": "do_not_pursue",
+      "notes": "Four digest cards for interactions on the shared Assets select control.",
+      "evidence": {
+        "frames": {
+          "sourceEventId": "20000000-0000-4000-8000-000000000001",
+          "status": "missing",
+          "resolverVersion": null,
+          "envelope": null,
+          "commitSha": "production-snapshot-assets-select"
+        },
+        "failedRequests": [],
+        "writeRollups": [{
+          "sessionId": "session-assets-select",
+          "pageRoute": "/assets",
+          "method": "GET",
+          "endpointPattern": "/api/assets",
+          "statusClass": 200,
+          "occurrenceCount": 4,
+          "ruleVersion": 1
+        }],
+        "productContext": [{
+          "route": "/assets",
+          "name": "Assets",
+          "purpose": "Browse and filter uploaded assets",
+          "tier": "customer",
+          "actions": ["open filter", "select an option"],
+          "clientRefs": ["src/components/AssetSelect.vue"],
+          "serverRefs": [],
+          "observedRequests": ["GET /api/assets"],
+          "audience": "customer",
+          "confidence": 0.91,
+          "commitSha": "production-snapshot-assets-select",
+          "promptVersion": 1,
+          "model": "production-context-model",
+          "source": "model"
+        }],
+        "replayPointers": [],
+        "availability": { "recording": "available", "sourceMap": "missing" },
+        "affectedUnits": 4,
+        "relatedCandidates": [
+          { "issueId": "20000000-0000-4000-8000-000000000011", "title": "Dead click on asset type", "route": "/assets" },
+          { "issueId": "20000000-0000-4000-8000-000000000012", "title": "Dead click on owner select", "route": "/assets" },
+          { "issueId": "20000000-0000-4000-8000-000000000013", "title": "Dead click on status select", "route": "/assets" }
+        ]
+      }
+    },
+    {
+      "name": "stale-release-assets",
+      "issueType": "release_delivery",
+      "expected": "investigate",
+      "notes": "577 occurrences and 42 identified users receiving stale release assets.",
+      "evidence": {
+        "frames": {
+          "sourceEventId": "30000000-0000-4000-8000-000000000001",
+          "status": "no_map",
+          "resolverVersion": 2,
+          "envelope": null,
+          "commitSha": "production-snapshot-stale-assets"
+        },
+        "failedRequests": [{
+          "sessionId": "session-stale-release",
+          "requestIdHash": "request-stale-release",
+          "pageRoute": "/app",
+          "method": "GET",
+          "endpointPattern": "/assets/entry-index.<hash>.js",
+          "status": 404,
+          "actionKind": null,
+          "actionSelector": null,
+          "actionLink": "none",
+          "occurredAt": "2026-08-15T11:00:00.000Z",
+          "ruleVersion": 1
+        }],
+        "writeRollups": [],
+        "productContext": [{
+          "route": "/app",
+          "name": "Application shell",
+          "purpose": "Load the signed-in application",
+          "tier": "customer",
+          "actions": [],
+          "clientRefs": ["src/main.ts"],
+          "serverRefs": [],
+          "observedRequests": ["GET /assets/entry-index.<hash>.js"],
+          "audience": "customer",
+          "confidence": 0.88,
+          "commitSha": "production-snapshot-stale-assets",
+          "promptVersion": 1,
+          "model": "production-context-model",
+          "source": "model"
+        }],
+        "replayPointers": [],
+        "availability": { "recording": "available", "sourceMap": "no_map" },
+        "affectedUnits": 42,
+        "relatedCandidates": []
+      }
+    },
+    {
+      "name": "browser-extension-noise",
+      "issueType": "third_party_noise",
+      "expected": "do_not_pursue",
+      "notes": "An extension-owned stack with no product-code or request evidence.",
+      "evidence": {
+        "frames": {
+          "sourceEventId": "40000000-0000-4000-8000-000000000001",
+          "status": "resolved",
+          "resolverVersion": 2,
+          "envelope": {
+            "version": 2,
+            "frames": [{
+              "original_file": "chrome-extension://extension/content.js",
+              "original_function": "inject",
+              "original_line": 19,
+              "generated": { "line": 1, "column": 444 }
+            }]
+          },
+          "commitSha": null
+        },
+        "failedRequests": [],
+        "writeRollups": [],
+        "productContext": [],
+        "replayPointers": [],
+        "availability": { "recording": "expired", "sourceMap": "resolved" },
+        "affectedUnits": 3,
+        "relatedCandidates": []
+      }
+    },
+    {
+      "name": "one-user-errors",
+      "issueType": "low_reach_error",
+      "expected": "wait_for_more_evidence",
+      "notes": "A prior one-user error retained as an inquiry-control case.",
+      "evidence": {
+        "frames": {
+          "sourceEventId": "50000000-0000-4000-8000-000000000001",
+          "status": "resolved",
+          "resolverVersion": 2,
+          "envelope": {
+            "version": 2,
+            "frames": [{
+              "original_file": "src/pages/Settings.tsx",
+              "original_function": "loadSettings",
+              "original_line": 42,
+              "generated": { "line": 8, "column": 120 }
+            }]
+          },
+          "commitSha": "production-snapshot-one-user"
+        },
+        "failedRequests": [],
+        "writeRollups": [],
+        "productContext": [{
+          "route": "/settings",
+          "name": "Settings",
+          "purpose": "Manage account settings",
+          "tier": "customer",
+          "actions": ["load settings"],
+          "clientRefs": ["src/pages/Settings.tsx"],
+          "serverRefs": [],
+          "observedRequests": [],
+          "audience": "customer",
+          "confidence": 0.8,
+          "commitSha": "production-snapshot-one-user",
+          "promptVersion": 1,
+          "model": "production-context-model",
+          "source": "model"
+        }],
+        "replayPointers": [],
+        "availability": { "recording": "missing", "sourceMap": "resolved" },
+        "affectedUnits": 1,
+        "relatedCandidates": []
+      }
+    },
+    {
+      "name": "previous-needs-more-context",
+      "issueType": "prior_inconclusive_investigation",
+      "expected": "investigate",
+      "notes": "A qualified issue whose earlier full investigation ended needs_more_context.",
+      "evidence": {
+        "frames": {
+          "sourceEventId": "60000000-0000-4000-8000-000000000001",
+          "status": "failed",
+          "resolverVersion": 2,
+          "envelope": null,
+          "commitSha": "production-snapshot-inconclusive"
+        },
+        "failedRequests": [{
+          "sessionId": "session-inconclusive",
+          "requestIdHash": "request-inconclusive",
+          "pageRoute": "/imports",
+          "method": "POST",
+          "endpointPattern": "/api/imports",
+          "status": 502,
+          "actionKind": "form_submit",
+          "actionSelector": "form[data-import]",
+          "actionLink": "direct",
+          "occurredAt": "2026-08-15T12:00:00.000Z",
+          "ruleVersion": 1
+        }],
+        "writeRollups": [],
+        "productContext": [{
+          "route": "/imports",
+          "name": "Imports",
+          "purpose": "Upload and process customer data",
+          "tier": "customer",
+          "actions": ["submit import"],
+          "clientRefs": ["src/pages/Imports.tsx"],
+          "serverRefs": ["server/imports.ts"],
+          "observedRequests": ["POST /api/imports"],
+          "audience": "customer",
+          "confidence": 0.9,
+          "commitSha": "production-snapshot-inconclusive",
+          "promptVersion": 1,
+          "model": "production-context-model",
+          "source": "model"
+        }],
+        "replayPointers": [],
+        "availability": { "recording": "partial", "sourceMap": "failed" },
+        "affectedUnits": 3,
+        "relatedCandidates": []
+      }
+    }
+  ]
+}
