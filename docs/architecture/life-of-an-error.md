@@ -24,7 +24,7 @@ The worker polls Postgres and claims jobs with `FOR UPDATE SKIP LOCKED` under a 
 
 ## 4. Triage
 
-A fast model call classifies the error: fixable in application code, or not? High-confidence *unfixable* verdicts short-circuit immediately into `needs_human` with a specific reason — `unfixable_third_party`, `unfixable_infra`, `unfixable_test_error`, `unfixable_no_app_frames`, or `unfixable_no_sourcemap` — each with remediation text ([full catalog](../reference/reason-codes.md)). Fixable errors are checked against the impact bar: at least one identified user or three recent anonymous sessions qualifies for automated fixing; below that threshold the diagnosis parks at `investigated` for human review.
+A fast model call classifies the error: fixable in application code, or not? High-confidence *unfixable* verdicts short-circuit immediately into `needs_human` with a specific reason — `unfixable_third_party`, `unfixable_infra`, `unfixable_test_error`, `unfixable_no_app_frames`, or `unfixable_no_sourcemap` — each with remediation text ([full catalog](../reference/reason-codes.md)).
 
 ## 5. Investigate and fix
 
@@ -34,7 +34,7 @@ For fixable errors, the worker clones the repository (GitHub token or App instal
 
 Investigation and fixing are separate stages:
 
-- **Investigation stage.** Errors above the impact bar proceed straight to the fix stage. Below-threshold investigations stop here: the **root-cause analysis** is persisted as **`investigated`** (no fix has been generated yet), waiting for a human to read it and trigger the fix from the dashboard.
+- **Investigation stage.** Some investigations proceed to the fix stage; others stop here with the **root-cause analysis** persisted as **`investigated`** (no fix has been generated yet), waiting for a human to read it and trigger the fix from the dashboard.
 - **Fix stage** (automatic for above-threshold, human-triggered from `investigated`). The agent writes a fix and declares a failing regression test; fail-first verification runs the test on the base commit (must fail with the declared assertion) and with the fix (must pass). An independent judge reviews the diff, declared test, and verification ledger; the judge may probe the sandbox (up to three commands) and can veto but cannot override mechanical predicates. A `reproduced` fix (red-then-green proof, clean suite, build passed) approved by the judge becomes a draft pull request (`pr_draft`). The exact head SHA is observed in repository CI and promoted to ready on green for human-triggered fixes; automated fixes remain draft. A `checked` fix (reproduction impossible, suite and build clean, quality confirmed) or judge veto preserves the bounded candidate diff and evidence on `needs_human` for manual review.
 - **Anything the worker cannot progress** at either stage → **`needs_human`** with `reason_code`, `reason_message`, and `remediation` — always all three.
 
