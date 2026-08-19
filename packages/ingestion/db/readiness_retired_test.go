@@ -10,7 +10,10 @@ import (
 )
 
 func TestNoRuntimeReferenceToDigestReadiness(t *testing.T) {
-	roots := []string{"../", "../../worker/src"}
+	// scripts/ holds operator SQL that runs against production; a script keyed
+	// on the frozen table acts on permanently stale rows, so it counts as a
+	// runtime reference even though nothing imports it.
+	roots := []string{"../", "../../worker/src", "../../../scripts"}
 	var offenders []string
 	for _, root := range roots {
 		err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
@@ -20,7 +23,7 @@ func TestNoRuntimeReferenceToDigestReadiness(t *testing.T) {
 			if strings.Contains(path, "/migrations/") || strings.HasSuffix(path, "_test.go") || strings.HasSuffix(path, ".test.ts") {
 				return nil
 			}
-			if ext := filepath.Ext(path); ext != ".go" && ext != ".ts" {
+			if ext := filepath.Ext(path); ext != ".go" && ext != ".ts" && ext != ".sql" {
 				return nil
 			}
 			body, readErr := os.ReadFile(path)

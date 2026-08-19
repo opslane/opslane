@@ -118,10 +118,29 @@ describe('daily digest contract (Slack webhook delivery)', () => {
         }),
       ],
     );
+    // Digest eligibility derives from the latest factual and inquiry
+    // decisions on the issue's newest episode (Slice 7B); digest_readiness is
+    // retired and ignored.
+    const { rows: episodeRows } = await db.query(
+      `INSERT INTO issue_episodes (project_id, canonical_issue_id, sequence)
+       VALUES ($1, $2, 1)
+       RETURNING id`,
+      [tenant.projectId, frictionGroupId],
+    );
+    const episodeId = episodeRows[0].id;
     await db.query(
-      `INSERT INTO digest_readiness (incident_id, project_id, status, reason, updated_at)
-       VALUES ($1, $2, 'eligible', 'validated_cause', now() - interval '30 minutes')`,
-      [frictionGroupId, tenant.projectId],
+      `INSERT INTO issue_decisions
+         (project_id, episode_id, decision, reason, users_7d, anon_7d, rule_version)
+       VALUES ($1, $2, 'open_inquiry', 'digest contract fixture', 2, 0, 1)`,
+      [tenant.projectId, episodeId],
+    );
+    await db.query(
+      `INSERT INTO issue_inquiry_decisions
+         (project_id, episode_id, decision, reason, evaluated_units,
+          evidence_signature, model, prompt_version)
+       VALUES ($1, $2, 'investigate', 'digest contract fixture', 2,
+               'digest-contract-fixture', 'fixture', 1)`,
+      [tenant.projectId, episodeId],
     );
 
     await db.query(

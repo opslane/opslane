@@ -23,19 +23,22 @@ func FreezeAnchors(ctx context.Context, tx pgx.Tx, projectID, episodeID string) 
 		    LEFT JOIN project_action_environments pae
 		      ON pae.project_id=e.project_id AND pae.environment_id=e.environment_id
 		   WHERE i.project_id=$1 AND i.episode_id=$2 AND i.status='settled'
-		), recent_scoped AS (
-		  SELECT * FROM episode_events
-		   WHERE in_scope AND created_at > now()-interval '7 days'
+		), scoped AS (
+		  SELECT * FROM episode_events WHERE in_scope
 		), unit_events AS (
+		  -- No recency window here: admission already judged reach when the
+		  -- decision was recorded. Re-judging it at freeze time made a delayed
+		  -- freeze fail forever once the admitting evidence aged past seven
+		  -- days, retrying every tick with no way out.
 		  SELECT e.id,e.created_at,
 		         CASE
 		           WHEN e.end_user_id IS NOT NULL THEN 'user:' || e.end_user_id::text
 		           WHEN e.session_id IS NOT NULL AND NOT EXISTS (
-		             SELECT 1 FROM recent_scoped known
+		             SELECT 1 FROM scoped known
 		              WHERE known.session_id=e.session_id AND known.end_user_id IS NOT NULL
 		           ) THEN 'session:' || e.session_id
 		         END AS unit_key
-		    FROM recent_scoped e
+		    FROM scoped e
 		), unit_firsts AS (
 		  SELECT DISTINCT ON (unit_key) id,created_at,unit_key
 		    FROM unit_events WHERE unit_key IS NOT NULL

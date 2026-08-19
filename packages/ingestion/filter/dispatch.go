@@ -14,6 +14,11 @@ import (
 // ASCII "filter". This differs from every other background sweeper lock.
 const sweepAdvisoryLockKey int64 = 0x66696c746572
 
+// sweepBatchLimit bounds one tick's work so a fleet-wide backlog (a rule
+// version bump marks every open episode stale at once) drains across ticks
+// instead of holding the advisory lock for one unbounded serial pass.
+const sweepBatchLimit = 500
+
 type Dispatcher struct {
 	pool      *pgxpool.Pool
 	projectID string
@@ -60,6 +65,9 @@ func (d *Dispatcher) Tick(ctx context.Context) (evaluated, enqueued int, err err
 		return 0, 0, err
 	}
 	for _, episode := range episodes {
+		if ctx.Err() != nil {
+			return evaluated, 0, ctx.Err()
+		}
 		if _, err := Evaluate(ctx, d.pool, episode.projectID, episode.episodeID); err != nil {
 			slog.Error("filter evaluation failed",
 				"project_id", episode.projectID, "episode_id", episode.episodeID, "error", err)
@@ -73,6 +81,9 @@ func (d *Dispatcher) Tick(ctx context.Context) (evaluated, enqueued int, err err
 		return evaluated, 0, err
 	}
 	for _, episode := range admitted {
+		if ctx.Err() != nil {
+			return evaluated, enqueued, ctx.Err()
+		}
 		inserted, err := d.admitOne(ctx, episode.projectID, episode.episodeID)
 		if err != nil {
 			slog.Error("filter admission failed",
@@ -114,14 +125,20 @@ func (d *Dispatcher) staleEpisodes(ctx context.Context) ([]episodeRef, error) {
 		   AND (
 		     latest.decision IS NULL
 		     OR latest.rule_version < $2
-		     OR latest.decided_at < now()-interval '7 days'
+		     -- Liveness flip only: a quiet watch/open_inquiry must eventually
+		     -- turn inactive, but once it has, only new evidence (the EXISTS
+		     -- below) re-evaluates it. Without the decision guard every quiet
+		     -- episode is re-locked on every tick forever, because unchanged
+		     -- outcomes append nothing and decided_at never advances.
+		     OR (latest.decided_at < now()-interval '7 days' AND latest.decision <> 'inactive')
 		     OR EXISTS (
 		       SELECT 1 FROM error_event_identities i
 		        WHERE i.project_id=ep.project_id AND i.episode_id=ep.id
 		          AND i.status='settled' AND i.settled_at > latest.decided_at
 		     )
 		   )
-		 ORDER BY ep.opened_at,ep.id`, d.projectID, RuleVersion)
+		 ORDER BY ep.opened_at,ep.id
+		 LIMIT $3`, d.projectID, RuleVersion, sweepBatchLimit)
 	if err != nil {
 		return nil, fmt.Errorf("list stale filter episodes: %w", err)
 	}
@@ -157,7 +174,8 @@ func (d *Dispatcher) admittedWithoutInquiry(ctx context.Context) ([]episodeRef, 
 		      WHERE j.project_id=ep.project_id AND j.episode_id=ep.id
 		        AND j.job_type='issue_inquiry'
 		   )
-		 ORDER BY ep.opened_at,ep.id`, d.projectID)
+		 ORDER BY ep.opened_at,ep.id
+		 LIMIT $2`, d.projectID, sweepBatchLimit)
 	if err != nil {
 		return nil, fmt.Errorf("list admitted filter episodes: %w", err)
 	}
