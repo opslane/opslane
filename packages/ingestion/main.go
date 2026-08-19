@@ -14,6 +14,7 @@ import (
 	"github.com/opslane/opslane/packages/ingestion/auth"
 	"github.com/opslane/opslane/packages/ingestion/db"
 	"github.com/opslane/opslane/packages/ingestion/digest"
+	"github.com/opslane/opslane/packages/ingestion/filter"
 	"github.com/opslane/opslane/packages/ingestion/handler"
 	"github.com/opslane/opslane/packages/ingestion/identity"
 	minioPkg "github.com/opslane/opslane/packages/ingestion/minio"
@@ -245,6 +246,15 @@ func main() {
 	}
 	go identity.NewLoop(pool).Start(ctx, identityInterval)
 	slog.Info("identity settlement loop started", "interval", identityInterval.String())
+
+	filterInterval := 30 * time.Second
+	if v := os.Getenv("FILTER_SWEEP_INTERVAL_SECONDS"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil && parsed > 0 {
+			filterInterval = time.Duration(parsed) * time.Second
+		}
+	}
+	go filter.NewDispatcher(pool).Start(ctx, filterInterval)
+	slog.Info("issue filter sweep started", "interval", filterInterval.String())
 
 	prioritySweeper := &priority.Sweeper{Pool: pool}
 	priorityInterval := 30 * time.Minute

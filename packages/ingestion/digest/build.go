@@ -24,8 +24,6 @@ var (
 	// failures can never consume LIMIT slots and starve renderable receipts.
 	receiptItemsFromClause = `
 		  FROM error_groups g
-		  JOIN digest_readiness dr
-		    ON dr.incident_id = g.id AND dr.project_id = g.project_id
 		 CROSS JOIN LATERAL (
 		    SELECT EXISTS (
 		      SELECT 1 FROM (
@@ -48,7 +46,10 @@ var (
 		        AND (latest.outcome <> 'code_fix'
 		             OR (NULLIF(btrim(latest.diagnosis->>'agentTaskBrief'), '') IS NOT NULL
 		                 AND latest.diagnosis->>'agentTaskBrief' !~* '^\s*(placeholder|tbd|to be determined)\M'))
-		    ) AS has_validated_diagnosis
+		    ) AS has_validated_diagnosis,
+		    (SELECT dd.decided_at FROM diagnosis_decisions dd
+		      WHERE dd.error_group_id=g.id AND dd.project_id=g.project_id
+		      ORDER BY dd.decided_at DESC,dd.id DESC LIMIT 1) AS diagnosis_decided_at
 		  ) d
 		 CROSS JOIN LATERAL (
 		    SELECT (COALESCE(g.root_cause, '') !~* '^\s*(placeholder|tbd|to be determined)\M')
@@ -60,8 +61,17 @@ var (
 		           END AS publishable
 		  ) pub
 		 WHERE g.project_id = $1
-		   AND dr.status = 'eligible'
-		   AND dr.updated_at >= $2 AND dr.updated_at < $3
+		   AND ` + pipelineEligibleSQL("g") + `
+		   AND (CASE
+		          WHEN g.status IN ('pr_created','pr_draft') THEN g.pr_created_at
+		          WHEN g.status='needs_human' THEN g.needs_human_at
+		          ELSE d.diagnosis_decided_at
+		        END) >= $2
+		   AND (CASE
+		          WHEN g.status IN ('pr_created','pr_draft') THEN g.pr_created_at
+		          WHEN g.status='needs_human' THEN g.needs_human_at
+		          ELSE d.diagnosis_decided_at
+		        END) < $3
 		   AND g.last_seen >= $4
 		   AND g.status IN ('pr_created','pr_draft','needs_human','investigated','insight','awaiting_approval')`
 
@@ -81,6 +91,28 @@ var (
 		 ORDER BY COALESCE(g.priority_score, 0) DESC, g.last_seen DESC, g.id DESC
 		 LIMIT %d`, receiptCap*2)
 )
+
+// pipelineEligibleSQL derives the temporary legacy renderer gate from the
+// latest factual and inquiry decisions. Slice 10 replaces this renderer with
+// frozen digest runs.
+func pipelineEligibleSQL(groupAlias string) string {
+	return fmt.Sprintf(`EXISTS (
+		SELECT 1 FROM issue_episodes ep
+		 WHERE ep.project_id=%[1]s.project_id
+		   AND ep.canonical_issue_id=%[1]s.id
+		   AND ep.sequence=(
+		     SELECT max(ep2.sequence) FROM issue_episodes ep2
+		      WHERE ep2.project_id=%[1]s.project_id
+		        AND ep2.canonical_issue_id=%[1]s.id
+		   )
+		   AND (SELECT d.decision FROM issue_decisions d
+		         WHERE d.project_id=ep.project_id AND d.episode_id=ep.id
+		         ORDER BY d.decided_at DESC,d.id DESC LIMIT 1)='open_inquiry'
+		   AND (SELECT d.decision FROM issue_inquiry_decisions d
+		         WHERE d.project_id=ep.project_id AND d.episode_id=ep.id
+		         ORDER BY d.decided_at DESC,d.id DESC LIMIT 1)='investigate'
+	)`, groupAlias)
+}
 
 func (s *Sweeper) Build(ctx context.Context, projectID string, now time.Time) (notify.EventPayload, error) {
 	var projectName, timezone string
@@ -296,16 +328,15 @@ func (s *Sweeper) buildReceiptItems(ctx context.Context, projectID string, from,
 func (s *Sweeper) buildTriageAndHeldBack(ctx context.Context, projectID string) (*notify.DigestTriageCounts, int, error) {
 	counts := &notify.DigestTriageCounts{}
 	var heldBack int
+	eligible := pipelineEligibleSQL("g")
 	err := s.pool.QueryRow(ctx, `
 		SELECT
 		  count(*) FILTER (WHERE g.status IN ('pr_created','pr_draft')),
 		  count(*) FILTER (WHERE g.status = 'needs_human'
-		    OR (g.status IN ('investigated','awaiting_approval') AND dr.status = 'eligible')),
+		    OR (g.status IN ('investigated','awaiting_approval') AND `+eligible+`)),
 		  count(*) FILTER (WHERE g.status IN ('needs_human','investigated','insight')
-		    AND dr.status IS DISTINCT FROM 'eligible')
+		    AND NOT (`+eligible+`))
 		FROM error_groups g
-		LEFT JOIN digest_readiness dr
-		  ON dr.incident_id = g.id AND dr.project_id = g.project_id
 		WHERE g.project_id = $1
 		  AND g.status NOT IN ('resolved','merged','archived')`, projectID).Scan(
 		&counts.PRsAwaitingReview, &counts.NeedsDecision, &heldBack,
@@ -326,10 +357,7 @@ func (s *Sweeper) buildInsights(ctx context.Context, projectID string, from, to 
 		WHERE fs.project_id = $1 AND fs.occurred_at >= $2 AND fs.occurred_at < $3
 		  AND fs.retracted_at IS NULL AND fs.superseded_by IS NULL
 		  AND g.status = 'insight'
-		  AND EXISTS (
-		    SELECT 1 FROM digest_readiness dr
-		    WHERE dr.incident_id = g.id AND dr.project_id = g.project_id AND dr.status = 'eligible'
-		  )
+		  AND `+pipelineEligibleSQL("g")+`
 		GROUP BY g.id
 		ORDER BY COUNT(DISTINCT fs.end_user_id) DESC, g.id
 		LIMIT $4`, projectID, from, to, listCap+1)
@@ -428,10 +456,7 @@ func (s *Sweeper) buildTopNewIssues(ctx context.Context, projectID string, from,
 		  AND (g.pr_created_at IS NULL OR g.pr_created_at < $2 OR g.pr_created_at >= $3)
 		  AND (g.needs_human_at IS NULL OR g.needs_human_at < $2 OR g.needs_human_at >= $3)
 		  AND (g.merged_at IS NULL OR g.merged_at < $2 OR g.merged_at >= $3)
-		  AND EXISTS (
-		    SELECT 1 FROM digest_readiness dr
-		    WHERE dr.incident_id = g.id AND dr.project_id = g.project_id AND dr.status = 'eligible'
-		  )
+		  AND `+pipelineEligibleSQL("g")+`
 		ORDER BY (g.affected_users_count::bigint * g.occurrence_count::bigint) DESC, g.id
 		LIMIT $4`, projectID, from, to, listCap+1)
 	if err != nil {
@@ -477,10 +502,7 @@ func (s *Sweeper) buildPRsOpened(ctx context.Context, projectID string, from, to
 		                AND po.outcome = 'merged')
 		FROM error_groups g
 		WHERE g.project_id = $1 AND g.pr_created_at >= $2 AND g.pr_created_at < $3
-		  AND EXISTS (
-		    SELECT 1 FROM digest_readiness dr
-		    WHERE dr.incident_id = g.id AND dr.project_id = g.project_id AND dr.status = 'eligible'
-		  )
+		  AND `+pipelineEligibleSQL("g")+`
 		ORDER BY g.pr_created_at DESC
 		LIMIT $4`, projectID, from, to, listCap+1)
 	if err != nil {
@@ -512,15 +534,7 @@ func (s *Sweeper) buildPRsMerged(ctx context.Context, projectID string, from, to
 		WHERE po.project_id = $1 AND po.outcome = 'merged'
 		  AND po.occurred_at >= $2 AND po.occurred_at < $3
 		  AND (g.pr_created_at IS NULL OR g.pr_created_at < $2)
-		  -- C1's interim predicate, kept deliberately (plan Deviation 3): merged
-		  -- groups were skipped by the 047 backfill, but a readiness row written
-		  -- while the incident was still open survives the merge — nothing deletes
-		  -- projection rows — so ineligible/pending rows are still excluded here.
-		  AND NOT EXISTS (
-		    SELECT 1 FROM digest_readiness dr
-		    WHERE dr.incident_id = g.id AND dr.project_id = g.project_id
-		      AND dr.status IN ('ineligible', 'pending')
-		  )
+		  AND `+pipelineEligibleSQL("g")+`
 		ORDER BY po.occurred_at DESC
 		LIMIT $4`, projectID, from, to, listCap+1)
 	if err != nil {
@@ -547,10 +561,7 @@ func (s *Sweeper) buildNeedsHuman(ctx context.Context, projectID string, from, t
 		SELECT g.id, g.title, COALESCE(g.reason_message,'')
 		FROM error_groups g
 		WHERE g.project_id = $1 AND g.needs_human_at >= $2 AND g.needs_human_at < $3
-		  AND EXISTS (
-		    SELECT 1 FROM digest_readiness dr
-		    WHERE dr.incident_id = g.id AND dr.project_id = g.project_id AND dr.status = 'eligible'
-		  )
+		  AND `+pipelineEligibleSQL("g")+`
 		ORDER BY g.needs_human_at DESC
 		LIMIT $4`, projectID, from, to, listCap+1)
 	if err != nil {

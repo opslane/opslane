@@ -69,8 +69,6 @@ describe('group lifecycle timestamp queries', () => {
       terminalFixJobId: 'job-human',
     });
 
-    // A needs_human transition also demotes a pending readiness row in a
-    // follow-up query; assert the timestamp CASEs on the group updates only.
     const groupUpdates = mockQuery.mock.calls.filter(
       (call) => String(call[0]).includes('UPDATE error_groups'),
     );
@@ -86,11 +84,6 @@ describe('group lifecycle timestamp queries', () => {
     }
     expect(groupUpdates[0]?.[1]?.[2]).toBe('pr_created');
     expect(groupUpdates[1]?.[1]?.[2]).toBe('needs_human');
-    const demotion = mockQuery.mock.calls.find(
-      (call) => String(call[0]).includes('UPDATE digest_readiness'),
-    );
-    expect(String(demotion?.[0])).toContain("status = 'pending'");
-    expect(demotion?.[1]?.[2]).toBe('missing_llm_key');
   });
 
   it('stamps needs-human investigation results without clearing lifecycle timestamps', async () => {
@@ -128,8 +121,6 @@ describe('group lifecycle timestamp queries', () => {
       evidence: { version: 1, tier: 'E0', checks: [] },
       terminalFixJobId: 'job-human',
     });
-    // The last call is the pending-readiness demotion; the group update is the
-    // one carrying the diff and evidence.
     const groupUpdate = mockQuery.mock.calls.find(
       (call) => String(call[0]).includes('UPDATE error_groups'),
     ) as [string, unknown[]];

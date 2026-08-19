@@ -1,7 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { purgeDiagnosisDecisions } from './purge-diagnosis-decisions.js';
 import { purgeFixRunLedger } from './purge-fix-run-ledger.js';
-import { readFileSync } from 'node:fs';
 import pg from 'pg';
 import {
   claimJob,
@@ -729,70 +728,7 @@ describeDb('db.ts integration tests', () => {
     });
   });
 
-  describe('digest readiness projection', () => {
-    it('moves the readiness clock only when status or reason changes', async () => {
-      const seeded = await seedErrorGroupAndJob();
-      await updateGroupInvestigation(seeded.errorGroupId, testProjectId, 'insight', {
-        rootCause: 'validated cause',
-        readiness: { status: 'eligible', reason: 'validated_cause' },
-      });
-      const oldClock = (await testPool.query<{ updated_at: Date }>(
-        `UPDATE digest_readiness SET updated_at = now() - interval '1 hour'
-         WHERE incident_id = $1 RETURNING updated_at`,
-        [seeded.errorGroupId],
-      )).rows[0]!.updated_at;
-
-      await updateGroupInvestigation(seeded.errorGroupId, testProjectId, 'insight', {
-        rootCause: 'validated cause',
-        readiness: { status: 'eligible', reason: 'validated_cause' },
-      });
-      const unchanged = (await testPool.query<{ updated_at: Date }>(
-        `SELECT updated_at FROM digest_readiness WHERE incident_id = $1`,
-        [seeded.errorGroupId],
-      )).rows[0]!.updated_at;
-      expect(unchanged.getTime()).toBe(oldClock.getTime());
-
-      await updateGroupInvestigation(seeded.errorGroupId, testProjectId, 'insight', {
-        rootCause: 'validated cause',
-        readiness: { status: 'eligible', reason: 'fix_pr_opened' },
-      });
-      const changed = (await testPool.query<{ updated_at: Date }>(
-        `SELECT updated_at FROM digest_readiness WHERE incident_id = $1`,
-        [seeded.errorGroupId],
-      )).rows[0]!.updated_at;
-      expect(changed.getTime()).toBeGreaterThan(oldClock.getTime());
-      expect(Date.now() - changed.getTime()).toBeLessThan(10_000);
-    });
-
-    it('upserts readiness in the same investigation write and leaves legacy rows absent', async () => {
-      const first = await seedErrorGroupAndJob();
-      await updateGroupInvestigation(first.errorGroupId, testProjectId, 'insight', {
-        rootCause: 'validated cause',
-        readiness: { status: 'ineligible', reason: 'filler_verdict: rejected' },
-      });
-      expect((await testPool.query(
-        `SELECT status, reason FROM digest_readiness WHERE incident_id = $1`,
-        [first.errorGroupId],
-      )).rows[0]).toEqual({ status: 'ineligible', reason: 'filler_verdict: rejected' });
-
-      await updateGroupInvestigation(first.errorGroupId, testProjectId, 'insight', {
-        rootCause: 'validated cause',
-        readiness: { status: 'eligible', reason: 'validated_cause' },
-      });
-      expect((await testPool.query(
-        `SELECT status, reason FROM digest_readiness WHERE incident_id = $1`,
-        [first.errorGroupId],
-      )).rows[0]).toEqual({ status: 'eligible', reason: 'validated_cause' });
-
-      const legacy = await seedErrorGroupAndJob();
-      await updateGroupInvestigation(legacy.errorGroupId, testProjectId, 'insight', {
-        rootCause: 'legacy cause',
-      });
-      expect((await testPool.query(
-        `SELECT count(*)::int AS n FROM digest_readiness WHERE incident_id = $1`,
-        [legacy.errorGroupId],
-      )).rows[0]!.n).toBe(0);
-    });
+  describe('investigation handoff decisions', () => {
 
     it('refuses report-only fix creation before mutating the group', async () => {
       const seeded = await seedErrorGroupAndJob();
@@ -843,7 +779,6 @@ describeDb('db.ts integration tests', () => {
             policyEligible: true,
             policyBasis: { v: 1, identified_users: 1, recent_anon_sessions: 0 },
           },
-          readiness: { status: 'eligible', reason: 'validated_cause' },
         },
         claim!,
       );
@@ -860,132 +795,6 @@ describeDb('db.ts integration tests', () => {
       )).toMatchObject({ policyEligible: true });
     });
 
-    it('reinvestigation script is idempotent over success and retries failures', async () => {
-      const seeded = await seedErrorGroupAndJob();
-      await testPool.query(
-        `INSERT INTO digest_readiness (incident_id, project_id, status, reason)
-         VALUES ($1, $2, 'ineligible', 'quarantined_degenerate')`,
-        [seeded.errorGroupId, testProjectId],
-      );
-      const script = readFileSync(
-        new URL('../../../../scripts/reinvestigate-quarantined.sql', import.meta.url),
-        'utf8',
-      );
-      const countJobs = async (): Promise<number> => Number((await testPool.query(
-        `SELECT count(*) AS n FROM error_group_jobs
-         WHERE error_group_id = $1 AND triggered_by = 'reinvestigate_report_only'`,
-        [seeded.errorGroupId],
-      )).rows[0]!.n);
-
-      await testPool.query(script);
-      expect(await countJobs()).toBe(1);
-
-      await testPool.query(
-        `UPDATE error_group_jobs SET status = 'completed'
-         WHERE error_group_id = $1 AND triggered_by = 'reinvestigate_report_only'`,
-        [seeded.errorGroupId],
-      );
-      await testPool.query(script);
-      expect(await countJobs()).toBe(1);
-
-      await testPool.query(
-        `UPDATE error_group_jobs SET status = 'failed'
-         WHERE error_group_id = $1 AND triggered_by = 'reinvestigate_report_only'`,
-        [seeded.errorGroupId],
-      );
-      await testPool.query(script);
-      expect(await countJobs()).toBe(2);
-    });
-
-    it('reinvestigation script resets quarantined incidents to queued so the adoption guard cannot no-op them', async () => {
-      const seeded = await seedErrorGroupAndJob();
-      // The quarantined book sits in terminal-looking statuses; without the
-      // reset every report-only job completes as a silent no-op (observed 8/8
-      // on the 2026-08-11 prod-copy rehearsal).
-      await testPool.query(
-        `UPDATE error_groups SET status = 'insight' WHERE id = $1`,
-        [seeded.errorGroupId],
-      );
-      await testPool.query(
-        `INSERT INTO digest_readiness (incident_id, project_id, status, reason)
-         VALUES ($1, $2, 'ineligible', 'quarantined_degenerate')`,
-        [seeded.errorGroupId, testProjectId],
-      );
-      const script = readFileSync(
-        new URL('../../../../scripts/reinvestigate-quarantined.sql', import.meta.url),
-        'utf8',
-      );
-      await testPool.query(script);
-      const { rows } = await testPool.query(
-        `SELECT status FROM error_groups WHERE id = $1`, [seeded.errorGroupId],
-      );
-      expect(rows[0]!.status).toBe('queued');
-    });
-
-    it('reinvestigation script leaves human-terminal incidents untouched', async () => {
-      const seeded = await seedErrorGroupAndJob();
-      await testPool.query(
-        `UPDATE error_groups SET status = 'resolved', resolved_at = now() WHERE id = $1`,
-        [seeded.errorGroupId],
-      );
-      await testPool.query(
-        `INSERT INTO digest_readiness (incident_id, project_id, status, reason)
-         VALUES ($1, $2, 'ineligible', 'quarantined_degenerate')`,
-        [seeded.errorGroupId, testProjectId],
-      );
-      const script = readFileSync(
-        new URL('../../../../scripts/reinvestigate-quarantined.sql', import.meta.url),
-        'utf8',
-      );
-      await testPool.query(script);
-      const { rows } = await testPool.query(
-        `SELECT g.status,
-           (SELECT count(*)::int FROM error_group_jobs j
-            WHERE j.error_group_id = g.id AND j.triggered_by = 'reinvestigate_report_only') AS jobs
-         FROM error_groups g WHERE g.id = $1`,
-        [seeded.errorGroupId],
-      );
-      expect(rows[0]!.status).toBe('resolved');
-      expect(rows[0]!.jobs).toBe(0);
-    });
-
-    it('a failure-path needs_human park demotes a pending readiness row and never creates one', async () => {
-      const seeded = await seedErrorGroupAndJob();
-      await testPool.query(
-        `INSERT INTO digest_readiness (incident_id, project_id, status, reason)
-         VALUES ($1, $2, 'pending', 'reinvestigating')`,
-        [seeded.errorGroupId, testProjectId],
-      );
-      await updateGroupStatus(seeded.errorGroupId, testProjectId, 'needs_human', {
-        reason: {
-          reason_code: 'repo_access_denied',
-          reason_message: 'clone failed',
-          remediation: 'check repository credentials',
-        },
-        terminalFixJobId: seeded.jobId,
-      });
-      const demoted = await testPool.query(
-        `SELECT status, reason FROM digest_readiness WHERE incident_id = $1`,
-        [seeded.errorGroupId],
-      );
-      expect(demoted.rows[0]).toMatchObject({ status: 'ineligible', reason: 'repo_access_denied' });
-
-      // Absent-row legacy groups stay absent-row on the same transition.
-      const legacy = await seedErrorGroupAndJob();
-      await updateGroupStatus(legacy.errorGroupId, testProjectId, 'needs_human', {
-        reason: {
-          reason_code: 'repo_access_denied',
-          reason_message: 'clone failed',
-          remediation: 'check repository credentials',
-        },
-        terminalFixJobId: legacy.jobId,
-      });
-      const rows = await testPool.query(
-        `SELECT count(*)::int AS n FROM digest_readiness WHERE incident_id = $1`,
-        [legacy.errorGroupId],
-      );
-      expect(rows.rows[0]!.n).toBe(0);
-    });
   });
 
   describe('draft delivery lifecycle', () => {
@@ -1022,7 +831,6 @@ describeDb('db.ts integration tests', () => {
         },
         candidateDiff: '--- a/a\n+++ b/a\n',
         evidence: { version: 1, tier: 'E0', checks: [] },
-        readiness: { status: 'eligible', reason: 'fix_pr_opened' },
       }, claim!);
 
       const group = await testPool.query<{
@@ -1037,10 +845,6 @@ describeDb('db.ts integration tests', () => {
         reason_code: 'low_confidence_fix',
         terminal_fix_job_id: jobId,
       });
-      expect((await testPool.query(
-        `SELECT status, reason FROM digest_readiness WHERE incident_id = $1`,
-        [errorGroupId],
-      )).rows[0]).toEqual({ status: 'eligible', reason: 'fix_pr_opened' });
       const delivery = await testPool.query<{ state: string; head_sha: string }>(
         `SELECT state, head_sha FROM delivery_reservations WHERE error_group_id = $1`,
         [errorGroupId],

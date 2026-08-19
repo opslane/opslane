@@ -669,7 +669,6 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
           remediation: 'Re-run the investigation after more evidence accumulates; the previous run could not verify a cause.',
         },
         decision,
-        readiness: { status: 'ineligible', reason: triage.decisionReason },
       }, job);
       jobsFailed++;
       logger.warn('Investigation: needs_human (unverified verdict)', {
@@ -690,7 +689,6 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
           remediation: 'Review the error manually; the investigation could not establish a cause.',
         },
         decision,
-        readiness: { status: 'ineligible', reason: 'no_usable_diagnosis' },
       }, job);
       jobsFailed++;
       logger.warn('Investigation: needs_human (no usable diagnosis)', {
@@ -712,7 +710,6 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
           ),
         },
         decision,
-        readiness: { status: 'eligible', reason: 'validated_cause' },
       }, job);
       jobsProcessed++;
       logger.info('Investigation: conclusion', { job_id: job.id, duration_ms: durationMs });
@@ -725,7 +722,6 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
         platform,
         decision,
         sourceJobId: job.id,
-        readiness: { status: 'eligible', reason: 'validated_cause' },
       }, job);
       if (fixResult.created) {
         jobsProcessed++;
@@ -749,7 +745,6 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
         rootCause: triage.diagnosis?.one_line_description ?? triage.decisionReason,
         confidence: triage.confidence,
         decision,
-        readiness: { status: 'eligible', reason: 'validated_cause' },
       }, job);
       jobsProcessed++;
       if (kindGateRefusal) {
@@ -903,7 +898,6 @@ export async function processFrictionInvestigateJob(
           remediation: 'Re-run the investigation after more evidence accumulates; the previous run could not verify a cause.',
         },
         decision,
-        readiness: { status: 'ineligible', reason: result.reason },
       }, job);
       jobsFailed++;
       lastJobAt = new Date().toISOString();
@@ -945,7 +939,6 @@ export async function processFrictionInvestigateJob(
           confidence: verdict.confidence,
           sourceJobId: job.id,
           decision,
-          readiness: { status: 'eligible', reason: 'validated_cause' },
         }, job, { allowFriction: true });
         if (fixResult.created) {
           logger.info('Friction investigation: auto-triggering fix (autonomy ladder)', {
@@ -959,7 +952,6 @@ export async function processFrictionInvestigateJob(
             rootCause: verdict.reason,
             confidence: verdict.confidence,
             decision,
-            readiness: { status: 'eligible', reason: 'validated_cause' },
           }, job);
           logger.warn('Friction investigation: auto-fix refused by kind gate — parked for approval', {
             job_id: job.id,
@@ -971,7 +963,6 @@ export async function processFrictionInvestigateJob(
           rootCause: verdict.reason,
           confidence: verdict.confidence,
           decision,
-          readiness: { status: 'eligible', reason: 'validated_cause' },
         }, job);
         logger.info('Friction investigation: awaiting human approval', {
           job_id: job.id,
@@ -983,7 +974,6 @@ export async function processFrictionInvestigateJob(
         rootCause: verdict.reason,
         confidence: verdict.confidence,
         decision,
-        readiness: { status: 'eligible', reason: 'validated_cause' },
       }, job);
       logger.info('Friction investigation: recorded insight', {
         job_id: job.id,
@@ -1237,7 +1227,6 @@ export async function processFixJob(job: ClaimedJob & { errorGroupId: string }, 
     await updateGroupStatus(job.errorGroupId, job.projectId, 'needs_human', {
       reason: cloneFailureReason(err),
       terminalFixJobId: job.id,
-      readiness: { status: 'eligible', reason: 'fix_attempt_failed_no_diff' },
     }, job);
     jobsFailed++;
     lastJobAt = new Date().toISOString();
@@ -1420,7 +1409,6 @@ export async function processFixJob(job: ClaimedJob & { errorGroupId: string }, 
           pr_fix_job_id: job.id,
           evidence: result.evidence,
           terminalFixJobId: job.id,
-          readiness: { status: 'eligible', reason: 'fix_pr_opened' },
         }, job);
       } else {
         if (!result.head_sha) throw new Error('Draft delivery result is missing head SHA');
@@ -1434,7 +1422,6 @@ export async function processFixJob(job: ClaimedJob & { errorGroupId: string }, 
           reason: result.reason,
           candidateDiff: result.candidateDiff,
           evidence: result.evidence,
-          readiness: { status: 'eligible', reason: 'fix_pr_opened' },
         }, job);
       }
       jobsProcessed++;
@@ -1450,12 +1437,6 @@ export async function processFixJob(job: ClaimedJob & { errorGroupId: string }, 
         candidate_diff: result.candidateDiff,
         evidence: result.evidence,
         terminalFixJobId: job.id,
-        readiness: {
-          status: 'eligible',
-          reason: result.candidateDiff
-            ? 'fix_attempt_failed_with_diff'
-            : 'fix_attempt_failed_no_diff',
-        },
       }, job);
       jobsFailed++;
       logger.warn('Fix job completed: needs_human (writeup preserved)', {

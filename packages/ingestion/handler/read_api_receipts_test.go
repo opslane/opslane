@@ -145,12 +145,24 @@ func TestLifecycleResponsesCarryReceiptAndRecordings(t *testing.T) {
 	if _, err := pool.Exec(ctx, `UPDATE error_groups SET status = 'pr_draft', pr_url = 'https://github.com/o/r/pull/7' WHERE id = $1`, result.GroupID); err != nil {
 		t.Fatalf("set draft status: %v", err)
 	}
+	var episodeID string
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO issue_episodes (project_id,canonical_issue_id,sequence)
+		VALUES ($1,$2,1) RETURNING id`, projectID, result.GroupID).Scan(&episodeID); err != nil {
+		t.Fatalf("seed episode: %v", err)
+	}
 	if _, err := pool.Exec(ctx, `
-		INSERT INTO digest_readiness (incident_id, project_id, status, reason, updated_at)
-		VALUES ($1, $2, 'eligible', 'fix_pr_opened', now())
-		ON CONFLICT (incident_id) DO UPDATE SET status = 'eligible', reason = 'fix_pr_opened', updated_at = now()`,
-		result.GroupID, projectID); err != nil {
-		t.Fatalf("seed readiness: %v", err)
+		INSERT INTO issue_decisions
+		  (project_id,episode_id,decision,reason,users_7d,anon_7d,rule_version)
+		VALUES ($1,$2,'open_inquiry','test',2,0,1)`, projectID, episodeID); err != nil {
+		t.Fatalf("seed factual decision: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO issue_inquiry_decisions
+		  (project_id,episode_id,decision,reason,evaluated_units,evidence_signature,model,prompt_version)
+		VALUES ($1,$2,'investigate','test',2,$3,'test',1)`,
+		projectID, episodeID, "handler-lifecycle-"+result.GroupID); err != nil {
+		t.Fatalf("seed inquiry decision: %v", err)
 	}
 
 	router := handler.NewRouterWithPool(deps, pool)
