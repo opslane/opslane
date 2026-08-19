@@ -312,7 +312,7 @@ export async function recordDiagnosisDecision(
   await insertDiagnosisDecision(getPool(), errorGroupId, projectId, row);
 }
 
-export type UsagePhase = 'investigation' | 'fix' | 'judge' | 'product_context';
+export type UsagePhase = 'investigation' | 'fix' | 'judge' | 'product_context' | 'inquiry';
 
 export interface TokenUsage {
   input: number;
@@ -541,7 +541,7 @@ export async function claimJob(
          AND available_at <= now()
          -- Claim only job types this worker can dispatch. New types stay
          -- pending until a handler ships and joins this list.
-         AND job_type IN ('setup_pr','session_analysis','ci_watch','route_map','product_context',
+         AND job_type IN ('setup_pr','session_analysis','ci_watch','route_map','product_context','issue_inquiry',
                           'score_sync','stack_resolve','fix','investigate','error_fix')
          AND (job_type <> 'session_analysis'
               OR (SELECT COUNT(*) FROM error_group_jobs
@@ -2048,6 +2048,122 @@ export async function countHumanRoutePatterns(
     [projectId, patterns],
   );
   return Number(rows[0]?.n ?? 0);
+}
+
+/**
+ * Append an inquiry decision under the durable job lease. The unique evidence
+ * key makes a retry idempotent. When the STORED decision for this evidence is
+ * investigate, the same transaction guarantees the round's investigate job
+ * exists — inserting it idempotently and verifying it survived — so a
+ * committed yes-decision can never exist without investigation work.
+ */
+export async function persistInquiryDecision(args: {
+  projectId: string;
+  episodeId: string;
+  jobId: string;
+  workerId: string;
+  leaseGeneration: string;
+  decision: 'investigate' | 'wait_for_more_evidence' | 'do_not_pursue';
+  reason: string;
+  brief: string | null;
+  relatedIssues: string[];
+  affectedUnits: number;
+  evidenceSignature: string;
+  productUnderstandingVersion: number | null;
+  model: string;
+  promptVersion: number;
+}): Promise<boolean> {
+  const client = await getPool().connect();
+  try {
+    await client.query('BEGIN');
+    const lease = await client.query<{ error_group_id: string | null; input_version: number | null }>(
+      `SELECT error_group_id, input_version
+         FROM error_group_jobs
+        WHERE id=$1 AND project_id=$2 AND episode_id=$3
+          AND worker_id=$4 AND lease_generation=$5::bigint
+          AND job_type='issue_inquiry' AND status='claimed'
+          AND lease_expires_at > now()
+        FOR UPDATE`,
+      [args.jobId, args.projectId, args.episodeId, args.workerId, args.leaseGeneration],
+    );
+    if ((lease.rowCount ?? 0) === 0) {
+      await client.query('ROLLBACK');
+      return false;
+    }
+    const errorGroupId = lease.rows[0]?.error_group_id;
+    const inputVersion = lease.rows[0]?.input_version;
+    if (!errorGroupId || inputVersion === null || inputVersion === undefined) {
+      // A job row without its issue or round version cannot satisfy the
+      // one-job-per-round invariant; fail the attempt rather than guess.
+      throw new Error(`Inquiry job ${args.jobId} missing error_group_id or input_version`);
+    }
+    const inserted = await client.query(
+      `INSERT INTO issue_inquiry_decisions
+         (project_id,episode_id,decision,reason,brief,related_issues,
+          evaluated_units,evidence_signature,product_understanding_version,model,prompt_version)
+       VALUES ($1,$2,$3,$4,$5,$6::uuid[],$7,$8,$9,$10,$11)
+       ON CONFLICT (project_id,episode_id,prompt_version,evidence_signature)
+       DO NOTHING
+       RETURNING decision`,
+      [
+        args.projectId,
+        args.episodeId,
+        args.decision,
+        args.reason,
+        args.brief,
+        args.relatedIssues,
+        args.affectedUnits,
+        args.evidenceSignature,
+        args.productUnderstandingVersion,
+        args.model,
+        args.promptVersion,
+      ],
+    );
+    // A suppressed insert defers to the row that beat it there: the stored
+    // decision, not this attempt's, decides whether investigation work exists.
+    let effectiveDecision = inserted.rows[0]?.decision as string | undefined;
+    if (effectiveDecision === undefined) {
+      const existing = await client.query<{ decision: string }>(
+        `SELECT decision FROM issue_inquiry_decisions
+          WHERE project_id=$1 AND episode_id=$2 AND prompt_version=$3 AND evidence_signature=$4`,
+        [args.projectId, args.episodeId, args.promptVersion, args.evidenceSignature],
+      );
+      effectiveDecision = existing.rows[0]?.decision;
+      if (effectiveDecision === undefined) {
+        throw new Error(`Inquiry decision for job ${args.jobId} neither inserted nor found`);
+      }
+    }
+    if (effectiveDecision === 'investigate') {
+      await client.query(
+        `INSERT INTO error_group_jobs
+           (error_group_id,project_id,episode_id,job_type,status,input_version,triggered_by)
+         VALUES ($1,$2,$3,'investigate','pending',$4,'auto')
+         ON CONFLICT DO NOTHING`,
+        [errorGroupId, args.projectId, args.episodeId, inputVersion],
+      );
+      // The targetless conflict clause swallows every unique-index violation,
+      // so prove the invariant instead of assuming it: some investigate job
+      // must now exist for this round, whatever its version or status.
+      const jobExists = await client.query(
+        `SELECT 1 FROM error_group_jobs
+          WHERE project_id=$1 AND episode_id=$2 AND job_type='investigate'
+          LIMIT 1`,
+        [args.projectId, args.episodeId],
+      );
+      if ((jobExists.rowCount ?? 0) === 0) {
+        throw new Error(
+          `Investigate decision for episode ${args.episodeId} has no investigation job after insert`,
+        );
+      }
+    }
+    await client.query('COMMIT');
+    return true;
+  } catch (error: unknown) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 /**
