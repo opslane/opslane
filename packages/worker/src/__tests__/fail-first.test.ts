@@ -4,6 +4,7 @@ import {
   deriveTierRecord,
   detectLedgerAnomalies,
   reproChecksNotRun,
+  declaredIdentifierGrounded,
 } from '../verification-ledger.js';
 import { validateDeclaration } from '../harness/fail-first.js';
 
@@ -139,5 +140,43 @@ describe('reproChecksNotRun (#354)', () => {
     recorder.record(row, 'repro_red');
     recorder.record({ ...row, failed: 0, passed: 1 }, 'repro_green');
     expect(reproChecksNotRun(recorder.roles())).toEqual([]);
+  });
+});
+
+// The runner's -t filter matches the RUNTIME title (nested describe titles +
+// the it/test title), which never appears verbatim in source. An agent that
+// declares the exact runtime title must not be flagged as fabricating: that
+// exact case voided an otherwise judge-approved fix in the slice-9 live run.
+describe('declaredIdentifierGrounded', () => {
+  const material = [
+    "describe('rebuildSelection', () => {",
+    "  it('keeps the selected option when the list is reordered', () => {",
+    '});',
+  ].join('\n');
+
+  it('grounds a verbatim identifier', () => {
+    expect(declaredIdentifierGrounded('keeps the selected option when the list is reordered', material)).toBe(true);
+  });
+
+  it('grounds a describe-composed runtime title by its it() suffix', () => {
+    expect(declaredIdentifierGrounded(
+      'rebuildSelection keeps the selected option when the list is reordered', material,
+    )).toBe(true);
+  });
+
+  it('rejects a fabricated identifier', () => {
+    expect(declaredIdentifierGrounded('rebuildSelection preserves identity across renders', material)).toBe(false);
+  });
+
+  it('rejects grounding through a too-short title suffix', () => {
+    const shortMaterial = "it('works', () => {})";
+    expect(declaredIdentifierGrounded('anything at all that ends with works', shortMaterial)).toBe(false);
+  });
+
+  it('grounds a pytest node id by its function name', () => {
+    expect(declaredIdentifierGrounded(
+      'tests/test_selection.py::test_rebuild_keeps_identity',
+      'def test_rebuild_keeps_identity():\n    assert rebuild("a") == "a"',
+    )).toBe(true);
   });
 });

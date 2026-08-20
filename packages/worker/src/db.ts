@@ -45,13 +45,14 @@ export async function closePool(): Promise<void> {
 }
 
 export interface DecisionRow {
-  outcome: DiagnosisOutcome;
+  outcome: DiagnosisOutcome | InvestigationTerminalOutcome;
   decisionReason: string;
   causeLocation?: string | null;
   diagnosis: Diagnosis | Record<string, unknown> | null;
   model: string;
   promptVersion: string;
   jobId?: string | null;
+  episodeId?: string | null;
   /**
    * Why the outcome was reached, and how strong the evidence was. Both are
    * required: the fix job reads this row to decide whether it may run, and a
@@ -64,6 +65,11 @@ export interface DecisionRow {
   policyEligible?: boolean | null;
   policyBasis?: { v: 1; identified_users: number; recent_anon_sessions: number } | null;
 }
+
+export type InvestigationTerminalOutcome =
+  | 'verified_fix'
+  | 'needs_human'
+  | 'unable_to_establish_cause';
 
 /** What a fix job needs from a persisted decision to know whether it may run. */
 export interface PersistedDecision {
@@ -99,9 +105,9 @@ async function insertDiagnosisDecision(
     `INSERT INTO diagnosis_decisions
        (error_group_id, project_id, job_id, outcome, decision_reason, cause_location, diagnosis,
         model, prompt_version, basis, confidence, policy_eligible, policy_basis,
-        candidate_dispositions, cause_kind)
+        candidate_dispositions, cause_kind, episode_id)
      VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11, $12, $13::jsonb,
-        $14::jsonb, $15)`,
+        $14::jsonb, $15, $16)`,
     [
       errorGroupId,
       projectId,
@@ -118,6 +124,7 @@ async function insertDiagnosisDecision(
       row.policyBasis ? JSON.stringify(row.policyBasis) : null,
       row.dispositions ? JSON.stringify(row.dispositions) : null,
       row.causeKind ?? null,
+      row.episodeId ?? null,
     ],
   );
 }
@@ -312,6 +319,77 @@ export async function recordDiagnosisDecision(
   await insertDiagnosisDecision(getPool(), errorGroupId, projectId, row);
 }
 
+/** Append the fix phase's useful terminal result under its live lease. The
+ * diagnostic code-fix row remains the authorization source for the fix; this
+ * second row records what deterministic verification and delivery actually
+ * achieved for the work round. */
+export async function recordFixTerminalDecision(args: {
+  lease: JobLease;
+  episodeId: string | null;
+  outcome: InvestigationTerminalOutcome;
+  reason: string;
+  confidence: ConfidenceLevel;
+}): Promise<void> {
+  const result = await getPool().query(
+    `INSERT INTO diagnosis_decisions
+       (error_group_id,project_id,job_id,episode_id,outcome,decision_reason,
+        diagnosis,model,prompt_version,basis,confidence,policy_eligible,policy_basis)
+     SELECT j.error_group_id,j.project_id,j.id,$7,$8,$9,NULL,
+            'deterministic-fix-verification','fix-terminal-v1','local_defect',$10,true,NULL
+       FROM error_group_jobs j
+      WHERE j.id=$1 AND j.worker_id=$2 AND j.lease_generation=$3::bigint
+        AND j.project_id=$4 AND j.error_group_id=$5
+        AND j.session_id IS NOT DISTINCT FROM $6
+        AND j.status='claimed' AND j.lease_expires_at>now()
+        AND NOT EXISTS (
+          SELECT 1 FROM diagnosis_decisions d
+           WHERE d.project_id=j.project_id AND d.job_id=j.id
+             AND d.outcome IN ('verified_fix','needs_human','unable_to_establish_cause'))`,
+    [
+      args.lease.id,
+      args.lease.workerId,
+      args.lease.leaseGeneration,
+      args.lease.projectId,
+      args.lease.errorGroupId,
+      args.lease.sessionId,
+      args.episodeId,
+      args.outcome,
+      args.reason,
+      args.confidence,
+    ],
+  );
+  if ((result.rowCount ?? 0) > 0) return;
+  const existing = await getPool().query<{ outcome: string }>(
+    `SELECT outcome FROM diagnosis_decisions
+      WHERE project_id=$1 AND job_id=$2
+        AND outcome IN ('verified_fix','needs_human','unable_to_establish_cause')
+      ORDER BY decided_at DESC,id DESC LIMIT 1`,
+    [args.lease.projectId, args.lease.id],
+  );
+  if ((existing.rowCount ?? 0) === 0) throw new LeaseLostError(args.lease.id);
+  if (existing.rows[0]!.outcome !== args.outcome) {
+    throw new Error(
+      `Fix job ${args.lease.id} already recorded terminal outcome ${existing.rows[0]!.outcome}`,
+    );
+  }
+}
+
+/** Record the commit a run actually checked out, on the job row, right after
+ * checkout. Written under the live lease so a zombie worker cannot stamp a
+ * commit onto a job another worker reclaimed. The diagnosis JSON also carries
+ * the commit on success; this column is what makes it observable when the run
+ * fails before the model answers. Best-effort: a lost lease skips the write
+ * (the reclaiming attempt will stamp its own checkout). */
+export async function recordInvestigatedCommit(lease: JobLease, commit: string): Promise<void> {
+  await getPool().query(
+    `UPDATE error_group_jobs
+        SET investigated_commit=$4, updated_at=now()
+      WHERE id=$1 AND worker_id=$2 AND lease_generation=$3::bigint
+        AND status='claimed' AND lease_expires_at>now()`,
+    [lease.id, lease.workerId, lease.leaseGeneration, commit],
+  );
+}
+
 export type UsagePhase = 'investigation' | 'fix' | 'judge' | 'product_context' | 'inquiry';
 
 export interface TokenUsage {
@@ -401,6 +479,7 @@ export interface ClaimedJob {
   errorGroupId: string | null;
   eventId: string | null;
   episodeId?: string | null;
+  inputVersion?: number | null;
   runId?: string | null;
   sourceId: string | null;
   sourceJobId?: string | null;
@@ -412,7 +491,7 @@ export interface ClaimedJob {
   guidance: string | null;
   /** Monotonically increasing fencing token for this claim. */
   leaseGeneration: string;
-  triggeredBy: 'auto' | 'human' | 'reinvestigate_report_only' | null;
+  triggeredBy: 'auto' | 'human' | null;
   sessionId: string | null;
   /** Effective routing platform persisted on durable fix jobs. */
   platform?: Platform | null;
@@ -426,7 +505,7 @@ export interface JobLease {
   projectId: string;
   errorGroupId: string | null;
   sessionId: string | null;
-  triggeredBy?: 'auto' | 'human' | 'reinvestigate_report_only' | null;
+  triggeredBy?: 'auto' | 'human' | null;
 }
 
 export class LeaseLostError extends Error {
@@ -507,6 +586,7 @@ export async function claimJob(
     error_group_id: string | null;
     event_id: string | null;
     episode_id: string | null;
+    input_version: number | null;
     run_id: string | null;
     source_id: string | null;
     source_job_id: string | null;
@@ -517,7 +597,7 @@ export async function claimJob(
     guidance: string | null;
     worker_id: string;
     lease_generation: string;
-    triggered_by: 'auto' | 'human' | 'reinvestigate_report_only' | null;
+    triggered_by: 'auto' | 'human' | null;
     session_id: string | null;
     platform: string | null;
     payload: unknown;
@@ -565,7 +645,7 @@ export async function claimJob(
        LIMIT 1
        FOR UPDATE SKIP LOCKED
      )
-     RETURNING id, error_group_id, event_id, episode_id, run_id,
+     RETURNING id, error_group_id, event_id, episode_id, input_version, run_id,
                source_id, source_job_id, project_id, job_type, attempts, max_attempts, guidance,
                worker_id, lease_generation::text AS lease_generation,
                triggered_by, session_id, platform, payload`,
@@ -588,6 +668,7 @@ export async function claimJob(
     errorGroupId: row.error_group_id,
     eventId: row.event_id ?? null,
     episodeId: row.episode_id,
+    inputVersion: row.input_version,
     runId: row.run_id,
     sourceId: row.source_id,
     sourceJobId: row.source_job_id,
@@ -1651,7 +1732,7 @@ export interface ErrorGroupData {
   remediation?: string | null;
   verification_evidence?: EvidenceRecord | null;
   terminal_fix_job_id?: string | null;
-  pr_fix_triggered_by?: 'auto' | 'human' | 'reinvestigate_report_only' | null;
+  pr_fix_triggered_by?: 'auto' | 'human' | null;
   impact_class?: 'blocked' | 'degraded' | 'invisible' | null;
   impact_visits?: number | null;
   impact_visits_recovered?: number | null;
@@ -2054,8 +2135,7 @@ export async function countHumanRoutePatterns(
  * Append an inquiry decision under the durable job lease. The unique evidence
  * key makes a retry idempotent. When the STORED decision for this evidence is
  * investigate, the same transaction guarantees the round's investigate job
- * exists — inserting it idempotently and verifying it survived — so a
- * committed yes-decision can never exist without investigation work.
+ * exists. A committed yes-decision therefore cannot exist without work.
  */
 export async function persistInquiryDecision(args: {
   projectId: string;
@@ -2093,8 +2173,6 @@ export async function persistInquiryDecision(args: {
     const errorGroupId = lease.rows[0]?.error_group_id;
     const inputVersion = lease.rows[0]?.input_version;
     if (!errorGroupId || inputVersion === null || inputVersion === undefined) {
-      // A job row without its issue or round version cannot satisfy the
-      // one-job-per-round invariant; fail the attempt rather than guess.
       throw new Error(`Inquiry job ${args.jobId} missing error_group_id or input_version`);
     }
     const inserted = await client.query(
@@ -2119,8 +2197,8 @@ export async function persistInquiryDecision(args: {
         args.promptVersion,
       ],
     );
-    // A suppressed insert defers to the row that beat it there: the stored
-    // decision, not this attempt's, decides whether investigation work exists.
+    // A suppressed insert defers to the row that beat it there. The stored
+    // decision, not this attempt's output, decides whether work must exist.
     let effectiveDecision = inserted.rows[0]?.decision as string | undefined;
     if (effectiveDecision === undefined) {
       const existing = await client.query<{ decision: string }>(
@@ -2141,13 +2219,6 @@ export async function persistInquiryDecision(args: {
          ON CONFLICT DO NOTHING`,
         [errorGroupId, args.projectId, args.episodeId, inputVersion, args.brief],
       );
-      // The targetless conflict clause swallows every unique-index violation,
-      // so prove the invariant instead of assuming it: either this
-      // round-and-version's investigate job exists (any status — a
-      // dead-lettered attempt spent its budget visibly), or a live investigate
-      // job from an earlier version is still working this episode (it is what
-      // blocked the insert via the active-job index). A dead row from another
-      // version must not vouch for this one.
       const jobExists = await client.query(
         `SELECT 1 FROM error_group_jobs
           WHERE project_id=$1 AND episode_id=$2 AND job_type='investigate'
@@ -2832,9 +2903,6 @@ export async function updateGroupAndCreateFixJob(
   lease: JobLease,
   opts?: { allowFriction?: boolean },
 ): Promise<FixJobResult> {
-  if (lease.triggeredBy === 'reinvestigate_report_only') {
-    return { created: false, reason: 'report_only' };
-  }
   const db = getPool();
   const client = await db.connect();
   try {
@@ -2934,6 +3002,12 @@ export async function updateGroupAndCreateFixJob(
                source_job_id = $4,
                event_id = (SELECT j.event_id FROM error_group_jobs j
                            WHERE j.id = $4 AND j.project_id = $5),
+               episode_id = (SELECT j.episode_id FROM error_group_jobs j
+                             WHERE j.id = $4 AND j.project_id = $5),
+               input_version = (SELECT j.input_version FROM error_group_jobs j
+                                WHERE j.id = $4 AND j.project_id = $5),
+               guidance = (SELECT j.guidance FROM error_group_jobs j
+                           WHERE j.id = $4 AND j.project_id = $5),
                updated_at = now()
            WHERE id = $1`,
           [
@@ -2986,9 +3060,13 @@ export async function updateGroupAndCreateFixJob(
       // without it a later out-of-scope occurrence could move sample_event_id
       // under the fix. NULL source (historical jobs) falls back to the sample.
       `INSERT INTO error_group_jobs
-         (error_group_id, project_id, job_type, triggered_by, platform, payload, source_job_id, event_id)
+         (error_group_id, project_id, job_type, triggered_by, platform, payload,
+          source_job_id, event_id, episode_id, input_version, guidance)
        VALUES ($1, $2, 'fix', 'auto', $3, $4::jsonb, $5,
-               (SELECT event_id FROM error_group_jobs WHERE id = $5 AND project_id = $2))
+               (SELECT event_id FROM error_group_jobs WHERE id = $5 AND project_id = $2),
+               (SELECT episode_id FROM error_group_jobs WHERE id = $5 AND project_id = $2),
+               (SELECT input_version FROM error_group_jobs WHERE id = $5 AND project_id = $2),
+               (SELECT guidance FROM error_group_jobs WHERE id = $5 AND project_id = $2))
        RETURNING id`,
       [
         errorGroupId,

@@ -674,6 +674,7 @@ func TestTriggerFixJob_OnlyFromInvestigated(t *testing.T) {
 	}
 
 	setGroupStatus(t, pool, groupID, "investigated")
+	episodeID, investigationJobID := seedEpisodeBackedInvestigation(t, pool, projID, groupID, "")
 
 	jobID, err := q.TriggerFixJob(ctx, projID, groupID, "focus on the null check")
 	if err != nil {
@@ -686,19 +687,53 @@ func TestTriggerFixJob_OnlyFromInvestigated(t *testing.T) {
 		t.Fatalf("group status = %q, want fixing", got)
 	}
 
-	var jobType, jobStatus, guidance string
+	var jobType, jobStatus, guidance, gotEpisodeID, gotSourceJobID string
 	if err := pool.QueryRow(ctx,
-		`SELECT job_type, status, COALESCE(guidance, '') FROM error_group_jobs WHERE id = $1`, jobID,
-	).Scan(&jobType, &jobStatus, &guidance); err != nil {
+		`SELECT job_type,status,COALESCE(guidance,''),episode_id::text,source_job_id::text
+		   FROM error_group_jobs WHERE id=$1`, jobID,
+	).Scan(&jobType, &jobStatus, &guidance, &gotEpisodeID, &gotSourceJobID); err != nil {
 		t.Fatalf("query job: %v", err)
 	}
 	if jobType != "fix" || jobStatus != "pending" || guidance != "focus on the null check" {
 		t.Fatalf("job = (%q, %q, %q), want (fix, pending, guidance)", jobType, jobStatus, guidance)
 	}
+	if gotEpisodeID != episodeID || gotSourceJobID != investigationJobID {
+		t.Fatalf("job episode/source = %s/%s, want %s/%s", gotEpisodeID, gotSourceJobID, episodeID, investigationJobID)
+	}
 
 	// Already fixing: a second trigger is refused (no double-queue).
 	if _, err := q.TriggerFixJob(ctx, projID, groupID, ""); !errors.Is(err, db.ErrNotInvestigated) {
 		t.Fatalf("expected ErrNotInvestigated on double trigger, got %v", err)
+	}
+}
+
+func TestTriggerFixJob_ErrorWithoutEpisodeBackedInvestigationRollsBack(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	q := db.New(pool)
+	_, projectID, _, groupID := seedGroup(t, pool, q, "trigger-fix-no-episode")
+	setGroupStatus(t, pool, groupID, "investigated")
+
+	jobID, err := q.TriggerFixJob(ctx, projectID, groupID, "do not use mutable evidence")
+	if err == nil || !strings.Contains(err.Error(), "no episode-backed investigation") {
+		t.Fatalf("TriggerFixJob error = %v, want missing episode-backed investigation", err)
+	}
+	if jobID != "" {
+		t.Fatalf("TriggerFixJob job id = %q after rejection, want empty", jobID)
+	}
+	if got := groupStatus(t, pool, groupID); got != "investigated" {
+		t.Fatalf("failed trigger left group status = %q, want investigated", got)
+	}
+	var fixJobs int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM error_group_jobs
+		  WHERE error_group_id=$1 AND project_id=$2 AND job_type='fix'`,
+		groupID, projectID,
+	).Scan(&fixJobs); err != nil {
+		t.Fatal(err)
+	}
+	if fixJobs != 0 {
+		t.Fatalf("fix jobs = %d after rejected trigger, want 0", fixJobs)
 	}
 }
 

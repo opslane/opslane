@@ -50,10 +50,16 @@ function candidateId(value: unknown): string | undefined {
   return typeof value === 'string' && CANDIDATE_ID.test(value) ? value : undefined;
 }
 
+/** Parser-side bound for candidate lists. The API-facing schema cannot carry
+ * `maxItems` (the Anthropic API 400s on array bounds in custom tool schemas),
+ * so the cap the schema used to enforce lives here instead. */
+export const MAX_CANDIDATES = 16;
+
 function candidates(value: unknown): Adjudication['candidates_considered'] {
   if (!Array.isArray(value)) return [];
   const out: Adjudication['candidates_considered'] = [];
   for (const entry of value) {
+    if (out.length >= MAX_CANDIDATES) break;
     if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) continue;
     const record = entry as Record<string, unknown>;
     const statement = typeof record['statement'] === 'string' ? record['statement'].trim() : '';
@@ -118,6 +124,7 @@ function rejectedCandidates(raw: Record<string, unknown>): Adjudication['rejecte
 
   const out: NonNullable<Adjudication['rejected_candidates']> = [];
   for (const entry of value) {
+    if (out.length >= MAX_CANDIDATES) break;
     if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
       out.push(malformedRejection());
       continue;
@@ -154,7 +161,9 @@ export function seal<T>(node: T): T {
  * cannot drift between the two pipelines. */
 export const EVIDENCE_ARRAY_SCHEMA = {
   type: 'array',
-  minItems: 1,
+  // No minItems: the Anthropic API rejects array bounds in custom tool schemas
+  // (400 invalid_request_error). The at-least-one rule is enforced after the
+  // call: a verdict without citations is discarded as incomplete.
   description: 'Citations that will be mechanically checked against the checkout. At least one is required; a verdict without citations is rejected as incomplete. Cite only files you actually read.',
   items: {
     type: 'object',
@@ -194,9 +203,9 @@ export function submitDiagnosisTool(): Anthropic.Tool {
         evidence_check: { type: 'string', description: 'Which files and evidence you checked.' },
         candidates_considered: {
           type: 'array',
-          maxItems: 16,
           description:
-            'Every cause you weighed, including the winner. Give each candidate an id ("c1", "c2", …). ' +
+            'Every cause you weighed, including the winner. List at most 16; entries past the sixteenth are dropped. ' +
+            'Give each candidate an id ("c1", "c2", …). ' +
             'For local_code and configuration candidates, citation is MANDATORY and must be real: ' +
             `{path, line, quote} with a verbatim quote from within ${WINDOW} lines of \`line\` in that file. Pass ` +
             'citation: null for other kinds. A candidate whose citation does not check out against the ' +
@@ -219,9 +228,9 @@ export function submitDiagnosisTool(): Anthropic.Tool {
         },
         rejected_candidates: {
           type: 'array',
-          maxItems: 16,
           description:
-            'Reject candidates BY ID. Each rejection needs its own citation {path, line, quote} anchoring ' +
+            'Reject candidates BY ID, at most 16; entries past the sixteenth are dropped. ' +
+            'Each rejection needs its own citation {path, line, quote} anchoring ' +
             'the evidence in a file you read — prose alone rejects nothing. Pass [] when you reject nothing.',
           items: {
             type: 'object',

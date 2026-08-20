@@ -223,6 +223,7 @@ func TestGuidedJobBypassesActionScope(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
+	seedEpisodeBackedInvestigation(t, fixture.pool, fixture.projectID, result.GroupID, result.EventID)
 	empty := []string{}
 	fixture.setScope(t, &empty)
 	jobID, err := fixture.queries.TriggerFixJob(context.Background(), fixture.projectID, result.GroupID, "human guidance")

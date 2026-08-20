@@ -87,6 +87,16 @@ export interface ReadOnlyRunResult {
   /** Raw input of the terminal tool call, or null if the run never made one. */
   terminalInput: Record<string, unknown> | null;
   stop: ReadOnlyStop;
+  /**
+   * HTTP status of the failed model call when stop is 'api_error', when the
+   * SDK exposed one. Callers use it to tell a deterministic request-construction
+   * failure (4xx: schema, model id, auth — an operator bug that retries cannot
+   * fix) from a transient outage (429/5xx/network) that deserves a durable-job
+   * retry. Absent on network-level failures that never got a response.
+   */
+  apiErrorStatus?: number;
+  /** Failure message of the model call when stop is 'api_error'. */
+  apiErrorDetail?: string;
   filesRead: string[];
   lastModelText: string;
   costUsd: number;
@@ -198,11 +208,19 @@ export async function runReadOnlyAgent(input: ReadOnlyRunInput): Promise<ReadOnl
           : {}),
       });
     } catch (error: unknown) {
-      logger.warn(`${SPAN_PREFIX}: model call failed`, {
-        error: error instanceof Error ? error.message : String(error),
-        turn,
-      });
-      return { terminalInput: null, stop: 'api_error', filesRead: [...filesRead], lastModelText, costUsd, usage };
+      const detail = error instanceof Error ? error.message : String(error);
+      const status = (error as { status?: unknown }).status;
+      logger.warn(`${SPAN_PREFIX}: model call failed`, { error: detail, turn, status });
+      return {
+        terminalInput: null,
+        stop: 'api_error',
+        ...(typeof status === 'number' ? { apiErrorStatus: status } : {}),
+        apiErrorDetail: detail,
+        filesRead: [...filesRead],
+        lastModelText,
+        costUsd,
+        usage,
+      };
     }
 
     recordUsage(response);
@@ -333,10 +351,19 @@ export async function runReadOnlyAgent(input: ReadOnlyRunInput): Promise<ReadOnl
         tool_choice: { type: 'tool', name: input.terminalTool.name },
       });
     } catch (error: unknown) {
-      logger.warn(`${SPAN_PREFIX}: classification call failed`, {
-        error: error instanceof Error ? error.message : String(error),
-      });
-      return { terminalInput: null, stop: 'api_error', filesRead: [...filesRead], lastModelText, costUsd, usage };
+      const detail = error instanceof Error ? error.message : String(error);
+      const status = (error as { status?: unknown }).status;
+      logger.warn(`${SPAN_PREFIX}: classification call failed`, { error: detail, status });
+      return {
+        terminalInput: null,
+        stop: 'api_error',
+        ...(typeof status === 'number' ? { apiErrorStatus: status } : {}),
+        apiErrorDetail: detail,
+        filesRead: [...filesRead],
+        lastModelText,
+        costUsd,
+        usage,
+      };
     }
 
     recordUsage(response);

@@ -24,7 +24,7 @@ import { INVESTIGATION_MODEL, investigateError } from './investigate.js';
 import { runPipeline } from './pipeline.js';
 import { buildSessionUrl } from './narrative.js';
 import { createPoller } from './poller.js';
-import { buildRepoUrl, cloneFailureReason, cloneRepo } from './repo-clone.js';
+import { buildRepoUrl, cloneFailureReason, cloneRepo, isRetriableCloneFailure, sweepAbandonedClones } from './repo-clone.js';
 import { getInstallationToken } from './github-app.js';
 import { type ReplaySignals } from './pr.js';
 import { processSetupPrJob } from './setup-pr.js';
@@ -60,6 +60,7 @@ import { processCIWatchJob } from './ci-watch.js';
 import { processRouteMapJob } from './route-map.js';
 import { runProductContext } from './product-context/job.js';
 import { runInquiry } from './inquiry/job.js';
+import { loadEvidence, type EvidenceBundle } from './evidence/bundle.js';
 import { effectivePlatform, pythonPipelineEnabled } from './platform.js';
 import { parseRuntimeInfo } from './runtime-info.js';
 import { parseDiagnosis } from './diagnosis-schema.js';
@@ -473,6 +474,39 @@ async function loadEvidenceEvent(
   return event;
 }
 
+function investigationEvidenceContext(evidence: EvidenceBundle): string {
+  return JSON.stringify({
+    inquiryBriefSources: {
+      affectedUnits: evidence.affectedUnits,
+      availability: evidence.availability,
+      failedRequests: evidence.failedRequests,
+      writeRollups: evidence.writeRollups,
+      productContext: evidence.productContext,
+      replayPointers: evidence.replayPointers,
+    },
+  });
+}
+
+function preflightDecision(
+  job: ClaimedJob,
+  outcome: 'needs_human' | 'unable_to_establish_cause',
+  reason: string,
+): db.DecisionRow {
+  return {
+    outcome,
+    decisionReason: reason,
+    diagnosis: null,
+    model: 'deterministic-preflight',
+    promptVersion: 'diagnosis-v1',
+    jobId: job.id,
+    episodeId: job.episodeId ?? null,
+    basis: 'no_evidence',
+    confidence: 'low',
+    policyEligible: true,
+    policyBasis: null,
+  };
+}
+
 /**
  * Investigation job: runs codebase-aware investigation, stores results,
  * and routes based on confidence (high → auto-fix, medium/low → investigated).
@@ -505,7 +539,11 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
     return;
   }
 
-  const event = await loadEvidenceEvent(job, group);
+  if (!job.episodeId) {
+    throw new Error(`Investigation job ${job.id} missing episode_id`);
+  }
+  const evidence = await loadEvidence(job.projectId, job.episodeId);
+  const event = await db.getErrorEvent(evidence.frames.sourceEventId, job.projectId);
   const customerRuntime = parseRuntimeInfo(event?.context ?? '');
 
   // Pre-clone guard: errors with no application stack frames (cross-origin
@@ -514,15 +552,17 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
   // an LLM/sandbox. The reason code is non-retriable, so the single collapsed
   // stackless group won't reopen on every recurrence.
   if (hasNoAppFrames(event?.stack_trace_raw ?? '', platform)) {
-    await updateGroupStatus(job.errorGroupId, job.projectId, 'needs_human', {
-      reason: buildReason(
+    const reason = buildReason(
         'unfixable_no_app_frames',
         platform === 'python'
           ? 'The Python traceback has no application frames, so there is nothing safe to investigate.'
           : 'Error has no application stack frames (cross-origin "Script error." or a non-Error promise rejection), so there is nothing to investigate.',
         undefined,
         platform,
-      ),
+      );
+    await updateGroupInvestigation(job.errorGroupId, job.projectId, 'needs_human', {
+      reason,
+      decision: preflightDecision(job, 'unable_to_establish_cause', reason.reason_message),
     }, job);
     jobsFailed++;
     lastJobAt = new Date().toISOString();
@@ -543,12 +583,14 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
   // the real blocker instead of a downstream clone failure.
   const apiKey = process.env['ANTHROPIC_API_KEY'];
   if (!apiKey) {
+    const reason = {
+      reason_code: 'missing_llm_key' as const,
+      reason_message: 'ANTHROPIC_API_KEY environment variable is not set',
+      remediation: 'Set the ANTHROPIC_API_KEY environment variable with a valid Anthropic API key',
+    };
     await updateGroupInvestigation(job.errorGroupId, job.projectId, 'needs_human', {
-      reason: {
-        reason_code: 'missing_llm_key',
-        reason_message: 'ANTHROPIC_API_KEY environment variable is not set',
-        remediation: 'Set the ANTHROPIC_API_KEY environment variable with a valid Anthropic API key',
-      },
+      reason,
+      decision: preflightDecision(job, 'needs_human', reason.reason_message),
     }, job);
     jobsFailed++;
     lastJobAt = new Date().toISOString();
@@ -580,14 +622,36 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
       githubRepo: project.github_repo,
       jobId: job.id,
       githubToken,
+      commitSha: evidence.frames.commitSha,
     });
     repoDir = cloneResult.repoDir;
     investigatedCommit = cloneResult.headSha;
     cleanup = cloneResult.cleanup;
     await db.cacheProjectDefaultBranch(job.projectId, cloneResult.defaultBranch);
+    // Stamp the checkout on the job row now, not inside the diagnosis: the
+    // diagnosis is null exactly when the run fails, and those are the runs
+    // whose checkout needs auditing.
+    const requestedCommit = evidence.frames.commitSha ?? null;
+    const fellBack = requestedCommit !== null
+      && requestedCommit.toLowerCase() !== investigatedCommit.toLowerCase();
+    await db.recordInvestigatedCommit(job, investigatedCommit);
+    logger.info('Investigation checkout', {
+      job_id: job.id,
+      requested_commit: requestedCommit,
+      investigated_commit: investigatedCommit,
+      fell_back_to_default_head: fellBack,
+    });
   } catch (err: unknown) {
-    await updateGroupStatus(job.errorGroupId, job.projectId, 'needs_human', {
-      reason: cloneFailureReason(err),
+    if (isRetriableCloneFailure(err)) {
+      // A network blip is not a diagnosis. Fail the durable job so it retries
+      // and, when exhausted, dead-letters into the operator's view instead of
+      // becoming a customer-facing terminal.
+      throw err;
+    }
+    const reason = cloneFailureReason(err);
+    await updateGroupInvestigation(job.errorGroupId, job.projectId, 'needs_human', {
+      reason,
+      decision: preflightDecision(job, 'needs_human', reason.reason_message),
     }, job);
     jobsFailed++;
     lastJobAt = new Date().toISOString();
@@ -597,12 +661,6 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
   try {
     checkAbort(signal);
 
-    const sessionPointer = await db.getSessionPointerForGroup(job.errorGroupId, job.projectId);
-    const sessionAnalysis = sessionPointer
-      ? await db.getSessionAnalysis(sessionPointer.session_id, job.projectId)
-      : null;
-    const sessionContext = sessionAnalysis ? formatSessionContext(sessionAnalysis) : null;
-
     // Run codebase-aware investigation
     const triage = await investigateError(apiKey, {
       platform,
@@ -611,9 +669,10 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
       title: group.title,
       errorMessage: event?.error_message ?? '',
       stackTrace: event?.stack_trace_raw ?? '',
-      resolvedStackTrace: await resolvedFramesForEvent(event, job.projectId),
+      resolvedStackTrace: evidence.frames.envelope,
       breadcrumbs: event?.breadcrumbs ?? '[]',
-      sessionContext,
+      sessionContext: investigationEvidenceContext(evidence),
+      investigationBrief: job.guidance,
     }, repoDir, investigatedCommit);
     await recordJobUsage({
       jobId: job.id,
@@ -624,6 +683,33 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
       costUsd: triage.costUsd,
     });
     checkAbort(signal);
+
+    if (triage.stop === 'api_error') {
+      const status = triage.apiErrorStatus;
+      const detail = triage.apiErrorDetail ?? 'model call failed';
+      const oversized = status === 400 && /prompt is too long|too many tokens|exceeds? .*(context|token)/i.test(detail);
+      const deterministic = status !== undefined && status >= 400 && status < 500
+        && status !== 408 && status !== 429 && !oversized;
+      if (deterministic) {
+        // A 4xx here is a request-construction failure — tool schema, model id,
+        // auth — an operator bug that retries cannot fix and evidence did not
+        // cause. Writing unable_to_establish_cause would blame missing evidence
+        // for a config failure, so fail the durable job instead: it retries
+        // cheaply (the call dies before any tokens) and dead-letters into the
+        // operator's view with the real error.
+        throw new Error(`Investigation model request rejected (HTTP ${status}): ${detail}`);
+      }
+      if (!oversized && job.attempts + 1 < (job.maxAttempts ?? 3)) {
+        // A transient outage (429/5xx/network) with retry budget left retries
+        // the same durable job rather than terminalizing the round on its
+        // first bad minute. Exhausted budget falls through to the existing
+        // unable_to_establish_cause terminal, which is the designed ending for
+        // exhausted model failures. Oversized input also falls through: it is
+        // deterministic per input, so retries cannot help, but it is an
+        // evidence-shaped condition, not an operator bug.
+        throw new Error(`Investigation model unavailable${status !== undefined ? ` (HTTP ${status})` : ''}; retrying: ${detail}`);
+      }
+    }
 
     logger.info('Investigation result', {
       job_id: job.id,
@@ -641,9 +727,6 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
         investigatedCommit: triage.investigatedCommit,
       }
       : null;
-    const impactBar = triage.outcome === 'code_fix'
-      ? await db.getGroupImpactBar(job.errorGroupId, job.projectId)
-      : null;
     const decision = {
       outcome: triage.outcome,
       decisionReason: triage.decisionReason,
@@ -652,13 +735,17 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
       model: INVESTIGATION_MODEL,
       promptVersion: 'diagnosis-v1',
       jobId: job.id,
+      episodeId: job.episodeId,
       // Persisted because the fix job loads this row to decide whether it may
       // run at all, and outcome alone cannot answer that.
       basis: triage.decisionBasis,
       confidence: triage.confidence,
       causeKind: triage.adjudication?.cause_kind,
       dispositions: triage.dispositions,
-      ...db.policyFields(impactBar),
+      // The cheap filter and inquiry already admitted this work round. The old
+      // post-investigation reach check must not veto an accepted diagnosis.
+      policyEligible: true,
+      policyBasis: null,
     };
 
     /** Set when the result is held for a human instead of opening a fix job. */
@@ -674,7 +761,7 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
           reason_message: triage.decisionReason,
           remediation: 'Re-run the investigation after more evidence accumulates; the previous run could not verify a cause.',
         },
-        decision,
+        decision: { ...decision, outcome: 'unable_to_establish_cause' as const },
       }, job);
       jobsFailed++;
       logger.warn('Investigation: needs_human (unverified verdict)', {
@@ -694,7 +781,7 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
           reason_message: 'The investigation could not establish a verified cause from the available evidence.',
           remediation: 'Review the error manually; the investigation could not establish a cause.',
         },
-        decision,
+        decision: { ...decision, outcome: 'unable_to_establish_cause' as const },
       }, job);
       jobsFailed++;
       logger.warn('Investigation: needs_human (no usable diagnosis)', {
@@ -715,12 +802,12 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
             'Investigate the named system; no reproduction steps were established.',
           ),
         },
-        decision,
+        decision: { ...decision, outcome: 'needs_human' as const },
       }, job);
       jobsProcessed++;
       logger.info('Investigation: conclusion', { job_id: job.id, duration_ms: durationMs });
 
-    } else if (impactBar?.eligible && job.triggeredBy !== 'reinvestigate_report_only') {
+    } else {
       const fixResult = await updateGroupAndCreateFixJob(job.errorGroupId, job.projectId, {
         rootCause: triage.diagnosis?.one_line_description ?? triage.decisionReason,
         diagnosis: triage.diagnosis,
@@ -740,8 +827,6 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
         parked = true;
         kindGateRefusal = fixResult.reason ?? 'refused';
       }
-    } else {
-      parked = true;
     }
 
     // Both parking paths write the same row and differ only in what they log,
@@ -750,7 +835,10 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
       await updateGroupInvestigation(job.errorGroupId, job.projectId, 'investigated', {
         rootCause: triage.diagnosis?.one_line_description ?? triage.decisionReason,
         confidence: triage.confidence,
-        decision,
+        decision: {
+          ...decision,
+          outcome: 'needs_human' as const,
+        },
       }, job);
       jobsProcessed++;
       if (kindGateRefusal) {
@@ -937,7 +1025,7 @@ export async function processFrictionInvestigateJob(
       // fixes exist; insights remain terminal and never produce a PR.
       const autonomyAllowsFix = project.friction_autonomy === 'auto_fix'
         || project.friction_autonomy === 'auto_fix_ux';
-      if (impactBar?.eligible && autonomyAllowsFix && job.triggeredBy !== 'reinvestigate_report_only') {
+      if (impactBar?.eligible && autonomyAllowsFix) {
         // allowFriction is the ladder's explicit opt-in past the kind gate;
         // refuse-by-default stays intact for every other caller (issue #56).
         const fixResult = await updateGroupAndCreateFixJob(job.errorGroupId, job.projectId, {
@@ -1114,22 +1202,11 @@ export async function processSessionAnalysisJob(
 
 /**
  * Fix job: loads investigation context, runs the full agent fix pipeline,
- * and creates a PR or reverts to investigated on failure.
+ * and creates a PR or records an actionable failure.
  */
 export async function processFixJob(job: ClaimedJob & { errorGroupId: string }, signal: AbortSignal): Promise<void> {
   const jobStart = Date.now();
   checkAbort(signal);
-
-  // Report-only attribution is only valid for investigation jobs. Refuse a
-  // malformed/stale fix job before any group read or mutation, and narrow the
-  // trigger type passed into the fix pipeline below.
-  if (job.triggeredBy === 'reinvestigate_report_only') {
-    logger.warn('Refused report-only fix job', {
-      job_id: job.id,
-      error_group_id: job.errorGroupId,
-    });
-    return;
-  }
 
   // Fetch real data
   const group = await db.getErrorGroup(job.errorGroupId, job.projectId);
@@ -1168,7 +1245,15 @@ export async function processFixJob(job: ClaimedJob & { errorGroupId: string }, 
     }
   }
 
-  const event = await loadEvidenceEvent(job, group);
+  if (group.kind !== 'friction' && !job.episodeId) {
+    throw new Error(`Error fix job ${job.id} missing episode_id`);
+  }
+  const frozenEvidence = group.kind === 'friction'
+    ? null
+    : await loadEvidence(job.projectId, job.episodeId!);
+  const event = frozenEvidence
+    ? await db.getErrorEvent(frozenEvidence.frames.sourceEventId, job.projectId)
+    : await loadEvidenceEvent(job, group);
   const customerRuntime = parseRuntimeInfo(event?.context ?? '');
   const project = await db.getProject(job.projectId);
   if (!project) throw new Error(`Project ${job.projectId} not found`);
@@ -1177,14 +1262,22 @@ export async function processFixJob(job: ClaimedJob & { errorGroupId: string }, 
   const investigation = await getGroupInvestigation(job.errorGroupId, job.projectId);
 
   // Parallel fetch for independent data
+  const frozenReplayPointer = frozenEvidence?.replayPointers[0];
   const [replay, sessionPointer, environmentContext] = await Promise.all([
-    db.getReplayForGroup(job.errorGroupId, job.projectId),
-    db.getSessionPointerForGroup(job.errorGroupId, job.projectId),
+    frozenEvidence ? Promise.resolve(null) : db.getReplayForGroup(job.errorGroupId, job.projectId),
+    frozenEvidence
+      ? Promise.resolve(frozenReplayPointer ? {
+          session_id: frozenReplayPointer.sessionId,
+          error_at: new Date(frozenReplayPointer.anchorMs).toISOString(),
+        } : null)
+      : db.getSessionPointerForGroup(job.errorGroupId, job.projectId),
     db.getEnvironmentNamesForGroup(job.errorGroupId, job.projectId, group.kind),
   ]);
   let watchUrl: string | null = null;
   try {
-    const watchable = await db.getWatchableSessionForGroup(job.projectId, job.errorGroupId);
+    const watchable = frozenReplayPointer
+      ? { sessionId: frozenReplayPointer.sessionId, anchorMs: frozenReplayPointer.anchorMs }
+      : frozenEvidence ? null : await db.getWatchableSessionForGroup(job.projectId, job.errorGroupId);
     if (watchable) {
       watchUrl = buildSessionUrl(process.env['DASHBOARD_URL'], watchable.sessionId, watchable.anchorMs, job.projectId);
     }
@@ -1224,11 +1317,21 @@ export async function processFixJob(job: ClaimedJob & { errorGroupId: string }, 
       githubRepo: project.github_repo,
       jobId: job.id,
       githubToken,
+      commitSha: frozenEvidence?.frames.commitSha,
     });
     repoDir = cloneResult.repoDir;
     defaultBranch = cloneResult.defaultBranch;
     cleanup = cloneResult.cleanup;
     await db.cacheProjectDefaultBranch(job.projectId, defaultBranch);
+    const requestedCommit = frozenEvidence?.frames.commitSha ?? null;
+    await db.recordInvestigatedCommit(job, cloneResult.headSha);
+    logger.info('Fix checkout', {
+      job_id: job.id,
+      requested_commit: requestedCommit,
+      investigated_commit: cloneResult.headSha,
+      fell_back_to_default_head: requestedCommit !== null
+        && requestedCommit.toLowerCase() !== cloneResult.headSha.toLowerCase(),
+    });
   } catch (err: unknown) {
     await updateGroupStatus(job.errorGroupId, job.projectId, 'needs_human', {
       reason: cloneFailureReason(err),
@@ -1331,7 +1434,8 @@ export async function processFixJob(job: ClaimedJob & { errorGroupId: string }, 
       errorType: event?.error_type ?? 'Unknown',
       errorMessage: event?.error_message ?? '',
       stackTrace: event?.stack_trace_raw ?? '',
-      resolvedStackTrace: await resolvedFramesForEvent(event, job.projectId),
+      resolvedStackTrace: frozenEvidence?.frames.envelope
+        ?? await resolvedFramesForEvent(event, job.projectId),
       breadcrumbs: event?.breadcrumbs ?? '[]',
       context: event?.context ?? '{}',
       environmentNames: environmentContext.names,
@@ -1374,7 +1478,9 @@ export async function processFixJob(job: ClaimedJob & { errorGroupId: string }, 
           if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
           return parseDiagnosis(raw as Record<string, unknown>);
         })(),
-        guidance: job.guidance ?? undefined,
+        guidance: frozenEvidence
+          ? `${job.guidance ?? ''}\nFrozen evidence: ${investigationEvidenceContext(frozenEvidence)}`.slice(0, 4000)
+          : job.guidance ?? undefined,
       } : undefined,
       prPosture: project.pr_posture ?? 'verified_only',
       reserveDelivery: (delivery) => db.reserveDelivery(
@@ -1406,6 +1512,13 @@ export async function processFixJob(job: ClaimedJob & { errorGroupId: string }, 
         throw new Error(`Delivery result ${result.status} is missing PR identity`);
       }
       if (!result.head_sha && result.status === 'pr_created') {
+        await db.recordFixTerminalDecision({
+          lease: job,
+          episodeId: job.episodeId ?? null,
+          outcome: 'verified_fix',
+          reason: `A deterministic verification run passed and produced ${result.pr_url}.`,
+          confidence: result.confidence ?? 'high',
+        });
         // Compatibility path for older injected pipeline implementations. The
         // production pipeline always returns a reserved delivery head SHA.
         await updateGroupStatus(job.errorGroupId, job.projectId, 'pr_created', {
@@ -1418,6 +1531,13 @@ export async function processFixJob(job: ClaimedJob & { errorGroupId: string }, 
         }, job);
       } else {
         if (!result.head_sha) throw new Error('Draft delivery result is missing head SHA');
+        await db.recordFixTerminalDecision({
+          lease: job,
+          episodeId: job.episodeId ?? null,
+          outcome: 'verified_fix',
+          reason: `A deterministic verification run passed and produced ${result.pr_url}.`,
+          confidence: result.confidence ?? (result.status === 'pr_draft' ? 'medium' : 'high'),
+        });
         await db.finalizeDelivery(job.errorGroupId, job.projectId, {
           status: result.status,
           confidence: result.confidence ?? (result.status === 'pr_draft' ? 'medium' : 'high'),
@@ -1437,8 +1557,16 @@ export async function processFixJob(job: ClaimedJob & { errorGroupId: string }, 
     } else {
       // Fix did not clear the precision floor (or failed) — terminate as needs_human,
       // preserving the full writeup (reason + confidence). root_cause is untouched.
+      const terminalReason = result.reason ?? buildReason('worker_runtime_error', 'Fix pipeline failed without a reason');
+      await db.recordFixTerminalDecision({
+        lease: job,
+        episodeId: job.episodeId ?? null,
+        outcome: 'needs_human',
+        reason: `${terminalReason.reason_message} Required action: ${terminalReason.remediation}`,
+        confidence: result.confidence ?? 'low',
+      });
       await updateGroupStatus(job.errorGroupId, job.projectId, 'needs_human', {
-        reason: result.reason ?? buildReason('worker_runtime_error', 'Fix pipeline failed without a reason'),
+        reason: terminalReason,
         confidence: result.confidence,
         candidate_diff: result.candidateDiff,
         evidence: result.evidence,
@@ -1458,6 +1586,13 @@ export async function processFixJob(job: ClaimedJob & { errorGroupId: string }, 
 
 async function main(): Promise<void> {
   logger.info('Opslane worker starting');
+
+  // Clone checkouts orphaned by a crashed worker process. Age-gated inside:
+  // a live long fix run's directory is never touched.
+  const sweptClones = await sweepAbandonedClones();
+  if (sweptClones > 0) {
+    logger.info('Swept abandoned clone directories', { count: sweptClones });
+  }
 
   const requiredEnv = ['DATABASE_URL'];
   for (const key of requiredEnv) {

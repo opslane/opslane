@@ -106,7 +106,7 @@ func TestAnchorSurvivesSampleOverwrite(t *testing.T) {
 	}
 }
 
-func TestGuidedJobStampsCurrentSample(t *testing.T) {
+func TestGuidedErrorJobInheritsInvestigationEpisode(t *testing.T) {
 	fixture := newAnchorFixture(t)
 	result := fixture.ingest(t, "anchor-guided")
 	if _, err := fixture.pool.Exec(context.Background(),
@@ -115,9 +115,22 @@ func TestGuidedJobStampsCurrentSample(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
+	episodeID, investigationJobID := seedEpisodeBackedInvestigation(
+		t, fixture.pool, fixture.projectID, result.GroupID, result.EventID,
+	)
 	jobID, err := fixture.queries.TriggerFixJob(context.Background(), fixture.projectID, result.GroupID, "try this")
 	if err != nil {
 		t.Fatal(err)
 	}
 	assertJobAnchor(t, fixture.pool, jobID, result.EventID)
+	var gotEpisodeID, gotSourceJobID string
+	if err := fixture.pool.QueryRow(context.Background(),
+		`SELECT episode_id::text,source_job_id::text FROM error_group_jobs WHERE id=$1`,
+		jobID,
+	).Scan(&gotEpisodeID, &gotSourceJobID); err != nil {
+		t.Fatal(err)
+	}
+	if gotEpisodeID != episodeID || gotSourceJobID != investigationJobID {
+		t.Fatalf("job episode/source = %s/%s, want %s/%s", gotEpisodeID, gotSourceJobID, episodeID, investigationJobID)
+	}
 }

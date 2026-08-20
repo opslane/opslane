@@ -277,3 +277,36 @@ describe('structural-shape hardening (review round)', () => {
     expect(declined?.candidates_considered).toEqual([]);
   });
 });
+
+describe('parser-side candidate caps (wire schema cannot carry maxItems)', () => {
+  function candidate(i: number) {
+    return { statement: `cause ${i}`, kind: 'unknown', id: `c${i}`, citation: null };
+  }
+
+  it('caps candidates_considered at 16', () => {
+    const raw = {
+      best_supported: 'cause 1',
+      evidence_check: 'checked',
+      candidates_considered: Array.from({ length: 24 }, (_, i) => candidate(i)),
+      cause_locations: [{ path: 'src/a.ts' }],
+      evidence: [{ path: 'src/a.ts', detail: 'd', symptomLink: 's' }],
+    };
+    const parsed = parseAdjudication(raw);
+    expect(parsed?.candidates_considered).toHaveLength(16);
+  });
+
+  it('caps rejected_candidates at 16', () => {
+    const raw = {
+      best_supported: 'cause 1',
+      evidence_check: 'checked',
+      candidates_considered: [candidate(1)],
+      rejected_candidates: Array.from({ length: 24 }, (_, i) => ({
+        id: `c${i}`, evidence: 'e', citation: { path: 'src/a.ts', line: 1, quote: 'const enough_chars_here = 1;' },
+      })),
+      cause_locations: [{ path: 'src/a.ts' }],
+      evidence: [{ path: 'src/a.ts', detail: 'd', symptomLink: 's' }],
+    };
+    const parsed = parseAdjudication(raw);
+    expect(parsed?.rejected_candidates).toHaveLength(16);
+  });
+});

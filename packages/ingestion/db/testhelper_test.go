@@ -37,6 +37,34 @@ func testPool(t *testing.T) *pgxpool.Pool {
 // ptrStr returns a pointer to a string literal (helper for *string params in tests).
 func ptrStr(s string) *string { return &s }
 
+// seedEpisodeBackedInvestigation gives human fix tests the frozen work round
+// that production investigations always carry after the pipeline cutover.
+func seedEpisodeBackedInvestigation(
+	t *testing.T,
+	pool *pgxpool.Pool,
+	projectID, groupID, eventID string,
+) (episodeID, investigationJobID string) {
+	t.Helper()
+	ctx := context.Background()
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO issue_episodes (project_id,canonical_issue_id,sequence)
+		 VALUES ($1,$2,1) RETURNING id`,
+		projectID, groupID,
+	).Scan(&episodeID); err != nil {
+		t.Fatalf("seed issue episode: %v", err)
+	}
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO error_group_jobs
+		   (error_group_id,project_id,event_id,episode_id,input_version,job_type,status)
+		 VALUES ($1,$2,NULLIF($3,'')::uuid,$4,1,'investigate','completed')
+		 RETURNING id`,
+		groupID, projectID, eventID, episodeID,
+	).Scan(&investigationJobID); err != nil {
+		t.Fatalf("seed episode-backed investigation: %v", err)
+	}
+	return episodeID, investigationJobID
+}
+
 // cleanupTenant removes all data created during a test, scoped by org ID.
 func cleanupTenant(t *testing.T, pool *pgxpool.Pool, orgID string) {
 	t.Helper()

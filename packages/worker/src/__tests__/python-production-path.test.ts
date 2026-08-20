@@ -111,6 +111,24 @@ describeDb('Python two-stage production path', () => {
     );
     const groupId = group.rows[0]!.id;
     await pool.query(`UPDATE error_events SET error_group_id = $1 WHERE id = $2`, [groupId, eventId]);
+    const episode = await pool.query<{ id: string }>(
+      `INSERT INTO issue_episodes (project_id,canonical_issue_id,sequence)
+       VALUES ($1,$2,1) RETURNING id`,
+      [projectId, groupId],
+    );
+    const episodeId = episode.rows[0]!.id;
+    await pool.query(
+      `INSERT INTO error_event_identities
+         (project_id,event_id,status,canonical_issue_id,raw_fingerprint,
+          identity_version,episode_id,settled_at)
+       VALUES ($1,$2,'settled',$3,$4,2,$5,now())`,
+      [projectId, eventId, groupId, `python-raw-${crypto.randomUUID()}`, episodeId],
+    );
+    await pool.query(
+      `INSERT INTO issue_evidence_anchors (project_id,episode_id,anchor_kind,event_id)
+       VALUES ($1,$2,'first',$3),($1,$2,'threshold',$3),($1,$2,'recent',$3)`,
+      [projectId, episodeId, eventId],
+    );
     await pool.query(
       `INSERT INTO error_group_affected_users (error_group_id, end_user_id)
        VALUES ($1, $2)`,
@@ -120,12 +138,12 @@ describeDb('Python two-stage production path', () => {
     const workerId = `python-investigate-${crypto.randomUUID()}`;
     const job = await pool.query<{ id: string; lease_generation: string }>(
       `INSERT INTO error_group_jobs
-         (error_group_id, project_id, status, job_type, attempts, max_attempts,
-          worker_id, claimed_at, lease_expires_at, lease_generation)
-       VALUES ($1, $2, 'claimed', 'investigate', 0, 3, $3, now(),
+         (error_group_id, project_id, episode_id, input_version, status, job_type,
+          attempts, max_attempts, worker_id, claimed_at, lease_expires_at, lease_generation)
+       VALUES ($1, $2, $4, 1, 'claimed', 'investigate', 0, 3, $3, now(),
                now() + interval '10 minutes', 1)
        RETURNING id, lease_generation::text`,
-      [groupId, projectId, workerId],
+      [groupId, projectId, workerId, episodeId],
     );
 
     return {
@@ -135,6 +153,8 @@ describeDb('Python two-stage production path', () => {
         workerId,
         errorGroupId: groupId,
         eventId: null,
+        episodeId,
+        inputVersion: 1,
         sourceId: null,
         projectId,
         jobType: 'investigate',
@@ -158,6 +178,9 @@ describeDb('Python two-stage production path', () => {
       lease_generation: string;
       platform: 'python' | 'javascript' | null;
       triggered_by: 'auto' | 'human' | null;
+      episode_id: string | null;
+      input_version: number | null;
+      guidance: string | null;
     }>(
       `UPDATE error_group_jobs
        SET status = 'claimed', worker_id = $2, claimed_at = now(),
@@ -171,7 +194,7 @@ describeDb('Python two-stage production path', () => {
          LIMIT 1
        )
        RETURNING id, attempts, max_attempts, lease_generation::text,
-                 platform, triggered_by`,
+                 platform, triggered_by, episode_id, input_version, guidance`,
       [groupId, workerId, projectId],
     );
     expect(result.rows).toHaveLength(1);
@@ -181,12 +204,14 @@ describeDb('Python two-stage production path', () => {
       workerId,
       errorGroupId: groupId,
       eventId: null,
+      episodeId: row.episode_id,
+      inputVersion: row.input_version,
       sourceId: null,
       projectId,
       jobType: 'fix',
       attempts: row.attempts,
       maxAttempts: row.max_attempts,
-      guidance: null,
+      guidance: row.guidance,
       leaseGeneration: row.lease_generation,
       triggeredBy: row.triggered_by,
       sessionId: null,
@@ -317,11 +342,12 @@ describeDb('Python two-stage production path', () => {
       customerRuntime: { name: 'CPython', version: '3.11.8' },
       stackTrace: PYTHON_TRACEBACK,
     }));
-    const group = await pool.query<{ status: string; reason_code: string }>(
-      `SELECT status, reason_code FROM error_groups WHERE id = $1`,
+    const group = await pool.query<{ status: string; reason_code: string; reason_message: string }>(
+      `SELECT status, reason_code, reason_message FROM error_groups WHERE id = $1`,
       [groupId],
     );
-    expect(group.rows[0]).toEqual({ status: 'needs_human', reason_code: 'tests_failed' });
+    expect(group.rows[0]!.reason_message).toBe('The candidate did not pass pytest.');
+    expect(group.rows[0]).toMatchObject({ status: 'needs_human', reason_code: 'tests_failed' });
   });
 
   it('keeps Python incidents on the existing terminal path while the flag is off', async () => {

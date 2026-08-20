@@ -51,6 +51,12 @@ branch, or pull request—not exactly one process invocation.
   retry budget.
 - Dead-lettering reconciles related product state: it cannot leave an incident
   permanently active without live work.
+- A model or clone failure is classified before it becomes customer-visible: a
+  deterministic request-construction failure (rejected tool schema, invalid
+  model, bad credentials) fails the durable job and dead-letters as an operator
+  error without writing a diagnosis; a transient failure (timeout, rate limit,
+  provider outage, network fault) retries the same job and produces
+  `unable_to_establish_cause` only after the retry budget is exhausted.
 
 Each claim increments a durable `lease_generation`. Job, incident, fix-job, trace,
 and setup-PR writes require the current unexpired generation and lock the job row

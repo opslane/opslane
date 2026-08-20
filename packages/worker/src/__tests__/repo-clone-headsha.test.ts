@@ -14,7 +14,7 @@ import {
 const execFile = promisify(execFileCb);
 const cleanupPaths: string[] = [];
 
-async function fixtureRepository(): Promise<{ repo: string; headSha: string }> {
+async function fixtureRepository(): Promise<{ repo: string; headSha: string; firstSha: string }> {
   const root = await mkdtemp(join(tmpdir(), 'clone-sha-'));
   cleanupPaths.push(root);
   const remote = join(root, 'remote.git');
@@ -28,8 +28,16 @@ async function fixtureRepository(): Promise<{ repo: string; headSha: string }> {
     'commit', '-m', 'one',
   ], { cwd: work });
   await execFile('git', ['push', 'origin', 'main'], { cwd: work });
+  const first = await execFile('git', ['rev-parse', 'HEAD'], { cwd: work });
+  await writeFile(join(work, 'a.txt'), 'y');
+  await execFile('git', ['add', '.'], { cwd: work });
+  await execFile('git', [
+    '-c', 'user.email=t@t', '-c', 'user.name=t',
+    'commit', '-m', 'two',
+  ], { cwd: work });
+  await execFile('git', ['push', 'origin', 'main'], { cwd: work });
   const { stdout } = await execFile('git', ['rev-parse', 'HEAD'], { cwd: work });
-  return { repo: remote, headSha: stdout.trim() };
+  return { repo: remote, headSha: stdout.trim(), firstSha: first.stdout.trim() };
 }
 
 afterEach(async () => {
@@ -59,6 +67,38 @@ describe('clone head sha', () => {
     try {
       expect(clone.headSha).toBe(fixture.headSha);
       expect(clone.defaultBranch).toBe('main');
+    } finally {
+      await clone.cleanup();
+    }
+  });
+
+  it('checks out the frozen observation commit when the remote can reach it', async () => {
+    const fixture = await fixtureRepository();
+    const clone = await cloneRepo({
+      githubRepo: 'owner/repo',
+      jobId: `frozen-sha-${Date.now()}`,
+      repoUrl: fixture.repo,
+      commitSha: fixture.firstSha,
+    });
+
+    try {
+      expect(clone.headSha).toBe(fixture.firstSha);
+    } finally {
+      await clone.cleanup();
+    }
+  });
+
+  it('records default HEAD when the requested commit is unreachable', async () => {
+    const fixture = await fixtureRepository();
+    const clone = await cloneRepo({
+      githubRepo: 'owner/repo',
+      jobId: `fallback-sha-${Date.now()}`,
+      repoUrl: fixture.repo,
+      commitSha: 'ffffffffffffffffffffffffffffffffffffffff',
+    });
+
+    try {
+      expect(clone.headSha).toBe(fixture.headSha);
     } finally {
       await clone.cleanup();
     }

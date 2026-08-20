@@ -126,7 +126,6 @@ describeDb('inquiry job write path integration', () => {
     );
     expect(decisions.rows[0]!.count).toBe(1);
     expect(investigations.rows[0]!.count).toBe(1);
-    // Both values come from the locked inquiry-job row, not the caller.
     expect(investigations.rows[0]!.input_version).toBe(1);
     expect(investigations.rows[0]!.error_group_id).toBe(issueId);
   });
