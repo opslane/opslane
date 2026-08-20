@@ -151,6 +151,7 @@ func NewRouterWithPool(deps *Dependencies, pool *pgxpool.Pool) *chi.Mux {
 		r.With(deps.AuthenticateUserSession).Get("/projects/{projectID}/sessions/{sessionID}/chunks/{seq}", deps.GetSessionChunk)
 		r.With(deps.AuthenticateUserSession).Get("/projects/{projectID}/incidents/{incidentID}/affected-users", deps.ListAffectedUsers)
 		r.With(deps.AuthenticateUserSession).Post("/projects/{projectID}/incidents/{incidentID}/fix", deps.TriggerFix)
+		r.With(deps.AuthenticateUserSession).Post("/projects/{projectID}/incidents/{incidentID}/review", deps.RequestIssueReview)
 		r.With(deps.AuthenticateUserSession).Post("/projects/{projectID}/incidents/{incidentID}/resolve", deps.ResolveIncident)
 		r.With(deps.AuthenticateUserSession).Post("/projects/{projectID}/incidents/{incidentID}/archive", deps.ArchiveIncident)
 		r.With(deps.AuthenticateUserSession).Post("/projects/{projectID}/incidents/{incidentID}/unarchive", deps.UnarchiveIncident)

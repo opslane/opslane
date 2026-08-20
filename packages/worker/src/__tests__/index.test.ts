@@ -97,6 +97,7 @@ vi.mock('../setup-pr.js', () => ({ processSetupPrJob: vi.fn() }));
 vi.mock('../route-map.js', () => ({ processRouteMapJob: vi.fn() }));
 vi.mock('../product-context/job.js', () => ({ runProductContext: vi.fn() }));
 vi.mock('../inquiry/job.js', () => ({ runInquiry: vi.fn() }));
+vi.mock('../digest-writer/job.js', () => ({ writeDigest: vi.fn() }));
 vi.mock('../evidence/bundle.js', () => ({ loadEvidence: vi.fn() }));
 vi.mock('../score-sync.js', () => ({ processScoreSyncJob: vi.fn() }));
 vi.mock('../resolve/job.js', () => ({ runStackResolve: vi.fn() }));
@@ -163,6 +164,7 @@ const { processFrictionOutcomes } = await import('../friction/promotion.js');
 const { processRouteMapJob } = await import('../route-map.js');
 const { runProductContext } = await import('../product-context/job.js');
 const { runInquiry } = await import('../inquiry/job.js');
+const { writeDigest } = await import('../digest-writer/job.js');
 const { loadEvidence } = await import('../evidence/bundle.js');
 const { processScoreSyncJob } = await import('../score-sync.js');
 const { runStackResolve } = await import('../resolve/job.js');
@@ -1298,6 +1300,32 @@ describe('issue_inquiry dispatch', () => {
     await expect(processJobInner(job, signal)).resolves.toBeUndefined();
 
     expect(runInquiry).toHaveBeenCalledWith(job, signal);
+  });
+});
+
+describe('digest_write dispatch', () => {
+  it('dispatches run-scoped jobs before the error-group-required guard', async () => {
+    const job: ClaimedJob = {
+      id: 'digest-write-1', workerId: 'worker-1', leaseGeneration: '1',
+      errorGroupId: null, eventId: null, sourceId: null, projectId: 'proj-1',
+      jobType: 'digest_write', attempts: 0, guidance: null, triggeredBy: 'auto',
+      sessionId: null, runId: 'run-1',
+    };
+
+    await expect(processJobInner(job, new AbortController().signal)).resolves.toBeUndefined();
+    expect(writeDigest).toHaveBeenCalledWith('run-1', 'proj-1');
+  });
+
+  it('rejects a job without its digest run', async () => {
+    const job: ClaimedJob = {
+      id: 'digest-write-2', workerId: 'worker-1', leaseGeneration: '1',
+      errorGroupId: null, eventId: null, sourceId: null, projectId: 'proj-1',
+      jobType: 'digest_write', attempts: 0, guidance: null, triggeredBy: 'auto',
+      sessionId: null, runId: null,
+    };
+
+    await expect(processJobInner(job, new AbortController().signal))
+      .rejects.toThrow('missing run_id');
   });
 });
 

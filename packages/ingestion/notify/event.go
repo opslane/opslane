@@ -6,6 +6,7 @@ import "fmt"
 type EventPayload struct {
 	Version      int            `json:"version"`
 	EventType    string         `json:"event_type"`
+	RunID        string         `json:"run_id,omitempty"`
 	Issue        *IssueRef      `json:"issue,omitempty"`
 	Project      ProjectRef     `json:"project"`
 	Environment  string         `json:"environment,omitempty"`
@@ -60,20 +61,35 @@ type TriageImpact struct {
 }
 
 type DigestPayload struct {
-	Date                string              `json:"date"`
-	Window              DigestWindow        `json:"window"`
-	Insights            []DigestInsight     `json:"insights"`
-	InsightsHasMore     bool                `json:"insights_has_more"`
-	TopNewIssues        []DigestIssue       `json:"top_new_issues"`
-	TopNewIssuesHasMore bool                `json:"top_new_issues_has_more"`
-	Outcomes            DigestOutcomes      `json:"outcomes"`
-	NeedsHumanBacklog   int                 `json:"needs_human_backlog"`
-	Watching            DigestWatching      `json:"watching"`
-	SchemaVersion       int                 `json:"schema_version,omitempty"`
-	ReceiptItems        []ReceiptItem       `json:"receipt_items,omitempty"`
-	TriageCounts        *DigestTriageCounts `json:"triage_counts,omitempty"`
-	HeldBackCount       int                 `json:"held_back_count,omitempty"`
-	ReceiptOverflow     int                 `json:"receipt_overflow,omitempty"`
+	Date                string                `json:"date"`
+	Window              DigestWindow          `json:"window"`
+	Insights            []DigestInsight       `json:"insights"`
+	InsightsHasMore     bool                  `json:"insights_has_more"`
+	TopNewIssues        []DigestIssue         `json:"top_new_issues"`
+	TopNewIssuesHasMore bool                  `json:"top_new_issues_has_more"`
+	Outcomes            DigestOutcomes        `json:"outcomes"`
+	NeedsHumanBacklog   int                   `json:"needs_human_backlog"`
+	Watching            DigestWatching        `json:"watching"`
+	SchemaVersion       int                   `json:"schema_version,omitempty"`
+	ReceiptItems        []ReceiptItem         `json:"receipt_items,omitempty"`
+	TriageCounts        *DigestTriageCounts   `json:"triage_counts,omitempty"`
+	HeldBackCount       int                   `json:"held_back_count,omitempty"`
+	ReceiptOverflow     int                   `json:"receipt_overflow,omitempty"`
+	GeneratedCards      []GeneratedDigestCard `json:"generated_cards,omitempty"`
+}
+
+// GeneratedDigestCard is model-authored prose grounded in a frozen candidate.
+// Its IDs, counts, accounts and links have all been mechanically validated.
+type GeneratedDigestCard struct {
+	EpisodeID     string   `json:"episode_id"`
+	IncidentID    string   `json:"incident_id"`
+	Title         string   `json:"title"`
+	Label         string   `json:"label"`
+	Copy          string   `json:"copy"`
+	Action        string   `json:"action"`
+	AffectedUsers int      `json:"affected_users"`
+	Accounts      []string `json:"accounts"`
+	PRURL         string   `json:"pr_url,omitempty"`
 }
 
 // DigestTriageCounts are point-in-time counts rendered in the digest header.

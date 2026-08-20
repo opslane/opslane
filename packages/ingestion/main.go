@@ -158,6 +158,7 @@ func main() {
 	}()
 	notifySender := notify.NewSender(0, notifyExtraHosts)
 	digestSweeper := digest.New(pool, queries.DashboardURL)
+	digestScheduler := digest.NewScheduler(pool)
 	deps, err := handler.NewDependencies(&handler.Dependencies{
 		Queries:               queries,
 		MinIO:                 minioClient,
@@ -197,11 +198,11 @@ func main() {
 	// is the off switch -- there is no global flag, per that migration's
 	// product decision that the digest is automatic with a per-destination
 	// unsubscribe.
-	go digestSweeper.Start(ctx, 5*time.Minute)
+	go digestScheduler.Start(ctx, 5*time.Minute)
 	// Boot-time proof the loop exists. The sweep is otherwise silent on a day
 	// it publishes nothing, so without this line a sweep that never started is
 	// indistinguishable in the logs from a sweep that had nothing to send.
-	slog.Info("digest sweep started")
+	slog.Info("digest scheduler started")
 
 	// Periodic cleanup of expired/revoked refresh tokens and auth codes
 	go func() {

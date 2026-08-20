@@ -62,6 +62,12 @@ type incidentJSON struct {
 	ArchivedAt             *string                   `json:"archived_at,omitempty"`
 	TraceURL               *string                   `json:"trace_url,omitempty"`
 	Environments           []incidentEnvironmentJSON `json:"environments,omitempty"`
+	EpisodeID              *string                   `json:"episode_id,omitempty"`
+	State                  string                    `json:"state,omitempty"`
+	StateReason            string                    `json:"state_reason,omitempty"`
+	StateDecidedAt         *string                   `json:"state_decided_at,omitempty"`
+	EvidenceEventIDs       []string                  `json:"evidence_event_ids,omitempty"`
+	PendingIdentity        bool                      `json:"pending_identity,omitempty"`
 }
 
 type incidentRecordingJSON struct {
@@ -173,6 +179,69 @@ func toIncidentJSON(g db.ErrorGroup) incidentJSON {
 		}
 	}
 	return inc
+}
+
+// inboxState translates storage stages into customer vocabulary.
+func inboxState(identity, filterDecision, inquiryDecision, diagnosisOutcome, groupStatus string) (state, reason string) {
+	switch {
+	case identity == "pending":
+		return "processing", "working out which problem this belongs to"
+	case groupStatus == "resolved":
+		return "resolved", "closed"
+	case inquiryDecision == "do_not_pursue":
+		return "reviewed_not_pursuing", "reviewed and not selected for investigation"
+	case inquiryDecision == "wait_for_more_evidence":
+		return "waiting_for_evidence", "waiting for more evidence"
+	case inquiryDecision == "investigate" && diagnosisOutcome == "verified_fix":
+		return "fix_ready", "a change is verified and waiting for your review"
+	case inquiryDecision == "investigate" && diagnosisOutcome == "needs_human":
+		return "needs_you", "your input is needed to continue"
+	case inquiryDecision == "investigate" && diagnosisOutcome == "unable_to_establish_cause":
+		return "reviewed_not_pursuing", "we could not establish a cause"
+	case inquiryDecision == "investigate":
+		return "investigating", "tracing the cause"
+	case filterDecision == "open_inquiry":
+		return "reviewing_evidence", "deciding whether this is worth investigating"
+	case filterDecision == "inactive":
+		return "inactive", "stopped occurring before it advanced"
+	default:
+		return "watching", "waiting for enough recent affected people or sessions"
+	}
+}
+
+func attachPipelineState(incident *incidentJSON, record db.IssuePipelineRecord) {
+	incident.EpisodeID = nil
+	if record.EpisodeID != "" {
+		incident.EpisodeID = &record.EpisodeID
+	}
+	// An issue with no episode has no pipeline state to report: every issue
+	// grouped before the rewrite, and every friction bucket. Reporting one
+	// anyway lands on the default arm, which claims a PR-bearing legacy issue
+	// is waiting for reach and hides it from the inbox's primary list.
+	// Archived issues keep their own label for the same reason: their last
+	// pipeline decision is real but no longer what the reader should act on.
+	if record.EpisodeID == "" || incident.Status == "archived" {
+		return
+	}
+	state, reason := inboxState("settled", record.FilterDecision, record.InquiryDecision, record.DiagnosisOutcome, incident.Status)
+	switch state {
+	case "reviewed_not_pursuing", "waiting_for_evidence":
+		if record.InquiryReason != "" {
+			reason = record.InquiryReason
+		}
+	case "needs_you":
+		if record.DiagnosisReason != "" {
+			reason = record.DiagnosisReason
+		}
+	case "watching", "inactive":
+		if record.FilterReason != "" {
+			reason = record.FilterReason
+		}
+	}
+	incident.State = state
+	incident.StateReason = reason
+	incident.EvidenceEventIDs = record.EvidenceEventIDs
+	incident.StateDecidedAt = fmtTimePtr(record.DecidedAt)
 }
 
 // projectJSON is the JSON representation of a project for the dashboard API.
@@ -330,8 +399,41 @@ func (d *Dependencies) ListIncidents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	incidents := make([]incidentJSON, 0, len(groups))
+	groupIDs := make([]string, 0, len(groups))
+	for _, group := range groups {
+		groupIDs = append(groupIDs, group.ID)
+	}
+	pipeline, err := d.Queries.IssuePipelineRecords(r.Context(), projectID, groupIDs)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "failed to load issue pipeline state")
+		return
+	}
 	for _, g := range groups {
-		incidents = append(incidents, toIncidentJSON(g))
+		incident := toIncidentJSON(g)
+		attachPipelineState(&incident, pipeline[g.ID])
+		incidents = append(incidents, incident)
+	}
+	// Pending observations have no canonical issue yet and therefore cannot be
+	// produced by ListErrorGroups. Include them in the unfiltered inbox.
+	if filters == nil {
+		pending, err := d.Queries.PendingIdentities(r.Context(), projectID)
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "failed to load processing observations")
+			return
+		}
+		for _, identity := range pending {
+			platform := identity.Platform
+			environmentID := identity.EnvironmentID
+			incidents = append(incidents, incidentJSON{
+				ID: identity.EventID, ProjectID: projectID, Fingerprint: identity.Fingerprint,
+				Title: identity.Title, Status: "new", Kind: "error", Platform: &platform,
+				EnvironmentID: &environmentID, FirstSeen: identity.ObservedAt.Format(time.RFC3339),
+				LastSeen: identity.ObservedAt.Format(time.RFC3339), OccurrenceCount: 1,
+				AffectedUsersCount: 0, Story: "1 crash observed.", State: "processing",
+				StateReason: "working out which problem this belongs to", PendingIdentity: true,
+				EvidenceEventIDs: []string{identity.EventID},
+			})
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -358,6 +460,9 @@ func (d *Dependencies) GetIncident(w http.ResponseWriter, r *http.Request) {
 	}
 
 	inc := toIncidentJSON(*group)
+	if pipeline, err := d.Queries.IssuePipelineRecords(r.Context(), projectID, []string{incidentID}); err == nil {
+		attachPipelineState(&inc, pipeline[incidentID])
+	}
 	if group.InvestigationReadiness != nil && *group.InvestigationReadiness == "eligible" {
 		if brief, err := d.Queries.GetLatestAgentTaskBrief(r.Context(), projectID, incidentID); err == nil && brief != nil {
 			inc.AgentTaskBrief = brief
@@ -1032,6 +1137,28 @@ func (d *Dependencies) TriggerFix(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"job_id": jobID})
+}
+
+// RequestIssueReview asks the inquiry stage to take another look at the
+// current episode. It does not bypass inquiry or create an investigation.
+func (d *Dependencies) RequestIssueReview(w http.ResponseWriter, r *http.Request) {
+	projectID := chi.URLParam(r, "projectID")
+	if !d.verifyProjectAccess(w, r, projectID) {
+		return
+	}
+	incidentID := chi.URLParam(r, "incidentID")
+	jobID, err := d.Queries.RequestIssueReview(r.Context(), projectID, incidentID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeJSONError(w, http.StatusConflict, "issue has no open review round")
+			return
+		}
+		writeJSONError(w, http.StatusInternalServerError, "failed to request another review")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	_ = json.NewEncoder(w).Encode(map[string]string{"job_id": jobID})
 }
 
 // sanitizeGuidance strips null bytes and ASCII control chars (except newline, tab).

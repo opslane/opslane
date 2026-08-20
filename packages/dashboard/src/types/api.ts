@@ -99,6 +99,18 @@ export type ErrorGroupStatus =
 
 export type ConfidenceLevel = 'high' | 'medium' | 'low';
 
+export type IssuePipelineState =
+  | 'processing'
+  | 'watching'
+  | 'reviewing_evidence'
+  | 'waiting_for_evidence'
+  | 'reviewed_not_pursuing'
+  | 'investigating'
+  | 'fix_ready'
+  | 'needs_you'
+  | 'inactive'
+  | 'resolved';
+
 export interface NeedsHumanReason {
   reason_code: string;
   reason_message: string;
@@ -194,6 +206,12 @@ export interface Incident {
     error_at: string;
   };
   environments?: IncidentEnvironment[];
+  episode_id?: string;
+  state?: IssuePipelineState;
+  state_reason?: string;
+  state_decided_at?: string;
+  evidence_event_ids?: string[];
+  pending_identity?: boolean;
 }
 
 export interface IncidentRecording {
@@ -364,6 +382,7 @@ export type AdminJobType =
   | 'session_analysis'
   | 'route_map'
   | 'product_context'
+  | 'digest_write'
   | 'score_sync'
   | 'stack_resolve';
 

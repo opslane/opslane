@@ -1,4 +1,4 @@
-import type { AdminJobStatus, ErrorGroupStatus, SessionStatus } from './types/api';
+import type { AdminJobStatus, ErrorGroupStatus, IssuePipelineState, SessionStatus } from './types/api';
 import type { StatusTone } from './components/ui/StatusLabel.vue';
 
 export interface StatusRecipe {
@@ -53,6 +53,22 @@ export function incidentStatusRecipe(status: ErrorGroupStatus): StatusRecipe {
     case 'insight': return recipe('Insight', 'insight');
   }
   return unknownStatusRecipe(status);
+}
+
+export function pipelineStateRecipe(state: IssuePipelineState): StatusRecipe {
+  switch (state) {
+    case 'processing': return recipe('Processing', 'progress');
+    case 'watching': return recipe('Watching', 'neutral');
+    case 'reviewing_evidence': return recipe('Reviewing evidence', 'progress');
+    case 'waiting_for_evidence': return recipe('Waiting for evidence', 'warning');
+    case 'reviewed_not_pursuing': return recipe('Reviewed, not pursuing', 'neutral');
+    case 'investigating': return recipe('Investigating', 'progress');
+    case 'fix_ready': return recipe('Fix ready', 'success');
+    case 'needs_you': return recipe('Needs you', 'warning');
+    case 'inactive': return recipe('Inactive', 'neutral');
+    case 'resolved': return recipe('Resolved', 'success');
+  }
+  return unknownStatusRecipe(state);
 }
 
 export function adminJobStatusRecipe(status: AdminJobStatus): StatusRecipe {

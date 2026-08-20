@@ -594,6 +594,16 @@ export function getIncident(
   );
 }
 
+export function requestIssueReview(
+  projectId: string,
+  incidentId: string,
+): Promise<{ job_id: string }> {
+  return postJSON<{ job_id: string }>(
+    `/projects/${projectId}/incidents/${incidentId}/review`,
+    {},
+  );
+}
+
 export function getSampleEvent(
   projectId: string,
   incidentId: string
