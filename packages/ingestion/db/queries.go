@@ -1388,12 +1388,18 @@ func (q *Queries) TriggerFixJob(ctx context.Context, projectID, groupID, guidanc
 	// yet, so its human fix keeps the existing sample anchor.
 	var jobID string
 	if kind == "error" {
+		// input_version stays NULL on human fixes: the one-job-per-round-and-
+		// version unique index has no status predicate, so a version-stamped
+		// human retry after a terminal automatic fix (for example a PR closed
+		// unmerged returning the group to 'investigated') would collide with
+		// the spent slot and 500. The episode still pins the frozen evidence;
+		// the active-job index still prevents concurrent duplicates.
 		err = tx.QueryRow(ctx,
 			`INSERT INTO error_group_jobs
 			   (error_group_id,project_id,job_type,guidance,triggered_by,platform,
 			    source_job_id,event_id,episode_id,input_version)
 			 SELECT $1,$2,'fix',$3,'human',g.platform,
-			        j.id,j.event_id,j.episode_id,j.input_version
+			        j.id,j.event_id,j.episode_id,NULL
 			   FROM error_groups g
 			   JOIN LATERAL (
 			     SELECT j.id,j.event_id,j.episode_id,j.input_version
@@ -1412,7 +1418,12 @@ func (q *Queries) TriggerFixJob(ctx context.Context, projectID, groupID, guidanc
 			groupID, projectID, nilIfEmpty(guidance),
 		).Scan(&jobID)
 		if err == pgx.ErrNoRows {
-			return "", fmt.Errorf("error group %s has no episode-backed investigation", groupID)
+			// No completed investigation in an open work round (pre-cutover
+			// rows have NULL episodes; a closed round has no live evidence).
+			// This is a fix-triggerability condition, not a server fault: the
+			// sentinel maps to the 409 the dashboard understands. The status
+			// transition above must not stick either way.
+			return "", ErrNotInvestigated
 		}
 	} else {
 		err = tx.QueryRow(ctx,

@@ -879,6 +879,16 @@ describe('processFixJob — preserves writeup on failure (no revert/null)', () =
     );
   });
 
+  it('fails the fix job on a transient clone failure instead of writing a terminal', async () => {
+    mockCloneRepo.mockRejectedValueOnce(new Error('fatal: unable to access repo: Connection timed out'));
+
+    await expect(processFixJob(fixJob(), new AbortController().signal))
+      .rejects.toThrow('Connection timed out');
+
+    expect(mockUpdateGroupStatus).not.toHaveBeenCalled();
+    expect(mockRunPipeline).not.toHaveBeenCalled();
+  });
+
   it('refuses an error fix job without frozen episode evidence', async () => {
     await expect(processFixJob(
       { ...fixJob(), episodeId: null },

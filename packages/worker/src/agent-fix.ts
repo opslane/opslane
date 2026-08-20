@@ -424,7 +424,9 @@ ${fenced(input.stackTrace, MAX_STACK_TRACE)}
       parts.push(`Files already examined: ${uniqueFiles.join(', ')}\nDo NOT re-read these files unless you need to edit them.`);
     }
     if (input.investigation.guidance) {
-      parts.push(`User guidance:\n<untrusted_user_data>\n${input.investigation.guidance}\n</untrusted_user_data>`);
+      // fenced() neutralizes embedded fence closers: guidance now carries the
+      // frozen-evidence summary, whose text is attacker-influenced.
+      parts.push(`User guidance:\n<untrusted_user_data>\n${fenced(input.investigation.guidance, 4000)}\n</untrusted_user_data>`);
     }
     sections.push(parts.join('\n'));
   }

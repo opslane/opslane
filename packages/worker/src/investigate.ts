@@ -48,7 +48,9 @@ const DEFAULT_SPEND_CEILING_USD = 2.0;
 const MAX_ERROR_MESSAGE = 500;
 const MAX_STACK_TRACE = 3000;
 const MAX_BREADCRUMBS = 4000;
-const MAX_SESSION_CONTEXT = 500;
+// Sized for the compact frozen-evidence summary (top-N'd lists, clamped
+// fields), not for raw session JSON; at 500 the summary's tail was cut.
+const MAX_SESSION_CONTEXT = 2000;
 const MAX_INVESTIGATION_BRIEF = 1000;
 
 export const MODEL_PRICING: Record<string, { input: number; output: number; cacheWrite: number; cacheRead: number }> = {

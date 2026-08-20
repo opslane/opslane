@@ -344,7 +344,7 @@ export async function recordFixTerminalDecision(args: {
         AND NOT EXISTS (
           SELECT 1 FROM diagnosis_decisions d
            WHERE d.project_id=j.project_id AND d.job_id=j.id
-             AND d.outcome IN ('verified_fix','needs_human','unable_to_establish_cause'))`,
+             AND d.outcome=$8)`,
     [
       args.lease.id,
       args.lease.workerId,
@@ -359,19 +359,20 @@ export async function recordFixTerminalDecision(args: {
     ],
   );
   if ((result.rowCount ?? 0) > 0) return;
-  const existing = await getPool().query<{ outcome: string }>(
-    `SELECT outcome FROM diagnosis_decisions
-      WHERE project_id=$1 AND job_id=$2
-        AND outcome IN ('verified_fix','needs_human','unable_to_establish_cause')
-      ORDER BY decided_at DESC,id DESC LIMIT 1`,
-    [args.lease.projectId, args.lease.id],
+  // Zero rows means either this exact outcome is already recorded (an
+  // idempotent retry) or the lease is gone. A retry that reached a DIFFERENT
+  // outcome appends a new row above rather than failing: attempt one can
+  // record needs_human and die before the status write, and the reclaimed
+  // attempt's verified_fix must be recordable or a delivered PR would exist
+  // with no record and the job would dead-letter mid-delivery. Readers take
+  // the newest row.
+  const existing = await getPool().query(
+    `SELECT 1 FROM diagnosis_decisions
+      WHERE project_id=$1 AND job_id=$2 AND outcome=$3
+      LIMIT 1`,
+    [args.lease.projectId, args.lease.id, args.outcome],
   );
   if ((existing.rowCount ?? 0) === 0) throw new LeaseLostError(args.lease.id);
-  if (existing.rows[0]!.outcome !== args.outcome) {
-    throw new Error(
-      `Fix job ${args.lease.id} already recorded terminal outcome ${existing.rows[0]!.outcome}`,
-    );
-  }
 }
 
 /** Record the commit a run actually checked out, on the job row, right after

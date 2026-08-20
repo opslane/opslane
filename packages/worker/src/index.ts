@@ -474,17 +474,30 @@ async function loadEvidenceEvent(
   return event;
 }
 
+/** Compact, bounded rendering of the frozen evidence bundle for model
+ * prompts. Never the raw JSON: a realistic bundle runs tens of kilobytes and
+ * the prompt slots that carry this are capped, so a stringified bundle
+ * arrived as a few hundred bytes of JSON cut mid-object. Every list is
+ * top-N'd and every free-text field is length-clamped. */
 function investigationEvidenceContext(evidence: EvidenceBundle): string {
-  return JSON.stringify({
-    inquiryBriefSources: {
-      affectedUnits: evidence.affectedUnits,
-      availability: evidence.availability,
-      failedRequests: evidence.failedRequests,
-      writeRollups: evidence.writeRollups,
-      productContext: evidence.productContext,
-      replayPointers: evidence.replayPointers,
-    },
-  });
+  const clamp = (value: string, max: number): string => value.slice(0, max);
+  const failed = evidence.failedRequests.slice(0, 8).map((r) =>
+    `${clamp(r.method, 8)} ${clamp(r.endpointPattern, 80)} -> ${r.status} on ${clamp(r.pageRoute, 60)}`);
+  const rollups = evidence.writeRollups.slice(0, 5).map((r) =>
+    `${clamp(r.method, 8)} ${clamp(r.endpointPattern, 80)} ${r.statusClass}xx x${r.occurrenceCount}`);
+  const routes = evidence.productContext.slice(0, 5).map((p) =>
+    `${clamp(p.route, 60)}: ${clamp(p.purpose, 100)}`);
+  const lines = [
+    `Affected units: ${evidence.affectedUnits}`,
+    `Availability: recording=${evidence.availability.recording}, sourceMap=${evidence.availability.sourceMap}`,
+    failed.length > 0
+      ? `Failed requests (${evidence.failedRequests.length} total, first ${failed.length}):\n  ${failed.join('\n  ')}`
+      : 'Failed requests: none recorded',
+    rollups.length > 0 ? `Successful-write rollups:\n  ${rollups.join('\n  ')}` : null,
+    routes.length > 0 ? `Product context:\n  ${routes.join('\n  ')}` : null,
+    `Replay pointers: ${evidence.replayPointers.length}`,
+  ].filter((line): line is string => line !== null);
+  return lines.join('\n');
 }
 
 function preflightDecision(
@@ -932,6 +945,11 @@ export async function processFrictionInvestigateJob(
     });
     await db.cacheProjectDefaultBranch(job.projectId, clone.defaultBranch);
   } catch (error: unknown) {
+    if (isRetriableCloneFailure(error)) {
+      // Same classification as the error pipeline: transient clone faults
+      // retry the durable job instead of terminalizing the incident.
+      throw error;
+    }
     await updateGroupInvestigation(job.errorGroupId, job.projectId, 'needs_human', {
       reason: cloneFailureReason(error),
     }, job);
@@ -1333,6 +1351,12 @@ export async function processFixJob(job: ClaimedJob & { errorGroupId: string }, 
         && requestedCommit.toLowerCase() !== cloneResult.headSha.toLowerCase(),
     });
   } catch (err: unknown) {
+    if (isRetriableCloneFailure(err)) {
+      // A network blip is not a fix verdict: fail the durable job so it
+      // retries and, when exhausted, dead-letters into the operator's view
+      // (docs/contracts/reliability.md).
+      throw err;
+    }
     await updateGroupStatus(job.errorGroupId, job.projectId, 'needs_human', {
       reason: cloneFailureReason(err),
       terminalFixJobId: job.id,

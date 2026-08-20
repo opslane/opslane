@@ -30,10 +30,19 @@ var (
 		        SELECT dd.outcome, dd.diagnosis
 		          FROM diagnosis_decisions dd
 		         WHERE dd.error_group_id = g.id AND dd.project_id = g.project_id
+		           -- The fix phase appends a delivery-outcome row (model
+		           -- 'deterministic-fix-verification', diagnosis NULL) after the
+		           -- investigation's diagnosis row. It documents what delivery
+		           -- achieved, not what was diagnosed, so it must not shadow the
+		           -- diagnosis row this predicate exists to read.
+		           AND dd.model <> 'deterministic-fix-verification'
 		         ORDER BY dd.decided_at DESC, dd.id DESC
 		         LIMIT 1
 		      ) latest
-		      WHERE latest.outcome IN ('code_fix','not_actionable')
+		      -- 'needs_human' joined the vocabulary when insight and parked
+		      -- results started persisting their terminal outcome; the diagnosis
+		      -- shape checks below still gate rows without a usable diagnosis.
+		      WHERE latest.outcome IN ('code_fix','not_actionable','needs_human')
 		        AND (CASE WHEN jsonb_typeof(latest.diagnosis->'evidence') = 'array'
 		                  THEN jsonb_array_length(latest.diagnosis->'evidence') >= 1
 		                   AND NOT EXISTS (
@@ -49,6 +58,7 @@ var (
 		    ) AS has_validated_diagnosis,
 		    (SELECT dd.decided_at FROM diagnosis_decisions dd
 		      WHERE dd.error_group_id=g.id AND dd.project_id=g.project_id
+		        AND dd.model <> 'deterministic-fix-verification'
 		      ORDER BY dd.decided_at DESC,dd.id DESC LIMIT 1) AS diagnosis_decided_at
 		  ) d
 		 CROSS JOIN LATERAL (

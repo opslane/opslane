@@ -384,12 +384,28 @@ export function parseAdjudication(raw: Record<string, unknown>): Adjudication | 
   if (!best) return null;
 
   const strength = raw['evidence_strength'];
+  const parsedCandidates = candidates(raw['candidates_considered']);
+  let parsedRejections = rejectedCandidates(raw);
+  // The parser caps both lists at MAX_CANDIDATES (the wire schema cannot
+  // carry maxItems). When the candidate list was actually truncated, a
+  // rejection of a dropped candidate would surface as rejection_unknown_id
+  // and terminalize an otherwise-grounded diagnosis, so those orphans are
+  // dropped with their candidates. Outside truncation an unknown id stays
+  // visible: there it marks a genuinely malformed submission.
+  const candidatesTruncated = Array.isArray(raw['candidates_considered'])
+    && raw['candidates_considered'].length > MAX_CANDIDATES;
+  if (candidatesTruncated && parsedRejections) {
+    const survivingIds = new Set(
+      parsedCandidates.map((candidate) => candidate.id).filter((id): id is string => Boolean(id)),
+    );
+    parsedRejections = parsedRejections.filter((rejection) => survivingIds.has(rejection.id));
+  }
   return {
     best_supported: best,
     evidence_check: typeof raw['evidence_check'] === 'string' ? raw['evidence_check'].trim() : '',
-    candidates_considered: candidates(raw['candidates_considered']),
+    candidates_considered: parsedCandidates,
     rejected: strings(raw['rejected']),
-    rejected_candidates: rejectedCandidates(raw),
+    rejected_candidates: parsedRejections,
     evidence_strength:
       typeof strength === 'string' && (STRENGTHS as string[]).includes(strength)
         ? (strength as EvidenceStrength)
