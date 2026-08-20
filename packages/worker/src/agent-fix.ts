@@ -424,7 +424,9 @@ ${fenced(input.stackTrace, MAX_STACK_TRACE)}
       parts.push(`Files already examined: ${uniqueFiles.join(', ')}\nDo NOT re-read these files unless you need to edit them.`);
     }
     if (input.investigation.guidance) {
-      parts.push(`User guidance:\n<untrusted_user_data>\n${input.investigation.guidance}\n</untrusted_user_data>`);
+      // fenced() neutralizes embedded fence closers: guidance now carries the
+      // frozen-evidence summary, whose text is attacker-influenced.
+      parts.push(`User guidance:\n<untrusted_user_data>\n${fenced(input.investigation.guidance, 4000)}\n</untrusted_user_data>`);
     }
     sections.push(parts.join('\n'));
   }
@@ -664,7 +666,11 @@ async function runAgentFixCore(input: AgentFixInput): Promise<AgentFixResult> {
       const execute = async (): Promise<T> => {
         const [sha, dirty] = await Promise.all([
           sandbox!.commands.run(`cd ${SANDBOX_REPO_PATH} && git rev-parse HEAD`, { timeoutMs: 10_000 }),
-          sandbox!.commands.run(`cd ${SANDBOX_REPO_PATH} && git status --porcelain`, { timeoutMs: 10_000 }),
+          // -uno: tracked modifications only. Untracked files (node_modules,
+          // lockfiles a bare fixture never committed, the agent's declared
+          // test file itself) marked every entry dirty and made the judge
+          // read routine runs as tampered trees.
+          sandbox!.commands.run(`cd ${SANDBOX_REPO_PATH} && git status --porcelain -uno`, { timeoutMs: 10_000 }),
         ]);
         const value = await run();
         const statuses = value.tests ? [...value.tests.values()] : [];

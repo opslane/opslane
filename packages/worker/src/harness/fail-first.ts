@@ -73,6 +73,19 @@ function invalidContract(input: FailFirstInput): string | null {
   return validateDeclaration(input.declaredTest);
 }
 
+/** Failure signatures that mean the declared test never truly executed — the
+ * file failed to load or the runner found nothing — so its red run is not
+ * evidence about the bug. Anything else (an assertion losing, the buggy code
+ * throwing a TypeError inside the test) is valid behavioral red: green runs
+ * the same test on the fix, so an unconditionally-broken test cannot pass
+ * both gates. */
+const NON_EXECUTION_FAILURE = /Cannot find module|Failed to resolve import|Failed to load url|SyntaxError|Transform failed|ERR_MODULE_NOT_FOUND|ImportError|ModuleNotFoundError|collection error|No test files found|no tests? (found|ran)/i;
+
+function isBehavioralFailure(message: string | null | undefined): boolean {
+  if (!message) return false;
+  return !NON_EXECUTION_FAILURE.test(message);
+}
+
 async function checkedRun(sandbox: SandboxRuntime, command: string, timeoutMs = 30_000): Promise<string> {
   const result = await sandbox.commands.run(`cd ${REPO} && ${command}`, { timeoutMs });
   if (result.exitCode !== 0) {
@@ -98,7 +111,11 @@ function counts(run: SuiteRun): Pick<Parameters<LedgerRecorder['record']>[0], 'd
 async function instrument(input: FailFirstInput): Promise<{ commitSha: string; workdirDirty: boolean }> {
   const [commitSha, status] = await Promise.all([
     checkedRun(input.sandbox, 'git rev-parse HEAD', 10_000),
-    input.sandbox.commands.run(`cd ${REPO} && git status --porcelain`, { timeoutMs: 10_000 }),
+    // -uno: tracked modifications only. The declared regression test is a new
+    // untracked file that is SUPPOSED to be present during repro runs; with
+    // plain --porcelain its presence marked every repro entry dirty and the
+    // judge read the expected state as a tampered tree.
+    input.sandbox.commands.run(`cd ${REPO} && git status --porcelain -uno`, { timeoutMs: 10_000 }),
   ]);
   return { commitSha, workdirDirty: status.stdout.trim().length > 0 };
 }
@@ -167,6 +184,14 @@ export async function runFailFirst(input: FailFirstInput): Promise<FailFirstOutc
       input.declaredTest.identifier,
     );
     if (red.run) {
+      // Signal, not a hard predicate: the agent declares before the base run
+      // exists, so it can only guess the test library's failure phrasing
+      // (toBe vs toHaveLength wording vetoed a genuinely red-then-green fix).
+      // A gaming agent controls its own assertion text anyway, so exact-text
+      // matching adds no strength; the hard predicates remain "the single
+      // declared test fails on base with an assertion-class failure and
+      // passes on the fix". The match still reaches the judge via the ledger
+      // role. Same structural reasoning as the #354 quoting relaxation.
       const assertionMatched = Boolean(
         red.failureMessage?.includes(input.declaredTest.expectedAssertion),
       );
@@ -182,11 +207,11 @@ export async function runFailFirst(input: FailFirstInput): Promise<FailFirstOutc
       });
       redObserved = red.runnable
         && red.run.outcome === 'failed'
-        && assertionMatched;
+        && isBehavioralFailure(red.failureMessage);
       if (red.run.timedOut) contractViolation = 'infra: declared test timed out';
-      else if (!redObserved) contractViolation = assertionMatched
-        ? 'contract_violation: declared test did not fail on base'
-        : 'contract_violation: expected assertion did not match the base failure';
+      else if (!redObserved) contractViolation = red.run.outcome === 'failed'
+        ? 'contract_violation: the declared test failed to execute on base'
+        : 'contract_violation: declared test did not fail on base';
     } else {
       contractViolation = `contract_violation: ${red.reason ?? 'declared test could not run'}`;
     }

@@ -48,7 +48,10 @@ const DEFAULT_SPEND_CEILING_USD = 2.0;
 const MAX_ERROR_MESSAGE = 500;
 const MAX_STACK_TRACE = 3000;
 const MAX_BREADCRUMBS = 4000;
-const MAX_SESSION_CONTEXT = 500;
+// Sized for the compact frozen-evidence summary (top-N'd lists, clamped
+// fields), not for raw session JSON; at 500 the summary's tail was cut.
+const MAX_SESSION_CONTEXT = 2000;
+const MAX_INVESTIGATION_BRIEF = 1000;
 
 export const MODEL_PRICING: Record<string, { input: number; output: number; cacheWrite: number; cacheRead: number }> = {
   'claude-sonnet-4-6': { input: 3, output: 15, cacheWrite: 3.75, cacheRead: 0.30 },
@@ -76,6 +79,8 @@ export interface InvestigateInput {
    * silently dropped on exactly the busy sessions it exists to explain.
    */
   sessionContext?: string | null;
+  /** Inquiry-authored starting point carried on the durable work-round job. */
+  investigationBrief?: string | null;
 }
 
 export interface InvestigationResult extends TriageResult {
@@ -117,6 +122,12 @@ export interface InvestigationResult extends TriageResult {
    * on ours.
    */
   stop: ReadOnlyStop;
+  /** HTTP status of the failed model call when stop is 'api_error', when known.
+   * 4xx (except 408/429) marks a deterministic request-construction failure —
+   * an operator bug retries cannot fix; the rest are transient. */
+  apiErrorStatus?: number;
+  /** Failure message of the model call when stop is 'api_error'. */
+  apiErrorDetail?: string;
   evidence: EvidenceCitation[];
   agentTaskBrief: string | null;
   investigatedCommit: string;
@@ -138,6 +149,9 @@ function evidenceBlock(input: InvestigateInput): string {
     : '';
   const sessionContext = input.sessionContext
     ? `\n\nSession context (analyzer facts for the recorded session):\n<untrusted_data>\n${fenced(input.sessionContext, MAX_SESSION_CONTEXT)}\n</untrusted_data>`
+    : '';
+  const investigationBrief = input.investigationBrief
+    ? `\n\nInquiry brief (untrusted starting point, verify against evidence and code):\n<untrusted_data>\n${fenced(input.investigationBrief, MAX_INVESTIGATION_BRIEF)}\n</untrusted_data>`
     : '';
   return `## Error
 Type: ${input.errorType}
@@ -161,7 +175,7 @@ ${fenced(input.stackTrace, MAX_STACK_TRACE)}
 Breadcrumbs, every one, with timestamps:
 <untrusted_data>
 ${fenced(input.breadcrumbs || '[]', MAX_BREADCRUMBS)}
-</untrusted_data>${sessionContext}
+</untrusted_data>${sessionContext}${investigationBrief}
 
 ${python
     ? 'Follow the traceback newest-first and use exact repository paths. Python runs do not use browser source maps.'
@@ -295,6 +309,8 @@ export async function investigateError(
     // exactly the failed and retried runs the eval most needs to price.
     return {
       ...failed(stopReason(run.stop, 'Investigation'), filesRead, run.lastModelText, run.stop, investigatedCommit),
+      ...(run.apiErrorStatus !== undefined ? { apiErrorStatus: run.apiErrorStatus } : {}),
+      ...(run.apiErrorDetail !== undefined ? { apiErrorDetail: run.apiErrorDetail } : {}),
       costUsd,
       usage: run.usage,
     };

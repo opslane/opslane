@@ -44,11 +44,13 @@ occurrences cannot requeue `resolved`, `merged`, or retriable `needs_human`
 groups. Existing release-order and non-retriable-reason gates still apply after
 the environment gate.
 
-Every automatically enqueued or requeued error-group job stores the triggering
-`event_id`; the worker's automatically created fix job inherits its source
-investigation's anchor. Human-guided fix jobs bypass the action scope and anchor
-to the group's current sample event. Workers prefer the job anchor and fall back
-to `sample_event_id` for historical jobs or anchors removed by retention.
+Every admitted error investigation stores its work-round `episode_id`. An
+automatically created fix inherits its source investigation's episode and
+frozen anchors. A human-guided error fix inherits the latest completed
+investigation in the open episode. Error investigation and fix jobs fail when
+that episode is absent; they never select mutable evidence through
+`sample_event_id`. The friction pipeline retains its existing evidence
+selection until its admission path moves to work rounds.
 
 ## What the scope does not cover
 

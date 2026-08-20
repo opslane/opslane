@@ -1362,7 +1362,7 @@ func (q *Queries) TriggerFixJob(ctx context.Context, projectID, groupID, guidanc
 	defer tx.Rollback(ctx)
 
 	// Atomically check and transition status
-	var id string
+	var id, kind string
 	err = tx.QueryRow(ctx,
 		`UPDATE error_groups
 			 SET status = 'fixing', terminal_fix_job_id = NULL, updated_at = now()
@@ -1372,9 +1372,9 @@ func (q *Queries) TriggerFixJob(ctx context.Context, projectID, groupID, guidanc
 		     OR
 		     (kind = 'friction' AND status = 'awaiting_approval')
 		   )
-		 RETURNING id`,
+		 RETURNING id, kind`,
 		groupID, projectID,
-	).Scan(&id)
+	).Scan(&id, &kind)
 	if err == pgx.ErrNoRows {
 		return "", ErrNotInvestigated
 	}
@@ -1382,20 +1382,60 @@ func (q *Queries) TriggerFixJob(ctx context.Context, projectID, groupID, guidanc
 		return "", fmt.Errorf("update error group status: %w", err)
 	}
 
-	// Create fix job
+	// Error fixes inherit the episode, input version, and source investigation
+	// that produced the report. The worker can then read the same frozen evidence
+	// for investigation and fixing. Friction has no episode-backed admission path
+	// yet, so its human fix keeps the existing sample anchor.
 	var jobID string
-	err = tx.QueryRow(ctx,
-		// Carry the group's platform onto the job so a human retry inherits the
-		// same durable routing decision an automatic fix job would. Without it
-		// the worker falls back to the live feature flag and can re-run a Python
-		// incident through the JavaScript pipeline.
-		`INSERT INTO error_group_jobs (error_group_id, project_id, job_type, guidance, triggered_by, platform, event_id)
-		 VALUES ($1, $2, 'fix', $3, 'human',
-		         (SELECT platform FROM error_groups WHERE id = $1 AND project_id = $2),
-		         (SELECT sample_event_id FROM error_groups WHERE id = $1 AND project_id = $2))
-		 RETURNING id`,
-		groupID, projectID, nilIfEmpty(guidance),
-	).Scan(&jobID)
+	if kind == "error" {
+		// input_version stays NULL on human fixes: the one-job-per-round-and-
+		// version unique index has no status predicate, so a version-stamped
+		// human retry after a terminal automatic fix (for example a PR closed
+		// unmerged returning the group to 'investigated') would collide with
+		// the spent slot and 500. The episode still pins the frozen evidence;
+		// the active-job index still prevents concurrent duplicates.
+		err = tx.QueryRow(ctx,
+			`INSERT INTO error_group_jobs
+			   (error_group_id,project_id,job_type,guidance,triggered_by,platform,
+			    source_job_id,event_id,episode_id,input_version)
+			 SELECT $1,$2,'fix',$3,'human',g.platform,
+			        j.id,j.event_id,j.episode_id,NULL
+			   FROM error_groups g
+			   JOIN LATERAL (
+			     SELECT j.id,j.event_id,j.episode_id,j.input_version
+			       FROM error_group_jobs j
+			       JOIN issue_episodes ep
+			         ON ep.id=j.episode_id AND ep.project_id=j.project_id
+			        AND ep.canonical_issue_id=j.error_group_id AND ep.closed_at IS NULL
+			      WHERE j.error_group_id=$1 AND j.project_id=$2
+			        AND j.job_type='investigate' AND j.status='completed'
+			        AND j.episode_id IS NOT NULL AND j.input_version IS NOT NULL
+			      ORDER BY j.created_at DESC,j.id DESC
+			      LIMIT 1
+			   ) j ON true
+			  WHERE g.id=$1 AND g.project_id=$2
+			 RETURNING id`,
+			groupID, projectID, nilIfEmpty(guidance),
+		).Scan(&jobID)
+		if err == pgx.ErrNoRows {
+			// No completed investigation in an open work round (pre-cutover
+			// rows have NULL episodes; a closed round has no live evidence).
+			// This is a fix-triggerability condition, not a server fault: the
+			// sentinel maps to the 409 the dashboard understands. The status
+			// transition above must not stick either way.
+			return "", ErrNotInvestigated
+		}
+	} else {
+		err = tx.QueryRow(ctx,
+			`INSERT INTO error_group_jobs
+			   (error_group_id,project_id,job_type,guidance,triggered_by,platform,event_id)
+			 VALUES ($1,$2,'fix',$3,'human',
+			        (SELECT platform FROM error_groups WHERE id=$1 AND project_id=$2),
+			        (SELECT sample_event_id FROM error_groups WHERE id=$1 AND project_id=$2))
+			 RETURNING id`,
+			groupID, projectID, nilIfEmpty(guidance),
+		).Scan(&jobID)
+	}
 	if err != nil {
 		return "", fmt.Errorf("insert fix job: %w", err)
 	}

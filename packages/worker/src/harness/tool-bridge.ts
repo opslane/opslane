@@ -246,8 +246,10 @@ export function createToolBridge(
         additionalProperties: false,
         properties: {
           test_files: {
-            type: 'array', minItems: 1, maxItems: 5, items: { type: 'string' },
-            description: 'Repo-relative paths of every file the test needs that you added or modified.',
+            // No minItems/maxItems: the Anthropic API 400s on array bounds in
+            // custom tool schemas. The 1..5 rule is enforced in execute below.
+            type: 'array', items: { type: 'string' },
+            description: 'Repo-relative paths of every file the test needs that you added or modified. Between 1 and 5 files.',
           },
           identifier: {
             type: 'string', maxLength: 300,
@@ -261,8 +263,14 @@ export function createToolBridge(
         required: ['test_files', 'identifier', 'expected_assertion'],
       },
       execute: async (input) => {
+        const testFiles = input.test_files as string[];
+        // The wire schema cannot carry minItems/maxItems (API rejects array
+        // bounds), so the 1..5 rule lands here as model feedback.
+        if (!Array.isArray(testFiles) || testFiles.length < 1 || testFiles.length > 5) {
+          return 'Rejected: test_files must list between 1 and 5 repo-relative paths. Re-declare with a bounded list.';
+        }
         state.declaredTest = {
-          testFiles: [...(input.test_files as string[])],
+          testFiles: [...testFiles],
           identifier: input.identifier as string,
           expectedAssertion: input.expected_assertion as string,
         };

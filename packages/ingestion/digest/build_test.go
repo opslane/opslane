@@ -921,3 +921,102 @@ func TestDigestExcerptAndSessionURLHelpers(t *testing.T) {
 		t.Fatalf("bounded excerpt has %d runes: %v", len([]rune(*got)), got)
 	}
 }
+
+// The fix phase appends a delivery-outcome row (model
+// 'deterministic-fix-verification', diagnosis NULL) after the investigation's
+// diagnosis row, and insight and parked results now persist their terminal
+// outcome as 'needs_human' with the diagnosis attached. Neither may cost a
+// group its validated diagnosis: the reader keys on the newest
+// diagnosis-bearing decision, not the newest row of any kind.
+func TestBuildDigestValidatedDiagnosisSurvivesFixTerminalRows(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	f := seedDigestFixture(t, pool, now)
+
+	validDiagnosis := `{"evidence":[{"path":"a.ts","detail":"d","symptomLink":"s"}],"agentTaskBrief":"guard the null selection before rebuild"}`
+	t.Cleanup(func() {
+		// 034 makes decision rows insert-only and 033 blocks deleting their
+		// groups, so this test's rows follow the documented wedge in one
+		// transaction before the fixture cleanup (LIFO) reaches projects.
+		cleanupCtx := context.Background()
+		tx, err := pool.Begin(cleanupCtx)
+		if err != nil {
+			t.Errorf("cleanup begin: %v", err)
+			return
+		}
+		defer tx.Rollback(cleanupCtx)
+		for _, step := range []string{
+			`ALTER TABLE diagnosis_decisions DISABLE TRIGGER diagnosis_decisions_immutable_row`,
+			`DELETE FROM diagnosis_decisions WHERE project_id='` + f.ProjectID + `'`,
+			`ALTER TABLE diagnosis_decisions ENABLE TRIGGER diagnosis_decisions_immutable_row`,
+		} {
+			if _, err := tx.Exec(cleanupCtx, step); err != nil {
+				t.Errorf("cleanup diagnosis decisions: %v", err)
+				return
+			}
+		}
+		if err := tx.Commit(cleanupCtx); err != nil {
+			t.Errorf("cleanup commit: %v", err)
+		}
+	})
+	seedGroup := func(title string) string {
+		t.Helper()
+		var groupID string
+		if err := pool.QueryRow(ctx, `INSERT INTO error_groups
+			(project_id,environment_id,fingerprint,title,kind,status,first_seen,last_seen,
+			 occurrence_count,affected_users_count,needs_human_at,reason_code,reason_message,remediation)
+			VALUES ($1,$2,$3,$4,'error','needs_human',$5,$5,1,1,$5,
+			 'low_confidence_fix','Fix below floor.','Review the diff.') RETURNING id`,
+			f.ProjectID, f.EnvID, "fixterm-"+uuid.NewString(), title, now.Add(-time.Hour),
+		).Scan(&groupID); err != nil {
+			t.Fatal(err)
+		}
+		setPipelineState(t, pool, f.ProjectID, groupID, "eligible", now.Add(-30*time.Minute))
+		return groupID
+	}
+	seedDecision := func(groupID, outcome, model, diagnosis string, at time.Time) {
+		t.Helper()
+		var diagArg any
+		if diagnosis != "" {
+			diagArg = diagnosis
+		}
+		if _, err := pool.Exec(ctx, `INSERT INTO diagnosis_decisions
+			(error_group_id,project_id,outcome,decision_reason,diagnosis,model,prompt_version,basis,confidence,decided_at)
+			VALUES ($1,$2,$3,'test',$4::jsonb,$5,'test','local_defect','high',$6)`,
+			groupID, f.ProjectID, outcome, diagArg, model, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// A newer fix-verification appendix row must not shadow the diagnosis.
+	shadowed := seedGroup("Shadowed by fix terminal")
+	seedDecision(shadowed, "code_fix", "claude-test", validDiagnosis, now.Add(-40*time.Minute))
+	seedDecision(shadowed, "needs_human", "deterministic-fix-verification", "", now.Add(-20*time.Minute))
+
+	// An insight/parked row persists outcome needs_human WITH its diagnosis.
+	parked := seedGroup("Parked with diagnosis")
+	seedDecision(parked, "needs_human", "claude-test", validDiagnosis, now.Add(-30*time.Minute))
+
+	// A diagnosis-less needs_human row alone stays unpublishable.
+	bare := seedGroup("Preflight only")
+	seedDecision(bare, "needs_human", "deterministic-preflight", "", now.Add(-30*time.Minute))
+
+	payload, err := New(pool, "https://dash.example").Build(ctx, f.ProjectID, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	included := map[string]bool{}
+	for _, item := range payload.Digest.ReceiptItems {
+		included[item.Title] = true
+	}
+	if !included["Shadowed by fix terminal"] {
+		t.Fatalf("fix-terminal appendix row shadowed a validated diagnosis; items=%v", included)
+	}
+	if !included["Parked with diagnosis"] {
+		t.Fatalf("needs_human decision with a valid diagnosis did not validate; items=%v", included)
+	}
+	if included["Preflight only"] {
+		t.Fatalf("diagnosis-less needs_human decision published; items=%v", included)
+	}
+}

@@ -119,6 +119,9 @@ func TestTriggerFixRequiresKindSpecificStatusAndRecordsHumanTrigger(t *testing.T
 	for i, tt := range tests {
 		t.Run(fmt.Sprintf("%s_%s", tt.kind, tt.status), func(t *testing.T) {
 			groupID := insertIncident(t, q, projectID, fmt.Sprintf("trigger-%d", i), tt.kind, tt.status)
+			if tt.wantOK && tt.kind == "error" {
+				seedEpisodeBackedInvestigation(t, q.Pool(), projectID, groupID, "")
+			}
 			jobID, err := q.TriggerFixJob(ctx, projectID, groupID, "ship the fix")
 			if !tt.wantOK {
 				if !errors.Is(err, db.ErrNotInvestigated) {

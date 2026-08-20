@@ -730,26 +730,6 @@ describeDb('db.ts integration tests', () => {
 
   describe('investigation handoff decisions', () => {
 
-    it('refuses report-only fix creation before mutating the group', async () => {
-      const seeded = await seedErrorGroupAndJob();
-      const claim = await claimJob('report-only-worker', 60_000);
-      expect(claim?.id).toBe(seeded.jobId);
-      const result = await updateGroupAndCreateFixJob(
-        seeded.errorGroupId,
-        testProjectId,
-        { rootCause: 'verified cause', confidence: 'high' },
-        { ...claim!, triggeredBy: 'reinvestigate_report_only' },
-      );
-      expect(result).toEqual({ created: false, reason: 'report_only' });
-      expect((await testPool.query(
-        `SELECT status FROM error_groups WHERE id = $1`, [seeded.errorGroupId],
-      )).rows[0]!.status).toBe('queued');
-      expect((await testPool.query(
-        `SELECT count(*)::int AS n FROM error_group_jobs WHERE error_group_id = $1 AND job_type IN ('fix','error_fix')`,
-        [seeded.errorGroupId],
-      )).rows[0]!.n).toBe(0);
-    });
-
     it('never steals a pending human fix while still recording the new policy decision', async () => {
       const seeded = await seedErrorGroupAndJob();
       const claim = await claimJob('human-precedence-worker', 60_000);

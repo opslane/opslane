@@ -674,6 +674,7 @@ func TestTriggerFixJob_OnlyFromInvestigated(t *testing.T) {
 	}
 
 	setGroupStatus(t, pool, groupID, "investigated")
+	episodeID, investigationJobID := seedEpisodeBackedInvestigation(t, pool, projID, groupID, "")
 
 	jobID, err := q.TriggerFixJob(ctx, projID, groupID, "focus on the null check")
 	if err != nil {
@@ -686,19 +687,86 @@ func TestTriggerFixJob_OnlyFromInvestigated(t *testing.T) {
 		t.Fatalf("group status = %q, want fixing", got)
 	}
 
-	var jobType, jobStatus, guidance string
+	var jobType, jobStatus, guidance, gotEpisodeID, gotSourceJobID string
+	var gotInputVersion *int
 	if err := pool.QueryRow(ctx,
-		`SELECT job_type, status, COALESCE(guidance, '') FROM error_group_jobs WHERE id = $1`, jobID,
-	).Scan(&jobType, &jobStatus, &guidance); err != nil {
+		`SELECT job_type,status,COALESCE(guidance,''),episode_id::text,source_job_id::text,input_version
+		   FROM error_group_jobs WHERE id=$1`, jobID,
+	).Scan(&jobType, &jobStatus, &guidance, &gotEpisodeID, &gotSourceJobID, &gotInputVersion); err != nil {
 		t.Fatalf("query job: %v", err)
 	}
 	if jobType != "fix" || jobStatus != "pending" || guidance != "focus on the null check" {
 		t.Fatalf("job = (%q, %q, %q), want (fix, pending, guidance)", jobType, jobStatus, guidance)
 	}
+	if gotEpisodeID != episodeID || gotSourceJobID != investigationJobID {
+		t.Fatalf("job episode/source = %s/%s, want %s/%s", gotEpisodeID, gotSourceJobID, episodeID, investigationJobID)
+	}
+	// A human fix carries no input_version: the one-job-per-round-and-version
+	// unique index has no status predicate, so a version-stamped human retry
+	// after a terminal automatic fix would collide with the spent slot.
+	if gotInputVersion != nil {
+		t.Fatalf("human fix input_version = %d, want NULL", *gotInputVersion)
+	}
 
 	// Already fixing: a second trigger is refused (no double-queue).
 	if _, err := q.TriggerFixJob(ctx, projID, groupID, ""); !errors.Is(err, db.ErrNotInvestigated) {
 		t.Fatalf("expected ErrNotInvestigated on double trigger, got %v", err)
+	}
+
+	// A spent automatic fix for the same round and version must not block a
+	// later human retry (a PR closed unmerged returns the group to
+	// investigated while the terminal fix job still holds the version slot).
+	if _, err := pool.Exec(ctx,
+		`UPDATE error_group_jobs SET status='completed' WHERE id=$1`, jobID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO error_group_jobs
+		   (error_group_id,project_id,job_type,status,triggered_by,episode_id,input_version)
+		 VALUES ($1,$2,'fix','completed','auto',$3,1)`,
+		groupID, projID, episodeID); err != nil {
+		t.Fatalf("seed spent auto fix: %v", err)
+	}
+	setGroupStatus(t, pool, groupID, "investigated")
+	retryID, err := q.TriggerFixJob(ctx, projID, groupID, "try again")
+	if err != nil {
+		t.Fatalf("TriggerFixJob after spent auto fix: %v", err)
+	}
+	if retryID == "" || retryID == jobID {
+		t.Fatalf("retry job id = %q, want a fresh job", retryID)
+	}
+}
+
+func TestTriggerFixJob_ErrorWithoutEpisodeBackedInvestigationRollsBack(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	q := db.New(pool)
+	_, projectID, _, groupID := seedGroup(t, pool, q, "trigger-fix-no-episode")
+	setGroupStatus(t, pool, groupID, "investigated")
+
+	// The missing-investigation condition is a triggerability state, not a
+	// server fault: the sentinel maps to the dashboard's 409, where the old
+	// bare error surfaced as an opaque 500 on every click.
+	jobID, err := q.TriggerFixJob(ctx, projectID, groupID, "do not use mutable evidence")
+	if !errors.Is(err, db.ErrNotInvestigated) {
+		t.Fatalf("TriggerFixJob error = %v, want ErrNotInvestigated", err)
+	}
+	if jobID != "" {
+		t.Fatalf("TriggerFixJob job id = %q after rejection, want empty", jobID)
+	}
+	if got := groupStatus(t, pool, groupID); got != "investigated" {
+		t.Fatalf("failed trigger left group status = %q, want investigated", got)
+	}
+	var fixJobs int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM error_group_jobs
+		  WHERE error_group_id=$1 AND project_id=$2 AND job_type='fix'`,
+		groupID, projectID,
+	).Scan(&fixJobs); err != nil {
+		t.Fatal(err)
+	}
+	if fixJobs != 0 {
+		t.Fatalf("fix jobs = %d after rejected trigger, want 0", fixJobs)
 	}
 }
 

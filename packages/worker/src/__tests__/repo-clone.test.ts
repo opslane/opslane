@@ -233,3 +233,54 @@ describe('cloneRepo input validation (git argument-injection guard)', () => {
     await expect(cloneRepo({ ...base, githubRepo: '--foo' })).rejects.toThrow(/unsafe repository name/);
   });
 });
+
+describe('isRetriableCloneFailure', () => {
+  it('classifies network faults and leftover paths as retriable', async () => {
+    const { isRetriableCloneFailure } = await import('../repo-clone.js');
+    for (const message of [
+      'fatal: unable to access repo: Could not resolve host: github.com',
+      'fatal: unable to access repo: Connection timed out',
+      "fatal: destination path '/tmp/opslane-repo-x' already exists and is not an empty directory",
+      'error: RPC failed; HTTP 503 curl 22',
+      'connect ECONNRESET',
+    ]) {
+      expect(isRetriableCloneFailure(new Error(message)), message).toBe(true);
+    }
+  });
+
+  it('classifies deterministic access and repo-state failures as terminal', async () => {
+    const { isRetriableCloneFailure, CloneResolutionError } = await import('../repo-clone.js');
+    expect(isRetriableCloneFailure(new Error('GITHUB_TOKEN is not set'))).toBe(false);
+    expect(isRetriableCloneFailure(new Error('fatal: Authentication failed for repo'))).toBe(false);
+    expect(isRetriableCloneFailure(new Error('remote: Repository not found.'))).toBe(false);
+    expect(isRetriableCloneFailure(new CloneResolutionError('empty_repository', 'o/r'))).toBe(false);
+  });
+});
+
+describe('sweepAbandonedClones', () => {
+  it('removes only old opslane-repo directories, never fresh or foreign ones', async () => {
+    const { sweepAbandonedClones } = await import('../repo-clone.js');
+    const { mkdir, utimes, stat } = await import('node:fs/promises');
+    const root = await mkdtemp(join(tmpdir(), 'sweep-test-'));
+    try {
+      const oldDir = join(root, 'opslane-repo-old-abc');
+      const freshDir = join(root, 'opslane-repo-fresh-def');
+      const foreignDir = join(root, 'someone-elses-dir');
+      await mkdir(oldDir);
+      await mkdir(freshDir);
+      await mkdir(foreignDir);
+      const past = new Date(Date.now() - 8 * 60 * 60 * 1000);
+      await utimes(oldDir, past, past);
+      await utimes(foreignDir, past, past);
+
+      const swept = await sweepAbandonedClones(6 * 60 * 60 * 1000, root);
+
+      expect(swept).toBe(1);
+      await expect(stat(oldDir)).rejects.toThrow();
+      await expect(stat(freshDir)).resolves.toBeTruthy();
+      await expect(stat(foreignDir)).resolves.toBeTruthy();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});

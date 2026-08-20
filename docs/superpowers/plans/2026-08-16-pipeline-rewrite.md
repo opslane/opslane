@@ -3198,7 +3198,7 @@ The inquiry answers what counts cannot: is this a genuine product problem, was t
 
 ```typescript
 describe('issue_inquiry', () => {
-  it('records an investigate decision and creates no job itself', async () => {
+  it('records an investigate decision and creates its job atomically', async () => {
     const ep = await seedQualifiedEpisode();
     stubModel({ decision: 'investigate', reason: 'real failed write', brief: 'check delete path' });
     await runInquiry({ projectId: ep.projectId, episodeId: ep.id } as ClaimedJob);
@@ -3206,11 +3206,10 @@ describe('issue_inquiry', () => {
       `SELECT decision, evidence_signature FROM issue_inquiry_decisions WHERE episode_id=$1`, [ep.id]);
     expect(d.decision).toBe('investigate');
     expect(d.evidence_signature).toBeTruthy();
-    // error_group_jobs has one writer, and it is Go. See Task 24.
     const { count } = await queryOne(
       `SELECT count(*)::int AS count FROM error_group_jobs
         WHERE job_type='investigate' AND episode_id=$1`, [ep.id]);
-    expect(count).toBe(0);
+    expect(count).toBe(1);
   });
 
   it('creates no job for do_not_pursue but stores the decision', async () => {
@@ -3306,8 +3305,9 @@ export async function runInquiry(job: ClaimedJob): Promise<InquiryDecision> {
       [job.projectId, job.episodeId, raw.decision, raw.reason, raw.brief ?? null,
        raw.related_issues ?? [], evidence.affectedUnits,
        evidenceSignature(evidence), MODEL, INQUIRY_PROMPT_VERSION]);
-    // No investigation job here. Go's acceptor (Task 24) turns an `investigate`
-    // decision into the investigation, so `error_group_jobs` keeps one writer.
+    // The same lease-fenced transaction creates the investigation job when the
+    // effective stored decision is `investigate`. See the dedicated Slice 8
+    // inquiry-to-investigation handoff plan for the complete idempotent insert.
     await client.query('COMMIT');
   } catch (err) {
     await client.query('ROLLBACK');
@@ -3454,6 +3454,14 @@ git commit -m "test(inquiry): add a fixed production evaluation set"
 # Slice 9: hand accepted work to the investigator
 
 ### Task 24: Turn an accepted inquiry into an investigation
+
+> **Superseded before implementation.** Do not add the Go acceptor described
+> below. The narrower Slice 8 specification and
+> `2026-08-19-inquiry-investigate-job-handoff.md` make
+> `persistInquiryDecision` the sole owner of the decision-to-job transition.
+> It stores the effective inquiry decision and creates or verifies the
+> investigation job in one lease-fenced transaction. The remaining Task 24
+> text is retained only as design history.
 
 **Files:**
 - Create: `packages/ingestion/inquiry/accept.go`

@@ -1,4 +1,7 @@
 import { execFile as execFileCb } from 'node:child_process';
+import { mkdtemp, readdir, rm, stat } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { promisify } from 'node:util';
 import type { NeedsHumanReason } from '@opslane/shared';
 import { redactCloneDetail } from './harness/redact.js';
@@ -13,6 +16,8 @@ export interface CloneOptions {
   githubToken?: string;
   /** Test/local transport override. Production callers use buildRepoUrl. */
   repoUrl?: string;
+  /** Preferred observation commit. Falls back to default HEAD when unreachable. */
+  commitSha?: string | null;
 }
 
 export interface CloneResult {
@@ -32,6 +37,34 @@ export interface GitResult {
 }
 
 export type GitRunner = (args: string[]) => Promise<GitResult>;
+
+const COMMIT_SHA_PATTERN = /^[0-9a-f]{7,64}$/i;
+
+/** Check out a requested commit only when the remote can prove it reachable.
+ * Any fetch/checkout failure leaves the clone on its authoritative default
+ * HEAD, whose sha is returned and persisted by the caller. */
+export async function checkoutReachableCommit(
+  run: GitRunner,
+  requestedCommit: string | null | undefined,
+  defaultHeadSha: string,
+): Promise<string> {
+  if (!requestedCommit || !COMMIT_SHA_PATTERN.test(requestedCommit)) return defaultHeadSha;
+  if (requestedCommit.toLowerCase() === defaultHeadSha.toLowerCase()) return defaultHeadSha;
+
+  const fetched = await run(['fetch', '--depth', '1', 'origin', requestedCommit]);
+  if (fetched.exitCode !== 0) return defaultHeadSha;
+  const checkedOut = await run(['checkout', '--detach', 'FETCH_HEAD']);
+  if (checkedOut.exitCode !== 0) {
+    await run(['checkout', '--detach', defaultHeadSha]);
+    return defaultHeadSha;
+  }
+  const head = await run(['rev-parse', '--verify', 'HEAD']);
+  if (head.exitCode !== 0 || !COMMIT_SHA_PATTERN.test(head.stdout.trim())) {
+    await run(['checkout', '--detach', defaultHeadSha]);
+    return defaultHeadSha;
+  }
+  return head.stdout.trim();
+}
 
 export type CloneResolutionKind =
   | 'empty_repository'
@@ -126,6 +159,36 @@ export async function resolveClonedBranch(
   return { branch, headSha: head.stdout.trim() };
 }
 
+/** Failure signatures that a retry of the durable job can plausibly fix:
+ * network faults, remote hiccups, and leftover-path collisions. Everything
+ * else (missing token, denied access, repository state) is deterministic and
+ * deserves the actionable terminal reason instead of a wasted retry. */
+const RETRIABLE_CLONE_PATTERN = new RegExp(
+  [
+    'could not resolve host',
+    'connection (timed out|reset|refused)',
+    'operation timed out',
+    'timed?out',
+    'early EOF',
+    'RPC failed',
+    'remote end hung up',
+    'destination path .* already exists',
+    'HTTP (429|500|502|503|504)',
+    'ETIMEDOUT|ECONNRESET|ECONNREFUSED|EAI_AGAIN',
+  ].join('|'),
+  'i',
+);
+
+/** True when a clone failure looks transient: the caller should fail the
+ * durable job (which retries and dead-letters into the operator's view)
+ * instead of writing a customer-facing terminal for a network blip. */
+export function isRetriableCloneFailure(err: unknown): boolean {
+  if (err instanceof CloneResolutionError) return false;
+  const raw = err instanceof Error ? err.message : String(err);
+  if (raw.includes('GITHUB_TOKEN')) return false;
+  return RETRIABLE_CLONE_PATTERN.test(raw);
+}
+
 /** Turn clone failures into actionable terminal reasons. */
 export function cloneFailureReason(err: unknown): NeedsHumanReason {
   if (err instanceof CloneResolutionError) {
@@ -179,6 +242,45 @@ export function buildGitNetrc(repoUrl: string, token: string): string | null {
   ].join('\n');
 }
 
+/** Abandoned checkouts older than this are certainly not in use: no job phase
+ * legitimately runs this long, and a shorter window could sweep a live clone
+ * out from under a long fix run. */
+const ABANDONED_CLONE_MAX_AGE_MS = 6 * 60 * 60 * 1000;
+
+/**
+ * Remove clone directories orphaned by a crashed worker. Age-gated, never
+ * keyed by job ID: a reclaimed job's original worker may still be alive inside
+ * its checkout, so only directories old enough that no legitimate run can
+ * still own them are removed. Run at worker startup; a normally-completing run
+ * removes its own directory through the cleanup handle.
+ */
+export async function sweepAbandonedClones(
+  maxAgeMs = ABANDONED_CLONE_MAX_AGE_MS,
+  root = tmpdir(),
+): Promise<number> {
+  let swept = 0;
+  let entries: string[];
+  try {
+    entries = await readdir(root);
+  } catch {
+    return 0;
+  }
+  const cutoff = Date.now() - maxAgeMs;
+  for (const entry of entries) {
+    if (!entry.startsWith('opslane-repo-')) continue;
+    const path = join(root, entry);
+    try {
+      const info = await stat(path);
+      if (!info.isDirectory() || info.mtimeMs > cutoff) continue;
+      await rm(path, { recursive: true, force: true });
+      swept += 1;
+    } catch {
+      // Another process may have removed it between readdir and rm.
+    }
+  }
+  return swept;
+}
+
 /**
  * Clone a repo using token-in-URL. execFile doesn't use a shell,
  * so the token is only visible in /proc/PID/environ (same process),
@@ -195,7 +297,12 @@ export async function cloneRepo(options: CloneOptions): Promise<CloneResult> {
     throw new Error('Refusing to clone: unsafe repository name');
   }
 
-  const repoDir = `/tmp/opslane-repo-${jobId}`;
+  // Attempt-unique, not job-keyed: after a lease lapses, the old worker can
+  // still be alive inside its checkout, so a fixed job-ID path would either
+  // collide ("destination path exists" poisoned every reclaimed retry) or
+  // invite a pre-clone rm -rf that deletes a directory a zombie worker is
+  // still using. Abandoned directories are removed by the age-gated sweep.
+  const repoDir = await mkdtemp(join(tmpdir(), `opslane-repo-${jobId}-`));
   const cloneUrl = options.repoUrl ?? buildRepoUrl(githubRepo, token);
 
   try {
@@ -217,6 +324,11 @@ export async function cloneRepo(options: CloneOptions): Promise<CloneResult> {
     resolved = await resolveClonedBranch(
       execFileGitRunner(repoDir),
       githubRepo,
+    );
+    resolved.headSha = await checkoutReachableCommit(
+      execFileGitRunner(repoDir),
+      options.commitSha,
+      resolved.headSha,
     );
   } catch (err: unknown) {
     // Resolution failures happen after clone, before the caller receives its

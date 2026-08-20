@@ -10,6 +10,9 @@ export interface LedgerEntry {
   entrySeq: number;
   command: string;
   commitSha: string;
+  /** True when TRACKED files differ from the commit (git status -uno): the
+   * tamper signal. Untracked files — install artifacts, the declared
+   * regression test — do not set it; repro runs legitimately carry them. */
   workdirDirty: boolean;
   discovered: number | null;
   passed: number | null;
@@ -107,6 +110,34 @@ export function deriveTierRecord(args: {
   };
 }
 
+/**
+ * Whether a declared test identifier is grounded in the submitted test
+ * material. A verbatim match is the simple case, but a runner-facing runtime
+ * title is composed from nested describe titles plus the it/test title
+ * ("rebuildSelection keeps the selected option ..."), so the full name never
+ * appears as one substring in source. An agent that declares the exact
+ * runtime title — precisely what the `-t` filter needs — must not be flagged
+ * as fabricating, so the declaration is also grounded when some it/test
+ * string literal in the material is the suffix of the declared identifier,
+ * or when a pytest node id's function name appears in the material.
+ */
+export function declaredIdentifierGrounded(identifier: string, material: string): boolean {
+  if (material.includes(identifier)) return true;
+  const literalPattern = /\b(?:it|test)\s*\(\s*(['"`])((?:\\.|(?!\1).)+?)\1/g;
+  for (const match of material.matchAll(literalPattern)) {
+    const title = match[2]!.replace(/\\(['"`\\])/g, '$1');
+    // A short title suffix grounds too easily ("works" would bless almost any
+    // fabricated name); require enough length to be distinctive.
+    if (title.length >= 8 && identifier.endsWith(title)) return true;
+  }
+  const pytestName = identifier.split('::').pop() ?? '';
+  if (/^test_[A-Za-z0-9_]+(\[.*\])?$/.test(pytestName)) {
+    const bareName = pytestName.replace(/\[.*\]$/, '');
+    if (material.includes(bareName)) return true;
+  }
+  return false;
+}
+
 const TEST_MATERIAL_PATTERNS = [
   /\.(test|spec)\./i,
   /(^|\/)__tests__\//i,
@@ -126,7 +157,7 @@ export function detectLedgerAnomalies(args: {
   if (args.entries.some((entry) => entry.timedOut)) anomalies.push('ledger_command_timed_out');
   if (
     args.declaredTest
-    && !`${args.diff}\n${args.testSource ?? ''}`.includes(args.declaredTest.identifier)
+    && !declaredIdentifierGrounded(args.declaredTest.identifier, `${args.diff}\n${args.testSource ?? ''}`)
   ) {
     anomalies.push('declared_test_identifier_not_found');
   }

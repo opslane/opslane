@@ -277,3 +277,69 @@ describe('structural-shape hardening (review round)', () => {
     expect(declined?.candidates_considered).toEqual([]);
   });
 });
+
+describe('parser-side candidate caps (wire schema cannot carry maxItems)', () => {
+  function candidate(i: number) {
+    return { statement: `cause ${i}`, kind: 'unknown', id: `c${i}`, citation: null };
+  }
+
+  it('caps candidates_considered at 16', () => {
+    const raw = {
+      best_supported: 'cause 1',
+      evidence_check: 'checked',
+      candidates_considered: Array.from({ length: 24 }, (_, i) => candidate(i)),
+      cause_locations: [{ path: 'src/a.ts' }],
+      evidence: [{ path: 'src/a.ts', detail: 'd', symptomLink: 's' }],
+    };
+    const parsed = parseAdjudication(raw);
+    expect(parsed?.candidates_considered).toHaveLength(16);
+  });
+
+  it('caps rejected_candidates at 16', () => {
+    const raw = {
+      best_supported: 'cause 1',
+      evidence_check: 'checked',
+      candidates_considered: [candidate(1)],
+      rejected_candidates: Array.from({ length: 24 }, (_, i) => ({
+        id: `c${i}`, evidence: 'e', citation: { path: 'src/a.ts', line: 1, quote: 'const enough_chars_here = 1;' },
+      })),
+      cause_locations: [{ path: 'src/a.ts' }],
+      evidence: [{ path: 'src/a.ts', detail: 'd', symptomLink: 's' }],
+    };
+    const parsed = parseAdjudication(raw);
+    expect(parsed?.rejected_candidates).toHaveLength(16);
+  });
+});
+
+describe('truncation-orphaned rejections (wire schema cannot carry maxItems)', () => {
+  function candidate(i: number) {
+    return { statement: `cause ${i}`, kind: 'unknown', id: `c${i}`, citation: null };
+  }
+  const rejection = (id: string) => ({
+    id, evidence: 'checked', citation: { path: 'src/a.ts', line: 1, quote: 'const enough_chars_here = 1;' },
+  });
+  const base = {
+    best_supported: 'cause 1',
+    evidence_check: 'checked',
+    cause_locations: [{ path: 'src/a.ts' }],
+    evidence: [{ path: 'src/a.ts', detail: 'd', symptomLink: 's' }],
+  };
+
+  it('drops a rejection whose candidate fell to the cap', () => {
+    const parsed = parseAdjudication({
+      ...base,
+      candidates_considered: Array.from({ length: 20 }, (_, i) => candidate(i)),
+      rejected_candidates: [rejection('c18'), rejection('c1')],
+    });
+    expect(parsed?.rejected_candidates?.map((r) => r.id)).toEqual(['c1']);
+  });
+
+  it('keeps an unknown-id rejection when nothing was truncated (a real model error)', () => {
+    const parsed = parseAdjudication({
+      ...base,
+      candidates_considered: [candidate(1)],
+      rejected_candidates: [rejection('c9')],
+    });
+    expect(parsed?.rejected_candidates?.map((r) => r.id)).toEqual(['c9']);
+  });
+});

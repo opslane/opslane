@@ -1,5 +1,7 @@
 import { afterEach, describe, it, expect, vi, beforeEach } from 'vitest';
+import { readFileSync } from 'node:fs';
 import type { ClaimedJob, ErrorGroupData, ErrorEventData, ProjectData } from '../db.js';
+import type { EvidenceBundle } from '../evidence/bundle.js';
 import { VerificationInfraError } from '../harness/errors.js';
 
 // index.ts is the worker entrypoint: it imports the whole world and calls main()
@@ -43,6 +45,8 @@ vi.mock('../db.js', async () => ({
   recordDeliveryPushed: vi.fn(),
   finalizeDelivery: vi.fn(),
   recordJobUsage: vi.fn(),
+  recordFixTerminalDecision: vi.fn(),
+  recordInvestigatedCommit: vi.fn(),
   getGroupImpactBar: vi.fn(async () => ({ identifiedUsers: 1, recentAnonSessions: 0, eligible: true })),
   getFrictionGroupImpactBar: vi.fn(async () => ({ identifiedUsers: 5, recentAnonSessions: 0, eligible: true })),
   // Pure shape helper: mirror the real implementation so decision assertions
@@ -63,15 +67,22 @@ vi.mock('../logger.js', () => ({
   setWorkerId: vi.fn(),
   safeErrorMessage: (err: unknown) => (err instanceof Error ? err.message : String(err)),
 }));
-vi.mock('../repo-clone.js', () => ({
-  cloneRepo: vi.fn(),
-  buildRepoUrl: vi.fn((githubRepo: string) => `https://github.com/${githubRepo}.git`),
-  cloneFailureReason: vi.fn((error: unknown) => ({
-    reason_code: 'repo_access_denied',
-    reason_message: error instanceof Error ? error.message : String(error),
-    remediation: 'Check repository access',
-  })),
-}));
+vi.mock('../repo-clone.js', async (importOriginal) => {
+  // The retriable-clone classifier runs REAL: the tests assert the actual
+  // routing decision, not a stub's.
+  const real = await importOriginal<typeof import('../repo-clone.js')>();
+  return {
+    cloneRepo: vi.fn(),
+    buildRepoUrl: vi.fn((githubRepo: string) => `https://github.com/${githubRepo}.git`),
+    isRetriableCloneFailure: real.isRetriableCloneFailure,
+    sweepAbandonedClones: vi.fn(async () => 0),
+    cloneFailureReason: vi.fn((error: unknown) => ({
+      reason_code: 'repo_access_denied',
+      reason_message: error instanceof Error ? error.message : String(error),
+      remediation: 'Check repository access',
+    })),
+  };
+});
 vi.mock('../minio-client.js', () => ({ fetchObject: vi.fn(), getMinIOConfig: vi.fn(() => null) }));
 vi.mock('../investigate.js', () => ({
   investigateError: vi.fn(),
@@ -86,6 +97,7 @@ vi.mock('../setup-pr.js', () => ({ processSetupPrJob: vi.fn() }));
 vi.mock('../route-map.js', () => ({ processRouteMapJob: vi.fn() }));
 vi.mock('../product-context/job.js', () => ({ runProductContext: vi.fn() }));
 vi.mock('../inquiry/job.js', () => ({ runInquiry: vi.fn() }));
+vi.mock('../evidence/bundle.js', () => ({ loadEvidence: vi.fn() }));
 vi.mock('../score-sync.js', () => ({ processScoreSyncJob: vi.fn() }));
 vi.mock('../resolve/job.js', () => ({ runStackResolve: vi.fn() }));
 vi.mock('../scores.js', () => ({ pushScore: vi.fn() }));
@@ -151,6 +163,7 @@ const { processFrictionOutcomes } = await import('../friction/promotion.js');
 const { processRouteMapJob } = await import('../route-map.js');
 const { runProductContext } = await import('../product-context/job.js');
 const { runInquiry } = await import('../inquiry/job.js');
+const { loadEvidence } = await import('../evidence/bundle.js');
 const { processScoreSyncJob } = await import('../score-sync.js');
 const { runStackResolve } = await import('../resolve/job.js');
 const { pushScore } = await import('../scores.js');
@@ -166,6 +179,7 @@ const mockRunPipeline = vi.mocked(runPipeline);
 const mockInvestigateError = vi.mocked(investigateError);
 const mockGetSessionPointerForGroup = vi.mocked(db.getSessionPointerForGroup);
 const mockGetPlayableChunkMetas = vi.mocked(db.getPlayableChunkMetas);
+const mockLoadEvidence = vi.mocked(loadEvidence);
 
 function makeJob(): ClaimedJob & { errorGroupId: string } {
   return {
@@ -173,6 +187,7 @@ function makeJob(): ClaimedJob & { errorGroupId: string } {
     workerId: 'worker-1',
     errorGroupId: 'grp-1',
     eventId: null,
+    episodeId: 'episode-1',
     sourceId: null,
     projectId: 'proj-1',
     jobType: 'investigate',
@@ -183,6 +198,29 @@ function makeJob(): ClaimedJob & { errorGroupId: string } {
     sessionId: null,
   };
 }
+
+function makeEvidence(sourceEventId = 'evt-1'): EvidenceBundle {
+  return {
+    frames: {
+      sourceEventId,
+      status: 'resolved',
+      resolverVersion: 2,
+      envelope: { version: 2, frames: [] },
+      commitSha: 'abc123',
+    },
+    failedRequests: [],
+    writeRollups: [],
+    productContext: [],
+    replayPointers: [],
+    availability: { recording: 'missing', sourceMap: 'resolved' },
+    affectedUnits: 2,
+    relatedCandidates: [],
+  };
+}
+
+beforeEach(() => {
+  mockLoadEvidence.mockResolvedValue(makeEvidence());
+});
 
 function makeGroup(overrides?: Partial<ErrorGroupData>): ErrorGroupData {
   return {
@@ -218,7 +256,7 @@ function makeEvent(stack: string): ErrorEventData {
 
 /** The needs_human call carrying the unfixable_no_app_frames disposition, if any. */
 function unfixableCall() {
-  return mockUpdateGroupStatus.mock.calls.find(
+  return vi.mocked(db.updateGroupInvestigation).mock.calls.find(
     (c) => c[2] === 'needs_human' && c[3]?.reason?.reason_code === 'unfixable_no_app_frames',
   );
 }
@@ -271,15 +309,14 @@ describe('processInvestigateJob — pre-clone guard for stackless errors', () =>
     expect(reason?.remediation).toBeTruthy();
   });
 
-  it('fetches the job evidence anchor, not the mutable group sample', async () => {
+  it('fetches the frozen threshold anchor, not the mutable group sample', async () => {
     mockGetErrorGroup.mockResolvedValue(makeGroup({ sample_event_id: 'evt-sample' }));
+    mockLoadEvidence.mockResolvedValue(makeEvidence('evt-anchor'));
     mockGetErrorEvent.mockResolvedValue(makeEvent('')); // stackless: guard exits before clone
 
-    await processInvestigateJob(
-      { ...makeJob(), eventId: 'evt-anchor' },
-      new AbortController().signal,
-    );
+    await processInvestigateJob(makeJob(), new AbortController().signal);
 
+    expect(mockLoadEvidence).toHaveBeenCalledWith('proj-1', 'episode-1');
     expect(mockGetErrorEvent).toHaveBeenCalledWith('evt-anchor', 'proj-1');
     expect(mockGetErrorEvent).not.toHaveBeenCalledWith('evt-sample', 'proj-1');
   });
@@ -297,13 +334,13 @@ describe('processInvestigateJob — pre-clone guard for stackless errors', () =>
     expect(unfixableCall()).toBeUndefined();
   });
 
-  it('treats a group with no sample event as unfixable (no event fetch, no clone)', async () => {
-    // sample_event_id is falsy → event is null → hasNoAppFrames('') is true.
+  it('treats a missing anchored event as unfixable without using the sample', async () => {
     mockGetErrorGroup.mockResolvedValue(makeGroup({ sample_event_id: '' }));
+    mockGetErrorEvent.mockResolvedValue(null);
 
     await processInvestigateJob(makeJob(), new AbortController().signal);
 
-    expect(mockGetErrorEvent).not.toHaveBeenCalled();
+    expect(mockGetErrorEvent).toHaveBeenCalledWith('evt-1', 'proj-1');
     expect(mockCloneRepo).not.toHaveBeenCalled();
     expect(unfixableCall()).toBeDefined();
   });
@@ -352,7 +389,12 @@ describe('processInvestigateJob diagnosis routing', () => {
     delete process.env['GITHUB_TOKEN'];
   });
 
-  it('routes not_actionable to insight without creating a fix job', async () => {
+  it('does not persist the internal report-ready phrase on any terminal path', () => {
+    const source = readFileSync(new URL('../index.ts', import.meta.url), 'utf8');
+    expect(source).not.toContain('Investigation report ready');
+  });
+
+  it('keeps an accepted external cause as an insight with a terminal human outcome', async () => {
     mockInvestigateError.mockResolvedValue({
       fixable: false,
       confidence: 'medium',
@@ -391,7 +433,7 @@ describe('processInvestigateJob diagnosis routing', () => {
         rootCause: 'The search endpoint exceeded its 10 second budget',
         decision: expect.objectContaining({
           jobId: 'job-1',
-          outcome: 'not_actionable',
+          outcome: 'needs_human',
           causeLocation: 'GET /api/assets/search (remote service)',
           promptVersion: 'diagnosis-v1',
           causeKind: 'external_system',
@@ -412,6 +454,104 @@ describe('processInvestigateJob diagnosis routing', () => {
       usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       costUsd: 0.12,
     });
+  });
+
+  function apiFailureResult(over: Record<string, unknown>) {
+    return {
+      fixable: false,
+      confidence: 'low' as const,
+      reason: 'Investigation could not reach the model',
+      adjudication: null,
+      costUsd: 0,
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      decisionBasis: 'no_adjudication' as const,
+      decisionReason: 'Investigation could not reach the model',
+      outcome: 'needs_more_context' as const,
+      diagnosis: null,
+      filesRead: [],
+      findings: '',
+      evidence: [],
+      agentTaskBrief: null,
+      investigatedCommit: 'abc123',
+      stop: 'api_error' as const,
+      ...over,
+    };
+  }
+
+  it('fails the job on a deterministic 4xx instead of writing a customer terminal', async () => {
+    mockInvestigateError.mockResolvedValue(apiFailureResult({
+      apiErrorStatus: 400,
+      apiErrorDetail: "tools.3.custom: For 'array' type, property 'maxItems' is not supported",
+    }) as never);
+
+    await expect(processInvestigateJob(makeJob(), new AbortController().signal))
+      .rejects.toThrow('Investigation model request rejected (HTTP 400)');
+
+    expect(db.updateGroupInvestigation).not.toHaveBeenCalled();
+    expect(db.updateGroupAndCreateFixJob).not.toHaveBeenCalled();
+  });
+
+  it('retries a transient model failure while the job has retry budget left', async () => {
+    mockInvestigateError.mockResolvedValue(apiFailureResult({
+      apiErrorStatus: 529,
+      apiErrorDetail: 'overloaded',
+    }) as never);
+
+    await expect(processInvestigateJob(makeJob(), new AbortController().signal))
+      .rejects.toThrow('Investigation model unavailable (HTTP 529)');
+
+    expect(db.updateGroupInvestigation).not.toHaveBeenCalled();
+  });
+
+  it('terminalizes a transient model failure only when the retry budget is exhausted', async () => {
+    mockInvestigateError.mockResolvedValue(apiFailureResult({
+      apiErrorStatus: 529,
+      apiErrorDetail: 'overloaded',
+    }) as never);
+    const job = { ...makeJob(), attempts: 2, maxAttempts: 3 };
+
+    await processInvestigateJob(job, new AbortController().signal);
+
+    expect(db.updateGroupInvestigation).toHaveBeenCalledWith(
+      'grp-1', 'proj-1', 'needs_human', expect.objectContaining({
+        decision: expect.objectContaining({ outcome: 'unable_to_establish_cause' }),
+      }), job,
+    );
+  });
+
+  it('treats an oversized prompt as an evidence condition, not an operator failure', async () => {
+    mockInvestigateError.mockResolvedValue(apiFailureResult({
+      apiErrorStatus: 400,
+      apiErrorDetail: 'prompt is too long: 250000 tokens > 200000 maximum',
+    }) as never);
+
+    await processInvestigateJob(makeJob(), new AbortController().signal);
+
+    expect(db.updateGroupInvestigation).toHaveBeenCalledWith(
+      'grp-1', 'proj-1', 'needs_human', expect.objectContaining({
+        decision: expect.objectContaining({ outcome: 'unable_to_establish_cause' }),
+      }), makeJob(),
+    );
+  });
+
+  it('fails the job on a transient clone failure instead of writing a terminal', async () => {
+    mockCloneRepo.mockRejectedValueOnce(new Error('fatal: unable to access repo: Connection timed out'));
+
+    await expect(processInvestigateJob(makeJob(), new AbortController().signal))
+      .rejects.toThrow('Connection timed out');
+
+    expect(db.updateGroupInvestigation).not.toHaveBeenCalled();
+  });
+
+  it('records the checked-out commit on the job row before the model runs', async () => {
+    mockInvestigateError.mockResolvedValue(apiFailureResult({
+      apiErrorStatus: 400,
+      apiErrorDetail: 'tools.3.custom: maxItems',
+    }) as never);
+
+    await expect(processInvestigateJob(makeJob(), new AbortController().signal)).rejects.toThrow();
+
+    expect(db.recordInvestigatedCommit).toHaveBeenCalledWith(makeJob(), 'abc123');
   });
 
   it('routes needs_more_context to needs_human with a complete reason', async () => {
@@ -447,7 +587,7 @@ describe('processInvestigateJob diagnosis routing', () => {
         },
         decision: expect.objectContaining({
           jobId: 'job-1',
-          outcome: 'needs_more_context',
+          outcome: 'unable_to_establish_cause',
           diagnosis: null,
         }),
       }), makeJob(),
@@ -477,7 +617,7 @@ describe('processInvestigateJob diagnosis routing', () => {
       'grp-1', 'proj-1', 'needs_human', expect.objectContaining({
         reason: expect.objectContaining({ reason_code: 'insufficient_context' }),
         decision: expect.objectContaining({
-          outcome: 'incomplete', basis: 'invalid_verdict',
+          outcome: 'unable_to_establish_cause', basis: 'invalid_verdict',
           decisionReason: 'duplicate_candidate_id: c1',
         }),
       }), makeJob(),
@@ -592,7 +732,7 @@ describe('processInvestigateJob diagnosis routing', () => {
     expect(db.updateGroupInvestigation).toHaveBeenCalled();
   });
 
-  it('parks a code_fix below the impact bar regardless of model confidence', async () => {
+  it('does not reapply the removed impact bar after inquiry acceptance', async () => {
     vi.mocked(db.getGroupImpactBar).mockResolvedValueOnce({
       identifiedUsers: 0,
       recentAnonSessions: 2,
@@ -619,24 +759,19 @@ describe('processInvestigateJob diagnosis routing', () => {
       evidence: [], agentTaskBrief: null, investigatedCommit: 'abc123',
       stop: 'terminal',
     });
+    vi.mocked(db.updateGroupAndCreateFixJob).mockResolvedValue({ created: true, fixJobId: 'fix-1' });
 
     await processInvestigateJob(makeJob(), new AbortController().signal);
 
-    expect(db.updateGroupAndCreateFixJob).not.toHaveBeenCalled();
-    expect(db.updateGroupInvestigation).toHaveBeenCalledWith(
-      'grp-1', 'proj-1', 'investigated',
-      expect.objectContaining({
-        confidence: 'medium',
-        decision: expect.objectContaining({
-          policyEligible: false,
-          policyBasis: { v: 1, identified_users: 0, recent_anon_sessions: 2 },
-        }),
-      }),
-      makeJob(),
+    expect(db.getGroupImpactBar).not.toHaveBeenCalled();
+    expect(db.updateGroupAndCreateFixJob).toHaveBeenCalledWith(
+      'grp-1', 'proj-1', expect.objectContaining({
+        decision: expect.objectContaining({ policyEligible: true, policyBasis: null }),
+      }), makeJob(),
     );
   });
 
-  it('parks a report-only high-confidence code fix instead of opening a fix job', async () => {
+  it('parks a kind-gate refusal without losing decision provenance', async () => {
     mockInvestigateError.mockResolvedValue({
       fixable: true, confidence: 'high', reason: 'The cause is at src/App.vue', adjudication: null,
       costUsd: 0.1, usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
@@ -644,15 +779,14 @@ describe('processInvestigateJob diagnosis routing', () => {
       diagnosis: { one_line_description: 'Disconnected save handler', why_chain: [], reproduction_steps: [], cause_location: 'src/App.vue' },
       filesRead: ['src/App.vue'], findings: '', stop: 'terminal', evidence: [], agentTaskBrief: 'wire it', investigatedCommit: 'abc123',
     });
-    const job = { ...makeJob(), triggeredBy: 'reinvestigate_report_only' as const };
+    vi.mocked(db.updateGroupAndCreateFixJob).mockResolvedValue({ created: false, reason: 'kind_not_error' });
 
-    await processInvestigateJob(job, new AbortController().signal);
+    await processInvestigateJob(makeJob(), new AbortController().signal);
 
-    expect(db.updateGroupAndCreateFixJob).not.toHaveBeenCalled();
     expect(db.updateGroupInvestigation).toHaveBeenCalledWith(
       'grp-1', 'proj-1', 'investigated', expect.objectContaining({
-        rootCause: 'Disconnected save handler',
-      }), job,
+        decision: expect.objectContaining({ jobId: 'job-1', outcome: 'needs_human' }),
+      }), makeJob(),
     );
   });
 });
@@ -678,6 +812,7 @@ describe('processFixJob — preserves writeup on failure (no revert/null)', () =
     mockCloneRepo.mockResolvedValue({
       repoDir: '/tmp/r',
       defaultBranch: 'master',
+      headSha: 'abc123',
       cleanup: vi.fn(),
     } as never);
     vi.mocked(db.getProjectGitHubInstallation).mockResolvedValue(null as never);
@@ -694,6 +829,7 @@ describe('processFixJob — preserves writeup on failure (no revert/null)', () =
       workerId: 'worker-1',
       errorGroupId: 'g1',
       eventId: null,
+      episodeId: 'episode-1',
       sourceId: null,
       projectId: 'p1',
       jobType: 'fix',
@@ -743,14 +879,23 @@ describe('processFixJob — preserves writeup on failure (no revert/null)', () =
     );
   });
 
-  it('refuses a report-only fix job before reading or mutating the group', async () => {
-    await processFixJob(
-      { ...fixJob(), triggeredBy: 'reinvestigate_report_only' },
-      new AbortController().signal,
-    );
+  it('fails the fix job on a transient clone failure instead of writing a terminal', async () => {
+    mockCloneRepo.mockRejectedValueOnce(new Error('fatal: unable to access repo: Connection timed out'));
 
-    expect(mockGetErrorGroup).not.toHaveBeenCalled();
+    await expect(processFixJob(fixJob(), new AbortController().signal))
+      .rejects.toThrow('Connection timed out');
+
     expect(mockUpdateGroupStatus).not.toHaveBeenCalled();
+    expect(mockRunPipeline).not.toHaveBeenCalled();
+  });
+
+  it('refuses an error fix job without frozen episode evidence', async () => {
+    await expect(processFixJob(
+      { ...fixJob(), episodeId: null },
+      new AbortController().signal,
+    )).rejects.toThrow('Error fix job j1 missing episode_id');
+
+    expect(mockLoadEvidence).not.toHaveBeenCalled();
     expect(mockRunPipeline).not.toHaveBeenCalled();
   });
 
@@ -773,6 +918,10 @@ describe('processFixJob — preserves writeup on failure (no revert/null)', () =
     expect(call![3]?.reason?.reason_message).toBeTruthy();
     expect(call![3]?.reason?.remediation).toBeTruthy();
     expect(call![3]?.confidence).toBe('medium');
+    expect(db.recordFixTerminalDecision).toHaveBeenCalledWith(expect.objectContaining({
+      outcome: 'needs_human',
+      reason: expect.stringContaining('Required action:'),
+    }));
   });
 
   it('sets pr_created on a successful high-confidence fix', async () => {
@@ -791,6 +940,10 @@ describe('processFixJob — preserves writeup on failure (no revert/null)', () =
       prNumber: 7,
       headSha: 'head-7',
       fixJobId: 'j1',
+    }));
+    expect(db.recordFixTerminalDecision).toHaveBeenCalledWith(expect.objectContaining({
+      outcome: 'verified_fix',
+      reason: expect.not.stringContaining('Investigation report ready'),
     }));
   });
 
@@ -879,10 +1032,16 @@ describe('processFixJob — preserves writeup on failure (no revert/null)', () =
     });
   });
 
-  it('prefers session-pointer evidence fetched through ingestion', async () => {
+  it('uses the frozen replay pointer fetched through ingestion', async () => {
     const errorAt = '2026-07-15T12:00:00.000Z';
     const errorAtMs = Date.parse(errorAt);
-    mockGetSessionPointerForGroup.mockResolvedValue({ session_id: 'sess/a', error_at: errorAt });
+    mockLoadEvidence.mockResolvedValue({
+      ...makeEvidence(),
+      replayPointers: [{
+        anchorKind: 'threshold', eventId: 'evt-1', sessionId: 'sess/a', anchorMs: errorAtMs,
+      }],
+      availability: { recording: 'available', sourceMap: 'resolved' },
+    });
     mockGetPlayableChunkMetas.mockResolvedValue([{
       seq: 3,
       size_bytes: 100,
@@ -910,6 +1069,7 @@ describe('processFixJob — preserves writeup on failure (no revert/null)', () =
 
     await processFixJob(fixJob(), new AbortController().signal);
 
+    expect(mockGetSessionPointerForGroup).not.toHaveBeenCalled();
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
       'http://ingestion:8080/internal/v1/projects/p1/sessions/sess%2Fa/chunks/3',
     );
@@ -1047,27 +1207,6 @@ describe('friction worker path', () => {
       makeJob(),
     );
     expect(db.updateGroupAndCreateFixJob).not.toHaveBeenCalled();
-  });
-
-  it('parks report-only friction even when autonomy allows auto-fix', async () => {
-    mockGetProject.mockResolvedValue({
-      id: 'proj-1', name: 'app', github_repo: 'org/app', default_branch: 'main', friction_autonomy: 'auto_fix',
-    });
-    vi.mocked(investigateFriction).mockResolvedValue({
-      status: 'verdict', investigatedCommit: 'abc123', costUsd: 0.1,
-      usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
-      verdict: { codeCause: true, confidence: 'high', reason: 'disconnected handler', evidence: [], agentTaskBrief: 'wire it' },
-    });
-    const job = { ...makeJob(), triggeredBy: 'reinvestigate_report_only' as const };
-
-    await processInvestigateJob(job, new AbortController().signal);
-
-    expect(db.updateGroupAndCreateFixJob).not.toHaveBeenCalled();
-    expect(db.updateGroupInvestigation).toHaveBeenCalledWith(
-      'grp-1', 'proj-1', 'awaiting_approval', expect.objectContaining({
-        rootCause: 'disconnected handler',
-      }), job,
-    );
   });
 
   it('refuses an auto friction fix under ask-first while preserving confidence', async () => {
