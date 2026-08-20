@@ -16,7 +16,7 @@ Opslane opens pull requests automatically. That is only tolerable if a ready-for
 A PR is opened ready for review only when **all** of the following held during the run (`packages/worker/src/pipeline.ts`):
 
 1. The candidate fix was produced and applied inside an isolated sandbox against a real clone of your repository.
-2. The agent declared a regression test distinctive to the reported error. The harness verified that this test failed with the expected assertion on the unmodified base commit (red) and passed when the fix was applied (green).
+2. The agent declared a regression test distinctive to the reported error. The harness verified that this test ran and failed on the unmodified base commit (red) and passed when the fix was applied (green).
 3. The sandbox build gate passed (E0), or the repository had no build runner.
 4. An independent review judge approved the fix quality.
 
@@ -26,7 +26,7 @@ If dependency installation fails, the test runner crashes, the sandbox becomes u
 
 - **E0:** the build/typecheck passed.
 - **E1:** the post-patch suite introduced no new failures compared with the recorded pre-patch baseline. A repository with no test runner cannot reach E1.
-- **E2:** the declared regression test failed on the unmodified base commit with the expected assertion (red), then passed when the fix was applied (green).
+- **E2:** the declared regression test ran and failed on the unmodified base commit (red), then passed when the fix was applied (green).
 
 Each check records its outcome (`passed`, `failed`, `skipped_no_runner`, or `infra_error`), command, real exit code when known, and a bounded scrubbed output tail. The latest evidence appears in the PR body and incident detail view; candidate diffs are detail-only and are not included in incident lists.
 
