@@ -299,6 +299,17 @@ export type ConfidenceLevel = 'high' | 'medium' | 'low';
 
 export type IncidentKind = 'error' | 'friction';
 export type FrictionSignalType = 'rage_click' | 'dead_click' | 'form_abandon';
+export type IssuePipelineState =
+  | 'processing'
+  | 'watching'
+  | 'reviewing_evidence'
+  | 'waiting_for_evidence'
+  | 'investigating'
+  | 'fix_ready'
+  | 'needs_you'
+  | 'reviewed_not_pursuing'
+  | 'inactive'
+  | 'resolved';
 
 // === Friction adjudication (Batch 4, issue #56) ===
 
@@ -377,6 +388,14 @@ export interface Incident {
   merged_at?: string;
   resolved_at?: string;
   archived_at?: string;
+  /** Customer-facing state derived from the current issue round. */
+  state?: IssuePipelineState;
+  /** Explanation paired with state. Named separately from the structured fix-attempt reason. */
+  state_reason?: string;
+  episode_id?: string;
+  state_decided_at?: string;
+  evidence_event_ids?: string[];
+  pending_identity?: boolean;
 }
 
 export interface IncidentRecording {
@@ -446,7 +465,7 @@ export interface Account {
   last_seen: string;
 }
 
-export type JobType = 'error_fix' | 'investigate' | 'fix' | 'setup_pr' | 'session_analysis' | 'ci_watch' | 'route_map' | 'product_context' | 'issue_inquiry' | 'score_sync' | 'stack_resolve';
+export type JobType = 'error_fix' | 'investigate' | 'fix' | 'setup_pr' | 'session_analysis' | 'ci_watch' | 'route_map' | 'product_context' | 'issue_inquiry' | 'digest_write' | 'score_sync' | 'stack_resolve';
 
 export type PRPosture = 'verified_only' | 'draft_when_unverified';
 

@@ -74,6 +74,25 @@ describe('IssuesList URL filters', () => {
     window.history.replaceState({}, '', '/');
   });
 
+  it('separates watched issues from reviewed declines', async () => {
+    mocks.route.query = { project_id: 'p1' };
+    window.history.replaceState({}, '', '/?project_id=p1');
+    mocks.listIncidents.mockResolvedValue([
+      incident('active', 'Active issue', 'javascript'),
+      { ...incident('watched', 'Watched issue', 'javascript'), state: 'watching', state_reason: 'One affected user' },
+      { ...incident('declined', 'Declined issue', 'javascript'), state: 'reviewed_not_pursuing', state_reason: 'Extension noise' },
+    ]);
+
+    const wrapper = mountFeed();
+    await flushPromises();
+
+    expect(wrapper.get('[data-testid="watching-issues"]').text()).toContain('Watched issue');
+    expect(wrapper.get('[data-testid="reviewed-issues"]').text()).toContain('Declined issue');
+    expect(wrapper.get('[data-testid="stacked-issues-list"]').text()).toContain('Active issue');
+    expect(wrapper.get('[data-testid="stacked-issues-list"]').text()).not.toContain('Watched issue');
+    wrapper.unmount();
+  });
+
   it('uses URL-derived platform and end-user filters for the only initial request', async () => {
     mocks.route.query = {
       project_id: 'p1',

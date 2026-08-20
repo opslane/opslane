@@ -110,6 +110,38 @@ describe('IssueRow', () => {
     expect(row.text()).not.toContain('Last seen');
   });
 
+  it('shows the review time and cited observations for a decline', () => {
+    const row = mountRow({
+      state: 'reviewed_not_pursuing',
+      state_reason: 'Browser extension noise',
+      state_decided_at: '2026-08-20T05:25:11Z',
+      evidence_event_ids: ['aaaaaaaa-0000-0000-0000-000000000001', 'bbbbbbbb-0000-0000-0000-000000000002', 'bbbbbbbb-0000-0000-0000-000000000002'],
+    }, { layout: 'stacked' });
+    const detail = row.get('[data-testid="review-detail"]').text();
+    expect(detail).toContain('Reviewed ');
+    expect(detail).toContain('cites 2 observations');
+  });
+
+  it('shows the pipeline reason and offers another review after a decline', () => {
+    const row = mountRow({
+      state: 'reviewed_not_pursuing',
+      state_reason: 'Browser extension noise',
+    }, { layout: 'stacked' });
+    expect(row.text()).toContain('Reviewed, not pursuing');
+    expect(row.text()).toContain('Browser extension noise');
+    expect(row.get('button').text()).toBe('Review again');
+  });
+
+  it('renders a pending capture without a broken issue link', () => {
+    const row = mountRow({
+      pending_identity: true,
+      state: 'processing',
+      state_reason: 'Working out which problem this belongs to',
+    }, { layout: 'stacked' });
+    expect(row.find('a').exists()).toBe(false);
+    expect(row.text()).toContain('Processing');
+  });
+
   it('renders the mobile layout as a stacked issue with status, users, and age', () => {
     const row = mountRow({}, { layout: 'stacked' });
     expect(row.get('[data-testid="stacked-issue"]').element.tagName).toBe('ARTICLE');

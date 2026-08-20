@@ -77,6 +77,10 @@ const viewingArchived = computed(() => currentFilters.value.status === 'archived
 const projectHasIdentify = computed(
   () => incidents.value.some((incident) => (incident.priority_inputs?.users_7d ?? 0) > 0),
 );
+const primaryIncidents = computed(() => sortedIncidents.value.filter((incident) =>
+  incident.state !== 'watching' && incident.state !== 'reviewed_not_pursuing'));
+const watchingIncidents = computed(() => sortedIncidents.value.filter((incident) => incident.state === 'watching'));
+const reviewedIncidents = computed(() => sortedIncidents.value.filter((incident) => incident.state === 'reviewed_not_pursuing'));
 
 function viewArchived() {
   filterBar.value?.showArchived();
@@ -281,11 +285,12 @@ onUnmounted(() => stopPolling());
 
     <template v-else>
       <div
+        v-if="primaryIncidents.length > 0"
         class="overflow-hidden rounded-lg border border-border sm:hidden"
         data-testid="stacked-issues-list"
       >
         <IssueRow
-          v-for="incident in sortedIncidents"
+          v-for="incident in primaryIncidents"
           :key="incident.id"
           :incident="incident"
           :project-id="projectId"
@@ -296,7 +301,7 @@ onUnmounted(() => stopPolling());
         />
       </div>
 
-      <div class="hidden overflow-x-auto rounded-lg border border-border sm:block">
+      <div v-if="primaryIncidents.length > 0" class="hidden overflow-x-auto rounded-lg border border-border sm:block">
         <table class="min-w-full text-sm" aria-label="Issues">
         <thead>
           <tr class="border-b border-border bg-surface-subtle">
@@ -363,7 +368,7 @@ onUnmounted(() => stopPolling());
         </thead>
         <tbody>
           <IssueRow
-            v-for="incident in sortedIncidents"
+            v-for="incident in primaryIncidents"
             :key="incident.id"
             :incident="incident"
             :project-id="projectId"
@@ -374,6 +379,40 @@ onUnmounted(() => stopPolling());
         </tbody>
         </table>
       </div>
+
+      <section v-if="watchingIncidents.length > 0" class="mt-6" data-testid="watching-issues">
+        <h2 class="text-lg font-semibold text-text">Watching</h2>
+        <p class="mt-1 text-sm text-muted">These issues need more recent reach before Opslane reviews them.</p>
+        <div class="mt-3 overflow-hidden rounded-lg border border-border">
+          <IssueRow
+            v-for="incident in watchingIncidents"
+            :key="incident.id"
+            :incident="incident"
+            :project-id="projectId"
+            :show-platform="platformsVary"
+            :environment-filtered="Boolean(currentFilters.environment_id)"
+            :project-has-identify="projectHasIdentify"
+            layout="stacked"
+          />
+        </div>
+      </section>
+
+      <section v-if="reviewedIncidents.length > 0" class="mt-6" data-testid="reviewed-issues">
+        <h2 class="text-lg font-semibold text-text">Reviewed, not pursuing</h2>
+        <p class="mt-1 text-sm text-muted">Opslane reviewed these issues and recorded why it stopped.</p>
+        <div class="mt-3 overflow-hidden rounded-lg border border-border">
+          <IssueRow
+            v-for="incident in reviewedIncidents"
+            :key="incident.id"
+            :incident="incident"
+            :project-id="projectId"
+            :show-platform="platformsVary"
+            :environment-filtered="Boolean(currentFilters.environment_id)"
+            :project-has-identify="projectHasIdentify"
+            layout="stacked"
+          />
+        </div>
+      </section>
     </template>
 
     <div v-if="!loading && !error && incidents.length > 0" class="mt-3 space-y-1 text-xs text-muted">

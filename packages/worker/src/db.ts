@@ -622,7 +622,7 @@ export async function claimJob(
          AND available_at <= now()
          -- Claim only job types this worker can dispatch. New types stay
          -- pending until a handler ships and joins this list.
-         AND job_type IN ('setup_pr','session_analysis','ci_watch','route_map','product_context','issue_inquiry',
+         AND job_type IN ('setup_pr','session_analysis','ci_watch','route_map','product_context','issue_inquiry','digest_write',
                           'score_sync','stack_resolve','fix','investigate','error_fix')
          AND (job_type <> 'session_analysis'
               OR (SELECT COUNT(*) FROM error_group_jobs

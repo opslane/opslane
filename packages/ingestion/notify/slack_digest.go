@@ -24,9 +24,60 @@ func formatSlackDigest(payload EventPayload) ([]byte, string, error) {
 		return nil, "application/json", fmt.Errorf("digest.daily payload missing digest body")
 	}
 	if payload.Digest.SchemaVersion >= 2 {
+		if payload.Digest.SchemaVersion >= 3 {
+			return formatSlackDigestV3(payload)
+		}
 		return formatSlackDigestV2(payload)
 	}
 	return formatSlackDigestV1(payload)
+}
+
+func formatSlackDigestV3(payload EventPayload) ([]byte, string, error) {
+	digest := payload.Digest
+	blocks := []map[string]any{
+		{
+			"type": "header",
+			"text": map[string]any{"type": "plain_text", "text": truncate("Daily digest — "+cleanProse(payload.Project.Name, headerMax), headerMax), "emoji": true},
+		},
+		{
+			"type":     "context",
+			"elements": []map[string]any{{"type": "mrkdwn", "text": cleanProse(digest.Date, digestTitleMax)}},
+		},
+	}
+	if len(digest.GeneratedCards) == 0 {
+		blocks = append(blocks, digestSectionBlock("Nothing needs your attention today."))
+	}
+	for _, card := range digest.GeneratedCards {
+		label := "New"
+		if card.Label == "returned" {
+			label = "Returned"
+		}
+		text := "*" + cleanProse(card.Title, digestTitleMax) + "* · " + label + "\n" +
+			cleanProse(card.Copy, digestDetailMax) + "\n*Action:* " + cleanProse(card.Action, digestDetailMax)
+		if card.AffectedUsers > 0 {
+			noun := "users"
+			if card.AffectedUsers == 1 {
+				noun = "user"
+			}
+			text += fmt.Sprintf("\n%d affected %s", card.AffectedUsers, noun)
+		}
+		if len(card.Accounts) > 0 {
+			text += " · " + cleanProse(strings.Join(card.Accounts, ", "), digestDetailMax)
+		}
+		links := make([]string, 0, 2)
+		if card.PRURL != "" {
+			links = append(links, slackDigestLink(card.PRURL, "Review fix PR"))
+		}
+		links = append(links, slackDigestLink(BuildIncidentURL(payload.DashboardURL, card.IncidentID, payload.Project.ID), "Issue page"))
+		blocks = append(blocks, digestSectionBlock(text), digestContextBlock(strings.Join(links, " · ")))
+	}
+	var body bytes.Buffer
+	encoder := json.NewEncoder(&body)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(map[string]any{"blocks": blocks}); err != nil {
+		return nil, "application/json", err
+	}
+	return body.Bytes(), "application/json", nil
 }
 
 func formatSlackDigestV1(payload EventPayload) ([]byte, string, error) {

@@ -60,6 +60,7 @@ import { processCIWatchJob } from './ci-watch.js';
 import { processRouteMapJob } from './route-map.js';
 import { runProductContext } from './product-context/job.js';
 import { runInquiry } from './inquiry/job.js';
+import { writeDigest } from './digest-writer/job.js';
 import { loadEvidence, type EvidenceBundle } from './evidence/bundle.js';
 import { effectivePlatform, pythonPipelineEnabled } from './platform.js';
 import { parseRuntimeInfo } from './runtime-info.js';
@@ -363,6 +364,12 @@ export async function processJobInner(job: ClaimedJob, signal: AbortSignal): Pro
 
   if (job.jobType === 'issue_inquiry') {
     await runInquiry(job, signal);
+    return;
+  }
+
+  if (job.jobType === 'digest_write') {
+    if (!job.runId) throw new Error(`Digest writer job ${job.id} missing run_id`);
+    await writeDigest(job.runId, job.projectId);
     return;
   }
 

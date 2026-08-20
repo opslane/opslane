@@ -89,6 +89,7 @@ The agent callback requires `code`, `installation_id`, and UUID `state`; definit
 | GET | `/api/v1/projects/{projectID}/incidents/{incidentID}/affected-users` | Affected users |
 | GET | `/api/v1/projects/{projectID}/incidents/{incidentID}/sample-event` | Fetch the redacted representative error event for traceback, breadcrumbs, and request context |
 | POST | `/api/v1/projects/{projectID}/incidents/{incidentID}/fix` | Trigger an eligible error or approved friction fix |
+| POST | `/api/v1/projects/{projectID}/incidents/{incidentID}/review` | Request another inquiry for the current open issue round; reuses active review work |
 | POST | `/api/v1/projects/{projectID}/incidents/{incidentID}/resolve` | Resolve incident |
 | POST | `/api/v1/projects/{projectID}/incidents/{incidentID}/archive` | Archive incident |
 | POST | `/api/v1/projects/{projectID}/incidents/{incidentID}/unarchive` | Unarchive incident |

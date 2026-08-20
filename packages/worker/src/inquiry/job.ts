@@ -200,7 +200,14 @@ export async function runInquiry(
   if (!job.episodeId) throw new Error(`Inquiry job ${job.id} missing episode_id`);
   checkAbort(signal);
   const evidence = await dependencies.loadEvidence(job.projectId, job.episodeId);
-  const signature = evidenceSignature(evidence);
+  // The stored decision wins on a signature collision, which is what stops
+  // automatic re-asks on unchanged evidence. A person who asked for another
+  // look is not that case: without a distinct signature their review is
+  // suppressed by the decision they are disputing, so salt it with the review
+  // attempt the request opened.
+  const signature = job.triggeredBy === 'human'
+    ? `${evidenceSignature(evidence)}:review-${job.inputVersion ?? 0}`
+    : evidenceSignature(evidence);
   const suppliedIssueIds = new Set(evidence.relatedCandidates.map((candidate) => candidate.issueId));
   const prepared = await dependencies.prepareRepository(job, signal);
   const startedAt = Date.now();

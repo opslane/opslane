@@ -279,6 +279,30 @@ func TestFormatSlackDigestV2QuietAndFooters(t *testing.T) {
 	}
 }
 
+func TestFormatSlackDigestV3RendersAuthoredActionAndReturnedLabel(t *testing.T) {
+	payload := EventPayload{
+		Version: 1, EventType: "digest.daily", RunID: "run-1",
+		Project: ProjectRef{ID: "p1", Name: "Shop"}, DashboardURL: "https://app.example",
+		Digest: &DigestPayload{Date: "2026-08-20", SchemaVersion: 3,
+			GeneratedCards: []GeneratedDigestCard{{
+				EpisodeID: "ep-2", IncidentID: "issue-1", Title: "Checkout failed",
+				Label: "returned", Copy: "Checkout fails before payment.",
+				Action: "Review the verified fix", AffectedUsers: 4,
+				Accounts: []string{"Acme"}, PRURL: "https://github.com/acme/shop/pull/42",
+			}}},
+	}
+	body, _, err := FormatSlack(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	for _, want := range []string{"Returned", "Checkout fails before payment.", "Review the verified fix", "Acme", "pull/42"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("v3 digest omitted %q: %s", want, text)
+		}
+	}
+}
+
 func TestFormatSlackDigestV2SkipsUnsupportedItems(t *testing.T) {
 	for _, item := range []ReceiptItem{
 		{Kind: "cluster", IncidentID: "cluster", Title: "cluster", ReceiptState: "report_ready"},

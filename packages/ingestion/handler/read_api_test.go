@@ -9,6 +9,27 @@ import (
 	"github.com/opslane/opslane/packages/ingestion/db"
 )
 
+func TestInboxStateVocabulary(t *testing.T) {
+	tests := []struct {
+		name, identity, filter, inquiry, diagnosis, status, want string
+	}{
+		{"pending", "pending", "", "", "", "new", "processing"},
+		{"watch", "settled", "watch", "", "", "new", "watching"},
+		{"declined", "settled", "open_inquiry", "do_not_pursue", "", "new", "reviewed_not_pursuing"},
+		{"waiting", "settled", "open_inquiry", "wait_for_more_evidence", "", "new", "waiting_for_evidence"},
+		{"fix", "settled", "open_inquiry", "investigate", "verified_fix", "pr_created", "fix_ready"},
+		{"resolved", "settled", "open_inquiry", "investigate", "verified_fix", "resolved", "resolved"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			state, reason := inboxState(test.identity, test.filter, test.inquiry, test.diagnosis, test.status)
+			if state != test.want || reason == "" {
+				t.Fatalf("state=%q reason=%q, want %q with a reason", state, reason, test.want)
+			}
+		})
+	}
+}
+
 func TestIncidentJSON_ReplayID(t *testing.T) {
 	id := "11111111-2222-3333-4444-555555555555"
 	inc := incidentJSON{ID: "g1", ReplayID: &id}

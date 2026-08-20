@@ -22,11 +22,22 @@ import IncidentLifecycle from '../components/incidents/IncidentLifecycle.vue';
 import { formatBreadcrumb, getRequestContext } from '../components/sample-event';
 import type { eventWithTime } from '@rrweb/types';
 import { useSessionPlayback } from '../composables/useSessionPlayback';
-import { incidentStatusRecipe } from '../status-recipes';
+import { incidentStatusRecipe, pipelineStateRecipe } from '../status-recipes';
 
 const route = useRoute();
 const incidentId = route.params['id'] as string;
 const incident = ref<Incident | null>(null);
+const reviewDetail = computed(() => {
+  const current = incident.value;
+  if (!current || (current.state !== 'reviewed_not_pursuing' && current.state !== 'waiting_for_evidence')) return null;
+  const parts: string[] = [];
+  if (current.state_decided_at) parts.push(`Reviewed ${formatDate(current.state_decided_at)}`);
+  const cited = [...new Set(current.evidence_event_ids ?? [])];
+  if (cited.length > 0) {
+    parts.push(`cites ${cited.length} observation${cited.length === 1 ? '' : 's'}: ${cited.map((id) => id.slice(0, 8)).join(', ')}`);
+  }
+  return parts.length > 0 ? parts.join(' · ') : null;
+});
 const causeHidden = computed(() =>
   incident.value?.investigation_readiness === 'ineligible'
   || incident.value?.investigation_readiness === 'pending',
@@ -280,11 +291,18 @@ onMounted(async () => {
             v-text="incident.impact_class"
           ></span>
           <StatusLabel
-            :tone="incidentStatusRecipe(incident.status).tone"
-            :label="incidentStatusRecipe(incident.status).label"
+            :tone="incident.state ? pipelineStateRecipe(incident.state).tone : incidentStatusRecipe(incident.status).tone"
+            :label="incident.state ? pipelineStateRecipe(incident.state).label : incidentStatusRecipe(incident.status).label"
             class="mt-1"
           />
         </div>
+        <p v-if="incident.state_reason" class="mt-2 text-sm text-muted" v-text="incident.state_reason"></p>
+        <p
+          v-if="reviewDetail"
+          data-testid="review-detail"
+          class="mt-1 text-sm text-faint"
+          v-text="reviewDetail"
+        ></p>
         <div
           v-if="incident.adjudication_status === 'unchecked'"
           class="mt-3 p-3 bg-warning/10 border border-warning/20 border-l-2 border-l-warning rounded-lg text-sm text-warning"
