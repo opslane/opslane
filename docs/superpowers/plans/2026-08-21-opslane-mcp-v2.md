@@ -949,11 +949,15 @@ func (q *Queries) LinkPR(ctx context.Context, projectID, groupID, prURL, repo st
 		return nil
 	}
 	// Disambiguate the refusal.
+	// Scope the disambiguation by project_id, exactly like the UPDATE. Without it,
+	// a groupID belonging to another project resolves a row here and returns
+	// 409/422, leaking that the incident exists; it must be a 404.
 	var repoMatches, hasNumber bool
 	if err := q.pool.QueryRow(ctx,
-		`SELECT lower(coalesce(p.github_repo,''))=lower($2), eg.pr_number IS NOT NULL
-		   FROM error_groups eg JOIN projects p ON p.id=eg.project_id WHERE eg.id=$1`,
-		groupID, repo).Scan(&repoMatches, &hasNumber); err != nil {
+		`SELECT lower(coalesce(p.github_repo,''))=lower($3), eg.pr_number IS NOT NULL
+		   FROM error_groups eg JOIN projects p ON p.id=eg.project_id
+		  WHERE eg.id=$1 AND eg.project_id=$2`,
+		groupID, projectID, repo).Scan(&repoMatches, &hasNumber); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrIncidentNotFound
 		}
@@ -962,6 +966,8 @@ func (q *Queries) LinkPR(ctx context.Context, projectID, groupID, prURL, repo st
 	if !repoMatches {
 		return ErrPRRepoMismatch
 	}
+	// hasNumber true means a PR is already linked; false means the group is in a
+	// terminal state (resolved/archived/merged). The 409 copy names both.
 	return ErrPRAlreadyLinked
 }
 ```
@@ -1301,8 +1307,11 @@ describe('formatIssue', () => {
     const ev = evidence({ frames: [{ anchor_kind: 'threshold', status: 'resolved', commit_sha: null,
       envelope: { version: 2, frames: [{ original_file: 'src/components/MainView.tsx', original_line: 25 }] } }] });
     const out = formatIssue({ incident, evidence: ev });
-    expect(out.indexOf('request_types is null')).toBeLessThan(out.indexOf('MainView.tsx'));
+    // Positive assertions first: indexOf(-1) < positive would pass falsely if the
+    // root cause were dropped entirely.
+    expect(out).toContain('request_types is null');
     expect(out).toContain('src/components/MainView.tsx:25');
+    expect(out.indexOf('request_types is null')).toBeLessThan(out.indexOf('MainView.tsx'));
   });
 
   it('gives friction the failing request when the diagnosis is thin', () => {
@@ -1324,13 +1333,14 @@ describe('formatIssue', () => {
       root_cause: 'r', occurrence_count: 1, affected_users_count: 1, first_seen: '', last_seen: '' } as unknown as McpIncident;
     const out = formatIssue({ incident, evidence: evidence() });
     expect(out).toContain('<untrusted>');
+    expect(out).toContain(' t'); // the title survived; the negative fence check is not passing by omission
   });
 });
 ```
 
 Define `isFillerRootCause` in `format.ts` (no such function exists on this branch; the current `formatIssue` never renders `root_cause`). Anchor it: `^\s*(placeholder|tbd|to be determined)\b`, so a real cause that merely mentions a placeholder image survives.
 
-- [ ] **Step 2-5:** implement `formatIssue`, run, commit (`feat(cli): render one issue root-cause first with fix-shaped evidence`). The implementation reads `incident.kind` to choose frames vs failing-request emphasis, refuses a filler root cause, and ends by naming `opslane_link_pr`.
+- [ ] **Step 2-5:** implement `formatIssue`, run, commit (`feat(cli): render one issue root-cause first with fix-shaped evidence`). The implementation reads `incident.kind` to choose frames vs failing-request emphasis, refuses a filler root cause, and ends by naming `opslane_link_pr`. **Guard the envelope:** `evidence.frames[].envelope` is `unknown` and is `null` for an unresolved anchor (the endpoint's `LEFT JOIN error_event_resolutions`), so narrow it before reading `.frames` (skip a frame whose envelope is null rather than dereferencing it). The `EvidenceFrame.envelope` type is `unknown`, which forces this narrowing at compile time under strict TypeScript.
 
 ---
 
@@ -1376,7 +1386,7 @@ describe('registerTools v2', () => {
 });
 ```
 
-- [ ] **Step 2-4:** rewrite `tools.ts` to register the three tools. `opslane_issue` calls both `getIncident` and `issueEvidence`, then `formatIssue({ incident, evidence })`. `opslane_link_pr` parses the id, calls `linkPr` inside a try, and returns the API message as text on failure. Delete any test asserting `opslane_worklist`/`opslane_resolve`.
+- [ ] **Step 2-4:** rewrite `tools.ts` to register the three tools. `opslane_issue` calls both `getIncident` and `issueEvidence`, then `formatIssue({ incident, evidence })`. `opslane_link_pr` parses the id, calls `linkPr` inside a try, and returns the refusal as readable text on failure. This is deliberate: a refusal ("not in this project's repository") is information a coding agent acts on, not a protocol error, matching how the other tools surface expected rejections. Delete any test asserting `opslane_worklist`/`opslane_resolve`.
 
 - [ ] **Step 5: Verify stdout stays clean**
 
@@ -1445,6 +1455,8 @@ Expected: green, **zero skips** in the Go suite. The storage exports above and `
 **Type consistency.** `DigestCard` fields match `GeneratedDigestCard`'s JSON tags (`notify/event.go`). `IssueEvidence` mirrors the worker's `EvidenceBundle` subset. `LinkPR` writes the columns `ProcessPRWebhook` matches (`queries.go:1878`), the same lesson the design records.
 
 **Deliberate deviations, stated.** The evidence endpoint does not throw on missing anchors where `loadEvidence` does; it returns an empty bundle, because anchorless issues are normal and must render as "no evidence yet". The list drops the model's prose and joins state only when an issue is opened, keeping it lean.
+
+**Codex feedback, round 1 (plan pasted inline; Codex could not read the tree).** Project-scoped the `LinkPR` disambiguation query so a foreign incident id returns 404, not a 409/422 that leaks existence. Added positive assertions to the `formatIssue` tests so an `indexOf(-1) < positive` or a dropped-section case cannot pass by omission. Required a null-envelope guard in `formatIssue`, since an unresolved anchor's `envelope` is null under strict TypeScript. Clarified that `opslane_link_pr` returns a refusal as text on purpose. Codex's `source_map` empty-string worry (N1) did not apply: `IssueEvidence` already initializes both availability fields to `"missing"`.
 
 **Review iteration 3 converged:** no blockers, no majors. Three minor tightenings applied: the Task 8 full-repo gate now inlines the MINIO/REPLAY_STORE storage exports (matching Task 3's gate) so a copy-pasted command block does not hit the ~30-skip trap; the `strconv` import keepalive crutch is removed from the link-PR test; and `formatDigest` uses `LIMITS.title` rather than a bare `200`. The load-bearing end-to-end claim was re-verified: `LinkPR` writes exactly the `pr_number` + `status='pr_created'` set the merge webhook matches (`queries.go:1878`).
 
