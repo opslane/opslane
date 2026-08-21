@@ -18,7 +18,9 @@ The rewrite makes this worse in one specific way and better in another. Worse: t
 is now model-authored prose, so the structured facts a coding agent needs are one layer
 below what Slack shows. Better: every issue now carries a customer-facing `state`
 (`inboxState`, `packages/ingestion/handler/read_api.go:201`) and its evidence is frozen
-and addressable, so a good answer exists to give the agent if we expose it.
+and addressable, so a good answer exists to give the agent if we expose it. That state
+is present for issues that have an episode; pre-rewrite issues, friction buckets, and
+archived issues carry none (`attachPipelineState`, `read_api.go:230`).
 
 ## What this builds
 
@@ -43,6 +45,11 @@ A glossary, because the rewrite renamed the nouns:
   `packages/worker/src/digest-writer/schema.ts`).
 - **Resolution** is a status of `resolved` on the issue. A database trigger then closes
   the open episode (`055_close_episodes_on_resolution.sql`).
+- A **pull request** attached to an issue lives on `error_groups`: `pr_url`, `pr_number`,
+  `pr_created_at`, and `status = 'pr_created'` (`001_baseline.sql:91`). It does not live on
+  `diagnosis_decisions`, which records only the diagnosis. The merge webhook matches a PR
+  by `github_repo` + `pr_number` + `status IN ('pr_created','pr_draft')`
+  (`queries.go:1876`), so those columns, not the URL alone, are what make a merge resolve.
 
 ## Goals
 
@@ -76,11 +83,11 @@ the worker's TypeScript. Two readers of one frozen source, not one shared functi
 | --- | --- | --- |
 | R1 | A developer sees today's model-selected issues | `opslane_digest` returns the `included` set of the latest delivered `digest_run` |
 | R2 | Each list row carries enough to choose without a second call | A row has the issue, its `state`, affected users or accounts, and a PR URL when one exists |
-| R3 | An issue that already has a PR is flagged with its URL | A `verified_fix` row shows the PR URL from its diagnosis decision |
+| R3 | An issue that already has a PR is flagged with its URL | A row shows `error_groups.pr_url`, already stamped onto the delivered digest card (`validate.go:144`) |
 | R4 | A developer sees a resolved stack pointing at real source | `opslane_issue` returns frames from `error_event_resolutions.envelope`, read through the episode's anchors |
 | R5 | A `needs_human` friction issue is locatable | `opslane_issue` returns the failing request from `session_request_failures` when the diagnosis alone does not name a component |
-| R6 | The developer sees what Opslane already tried | `opslane_issue` returns the diagnosis summary and outcome, and the PR when there is one |
-| R7 | A developer records a PR from any state | `opslane_link_pr` writes `pr_url` on the issue's diagnosis decision regardless of state |
+| R6 | The developer sees what Opslane already tried | `opslane_issue` returns the diagnosis outcome and `decision_reason` from `diagnosis_decisions`, and `error_groups.pr_url` when set |
+| R7 | A developer records a PR | `opslane_link_pr` writes `error_groups.pr_url/pr_number/pr_created_at` and sets `status = 'pr_created'`, refusing to overwrite an existing `pr_number` |
 | R8 | Recording a PR does not claim the issue is fixed | `opslane_link_pr` does not set `resolved`; the pipeline resolves on merge-and-quiet |
 | R9 | Customer text reaches a model as data | Titles, routes, and diagnosis text are fenced, and the fence cannot be closed by its content |
 | R10 | The protocol is not corrupted by logging | An `initialize` exchange returns one line of JSON-RPC and stderr is empty |
@@ -118,20 +125,24 @@ sequenceDiagram
 
 ### `opslane_digest()`
 
-Reads the latest delivered `digest_run` for the project and returns its `included` items
-as structured facts.
+Reads the latest delivered `digest_run` (`status = 'delivered'`) and returns the cards in
+its `rendered_payload.digest.generated_cards` as structured facts.
 
 **Why the delivered run, not a live query.** The developer arrives having read the Slack
 digest. A live query would return a different set, so the item they came for might be
 missing or joined by items they never triaged. The digest is only useful because it is the
-same list. The run is already frozen and stored (`digest_runs.rendered_payload`), so this
-is a read, not a recomputation.
+same list. The run is already frozen and stored in `digest_runs.rendered_payload`, so this is a read,
+not a recomputation. The same "latest delivered" query already runs in
+`cmd/digest-eval/main.go:44`.
 
-**Why facts, not the model's prose.** The Slack card carries `copy` and `action`, written
-for a person (`DigestCard`, `digest-writer/schema.ts`). A coding agent wants the issue, the
-`state`, the affected count, and the PR URL. The list joins each `included` episode back to
-its issue and its `inboxState`, and drops the prose. It may keep the one-line `action` as a
-hint, because it names what Opslane thinks the next step is.
+**Why facts, not the model's prose, and why this is nearly free.** Two payload columns are
+easy to confuse. `writer_payload` (also `payload`) holds the model's `{included, deferred}`
+output (`digest-writer/schema.ts`), written for a person. `rendered_payload` holds the
+delivered `GeneratedDigestCard`s (`notify/event.go:78`), and `validate.go:144` stamps each
+one with the system's own `incident_id`, `title`, `affected_users`, `accounts`, and
+`pr_url` taken from the frozen candidate, not the model. So the delivered cards already
+carry system-truth facts. The list reads them and joins only `inboxState`, which the
+`generated_cards` do not include. It keeps the model's one-line `action` as a hint.
 
 **Why the PR flag is a first-class field.** A `verified_fix` row means Opslane already
 opened a PR. The developer's job there is review, not authoring, and burying the URL inside
@@ -173,18 +184,29 @@ are wrapped and the wrapper cannot be closed by its content.
 
 Records a pull request against an issue. The only write.
 
-**Why it is symmetric with Opslane's own PR.** A PR attached to an issue is one fact:
-a fix is in flight at this URL. It does not matter who opened it. Opslane stores its own PR
-as `pr_url` on the issue's diagnosis decision; the developer's PR goes in the same slot.
-There is no separate developer-PR record and no separate resolution path.
+**Why it is symmetric with Opslane's own PR.** A PR attached to an issue is one fact: a
+fix is in flight at this URL. It does not matter who opened it. Opslane records its own PR
+on `error_groups` (`pr_url`, `pr_number`, `pr_created_at`, `status = 'pr_created'`); the
+developer's PR goes in the identical columns. There is no separate developer-PR record.
 
-**Why it does not set a status.** Recording a PR is not a claim that the fix works. The
-pipeline already resolves an issue when the fix ships and occurrences stop, and the closure
-trigger closes the episode from there. Writing `resolved` here would assert a fix before
-anything proved it.
+**Why it sets `status = 'pr_created'`, which is required, not optional.** The merge webhook
+matches on `pr_number` and `status IN ('pr_created','pr_draft')` (`queries.go:1876`). Write
+the URL without the status and the merge never matches, and the issue never resolves. This
+is the exact bug that reached a green test suite in the pre-rewrite design. Setting the
+status is not a claim the fix works; it is the claim that a PR exists, which just became
+true. `resolved` is still never written here.
 
-**Why it works from any state.** "I opened a PR" is true whether the issue is `needs_human`,
-`fix_ready`, or `investigating`. There is no gate, because the fact is state-independent.
+**Why it refuses to overwrite an existing `pr_number`.** Forcing `pr_created` over a group
+that already holds Opslane's own `pr_number` would clobber Opslane's PR association and
+break the merge match for that PR. So the write is guarded: it refuses when `pr_number` is
+already set, and it confirms the PR's repository matches `projects.github_repo` first. The
+repository check is mandatory here, not the optional nicety Open-Q4 once called it.
+
+**The cost of setting `pr_created`: the merge webhook becomes the only resolver.**
+`resolveInactiveGroups` excludes `pr_created` (`db.ts:1668`), so a linked PR that is
+abandoned, or that lands in a repository other than the project's, strands the issue in
+`pr_created` with no auto-resolution. The repository guard removes the wrong-repo case; the
+abandoned-PR case is a real edge the pipeline does not currently sweep.
 
 ## Server-side work
 
@@ -198,12 +220,19 @@ episodes joined to issue facts and `inboxState`. New. Nothing serves the digest 
 The incident endpoint already carries `state`, `episode_id`, and priority
 (`read_api.go:201`), but not the frozen frames or the failing request.
 
-**`POST /projects/{id}/incidents/{id}/link-pr`.** Writes `pr_url` on the diagnosis
-decision. New; the old `link-pr` was never built and the pre-rewrite version targeted the
-wrong table.
+**`POST /projects/{id}/incidents/{id}/link-pr`.** Writes `error_groups.pr_url/pr_number/`
+`pr_created_at` and `status = 'pr_created'`, guarded against overwriting an existing
+`pr_number` and against a foreign repository. New.
 
-The incident detail endpoint stays as the source of per-issue state; the evidence endpoint
-is additive beside it.
+Two things are more built than a first look suggests, and the evidence endpoint should lean
+on them. The incident detail endpoint already returns per-issue `state`, `episode_id`, and
+the anchor `evidence_event_ids` via `IssuePipelineRecords` (`db/inbox.go:28`,
+`read_api.go:259`). And `packages/worker/src/evidence/bundle.ts` `loadEvidence` is a
+complete blueprint for the bundle: frames from `error_event_resolutions.envelope` through
+the anchors, failing requests from `session_request_failures`, a `recordingAvailability` of
+`available`/`partial`/`expired`/`missing`, and a replay pointer. The Go endpoint is a port
+of it. Only the frames and the failing-request assembly are genuinely net-new; the anchor
+IDs are already exposed.
 
 ## Milestones
 
@@ -219,9 +248,11 @@ Milestone 4 is gated on 1 through 3.
 
 ## Testing and validation
 
-Go handler tests drive the real router with a real database and a real session token. They
-skip when `DATABASE_URL` is unset (`digest/build_test.go:23`), so read the skip count.
-Before trusting a green suite, confirm zero skips.
+Go handler tests drive the real router with a real database and a real session token.
+Database-gated tests skip when `DATABASE_URL` is unset, so read the skip count before
+trusting a green suite. Note the pattern is not uniform: `digest/build_test.go:20` falls
+back to the Compose DSN rather than skipping, so a bare `go test ./...` still exercises that
+package.
 
 Vitest covers the pure parts: digest partitioning, fencing, rendering, and tool
 registration. Client tests mock `authedFetch`.
@@ -241,14 +272,21 @@ the blast radius but does not fix the cause.
 must state what is missing rather than fail, or a coding agent treats an expired recording
 as an empty one.
 
+**A linked PR can strand an issue in `pr_created`.** Once the write sets `pr_created`, the
+merge webhook is the only resolver, because `resolveInactiveGroups` excludes that status
+(`db.ts:1668`). A PR opened and then abandoned leaves the issue stuck. The repository guard
+handles the wrong-repo case; the abandoned case needs a pipeline sweep that does not exist
+yet, and is worth flagging to whoever owns resolution.
+
 **The digest may be empty or thin.** The pipeline is new. If a day's run includes few
 issues, the MCP is honest but sparse. This surface delivers the selection; it cannot enrich
 it.
 
-**The evidence assembly is new Go.** The worker assembles evidence in TypeScript for the
-inquiry. Building a second assembler in Go risks the two describing an issue differently.
-They share the frozen anchors, so they select the same events, but the shapes are authored
-separately and can drift.
+**The evidence assembly is a second implementation.** The Go endpoint ports `loadEvidence`
+from the worker's TypeScript (`evidence/bundle.ts`). They read the same frozen anchors, so
+they select the same events, but the two shapes are authored separately and can drift. The
+mitigation is to mirror `loadEvidence` field for field and test both against one fixture,
+rather than designing a fresh shape.
 
 ## Alternatives considered
 
@@ -269,25 +307,20 @@ auth to avoid a dependency it would then recreate.
 
 ## Open questions
 
-**1. Does the list read `rendered_payload.included`, or `digest_run_items` where
-`outcome = 'included'`?** Both name the same episodes. The payload carries the model's
-`claimedUsers` and `accounts`; the items table is the normalized record. The payload is
-richer but is the model's output; the items table is the system's. My lean is the items
-table joined to live issue facts, so the counts are the system's, not the model's.
-
-**2. Should `opslane_digest` fall back to the inbox when there is no delivered run today?**
+**1. Should `opslane_digest` fall back to the inbox when there is no delivered run today?**
 A developer working before the daily run has nothing to read. Falling back to recent
 `needs_human` and `fix_ready` issues would fill the gap but breaks the "same list as Slack"
 guarantee.
 
-**3. Should the evidence endpoint be one call or several?** One call is fewer round trips
+**2. Should the evidence endpoint be one call or several?** One call is fewer round trips
 but a larger payload with expiry-dependent parts. Several calls let the agent pull the
 replay only when it needs it. My lean is one call with the replay as a pointer, not the
-bytes.
+bytes, matching `loadEvidence`'s existing `ReplayPointer`.
 
-**4. Does `link_pr` need the repository check that the pre-rewrite design had?** The
-duplicate-project risk says yes. Confirming the PR's repository matches the project's costs
-one lookup and closes the cross-project write.
+**3. Should a developer be able to relink after abandoning a PR?** The write refuses to
+overwrite an existing `pr_number`, which protects Opslane's PR but also blocks a developer
+who opened the wrong PR and wants to correct it. A relink path would need to distinguish
+"replace my own abandoned PR" from "clobber Opslane's".
 
 ## The honest caveat
 
