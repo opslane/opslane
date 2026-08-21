@@ -52,7 +52,13 @@ func TestMigration060AdoptsThePreRewriteWorld(t *testing.T) {
 		   now() - interval '29 days'),
 		  ('aaaaaaaa-0000-0000-0000-000000000003',
 		   '22222222-2222-2222-2222-222222222222', 'fp-friction', 'Dead click',
-		   'friction', 'new', now() - interval '10 days', now(), NULL);
+		   'friction', 'new', now() - interval '10 days', now(), NULL),
+		  ('aaaaaaaa-0000-0000-0000-000000000004',
+		   '22222222-2222-2222-2222-222222222222', 'fp-archived', 'Archived issue',
+		   'error', 'archived', now() - interval '60 days', now() - interval '50 days', NULL),
+		  ('aaaaaaaa-0000-0000-0000-000000000005',
+		   '22222222-2222-2222-2222-222222222222', 'fp-merged', 'Merged issue',
+		   'error', 'merged', now() - interval '70 days', now() - interval '60 days', NULL);
 
 		INSERT INTO error_events
 		  (id, project_id, environment_id, error_group_id, timestamp,
@@ -86,11 +92,24 @@ func TestMigration060AdoptsThePreRewriteWorld(t *testing.T) {
 		  FROM issue_episodes`).Scan(&episodes, &openEpisodes); err != nil {
 		t.Fatal(err)
 	}
-	if episodes != 3 {
-		t.Errorf("episodes = %d, want 3 (one per adopted issue)", episodes)
+	if episodes != 5 {
+		t.Errorf("episodes = %d, want 5 (one per adopted issue)", episodes)
 	}
+	// Only the active error issue and the friction issue stay open. The
+	// dispatcher treats resolved, merged, and archived alike as terminal, so an
+	// archived issue with an open round would read as live on day one.
 	if openEpisodes != 2 {
-		t.Errorf("open episodes = %d, want 2 (the resolved issue's round is closed)", openEpisodes)
+		t.Errorf("open episodes = %d, want 2 (resolved, merged and archived rounds are closed)", openEpisodes)
+	}
+	var terminalOpen int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM issue_episodes ep
+		  JOIN error_groups g ON g.id = ep.canonical_issue_id
+		 WHERE g.status IN ('resolved','merged','archived') AND ep.closed_at IS NULL`).Scan(&terminalOpen); err != nil {
+		t.Fatal(err)
+	}
+	if terminalOpen != 0 {
+		t.Errorf("%d terminal issues have an open round", terminalOpen)
 	}
 
 	// Each issue's own fingerprint becomes its alias, typed by the issue's kind.
@@ -109,8 +128,20 @@ func TestMigration060AdoptsThePreRewriteWorld(t *testing.T) {
 		 WHERE confirmed_by = 'exact' AND identity_version = 2`).Scan(&aliases); err != nil {
 		t.Fatal(err)
 	}
-	if aliases != 3 {
-		t.Errorf("aliases = %d, want 3", aliases)
+	// Four, not five: a merged group's fingerprint is deliberately left unbound.
+	// Settlement aborts when it locks an issue whose status is 'merged', so
+	// binding it would stall every future observation that matches it.
+	if aliases != 4 {
+		t.Errorf("aliases = %d, want 4 (every issue except the merged one)", aliases)
+	}
+	var mergedBound int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM canonical_issue_fingerprints
+		 WHERE fingerprint = 'fp-merged'`).Scan(&mergedBound); err != nil {
+		t.Fatal(err)
+	}
+	if mergedBound != 0 {
+		t.Errorf("merged issue's fingerprint was bound; settlement would stall on it")
 	}
 
 	// The backfill merges nothing: three issues in, three issues out.
@@ -238,5 +269,130 @@ func TestMigration060IsReapplySafeWithData(t *testing.T) {
 	if episodes != 1 || aliases != 1 || identities != 1 || receipts != 1 {
 		t.Errorf("after two passes: episodes=%d aliases=%d identities=%d receipts=%d, want 1 each",
 			episodes, aliases, identities, receipts)
+	}
+}
+
+// TestMigration060DoesNotPublishRoundsItDidNotAdopt is the regression for the
+// worst defect the review found. run-migrations.sh replays every file on every
+// service start. An earlier draft stamped a digest receipt on every sequence-1
+// episode, so a restart would mark a genuinely new issue as already published,
+// and digest.FreezeCandidates skips any episode that already carries a
+// publication row. The issue would never reach the daily message.
+func TestMigration060DoesNotPublishRoundsItDidNotAdopt(t *testing.T) {
+	admin := testPool(t)
+	psql := findPsql(t)
+	pool, dsn := disposableDB(t, admin)
+	ctx := context.Background()
+
+	files := migrationFiles(t)
+	backfill := ""
+	for _, file := range files {
+		if err := applyMigration(t, psql, dsn, file); err != nil {
+			t.Fatalf("apply %s: %v", file, err)
+		}
+		if strings.HasPrefix(filepath.Base(file), "060_") {
+			backfill = file
+		}
+	}
+
+	// A new issue born after cutover, with its first round open and unpublished.
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO orgs (id, name) VALUES ('77777777-7777-7777-7777-777777777777', 'post-cutover');
+		INSERT INTO projects (id, org_id, name, github_repo)
+		  VALUES ('88888888-8888-8888-8888-888888888888',
+		          '77777777-7777-7777-7777-777777777777', 'app', 'owner/repo');
+		INSERT INTO error_groups
+		  (id, project_id, fingerprint, title, kind, status, first_seen, last_seen)
+		VALUES ('eeeeeeee-0000-0000-0000-000000000001',
+		        '88888888-8888-8888-8888-888888888888', 'canonical:new-issue',
+		        'Born after cutover', 'error', 'new', now(), now());
+		INSERT INTO issue_episodes (id, project_id, canonical_issue_id, sequence)
+		  VALUES ('ffffffff-0000-0000-0000-000000000001',
+		          '88888888-8888-8888-8888-888888888888',
+		          'eeeeeeee-0000-0000-0000-000000000001', 1);
+	`); err != nil {
+		t.Fatalf("seed post-cutover issue: %v", err)
+	}
+
+	// The restart.
+	if err := applyMigration(t, psql, dsn, backfill); err != nil {
+		t.Fatalf("replay backfill: %v", err)
+	}
+
+	var published int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM issue_publications
+		 WHERE episode_id = 'ffffffff-0000-0000-0000-000000000001'`).Scan(&published); err != nil {
+		t.Fatal(err)
+	}
+	if published != 0 {
+		t.Errorf("a replay published a round the backfill never adopted; that issue would be "+
+			"suppressed from the digest permanently (receipts = %d)", published)
+	}
+}
+
+// TestMigration060DoesNotSettleAcrossProjects covers the tenant-scoping gap the
+// review found. error_event_identities has independent foreign keys onto the
+// project and the event, so neither rejects an identity whose event belongs to
+// one project and whose canonical issue belongs to another.
+func TestMigration060DoesNotSettleAcrossProjects(t *testing.T) {
+	admin := testPool(t)
+	psql := findPsql(t)
+	pool, dsn := disposableDB(t, admin)
+	ctx := context.Background()
+
+	files := migrationFiles(t)
+	backfill := ""
+	for _, file := range files {
+		if strings.HasPrefix(filepath.Base(file), "060_") {
+			backfill = file
+			continue
+		}
+		if err := applyMigration(t, psql, dsn, file); err != nil {
+			t.Fatalf("apply %s: %v", file, err)
+		}
+	}
+
+	// A legacy event in project A pointing at project B's group.
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO orgs (id, name) VALUES ('99999999-9999-9999-9999-999999999999', 'two-tenants');
+		INSERT INTO projects (id, org_id, name, github_repo) VALUES
+		  ('aaaaaaaa-1111-1111-1111-111111111111',
+		   '99999999-9999-9999-9999-999999999999', 'project-a', 'owner/a'),
+		  ('bbbbbbbb-1111-1111-1111-111111111111',
+		   '99999999-9999-9999-9999-999999999999', 'project-b', 'owner/b');
+		INSERT INTO environments (id, project_id, name) VALUES
+		  ('cccccccc-1111-1111-1111-111111111111',
+		   'aaaaaaaa-1111-1111-1111-111111111111', 'production');
+		INSERT INTO error_groups
+		  (id, project_id, fingerprint, title, kind, status, first_seen, last_seen)
+		VALUES ('dddddddd-1111-1111-1111-111111111111',
+		        'bbbbbbbb-1111-1111-1111-111111111111', 'fp-project-b', 'B issue',
+		        'error', 'new', now(), now());
+		INSERT INTO error_events
+		  (id, project_id, environment_id, error_group_id, timestamp,
+		   error_type, error_message, stack_trace_raw)
+		VALUES ('eeeeeeee-1111-1111-1111-111111111111',
+		        'aaaaaaaa-1111-1111-1111-111111111111',
+		        'cccccccc-1111-1111-1111-111111111111',
+		        'dddddddd-1111-1111-1111-111111111111', now(),
+		        'TypeError', 'boom', 'at x');
+	`); err != nil {
+		t.Fatalf("seed cross-project event: %v", err)
+	}
+
+	if err := applyMigration(t, psql, dsn, backfill); err != nil {
+		t.Fatalf("apply backfill: %v", err)
+	}
+
+	var straddling int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM error_event_identities i
+		  JOIN error_groups g ON g.id = i.canonical_issue_id
+		 WHERE g.project_id <> i.project_id`).Scan(&straddling); err != nil {
+		t.Fatal(err)
+	}
+	if straddling != 0 {
+		t.Errorf("%d identities point at another project's canonical issue", straddling)
 	}
 }
