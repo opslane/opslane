@@ -135,10 +135,11 @@ sequenceDiagram
 ### `opslane_digest()`
 
 Reads the latest delivered `digest_run` (`status = 'delivered'`) and returns the cards in
-its `rendered_payload.digest.generated_cards` as structured facts. These are the model's
-`included` set after validation dropped any card whose claimed counts did not match the
-frozen candidate (`digest/validate.go:128`), so they are the delivered set, not the raw
-model output.
+its `rendered_payload.digest.generated_cards` as structured facts. Validation is fail-closed rather than a filter: if any card's claimed label, count, or
+accounts disagree with the frozen candidate, the whole run is rejected
+(`digest/validate.go:128`). A delivered run therefore has every card stamped from the
+candidate, so `generated_cards` is system-truth by construction, not by trusting the
+model.
 
 **Why the delivered run, not a live query.** The developer arrives having read the Slack
 digest. A live query would return a different set, so the item they came for might be
@@ -188,6 +189,12 @@ of `verified_fix`, `needs_human`, or `unable_to_establish_cause`, plus a summary
 when one exists. For a `needs_human`, that summary is where the agent starts. For a
 `verified_fix`, the PR is what it reviews.
 
+**When there are no anchors.** Pre-rewrite issues and friction buckets can lack an episode,
+and therefore anchors (`attachPipelineState`, `read_api.go:228`). The endpoint returns empty
+evidence with stated availability, never an error, matching `loadEvidence`'s behavior when
+`retainedSessionIds` is empty (`evidence/bundle.ts`). R5 still holds for the issues it
+targets: a `needs_human` diagnosis implies an investigated episode, which has anchors.
+
 **Bounded and fenced.** Every field is capped, the payload is capped, and truncation is
 marked. Titles, routes, and diagnosis text come from customer browsers or a model, so they
 are wrapped and the wrapper cannot be closed by its content.
@@ -211,8 +218,15 @@ true. `resolved` is still never written here.
 **Why it refuses to overwrite an existing `pr_number`.** Forcing `pr_created` over a group
 that already holds Opslane's own `pr_number` would clobber Opslane's PR association and
 break the merge match for that PR. So the write is guarded: it refuses when `pr_number` is
-already set, and it confirms the PR's repository matches `projects.github_repo` first. The
-repository check is mandatory here, not the optional nicety Open-Q4 once called it.
+already set, and it confirms the PR's repository matches `projects.github_repo` first.
+
+**How the URL becomes a `pr_number`.** The merge match is `github_repo` + `pr_number`
+(`queries.go:1878`), so the write must extract the number correctly or the merge silently
+never matches. Reuse `projectPullRequest` (`digest/validate.go:287`), which parses a
+`https://github.com/{owner}/{repo}/pull/{n}` URL and confirms the repo. It returns a bool
+rather than the number, so `link_pr` still extracts `parts[3]` as the `pr_number`. This is
+the whole reason the tool exists rather than telling the developer to paste a URL into a
+form: a wrong number looks like success and resolves nothing.
 
 **The cost of setting `pr_created`: the merge webhook becomes the only resolver.**
 `resolveInactiveGroups` excludes `pr_created` (`db.ts:1668`), so a linked PR that is
@@ -323,20 +337,13 @@ auth to avoid a dependency it would then recreate.
 
 ## Open questions
 
-**1. Should `opslane_digest` fall back to the inbox when there is no delivered run today?**
-A developer working before the daily run has nothing to read. Falling back to recent
-`needs_human` and `fix_ready` issues would fill the gap but breaks the "same list as Slack"
-guarantee.
-
-**2. Should the evidence endpoint be one call or several?** One call is fewer round trips
-but a larger payload with expiry-dependent parts. Several calls let the agent pull the
-replay only when it needs it. My lean is one call with the replay as a pointer, not the
-bytes, matching `loadEvidence`'s existing `ReplayPointer`.
-
-**3. Should a developer be able to relink after abandoning a PR?** The write refuses to
-overwrite an existing `pr_number`, which protects Opslane's PR but also blocks a developer
-who opened the wrong PR and wants to correct it. A relink path would need to distinguish
-"replace my own abandoned PR" from "clobber Opslane's".
+**Should a developer be able to relink after abandoning a PR?** This is the one genuinely
+open question. The write refuses to overwrite an existing `pr_number`, which protects
+Opslane's PR but also blocks a developer who opened the wrong PR and wants to correct it. A
+relink path would need to distinguish "replace my own abandoned PR" from "clobber
+Opslane's". Two earlier questions closed during review: the empty-digest case is decided
+against a fallback by Milestone 1, and the evidence endpoint is one call by the diagram and
+Milestone 2.
 
 ## The honest caveat
 
@@ -344,5 +351,12 @@ The detail view assumes the frozen evidence is enough for a coding agent to fix 
 `needs_human` from the editor. This has never been driven from a real production issue
 through the new pipeline. The anchors, resolutions, and session failures all exist as
 tables; whether their contents, assembled, let an agent find and fix a component is
-untested. One session with one real issue would answer it, and it should happen before
-Milestone 5 rather than after.
+untested.
+
+The sharper risk is coverage. The detail view is anchor-dependent, and a share of issues
+carry no episode and therefore no anchors, so they return empty evidence. Friction, which
+dominates actionable volume, is exactly where the diagnosis is thinnest and the failing
+request matters most. So the honest test is not "does the bundle assemble" but "on a real
+friction `needs_human`, is the assembled evidence enough to fix." One session with one such
+issue would answer it, and it should happen before the rewrite of the tools ships, not
+after.
