@@ -901,9 +901,6 @@ Expected: FAIL (404).
 In `read_api.go`:
 
 ```go
-// parseGitHubPRNumber extracts the PR number from a github.com pull URL and
-// confirms the repo matches. Reuses digest.ProjectPullRequest for the repo/host
-// check (digest/validate.go:287), which returns a bool, then pulls the number.
 // parseGitHubPR extracts owner/repo and the number from a github.com pull URL.
 // It rolls its own regex rather than reusing digest.projectPullRequest, which is
 // unexported and returns only a bool.
@@ -970,8 +967,6 @@ func (q *Queries) LinkPR(ctx context.Context, projectID, groupID, prURL, repo st
 	return ErrPRAlreadyLinked
 }
 ```
-
-`prRepoFromURL` extracts `owner/repo` from the URL (a small helper beside `LinkPR`, or pass the repo in from the handler which already parsed it). Prefer passing `repo` in from the handler so parsing happens once.
 
 - [ ] **Step 4: Add the handler and route**
 
