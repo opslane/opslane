@@ -82,9 +82,15 @@ the closure trigger already handle.
 **Reproducing the dashboard.** The dashboard is for browsing every issue. The MCP is for
 working the day's selection. The list is the digest's `included` set, not the full inbox.
 
-**Serving the worker's evidence assembly.** The worker builds its own evidence for the
-inquiry. The MCP reads the same frozen anchors through a Go endpoint rather than sharing
-the worker's TypeScript. Two readers of one frozen source, not one shared function.
+**Designing around the dashboard.** This is MCP-first. A coding agent wants one call that
+returns everything to fix an issue; a human wants to click between tabs. The evidence
+endpoint is shaped for the agent, one round trip, and the dashboard adopts it rather than
+the MCP matching the dashboard's current three-call sprawl (`getIncident` +
+`getSampleEvent` + `getReplay`, `IncidentDetail.vue:5`).
+
+**Carrying the inquiry's evidence.** The worker's `loadEvidence` also returns session write
+rollups, product context, and related candidates, because the inquiry consumes them to
+decide whether to investigate. A coding agent fixing code does not, so they are left out.
 
 ## Requirements
 
@@ -163,8 +169,11 @@ a detail call would cost a round trip per row. The URL rides on the list row.
 
 ### `opslane_issue(id)`
 
-Everything known about one issue, assembled from the frozen evidence so a coding agent can
-act without opening anything else.
+Everything known about one issue in one call, assembled from the frozen evidence so a
+coding agent acts without a second round trip. This reads one new endpoint,
+`GET /projects/{projectID}/incidents/{incidentID}/evidence`, which is the shared source of
+"an issue's evidence": the dashboard moves onto it too. The bundle is deliberately smaller
+than the worker's `loadEvidence`, carrying only what a fix needs.
 
 **Why it reads anchors, never `sample_event_id`.** The pipeline freezes three evidence
 events per episode in `issue_evidence_anchors` (`anchor_kind` of `threshold`, `first`,
@@ -241,10 +250,15 @@ Three reads and one write, all Go, all reused by the dashboard.
 **`GET /projects/{projectID}/digest/latest`.** Returns the latest delivered run's `included`
 episodes joined to issue facts and `inboxState`. New. Nothing serves the digest today.
 
-**`GET /projects/{projectID}/incidents/{incidentID}/evidence`.** Assembles the detail bundle from
-`issue_evidence_anchors`, `error_event_resolutions`, and `session_request_failures`. New.
-The incident endpoint already carries `state`, `episode_id`, and priority
-(`read_api.go:201`), but not the frozen frames or the failing request.
+**`GET /projects/{projectID}/incidents/{incidentID}/evidence`.** The shared evidence source.
+One call returning the fix-shaped bundle: the diagnosis and outcome, the resolved stack
+frames, the route and selector, the failing request, a replay pointer, and the PR when set.
+It assembles from `issue_evidence_anchors`, `error_event_resolutions`, and
+`session_request_failures`, a Go port of the worker's `loadEvidence` (`evidence/bundle.ts`)
+minus the three inquiry-only fields. New. The incident endpoint already carries `state`,
+`episode_id`, priority, root cause, selector, route, and the anchor event IDs
+(`read_api.go:201,73`), but not the frozen frames or the failing request, so the evidence
+endpoint composes those existing facts with the two missing pieces.
 
 **`POST /projects/{projectID}/incidents/{incidentID}/link-pr`.** Writes `error_groups.pr_url/pr_number/`
 `pr_created_at` and `status = 'pr_created'`, guarded against overwriting an existing
@@ -323,9 +337,15 @@ rather than designing a fresh shape.
 **Read the model's prose cards directly.** Rejected. The cards are written for a human
 reader. A coding agent wants facts, and the facts are one join below the prose.
 
-**Reuse the worker's `loadEvidence` over HTTP.** Rejected. It would make the inquiry, a
+**Call the worker's `loadEvidence` over HTTP.** Rejected. It would make the inquiry, a
 batch job, depend on ingestion being up at request time, which it does not today. The two
-services share a database and nothing else, and the plan keeps it that way.
+services share a database and nothing else. Instead the Go evidence endpoint ports
+`loadEvidence`'s shape and reads the same frozen tables, so the two agree by mirroring, not
+by a runtime call.
+
+**Match the dashboard's three-call evidence pattern.** Rejected. That pattern suits a human
+paging between tabs. An agent wants one call and the full context, so the MCP defines the
+one-call endpoint and the dashboard converges onto it.
 
 **Serve the full inbox instead of the digest.** Rejected for the list. The inbox is for
 browsing; the day's work is the digest's selection. The inbox belongs behind a future tool,
@@ -337,13 +357,10 @@ auth to avoid a dependency it would then recreate.
 
 ## Open questions
 
-**Should a developer be able to relink after abandoning a PR?** This is the one genuinely
-open question. The write refuses to overwrite an existing `pr_number`, which protects
-Opslane's PR but also blocks a developer who opened the wrong PR and wants to correct it. A
-relink path would need to distinguish "replace my own abandoned PR" from "clobber
-Opslane's". Two earlier questions closed during review: the empty-digest case is decided
-against a fallback by Milestone 1, and the evidence endpoint is one call by the diagram and
-Milestone 2.
+None block starting. Relinking after a developer opens the wrong PR is deliberately punted:
+the overwrite guard protects Opslane's PR, and correcting a wrong link is a rare case not
+worth the branch in v1. The empty-digest fallback and the one-versus-many evidence calls
+were both settled during review, against a fallback and for one call.
 
 ## The honest caveat
 
