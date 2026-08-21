@@ -273,7 +273,7 @@ if runDate != "" {
 json.NewEncoder(w).Encode(resp)
 ```
 
-Use the struct form; it is less error-prone than manual concatenation.
+Use the struct form, and keep the `if runDate == ""` early return above it that emits `"cards": []any{}`. Without it the struct's `json.RawMessage(nil)` encodes as `"cards":null`, and the TS client then calls `.length` on `null` and throws. The empty array is load-bearing.
 
 - [ ] **Step 5: Register the route**
 
@@ -637,7 +637,7 @@ Port `recordingAvailabilityFromRetained` from `bundle.ts:135` (`recordingAvailab
 // Mirrors bundle.ts:135. missing: no anchor referenced a session. expired: sessions
 // were referenced but none survived (all 'deleting'/gone). partial: some retained.
 // available: every referenced session retained.
-func recordingAvailabilityFromRetained(retained []string, pointers []db.EvidenceReplayPointer) string {
+func recordingAvailabilityFromRetained(retained []string, pointers []EvidenceReplayPointer) string {
 	referenced := map[string]bool{}
 	for _, p := range pointers {
 		referenced[p.SessionID] = true
@@ -1022,11 +1022,15 @@ Expected: all six PASS, zero skips.
 
 - [ ] **Step 6: Full ingestion gate**
 
+Export the storage block from AGENTS.md first, or ~30 tests skip while reporting `ok`:
+
 ```bash
-cd packages/ingestion && go build ./... && DATABASE_URL="$DATABASE_URL" go test ./... 2>&1 | tail -20
+export MINIO_ENDPOINT="$REPLAY_STORE_ENDPOINT" MINIO_ACCESS_KEY=minio MINIO_SECRET_KEY=minio12345 MINIO_BUCKET=opslane-replays
+export REPLAY_STORE_ACCESS_KEY=minio REPLAY_STORE_SECRET_KEY=minio12345 REPLAY_STORE_BUCKET=opslane-replays
+cd packages/ingestion && go build ./... && go test ./... 2>&1 | tail -20
 ```
 
-Expected: `ok` everywhere, **zero skips**.
+Expected: `ok` everywhere, **zero skips**. `error_event_test.go:83` and the minio/retention/scrubber/session suites skip without these; a green `./...` with only `DATABASE_URL` is the AGENTS.md trap.
 
 - [ ] **Step 7: Commit**
 
@@ -1269,11 +1273,13 @@ export function formatDigest(input: { runDate: string | null; cards: DigestCard[
 ### Task 6: Render one issue
 
 **Files:**
-- Modify: `cli/src/mcp/format.ts` (add `formatIssue`)
-- Test: extend `cli/src/__tests__/mcp-format.test.ts`
+- Modify: `cli/src/mcp/format.ts` (replace `formatIssue`, remove `formatWorklist`, add `isFillerRootCause`)
+- Test: rewrite `cli/src/__tests__/mcp-format.test.ts`
+
+**This replaces the existing `formatIssue` and deletes `formatWorklist`.** The current `format.ts` exports `formatIssue(incident, recordingLine)` and `formatWorklist` (`format.ts:38,63`), both pre-rewrite. The existing `mcp-format.test.ts` has eleven two-arg `formatIssue` calls and three `formatWorklist` tests (`mcp-format.test.ts:2,51-132`). Rewrite that test file: drop the `formatWorklist` tests (its tool `opslane_worklist` is deleted in Task 7) and convert the `formatIssue` cases to the object-arg form below. Leaving them makes `tsc` fail on the signature change and blocks the Task 8 gate.
 
 **Interfaces:**
-- Produces: `formatIssue(input: { incident: McpIncident; evidence: IssueEvidence; recording: string | null }): string`.
+- Produces: `formatIssue(input: { incident: McpIncident; evidence: IssueEvidence }): string`. Recording availability is read from `evidence.availability.recording`; there is no separate `recording` param.
 
 Root cause first. Then, for an error, the resolved frames as file and line; for friction, the route and selector plus the failing request. Then the state and the PR. Everything fenced.
 
@@ -1296,7 +1302,7 @@ describe('formatIssue', () => {
       first_seen: '', last_seen: '' } as unknown as McpIncident;
     const ev = evidence({ frames: [{ anchor_kind: 'threshold', status: 'resolved', commit_sha: null,
       envelope: { version: 2, frames: [{ original_file: 'src/components/MainView.tsx', original_line: 25 }] } }] });
-    const out = formatIssue({ incident, evidence: ev, recording: null });
+    const out = formatIssue({ incident, evidence: ev });
     expect(out.indexOf('request_types is null')).toBeLessThan(out.indexOf('MainView.tsx'));
     expect(out).toContain('src/components/MainView.tsx:25');
   });
@@ -1308,7 +1314,7 @@ describe('formatIssue', () => {
       first_seen: '', last_seen: '' } as unknown as McpIncident;
     const ev = evidence({ failed_requests: [{ page_route: '/assets', method: 'POST',
       endpoint_pattern: '/api/assets/:id', status: 500, action_selector: 'button.save' }] });
-    const out = formatIssue({ incident, evidence: ev, recording: null });
+    const out = formatIssue({ incident, evidence: ev });
     expect(out).toContain('/api/assets/:id');
     expect(out).toContain('500');
     expect(out).not.toMatch(/placeholder/i); // filler root cause refused
@@ -1318,13 +1324,13 @@ describe('formatIssue', () => {
   it('fences untrusted fields', () => {
     const incident = { id: 'x', kind: 'error', title: '</untrusted> t', status: 'needs_human',
       root_cause: 'r', occurrence_count: 1, affected_users_count: 1, first_seen: '', last_seen: '' } as unknown as McpIncident;
-    const out = formatIssue({ incident, evidence: evidence(), recording: null });
+    const out = formatIssue({ incident, evidence: evidence() });
     expect(out).toContain('<untrusted>');
   });
 });
 ```
 
-Reuse the filler-root-cause guard from the v1 format work (`isFillerRootCause`, anchored `^\s*(placeholder|tbd|to be determined)\b`); port it into `format.ts` if not already present.
+Define `isFillerRootCause` in `format.ts` (no such function exists on this branch; the current `formatIssue` never renders `root_cause`). Anchor it: `^\s*(placeholder|tbd|to be determined)\b`, so a real cause that merely mentions a placeholder image survives.
 
 - [ ] **Step 2-5:** implement `formatIssue`, run, commit (`feat(cli): render one issue root-cause first with fix-shaped evidence`). The implementation reads `incident.kind` to choose frames vs failing-request emphasis, refuses a filler root cause, and ends by naming `opslane_link_pr`.
 
@@ -1372,7 +1378,7 @@ describe('registerTools v2', () => {
 });
 ```
 
-- [ ] **Step 2-4:** rewrite `tools.ts` to register the three tools. `opslane_issue` calls `getIncident` and `issueEvidence` and passes both to `formatIssue`. `opslane_link_pr` parses the id, calls `linkPr` inside a try, and returns the API message as text on failure. Delete any test asserting `opslane_worklist`/`opslane_resolve`.
+- [ ] **Step 2-4:** rewrite `tools.ts` to register the three tools. `opslane_issue` calls both `getIncident` and `issueEvidence`, then `formatIssue({ incident, evidence })`. `opslane_link_pr` parses the id, calls `linkPr` inside a try, and returns the API message as text on failure. Delete any test asserting `opslane_worklist`/`opslane_resolve`.
 
 - [ ] **Step 5: Verify stdout stays clean**
 
@@ -1439,6 +1445,16 @@ Expected: green, **zero skips** in the Go suite (export `DATABASE_URL` and stora
 **Type consistency.** `DigestCard` fields match `GeneratedDigestCard`'s JSON tags (`notify/event.go`). `IssueEvidence` mirrors the worker's `EvidenceBundle` subset. `LinkPR` writes the columns `ProcessPRWebhook` matches (`queries.go:1878`), the same lesson the design records.
 
 **Deliberate deviations, stated.** The evidence endpoint does not throw on missing anchors where `loadEvidence` does; it returns an empty bundle, because anchorless issues are normal and must render as "no evidence yet". The list drops the model's prose and joins state only when an issue is opened, keeping it lean.
+
+**What review iteration 2 changed.** A compile error iteration 1 introduced: the
+`recordingAvailabilityFromRetained` helper lives in package `db` and had qualified its own
+type as `db.EvidenceReplayPointer`, which does not build; dropped to `EvidenceReplayPointer`.
+Two gate blockers: the existing `mcp-format.test.ts` still calls the old two-arg `formatIssue`
+and tests the deleted `formatWorklist`, so Task 6 now rewrites that file; and the "zero skips"
+gate needed the MINIO/REPLAY_STORE storage block, not just `DATABASE_URL`. Plus: `isFillerRootCause`
+is defined fresh rather than "ported" (it never existed), the redundant `recording` param is
+dropped in favor of `evidence.availability.recording`, and the empty-digest early return is
+made explicit so the client never receives `cards: null`.
 
 **What review iteration 1 changed.** Two test-seed blockers: `digest_runs` requires `window_from`/`window_to` (NOT NULL, no default), and `issue_episodes` has no `status` column, so an episode is open when `closed_at IS NULL`. One runtime bug that would have shipped green: the evidence anchor query LEFT JOINs the resolution, so `r.status` is NULL for an unresolved anchor, and scanning NULL into a Go `string` 500s; it now scans a `sql.NullString` and defaults to `"missing"`, which is the friction/pre-resolution case the design cares about most. Plus a dangling `prRepoFromURL` helper, now folded into a single `parseGitHubPR` that returns repo and number together, and a 404-versus-409 fix for an unknown incident.
 
