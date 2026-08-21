@@ -1066,10 +1066,12 @@ export interface LatestDigest { run_date: string | null; cards: DigestCard[] }
 export interface EvidenceFrame { anchor_kind: string; status: string; envelope: unknown; commit_sha: string | null }
 export interface EvidenceFailedRequest { page_route: string; method: string; endpoint_pattern: string; status: number; action_selector: string | null }
 export interface EvidenceReplayPointer { anchor_kind: string; session_id: string; anchor_ms: number }
+export type RecordingAvailability = 'available' | 'partial' | 'expired' | 'missing';
+export type SourceMapStatus = 'resolved' | 'no_map' | 'failed' | 'pending' | 'missing';
 export interface IssueEvidence {
   frames: EvidenceFrame[]; failed_requests: EvidenceFailedRequest[];
   replay_pointers: EvidenceReplayPointer[];
-  availability: { recording: string; source_map: string };
+  availability: { recording: RecordingAvailability; source_map: SourceMapStatus };
 }
 
 export interface OpslaneClient {
@@ -1225,7 +1227,7 @@ describe('formatDigest', () => {
     ]});
     expect(out).toContain('i-1');
     expect(out).toContain('Dead clicks on /assets');
-    expect(out).toContain('6');
+    expect(out).toContain('6 users'); // tie the count to its label so a stray '6' elsewhere cannot pass
     expect(out).toContain('https://github.com/acme/app/pull/9');
     expect(out).not.toContain('prose'); // model copy is dropped
   });
@@ -1340,7 +1342,7 @@ describe('formatIssue', () => {
 
 Define `isFillerRootCause` in `format.ts` (no such function exists on this branch; the current `formatIssue` never renders `root_cause`). Anchor it: `^\s*(placeholder|tbd|to be determined)\b`, so a real cause that merely mentions a placeholder image survives.
 
-- [ ] **Step 2-5:** implement `formatIssue`, run, commit (`feat(cli): render one issue root-cause first with fix-shaped evidence`). The implementation reads `incident.kind` to choose frames vs failing-request emphasis, refuses a filler root cause, and ends by naming `opslane_link_pr`. **Guard the envelope:** `evidence.frames[].envelope` is `unknown` and is `null` for an unresolved anchor (the endpoint's `LEFT JOIN error_event_resolutions`), so narrow it before reading `.frames` (skip a frame whose envelope is null rather than dereferencing it). The `EvidenceFrame.envelope` type is `unknown`, which forces this narrowing at compile time under strict TypeScript.
+- [ ] **Step 2-5:** implement `formatIssue`, run, commit (`feat(cli): render one issue root-cause first with fix-shaped evidence`). The implementation reads `incident.kind` to choose frames vs failing-request emphasis, refuses a filler root cause, and ends by naming `opslane_link_pr`. **Guard the envelope:** `evidence.frames[].envelope` is `unknown` and is `null` for an unresolved anchor (the endpoint's `LEFT JOIN error_event_resolutions`), so narrow it properly before reading `.frames`: check it is a non-null object with an array `frames` (`envelope && typeof envelope === 'object' && Array.isArray((envelope as {frames?: unknown}).frames)`), and skip the frame otherwise. A bare truthy check lets a malformed `{frames: null}` through to throw at traversal. The `EvidenceFrame.envelope` type is `unknown`, which forces this narrowing at compile time under strict TypeScript.
 
 ---
 
@@ -1455,6 +1457,8 @@ Expected: green, **zero skips** in the Go suite. The storage exports above and `
 **Type consistency.** `DigestCard` fields match `GeneratedDigestCard`'s JSON tags (`notify/event.go`). `IssueEvidence` mirrors the worker's `EvidenceBundle` subset. `LinkPR` writes the columns `ProcessPRWebhook` matches (`queries.go:1878`), the same lesson the design records.
 
 **Deliberate deviations, stated.** The evidence endpoint does not throw on missing anchors where `loadEvidence` does; it returns an empty bundle, because anchorless issues are normal and must render as "no evidence yet". The list drops the model's prose and joins state only when an issue is opened, keeping it lean.
+
+**Codex feedback, round 2.** Tightened the `formatIssue` envelope guard to a real object-plus-array narrowing rather than a truthy check, so a malformed `{frames: null}` is skipped, not dereferenced. Tied the digest count assertion to `'6 users'` so a stray digit cannot pass it. Made the evidence `availability` fields closed unions (`RecordingAvailability`, `SourceMapStatus`) instead of bare `string`. Three items Codex raised as Major were verified clean against the tree: `latestDigestJSON` carries the `json:"run_date"`/`json:"cards"` tags (the inline paste had dropped them), `session_analysis.session_id` is a PRIMARY KEY so the correlated subquery is single-valued, and `retained` is already deduplicated and a subset of the referenced sessions. `pr_url` is `omitempty` on the Go side, so `pr_url?: string` never sees a `null`.
 
 **Codex feedback, round 1 (plan pasted inline; Codex could not read the tree).** Project-scoped the `LinkPR` disambiguation query so a foreign incident id returns 404, not a 409/422 that leaks existence. Added positive assertions to the `formatIssue` tests so an `indexOf(-1) < positive` or a dropped-section case cannot pass by omission. Required a null-envelope guard in `formatIssue`, since an unresolved anchor's `envelope` is null under strict TypeScript. Clarified that `opslane_link_pr` returns a refusal as text on purpose. Codex's `source_map` empty-string worry (N1) did not apply: `IssueEvidence` already initializes both availability fields to `"missing"`.
 
