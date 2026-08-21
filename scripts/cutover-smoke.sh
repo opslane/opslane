@@ -10,6 +10,15 @@
 # reaches a terminal worker state because the filter admits at two affected
 # units. Run this instead, with SKIP_SMOKE=1 on the deploy.
 #
+# What the target stack needs, learned by running this against a fresh rig:
+#   - a project with a connected repository. The inquiry clones it, preferring
+#     the GitHub App installation token and falling back to GITHUB_TOKEN. With
+#     neither, issue_inquiry dead-letters on "GITHUB_TOKEN is not set" and
+#     stage 5 stalls with no decision ever written.
+#   - an enabled notification destination carrying 'digest.daily' in its
+#     event_types. Without one, publishing fails with "digest has no enabled
+#     destination", the run is marked failed, and stage 7 cannot pass.
+#
 # Required:
 #   INGESTION_URL     e.g. https://app.opslane.com
 #   DATABASE_URL      a DSN that can read the pipeline tables
@@ -37,7 +46,10 @@ readonly SMOKE_QUERY_TIMEOUT="${SMOKE_QUERY_TIMEOUT:-30}"
 # never exercises the handoff to the investigator. Set this to accept that and
 # still exit 0, knowing the accepted path went unproven.
 readonly SMOKE_ALLOW_DECLINED_INQUIRY="${SMOKE_ALLOW_DECLINED_INQUIRY:-0}"
-readonly DIGEST_REPLAY_CMD="${DIGEST_REPLAY_CMD:-go run ./packages/ingestion/cmd/digest-replay}"
+# `go run` resolves its package path against the module root, and there is no
+# go.mod at the repository root, so this has to enter packages/ingestion. In a
+# deployed image the binary already exists; override this with its path.
+readonly DIGEST_REPLAY_CMD="${DIGEST_REPLAY_CMD:-go -C packages/ingestion run ./cmd/digest-replay}"
 
 for command_name in curl jq psql; do
   command -v "$command_name" >/dev/null 2>&1 || {
