@@ -257,8 +257,7 @@ It assembles from `issue_evidence_anchors`, `error_event_resolutions`, and
 `session_request_failures`, a Go port of the worker's `loadEvidence` (`evidence/bundle.ts`)
 minus the three inquiry-only fields. New. The incident endpoint already carries `state`,
 `episode_id`, priority, root cause, selector, route, and the anchor event IDs
-(`read_api.go:201,73`), but not the frozen frames or the failing request, so the evidence
-endpoint composes those existing facts with the two missing pieces.
+(`read_api.go:201,73`), It does not carry the frozen frames or the failing request. The evidence endpoint composes those existing facts with the two missing pieces.
 
 **`POST /projects/{projectID}/incidents/{incidentID}/link-pr`.** Writes `error_groups.pr_url/pr_number/`
 `pr_created_at` and `status = 'pr_created'`, guarded against overwriting an existing
@@ -373,7 +372,6 @@ untested.
 The sharper risk is coverage. The detail view is anchor-dependent, and a share of issues
 carry no episode and therefore no anchors, so they return empty evidence. Friction, which
 dominates actionable volume, is exactly where the diagnosis is thinnest and the failing
-request matters most. So the honest test is not "does the bundle assemble" but "on a real
+request matters most. So the honest test is not "does the bundle assemble." It is "on a real
 friction `needs_human`, is the assembled evidence enough to fix." One session with one such
-issue would answer it, and it should happen before the rewrite of the tools ships, not
-after.
+issue would answer it. It should happen before the tools ship, not after.
