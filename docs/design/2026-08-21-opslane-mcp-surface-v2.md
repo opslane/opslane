@@ -147,14 +147,14 @@ accounts disagree with the frozen candidate, the whole run is rejected
 candidate, so `generated_cards` is system-truth by construction, not by trusting the
 model.
 
-**Why the delivered run, not a live query.** The developer arrives having read the Slack
+It reads the delivered run rather than running a live query. The developer arrives having read the Slack
 digest. A live query would return a different set, so the item they came for might be
 missing or joined by items they never triaged. The digest is only useful because it is the
 same list. The run is already frozen and stored in `digest_runs.rendered_payload`, so this is a read,
 not a recomputation. The same "latest delivered" query already runs in
 `cmd/digest-eval/main.go:44`.
 
-**Why facts, not the model's prose, and why this is nearly free.** Two payload columns are
+Facts rather than the model's prose, and this turns out to be nearly free. Two payload columns are
 easy to confuse. `writer_payload` (also `payload`) holds the model's `{included, deferred}`
 output (`digest-writer/schema.ts`), written for a person. `rendered_payload` holds the
 delivered `GeneratedDigestCard`s (`notify/event.go:78`), and `digest/validate.go:144` stamps each
@@ -163,7 +163,7 @@ one with the system's own `incident_id`, `title`, `affected_users`, `accounts`, 
 carry system-truth facts. The list reads them and joins only `inboxState`, which the
 `generated_cards` do not include. It keeps the model's one-line `action` as a hint.
 
-**Why the PR flag is a first-class field.** A `verified_fix` row means Opslane already
+The PR flag is a first-class field for a reason. A `verified_fix` row means Opslane already
 opened a PR. The developer's job there is review, not authoring, and burying the URL inside
 a detail call would cost a round trip per row. The URL rides on the list row.
 
@@ -175,25 +175,25 @@ coding agent acts without a second round trip. This reads one new endpoint,
 "an issue's evidence": the dashboard moves onto it too. The bundle is deliberately smaller
 than the worker's `loadEvidence`, carrying only what a fix needs.
 
-**Why it reads anchors, never `sample_event_id`.** The pipeline freezes three evidence
+It reads anchors, never `sample_event_id`. The pipeline freezes three evidence
 events per episode in `issue_evidence_anchors` (`anchor_kind` of `threshold`, `first`,
 `recent`). `sample_event_id` is rewritten on every new occurrence
 (`db/queries.go` rewrites it), so reading it would hand the agent a moving target. The
 detail view reads the anchored events, which are stable.
 
-**Why the resolved stack comes from `error_event_resolutions`.** The rewrite resolves
+The resolved stack comes from `error_event_resolutions`. The rewrite resolves
 stacks to source before grouping and stores the frames in `error_event_resolutions.envelope`
 as JSONB. Reading that gives the agent file and line against the developer's own tree. The
 old `sample-event` endpoint returned only the raw minified stack; this is the field that
 was missing.
 
-**Why the failing request is included for friction.** A `needs_human` friction issue often
+The failing request earns its place on friction issues. A `needs_human` friction issue often
 cannot be located from the diagnosis alone, because the selector is positional and its
 classes are generated at build time. `session_request_failures` carries the route, method,
 endpoint pattern, and status for the failing action, which points the agent at the network
 call behind the dead click. This is the cheapest evidence that closes the friction gap.
 
-**Why it hands over the diagnosis and the attempt.** The issue carries a diagnosis outcome
+It hands over the diagnosis and the attempt. The issue carries a diagnosis outcome
 of `verified_fix`, `needs_human`, or `unable_to_establish_cause`, plus a summary and a PR
 when one exists. For a `needs_human`, that summary is where the agent starts. For a
 `verified_fix`, the PR is what it reviews.
@@ -212,7 +212,7 @@ are wrapped and the wrapper cannot be closed by its content.
 
 Records a pull request against an issue. The only write.
 
-**Why it is symmetric with Opslane's own PR.** A PR attached to an issue is one fact: a
+The write is symmetric with Opslane's own PR. A PR attached to an issue is one fact: a
 fix is in flight at this URL. It does not matter who opened it. Opslane records its own PR
 on `error_groups` (`pr_url`, `pr_number`, `pr_created_at`, `status = 'pr_created'`); the
 developer's PR goes in the identical columns. There is no separate developer-PR record.
@@ -238,9 +238,9 @@ the whole reason the tool exists rather than telling the developer to paste a UR
 form: a wrong number looks like success and resolves nothing.
 
 **The cost of setting `pr_created`: the merge webhook becomes the only resolver.**
-`resolveInactiveGroups` excludes `pr_created` (`db.ts:1668`), so a linked PR that is
-abandoned, or that lands in a repository other than the project's, strands the issue in
-`pr_created` with no auto-resolution. The repository guard removes the wrong-repo case; the
+`resolveInactiveGroups` excludes `pr_created` (`db.ts:1668`). So a linked PR that is
+abandoned, or lands in a repository other than the project's, strands the issue in
+`pr_created` with nothing to auto-resolve it. The repository guard removes the wrong-repo case; the
 abandoned-PR case is a real edge the pipeline does not currently sweep.
 
 ## Server-side work
