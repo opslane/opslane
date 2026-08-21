@@ -240,7 +240,7 @@ IDs are already exposed.
 | --- | --- | --- |
 | 1 | `GET /digest/latest` | The latest delivered run's `included` set returns as facts with state and PR URL; a project with no delivered run returns an empty set, not an error |
 | 2 | `GET /incidents/{id}/evidence` | An issue returns resolved frames from its anchors and the failing request; an issue whose recording expired returns stated availability, not an error |
-| 3 | `POST /incidents/{id}/link-pr` | A PR URL lands on the diagnosis decision from any state; a PR from another repository is refused |
+| 3 | `POST /incidents/{id}/link-pr` | A PR sets `error_groups.pr_number` and `status='pr_created'`, then a merge webhook drives the issue to `merged`; a foreign repo and an already-set `pr_number` are both refused |
 | 4 | The three tools over stdio | `tools/list` returns the three names; stderr is empty during `initialize` |
 | 5 | The skill and `opslane init-claude` | From a linked repository, a fresh session works one item start to finish without the dashboard |
 
