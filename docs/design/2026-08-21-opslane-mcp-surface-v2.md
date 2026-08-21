@@ -20,7 +20,7 @@ below what Slack shows. Better: every issue now carries a customer-facing `state
 (`inboxState`, `packages/ingestion/handler/read_api.go:201`) and its evidence is frozen
 and addressable, so a good answer exists to give the agent if we expose it. That state
 is present for issues that have an episode; pre-rewrite issues, friction buckets, and
-archived issues carry none (`attachPipelineState`, `read_api.go:230`).
+archived issues carry none (`attachPipelineState`, `read_api.go:228`).
 
 ## What this builds
 
@@ -34,6 +34,15 @@ Claude Code skill that drives them:
 
 And the server-side reads and one write they need, because none exist yet.
 
+This replaces the MCP surface that already ships. `cli/src/mcp/tools.ts` registers three
+pre-rewrite tools against the old friction schema: `opslane_worklist`, `opslane_issue`, and
+`opslane_resolve`. `opslane_resolve` writes `resolved` (`client.ts:88`), which this design's
+non-goals forbid, so it is deleted rather than renamed. `opslane_worklist` becomes
+`opslane_digest`. The CLI-side files that assume the old shape (`format.ts`, `client.ts`,
+built around `element_selector` and `/incidents?kind=friction`) are rewritten against the
+new endpoints. `opslane mcp` and `opslane init-claude` are already wired
+(`cli/src/index.ts:176,186`); only the tools, the skill, and the client change.
+
 A glossary, because the rewrite renamed the nouns:
 
 - An **issue** is a stable problem. Its database row is an `error_group`; its identity is
@@ -46,7 +55,7 @@ A glossary, because the rewrite renamed the nouns:
 - **Resolution** is a status of `resolved` on the issue. A database trigger then closes
   the open episode (`055_close_episodes_on_resolution.sql`).
 - A **pull request** attached to an issue lives on `error_groups`: `pr_url`, `pr_number`,
-  `pr_created_at`, and `status = 'pr_created'` (`001_baseline.sql:91`). It does not live on
+  `pr_created_at`, and `status = 'pr_created'` (`error_groups`, `001_baseline.sql:83,91`; `pr_created_at` added in `006_admin_observability.sql:4`). It does not live on
   `diagnosis_decisions`, which records only the diagnosis. The merge webhook matches a PR
   by `github_repo` + `pr_number` + `status IN ('pr_created','pr_draft')`
   (`queries.go:1876`), so those columns, not the URL alone, are what make a merge resolve.
@@ -83,7 +92,7 @@ the worker's TypeScript. Two readers of one frozen source, not one shared functi
 | --- | --- | --- |
 | R1 | A developer sees today's model-selected issues | `opslane_digest` returns the `included` set of the latest delivered `digest_run` |
 | R2 | Each list row carries enough to choose without a second call | A row has the issue, its `state`, affected users or accounts, and a PR URL when one exists |
-| R3 | An issue that already has a PR is flagged with its URL | A row shows `error_groups.pr_url`, already stamped onto the delivered digest card (`validate.go:144`) |
+| R3 | An issue that already has a PR is flagged with its URL | A row shows `error_groups.pr_url`, already stamped onto the delivered digest card (`digest/validate.go:144`) |
 | R4 | A developer sees a resolved stack pointing at real source | `opslane_issue` returns frames from `error_event_resolutions.envelope`, read through the episode's anchors |
 | R5 | A `needs_human` friction issue is locatable | `opslane_issue` returns the failing request from `session_request_failures` when the diagnosis alone does not name a component |
 | R6 | The developer sees what Opslane already tried | `opslane_issue` returns the diagnosis outcome and `decision_reason` from `diagnosis_decisions`, and `error_groups.pr_url` when set |
@@ -104,10 +113,10 @@ sequenceDiagram
 
     D->>CC: "let's work today's Opslane digest"
     CC->>M: opslane_digest
-    M->>I: GET /projects/{id}/digest/latest
+    M->>I: GET /projects/{projectID}/digest/latest
     M-->>CC: today's included issues as facts, PRs flagged
     CC->>M: opslane_issue(id)
-    M->>I: GET /projects/{id}/incidents/{id}/evidence
+    M->>I: GET /projects/{projectID}/incidents/{incidentID}/evidence
     Note over I: anchors -> resolved frames,<br/>failing request, diagnosis, PR
     alt fix ready
         CC->>D: review Opslane's PR
@@ -115,7 +124,7 @@ sequenceDiagram
         CC->>CC: locate the component, fix, run tests
         CC->>G: open a pull request
         CC->>M: opslane_link_pr(id, url)
-        M->>I: POST /projects/{id}/incidents/{id}/link-pr
+        M->>I: POST /projects/{projectID}/incidents/{incidentID}/link-pr
     end
     G->>I: fix ships, issue goes quiet
     Note over I: auto-resolver sets resolved,<br/>trigger closes the episode
@@ -126,7 +135,10 @@ sequenceDiagram
 ### `opslane_digest()`
 
 Reads the latest delivered `digest_run` (`status = 'delivered'`) and returns the cards in
-its `rendered_payload.digest.generated_cards` as structured facts.
+its `rendered_payload.digest.generated_cards` as structured facts. These are the model's
+`included` set after validation dropped any card whose claimed counts did not match the
+frozen candidate (`digest/validate.go:128`), so they are the delivered set, not the raw
+model output.
 
 **Why the delivered run, not a live query.** The developer arrives having read the Slack
 digest. A live query would return a different set, so the item they came for might be
@@ -138,7 +150,7 @@ not a recomputation. The same "latest delivered" query already runs in
 **Why facts, not the model's prose, and why this is nearly free.** Two payload columns are
 easy to confuse. `writer_payload` (also `payload`) holds the model's `{included, deferred}`
 output (`digest-writer/schema.ts`), written for a person. `rendered_payload` holds the
-delivered `GeneratedDigestCard`s (`notify/event.go:78`), and `validate.go:144` stamps each
+delivered `GeneratedDigestCard`s (`notify/event.go:78`), and `digest/validate.go:144` stamps each
 one with the system's own `incident_id`, `title`, `affected_users`, `accounts`, and
 `pr_url` taken from the frozen candidate, not the model. So the delivered cards already
 carry system-truth facts. The list reads them and joins only `inboxState`, which the
@@ -212,15 +224,15 @@ abandoned-PR case is a real edge the pipeline does not currently sweep.
 
 Three reads and one write, all Go, all reused by the dashboard.
 
-**`GET /projects/{id}/digest/latest`.** Returns the latest delivered run's `included`
+**`GET /projects/{projectID}/digest/latest`.** Returns the latest delivered run's `included`
 episodes joined to issue facts and `inboxState`. New. Nothing serves the digest today.
 
-**`GET /projects/{id}/incidents/{id}/evidence`.** Assembles the detail bundle from
+**`GET /projects/{projectID}/incidents/{incidentID}/evidence`.** Assembles the detail bundle from
 `issue_evidence_anchors`, `error_event_resolutions`, and `session_request_failures`. New.
 The incident endpoint already carries `state`, `episode_id`, and priority
 (`read_api.go:201`), but not the frozen frames or the failing request.
 
-**`POST /projects/{id}/incidents/{id}/link-pr`.** Writes `error_groups.pr_url/pr_number/`
+**`POST /projects/{projectID}/incidents/{incidentID}/link-pr`.** Writes `error_groups.pr_url/pr_number/`
 `pr_created_at` and `status = 'pr_created'`, guarded against overwriting an existing
 `pr_number` and against a foreign repository. New.
 
@@ -238,11 +250,11 @@ IDs are already exposed.
 
 | | Deliverable | Exit criterion |
 | --- | --- | --- |
-| 1 | `GET /digest/latest` | The latest delivered run's `included` set returns as facts with state and PR URL; a project with no delivered run returns an empty set, not an error |
+| 1 | `GET /projects/{projectID}/digest/latest` | The latest delivered run's `included` set returns as facts with state and PR URL; a project with no delivered run returns an empty set, not an error |
 | 2 | `GET /incidents/{id}/evidence` | An issue returns resolved frames from its anchors and the failing request; an issue whose recording expired returns stated availability, not an error |
 | 3 | `POST /incidents/{id}/link-pr` | A PR sets `error_groups.pr_number` and `status='pr_created'`, then a merge webhook drives the issue to `merged`; a foreign repo and an already-set `pr_number` are both refused |
-| 4 | The three tools over stdio | `tools/list` returns the three names; stderr is empty during `initialize` |
-| 5 | The skill and `opslane init-claude` | From a linked repository, a fresh session works one item start to finish without the dashboard |
+| 4 | The three tools over stdio | `tools/list` returns exactly `opslane_digest`, `opslane_issue`, `opslane_link_pr` and no others, so a leftover `opslane_resolve` fails the check; stderr is empty during `initialize` |
+| 5 | The rewritten skill and tools | From a linked repository, a fresh session works one item start to finish without the dashboard. `opslane init-claude` already ships, so only the skill and the three tools are new here |
 
 Milestone 4 is gated on 1 through 3.
 
@@ -265,8 +277,12 @@ working an item.
 
 **Duplicate projects make the wrong project reachable.** Production has multiple projects
 named AMFJ sharing a repository. The MCP picks a project from the git remote, so it can pick
-the wrong one, and `link_pr` would write to it. The repository check on the write narrows
-the blast radius but does not fix the cause.
+the wrong one, and `link_pr` would write to it. The repository check does not help here: the
+duplicates share a `github_repo`, so it passes for both. Worse, the merge webhook matches on
+`github_repo` and `pr_number` without scoping to a project (`queries.go:1878`), so a
+`pr_number` that collides with a sibling project's Opslane PR could resolve the wrong
+project's issue. The `link_pr` write is what makes that reachable. The real fix is
+de-duplicating the AMFJ projects, which is upstream.
 
 **Evidence availability degrades.** Recordings and source maps expire. The evidence endpoint
 must state what is missing rather than fail, or a coding agent treats an expired recording
