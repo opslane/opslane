@@ -18,6 +18,9 @@
 #
 # Optional:
 #   SMOKE_TIMEOUT      seconds to wait per stage (default 180)
+#   SMOKE_QUERY_TIMEOUT       seconds before one read is abandoned (default 30)
+#   SMOKE_ALLOW_DECLINED_INQUIRY=1  pass even if the inquiry declines, leaving
+#                                   the investigator handoff unproven
 #   DIGEST_REPLAY_CMD  how to invoke cmd/digest-replay (default: go run ...)
 #
 # Exit 0 only when every stage passed.
@@ -29,6 +32,11 @@ readonly DATABASE_URL="${DATABASE_URL:?DATABASE_URL is required}"
 readonly SMOKE_API_KEY="${SMOKE_API_KEY:?SMOKE_API_KEY is required}"
 readonly SMOKE_PROJECT_ID="${SMOKE_PROJECT_ID:?SMOKE_PROJECT_ID is required}"
 readonly SMOKE_TIMEOUT="${SMOKE_TIMEOUT:-180}"
+readonly SMOKE_QUERY_TIMEOUT="${SMOKE_QUERY_TIMEOUT:-30}"
+# A model declining a synthetic error is a legitimate answer, but then stage 6
+# never exercises the handoff to the investigator. Set this to accept that and
+# still exit 0, knowing the accepted path went unproven.
+readonly SMOKE_ALLOW_DECLINED_INQUIRY="${SMOKE_ALLOW_DECLINED_INQUIRY:-0}"
 readonly DIGEST_REPLAY_CMD="${DIGEST_REPLAY_CMD:-go run ./packages/ingestion/cmd/digest-replay}"
 
 for command_name in curl jq psql; do
@@ -48,9 +56,11 @@ fail() {
   exit 1
 }
 
-# query runs one read and returns a single value with no decoration.
+# query runs one read and returns a single value with no decoration. The outer
+# timeout is what makes SMOKE_TIMEOUT real: without it a wedged connection blocks
+# inside psql and the deadline below is never even evaluated.
 query() {
-  psql "$DATABASE_URL" -X -q -t -A -v ON_ERROR_STOP=1 -c "$1"
+  timeout "$SMOKE_QUERY_TIMEOUT" psql "$DATABASE_URL" -X -q -t -A -v ON_ERROR_STOP=1 -c "$1"
 }
 
 # await polls one scalar query until it equals the expected value.
@@ -58,7 +68,9 @@ await() {
   local description="$1" sql="$2" want="$3" deadline got
   deadline=$(( $(date +%s) + SMOKE_TIMEOUT ))
   while :; do
-    got="$(query "$sql")"
+    # A failed read must not trip `set -e`: that would kill the script without
+    # naming the stage. Keep polling and let the deadline report it.
+    got="$(query "$sql" || true)"
     if [[ "$got" == "$want" ]]; then
       echo "  ok: $description"
       return 0
@@ -166,14 +178,14 @@ await "a filter decision exists" \
     WHERE project_id='${SMOKE_PROJECT_ID}' AND episode_id='${EPISODE_ID}'" \
   "t"
 
-FILTER_DECISION="$(query "SELECT decision FROM issue_decisions
-                           WHERE project_id='${SMOKE_PROJECT_ID}'
-                             AND episode_id='${EPISODE_ID}'
-                           ORDER BY decided_at DESC, id DESC LIMIT 1")"
-FILTER_REASON="$(query "SELECT reason FROM issue_decisions
-                         WHERE project_id='${SMOKE_PROJECT_ID}'
-                           AND episode_id='${EPISODE_ID}'
-                         ORDER BY decided_at DESC, id DESC LIMIT 1")"
+# One row, one round trip. Reading decision and reason separately could pair a
+# decision with a different row's reason if another lands between the two reads.
+FILTER_ROW="$(query "SELECT decision || '|' || reason FROM issue_decisions
+                      WHERE project_id='${SMOKE_PROJECT_ID}'
+                        AND episode_id='${EPISODE_ID}'
+                      ORDER BY decided_at DESC, id DESC LIMIT 1")"
+FILTER_DECISION="${FILTER_ROW%%|*}"
+FILTER_REASON="${FILTER_ROW#*|}"
 echo "  filter: ${FILTER_DECISION} (${FILTER_REASON})"
 
 # Two distinct users in scope must clear the bar. Anything else means the filter
@@ -191,14 +203,12 @@ await "an inquiry decision exists" \
     WHERE project_id='${SMOKE_PROJECT_ID}' AND episode_id='${EPISODE_ID}'" \
   "t"
 
-INQUIRY_DECISION="$(query "SELECT decision FROM issue_inquiry_decisions
-                            WHERE project_id='${SMOKE_PROJECT_ID}'
-                              AND episode_id='${EPISODE_ID}'
-                            ORDER BY decided_at DESC, id DESC LIMIT 1")"
-INQUIRY_REASON="$(query "SELECT reason FROM issue_inquiry_decisions
-                          WHERE project_id='${SMOKE_PROJECT_ID}'
-                            AND episode_id='${EPISODE_ID}'
-                          ORDER BY decided_at DESC, id DESC LIMIT 1")"
+INQUIRY_ROW="$(query "SELECT decision || '|' || reason FROM issue_inquiry_decisions
+                       WHERE project_id='${SMOKE_PROJECT_ID}'
+                         AND episode_id='${EPISODE_ID}'
+                       ORDER BY decided_at DESC, id DESC LIMIT 1")"
+INQUIRY_DECISION="${INQUIRY_ROW%%|*}"
+INQUIRY_REASON="${INQUIRY_ROW#*|}"
 echo "  inquiry: ${INQUIRY_DECISION} (${INQUIRY_REASON})"
 
 # The verdict itself is not asserted. The inquiry asks a model whether this is a
@@ -222,6 +232,16 @@ else
   [[ "$(query "$INVESTIGATIONS")" == "0" ]] ||
     fail "inquiry returned '${INQUIRY_DECISION}' but an investigation was created anyway"
   echo "  ok: declined episode created no investigation"
+
+  # Passing here would be a false pass. The negative half held, but the handoff
+  # to the investigator, which is what the window actually needs proven, was
+  # never exercised. Say so rather than printing a green line.
+  if [[ "$SMOKE_ALLOW_DECLINED_INQUIRY" != "1" ]]; then
+    fail "the inquiry declined this observation, so the accepted path was never run.
+  Nothing here proves an accepted episode reaches the investigator. Re-run, or set
+  SMOKE_ALLOW_DECLINED_INQUIRY=1 to accept the gate with that path unproven."
+  fi
+  echo "  WARNING: accepted path unproven (SMOKE_ALLOW_DECLINED_INQUIRY=1)" >&2
 fi
 
 # ---------------------------------------------------------------------------
@@ -231,17 +251,34 @@ stage "a digest run freezes, validates, and delivers"
 # The sweeper runs on the daily boundary, which the window cannot wait for, so
 # drive one run directly. Same code path, explicit timestamp.
 BOUNDARY="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-$DIGEST_REPLAY_CMD -project "$SMOKE_PROJECT_ID" -freeze -at "$BOUNDARY" ||
+FREEZE_OUTPUT="$($DIGEST_REPLAY_CMD -project "$SMOKE_PROJECT_ID" -freeze -at "$BOUNDARY")" ||
   fail "freezing a digest run failed"
 
-RUN_ID="$(query "SELECT id FROM digest_runs
-                  WHERE project_id='${SMOKE_PROJECT_ID}'
-                  ORDER BY created_at DESC LIMIT 1")"
-[[ -n "$RUN_ID" ]] || fail "no digest run was frozen"
-echo "  ok: run ${RUN_ID} frozen"
+# Take the id the freezer reports, not the newest row. digest_runs is unique per
+# project and local date, so the freezer may hand back a run that already
+# existed; picking "latest" could just as easily land on an unrelated project's
+# newer run and assert against it.
+RUN_ID="$(sed -n 's/^run=\([0-9a-f-]*\).*/\1/p' <<<"$FREEZE_OUTPUT")"
+[[ -n "$RUN_ID" ]] || fail "could not read a run id from the freezer: ${FREEZE_OUTPUT}"
 
-await "the run is written" \
-  "SELECT status IN ('written','validated','delivered') FROM digest_runs WHERE id='${RUN_ID}'" \
+# If today's run was already delivered, both freeze and publish short-circuit and
+# every assertion below passes without a single new write. That is the digest
+# equivalent of a green light on a dead wire.
+FROZEN_STATUS="$(query "SELECT status FROM digest_runs WHERE id='${RUN_ID}'")"
+if [[ "$FROZEN_STATUS" == "delivered" ]]; then
+  fail "today's digest run (${RUN_ID}) was already delivered before this smoke ran.
+  Freezing and publishing are both no-ops now, so stage 7 would pass without
+  writing or validating anything. Re-run after the next daily boundary."
+fi
+echo "  ok: run ${RUN_ID} at status ${FROZEN_STATUS}"
+
+# Assert on the payload, not on the exact status. The daily sweeper runs in
+# production and may validate or deliver this run between the freeze above and
+# this read; demanding status='written' would then time out on a run that in fact
+# succeeded. A non-null payload is the part that proves the writer ran.
+await "the writer produced a payload" \
+  "SELECT payload IS NOT NULL AND status IN ('written','validated','delivered')
+     FROM digest_runs WHERE id='${RUN_ID}'" \
   "t"
 
 $DIGEST_REPLAY_CMD -project "$SMOKE_PROJECT_ID" -publish -run "$RUN_ID" ||
