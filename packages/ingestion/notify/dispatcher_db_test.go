@@ -30,14 +30,22 @@ func TestDispatcherClaimLeaseAndFencing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(claims) != 1 || claims[0].ID != seed.DeliveryID || claims[0].Attempts != 1 || claims[0].LeaseGeneration != 1 {
-		t.Fatalf("claims = %+v", claims)
+	claim, ok := claimFor(claims, seed.DeliveryID)
+	if !ok {
+		t.Fatalf("seeded delivery not claimed; batch = %+v", claims)
 	}
-	if again, err := d.claim(context.Background()); err != nil || len(again) != 0 {
-		t.Fatalf("second claim = %+v, %v", again, err)
+	if claim.Attempts != 1 || claim.LeaseGeneration != 1 {
+		t.Fatalf("claim = %+v", claim)
+	}
+	again, err := d.claim(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, reclaimed := claimFor(again, seed.DeliveryID); reclaimed {
+		t.Fatalf("leased delivery was claimed again; batch = %+v", again)
 	}
 
-	stale := claims[0]
+	stale := claim
 	stale.LeaseGeneration++
 	updated, err := d.complete(context.Background(), stale, Outcome{Class: "delivered"})
 	if err != nil || updated {
@@ -68,8 +76,8 @@ func TestDispatcherClaimSkipsExhaustedRows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(claims) != 0 {
-		t.Fatalf("exhausted row was claimed: %+v", claims)
+	if claim, ok := claimFor(claims, seed.DeliveryID); ok {
+		t.Fatalf("exhausted row was claimed: %+v", claim)
 	}
 }
 
@@ -90,9 +98,11 @@ func TestDispatcherReapsExpiredAndExhaustedClaims(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	count, err := New(pool, cipher, Options{}).reapExpired(ctx)
-	if err != nil || count != 2 {
-		t.Fatalf("reap count=%d err=%v", count, err)
+	// reapExpired sweeps the whole table, so its count includes rows other
+	// packages seeded. The contract this test owns is the state each of its two
+	// rows lands in, asserted below.
+	if _, err := New(pool, cipher, Options{}).reapExpired(ctx); err != nil {
+		t.Fatalf("reap: %v", err)
 	}
 	var retryStatus string
 	var retryAt time.Time
@@ -133,10 +143,14 @@ func TestDispatcherHTTPOutcomesPersistExpectedState(t *testing.T) {
 			seed := seedDelivery(t, pool, cipher, server.URL+"/hook")
 			d := New(pool, cipher, Options{ExtraHosts: []string{serverHost(server)}})
 			claims, err := d.claim(context.Background())
-			if err != nil || len(claims) != 1 {
-				t.Fatalf("claim=%+v err=%v", claims, err)
+			if err != nil {
+				t.Fatal(err)
 			}
-			d.deliverClaim(context.Background(), claims[0])
+			claim, ok := claimFor(claims, seed.DeliveryID)
+			if !ok {
+				t.Fatalf("seeded delivery not claimed; batch = %+v", claims)
+			}
+			d.deliverClaim(context.Background(), claim)
 
 			var status string
 			var nextAttempt time.Time

@@ -97,10 +97,27 @@ func seedDelivery(t *testing.T, pool *pgxpool.Pool, cipher *ConfigCipher, webhoo
 		VALUES ($1, $2, 'issue.created', $3, $4)`, seed.EventID, seed.ProjectID, "test:"+seed.EventID, payload); err != nil {
 		t.Fatalf("insert outbound event: %v", err)
 	}
+	// Backdate next_attempt_at. claim() orders by it and takes a limited batch,
+	// and `go test ./...` runs packages concurrently against one database, so
+	// another package's freshly inserted delivery can crowd this row out of the
+	// batch. An hour in the past sorts ahead of anything a concurrent test
+	// creates while this one runs.
 	if _, err := pool.Exec(ctx, `
-		INSERT INTO outbound_deliveries (id, event_id, destination_id)
-		VALUES ($1, $2, $3)`, seed.DeliveryID, seed.EventID, seed.DestinationID); err != nil {
+		INSERT INTO outbound_deliveries (id, event_id, destination_id, next_attempt_at)
+		VALUES ($1, $2, $3, now() - interval '1 hour')`, seed.DeliveryID, seed.EventID, seed.DestinationID); err != nil {
 		t.Fatalf("insert outbound delivery: %v", err)
 	}
 	return seed
+}
+
+// claimFor finds one seeded delivery inside a claim batch. The dispatcher
+// claims across every tenant, so a batch can carry rows a concurrently running
+// package seeded. Assert on the row the test owns, never on the batch size.
+func claimFor(claims []deliveryClaim, deliveryID string) (deliveryClaim, bool) {
+	for _, claim := range claims {
+		if claim.ID == deliveryID {
+			return claim, true
+		}
+	}
+	return deliveryClaim{}, false
 }
