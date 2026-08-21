@@ -80,8 +80,9 @@ import (
 func insertDeliveredDigest(t *testing.T, pool *pgxpool.Pool, projectID, runDate, renderedPayload string) {
 	t.Helper()
 	_, err := pool.Exec(context.Background(),
-		`INSERT INTO digest_runs (project_id, run_date, status, rendered_payload)
-		 VALUES ($1, $2::date, 'delivered', $3::jsonb)`, projectID, runDate, renderedPayload)
+		`INSERT INTO digest_runs (project_id, window_from, window_to, run_date, status, rendered_payload)
+		 VALUES ($1, $2::date - interval '1 day', $2::date, $2::date, 'delivered', $3::jsonb)`,
+		projectID, runDate, renderedPayload)
 	if err != nil {
 		t.Fatalf("insert digest run: %v", err)
 	}
@@ -186,8 +187,8 @@ func TestLatestDigestIsScopedToProject(t *testing.T) {
 func insertDigestRunFrozen(t *testing.T, pool *pgxpool.Pool, projectID string) {
 	t.Helper()
 	_, err := pool.Exec(context.Background(),
-		`INSERT INTO digest_runs (project_id, run_date, status) VALUES ($1, '2026-08-21'::date, 'frozen')`,
-		projectID)
+		`INSERT INTO digest_runs (project_id, window_from, window_to, run_date, status)
+		 VALUES ($1, '2026-08-20'::date, '2026-08-21'::date, '2026-08-21'::date, 'frozen')`, projectID)
 	if err != nil {
 		t.Fatalf("insert frozen run: %v", err)
 	}
@@ -346,8 +347,8 @@ func seedEpisodeWithAnchor(t *testing.T, pool *pgxpool.Pool, projectID, envID, r
 		t.Fatalf("group: %v", err)
 	}
 	if err := pool.QueryRow(ctx,
-		`INSERT INTO issue_episodes (project_id, canonical_issue_id, sequence, status)
-		 VALUES ($1,$2,1,'open') RETURNING id`, projectID, groupID).Scan(&episodeID); err != nil {
+		`INSERT INTO issue_episodes (project_id, canonical_issue_id, sequence)
+		 VALUES ($1,$2,1) RETURNING id`, projectID, groupID).Scan(&episodeID); err != nil {
 		t.Fatalf("episode: %v", err)
 	}
 	var eventID string
@@ -571,12 +572,17 @@ func (q *Queries) IssueEvidence(ctx context.Context, projectID, groupID string) 
 		var sessionID *string
 		var anchorMs int64
 		var retainedID *string
+		// r.status is NULL when a frozen anchor's event has no resolution row yet
+		// (the LEFT JOIN). loadEvidence maps that to "missing" (bundle.ts:349).
+		// Scanning NULL into a Go string errors, so scan into a nullable first.
+		var status sql.NullString
 		if err := rows.Scan(&f.AnchorKind, &f.SourceEventID, &sessionID, &f.CommitSHA,
-			&f.Status, &f.Envelope, &f.ResolverVersion, &anchorMs, &retainedID); err != nil {
+			&status, &f.Envelope, &f.ResolverVersion, &anchorMs, &retainedID); err != nil {
 			return res, fmt.Errorf("scan anchor: %w", err)
 		}
-		if f.Status == "" {
-			f.Status = "missing"
+		f.Status = "missing"
+		if status.Valid && status.String != "" {
+			f.Status = status.String
 		}
 		res.Frames = append(res.Frames, f)
 		if f.AnchorKind == "threshold" {
@@ -625,7 +631,31 @@ func (q *Queries) IssueEvidence(ctx context.Context, projectID, groupID string) 
 }
 ```
 
-Port `recordingAvailabilityFromRetained` from `bundle.ts:135` (`recordingAvailability`): return `available` when every replay pointer has a retained session, `partial` when some do, `missing` when none. Mirror the worker's exact rule; if it distinguishes `expired`, carry that.
+Port `recordingAvailabilityFromRetained` from `bundle.ts:135` (`recordingAvailability`), keeping all four states so Milestone 2's expired-recording criterion holds:
+
+```go
+// Mirrors bundle.ts:135. missing: no anchor referenced a session. expired: sessions
+// were referenced but none survived (all 'deleting'/gone). partial: some retained.
+// available: every referenced session retained.
+func recordingAvailabilityFromRetained(retained []string, pointers []db.EvidenceReplayPointer) string {
+	referenced := map[string]bool{}
+	for _, p := range pointers {
+		referenced[p.SessionID] = true
+	}
+	if len(referenced) == 0 {
+		return "missing"
+	}
+	if len(retained) == 0 {
+		return "expired"
+	}
+	if len(retained) < len(referenced) {
+		return "partial"
+	}
+	return "available"
+}
+```
+
+Confirm the field order against `bundle.ts:135` before trusting this; the worker is the source of truth.
 
 - [ ] **Step 4: Add the handler and register it**
 
@@ -700,7 +730,7 @@ git commit -m "feat(ingestion): shared issue-evidence endpoint, a Go port of loa
 **Interfaces:**
 - Produces: `POST /api/v1/projects/{projectID}/incidents/{incidentID}/link-pr` with body `{"url": "..."}`. Responds with the incident JSON. 400 on an unparseable URL, 409 when `pr_number` is already set, 422 when the repository does not match the project's.
 
-Writes `error_groups.pr_url/pr_number/pr_created_at` and `status='pr_created'`. This is the exact set the merge webhook matches (`queries.go:1878`). Reuse `projectPullRequest` (`digest/validate.go:287`) for the repo check; it returns a bool, so extract the number from `parts[3]`.
+Writes `error_groups.pr_url/pr_number/pr_created_at` and `status='pr_created'`. This is the exact set the merge webhook matches (`queries.go:1878`). `projectPullRequest` (`digest/validate.go:287`) is unexported, so the handler rolls its own regex that returns both the repo and the number in one pass.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -874,34 +904,38 @@ In `read_api.go`:
 // parseGitHubPRNumber extracts the PR number from a github.com pull URL and
 // confirms the repo matches. Reuses digest.ProjectPullRequest for the repo/host
 // check (digest/validate.go:287), which returns a bool, then pulls the number.
-var githubPRPath = regexp.MustCompile(`^https://github\.com/[^/\s]+/[^/\s]+/pull/(\d+)/?$`)
+// parseGitHubPR extracts owner/repo and the number from a github.com pull URL.
+// It rolls its own regex rather than reusing digest.projectPullRequest, which is
+// unexported and returns only a bool.
+var githubPRPath = regexp.MustCompile(`^https://github\.com/([^/\s]+/[^/\s]+)/pull/(\d+)/?$`)
 
-func parseGitHubPRNumber(raw string) (int, bool) {
+func parseGitHubPR(raw string) (repo string, number int, ok bool) {
 	m := githubPRPath.FindStringSubmatch(strings.TrimSpace(raw))
 	if m == nil {
-		return 0, false
+		return "", 0, false
 	}
-	n, err := strconv.Atoi(m[1])
+	n, err := strconv.Atoi(m[2])
 	if err != nil || n <= 0 {
-		return 0, false
+		return "", 0, false
 	}
-	return n, true
+	return m[1], n, true
 }
 ```
 
-In `queries.go`:
+In `queries.go` (the evidence scan needs `database/sql` for `sql.NullString`; `read_api.go`'s parser needs `regexp` and `strconv`, neither currently imported):
 
 ```go
 var (
-	ErrPRAlreadyLinked = errors.New("incident already has a pull request")
-	ErrPRRepoMismatch  = errors.New("pull request is not in this project's repository")
+	ErrPRAlreadyLinked  = errors.New("incident already has a pull request")
+	ErrPRRepoMismatch   = errors.New("pull request is not in this project's repository")
+	ErrIncidentNotFound = errors.New("incident not found")
 )
 
 // LinkPR records a developer's PR on error_groups so the merge webhook can resolve
 // it (queries.go:1878 matches github_repo + pr_number + status pr_created/pr_draft).
 // Repo match and the no-overwrite guard are folded into the predicate. pr_created_at
 // matches the worker invariant (db.ts sets it on every path to pr_created).
-func (q *Queries) LinkPR(ctx context.Context, projectID, groupID, prURL string, prNumber int) error {
+func (q *Queries) LinkPR(ctx context.Context, projectID, groupID, prURL, repo string, prNumber int) error {
 	tag, err := q.pool.Exec(ctx,
 		`UPDATE error_groups eg
 		    SET pr_url=$3, pr_number=$4, status='pr_created',
@@ -912,7 +946,7 @@ func (q *Queries) LinkPR(ctx context.Context, projectID, groupID, prURL string, 
 		    AND eg.status NOT IN ('resolved','archived','merged')
 		    AND p.github_repo IS NOT NULL
 		    AND lower(p.github_repo)=lower($5)`,
-		groupID, projectID, prURL, prNumber, prRepoFromURL(prURL))
+		groupID, projectID, prURL, prNumber, repo)
 	if err != nil {
 		return fmt.Errorf("link pr: %w", err)
 	}
@@ -924,7 +958,10 @@ func (q *Queries) LinkPR(ctx context.Context, projectID, groupID, prURL string, 
 	if err := q.pool.QueryRow(ctx,
 		`SELECT lower(coalesce(p.github_repo,''))=lower($2), eg.pr_number IS NOT NULL
 		   FROM error_groups eg JOIN projects p ON p.id=eg.project_id WHERE eg.id=$1`,
-		groupID, prRepoFromURL(prURL)).Scan(&repoMatches, &hasNumber); err != nil {
+		groupID, repo).Scan(&repoMatches, &hasNumber); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrIncidentNotFound
+		}
 		return ErrPRAlreadyLinked
 	}
 	if !repoMatches {
@@ -951,14 +988,16 @@ func (d *Dependencies) LinkIncidentPR(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	number, ok := parseGitHubPRNumber(req.URL)
+	repo, number, ok := parseGitHubPR(req.URL)
 	if !ok {
 		writeJSONError(w, http.StatusBadRequest,
 			"url must be a GitHub pull request, for example https://github.com/owner/repo/pull/123")
 		return
 	}
-	if err := d.Queries.LinkPR(r.Context(), projectID, incidentID, req.URL, number); err != nil {
+	if err := d.Queries.LinkPR(r.Context(), projectID, incidentID, req.URL, repo, number); err != nil {
 		switch {
+		case errors.Is(err, db.ErrIncidentNotFound):
+			writeJSONError(w, http.StatusNotFound, "no such incident")
 		case errors.Is(err, db.ErrPRRepoMismatch):
 			writeJSONError(w, http.StatusUnprocessableEntity, "that pull request is not in this project's repository")
 		case errors.Is(err, db.ErrPRAlreadyLinked):
@@ -1405,5 +1444,7 @@ Expected: green, **zero skips** in the Go suite (export `DATABASE_URL` and stora
 **Type consistency.** `DigestCard` fields match `GeneratedDigestCard`'s JSON tags (`notify/event.go`). `IssueEvidence` mirrors the worker's `EvidenceBundle` subset. `LinkPR` writes the columns `ProcessPRWebhook` matches (`queries.go:1878`), the same lesson the design records.
 
 **Deliberate deviations, stated.** The evidence endpoint does not throw on missing anchors where `loadEvidence` does; it returns an empty bundle, because anchorless issues are normal and must render as "no evidence yet". The list drops the model's prose and joins state only when an issue is opened, keeping it lean.
+
+**What review iteration 1 changed.** Two test-seed blockers: `digest_runs` requires `window_from`/`window_to` (NOT NULL, no default), and `issue_episodes` has no `status` column, so an episode is open when `closed_at IS NULL`. One runtime bug that would have shipped green: the evidence anchor query LEFT JOINs the resolution, so `r.status` is NULL for an unresolved anchor, and scanning NULL into a Go `string` 500s; it now scans a `sql.NullString` and defaults to `"missing"`, which is the friction/pre-resolution case the design cares about most. Plus a dangling `prRepoFromURL` helper, now folded into a single `parseGitHubPR` that returns repo and number together, and a 404-versus-409 fix for an unknown incident.
 
 **Not covered, deliberately.** Relinking after a wrong PR is punted (design decision). The duplicate-AMFJ cross-project write is an upstream fix; the repo guard narrows but does not close it. `writeRollups`, `productContext`, and `relatedCandidates` are omitted from the bundle because only the inquiry consumes them.
