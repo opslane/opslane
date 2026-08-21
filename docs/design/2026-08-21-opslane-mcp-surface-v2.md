@@ -1,0 +1,299 @@
+# Working the Opslane digest from Claude Code (against the landed pipeline)
+
+Status: specification, not built. Supersedes `docs/design/2026-08-14-opslane-mcp-surface.md`,
+which was written against the pre-rewrite schema.
+
+The pipeline rewrite has landed on `main` (migrations 054 through 059). This document
+is written against that code, not against the plan that produced it.
+
+## Problem
+
+A developer reads the daily Opslane digest in Slack, picks something worth fixing, and
+then has to open the dashboard to act on it. The context Opslane already gathered lives
+in a web UI, so the developer reads a title on their phone, walks to their editor, and
+starts from a blank prompt. The marketing promise is that they never open a dashboard.
+Today, acting on a digest item means opening one.
+
+The rewrite makes this worse in one specific way and better in another. Worse: the digest
+is now model-authored prose, so the structured facts a coding agent needs are one layer
+below what Slack shows. Better: every issue now carries a customer-facing `state`
+(`inboxState`, `packages/ingestion/handler/read_api.go:201`) and its evidence is frozen
+and addressable, so a good answer exists to give the agent if we expose it.
+
+## What this builds
+
+Three MCP tools inside the existing `@opslane/cli`, run as `opslane mcp` over stdio, and a
+Claude Code skill that drives them:
+
+- `opslane_digest()` returns today's model-selected issues as facts, not prose.
+- `opslane_issue(id)` returns everything Opslane knows about one issue, rich enough to fix
+  without a second system.
+- `opslane_link_pr(id, url)` records a pull request against an issue.
+
+And the server-side reads and one write they need, because none exist yet.
+
+A glossary, because the rewrite renamed the nouns:
+
+- An **issue** is a stable problem. Its database row is an `error_group`; its identity is
+  settled after stack resolution rather than at write time.
+- An **episode** is one open round of work on an issue. A resolved issue closes its
+  episode; a later recurrence opens a new one.
+- The **digest** is the daily message. A Go query freezes a candidate set, then a model
+  chooses which candidates to `include` and writes prose for each (`DigestPayload`,
+  `packages/worker/src/digest-writer/schema.ts`).
+- **Resolution** is a status of `resolved` on the issue. A database trigger then closes
+  the open episode (`055_close_episodes_on_resolution.sql`).
+
+## Goals
+
+Work one digest item end to end from a Claude Code session: read it, find the code, fix
+it or review Opslane's fix, record the pull request. Never open the dashboard.
+
+Hand a coding agent everything Opslane learned about an issue, so a `needs_human` is
+fixable from the editor and a `verified_fix` is reviewable there.
+
+Ship against the landed pipeline, reusing its frozen evidence rather than recomputing it.
+
+## Non-goals
+
+**Choosing what matters.** The MCP shows the model's selection. It does not re-rank, filter,
+or second-guess the digest. If the selection is wrong, that is pipeline work.
+
+**Marking anything resolved from a human claim.** No tool writes `resolved`. A fix is
+resolved when it ships and the issue goes quiet, which the pipeline's auto-resolvers and
+the closure trigger already handle.
+
+**Reproducing the dashboard.** The dashboard is for browsing every issue. The MCP is for
+working the day's selection. The list is the digest's `included` set, not the full inbox.
+
+**Serving the worker's evidence assembly.** The worker builds its own evidence for the
+inquiry. The MCP reads the same frozen anchors through a Go endpoint rather than sharing
+the worker's TypeScript. Two readers of one frozen source, not one shared function.
+
+## Requirements
+
+| | Requirement | Verified by |
+| --- | --- | --- |
+| R1 | A developer sees today's model-selected issues | `opslane_digest` returns the `included` set of the latest delivered `digest_run` |
+| R2 | Each list row carries enough to choose without a second call | A row has the issue, its `state`, affected users or accounts, and a PR URL when one exists |
+| R3 | An issue that already has a PR is flagged with its URL | A `verified_fix` row shows the PR URL from its diagnosis decision |
+| R4 | A developer sees a resolved stack pointing at real source | `opslane_issue` returns frames from `error_event_resolutions.envelope`, read through the episode's anchors |
+| R5 | A `needs_human` friction issue is locatable | `opslane_issue` returns the failing request from `session_request_failures` when the diagnosis alone does not name a component |
+| R6 | The developer sees what Opslane already tried | `opslane_issue` returns the diagnosis summary and outcome, and the PR when there is one |
+| R7 | A developer records a PR from any state | `opslane_link_pr` writes `pr_url` on the issue's diagnosis decision regardless of state |
+| R8 | Recording a PR does not claim the issue is fixed | `opslane_link_pr` does not set `resolved`; the pipeline resolves on merge-and-quiet |
+| R9 | Customer text reaches a model as data | Titles, routes, and diagnosis text are fenced, and the fence cannot be closed by its content |
+| R10 | The protocol is not corrupted by logging | An `initialize` exchange returns one line of JSON-RPC and stderr is empty |
+
+## System overview
+
+```mermaid
+sequenceDiagram
+    participant D as Developer
+    participant CC as Claude Code
+    participant M as opslane mcp
+    participant I as Ingestion API
+    participant G as GitHub
+
+    D->>CC: "let's work today's Opslane digest"
+    CC->>M: opslane_digest
+    M->>I: GET /projects/{id}/digest/latest
+    M-->>CC: today's included issues as facts, PRs flagged
+    CC->>M: opslane_issue(id)
+    M->>I: GET /projects/{id}/incidents/{id}/evidence
+    Note over I: anchors -> resolved frames,<br/>failing request, diagnosis, PR
+    alt fix ready
+        CC->>D: review Opslane's PR
+    else needs human
+        CC->>CC: locate the component, fix, run tests
+        CC->>G: open a pull request
+        CC->>M: opslane_link_pr(id, url)
+        M->>I: POST /projects/{id}/incidents/{id}/link-pr
+    end
+    G->>I: fix ships, issue goes quiet
+    Note over I: auto-resolver sets resolved,<br/>trigger closes the episode
+```
+
+## Component design
+
+### `opslane_digest()`
+
+Reads the latest delivered `digest_run` for the project and returns its `included` items
+as structured facts.
+
+**Why the delivered run, not a live query.** The developer arrives having read the Slack
+digest. A live query would return a different set, so the item they came for might be
+missing or joined by items they never triaged. The digest is only useful because it is the
+same list. The run is already frozen and stored (`digest_runs.rendered_payload`), so this
+is a read, not a recomputation.
+
+**Why facts, not the model's prose.** The Slack card carries `copy` and `action`, written
+for a person (`DigestCard`, `digest-writer/schema.ts`). A coding agent wants the issue, the
+`state`, the affected count, and the PR URL. The list joins each `included` episode back to
+its issue and its `inboxState`, and drops the prose. It may keep the one-line `action` as a
+hint, because it names what Opslane thinks the next step is.
+
+**Why the PR flag is a first-class field.** A `verified_fix` row means Opslane already
+opened a PR. The developer's job there is review, not authoring, and burying the URL inside
+a detail call would cost a round trip per row. The URL rides on the list row.
+
+### `opslane_issue(id)`
+
+Everything known about one issue, assembled from the frozen evidence so a coding agent can
+act without opening anything else.
+
+**Why it reads anchors, never `sample_event_id`.** The pipeline freezes three evidence
+events per episode in `issue_evidence_anchors` (`anchor_kind` of `threshold`, `first`,
+`recent`). `sample_event_id` is rewritten on every new occurrence
+(`db/queries.go` rewrites it), so reading it would hand the agent a moving target. The
+detail view reads the anchored events, which are stable.
+
+**Why the resolved stack comes from `error_event_resolutions`.** The rewrite resolves
+stacks to source before grouping and stores the frames in `error_event_resolutions.envelope`
+as JSONB. Reading that gives the agent file and line against the developer's own tree. The
+old `sample-event` endpoint returned only the raw minified stack; this is the field that
+was missing.
+
+**Why the failing request is included for friction.** A `needs_human` friction issue often
+cannot be located from the diagnosis alone, because the selector is positional and its
+classes are generated at build time. `session_request_failures` carries the route, method,
+endpoint pattern, and status for the failing action, which points the agent at the network
+call behind the dead click. This is the cheapest evidence that closes the friction gap.
+
+**Why it hands over the diagnosis and the attempt.** The issue carries a diagnosis outcome
+of `verified_fix`, `needs_human`, or `unable_to_establish_cause`, plus a summary and a PR
+when one exists. For a `needs_human`, that summary is where the agent starts. For a
+`verified_fix`, the PR is what it reviews.
+
+**Bounded and fenced.** Every field is capped, the payload is capped, and truncation is
+marked. Titles, routes, and diagnosis text come from customer browsers or a model, so they
+are wrapped and the wrapper cannot be closed by its content.
+
+### `opslane_link_pr(id, url)`
+
+Records a pull request against an issue. The only write.
+
+**Why it is symmetric with Opslane's own PR.** A PR attached to an issue is one fact:
+a fix is in flight at this URL. It does not matter who opened it. Opslane stores its own PR
+as `pr_url` on the issue's diagnosis decision; the developer's PR goes in the same slot.
+There is no separate developer-PR record and no separate resolution path.
+
+**Why it does not set a status.** Recording a PR is not a claim that the fix works. The
+pipeline already resolves an issue when the fix ships and occurrences stop, and the closure
+trigger closes the episode from there. Writing `resolved` here would assert a fix before
+anything proved it.
+
+**Why it works from any state.** "I opened a PR" is true whether the issue is `needs_human`,
+`fix_ready`, or `investigating`. There is no gate, because the fact is state-independent.
+
+## Server-side work
+
+Three reads and one write, all Go, all reused by the dashboard.
+
+**`GET /projects/{id}/digest/latest`.** Returns the latest delivered run's `included`
+episodes joined to issue facts and `inboxState`. New. Nothing serves the digest today.
+
+**`GET /projects/{id}/incidents/{id}/evidence`.** Assembles the detail bundle from
+`issue_evidence_anchors`, `error_event_resolutions`, and `session_request_failures`. New.
+The incident endpoint already carries `state`, `episode_id`, and priority
+(`read_api.go:201`), but not the frozen frames or the failing request.
+
+**`POST /projects/{id}/incidents/{id}/link-pr`.** Writes `pr_url` on the diagnosis
+decision. New; the old `link-pr` was never built and the pre-rewrite version targeted the
+wrong table.
+
+The incident detail endpoint stays as the source of per-issue state; the evidence endpoint
+is additive beside it.
+
+## Milestones
+
+| | Deliverable | Exit criterion |
+| --- | --- | --- |
+| 1 | `GET /digest/latest` | The latest delivered run's `included` set returns as facts with state and PR URL; a project with no delivered run returns an empty set, not an error |
+| 2 | `GET /incidents/{id}/evidence` | An issue returns resolved frames from its anchors and the failing request; an issue whose recording expired returns stated availability, not an error |
+| 3 | `POST /incidents/{id}/link-pr` | A PR URL lands on the diagnosis decision from any state; a PR from another repository is refused |
+| 4 | The three tools over stdio | `tools/list` returns the three names; stderr is empty during `initialize` |
+| 5 | The skill and `opslane init-claude` | From a linked repository, a fresh session works one item start to finish without the dashboard |
+
+Milestone 4 is gated on 1 through 3.
+
+## Testing and validation
+
+Go handler tests drive the real router with a real database and a real session token. They
+skip when `DATABASE_URL` is unset (`digest/build_test.go:23`), so read the skip count.
+Before trusting a green suite, confirm zero skips.
+
+Vitest covers the pure parts: digest partitioning, fencing, rendering, and tool
+registration. Client tests mock `authedFetch`.
+
+Two things need a live run: the stdio cleanliness check, because a stray `console.log`
+anywhere in the import graph corrupts the protocol, and Milestone 5, which is a person
+working an item.
+
+## Risks
+
+**Duplicate projects make the wrong project reachable.** Production has multiple projects
+named AMFJ sharing a repository. The MCP picks a project from the git remote, so it can pick
+the wrong one, and `link_pr` would write to it. The repository check on the write narrows
+the blast radius but does not fix the cause.
+
+**Evidence availability degrades.** Recordings and source maps expire. The evidence endpoint
+must state what is missing rather than fail, or a coding agent treats an expired recording
+as an empty one.
+
+**The digest may be empty or thin.** The pipeline is new. If a day's run includes few
+issues, the MCP is honest but sparse. This surface delivers the selection; it cannot enrich
+it.
+
+**The evidence assembly is new Go.** The worker assembles evidence in TypeScript for the
+inquiry. Building a second assembler in Go risks the two describing an issue differently.
+They share the frozen anchors, so they select the same events, but the shapes are authored
+separately and can drift.
+
+## Alternatives considered
+
+**Read the model's prose cards directly.** Rejected. The cards are written for a human
+reader. A coding agent wants facts, and the facts are one join below the prose.
+
+**Reuse the worker's `loadEvidence` over HTTP.** Rejected. It would make the inquiry, a
+batch job, depend on ingestion being up at request time, which it does not today. The two
+services share a database and nothing else, and the plan keeps it that way.
+
+**Serve the full inbox instead of the digest.** Rejected for the list. The inbox is for
+browsing; the day's work is the digest's selection. The inbox belongs behind a future tool,
+not this one.
+
+**A standalone `@opslane/mcp` package.** Rejected. Only `opslane login` produces a session
+usable on these routes, and it lives in the CLI. A standalone package would reimplement
+auth to avoid a dependency it would then recreate.
+
+## Open questions
+
+**1. Does the list read `rendered_payload.included`, or `digest_run_items` where
+`outcome = 'included'`?** Both name the same episodes. The payload carries the model's
+`claimedUsers` and `accounts`; the items table is the normalized record. The payload is
+richer but is the model's output; the items table is the system's. My lean is the items
+table joined to live issue facts, so the counts are the system's, not the model's.
+
+**2. Should `opslane_digest` fall back to the inbox when there is no delivered run today?**
+A developer working before the daily run has nothing to read. Falling back to recent
+`needs_human` and `fix_ready` issues would fill the gap but breaks the "same list as Slack"
+guarantee.
+
+**3. Should the evidence endpoint be one call or several?** One call is fewer round trips
+but a larger payload with expiry-dependent parts. Several calls let the agent pull the
+replay only when it needs it. My lean is one call with the replay as a pointer, not the
+bytes.
+
+**4. Does `link_pr` need the repository check that the pre-rewrite design had?** The
+duplicate-project risk says yes. Confirming the PR's repository matches the project's costs
+one lookup and closes the cross-project write.
+
+## The honest caveat
+
+The detail view assumes the frozen evidence is enough for a coding agent to fix a
+`needs_human` from the editor. This has never been driven from a real production issue
+through the new pipeline. The anchors, resolutions, and session failures all exist as
+tables; whether their contents, assembled, let an agent find and fix a component is
+untested. One session with one real issue would answer it, and it should happen before
+Milestone 5 rather than after.
