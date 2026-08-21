@@ -741,7 +741,6 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -869,7 +868,6 @@ func TestLinkPRRejectsMalformedUrl(t *testing.T) {
 	if rec := linkPR(t, router, orgID, projectID, groupID, "https://github.com/acme/app/issues/42"); rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rec.Code)
 	}
-	_ = strconv.Itoa // keep import if unused elsewhere
 }
 
 func TestLinkPRExplainsUnconfiguredRepo(t *testing.T) {
@@ -1257,9 +1255,9 @@ export function formatDigest(input: { runDate: string | null; cards: DigestCard[
   const lines: string[] = [`Opslane digest for ${projectLabel}, ${runDate}.`, ''];
   for (const c of cards) {
     const who = c.accounts.length > 0 ? `${c.affected_users} users (${c.accounts.join(', ')})` : `${c.affected_users} users`;
-    lines.push(`- ${c.incident_id}  ${fence(truncate(c.title, 200))}`);
+    lines.push(`- ${c.incident_id}  ${fence(truncate(c.title, LIMITS.title))}`);
     lines.push(`  ${who}${c.pr_url ? `  PR: ${c.pr_url}` : ''}`);
-    if (c.action) lines.push(`  next: ${fence(truncate(c.action, 200))}`);
+    if (c.action) lines.push(`  next: ${fence(truncate(c.action, LIMITS.title))}`);
   }
   lines.push('', 'Call opslane_issue with an id for the full context on one of these.');
   return clampPayload(lines.join('\n'));
@@ -1425,14 +1423,16 @@ it('embeds a skill naming the v2 tools and no retired ones', async () => {
 - [ ] **Step 5: Full repository gate**
 
 ```bash
+export MINIO_ENDPOINT="$REPLAY_STORE_ENDPOINT" MINIO_ACCESS_KEY=minio MINIO_SECRET_KEY=minio12345 MINIO_BUCKET=opslane-replays
+export REPLAY_STORE_ACCESS_KEY=minio REPLAY_STORE_SECRET_KEY=minio12345 REPLAY_STORE_BUCKET=opslane-replays
 pnpm install --frozen-lockfile
 pnpm -r build
 pnpm test
-(cd packages/ingestion && go build ./... && DATABASE_URL="$DATABASE_URL" go test ./...)
+(cd packages/ingestion && go build ./... && go test ./...)
 docker compose config --quiet
 ```
 
-Expected: green, **zero skips** in the Go suite (export `DATABASE_URL` and storage credentials first).
+Expected: green, **zero skips** in the Go suite. The storage exports above and `DATABASE_URL` must both be set, or ~30 Go tests skip while the suite still prints `ok`.
 
 ---
 
@@ -1445,6 +1445,8 @@ Expected: green, **zero skips** in the Go suite (export `DATABASE_URL` and stora
 **Type consistency.** `DigestCard` fields match `GeneratedDigestCard`'s JSON tags (`notify/event.go`). `IssueEvidence` mirrors the worker's `EvidenceBundle` subset. `LinkPR` writes the columns `ProcessPRWebhook` matches (`queries.go:1878`), the same lesson the design records.
 
 **Deliberate deviations, stated.** The evidence endpoint does not throw on missing anchors where `loadEvidence` does; it returns an empty bundle, because anchorless issues are normal and must render as "no evidence yet". The list drops the model's prose and joins state only when an issue is opened, keeping it lean.
+
+**Review iteration 3 converged:** no blockers, no majors. Three minor tightenings applied: the Task 8 full-repo gate now inlines the MINIO/REPLAY_STORE storage exports (matching Task 3's gate) so a copy-pasted command block does not hit the ~30-skip trap; the `strconv` import keepalive crutch is removed from the link-PR test; and `formatDigest` uses `LIMITS.title` rather than a bare `200`. The load-bearing end-to-end claim was re-verified: `LinkPR` writes exactly the `pr_number` + `status='pr_created'` set the merge webhook matches (`queries.go:1878`).
 
 **What review iteration 2 changed.** A compile error iteration 1 introduced: the
 `recordingAvailabilityFromRetained` helper lives in package `db` and had qualified its own
