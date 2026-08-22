@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,6 +21,20 @@ import (
 	"github.com/opslane/opslane/packages/ingestion/masking"
 	"github.com/opslane/opslane/packages/ingestion/narrative"
 )
+
+var githubPRPath = regexp.MustCompile(`^https://github\.com/([^/\s]+/[^/\s]+)/pull/(\d+)/?$`)
+
+func parseGitHubPR(raw string) (repo string, number int, ok bool) {
+	match := githubPRPath.FindStringSubmatch(strings.TrimSpace(raw))
+	if match == nil {
+		return "", 0, false
+	}
+	number, err := strconv.Atoi(match[2])
+	if err != nil || number <= 0 {
+		return "", 0, false
+	}
+	return match[1], number, true
+}
 
 // incidentJSON is the JSON representation of an incident, matching the
 // Incident type in shared/src/types.ts. Fields use snake_case.
@@ -32,6 +48,10 @@ type incidentJSON struct {
 	Platform               *string                   `json:"platform,omitempty"`
 	EnvironmentID          *string                   `json:"environment_id,omitempty"`
 	AdjudicationStatus     *string                   `json:"adjudication_status,omitempty"`
+	SignalType             *string                   `json:"signal_type,omitempty"`
+	ElementSelector        *string                   `json:"element_selector,omitempty"`
+	PageURLNormalized      *string                   `json:"page_url_normalized,omitempty"`
+	WatchableSession       *watchableSessionJSON     `json:"watchable_session,omitempty"`
 	FirstSeen              string                    `json:"first_seen"`
 	LastSeen               string                    `json:"last_seen"`
 	OccurrenceCount        int                       `json:"occurrence_count"`
@@ -76,6 +96,15 @@ type incidentRecordingJSON struct {
 	DurationMs int64  `json:"duration_ms"`
 	CrashCount int64  `json:"crash_count"`
 	AnchorMs   int64  `json:"anchor_ms"`
+}
+
+// watchableSessionJSON points at a session whose scrubbed chunks span the
+// playback window. AnchorMs is absolute client-clock epoch milliseconds, which
+// is the dashboard's ?t= contract. Unlike Recordings, this is populated for
+// friction incidents too.
+type watchableSessionJSON struct {
+	SessionID string `json:"session_id"`
+	AnchorMs  int64  `json:"anchor_ms"`
 }
 
 type incidentEnvironmentJSON struct {
@@ -130,6 +159,9 @@ func toIncidentJSON(g db.ErrorGroup) incidentJSON {
 		Platform:               g.Platform,
 		EnvironmentID:          g.EnvironmentID,
 		AdjudicationStatus:     g.AdjudicationStatus,
+		SignalType:             g.SignalType,
+		ElementSelector:        g.ElementSelector,
+		PageURLNormalized:      g.PageURLNormalized,
 		FirstSeen:              g.FirstSeen.Format(time.RFC3339),
 		LastSeen:               g.LastSeen.Format(time.RFC3339),
 		OccurrenceCount:        g.OccurrenceCount,
@@ -179,6 +211,70 @@ func toIncidentJSON(g db.ErrorGroup) incidentJSON {
 		}
 	}
 	return inc
+}
+
+type latestDigestJSON struct {
+	RunDate *string         `json:"run_date"`
+	Cards   json.RawMessage `json:"cards"`
+}
+
+// GetLatestDigest returns the cards from the latest delivered daily digest.
+// GET /api/v1/projects/{projectID}/digest/latest
+func (d *Dependencies) GetLatestDigest(w http.ResponseWriter, r *http.Request) {
+	projectID := chi.URLParam(r, "projectID")
+	if !d.verifyProjectAccess(w, r, projectID) {
+		return
+	}
+	runDate, cards, err := d.Queries.LatestDeliveredDigest(r.Context(), projectID)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "failed to read digest")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	if runDate == "" {
+		_ = json.NewEncoder(w).Encode(map[string]any{"run_date": nil, "cards": []any{}})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(latestDigestJSON{RunDate: &runDate, Cards: json.RawMessage(cards)})
+}
+
+// GetIncidentEvidence returns the fix-shaped evidence for a group's open episode.
+// GET /api/v1/projects/{projectID}/incidents/{incidentID}/evidence
+func (d *Dependencies) GetIncidentEvidence(w http.ResponseWriter, r *http.Request) {
+	projectID := chi.URLParam(r, "projectID")
+	if !d.verifyProjectAccess(w, r, projectID) {
+		return
+	}
+	incidentID := chi.URLParam(r, "incidentID")
+	evidence, err := d.Queries.IssueEvidence(r.Context(), projectID, incidentID)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "failed to assemble evidence")
+		return
+	}
+	frames := evidence.Frames
+	if frames == nil {
+		frames = []db.EvidenceFrame{}
+	}
+	failedRequests := evidence.FailedRequests
+	if failedRequests == nil {
+		failedRequests = []db.EvidenceFailedRequest{}
+	}
+	replayPointers := evidence.ReplayPointers
+	if replayPointers == nil {
+		replayPointers = []db.EvidenceReplayPointer{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"frames":          frames,
+		"failed_requests": failedRequests,
+		"replay_pointers": replayPointers,
+		"availability": map[string]string{
+			"recording":  evidence.Recording,
+			"source_map": evidence.SourceMap,
+		},
+	})
 }
 
 // inboxState translates storage stages into customer vocabulary.
@@ -361,6 +457,11 @@ func (d *Dependencies) ListIncidents(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "invalid platform")
 		return
 	}
+	kind := r.URL.Query().Get("kind")
+	if kind != "" && kind != "friction" && kind != "error" {
+		writeJSONError(w, http.StatusBadRequest, "kind must be 'friction' or 'error'")
+		return
+	}
 	environmentID := r.URL.Query().Get("environment_id")
 	if environmentID != "" {
 		if _, err := uuid.Parse(environmentID); err != nil {
@@ -379,12 +480,13 @@ func (d *Dependencies) ListIncidents(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if accountID != "" || endUserID != "" || status != "" || environmentID != "" || platform != "" {
+	if accountID != "" || endUserID != "" || status != "" || environmentID != "" || platform != "" || kind != "" {
 		filters = &db.ErrorGroupFilters{
 			AccountID:     accountID,
 			EndUserID:     endUserID,
 			Status:        status,
 			Platform:      platform,
+			Kind:          kind,
 			EnvironmentID: nil,
 		}
 		if environmentID != "" {
@@ -500,6 +602,12 @@ func (d *Dependencies) GetIncident(w http.ResponseWriter, r *http.Request) {
 	// manifest readiness; the incident contract must not hide processing sessions.
 	if sessionID, errorAt, ok, err := d.Queries.SessionPointerForGroup(r.Context(), incidentID, projectID); err == nil && ok {
 		inc.SessionPointer = &sessionPointerJSON{SessionID: sessionID, ErrorAt: errorAt.Format(time.RFC3339)}
+	}
+	// Best-effort, exactly like the pointer above: missing playback evidence
+	// costs the field, never the response. RecordingsForGroup returns nil for
+	// friction by design, so this is the only friction recording pointer.
+	if sessionID, anchorMs, ok, err := d.Queries.WatchableSessionForGroup(r.Context(), incidentID, projectID); err == nil && ok {
+		inc.WatchableSession = &watchableSessionJSON{SessionID: sessionID, AnchorMs: anchorMs}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(inc)
@@ -1188,6 +1296,46 @@ func (d *Dependencies) respondWithIncident(w http.ResponseWriter, r *http.Reques
 	d.attachReceiptAndRecordings(r.Context(), projectID, incidentID, *group, &inc)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(inc)
+}
+
+// LinkIncidentPR records a developer's pull request on an incident.
+// POST /api/v1/projects/{projectID}/incidents/{incidentID}/link-pr
+func (d *Dependencies) LinkIncidentPR(w http.ResponseWriter, r *http.Request) {
+	projectID := chi.URLParam(r, "projectID")
+	if !d.verifyProjectAccess(w, r, projectID) {
+		return
+	}
+	incidentID := chi.URLParam(r, "incidentID")
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<14)
+	var request struct {
+		URL string `json:"url"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	repo, number, ok := parseGitHubPR(request.URL)
+	if !ok {
+		writeJSONError(w, http.StatusBadRequest,
+			"url must be a GitHub pull request, for example https://github.com/owner/repo/pull/123")
+		return
+	}
+	if err := d.Queries.LinkPR(r.Context(), projectID, incidentID, request.URL, repo, number); err != nil {
+		switch {
+		case errors.Is(err, db.ErrIncidentNotFound):
+			writeJSONError(w, http.StatusNotFound, "no such incident")
+		case errors.Is(err, db.ErrPRRepoMismatch):
+			writeJSONError(w, http.StatusUnprocessableEntity,
+				"that pull request is not in this project's repository")
+		case errors.Is(err, db.ErrPRAlreadyLinked):
+			writeJSONError(w, http.StatusConflict,
+				"incident already has a pull request, or is resolved, archived, or merged")
+		default:
+			writeJSONError(w, http.StatusInternalServerError, "failed to link pull request")
+		}
+		return
+	}
+	d.respondWithIncident(w, r, projectID, incidentID)
 }
 
 // ResolveIncident manually marks an incident as resolved.

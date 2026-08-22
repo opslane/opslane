@@ -23,6 +23,40 @@ describe('authedFetch', () => {
     expect((init.headers as Record<string, string>)['X-API-Key']).toBeUndefined();
   });
 
+  it('forwards an explicit method and body', async () => {
+    const seen: Array<{ url: string; init?: RequestInit }> = [];
+    const fetchFn = (async (url: string, init?: RequestInit) => {
+      seen.push({ url, init });
+      return new Response('{}', { status: 200 });
+    }) as unknown as typeof fetch;
+
+    await authedFetch('https://api.example.com/thing', {
+      apiUrl: 'https://api.example.com',
+      fetchFn,
+      loadToken: async () => ({ accessToken: 'tok' }),
+      method: 'POST',
+    });
+
+    expect(seen[0]?.init?.method).toBe('POST');
+    expect((seen[0]?.init?.headers as Record<string, string>).Authorization).toBe('Bearer tok');
+  });
+
+  it('still defaults to GET', async () => {
+    const seen: Array<RequestInit | undefined> = [];
+    const fetchFn = (async (_url: string, init?: RequestInit) => {
+      seen.push(init);
+      return new Response('{}', { status: 200 });
+    }) as unknown as typeof fetch;
+
+    await authedFetch('https://api.example.com/thing', {
+      apiUrl: 'https://api.example.com',
+      fetchFn,
+      loadToken: async () => ({ accessToken: 'tok' }),
+    });
+
+    expect(seen[0]?.method).toBeUndefined();
+  });
+
   it('reports a missing session instead of sending nothing', async () => {
     const fetchFn = vi.fn();
 

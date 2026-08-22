@@ -75,8 +75,10 @@ The agent callback requires `code`, `installation_id`, and UUID `state`; definit
 | GET | `/api/v1/projects/{projectID}/fix-stats` | Per-kind fix generation and PR outcome receipts |
 | GET | `/api/v1/projects/{projectID}/environments` | List all environments, or only surface-observed rows with `used_by=incidents` or `used_by=sessions` |
 | GET | `/api/v1/projects/{projectID}/event-count` | Event count stats |
+| GET | `/api/v1/projects/{projectID}/digest/latest` | Latest delivered daily digest cards, or an empty digest when no run has been delivered |
 | GET | `/api/v1/projects/{projectID}/incidents` | List incidents |
 | GET | `/api/v1/projects/{projectID}/incidents/{incidentID}` | Incident detail |
+| GET | `/api/v1/projects/{projectID}/incidents/{incidentID}/evidence` | Frozen source frames, failed requests, replay pointers, and evidence availability for the open issue round |
 | GET | `/api/v1/projects/{projectID}/notification-destinations` | List project notification destinations and recent delivery state |
 | POST | `/api/v1/projects/{projectID}/notification-destinations` | Create a Slack notification destination |
 | PATCH | `/api/v1/projects/{projectID}/notification-destinations/{destID}` | Update a notification destination |
@@ -90,6 +92,7 @@ The agent callback requires `code`, `installation_id`, and UUID `state`; definit
 | GET | `/api/v1/projects/{projectID}/incidents/{incidentID}/sample-event` | Fetch the redacted representative error event for traceback, breadcrumbs, and request context |
 | POST | `/api/v1/projects/{projectID}/incidents/{incidentID}/fix` | Trigger an eligible error or approved friction fix |
 | POST | `/api/v1/projects/{projectID}/incidents/{incidentID}/review` | Request another inquiry for the current open issue round; reuses active review work |
+| POST | `/api/v1/projects/{projectID}/incidents/{incidentID}/link-pr` | Record a same-repository GitHub pull request without marking the issue resolved |
 | POST | `/api/v1/projects/{projectID}/incidents/{incidentID}/resolve` | Resolve incident |
 | POST | `/api/v1/projects/{projectID}/incidents/{incidentID}/archive` | Archive incident |
 | POST | `/api/v1/projects/{projectID}/incidents/{incidentID}/unarchive` | Unarchive incident |

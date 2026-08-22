@@ -48,4 +48,4 @@ One known gap in this contract, stated honestly: if an **investigate** job repea
 
 ## 8. Human follow-up
 
-From the dashboard: review an `investigated` analysis and trigger the fix, open a `pr_draft` in GitHub to inspect its CI, resolve or archive incidents, or act on a `needs_human` remediation (connect the GitHub App, upload source maps, add context) and retry. Automated draft PRs wait for external CI observation before promotion to ready; human-triggered drafts promote on green CI. Project settings keep draft delivery opt-in and default to verified-only.
+From the dashboard: review an `investigated` analysis and trigger the fix, open a `pr_draft` in GitHub to inspect its CI, link a pull request, resolve or archive incidents, or act on a `needs_human` remediation (connect the GitHub App, upload source maps, add context) and retry. Automated draft PRs wait for external CI observation before promotion to ready; human-triggered drafts promote on green CI. Project settings keep draft delivery opt-in and default to verified-only.

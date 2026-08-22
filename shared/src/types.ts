@@ -347,6 +347,17 @@ export interface Incident {
   /** Present only on kind='friction'; 'unchecked' flags an exhausted
    * adjudication surfaced as a non-fixable diagnostic. */
   adjudication_status?: AdjudicationStatus;
+  /** Present only on kind='friction': which detector raised this. */
+  signal_type?: string | null;
+  /** Present only on kind='friction': the clicked element's selector. Positional
+   * parts and hashed classes are not stable across builds. */
+  element_selector?: string | null;
+  /** Present only on kind='friction': the templated route, e.g. '/assets/:id/edit'. */
+  page_url_normalized?: string | null;
+  /** A session whose scrubbed chunks span the playback window. anchor_ms is
+   * absolute client-clock epoch milliseconds, the dashboard's ?t= contract.
+   * Unlike `recordings`, this is populated for friction incidents. */
+  watchable_session?: { session_id: string; anchor_ms: number };
   fingerprint: string;
   title: string;
   status: ErrorGroupStatus;
