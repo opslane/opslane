@@ -50,4 +50,12 @@ describe('installClaudeIntegration', () => {
     await writeFile(join(cwd, '.mcp.json'), '{ not json', 'utf8');
     await expect(installClaudeIntegration({ cwd, skill: SKILL })).rejects.toThrow(/\.mcp\.json/);
   });
+
+  it('embeds a skill naming the v2 tools and no retired ones', async () => {
+    const { SKILL_MD } = await import('../mcp/skill-source.js');
+    expect(SKILL_MD).toContain('opslane_digest');
+    expect(SKILL_MD).toContain('opslane_link_pr');
+    expect(SKILL_MD).not.toContain('opslane_worklist');
+    expect(SKILL_MD).not.toContain('opslane_resolve');
+  });
 });

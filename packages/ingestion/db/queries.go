@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -41,6 +42,12 @@ var ErrOAuthLoginStateReservation = errors.New("OAuth login state reservation is
 // email-mismatched invitations. It intentionally does not reveal which check failed.
 var ErrInvalidInvitation = errors.New("invalid invitation")
 
+var (
+	ErrPRAlreadyLinked  = errors.New("incident already has a pull request")
+	ErrPRRepoMismatch   = errors.New("pull request is not in this project's repository")
+	ErrIncidentNotFound = errors.New("incident not found")
+)
+
 // Queries wraps a connection pool and provides tenant-scoped database operations.
 // All query helpers MUST take tenant scope (project_id or org_id) as required parameter.
 type Queries struct {
@@ -64,6 +71,247 @@ func nilIfEmpty(s string) *string {
 		return nil
 	}
 	return &s
+}
+
+// LatestDeliveredDigest returns the run date and generated cards from the most
+// recent delivered digest, or ("", nil, nil) when none exists. Validation stamps
+// generated_cards with system facts before delivery, so they are returned as-is.
+func (q *Queries) LatestDeliveredDigest(ctx context.Context, projectID string) (runDate string, cards []byte, err error) {
+	err = q.pool.QueryRow(ctx,
+		`SELECT run_date::text,
+		        coalesce(rendered_payload->'digest'->'generated_cards', '[]'::jsonb)
+		   FROM digest_runs
+		  WHERE project_id = $1
+		    AND status = 'delivered'
+		    AND rendered_payload IS NOT NULL
+		  ORDER BY run_date DESC
+		  LIMIT 1`, projectID,
+	).Scan(&runDate, &cards)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil, nil
+	}
+	return runDate, cards, err
+}
+
+type EvidenceFrame struct {
+	AnchorKind      string          `json:"anchor_kind"`
+	SourceEventID   string          `json:"source_event_id"`
+	Status          string          `json:"status"`
+	ResolverVersion *int            `json:"resolver_version"`
+	Envelope        json.RawMessage `json:"envelope"`
+	CommitSHA       *string         `json:"commit_sha"`
+}
+
+type EvidenceFailedRequest struct {
+	SessionID       string  `json:"session_id"`
+	PageRoute       string  `json:"page_route"`
+	Method          string  `json:"method"`
+	EndpointPattern string  `json:"endpoint_pattern"`
+	Status          int     `json:"status"`
+	ActionKind      *string `json:"action_kind"`
+	ActionSelector  *string `json:"action_selector"`
+	ActionLink      string  `json:"action_link"`
+	OccurredAt      string  `json:"occurred_at"`
+}
+
+type EvidenceReplayPointer struct {
+	AnchorKind string `json:"anchor_kind"`
+	EventID    string `json:"event_id"`
+	SessionID  string `json:"session_id"`
+	AnchorMs   int64  `json:"anchor_ms"`
+}
+
+type IssueEvidenceResult struct {
+	Frames         []EvidenceFrame
+	FailedRequests []EvidenceFailedRequest
+	ReplayPointers []EvidenceReplayPointer
+	Recording      string
+	SourceMap      string
+}
+
+// IssueEvidence assembles the fix-shaped evidence for a group's open episode.
+// It mirrors the worker's loadEvidence read path, but an issue without frozen
+// anchors returns an empty result instead of an error.
+func (q *Queries) IssueEvidence(ctx context.Context, projectID, groupID string) (IssueEvidenceResult, error) {
+	res := IssueEvidenceResult{Recording: "missing", SourceMap: "missing"}
+
+	var episodeID string
+	err := q.pool.QueryRow(ctx,
+		`SELECT id
+		   FROM issue_episodes
+		  WHERE project_id = $1
+		    AND canonical_issue_id = $2
+		    AND closed_at IS NULL
+		  ORDER BY sequence DESC
+		  LIMIT 1`, projectID, groupID,
+	).Scan(&episodeID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return res, nil
+	}
+	if err != nil {
+		return res, fmt.Errorf("resolve episode: %w", err)
+	}
+
+	rows, err := q.pool.Query(ctx,
+		`SELECT a.anchor_kind, a.event_id, e.session_id, e.commit_sha,
+		        r.status, r.envelope, r.resolver_version,
+		        (extract(epoch FROM e."timestamp") * 1000)::bigint AS anchor_ms,
+		        CASE WHEN s.status <> 'deleting' THEN s.id END AS retained_session_id
+		   FROM issue_evidence_anchors a
+		   JOIN error_events e
+		     ON e.id = a.event_id AND e.project_id = a.project_id
+		   LEFT JOIN sessions s
+		     ON s.id = e.session_id AND s.project_id = a.project_id
+		   LEFT JOIN error_event_resolutions r
+		     ON r.event_id = a.event_id AND r.project_id = a.project_id
+		  WHERE a.project_id = $1 AND a.episode_id = $2
+		  ORDER BY CASE a.anchor_kind WHEN 'threshold' THEN 0 WHEN 'first' THEN 1 ELSE 2 END`,
+		projectID, episodeID)
+	if err != nil {
+		return res, fmt.Errorf("anchors: %w", err)
+	}
+	defer rows.Close()
+
+	var retained []string
+	seenRetained := map[string]bool{}
+	for rows.Next() {
+		var frame EvidenceFrame
+		var sessionID *string
+		var anchorMs int64
+		var retainedID *string
+		var status sql.NullString
+		if err := rows.Scan(&frame.AnchorKind, &frame.SourceEventID, &sessionID, &frame.CommitSHA,
+			&status, &frame.Envelope, &frame.ResolverVersion, &anchorMs, &retainedID); err != nil {
+			return res, fmt.Errorf("scan anchor: %w", err)
+		}
+		frame.Status = "missing"
+		if status.Valid && status.String != "" {
+			frame.Status = status.String
+		}
+		res.Frames = append(res.Frames, frame)
+		if frame.AnchorKind == "threshold" {
+			res.SourceMap = frame.Status
+		}
+		if sessionID != nil {
+			res.ReplayPointers = append(res.ReplayPointers, EvidenceReplayPointer{
+				AnchorKind: frame.AnchorKind,
+				EventID:    frame.SourceEventID,
+				SessionID:  *sessionID,
+				AnchorMs:   anchorMs,
+			})
+		}
+		if retainedID != nil && !seenRetained[*retainedID] {
+			seenRetained[*retainedID] = true
+			retained = append(retained, *retainedID)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return res, fmt.Errorf("iterate anchors: %w", err)
+	}
+	if len(res.Frames) == 0 {
+		return res, nil
+	}
+	res.Recording = recordingAvailabilityFromRetained(retained, res.ReplayPointers)
+
+	if len(retained) == 0 {
+		return res, nil
+	}
+	failureRows, err := q.pool.Query(ctx,
+		`SELECT f.session_id, f.page_route, f.method, f.endpoint_pattern, f.status,
+		        f.action_kind, f.action_selector, f.action_link, f.occurred_at::text
+		   FROM session_request_failures f
+		  WHERE f.project_id = $1
+		    AND f.session_id = ANY($2::text[])
+		    AND f.rule_version = (
+		      SELECT analysis.rule_version
+		        FROM session_analysis analysis
+		       WHERE analysis.project_id = f.project_id
+		         AND analysis.session_id = f.session_id
+		    )
+		  ORDER BY f.occurred_at DESC, f.request_id_hash
+		  LIMIT 50`, projectID, retained)
+	if err != nil {
+		return res, fmt.Errorf("failed requests: %w", err)
+	}
+	defer failureRows.Close()
+	for failureRows.Next() {
+		var failure EvidenceFailedRequest
+		if err := failureRows.Scan(&failure.SessionID, &failure.PageRoute, &failure.Method,
+			&failure.EndpointPattern, &failure.Status, &failure.ActionKind,
+			&failure.ActionSelector, &failure.ActionLink, &failure.OccurredAt); err != nil {
+			return res, fmt.Errorf("scan failed request: %w", err)
+		}
+		res.FailedRequests = append(res.FailedRequests, failure)
+	}
+	if err := failureRows.Err(); err != nil {
+		return res, fmt.Errorf("iterate failed requests: %w", err)
+	}
+	return res, nil
+}
+
+// recordingAvailabilityFromRetained mirrors the worker's four-state recording
+// availability calculation.
+func recordingAvailabilityFromRetained(retained []string, pointers []EvidenceReplayPointer) string {
+	referenced := map[string]bool{}
+	for _, pointer := range pointers {
+		referenced[pointer.SessionID] = true
+	}
+	if len(referenced) == 0 {
+		return "missing"
+	}
+	if len(retained) == 0 {
+		return "expired"
+	}
+	if len(retained) < len(referenced) {
+		return "partial"
+	}
+	return "available"
+}
+
+// LinkPR records a developer's PR on error_groups so the existing merge webhook
+// can resolve it. Repository matching and the no-overwrite guard are enforced
+// in the update predicate.
+func (q *Queries) LinkPR(ctx context.Context, projectID, groupID, prURL, repo string, prNumber int) error {
+	tag, err := q.pool.Exec(ctx,
+		`UPDATE error_groups eg
+		    SET pr_url = $3,
+		        pr_number = $4,
+		        status = 'pr_created',
+		        pr_created_at = COALESCE(eg.pr_created_at, now()),
+		        updated_at = now()
+		   FROM projects p
+		  WHERE eg.id = $1
+		    AND eg.project_id = $2
+		    AND p.id = eg.project_id
+		    AND eg.pr_number IS NULL
+		    AND eg.status NOT IN ('resolved', 'archived', 'merged')
+		    AND p.github_repo IS NOT NULL
+		    AND lower(p.github_repo) = lower($5)`,
+		groupID, projectID, prURL, prNumber, repo)
+	if err != nil {
+		return fmt.Errorf("link pr: %w", err)
+	}
+	if tag.RowsAffected() == 1 {
+		return nil
+	}
+
+	var repoMatches, hasNumber bool
+	if err := q.pool.QueryRow(ctx,
+		`SELECT lower(coalesce(p.github_repo, '')) = lower($3),
+		        eg.pr_number IS NOT NULL
+		   FROM error_groups eg
+		   JOIN projects p ON p.id = eg.project_id
+		  WHERE eg.id = $1 AND eg.project_id = $2`,
+		groupID, projectID, repo).Scan(&repoMatches, &hasNumber); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrIncidentNotFound
+		}
+		return fmt.Errorf("classify link pr refusal: %w", err)
+	}
+	if !repoMatches {
+		return ErrPRRepoMismatch
+	}
+	return ErrPRAlreadyLinked
 }
 
 // investigationReadinessSQL keeps the legacy API field derived from the

@@ -1,72 +1,112 @@
 import { describe, expect, it } from 'vitest';
-import { recordingLine, selectWorklist } from '../mcp/tools.js';
-import type { McpIncident } from '../mcp/types.js';
+import type { OpslaneClient } from '../mcp/client.js';
+import { registerTools } from '../mcp/tools.js';
 
-function incident(overrides: Partial<McpIncident>): McpIncident {
+type ToolResult = { content: Array<{ text: string }> };
+
+function fakeServer() {
+  const registered = new Map<string, (args: Record<string, unknown>) => Promise<ToolResult>>();
   return {
-    id: '9d4e2a71-77aa-4f83-b8f1-0123456789ab',
-    kind: 'friction',
-    title: 'Dead clicks',
-    status: 'insight',
-    occurrence_count: 1,
-    affected_users_count: 1,
-    first_seen: '2026-07-29T00:00:00Z',
-    last_seen: '2026-08-13T00:00:00Z',
+    registered,
+    registerTool(
+      name: string,
+      _config: unknown,
+      handler: (args: Record<string, unknown>) => Promise<ToolResult>,
+    ) {
+      registered.set(name, handler);
+    },
+  };
+}
+
+function fakeClient(overrides: Partial<OpslaneClient> = {}): OpslaneClient {
+  return {
+    projectId: 'p',
+    projectLabel: 'p (acme/app)',
+    dashboardUrl: null,
+    latestDigest: async () => ({
+      run_date: '2026-08-21',
+      cards: [{
+        episode_id: 'e',
+        incident_id: 'i-1',
+        title: 't',
+        label: 'new',
+        copy: 'c',
+        action: 'a',
+        affected_users: 3,
+        accounts: [],
+      }],
+    }),
+    getIncident: async () => ({
+      id: 'i-1',
+      kind: 'error',
+      title: 't',
+      status: 'needs_human',
+      root_cause: 'r',
+      occurrence_count: 1,
+      affected_users_count: 1,
+      first_seen: '',
+      last_seen: '',
+    }),
+    issueEvidence: async () => ({
+      frames: [],
+      failed_requests: [],
+      replay_pointers: [],
+      availability: { recording: 'missing', source_map: 'missing' },
+    }),
+    linkPr: async () => undefined,
     ...overrides,
   };
 }
 
-describe('selectWorklist', () => {
-  it('drops incidents whose investigation was marked ineligible', () => {
-    const result = selectWorklist([
-      incident({ id: 'a', investigation_readiness: 'eligible' }),
-      incident({ id: 'b', investigation_readiness: 'ineligible' }),
+describe('registerTools v2', () => {
+  it('registers exactly the three tools', () => {
+    const server = fakeServer();
+    registerTools(server as never, fakeClient());
+    expect([...server.registered.keys()].sort()).toEqual([
+      'opslane_digest',
+      'opslane_issue',
+      'opslane_link_pr',
     ]);
-    expect(result.rows.map((r) => r.id)).toEqual(['a']);
-    expect(result.droppedIneligible).toBe(1);
   });
 
-  it('keeps incidents with no readiness recorded', () => {
-    expect(selectWorklist([incident({ id: 'a' })]).rows).toHaveLength(1);
+  it('renders the delivered digest', async () => {
+    const server = fakeServer();
+    registerTools(server as never, fakeClient());
+    const result = await server.registered.get('opslane_digest')!({});
+    expect(result.content[0]!.text).toContain('i-1');
   });
 
-  it('drops errors, since version 1 is friction only', () => {
-    const result = selectWorklist([
-      incident({ id: 'a', kind: 'friction' }),
-      incident({ id: 'b', kind: 'error' }),
-    ]);
-    expect(result.rows.map((r) => r.id)).toEqual(['a']);
+  it('combines incident state and evidence', async () => {
+    const id = '3f2504e0-4f89-11d3-9a0c-0305e82c3301';
+    const server = fakeServer();
+    registerTools(server as never, fakeClient({
+      getIncident: async () => ({
+        id,
+        kind: 'error',
+        title: 'TypeError',
+        status: 'needs_human',
+        root_cause: 'request_types is null',
+        occurrence_count: 2,
+        affected_users_count: 1,
+        first_seen: '',
+        last_seen: '',
+      }),
+    }));
+    const result = await server.registered.get('opslane_issue')!({ id });
+    expect(result.content[0]!.text).toContain('request_types is null');
   });
 
-  it('drops incidents that are already finished', () => {
-    const result = selectWorklist([
-      incident({ id: 'a', status: 'insight' }),
-      incident({ id: 'b', status: 'resolved' }),
-      incident({ id: 'c', status: 'archived' }),
-      incident({ id: 'd', status: 'merged' }),
-    ]);
-    expect(result.rows.map((r) => r.id)).toEqual(['a']);
-  });
-});
-
-describe('recordingLine', () => {
-  const withSession = incident({
-    watchable_session: { session_id: 's1', anchor_ms: 98000 },
-  });
-
-  it('builds a seekable link when a dashboard url is configured', () => {
-    expect(recordingLine(withSession, 'https://app.example.com/'))
-      .toContain('https://app.example.com/sessions/s1?t=98000');
-  });
-
-  it('reports the session and anchor without inventing an origin', () => {
-    const line = recordingLine(withSession, null);
-    expect(line).toContain('s1');
-    expect(line).toContain('98000');
-    expect(line).not.toContain('http');
-  });
-
-  it('returns null when there is no watchable session', () => {
-    expect(recordingLine(incident({}), 'https://app.example.com')).toBeNull();
+  it('surfaces a link refusal as readable text', async () => {
+    const server = fakeServer();
+    registerTools(server as never, fakeClient({
+      linkPr: async () => {
+        throw new Error("not in this project's repository");
+      },
+    }));
+    const result = await server.registered.get('opslane_link_pr')!({
+      id: '3f2504e0-4f89-11d3-9a0c-0305e82c3301',
+      url: 'https://github.com/other/app/pull/1',
+    });
+    expect(result.content[0]!.text).toContain("not in this project's repository");
   });
 });

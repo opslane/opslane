@@ -140,8 +140,10 @@ func NewRouterWithPool(deps *Dependencies, pool *pgxpool.Pool) *chi.Mux {
 		r.With(deps.AuthenticateUserSession).Get("/projects/{projectID}/fix-stats", deps.GetFixStatsEndpoint)
 
 		// Incidents are user-session reads.
+		r.With(deps.AuthenticateUserSession).Get("/projects/{projectID}/digest/latest", deps.GetLatestDigest)
 		r.With(deps.AuthenticateUserSession).Get("/projects/{projectID}/incidents", deps.ListIncidents)
 		r.With(deps.AuthenticateUserSession).Get("/projects/{projectID}/incidents/{incidentID}", deps.GetIncident)
+		r.With(deps.AuthenticateUserSession).Get("/projects/{projectID}/incidents/{incidentID}/evidence", deps.GetIncidentEvidence)
 		r.With(deps.AuthenticateUserSession).Get("/projects/{projectID}/incidents/{incidentID}/sample-event", deps.GetSampleEvent)
 		// === Project D: replay retrieval (project-scoped, dashboard JWT auth) ===
 		r.With(deps.AuthenticateUserSession).Get("/projects/{projectID}/replays/{replayID}", deps.GetReplay)
@@ -152,6 +154,7 @@ func NewRouterWithPool(deps *Dependencies, pool *pgxpool.Pool) *chi.Mux {
 		r.With(deps.AuthenticateUserSession).Get("/projects/{projectID}/incidents/{incidentID}/affected-users", deps.ListAffectedUsers)
 		r.With(deps.AuthenticateUserSession).Post("/projects/{projectID}/incidents/{incidentID}/fix", deps.TriggerFix)
 		r.With(deps.AuthenticateUserSession).Post("/projects/{projectID}/incidents/{incidentID}/review", deps.RequestIssueReview)
+		r.With(deps.AuthenticateUserSession).Post("/projects/{projectID}/incidents/{incidentID}/link-pr", deps.LinkIncidentPR)
 		r.With(deps.AuthenticateUserSession).Post("/projects/{projectID}/incidents/{incidentID}/resolve", deps.ResolveIncident)
 		r.With(deps.AuthenticateUserSession).Post("/projects/{projectID}/incidents/{incidentID}/archive", deps.ArchiveIncident)
 		r.With(deps.AuthenticateUserSession).Post("/projects/{projectID}/incidents/{incidentID}/unarchive", deps.UnarchiveIncident)

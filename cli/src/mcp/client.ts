@@ -3,7 +3,7 @@ import { promisify } from 'node:util';
 import { authedFetch } from '../authed-fetch.js';
 import { resolveCredentials } from '../agent-credentials.js';
 import { defaultApiUrl } from '../config.js';
-import type { McpIncident } from './types.js';
+import type { IssueEvidence, LatestDigest, McpIncident } from './types.js';
 
 const run = promisify(execFile);
 const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
@@ -29,9 +29,10 @@ export interface OpslaneClient {
   projectId: string;
   projectLabel: string;
   dashboardUrl: string | null;
-  listFriction(): Promise<McpIncident[]>;
+  latestDigest(): Promise<LatestDigest>;
   getIncident(id: string): Promise<McpIncident>;
-  resolveIncident(id: string): Promise<void>;
+  issueEvidence(id: string): Promise<IssueEvidence>;
+  linkPr(id: string, url: string): Promise<void>;
 }
 
 async function currentRepoSlug(cwd: string): Promise<string | null> {
@@ -68,28 +69,42 @@ export async function createOpslaneClient(options: { cwd: string }): Promise<Ops
     return (await response.json()) as T;
   }
 
+  async function apiError(response: { json: () => Promise<unknown> }): Promise<string | null> {
+    try {
+      const body: unknown = await response.json();
+      if (body && typeof body === 'object' && 'error' in body) {
+        const message = (body as { error: unknown }).error;
+        return typeof message === 'string' ? message : null;
+      }
+    } catch {
+      // Fall through to the status-based message.
+    }
+    return null;
+  }
+
   return {
     projectId,
     projectLabel: `${projectId} (${repo ?? 'no git remote'})`,
     dashboardUrl: process.env['OPSLANE_DASHBOARD_URL'] ?? null,
-    async listFriction() {
-      // ListIncidents encodes a bare array, not an envelope
-      // (packages/ingestion/handler/read_api.go, ListIncidents). The guard is
-      // here so an unexpected shape returns nothing rather than throwing inside
-      // the formatter.
-      const body = await readJson<unknown>(`${base}/incidents?kind=friction`);
-      return Array.isArray(body) ? (body as McpIncident[]) : [];
+    async latestDigest() {
+      return readJson<LatestDigest>(`${base}/digest/latest`);
     },
     async getIncident(id) {
       return readJson<McpIncident>(buildIncidentUrl(apiUrl, projectId, id));
     },
-    async resolveIncident(id) {
+    async issueEvidence(id) {
+      return readJson<IssueEvidence>(`${buildIncidentUrl(apiUrl, projectId, id)}/evidence`);
+    },
+    async linkPr(id, url) {
       const response = await authedFetch(
-        `${buildIncidentUrl(apiUrl, projectId, id)}/resolve`,
-        { apiUrl, method: 'POST' },
+        `${buildIncidentUrl(apiUrl, projectId, id)}/link-pr`,
+        { apiUrl, method: 'POST', body: JSON.stringify({ url }) },
       );
       if (!response.ok) {
-        throw new Error(`Could not resolve ${id}: Opslane API returned ${response.status}`);
+        throw new Error(
+          (await apiError(response))
+            ?? `Opslane API returned ${response.status} linking ${url}`,
+        );
       }
     },
   };
