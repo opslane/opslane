@@ -295,14 +295,18 @@ func (q *Queries) LinkPR(ctx context.Context, projectID, groupID, prURL, repo st
 		return nil
 	}
 
-	var repoMatches, hasNumber bool
+	// The update matched no row: the incident is absent for this project, its
+	// repo differs, or it already has a PR / is in a terminal state. Scope the
+	// lookup by project_id like the update, so a foreign incident id is a 404
+	// rather than leaking its existence. A repo mismatch is the only refusal we
+	// can name distinctly; every other case is the "already linked" 409.
+	var repoMatches bool
 	if err := q.pool.QueryRow(ctx,
-		`SELECT lower(coalesce(p.github_repo, '')) = lower($3),
-		        eg.pr_number IS NOT NULL
+		`SELECT lower(coalesce(p.github_repo, '')) = lower($3)
 		   FROM error_groups eg
 		   JOIN projects p ON p.id = eg.project_id
 		  WHERE eg.id = $1 AND eg.project_id = $2`,
-		groupID, projectID, repo).Scan(&repoMatches, &hasNumber); err != nil {
+		groupID, projectID, repo).Scan(&repoMatches); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrIncidentNotFound
 		}

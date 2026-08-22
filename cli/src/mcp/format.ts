@@ -24,7 +24,10 @@ export function formatDigest(input: {
   cards: DigestCard[];
   projectLabel: string;
 }): string {
-  const { runDate, cards, projectLabel } = input;
+  const { runDate, projectLabel } = input;
+  // The server stamps generated_cards as an array, but a JSON `null` in the
+  // payload would otherwise crash the .length read below. Coerce defensively.
+  const cards = Array.isArray(input.cards) ? input.cards : [];
   if (cards.length === 0) {
     return `No digest has been delivered for ${projectLabel} yet. The daily run produces it.`;
   }
@@ -32,7 +35,7 @@ export function formatDigest(input: {
   const lines: string[] = [`Opslane digest for ${projectLabel}, ${runDate}.`, ''];
   for (const card of cards) {
     const affected = card.accounts.length > 0
-      ? `${card.affected_users} users (${card.accounts.join(', ')})`
+      ? `${card.affected_users} users (${fence(truncate(card.accounts.join(', '), LIMITS.title))})`
       : `${card.affected_users} users`;
     lines.push(`- ${card.incident_id}  ${fence(truncate(card.title, LIMITS.title))}`);
     lines.push(`  ${affected}${card.pr_url ? `  PR: ${card.pr_url}` : ''}`);
@@ -100,7 +103,7 @@ export function formatIssue(input: {
       lines.push(
         '',
         'Failing request:',
-        `  ${failure.method} ${fence(truncate(failure.endpoint_pattern, LIMITS.selector))} -> ${failure.status}`,
+        `  ${fence(failure.method)} ${fence(truncate(failure.endpoint_pattern, LIMITS.selector))} -> ${failure.status}`,
         `  route: ${fence(truncate(failure.page_route, LIMITS.selector))}`,
       );
       if (failure.action_selector) {
