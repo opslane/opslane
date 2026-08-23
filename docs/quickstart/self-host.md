@@ -75,7 +75,7 @@ Expected result:
 
 That `needs_human` + reason code is part of the product's core contract: every run ends in an explicit state. The main outcomes are a ready-for-review fix PR backed by executed evidence (`pr_created`), an opt-in unverified draft awaiting repository CI (`pr_draft`), a posted root-cause analysis awaiting your go-ahead (`investigated`), and a stated reason a human is needed (`needs_human`). Which specific reason code you see depends on which credential the worker misses first; the guarantee is the explicit state, not a particular code.
 
-One note on keys: a project has two key scopes. The seeded `opslane_pk_` **ingest key** can only send events and recordings, and is safe to ship in a browser bundle. Uploading source maps takes a separate `opslane_sk_` **source-map key**, minted with `mint-key`; see the [source maps guide](../guides/source-maps.md).
+One note on keys: a project has three key scopes (ingest, source maps, and API). The seeded `opslane_pk_` **ingest key** can only send events and recordings, and is safe to ship in a browser bundle. Uploading source maps takes a separate `opslane_sk_` **source-map key**, minted with `mint-key`; see the [source maps guide](../guides/source-maps.md).
 
 ## Path 2: full error-to-PR
 

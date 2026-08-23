@@ -68,5 +68,5 @@ Minting never revokes, so old and new keys can overlap. Mint the new key, deploy
 
 ## When a key is rejected
 
-- `401`: the key doesn't parse or was revoked. Copy the full value; a truncated key can't parse.
+- `401`: the key doesn't parse, was revoked, or expired. Copy the full value; a truncated key can't parse.
 - `403 insufficient_scope`: a valid key with the wrong scope, usually a source-map key sent with events, or a non-MCP key used against the MCP server.
