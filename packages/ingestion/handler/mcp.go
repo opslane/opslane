@@ -48,7 +48,12 @@ func (d *Dependencies) MCPHandler() http.Handler {
 		}
 		if err != nil {
 			recordMCPAuth("lookup_error", "", "")
-			return nil, err
+			// Log the detail server-side but return a generic error: the SDK
+			// writes the verifier's error text into the 500 response body, and a
+			// pgx connection fault embeds the DB host/user/name, which must not
+			// reach an unauthenticated caller.
+			slog.Error("mcp api key lookup failed", "error", err)
+			return nil, errors.New("internal error")
 		}
 
 		outcome := "ok"

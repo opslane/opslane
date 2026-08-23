@@ -90,6 +90,9 @@ func TestMCPBearerAuth(t *testing.T) {
 			if tc.token != "" && strings.Contains(response.Body.String(), tc.token) {
 				t.Fatal("response leaked bearer token")
 			}
+			if tc.name == "database failure" && strings.Contains(response.Body.String(), "lookup project key") {
+				t.Fatalf("500 body leaked internal DB error detail: %s", response.Body.String())
+			}
 		})
 	}
 
