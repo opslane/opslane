@@ -2,9 +2,13 @@
 
 # Opslane
 
-Error trackers see stack traces. Opslane knows your product.
+**Finds the bugs that impact real users. Opens a PR when it's sure.**
 
-It learns where users get stuck from errors and session recordings. You get a daily digest of what matters, and pull requests with tested fixes. When it can't fix something, it says why.
+Your error tracker logs thousands of alerts, and you can't tell which ones actually hurt users. The worst ones don't even throw an exception: a dead button, a form nobody can submit. You only hear about those when a customer complains.
+
+Opslane learns your product from your code and real user sessions, ranks issues by how many users hit them, and investigates the ones that matter. When it can verify a fix, it opens a pull request. When it can't, it hands you the investigation and the decision to make.
+
+You review a pull request instead of triaging a dashboard, and the bug is gone before the next customer hits it.
 
 [Docs](docs) · [Self-host quickstart](docs/quickstart/self-host.md) · [Install the SDK](docs/install.md) · [Issue tracker](https://github.com/opslane/opslane-oss/issues)
 
@@ -22,46 +26,45 @@ Over two weeks spanning July and August 2026, one production app sent Opslane 7,
 
 ## What it does
 
-- **Know what's broken without reading 7,000 alerts.** Errors group into causes, noise is suppressed, and issues are ranked by how many users they hit. One Slack digest a day.
-- **Get bugs fixed without losing the afternoon.** Opslane investigates in your repo and sends the fix as a pull request that built and passed your tests. You review and merge.
+- **Know which bugs hit users.** The same crash from 500 people is one issue ranked by impact, not 500 alerts to sort through. One Slack digest a day, and nothing when nothing needs you.
+- **Catch bugs that never throw an error.** Dead buttons and abandoned forms show up in the session recordings, even when the console is clean.
+- **The fix is a pull request.** Opslane investigates in your repo and opens a PR only after it checks its own work: your tests pass before and after, the build passes, and a second model reviews the diff. You review and merge; Opslane never merges its own PRs.
+- **Work from your coding agent.** The bugs worth fixing, and the evidence behind each one, land in the coding agent you already use. No dashboard to open.
 - **See what the user saw.** When session recording is on, each issue links to the recording behind it: the clicks, pages, and requests that led up to it.
-- **Catch failures that never throw.** Dead buttons and abandoned forms surface from session recordings, even when the console is clean.
-- **Stay in control.** It never merges its own PRs, it says why whenever it stops, and the application stack runs on your infrastructure.
 
 ## How it works
 
-1. **Capture.** The SDK sends errors and session recordings to the ingestion server. Two lines of code to install ([install guide](docs/install.md)).
-2. **Group.** The same bug hitting 500 users becomes one issue, not 500 alerts. Errors that come from browser extensions, cross-origin scripts, or known-harmless browser warnings are filtered out before they become issues.
-3. **Investigate.** The worker clones the repository and reads the code until it finds the cause. The cause has to name the exact files involved; guesses get thrown out.
-4. **Verify.** The fix is applied in an isolated sandbox, where the build and tests run. Whatever passed before has to pass after.
-5. **Deliver.** A verified fix opens as a pull request on the repository, ready for review. A fix that could not be verified opens as a draft, marked as such, and only if the project allows drafts. When there is no fix, the issue shows the reason instead.
-6. **Digest.** When Slack is connected, a daily digest lists what broke, what got fixed, and what needs a human.
+Opslane has four parts:
 
-The pipeline calls three outside services: Anthropic to investigate, E2B to run the sandbox, and GitHub for clones and pull requests. Everything else runs on the self-hosted stack: Postgres for state and jobs, S3-compatible object storage for session recordings (MinIO in the bundled stack). There is no Redis or queue service to operate. JavaScript apps are supported end to end today; a Python SDK (alpha) captures and triages server-side errors, with its fix pipeline off by default.
+| Component | What it does |
+| --- | --- |
+| Browser SDK | Captures errors and session recordings in the user's browser, with input masking on by default |
+| Ingestion service | Receives what the SDK sends, groups errors so one bug is one issue, ranks them by user impact, and serves the dashboard |
+| Worker | Investigates issues, writes and verifies a fix in a sandbox, and opens the pull request |
+| Dashboard | Web app for browsing issues, watching replays, and changing project settings |
+
+An error travels through those parts like this:
+
+1. **Capture.** The SDK sends errors and session recordings to the ingestion service (two lines to install). Everything is stored, but nothing is triaged yet, so one error firing once doesn't turn into an alert.
+2. **Group.** Opslane uses your source maps to turn the minified stack trace back into real file names, then groups errors by where they happen in your code. The same bug is one issue, even after a redeploy, and if it comes back after a fix it's marked as returned. Noise from browser extensions and other sites is dropped.
+3. **Qualify.** Before investigating, Opslane checks how many users hit the bug and how recently, then reads your repo to decide whether it's a real product problem. Only bugs that pass both checks get investigated.
+4. **Investigate.** The worker clones your repo and reads the code until it finds the cause. If it can't point to the exact files, it stops instead of guessing.
+5. **Verify.** The fix goes into a sandbox where your build and tests run. Everything that passed before has to pass again, and a second model reviews the change.
+6. **Deliver.** A fix that passes becomes a pull request. One Opslane couldn't verify becomes a draft, if you allow drafts. When there's no fix, you get the reason and the call to make. A daily Slack digest covers what broke, what got fixed, and what needs you.
 
 ```mermaid
 flowchart LR
-    A[SDK] -->|errors + session recordings| B[Ingestion and grouping]
-    B --> C[(Postgres job queue)]
-    C --> D[Worker: investigate]
-    D -->|candidate fix| E[Fix + sandbox verification]
-    D -->|analysis only| I[investigated: analysis for a human]
-    D -->|blocked| H[needs_human: reason + next action]
-    E -->|ready gate passes| F[Ready GitHub PR]
-    E -->|draft gate passes + project opt-in| G[Draft GitHub PR]
-    E -->|neither gate passes| H
+    A[Your app] -->|errors + recordings| B[Capture and group]
+    B --> Q{Worth fixing?}
+    Q -->|not enough users| W[Watched, not investigated]
+    Q -->|real problem| D[Investigate in your repo]
+    D --> V{Fix verified?}
+    V -->|yes| PR[Pull request]
+    V -->|couldn't verify| DR[Draft PR]
+    V -->|no fix found| HR[Written-up reason for you]
 ```
 
-| Component | What it does | Where |
-| --- | --- | --- |
-| Browser SDK | Captures errors and session recordings, with input masking on by default | [`packages/sdk`](packages/sdk) |
-| Ingestion API | Go service that receives events, groups errors, and serves the dashboard | [`packages/ingestion`](packages/ingestion) |
-| Worker | Investigates issues and proposes changes; for candidate fixes, runs the build and tests in an [E2B](https://e2b.dev) sandbox, records the results, and opens the PR | [`packages/worker`](packages/worker) |
-| Dashboard | Vue app for issues, replays, and project settings | [`packages/dashboard`](packages/dashboard) |
-| CLI | Lists and inspects projects and issues from the command line | [`cli`](cli) |
-| Python SDK (alpha) | Captures server-side Python errors, with a Flask integration | [`packages/sdk-python`](packages/sdk-python) |
-
-The exact evidence gates, their limits, and what they do not guarantee: [precision](docs/architecture/precision.md).
+Opslane calls three outside services: Anthropic to investigate, E2B to run the sandbox, and GitHub for clones and pull requests. Everything else runs on your own stack: Postgres for state and the job queue, and S3-compatible storage for session recordings (MinIO in the bundled setup). There's no Redis or separate queue to run. JavaScript apps are supported end to end today.
 
 ## Run it locally
 
@@ -94,12 +97,12 @@ docker compose exec -T postgres psql -U opslane -d opslane \
 ```
 
 ```text
-   status    |   reason_code   |                  reason_message
--------------+-----------------+---------------------------------------------------
- needs_human | missing_llm_key | ANTHROPIC_API_KEY environment variable is not set
+ status | reason_code | reason_message
+--------+-------------+----------------
+ new    |             |
 ```
 
-The worker stopped because it has no AI credentials, and it said so. To go further:
+Opslane captured the event, resolved its stack, and grouped it into a new issue. It watches the issue but won't investigate a one-off that hasn't reached enough users yet. To see the full investigate-and-fix path, you need an issue real users are hitting, plus a few credentials:
 
 - **Dashboard sign-in:** a GitHub App, or WorkOS for cloud deployments.
 - **Investigation:** `ANTHROPIC_API_KEY`.
@@ -108,43 +111,21 @@ The worker stopped because it has no AI credentials, and it said so. To go furth
 
 Exact permissions and environment variables are in the [self-host quickstart](docs/quickstart/self-host.md). SDK setup is in the [install guide](docs/install.md); replay privacy defaults in [replay privacy and masking](docs/guides/replay-privacy.md).
 
-## What Opslane is not
-
-- **Not an APM or metrics backend.** Opslane ingests application errors and the session context around them: breadcrumbs, network timing, and optional replays. It does not do latency percentiles, distributed tracing, or infrastructure monitoring.
-- **Not autopilot.** Opslane opens pull requests but never merges them. Review and merge stay with the repository owner.
-- **Not a dashboard to babysit.** Conclusions ship as PRs and issues; the dashboard exists for replays and settings, not triage duty.
-- **Pre-1.0.** The [`POST /api/v1/events` wire contract](docs/contracts/events.md) is append-only and backward-compatible. Other interfaces may still change before 1.0.
-
-## What leaves your host
-
-With no external integrations configured, the self-hosted services send no captured data (errors, session recordings, or repository source) to anyone. Each integration you enable adds its own destination:
-
-- **GitHub:** authentication, repository access, clones, pull requests.
-- **Anthropic:** investigation context and selected source.
-- **E2B:** repository contents and commands for sandbox verification.
-- **WorkOS** (optional): cloud authentication.
-- **Slack** (optional): issue titles, summaries, and links in notifications and digests.
-- **Langfuse** (optional): full investigation traces, including prompts and completions.
-
-The full data-flow and trust model, including what each destination receives: [trust and security](docs/architecture/trust.md).
-
 ## Documentation
 
 - [Self-host quickstart](docs/quickstart/self-host.md): the local run and the full error-to-PR path, in detail
 - [Install guide](docs/install.md): add the SDK to your app
 - [Guides](docs/guides): React, Vue, vanilla JS, source maps, GitHub App, Slack notifications, replay privacy
 - [Architecture](docs/architecture/overview.md): components, trust boundaries, life of an error
+- [Trust and data flow](docs/architecture/trust.md): what each integration receives and what leaves your infrastructure
 - [Reference](docs/reference): SDK options, HTTP routes, environment variables, reason codes, checked against source by [`scripts/check-docs-drift.mjs`](scripts/check-docs-drift.mjs) in CI
 
-## Licensing
+## License
 
-| Code | License |
-| --- | --- |
-| Server, worker, agent core ([`packages/agent-core`](packages/agent-core)), dashboard, CLI ([`cli`](cli/LICENSE)), docs site, and tests | [AGPL-3.0-only](LICENSE) |
-| Browser SDK ([`packages/sdk`](packages/sdk/LICENSE)), Python SDK ([`packages/sdk-python`](packages/sdk-python/LICENSE)), and shared types ([`shared`](shared/LICENSE)) | MIT |
-
-In short: the SDKs and shared contracts are MIT; the ingestion service, worker, agent core, dashboard, CLI, docs site, and tests are AGPL-3.0-only.
+Opslane is [AGPL-3.0](LICENSE). The browser and Python SDKs and the shared types are MIT, so you can ship them in your own app.
 
 ## Contributing
+
+Opslane is pre-1.0: the [`POST /api/v1/events` wire contract](docs/contracts/events.md) is stable and backward-compatible, but other interfaces may still change.
 
 Bug reports and feature requests are welcome on the [issue tracker](https://github.com/opslane/opslane-oss/issues). For development setup, codebase conventions, and the verification bar for changes, see [AGENTS.md](AGENTS.md).
