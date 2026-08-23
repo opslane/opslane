@@ -5,10 +5,20 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createMemoryHistory, createRouter } from 'vue-router';
 
 import Settings from './Settings.vue';
-import { getMe, listEnvironments, listProjects, updateProject, type Project } from '../api';
+import {
+  createAPIKey,
+  getMe,
+  listAPIKeys,
+  listEnvironments,
+  listProjects,
+  revokeAPIKey,
+  updateProject,
+  type Project,
+} from '../api';
 
 vi.mock('../api', () => ({
   createInvitation: vi.fn(),
+  createAPIKey: vi.fn(),
   createProject: vi.fn(),
   deleteGitHubConfig: vi.fn(),
   getFixStats: vi.fn().mockResolvedValue({
@@ -20,8 +30,10 @@ vi.mock('../api', () => ({
   getMe: vi.fn(),
   listEnvironments: vi.fn().mockResolvedValue({ environments: [], rollup_ready: true }),
   listInvitations: vi.fn().mockResolvedValue([]),
+  listAPIKeys: vi.fn().mockResolvedValue([]),
   listProjects: vi.fn(),
   revokeInvitation: vi.fn(),
+  revokeAPIKey: vi.fn(),
   setGitHubConfig: vi.fn(),
   updateProject: vi.fn(),
 }));
@@ -108,6 +120,84 @@ describe('project default environment setting', () => {
     expect(wrapper.text()).not.toContain('Make default');
     expect(updateProject).not.toHaveBeenCalled();
     wrapper.unmount();
+  });
+});
+
+describe('MCP API key management', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    localStorage.setItem('opslane_project_id', project.id);
+    localStorage.setItem('opslane_project_name', project.name);
+    vi.mocked(listAPIKeys).mockResolvedValue([{
+      key_id: 'aaaaaaaaaaaaaaaaaaaaaaaaaa',
+      scope: 'api',
+      label: 'Claude Code',
+      status: 'active',
+      redacted: 'opslane_ak_aaaaaaaaaaaaaaaaaaaaaaaaaa_…',
+      created_by: 'user-1',
+      created_at: '2026-08-22T00:00:00Z',
+      last_used_at: null,
+      expires_at: '2026-09-22T00:00:00Z',
+      revoked_at: null,
+    }]);
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+    localStorage.clear();
+  });
+
+  it('loads redacted keys for admins when the tab opens', async () => {
+    const wrapper = await mountSettings('admin');
+    await wrapper.get('#settings-api-keys-tab').trigger('click');
+    await flushPromises();
+
+    expect(listAPIKeys).toHaveBeenCalledWith(project.id);
+    expect(wrapper.text()).toContain('Claude Code');
+    expect(wrapper.text()).toContain('opslane_ak_aaaaaaaaaaaaaaaaaaaaaaaaaa_…');
+    expect(wrapper.text()).toContain('Sep');
+    wrapper.unmount();
+  });
+
+  it('shows a created token once and requires acknowledgement', async () => {
+    vi.mocked(createAPIKey).mockResolvedValue({
+      key_id: 'bbbbbbbbbbbbbbbbbbbbbbbbbb',
+      token: 'opslane_ak_bbbbbbbbbbbbbbbbbbbbbbbbbb_SECRET',
+      label: 'Codex',
+      scope: 'api',
+      expires_at: null,
+    });
+    const wrapper = await mountSettings('admin');
+    await wrapper.get('#settings-api-keys-tab').trigger('click');
+    await flushPromises();
+    await wrapper.get('#api-key-label').setValue('Codex');
+    await wrapper.get('#api-key-create-form').trigger('submit');
+    await flushPromises();
+
+    expect(createAPIKey).toHaveBeenCalledWith(project.id, { label: 'Codex', expires_at: null });
+    expect(wrapper.text()).toContain('opslane_ak_bbbbbbbbbbbbbbbbbbbbbbbbbb_SECRET');
+    const done = wrapper.findAll('button').find((button) => button.text() === 'Done');
+    expect(done?.attributes('disabled')).toBeDefined();
+    await wrapper.get('#api-key-acknowledged').setValue(true);
+    await done!.trigger('click');
+    expect(wrapper.text()).not.toContain('opslane_ak_bbbbbbbbbbbbbbbbbbbbbbbbbb_SECRET');
+    wrapper.unmount();
+  });
+
+  it('confirms revocation and hides key management from members', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    vi.mocked(revokeAPIKey).mockResolvedValue(undefined);
+    const wrapper = await mountSettings('admin');
+    await wrapper.get('#settings-api-keys-tab').trigger('click');
+    await flushPromises();
+    await wrapper.get('[data-revoke-api-key="aaaaaaaaaaaaaaaaaaaaaaaaaa"]').trigger('click');
+    await flushPromises();
+    expect(revokeAPIKey).toHaveBeenCalledWith(project.id, 'aaaaaaaaaaaaaaaaaaaaaaaaaa');
+    wrapper.unmount();
+
+    const member = await mountSettings('member');
+    expect(member.find('#settings-api-keys-tab').exists()).toBe(false);
+    member.unmount();
   });
 });
 

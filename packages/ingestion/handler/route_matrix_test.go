@@ -333,7 +333,6 @@ func TestRemovedCredentialRoutesAreNotRegistered(t *testing.T) {
 		{method: http.MethodPost, path: "/api/v1/sourcemaps"},
 		{method: http.MethodPost, path: "/api/v1/environments/00000000-0000-0000-0000-000000000000/api-keys"},
 		{method: http.MethodPost, path: "/api/v1/projects/" + env.projectID + "/environments"},
-		{method: http.MethodGet, path: "/api/v1/projects/" + env.projectID + "/api-keys"},
 	} {
 		status, _ := env.call(t, route, matrixPK)
 		if status != http.StatusNotFound {

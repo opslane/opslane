@@ -7,10 +7,12 @@ import type {
   AuthConfig, AuthUser, ForgotPasswordResult, OrgInvitation,
   NotificationDestination, NotificationDestinationList, NotificationTestResult,
   OAuthEmailVerificationResult, PasswordAuthResult, ResetPasswordResult,
+  ManagedAPIKey, CreatedAPIKey,
 } from './types/api';
 export type {
   AuthConfig, AuthMembership, AuthUser, ForgotPasswordResult, OrgInvitation,
   OAuthEmailVerificationResult, PasswordAuthResult, ResetPasswordResult,
+  ManagedAPIKey, CreatedAPIKey,
 } from './types/api';
 import type { ChunkEnvelope } from './components/session-replay';
 
@@ -111,6 +113,7 @@ async function fetchWithAuth<T>(path: string, options: RequestInit = {}): Promis
     const body = await res.text();
     throw new APIError(res.status, `API ${res.status}: ${body || res.statusText}`);
   }
+  if (res.status === 204) return undefined as T;
   return res.json() as Promise<T>;
 }
 
@@ -175,15 +178,6 @@ export interface Environment {
 export interface EnvironmentListResponse {
   environments: Environment[];
   rollup_ready: boolean;
-}
-
-export interface APIKey {
-  key_id: string;
-  scope: 'ingest' | 'sourcemaps';
-  label: string;
-  status: 'active' | 'revoked';
-  revoked_at: string | null;
-  created_at: string;
 }
 
 export interface APIKeyCreated {
@@ -459,6 +453,21 @@ export function listEnvironments(
 ): Promise<EnvironmentListResponse> {
   const query = usedBy ? `?used_by=${usedBy}` : '';
   return fetchJSON<EnvironmentListResponse>(`/projects/${projectId}/environments${query}`);
+}
+
+export function listAPIKeys(projectId: string): Promise<ManagedAPIKey[]> {
+  return fetchJSON<ManagedAPIKey[]>(`/projects/${projectId}/api-keys`);
+}
+
+export function createAPIKey(
+  projectId: string,
+  input: { label: string; expires_at: string | null },
+): Promise<CreatedAPIKey> {
+  return postJSON<CreatedAPIKey>(`/projects/${projectId}/api-keys`, input);
+}
+
+export function revokeAPIKey(projectId: string, keyId: string): Promise<void> {
+  return fetchWithAuth<void>(`/projects/${projectId}/api-keys/${keyId}`, { method: 'DELETE' });
 }
 
 export function listNotificationDestinations(

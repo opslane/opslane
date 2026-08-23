@@ -74,6 +74,9 @@ func NewRouterWithPool(deps *Dependencies, pool *pgxpool.Pool) *chi.Mux {
 	// GitHub webhook (unauthenticated — uses HMAC signature verification)
 	r.Post("/api/v1/github/webhook", deps.HandleWebhook)
 
+	// Remote MCP transport. Bearer authentication is owned by the MCP handler.
+	r.Handle("/mcp", deps.MCPHandler())
+
 	// Internal service read (worker -> ingestion). The shared implementation
 	// applies the same scrub gate and redact-on-read policy as dashboard reads.
 	r.With(RequireInternalToken).Get("/internal/v1/projects/{projectID}/sessions/{sessionID}/chunks/{seq}",
@@ -129,6 +132,9 @@ func NewRouterWithPool(deps *Dependencies, pool *pgxpool.Pool) *chi.Mux {
 		r.With(deps.AuthenticateUserSession).Get("/projects", deps.ListProjects)
 		r.With(deps.AuthenticateUserSession, deps.RequireRoleIfCloud("admin")).Post("/projects", deps.CreateProjectEndpoint)
 		r.With(deps.AuthenticateUserSession, deps.RequireRoleIfCloud("admin")).Patch("/projects/{projectID}", deps.UpdateProjectEndpoint)
+		r.With(deps.AuthenticateUserSession, deps.RequireRoleIfCloud("admin")).Post("/projects/{projectID}/api-keys", deps.CreateAPIKey)
+		r.With(deps.AuthenticateUserSession, deps.RequireRoleIfCloud("admin")).Get("/projects/{projectID}/api-keys", deps.ListAPIKeys)
+		r.With(deps.AuthenticateUserSession, deps.RequireRoleIfCloud("admin")).Delete("/projects/{projectID}/api-keys/{keyID}", deps.RevokeAPIKey)
 
 		// Environment discovery is telemetry-driven; dashboard access is read-only.
 		r.With(deps.AuthenticateUserSession).Get("/projects/{projectID}/environments", deps.ListEnvironmentsEndpoint)

@@ -54,6 +54,27 @@ export interface OrgInvitation {
   revoked_at?: string;
 }
 
+export interface ManagedAPIKey {
+  key_id: string;
+  scope: 'api';
+  label: string;
+  status: 'active' | 'revoked';
+  redacted: string;
+  created_by: string | null;
+  created_at: string;
+  last_used_at: string | null;
+  expires_at: string | null;
+  revoked_at: string | null;
+}
+
+export interface CreatedAPIKey {
+  key_id: string;
+  token: string;
+  label: string;
+  scope: 'api';
+  expires_at: string | null;
+}
+
 export type NotificationEventType = 'issue.created' | 'digest.daily';
 export type NotificationDeliveryPolicy = 'immediate' | 'post_triage';
 

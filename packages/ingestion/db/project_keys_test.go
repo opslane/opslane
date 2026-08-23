@@ -59,6 +59,26 @@ func TestNewProjectKeyPrefixMatchesScope(t *testing.T) {
 	}
 }
 
+func TestNewProjectKeyAPIScope(t *testing.T) {
+	minted, err := NewProjectKey("api", "")
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+	if minted.TokenPrefix != "opslane_ak" || !strings.HasPrefix(minted.Raw, "opslane_ak_") {
+		t.Fatalf("unexpected api key: %+v", minted)
+	}
+	if _, err := NewProjectKey("api", testEndpoint); err == nil {
+		t.Fatal("expected endpoint to be rejected for api scope")
+	}
+	parsed, err := ParseProjectKey(minted.Raw)
+	if err != nil {
+		t.Fatalf("parse api key: %v", err)
+	}
+	if parsed.Scope != "api" || parsed.KeyID != minted.KeyID {
+		t.Fatalf("parsed api key = %+v", parsed)
+	}
+}
+
 func TestNewProjectKeyRejectsUnknownScope(t *testing.T) {
 	if _, err := NewProjectKey("admin", ""); err == nil {
 		t.Fatal("expected unknown scope to fail")
