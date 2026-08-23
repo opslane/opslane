@@ -97,12 +97,12 @@ docker compose exec -T postgres psql -U opslane -d opslane \
 ```
 
 ```text
-   status    |   reason_code   |                  reason_message
--------------+-----------------+---------------------------------------------------
- needs_human | missing_llm_key | ANTHROPIC_API_KEY environment variable is not set
+ status | reason_code | reason_message
+--------+-------------+----------------
+ new    |             |
 ```
 
-The worker stopped because it has no AI credentials, and it said so. To go further:
+Opslane captured the event, resolved its stack, and grouped it into a new issue. It watches the issue but won't investigate a one-off that hasn't reached enough users yet. To see the full investigate-and-fix path, you need an issue real users are hitting, plus a few credentials:
 
 - **Dashboard sign-in:** a GitHub App, or WorkOS for cloud deployments.
 - **Investigation:** `ANTHROPIC_API_KEY`.
