@@ -1,6 +1,6 @@
 # Opslane
 
-> Opslane watches errors and session recordings from a web app, investigates the ones worth fixing against the connected repository, and opens a pull request whose build and tests ran in a sandbox. When it cannot fix something it records a reason code. Self-hosted with Docker Compose. Server, worker, agent core, dashboard, and CLI are AGPL-3.0-only; the SDKs and shared types are MIT.
+> Opslane watches errors and session recordings from a web app, investigates the ones worth fixing against the connected repository, and opens a pull request whose build and tests ran in a sandbox. When it cannot fix something it records a reason code. Self-hosted with Docker Compose. Server, worker, agent core, and dashboard are AGPL-3.0-only; the SDKs and shared types are MIT.
 
 Every page below is plain Markdown in this repository and is published at https://docs.opslane.com. Paths are repo-relative; the published URL drops the `docs/` prefix and the `.md` suffix.
 
@@ -25,6 +25,7 @@ Every page below is plain Markdown in this repository and is published at https:
 
 - [Environments](docs/guides/environments.md): label resolution, the project default, and limiting automatic error investigation by environment
 - [API keys](docs/guides/api-keys.md): `opslane_pk_` ingest keys and `opslane_sk_` source-map keys, minting, rotation, 401 vs 403
+- [Connect a coding agent](docs/guides/mcp.md): wire Claude Code or Codex to the remote MCP server with an `opslane_ak_` key
 - [Slack notifications](docs/guides/slack-notifications.md): incoming webhooks, new-issue alerts, the daily digest
 
 ## Trust and privacy
@@ -39,7 +40,6 @@ Every page below is plain Markdown in this repository and is published at https:
 - [HTTP routes](docs/reference/http-routes.md): every registered route with its auth mode
 - [Environment variables](docs/reference/environment-variables.md): every variable each service reads, including known dead config
 - [Reason codes](docs/reference/reason-codes.md): every `needs_human` reason code with its remediation
-- [CLI agent contract](docs/reference/cli-agent-contract.md): the CLI's JSON status vocabulary for non-interactive callers
 
 ## Contracts
 

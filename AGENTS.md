@@ -12,10 +12,9 @@ Opslane is an AI-powered production error-resolution engine. It ingests browser 
 | `packages/dashboard` | Vue 3, Vite, Tailwind CSS; ingestion-served UI |
 | `packages/sdk` | Browser TypeScript SDK, React/Vue integrations, Vite source maps |
 | `shared` | Runtime-free shared TypeScript contracts |
-| `cli` | Node 22, Commander, Inquirer, Chalk |
 | `test-e2e`, `test-fixtures` | End-to-end contracts and browser fixtures |
 
-Server, worker, agent-core, dashboard, CLI, and test code is AGPL-3.0-only. The browser and Python SDKs and shared types are MIT licensed.
+Server, worker, agent-core, dashboard, and test code is AGPL-3.0-only. The browser and Python SDKs and shared types are MIT licensed.
 
 ## Verification
 
@@ -37,7 +36,6 @@ Two ways that gate reports success without having run:
 - `dist/` is gitignored but survives between runs, so a local build proves nothing about a clean checkout. After adding a workspace dependency, rebuild with the dists removed.
 
 - Shared types or workspace metadata: run `pnpm -r build` and affected tests.
-- CLI: run `pnpm --filter @opslane/cli build` and `pnpm --filter @opslane/cli test`.
 - Compose or health checks: validate config, start services, and inspect health. Build any affected Compose image after Dockerfile changes.
 - Pipeline changes require a live smoke: apply migrations, run `scripts/seed-e2e.sql`, rebuild ingestion and worker, send an event to `$INGESTION_URL/api/v1/events`, and confirm the job reaches its expected terminal state. Use `test-fixtures/vue-app` or `test-fixtures/react-app` for browser fixtures.
 
@@ -65,7 +63,7 @@ Two ways that gate reports success without having run:
 
 - Use ESM and strict TypeScript. Use `unknown` plus narrowing instead of `any`.
 - Keep Vitest tests colocated in `__tests__`.
-- Use the `@opslane/` package scope and the `opslane` CLI name.
+- Use the `@opslane/` package scope.
 - Local Postgres user/database names are `opslane`; Compose services are `ingestion`, `worker`, `postgres`, and `minio`.
 - New server-side packages default to `AGPL-3.0-only`. Put code in the MIT SDKs/shared boundary only when that distribution choice is intentional.
 

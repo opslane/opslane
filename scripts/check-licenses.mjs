@@ -19,17 +19,6 @@ const MIT_PACKAGES = ['@opslane/sdk', '@opslane/shared'];
 const EXPECTED_MIT_INVENTORY = ['@opslane/sdk', '@opslane/sdk-python', '@opslane/shared'];
 const EXPECTED_MIT_PNPM_PACKAGES = ['@opslane/sdk', '@opslane/shared'];
 
-const cliPackage = JSON.parse(
-  readFileSync(new URL('../cli/package.json', import.meta.url), 'utf8')
-);
-if (cliPackage.license !== 'AGPL-3.0-only') {
-  throw new Error(
-    `cli/package.json must declare AGPL-3.0-only, found ${JSON.stringify(cliPackage.license)}`
-  );
-}
-if (MIT_PACKAGES.includes('@opslane/cli')) {
-  throw new Error('@opslane/cli must not be included in the MIT package boundary');
-}
 const agentCorePackage = JSON.parse(
   readFileSync(new URL('../packages/agent-core/package.json', import.meta.url), 'utf8')
 );

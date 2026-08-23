@@ -42,9 +42,7 @@ A GitHub App gives you short-lived installation tokens scoped to explicitly sele
 
 ### Extra requirements for agent onboarding
 
-If agents will set up projects via `opslane setup` (see the agent quickstart), the App additionally needs:
-
-- **"Request user authorization (OAuth) during installation" enabled** — the agent flow verifies the authorizing human's identity in the same interaction as the install.
+This section described the removed CLI agent-setup flow and no longer applies.
 - **Account permission "Email addresses: Read-only"** — the identity check reads the authorizer's verified email; without this permission every agent authorization fails with "GitHub check failed".
 - The **Callback URL** must be your server's `/auth/github/callback` (one shared callback dispatches both the web login flow and agent sessions).
 
