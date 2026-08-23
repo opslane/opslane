@@ -76,6 +76,9 @@ The agent callback requires `code`, `installation_id`, and UUID `state`; definit
 | GET | `/api/v1/projects/{projectID}/environments` | List all environments, or only surface-observed rows with `used_by=incidents` or `used_by=sessions` |
 | GET | `/api/v1/projects/{projectID}/event-count` | Event count stats |
 | GET | `/api/v1/projects/{projectID}/digest/latest` | Latest delivered daily digest cards, or an empty digest when no run has been delivered |
+| POST | `/api/v1/projects/{projectID}/api-keys` | Create an MCP API key (admin); the `opslane_ak_` secret is returned once and never again |
+| GET | `/api/v1/projects/{projectID}/api-keys` | List the project's MCP API keys, redacted (admin) |
+| DELETE | `/api/v1/projects/{projectID}/api-keys/{keyID}` | Revoke an MCP API key (admin) |
 | GET | `/api/v1/projects/{projectID}/incidents` | List incidents |
 | GET | `/api/v1/projects/{projectID}/incidents/{incidentID}` | Incident detail |
 | GET | `/api/v1/projects/{projectID}/incidents/{incidentID}/evidence` | Frozen source frames, failed requests, replay pointers, and evidence availability for the open issue round |
