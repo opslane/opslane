@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/opslane/opslane/packages/ingestion/db"
 )
@@ -24,6 +25,60 @@ func seedProjectKeyTest(t *testing.T, label string) (*db.Queries, string, string
 	}
 	return q, org.ID, provisioning.Project.ID
 }
+
+func TestLookupProjectKeyExpiry(t *testing.T) {
+	q, _, projectID := seedProjectKeyTest(t, "project-keys-expiry")
+	ctx := context.Background()
+
+	tests := []struct {
+		name      string
+		expiresAt *time.Time
+		revoke    bool
+		wantErr   bool
+	}{
+		{name: "no expiry"},
+		{name: "future expiry", expiresAt: timePtr(time.Now().Add(time.Hour))},
+		{name: "past expiry", expiresAt: timePtr(time.Now().Add(-time.Hour)), wantErr: true},
+		{name: "revoked before future expiry", expiresAt: timePtr(time.Now().Add(time.Hour)), revoke: true, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			minted, err := q.CreateProjectKey(ctx, projectID, db.ScopeAPI, tc.name, nil, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := q.Pool().Exec(ctx, `
+				UPDATE project_api_keys
+				SET expires_at = $2,
+				    revoked_at = CASE WHEN $3::boolean THEN now() ELSE NULL END
+				WHERE key_id = $1`, minted.KeyID, tc.expiresAt, tc.revoke); err != nil {
+				t.Fatal(err)
+			}
+			lookup, err := q.LookupProjectKey(ctx, minted.Raw)
+			if tc.wantErr {
+				if !errors.Is(err, db.ErrProjectKeyInvalid) {
+					t.Fatalf("err = %v, want ErrProjectKeyInvalid", err)
+				}
+				if tc.name == "past expiry" && !errors.Is(err, db.ErrProjectKeyExpired) {
+					t.Fatalf("err = %v, want ErrProjectKeyExpired", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.expiresAt == nil {
+				if lookup.ExpiresAt != nil {
+					t.Fatalf("expires_at = %v, want nil", lookup.ExpiresAt)
+				}
+			} else if lookup.ExpiresAt == nil || !lookup.ExpiresAt.Equal(tc.expiresAt.Truncate(time.Microsecond)) {
+				t.Fatalf("expires_at = %v, want %v", lookup.ExpiresAt, tc.expiresAt)
+			}
+		})
+	}
+}
+
+func timePtr(value time.Time) *time.Time { return &value }
 
 func TestCreateAndLookupProjectKey(t *testing.T) {
 	q, orgID, projectID := seedProjectKeyTest(t, "project-keys-lookup")

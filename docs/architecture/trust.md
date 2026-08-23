@@ -30,6 +30,7 @@ The worker pushes only to a reserved Opslane fix branch (`opslane/fix-<group-id>
 | Configured identity provider | OAuth code exchange and user/email lookup (sign-in); email verification codes when the OAuth provider requires verification | During dashboard sign-in and OAuth email verification |
 | GitHub (ingestion) | Installation and repository listing (App setup) | During GitHub App setup |
 | Configured webhooks | Issue events (issue ID, title, first-seen timestamp, environment; destinations with `post_triage` delivery policy receive `issue.triaged` adding triage outcome, dashboard URL, 7-day user and session counts) and digest events (date, session and user counts, triage counts, held-back count, overflow count); both include project ID and name | When enabled notification destinations are triggered by subscribed events |
+| MCP clients (Claude Desktop, Claude Code) | Issue details (ID, title, status, root cause, affected user counts, evidence: stack frames with source paths, failed request patterns, session replay pointers), digest summaries (incident IDs, titles, affected user counts, account names), PR URL updates | During MCP tool invocations with API-scoped bearer authentication |
 | WorkOS (ingestion) | Email addresses, passwords, verification codes, reset tokens | Only when password authentication is enabled; during sign-in, signup, email verification, and password reset |
 
 With no credentials configured, **nothing leaves your host** — the stack ingests and captures error events entirely locally.
@@ -75,7 +76,7 @@ See [replay privacy and masking](../guides/replay-privacy.md) for what replay da
 
 ## Credential storage
 
-- **Ingest API keys** are stored as SHA-256 hashes; the raw key is shown once at creation.
+- **Project API keys** are stored as SHA-256 hashes; the raw key is shown once at creation. This includes ingest keys (`opslane_pk_` prefix, browser SDK authentication) and API keys (`opslane_ak_` prefix, MCP client authentication). Keys support optional expiry and revocation.
 - **User sessions** are JWTs signed with `JWT_SECRET`, mated with rotating refresh-token families (token hashes only in the database).
 - **Passwords** (when password authentication is enabled) are not stored locally — registration, authentication, and reset are handled by the configured identity provider (WorkOS).
 - **GitHub App private key**, **Langfuse credentials** (`LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_BASE_URL`), and other worker credentials are environment variables — supplied by your deployment, never written to the database.

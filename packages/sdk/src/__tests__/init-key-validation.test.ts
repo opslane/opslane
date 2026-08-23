@@ -26,6 +26,16 @@ describe('init key validation', () => {
     expect(error).toHaveBeenCalledWith(expect.stringContaining('opslane_pk_'));
   });
 
+  it('refuses a secret api key and identifies secret browser prefixes', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { init } = await import('../index.js');
+
+    init({ apiKey: 'opslane_ak_mzxw6ytboi3damrrgi3tknzxgq_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopq' });
+
+    expect(error).toHaveBeenCalledWith(expect.stringContaining('opslane_ak_'));
+    expect(error).toHaveBeenCalledWith(expect.stringContaining('opslane_sk_'));
+  });
+
   it('refuses a legacy def_ key', async () => {
     const error = vi.spyOn(console, 'error').mockImplementation(() => {});
     const { init } = await import('../index.js');

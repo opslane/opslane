@@ -20,11 +20,13 @@ import (
 const (
 	ScopeIngest     = "ingest"
 	ScopeSourcemaps = "sourcemaps"
+	ScopeAPI        = "api"
 )
 
 const (
 	prefixIngest     = "opslane_pk"
 	prefixSourcemaps = "opslane_sk"
+	prefixAPI        = "opslane_ak"
 	keyIDBytes       = 16
 	secretBytes      = 32
 )
@@ -37,6 +39,9 @@ var (
 	// ErrProjectKeyInvalid intentionally combines every unusable-credential
 	// case so callers do not reveal which part of a credential was recognised.
 	ErrProjectKeyInvalid = errors.New("invalid project key")
+	// ErrProjectKeyExpired remains an invalid credential to every caller, while
+	// allowing internal observability to distinguish expiry from other rejects.
+	ErrProjectKeyExpired = fmt.Errorf("%w: expired", ErrProjectKeyInvalid)
 )
 
 // MintedProjectKey contains the raw key only at creation time. The database
@@ -61,8 +66,21 @@ type ProjectKeyLookup struct {
 	ProjectID            string
 	OrgID                string
 	Scope                string
+	ExpiresAt            *time.Time
 	AllowedOrigins       []string
 	DefaultEnvironmentID *string
+}
+
+type APIKeyRecord struct {
+	KeyID      string
+	Scope      string
+	Label      string
+	CreatedBy  *string
+	CreatedAt  time.Time
+	ExpiresAt  *time.Time
+	RevokedAt  *time.Time
+	RevokedBy  *string
+	LastUsedAt *time.Time
 }
 
 func prefixForScope(scope string) (string, error) {
@@ -71,6 +89,8 @@ func prefixForScope(scope string) (string, error) {
 		return prefixIngest, nil
 	case ScopeSourcemaps:
 		return prefixSourcemaps, nil
+	case ScopeAPI:
+		return prefixAPI, nil
 	default:
 		return "", fmt.Errorf("unknown key scope %q", scope)
 	}
@@ -82,6 +102,8 @@ func scopeForPrefix(prefix string) (string, bool) {
 		return ScopeIngest, true
 	case prefixSourcemaps:
 		return ScopeSourcemaps, true
+	case prefixAPI:
+		return ScopeAPI, true
 	default:
 		return "", false
 	}
@@ -175,14 +197,15 @@ func ParseProjectKey(raw string) (*ParsedProjectKey, error) {
 	}
 	switch {
 	case len(remainder) == secretLen:
-		// Bare key: still valid server-side for both scopes, because routing
-		// to an endpoint is a client concern.
+		// Bare keys are the complete wire form for ingest and api. They also
+		// remain valid server-side for sourcemaps because endpoint routing is
+		// a client concern.
 	case remainder[secretLen] != '_':
 		return nil, fmt.Errorf("malformed key")
 	default:
 		payload := remainder[secretLen+1:]
 		if scope != ScopeSourcemaps {
-			return nil, fmt.Errorf("malformed key") // payload on a pk
+			return nil, fmt.Errorf("malformed key") // payload on a non-sk key
 		}
 		if _, err := ParseSKPayload(payload); err != nil {
 			return nil, fmt.Errorf("malformed key")
@@ -238,6 +261,82 @@ func (q *Queries) CreateProjectKeyTx(
 	return minted, nil
 }
 
+func (q *Queries) CreateAPIKey(
+	ctx context.Context,
+	orgID, projectID, label, createdByUserID string,
+	expiresAt *time.Time,
+) (*MintedProjectKey, *APIKeyRecord, error) {
+	minted, err := NewProjectKey(ScopeAPI, "")
+	if err != nil {
+		return nil, nil, err
+	}
+	record := &APIKeyRecord{}
+	err = q.pool.QueryRow(ctx, `
+		INSERT INTO project_api_keys
+		  (key_id, project_id, scope, token_prefix, secret_hash, label,
+		   created_by_user_id, expires_at)
+		SELECT $3, p.id, 'api', 'opslane_ak', $4, $5, $6, $7
+		FROM projects p
+		WHERE p.id = $2 AND p.org_id = $1
+		RETURNING id, key_id, scope, label, created_by_user_id, created_at,
+		          expires_at, revoked_at, revoked_by_user_id`,
+		orgID, projectID, minted.KeyID, minted.SecretHash, label,
+		createdByUserID, expiresAt,
+	).Scan(&minted.ID, &record.KeyID, &record.Scope, &record.Label,
+		&record.CreatedBy, &record.CreatedAt, &record.ExpiresAt,
+		&record.RevokedAt, &record.RevokedBy)
+	if err != nil {
+		return nil, nil, fmt.Errorf("create api key: %w", err)
+	}
+	return minted, record, nil
+}
+
+func (q *Queries) ListAPIKeys(ctx context.Context, orgID, projectID string) ([]APIKeyRecord, error) {
+	rows, err := q.pool.Query(ctx, `
+		SELECT k.key_id, k.scope, k.label, k.created_by_user_id, k.created_at,
+		       k.expires_at, k.revoked_at, k.revoked_by_user_id
+		FROM project_api_keys k
+		JOIN projects p ON p.id = k.project_id AND p.org_id = $1
+		WHERE k.project_id = $2 AND k.scope = 'api'
+		ORDER BY k.created_at DESC, k.id DESC`, orgID, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("list api keys: %w", err)
+	}
+	defer rows.Close()
+
+	keys := make([]APIKeyRecord, 0)
+	for rows.Next() {
+		var key APIKeyRecord
+		if err := rows.Scan(&key.KeyID, &key.Scope, &key.Label, &key.CreatedBy,
+			&key.CreatedAt, &key.ExpiresAt, &key.RevokedAt, &key.RevokedBy); err != nil {
+			return nil, fmt.Errorf("scan api key: %w", err)
+		}
+		keys = append(keys, key)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list api keys: %w", err)
+	}
+	return keys, nil
+}
+
+func (q *Queries) RevokeAPIKey(
+	ctx context.Context,
+	orgID, projectID, keyID, revokedByUserID string,
+) (bool, error) {
+	command, err := q.pool.Exec(ctx, `
+		UPDATE project_api_keys k
+		SET revoked_at = COALESCE(k.revoked_at, now()),
+		    revoked_by_user_id = COALESCE(k.revoked_by_user_id, $4)
+		FROM projects p
+		WHERE p.id = k.project_id AND p.org_id = $1
+		  AND k.project_id = $2 AND k.key_id = $3 AND k.scope = 'api'`,
+		orgID, projectID, keyID, revokedByUserID)
+	if err != nil {
+		return false, fmt.Errorf("revoke api key: %w", err)
+	}
+	return command.RowsAffected() > 0, nil
+}
+
 func (q *Queries) LookupProjectKey(ctx context.Context, raw string) (*ProjectKeyLookup, error) {
 	parsed, err := ParseProjectKey(raw)
 	if err != nil {
@@ -250,13 +349,13 @@ func (q *Queries) LookupProjectKey(ctx context.Context, raw string) (*ProjectKey
 		revokedAt  *time.Time
 	)
 	err = q.pool.QueryRow(ctx,
-		`SELECT k.project_id, p.org_id, k.scope, k.secret_hash, k.revoked_at,
+		`SELECT k.project_id, p.org_id, k.scope, k.secret_hash, k.revoked_at, k.expires_at,
 		        p.allowed_origins, p.default_environment_id
 		 FROM project_api_keys k
 		 JOIN projects p ON p.id = k.project_id
 		 WHERE k.key_id = $1`,
 		parsed.KeyID,
-	).Scan(&out.ProjectID, &out.OrgID, &out.Scope, &storedHash, &revokedAt,
+	).Scan(&out.ProjectID, &out.OrgID, &out.Scope, &storedHash, &revokedAt, &out.ExpiresAt,
 		&out.AllowedOrigins, &out.DefaultEnvironmentID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrProjectKeyInvalid
@@ -271,6 +370,9 @@ func (q *Queries) LookupProjectKey(ctx context.Context, raw string) (*ProjectKey
 	) == 1
 	if !secretOK || out.Scope != parsed.Scope || revokedAt != nil {
 		return nil, ErrProjectKeyInvalid
+	}
+	if out.ExpiresAt != nil && out.ExpiresAt.Before(time.Now()) {
+		return nil, ErrProjectKeyExpired
 	}
 
 	out.KeyID = parsed.KeyID

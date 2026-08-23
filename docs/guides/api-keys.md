@@ -2,21 +2,22 @@
 covers:
   - packages/ingestion/db/project_keys.go
   - packages/ingestion/cmd/mint-key/main.go
-description: The two project key scopes, how to mint them, and how to rotate them.
+  - packages/ingestion/handler/api_keys.go
+description: The project key scopes, how to create them, and how to rotate them.
 ---
 
 # API keys
 
-A project has two kinds of keys. The server enforces what each can do.
+A project has three kinds of keys. The server enforces what each can do.
 
-| | Ingest key | Source-map key |
-| --- | --- | --- |
-| Looks like | `opslane_pk_...` | `opslane_sk_...` |
-| What it can do | Send events and session recordings | Upload source maps |
-| Where it lives | Inside your browser bundle | In CI |
-| If it leaks | Nothing to do; it is public by construction | Revoke it and mint a new one |
+| | Ingest key | Source-map key | MCP key |
+| --- | --- | --- | --- |
+| Looks like | `opslane_pk_...` | `opslane_sk_...` | `opslane_ak_...` |
+| What it can do | Send events and session recordings | Upload source maps | Read incidents and link pull requests through the MCP tools |
+| Where it lives | Inside your browser bundle | In CI | In a coding agent's MCP config |
+| If it leaks | Nothing to do; it is public by construction | Revoke it and create a new one | Revoke it and create a new one |
 
-No key can read data. Reading requires a signed-in user.
+The ingest and source-map keys cannot read your data. The MCP key can read a project's incidents and link pull requests, which is why it is a secret you keep out of client code.
 
 ## The ingest key
 
@@ -38,6 +39,12 @@ OPSLANE_SOURCEMAP_KEY=opslane_sk_...
 
 Never give it a `VITE_`-style public prefix; that bundles the secret into the browser. The [source maps guide](source-maps.md) covers the Vite plugin that uses it.
 
+## The MCP key
+
+The MCP key lets a coding agent (Claude Code or Codex) work a project's digest through Opslane's remote MCP server. Unlike the other keys it can read incident detail and link a pull request, so it is a secret: keep it out of browser and client code. It is scoped to one project, so the key itself selects the project.
+
+Create an MCP key from the dashboard (project settings, API keys). The secret is shown once. It supports an optional expiry and can be revoked at any time; revoking it stops that key immediately without touching the others. Configure it in your agent as a bearer token, ideally from an environment variable: `Authorization: Bearer opslane_ak_...`.
+
 ## Minting keys on a self-host
 
 The `mint-key` tool ships in the ingestion container:
@@ -53,11 +60,13 @@ It prints the key once, plus the key ID and the SQL to revoke it. Source-map key
 docker compose exec -T postgres psql -U opslane -d opslane -c "SELECT id, name FROM projects;"
 ```
 
+`mint-key` covers the ingest and source-map scopes. MCP keys are created from the dashboard (project settings, API keys).
+
 ## Rotating a key
 
 Minting never revokes, so old and new keys can overlap. Mint the new key, deploy it, then revoke the old one with the SQL `mint-key` printed. Revoking one key never touches the others.
 
 ## When a key is rejected
 
-- `401`: the key doesn't parse or was revoked. Copy the full value; a truncated key can't parse.
-- `403 insufficient_scope`: a valid key with the wrong scope, usually a source-map key sent with events.
+- `401`: the key doesn't parse, was revoked, or expired. Copy the full value; a truncated key can't parse.
+- `403 insufficient_scope`: a valid key with the wrong scope, usually a source-map key sent with events, or a non-MCP key used against the MCP server.

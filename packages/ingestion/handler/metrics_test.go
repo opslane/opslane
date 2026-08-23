@@ -158,3 +158,20 @@ func TestKeyAuthMetricRenders(t *testing.T) {
 		}
 	}
 }
+
+func TestMCPAuthMetricUsesFixedOutcomes(t *testing.T) {
+	RecordMCPAuth("ok")
+	RecordMCPAuth("unbounded")
+
+	rec := httptest.NewRecorder()
+	Metrics(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body := rec.Body.String()
+	for _, outcome := range []string{"ok", "missing", "invalid", "wrong_scope", "expired", "lookup_error"} {
+		if !strings.Contains(body, `opslane_mcp_auth_total{outcome="`+outcome+`"}`) {
+			t.Fatalf("metrics output missing MCP outcome %q", outcome)
+		}
+	}
+	if strings.Contains(body, `opslane_mcp_auth_total{outcome="unbounded"}`) {
+		t.Fatal("MCP metric accepted an unbounded outcome")
+	}
+}

@@ -49,13 +49,16 @@ Seed a test project and its ingest key, then send a fake error:
 ```bash
 docker compose exec -T postgres psql -U opslane -d opslane < scripts/seed-e2e.sql
 
+# Read the seed script's public ingest key from the top of scripts/seed-e2e.sql:
+INGEST_KEY=$(grep -oim1 'opslane_pk_[a-z0-9_]*' scripts/seed-e2e.sql)
+
 curl -X POST http://localhost:8082/api/v1/events \
   -H 'Content-Type: application/json' \
-  -H 'X-API-Key: opslane_pk_mzxw6ytboi3damrrgi3tknzxgq_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopq' \
+  -H "X-API-Key: $INGEST_KEY" \
   -d '{"timestamp":"2026-01-01T00:00:00Z","error":{"type":"ReferenceError","message":"demo is not defined","stack":"ReferenceError: demo is not defined\n  at app.js:1:1"},"breadcrumbs":[],"context":{"url":"https://example.com","user_agent":"smoke test"},"sdk_version":"0.0.1","platform":"javascript"}'
 ```
 
-The `opslane_pk_...` value is the seed script's test ingest key, quoted at the top of `scripts/seed-e2e.sql`; real deployments mint their own. You should get HTTP `202` with an `error_group_id`. Within ~30 seconds the worker claims the investigation job. It has no AI credentials, so it stops and says why:
+That `INGEST_KEY` line reads the seed script's test ingest key from `scripts/seed-e2e.sql`; real deployments mint their own. You should get HTTP `202` with an `error_group_id`. Within ~30 seconds the worker claims the investigation job. It has no AI credentials, so it stops and says why:
 
 ```bash
 docker compose exec -T postgres psql -U opslane -d opslane \
@@ -72,7 +75,7 @@ Expected result:
 
 That `needs_human` + reason code is part of the product's core contract: every run ends in an explicit state. The main outcomes are a ready-for-review fix PR backed by executed evidence (`pr_created`), an opt-in unverified draft awaiting repository CI (`pr_draft`), a posted root-cause analysis awaiting your go-ahead (`investigated`), and a stated reason a human is needed (`needs_human`). Which specific reason code you see depends on which credential the worker misses first; the guarantee is the explicit state, not a particular code.
 
-One note on keys: a project has two key scopes. The seeded `opslane_pk_` **ingest key** can only send events and recordings, and is safe to ship in a browser bundle. Uploading source maps takes a separate `opslane_sk_` **source-map key**, minted with `mint-key`; see the [source maps guide](../guides/source-maps.md).
+One note on keys: a project has three key scopes (ingest, source maps, and API). The seeded `opslane_pk_` **ingest key** can only send events and recordings, and is safe to ship in a browser bundle. Uploading source maps takes a separate `opslane_sk_` **source-map key**, minted with `mint-key`; see the [source maps guide](../guides/source-maps.md).
 
 ## Path 2: full error-to-PR
 
