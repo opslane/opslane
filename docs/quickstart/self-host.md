@@ -51,11 +51,11 @@ docker compose exec -T postgres psql -U opslane -d opslane < scripts/seed-e2e.sq
 
 curl -X POST http://localhost:8082/api/v1/events \
   -H 'Content-Type: application/json' \
-  -H 'X-API-Key: opslane_pk_mzxw6ytboi3damrrgi3tknzxgq_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopq' \
+  -H 'X-API-Key: opslane_pk_...' \
   -d '{"timestamp":"2026-01-01T00:00:00Z","error":{"type":"ReferenceError","message":"demo is not defined","stack":"ReferenceError: demo is not defined\n  at app.js:1:1"},"breadcrumbs":[],"context":{"url":"https://example.com","user_agent":"smoke test"},"sdk_version":"0.0.1","platform":"javascript"}'
 ```
 
-The `opslane_pk_...` value is the seed script's test ingest key, quoted at the top of `scripts/seed-e2e.sql`; real deployments mint their own. You should get HTTP `202` with an `error_group_id`. Within ~30 seconds the worker claims the investigation job. It has no AI credentials, so it stops and says why:
+Copy the real `opslane_pk_...` value from the top of `scripts/seed-e2e.sql` (the seed script's test ingest key) into the header above; real deployments mint their own. You should get HTTP `202` with an `error_group_id`. Within ~30 seconds the worker claims the investigation job. It has no AI credentials, so it stops and says why:
 
 ```bash
 docker compose exec -T postgres psql -U opslane -d opslane \
