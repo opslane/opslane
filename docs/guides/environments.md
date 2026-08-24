@@ -45,7 +45,7 @@ The issue list filters by environment, and each issue carries per-environment co
 
 By default, an error in any environment can trigger an investigation, and investigations cost real money and can open pull requests. If you don't want staging errors doing that, enable the scope under **Settings → Environments** and pick the environments allowed to trigger error investigation.
 
-- Events outside the scope still ingest, group, and show up in the per-environment counts. The scope controls investigation, not data.
+- Events outside the scope still ingest, resolve, settle into issues, and show up in the per-environment counts. The scope controls whether their observations can admit an error issue to repository inquiry, not whether Opslane stores them.
 - The scope fails closed: enabled with an empty list means no environment triggers an error investigation.
 - Manually triggered fixes bypass the scope.
 - Projects that never enable the scope behave exactly as before.

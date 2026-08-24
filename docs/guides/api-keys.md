@@ -14,7 +14,7 @@ A project has two kinds of keys. The server enforces what each can do.
 | Looks like | `opslane_pk_...` | `opslane_sk_...` |
 | What it can do | Send events and session recordings | Upload source maps |
 | Where it lives | Inside your browser bundle | In CI |
-| If it leaks | Nothing to do; it is public by construction | Revoke it and mint a new one |
+| If it leaks | It is already public in your bundle; rotate it only if it is being abused | Revoke it and mint a new one |
 
 No key can read data. Reading requires a signed-in user.
 

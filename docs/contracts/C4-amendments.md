@@ -1,28 +1,14 @@
 ---
-description: Session replay chunk, pointer, scrub, and retention invariants.
+description: How session replay chunks connect browser errors to scrubbed playback.
 ---
-# Session replay contract (amended 2026-07-15)
+# Session replay data flow
 
-The current SDK records replay data as an always-on stream of bounded session
-chunks. Error incidents refer into that stream with a pointer rather than
-uploading a second one-shot recording.
+The browser SDK records a session as a stream of bounded chunks. An error points into that stream with a session ID and the error time instead of uploading a second recording just for the error.
 
-1. An incident may include `session_pointer: { session_id, error_at }`, where
-   `error_at` is the linked error event's RFC3339 timestamp. Pointer identity is
-   valid before chunks finish scrubbing; readers treat that interval as processing.
+Each regular chunk contains ordered replay events and enough initial state to play on its own. The SDK also flushes its current buffer after an error is accepted, which makes the activity around that error available without waiting for the next routine flush.
 
-2. Regular chunk envelopes contain `{ events, meta }`. Events are ascending by
-   `timestamp`, and each regular chunk opens with rrweb `Meta` followed by
-   `FullSnapshot`, making it independently playable. Chunk reads are project-scoped,
-   authenticated, scrubbed-only, decoded JSON:
-   `GET /api/v1/projects/{projectID}/sessions/{sessionID}/chunks/{seq}`.
+Ingestion stores chunk metadata in Postgres and chunk bodies in the configured replay object store. A server-side scrub processes each object before any reader can fetch it. The dashboard, API, session analyzer, and investigation path all use the authenticated, project-scoped, scrubbed read path.
 
-3. The current SDK flushes its in-flight buffer through the session chunk protocol
-   when an error is accepted. It does not produce `/api/v1/replays/*` uploads.
+An error pointer can exist while its replay chunks are still uploading or scrubbing. Readers treat that period as processing rather than as missing evidence.
 
-4. The project-scoped legacy retrieval endpoint and `/api/v1/replays/*` ingest
-   routes remain accepted for older SDKs and incidents:
-   `GET /api/v1/projects/{projectID}/replays/{replayID}` (session/JWT auth).
-
-5. rrweb remains pinned to `rrweb@2.0.0-alpha.18` and
-   `@rrweb/types@2.0.0-alpha.18`.
+Older SDKs may use the legacy replay upload and project-scoped retrieval routes. Current SDKs use session chunks, and new integrations should use that path.

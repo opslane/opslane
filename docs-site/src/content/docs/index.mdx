@@ -7,7 +7,7 @@ import { CardGrid, LinkCard } from '@astrojs/starlight/components';
 
 Finds the bugs that impact real users. Opens a pull request when it can verify the fix.
 
-Opslane watches errors and session recordings from your app and turns them into a short list of issues worth fixing. It investigates the ones that reach real users against your repository, and when it can verify a fix it opens a pull request. When it can't, it says what it found. A daily digest keeps you out of the dashboard.
+Opslane watches errors and session recordings from your app and turns them into a short list of issues worth fixing. A factual impact filter and a repository inquiry decide which error issues deserve investigation. When Opslane can verify a fix, it opens a pull request. Otherwise, it records an insight or explains why a person must take over. A daily digest keeps you out of the dashboard.
 
 ## Who it is for
 
@@ -35,12 +35,12 @@ Teams who own a production web app and review their own pull requests. Opslane r
   />
   <LinkCard
     title="How issues work"
-    description="Occurrences, grouping, ranking, and the statuses in the list."
+    description="Occurrences, stable issue identity, ranking, and the issue lifecycle."
     href="/guides/issues/"
   />
   <LinkCard
     title="When Opslane opens a pull request"
-    description="The three paths to a fix, and what a ready pull request means."
+    description="When a fix starts, how it is verified, and why a pull request is ready or draft."
     href="/guides/fix-prs/"
   />
 </CardGrid>

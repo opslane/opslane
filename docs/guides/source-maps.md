@@ -54,8 +54,7 @@ public `VITE_OPSLANE_API_KEY=opslane_pk_...` ingest key.
 
 Uploads happen during `closeBundle`. Each final map is sent with
 `PUT /api/v1/sourcemaps/{debugID}`; HTTP 200 and 201 are success. Rate-limited
-uploads honor `Retry-After`, network errors get one retry, and upload failures
-are reported without failing the production build.
+uploads honor `Retry-After`, and upload failures are reported without failing the production build.
 
 ## Mint and revoke an upload key
 
@@ -87,8 +86,8 @@ go run ./cmd/mint-key \
 
 `-endpoint <url>` supplies the same value per invocation; if both are set they
 must canonicalize to the same origin. The origin must be an absolute
-`https://` URL — `http://` is accepted only for `localhost`, `127.0.0.1`, and
-`[::1]` — with no userinfo, path, query, or fragment. Minting fails before it
+`https://` URL (`http://` is accepted only for `localhost`, `127.0.0.1`, and
+`[::1]`) with no userinfo, path, query, or fragment. Minting fails before it
 touches the database when the origin is missing or unusable.
 
 The command prints the target project's name and repo, then the raw
@@ -118,7 +117,7 @@ cd packages/ingestion
 DATABASE_URL=postgres://... go run ./cmd/mint-key -project <uuid> -scope ingest
 ```
 
-The tool prints the project's name and repo before the key — read it and
+The tool prints the project's name and repo before the key. Read it and
 confirm it is the project you meant. The printed `opslane_pk_` value goes
 into the app's build environment (`VITE_OPSLANE_API_KEY` for Vite apps, or
 your framework's equivalent public variable); it takes effect when the app
@@ -127,7 +126,7 @@ is rebuilt and redeployed, because the key ships inside the browser bundle.
 Cutover order when an upgrade removes old keys: deploy the server first,
 then mint per project, then update each app's environment and redeploy it.
 Ingestion for an app stays down from the server deploy until that app's
-redeploy — budget the window accordingly.
+redeploy, so budget the window accordingly.
 
 ## Map custody
 
@@ -221,10 +220,7 @@ WHERE project_id = '<projectID>'
 ORDER BY created_at DESC;
 ```
 
-Trigger an error from the built app and inspect its event. `resolution_status`
-is `resolved`, `partial`, `no_debug_ids`, `map_not_found`, `invalid_map`, or
-`resolution_failed`; successful frames are stored in the versioned
-`stack_trace_resolved` envelope. Opslane exposes no source-map download API.
+Trigger an error from the built app and inspect its event. The event shows whether stack resolution succeeded, is still waiting, or fell back because a matching usable map was unavailable. Successful frames appear in the resolved stack. Opslane exposes no source-map download API.
 
 Only Vite has a first-party upload integration today. Other bundlers may call
 the single-map PUT route if they reproduce the same canonical debug-ID

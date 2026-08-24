@@ -17,7 +17,7 @@ All options accepted by `init()` from `@opslane/sdk`, mirrored from `SdkInitOpti
 | `maxBatchSize` | `number` | `10` | Maximum events per flush. |
 | `debug` | `boolean` | `false` | Log SDK-internal problems to the console. |
 | `reporting` | `{ enabled?: boolean }` | `{ enabled: true }` | Lightweight session-init reporting. Independent of the replay flag; set `enabled: false` to suppress `/api/v1/sessions/init`, which also prevents replay from starting. Error-event delivery is unaffected. |
-| `replay` | `{ enabled?: boolean }` | `{ enabled: true }` | Session recording. **On by default since 1.0.0.** Set `enabled: false` to opt out; a per-project kill switch also exists server-side. Needs `CompressionStream` (Chrome 80+, Safari 16.4+, Firefox 113+). |
+| `replay` | `{ enabled?: boolean }` | `{ enabled: true }` | Session recording. **On by default.** Set `enabled: false` to opt out; a per-project kill switch also exists server-side. Needs `CompressionStream` support. |
 | `sampleRate` | `number` | `1` | Fraction of events sent; clamped to `[0, 1]`. |
 | `errorThrottleMs` | `number` | `1000` | Minimum interval between reports of the same error. |
 | `beforeSend` | `(event) => event \| null` | `undefined` | Final hook: mutate the outgoing payload or return `null` to drop it. |
@@ -43,4 +43,4 @@ Uploads require one private build-time variable, `OPSLANE_SOURCEMAP_KEY`: the
 key carries the ingestion origin it was minted for, so it configures both the
 credential and the destination. See the [source-map guide](../guides/source-maps.md).
 
-Related exports: `captureException(err)`, `setUser({ id })`, `clearUser()`, `destroy()`, `opslaneVuePlugin`, and (from `@opslane/sdk/react`) `OpslaneErrorBoundary` / `captureReactError`. The `@opslane/sdk/vite-plugin` export stamps and uploads source maps during production builds — see the [SDK README](../../packages/sdk/README.md).
+Related exports: `captureException(err)`, `setUser({ id })`, `clearUser()`, `destroy()`, `opslaneVuePlugin`, and (from `@opslane/sdk/react`) `OpslaneErrorBoundary` / `captureReactError`. The `@opslane/sdk/vite-plugin` export stamps and uploads source maps during production builds. See the [SDK README](../../packages/sdk/README.md).

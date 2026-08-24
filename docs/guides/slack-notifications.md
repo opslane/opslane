@@ -4,12 +4,12 @@ covers:
   - packages/ingestion/handler/notifications.go
   - packages/ingestion/db/notifications.go
   - packages/dashboard/src/components/IntegrationsSettings.vue
-description: Send new-issue alerts and the daily digest to Slack with an incoming webhook.
+description: Send post-triage issue alerts and the daily digest to Slack with an incoming webhook.
 ---
 
 # Slack notifications
 
-Opslane posts Slack messages for **new issue alerts** and **daily digests**. Each Slack destination can send a new-issue alert immediately or wait until triage has a known outcome. Repeat events of the same issue do not notify again, so a noisy error is one message, not a flood.
+Opslane posts Slack messages for **issue alerts** and **daily digests**. Capture itself sends no alert. The current settled-identity error path publishes an issue notification only after triage opens a fix pull request or stops for a person. A noisy issue therefore does not produce one message per occurrence.
 
 Delivery goes through a Slack **incoming webhook** you create in your workspace. The webhook URL is the only credential involved; Opslane never needs a Slack bot token or app installation.
 
@@ -23,9 +23,9 @@ Treat that URL as a secret: anyone holding it can post to your channel. Opslane 
 
 ## 2. Add the destination in Opslane
 
-Dashboard → **Settings** → **Integrations** → *Notification integrations*: add a destination, name it, and paste the webhook URL. Select which event types to receive; by default both new issue alerts and daily digests are enabled. For new issues, choose **Alert immediately** or **Alert after triage**. Use the test actions to send samples of each message type and confirm the channel wiring before relying on it.
+Dashboard > **Settings** > **Integrations** > *Notification integrations*: add a destination, name it, and paste the webhook URL. Select which event types to receive; by default both issue alerts and daily digests are enabled. Choose **Alert after triage** for current error-pipeline notifications. The **Alert immediately** setting remains available for compatibility, but the settled-identity path does not currently publish its source event. Use the test actions to confirm the channel wiring before relying on it.
 
-Or via the API (session-authenticated — an SDK API key cannot manage destinations):
+Or via the API (session-authenticated; an SDK API key cannot manage destinations):
 
 ```bash
 curl -X POST "https://your-instance/api/v1/projects/$PROJECT_ID/notification-destinations" \
@@ -37,22 +37,21 @@ Omitting `event_types` enables both new issue alerts and daily digests by defaul
 
 Omitting `delivery_policy` defaults to `immediate`. `post_triage` still uses the
 `issue.created` subscription; it is a timing policy, not another event checkbox.
-It sends only when triage reaches `needs_human` or opens a fix PR. Insight and
-not-actionable outcomes remain in the daily digest and do not page the channel.
+It sends when triage requires human attention or opens a fix pull request. Insights and decisions not to pursue remain in the daily digest and do not page the channel.
 
 The full endpoint set (list, update, delete, test) is in [HTTP routes](../reference/http-routes.md). To test a specific message type, pass `{"event_type":"digest.daily"}` in the test request body; omitting it sends a test issue alert. On cloud multi-org deployments, creating, updating, deleting, and testing destinations requires the **admin** organization role; self-hosted OSS deployments allow any signed-in org member.
 
 ## Delivery semantics
 
-- Notifications are published through a transactional outbox: an issue either commits together with its pending deliveries or not at all, so a crash cannot drop or duplicate a notification.
-- Post-triage delivery commits atomically with the terminal status transition. Retries of the same job deduplicate, while a reopened regression can alert again under its new terminal job.
-- Failed sends retry with backoff up to 5 attempts, honoring Slack's `Retry-After` on rate limits. Delivery state (`last_delivery`, `recent_failures`) is visible on the destination list.
+- Notifications use a transactional outbox. When the pipeline publishes an event, it commits that event and its pending deliveries with the related state change.
+- Post-triage delivery commits with the completed investigation result. Retries of the same job deduplicate, while a reopened issue can alert again after new work finishes.
+- Failed sends retry with backoff and honor Slack's `Retry-After` response on rate limits. Delivery state (`last_delivery`, `recent_failures`) is visible on the destination list.
 - Messages include the issue title, project, environment, first-seen time, and a link to the incident. Set `DASHBOARD_URL` so those links point at your reachable dashboard; without it, messages are delivered without a link.
 - Issue titles are sanitized before formatting: Slack control sequences (like `@channel`) are neutralized and token-shaped strings are masked.
 
 ## Security notes
 
 - Webhook URLs are encrypted at rest with a key derived from `JWT_SECRET`. Rotating `JWT_SECRET` invalidates stored webhook configs, and each destination's URL must be re-entered.
-- Every read surface — API responses, dashboard, logs, delivery errors — shows only a redacted fingerprint (`hooks.slack.com/…/****abcd`), never the URL.
+- Every read surface (API responses, dashboard, logs, delivery errors) shows only a redacted fingerprint (`hooks.slack.com/…/****abcd`), never the URL.
 - Destinations must use HTTPS `hooks.slack.com` URLs. `NOTIFY_UNSAFE_EXTRA_WEBHOOK_HOSTS` extends the allowlist for local development and tests only; never set it in production ([environment variables](../reference/environment-variables.md)).
-- What leaves your host, exactly: issue ID and title, first-seen timestamp, project ID and name, and environment name — itemized in [trust](../architecture/trust.md#data-flow-what-leaves-your-host). With no destinations configured, nothing is sent.
+- What leaves your host, exactly: issue ID and title, first-seen timestamp, project ID and name, and environment name, itemized in [trust](../architecture/trust.md#data-flow-what-leaves-your-host). With no destinations configured, nothing is sent.

@@ -22,36 +22,28 @@ Each row shows the title, the occurrence count, the affected-user count, the tim
 
 ## How error occurrences group
 
-Opslane fingerprints each error from four inputs: the platform, the error type, the normalized message, and at most five stack lines. Where the operator has enabled `GROUPING_DEBUG_ID_FRAMES` and the SDK provides debug_meta images, Opslane substitutes debug IDs for non-content-hashed bundle URLs before normalization, which stabilizes grouping when a bundle URL varies per page load. Normalization replaces the parts that vary between users and deploys: numbers, hex values, UUIDs, double-quoted strings, URL origins, and hashed asset names. This reduces needless splitting. Because browsers emit different stack text, one bug can still surface as more than one issue.
+Capture does not create an issue. It stores the observation and queues a worker job to resolve the stack. Once resolution finishes or falls back to the raw stack, ingestion decides issue identity.
 
-Python errors group on their application frames instead. When Opslane cannot parse a traceback, it falls back to the raw text.
+That identity uses normalized error details and application frames. Opslane records aliases for both raw and resolved forms, so the same bug can stay attached to one issue when source maps arrive late or bundle names change between deploys. Python errors follow the same goal using parsed application frames, with raw text as a fallback when parsing fails.
 
-Grouping is per project. One issue holds separate counts for every environment it appeared in.
+Identity is per project. One issue holds separate counts for every environment where it appeared.
 
 ## How ranking works
 
-The score adds the affected users over seven days to twice the affected users over 24 hours. This count includes signed-in users and anonymous sessions. Opslane then multiplies that total by a route weight: 3.0 for customer-facing routes, 1.0 for standard routes, 0.5 for admin routes.
+Ranking considers recent impact across distinct signed-in users and anonymous sessions, with route importance as another signal. Issues that Opslane cannot act on rank lower.
 
-Five stop reasons cut the score to a tenth: `unfixable_third_party`, `unfixable_no_app_frames`, `unfixable_infra`, `unfixable_test_error`, and `triage_unfixable`.
+Reach and recency therefore matter more than raw occurrence counts. Repeated failures from one person do not outweigh a problem that affects many people.
 
-Reach and recency therefore beat raw occurrence counts. One user reloading 400 times ranks below a bug that reached 50 people once.
+Ranking only decides order. A separate, cheap filter decides whether an error issue has enough recent impact in an allowed environment to enter the repository inquiry. Below that bar, Opslane watches the issue. The inquiry then decides whether to investigate, wait, or stop. See [when Opslane opens a pull request](fix-prs.md).
 
-Ranking only decides order. Whether an issue is investigated at all is a separate bar: it needs at least two affected users or sessions in the last seven days before Opslane reads your repository to weigh it up. Below that, the issue stays watched and nothing investigates it. See [when Opslane opens a pull request](fix-prs.md).
+## Reading the lifecycle
 
-## Statuses
-
-Statuses group by meaning. An issue can move between the groups in any order.
-
-- **Working:** `new`, `queued`, `analyzing`, `fixing`.
-- **Waiting for you:** `investigated` (analysis posted, fix button ready), `awaiting_approval`.
-- **Delivered:** `pr_created`, `pr_draft`, `merged`.
-- **Stopped:** `needs_human` with a reason code, `insight` for a real problem with no code cause. Every code and its remediation: [reason codes](../reference/reason-codes.md).
-- **Closed:** `resolved`, `archived`.
+The status tells you what Opslane is doing now: watching for more evidence, reviewing the issue, investigating or fixing it, waiting for a person, tracking a pull request, or finished. A stopped issue includes a reason and next step; see [reason codes](../reference/reason-codes.md). An insight means the problem is real but its cause lies outside your code.
 
 For what reopens a closed issue, see [when Opslane opens a pull request](fix-prs.md).
 
 ## Which events Opslane drops
 
-Opslane drops three kinds of JavaScript noise before they reach the list: ResizeObserver loop warnings, bare `Script error.` messages with no stack, and errors whose stack frames all come from a browser extension.
+Opslane drops common JavaScript noise before capture, including ResizeObserver loop warnings, bare `Script error.` messages with no stack, and errors whose frames all come from browser extensions.
 
 Opslane keeps stale-deploy failures and groups them. When a release replaces hashed assets, every failure to load an old asset lands in one issue.

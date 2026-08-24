@@ -3,9 +3,9 @@ description: Every registered HTTP route with its authentication mode.
 ---
 # HTTP routes
 
-All routes registered by the ingestion API (`packages/ingestion/handler/routes.go`). Auth column legend: **none** (public), **poll token** (`X-Opslane-Poll-Token` for one agent session), **SDK** (`X-API-Key` project-scoped public ingest key; rate-limited per project, and origin-gated — unconditionally on the browser-only endpoints, and on `/api/v1/events` only when the request presents `Origin` or `Referer`), and **session** (dashboard JWT cookie or CLI token).
+All routes registered by the ingestion API (`packages/ingestion/handler/routes.go`). Auth column legend: **none** (public), **poll token** (`X-Opslane-Poll-Token` for one agent session), **SDK** (`X-API-Key` project-scoped public ingest key; rate-limited per project, and origin-gated (unconditionally on the browser-only endpoints, and on `/api/v1/events` only when the request presents `Origin` or `Referer`), and **session** (dashboard JWT cookie or CLI token).
 
-These are curated tables, not a stability contract — the API is early-stage and may change. The [drift check](../../scripts/check-docs-drift.mjs) fails the repository test gate (`pnpm test`, which CI runs) if this page and `routes.go` disagree.
+These are curated tables, not a stability contract. The API is early-stage and may change. The [drift check](../../scripts/check-docs-drift.mjs) fails the repository test gate (`pnpm test`, which CI runs) if this page and `routes.go` disagree.
 
 ## Public
 
@@ -31,7 +31,7 @@ These are curated tables, not a stability contract — the API is early-stage an
 | GET | `/api/v1/agent/poll/{sessionID}` | poll token (`X-Opslane-Poll-Token`) | Agent onboarding poll |
 | GET | `/agent/auth/{sessionID}` | none | Agent onboarding browser auth |
 | GET | `/agent/auth/callback` | none | Agent onboarding callback |
-| POST | `/api/v1/github/webhook` | HMAC | GitHub pull-request and default-branch push receiver — requires `X-GitHub-Delivery` (400 without it); push events enqueue product-context refreshes |
+| POST | `/api/v1/github/webhook` | HMAC | GitHub pull-request and default-branch push receiver, requires `X-GitHub-Delivery` (400 without it); push events enqueue product-context refreshes |
 
 The agent callback requires `code`, `installation_id`, and UUID `state`; definitive failures are returned by polling as machine-readable reasons. `/auth/callback` dispatches UUID-state GitHub App installs to the agent flow and handles other states through the existing browser-login/install flow.
 
@@ -39,7 +39,7 @@ The agent callback requires `code`, `installation_id`, and UUID `state`; definit
 
 | Method | Path | Origin-gated | Purpose |
 | --- | --- | --- | --- |
-| POST | `/api/v1/events` | browser callers only | Ingest an error event; optional payload `environment` is project-gated and falls back to production |
+| POST | `/api/v1/events` | browser callers only | Store an error observation and queue stack resolution; capture creates no issue, investigation, or alert |
 | POST | `/api/v1/replays/init` | yes | Begin a replay upload |
 | POST | `/api/v1/replays/{replayID}/complete` | yes | Finish a replay upload |
 | POST | `/api/v1/replays/{replayID}/fail` | yes | Record a replay upload failure |

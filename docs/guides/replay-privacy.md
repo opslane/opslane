@@ -11,7 +11,7 @@ description: What session recordings capture, how masking works, and how long re
 
 # Replay privacy and masking
 
-Session replay shows what a user saw and did around an error. It is the most privacy-sensitive feature in the SDK, and session recording is **on by default since SDK 1.0.0**. This guide explains the separate session-reporting and replay controls, when recording actually starts, what leaves the browser, how masking works, and how to turn either one off.
+Session replay shows what a user saw and did around an error. It is the most privacy-sensitive feature in the SDK, and session recording is **on by default**. This guide explains the separate session-reporting and replay controls, when recording actually starts, what leaves the browser, how masking works, and how to turn either one off.
 
 By default, every `init()` attempts to report lightweight session metadata to `/api/v1/sessions/init`, even when replay is disabled or the browser cannot record. That request contains no serialized DOM. A stored recording still requires `CompressionStream`, configured object storage, and server approval for the project. If any of those checks fail, the SDK does not create a usable recording.
 
@@ -20,11 +20,11 @@ By default, every `init()` attempts to report lightweight session metadata to `/
 The current SDK records a continuous rrweb session stream rather than creating a separate replay only when an error occurs:
 
 1. The SDK reports the browser session to `/api/v1/sessions/init`. The request includes the SDK name and version, release, environment, session id, start time, scrubbed page URL, and any user identity supplied through `setUser()`. The server returns whether recording is allowed. If the SDK supplies an `environment`, ingestion resolves it within the API key's project only when that project's payload override is enabled; otherwise the key environment is used. A session keeps its first accepted environment for its lifetime.
-2. The SDK cuts the stream into independently playable chunks roughly every 30 seconds. When an error is accepted, it also flushes the current chunk so the incident can point into that same session.
+2. The SDK cuts the stream into independently playable chunks. When an error is accepted, it also flushes the current chunk so the incident can point into that same session.
 3. The browser gzips each chunk and posts it to ingestion in one authenticated request. Ingestion rejects bodies over 5MiB, writes accepted bytes to private object storage with server-side credentials, and commits the chunk row.
 4. A server-side scrubber inflates the chunk under a hard size ceiling, redacts it, rewrites the stored object, and sets `scrubbed_at`.
 
-The browser-side masks described below are the protection applied before upload. Raw gzipped chunks now transit ingestion and are buffered there for validation before they reach object storage. Server-side scrubbing happens afterward, but the raw chunk is fail-closed for application reads: no dashboard, API, or worker read path serves it until scrubbing succeeds and `scrubbed_at` is set. A chunk that never scrubs stays unreadable through the application. This gate does not apply to ingestion process memory or the storage layer itself — operators and anyone holding the object-storage credentials can access pre-scrub recordings.
+The browser-side masks described below are the protection applied before upload. Raw gzipped chunks now transit ingestion and are buffered there for validation before they reach object storage. Server-side scrubbing happens afterward, but the raw chunk is fail-closed for application reads: no dashboard, API, or worker read path serves it until scrubbing succeeds and `scrubbed_at` is set. A chunk that never scrubs stays unreadable through the application. This gate does not apply to ingestion process memory or the storage layer itself. Operators and anyone holding the object-storage credentials can access pre-scrub recordings.
 
 Errors refer to the continuous recording with a session pointer; the current SDK does not create `/api/v1/replays/*` one-shot uploads. See the [session replay contract](../contracts/C4-amendments.md) for the exact read and compatibility contracts.
 
@@ -43,7 +43,7 @@ That is the complete browser-side masking list for replay DOM content. The SDK's
 
 Masking is not anonymization. A recording may include page URLs and titles, visible page text not marked with `opslane-mask`, click and navigation timing, console signals, and network status metadata. Rendered email addresses, invoices, support tickets, and other personal data are captured as displayed unless you mask or block them.
 
-Separately from the DOM recording: if your application calls `setUser()`, the SDK sends that user's id, email, account id, and account name **unmasked** when it registers the session with `/api/v1/sessions/init`, and ingestion persists them to associate recordings with the person who hit an error. Masking never applies to these fields — if you identify users, say so in your privacy notice.
+Separately from the DOM recording: if your application calls `setUser()`, the SDK sends that user's id, email, account id, and account name **unmasked** when it registers the session with `/api/v1/sessions/init`, and ingestion persists them to associate recordings with the person who hit an error. Masking never applies to these fields. If you identify users, say so in your privacy notice.
 
 ## Session reporting without replay
 
@@ -86,12 +86,12 @@ To stop recording for a whole project without redeploying the application, set `
 
 Recording user interactions may require an update to your privacy notice. This sample is only a starting point; adapt it to your jurisdiction and have your own counsel review it:
 
-> We record how you interact with this application — pages viewed, clicks, and
-> form interactions — to diagnose errors and fix problems you run into. Values
+> We record how you interact with this application (pages viewed, clicks, and
+> form interactions) to diagnose errors and fix problems you run into. Values
 > you type into forms are masked before the recording leaves your browser.
 > Recordings are deleted after 30 days.
 
-Adjust the retention figure to the project's actual `session_retention_days` value, and if you call `setUser()`, disclose that recordings are linked to the signed-in user. The deletion promise holds for the current chunked-session path; if your deployment still accepts uploads from pre-1.0 SDKs, the [legacy one-shot path below](#retention) has no automated deletion yet — schedule your own cleanup before making this promise.
+Adjust the retention figure to the project's actual `session_retention_days` value, and if you call `setUser()`, disclose that recordings are linked to the signed-in user. The deletion promise holds for the current chunked-session path. If your deployment still accepts legacy one-shot uploads, that path has no automated deletion yet, so schedule your own cleanup before making this promise.
 
 ## Retention
 

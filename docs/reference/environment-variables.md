@@ -34,7 +34,7 @@ systems use it for a branch name.
 | `DATABASE_URL` | yes | Postgres connection string |
 | `PORT` | no (8080) | HTTP listen port |
 | `JWT_SECRET` | yes | Signs session tokens and derives the notification destination encryption key (≥32 bytes). Rotating it invalidates stored webhook configs; users must re-enter their webhook URLs. |
-| `OPSLANE_PUBLIC_INGEST_URL` | for minting source-map keys | Public origin that source-map uploads should reach this deployment on. Read by `cmd/mint-key`, which seals it into every `-scope sourcemaps` key it prints; a build therefore configures uploads with that one key and no endpoint variable. Must be an absolute origin — https, or http only for loopback — with no path, query, or fragment. `-endpoint` overrides it and must agree if both are set. |
+| `OPSLANE_PUBLIC_INGEST_URL` | for minting source-map keys | Public origin that source-map uploads should reach this deployment on. Read by `cmd/mint-key`, which seals it into every `-scope sourcemaps` key it prints; a build therefore configures uploads with that one key and no endpoint variable. Must be an absolute origin (https, or http only for loopback) with no path, query, or fragment. `-endpoint` overrides it and must agree if both are set. |
 | `AUTH_PROVIDER` | no | Identity provider: `github` (default) or `workos`. Selection is explicit and invalid/partial WorkOS configuration fails boot. |
 | `AUTH_CALLBACK_ORIGIN` | no | Public ingestion origin used to construct the allowlisted `/auth/callback` URL. Never derived from the request Host header. Defaults to the local ingestion port; Compose sets `http://localhost:8082`. |
 | `WORKOS_API_KEY` | when `AUTH_PROVIDER=workos` | WorkOS secret API key used for AuthKit code exchange. |
@@ -43,7 +43,7 @@ systems use it for a branch name.
 | `DASHBOARD_DIR` | no | Directory of built dashboard SPA to serve (set in the Docker image) |
 | `DASHBOARD_ORIGIN` | no | Allowed dashboard origin for CORS **and** the OAuth redirect target. For the bundled Compose setup, set `http://localhost:8082`. This is separate from the worker's reader-facing `DASHBOARD_URL`. |
 | `DASHBOARD_URL` | no | Public or private HTTP(S) dashboard base URL used for reader-facing notification links. Configure it explicitly; loopback URLs are rejected, and `DASHBOARD_ORIGIN` is not used as a fallback. This mirrors the worker variable of the same name. |
-| `GROUPING_DEBUG_ID_FRAMES` | no (`false`) | Groups JavaScript stack frames by the SDK's `debug_meta` debug ID instead of the bundle URL, so a URL that changes on every page load stops splitting one bug across many issues. Only the literal `true` enables it, and it is read once at start-up. Roll the build out to every ingestion replica before setting it: replicas that disagree key the same event two ways. Enabling it re-keys every JavaScript group carrying `debug_meta`, and each re-keyed group notifies once as new. |
+| `GROUPING_DEBUG_ID_FRAMES` | no (`false`) | Uses valid SDK debug metadata to normalize provisional JavaScript frames whose bundle URL changes between page loads. Only the literal `true` enables it, and it is read once at startup. Keep the setting consistent across ingestion replicas. Final issue identity still settles after stack resolution. |
 | `NOTIFY_UNSAFE_EXTRA_WEBHOOK_HOSTS` | no | **Development/test only.** Comma-separated exact `host[:port]` additions to the Slack webhook allowlist; added hosts may use HTTP. Never set this in production. |
 | `GITHUB_APP_ID` | for GitHub App | App ID |
 | `GITHUB_APP_CLIENT_ID` | for OAuth sign-in | OAuth client ID |
@@ -58,10 +58,10 @@ systems use it for a branch name.
 | `SESSION_IDLE_CLOSE_MINUTES` | no (30) | Idle minutes before a recording session closes and its `session_analysis` job is enqueued (friction detection producer) |
 | `RETENTION_SWEEP_INTERVAL_SECONDS` | no (3600) | How often the retention sweeper runs (session close + expiry pass) |
 | `PRIORITY_SCORE_INTERVAL_SECONDS` | no (1800) | How often ingestion recomputes priority scores for open incidents and discovers missing route-map classifications. Must be a positive integer number of seconds; invalid values use the default. |
-| `SCRUB_INTERVAL_SECONDS` | no (15) | How often the chunk scrubber looks for committed chunks to redact. Test lanes shorten it to cut e2e wall-clock. Separate from the retained fixed 30s eligibility grace; chunk uploads are no longer presigned, so shortening that grace is now a separate privacy-timing decision. |
-| `RESOLVE_SWEEP_INTERVAL_SECONDS` | no (300) | How often the stack-resolution watchdog sweeps: resolutions still pending past the 24h daily boundary settle to the explicit `no_map` raw fallback, and resolutions stuck in `failed` past that boundary are counted and logged. Only the tick rate is tunable; the boundary itself is fixed by the pipeline design. |
-| `IDENTITY_SETTLE_INTERVAL_SECONDS` | no (5) | How often the identity settlement loop claims a batch of captured events whose stack resolution is terminal and binds their fingerprints to canonical issues. Test lanes shorten it; the batch size and settlement lease are fixed. |
-| `FILTER_SWEEP_INTERVAL_SECONDS` | no (30) | How often the issue filter sweep re-evaluates open episodes with new evidence or a stale rule version, appends factual admission decisions, freezes evidence anchors, and enqueues inquiry jobs for admitted episodes. Must be a positive integer number of seconds; invalid values use the default. |
+| `SCRUB_INTERVAL_SECONDS` | no (15) | How often the chunk scrubber looks for committed replay chunks to redact. Test lanes may shorten it. |
+| `RESOLVE_SWEEP_INTERVAL_SECONDS` | no (300) | How often the stack-resolution watchdog checks pending or failed work and applies the raw-stack fallback when it has waited too long. |
+| `IDENTITY_SETTLE_INTERVAL_SECONDS` | no (5) | How often ingestion assigns observations with completed stack resolution to stable issues. |
+| `FILTER_SWEEP_INTERVAL_SECONDS` | no (30) | How often ingestion re-evaluates watched error issues and queues repository inquiry for those with enough recent allowed-environment evidence. Invalid values use the default. |
 | `ADMIN_EMAILS` | no | Comma-separated operator email allowlist for the cross-tenant admin dashboard. Empty disables the admin API. Docker Compose maps it from the host-side `OPSLANE_ADMIN_EMAILS`. |
 | `VERSION` | no | Reported by `/health` |
 
@@ -81,7 +81,7 @@ Ingestion reads **only** the `REPLAY_STORE_*` names; `MINIO_*` names appear in i
 | `PRODUCT_CONTEXT_MODEL` | no (`INVESTIGATION_MODEL`, then `claude-sonnet-5`) | Anthropic model used to build grounded route and action understanding after a default-branch push. |
 | `FIX_JUDGE_MODEL` | no (`claude-sonnet-5`) | Anthropic model used by the independent post-verification fix judge. Automated fixes fail closed when this judge does not approve them. |
 | `INVESTIGATION_MAX_TURNS` | no (10) | Maximum tool-use turns allowed for one diagnosis pass. |
-| `INVESTIGATION_BUDGET_USD` | no (2.00) | Estimated model-spend ceiling in USD for the investigation. It is a runaway backstop, not the operating budget: turns are what the agent paces itself against. Exceeding it fails closed as `needs_more_context`; it never becomes a conclusion. |
+| `INVESTIGATION_BUDGET_USD` | no (2.00) | Estimated model-spend ceiling for one investigation. It is a runaway backstop, not an operating target. Crossing it stops the attempt without inventing a conclusion. |
 | `FRICTION_INVESTIGATION_MODEL` | no (`claude-sonnet-4-6`) | Anthropic model used by the repository-aware friction classification pass. |
 | `FRICTION_INVESTIGATION_MAX_TURNS` | no (20) | Maximum repository-exploration turns allowed before the friction classifier must submit its verdict. Zero produces an evidence-incomplete result. |
 | `FRICTION_INVESTIGATION_BUDGET_USD` | no (2.00) | Estimated model-spend ceiling in USD for friction investigation. Exceeding it fails closed without publishing a cause. |
@@ -93,7 +93,7 @@ Ingestion reads **only** the `REPLAY_STORE_*` names; `MINIO_*` names appear in i
 | `POLL_INTERVAL_MS` | no (5000) | How long the worker waits when the queue is empty (it drains continuously while work exists). Accepted range 50-300000; out-of-range or non-integer values log a warning and fall back to the default |
 | `SHUTDOWN_GRACE_MS` | no (25000) | Maximum time to wait for the poll loop during shutdown. Must stay below the platform's container termination grace period, or the container is killed before the graceful path runs. Compose sets `stop_grace_period: 30s` on the worker for this reason; Docker's 10s default is *below* the 25s grace. Accepted range 1000-120000; out-of-range values log a warning and fall back to the default |
 | `LEASE_DURATION_MS` / `REAPER_INTERVAL_MS` / `SILENCE_CHECK_INTERVAL_MS` | no | Queue lease and maintenance tuning |
-| `RESOLVE_AGE_DAYS` | no (14) | Days without a new occurrence before `needs_human` and `investigated` issues are auto-resolved |
+| `RESOLVE_AGE_DAYS` | no (14) | Inactivity period before eligible human-review or completed-analysis issues resolve automatically |
 | `INACTIVITY_CHECK_INTERVAL_MS` | no (900000) | How often the worker sweeps for inactive issues (15 minutes by default) |
 | `SESSION_ANALYSIS_MAX_CONCURRENT` | no (2) | Fleet-wide cap on concurrently claimed `session_analysis` jobs; `0` disables analysis claiming entirely; raising it has no effect at fleet size 1 |
 | `ADJUDICATION_EVIDENCE_WINDOWS` | no (`off`) | Evidence-window adjudication mode: `off`, `shadow`, or `on`. `shadow` makes a second model call for flagged signals while the selector-only verdict still decides. |
@@ -111,7 +111,7 @@ Ingestion reads **only** the `REPLAY_STORE_*` names; `MINIO_*` names appear in i
 | `OPSLANE_GITHUB_URL` | no (`https://github.com`) | Alternate git host for clones; used by tests and self-hosted git |
 | `OPSLANE_GITHUB_API_URL` | no (GitHub default) | Alternate GitHub REST API base URL for PR creation |
 
-The worker starts with only `DATABASE_URL` and logs a warning for missing `ANTHROPIC_API_KEY`, `E2B_API_KEY`, and `GITHUB_TOKEN` — jobs then end in explicit `needs_human` states rather than crashing.
+The worker starts with only `DATABASE_URL` and logs a warning for missing `ANTHROPIC_API_KEY`, `E2B_API_KEY`, and `GITHUB_TOKEN`. Work that needs a missing credential stops with a reason instead of crashing the worker.
 
 ## Set in Compose but consumed by no code (known dead config)
 
@@ -122,7 +122,7 @@ The worker starts with only `DATABASE_URL` and logs a warning for missing `ANTHR
 | `OPSLANE_ADMIN_EMAILS` | Host-side name that docker-compose.yml maps into the ingestion service's `ADMIN_EMAILS`; consumed by Compose interpolation, not read by code directly. |
 | `INGESTION_PORT` | Host port published for the ingestion API and dashboard (default 8082). Compose interpolation only. `AUTH_CALLBACK_ORIGIN` follows it unless set explicitly. |
 | `OPSLANE_POSTGRES_HOST_PORT` | Host port published for the bundled Postgres (default 5434). Compose interpolation only. Set it, plus a matching `DATABASE_URL`, to run a second stack beside an existing one. |
-| `OPSLANE_MINIO_HOST_PORT` | Host port published for the bundled MinIO (default 9012). Compose interpolation only. `REPLAY_STORE_PUBLIC_ENDPOINT` follows it unless set explicitly — browsers upload replay chunks to that origin, so the two must agree. |
+| `OPSLANE_MINIO_HOST_PORT` | Host port published for the bundled MinIO (default 9012). Compose interpolation only. `REPLAY_STORE_PUBLIC_ENDPOINT` follows it unless set explicitly. Browsers upload replay chunks to that origin, so the two must agree. |
 | `OPSLANE_INFRA_BIND_ADDR` | Interface the Postgres and MinIO host ports bind to (default `127.0.0.1`; they carry committed dev credentials). Compose interpolation only. Widen it only when loopback is inside a VM, as with Colima or a remote `DOCKER_HOST`. |
 | `OPSLANE_MINIO_READY_TIMEOUT_SECONDS` | How long `minio-setup` waits for MinIO before exiting non-zero with a diagnostic (default 60). Compose interpolation only. |
 | `ENCRYPTION_KEY` | Read by nothing except a sandbox scrub list; at-rest token encryption is not implemented (see [trust](../architecture/trust.md#honest-gaps-current-state)). |

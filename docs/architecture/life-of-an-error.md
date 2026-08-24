@@ -8,44 +8,42 @@ description: One error from capture through investigation, verification, and del
 
 # Life of an error
 
-What happens between an exception in a user's browser and a ready pull request, an actionable draft, or an honest reason there isn't one.
+Follow one browser error from the moment it's thrown to what comes out the other end: a pull request, an insight, or an honest reason Opslane couldn't fix it.
 
-## 1. Capture (browser)
+## 1. Capture, in the browser
 
-The SDK catches the error via global handlers (or a framework hook), attaches breadcrumbs (console, fetch/XHR, navigation) and network timings, scrubs tokens and credentials from text and URLs, and POSTs to `/api/v1/events`. Session recording is enabled by default; when browser support, storage, and the project's server-side switch allow it, the SDK uploads a continuous stream of masked-input chunks and the error points into that session.
+The SDK catches the error, attaches breadcrumbs (console, network, navigation) and network timings, and strips tokens and credentials from the text and URLs before sending anything. If session recording is on, and it is by default, the error also points into a masked recording of what the user was doing. The SDK sends all of this to the ingestion service and decides nothing else.
 
-## 2. Ingest and group (ingestion API)
+## 2. Store and group, in ingestion
 
-The event is authenticated by API key, origin-checked for browser traffic, rate-limited, and masked again server-side (sensitive headers, API-key prefixes, URL credentials). Known JavaScript noise (ResizeObserver loops, stackless Script error., extension-only stacks) is dropped before persistence. Surviving events are fingerprinted: JavaScript stale-deploy asset failures (failed to fetch dynamically imported module and similar) share one family fingerprint per project; others on platform + error type + message + stack. When `GROUPING_DEBUG_ID_FRAMES` is enabled, JavaScript events carrying `debug_meta` images are keyed on debug IDs instead of bundle URLs in the first five stack frames, collapsing per-page-load URL variation; frames with content-hashed assets are skipped as already deploy-stable. Each event is captured into a provisional bucket by fingerprint with identity pending; a `stack_resolve` job is enqueued (a Postgres row, not a message queue). After resolution completes, the ingestion service's identity settlement loop attaches the event to its canonical issue. A periodic admission filter evaluates reach (two or more affected units in seven days, within configured action environments) and queues eligible issues for inquiry with evidence frozen.
+Ingestion authenticates the event, drops known noise (browser-extension stacks, cross-origin `Script error.` with no frames), and masks sensitive fields again on the server. Then it stores the event. It does not create an issue or fire an alert yet.
 
-## 3. Claim (worker)
+Grouping happens after the stack-resolution job finishes, not during capture. Ingestion records aliases for both the raw and resolved stack identities and points them at one canonical issue. Those aliases keep one bug attached to one issue across deploys, including when a source map arrives after the event.
 
-The worker polls Postgres and claims jobs with `FOR UPDATE SKIP LOCKED` under a lease. If a worker dies mid-job, the lease expires and a reaper schedules a retry with exponential backoff (`lease_lost` is reported if a worker discovers it lost its lease).
+## 3. Decide whether it's worth investigating
 
-## 4. Inquiry
+Opslane doesn't investigate every issue. A cheap, mechanical filter checks whether the issue has reached enough real users recently, inside the environments you allow automation in. An issue below that bar is watched, not investigated.
 
-A read-only agent reviews the bounded evidence bundle (stack frames, failed requests, product context, session replay pointers, affected-unit count) and repository to decide whether the episode deserves investigation. Three decisions: `investigate` (enqueues an `investigate` job with a brief naming what to examine first), `wait_for_more_evidence` (episode remains open; the filter re-queues it when new evidence settles and either the inquiry prompt version has advanced or affected-unit count has grown to 1.5× the evaluated count), or `do_not_pursue` (third-party noise, browser extensions, insufficient product connection). Each decision is persisted with its evidence signature and prompt version under the durable job lease; retries against identical evidence and prompt are idempotent, except manual review requests which add a version suffix to force re-evaluation.
+An issue that clears the bar goes to an inquiry: a read-only agent that reads the evidence and your repository and decides one of three things. Investigate it now, wait for more evidence, or don't pursue it (third-party noise, a browser extension, too little to act on). An issue told to wait comes back when new evidence arrives.
 
-## 5. Triage
+## 4. Investigate, read-only
 
-A fast model call classifies the error: fixable in application code, or not? High-confidence *unfixable* verdicts short-circuit immediately into `needs_human` with a specific reason — `unfixable_third_party`, `unfixable_infra`, `unfixable_test_error`, `unfixable_no_app_frames`, or `unfixable_no_sourcemap` — each with remediation text ([full catalog](../reference/reason-codes.md)).
+When the inquiry says investigate, the worker clones your repository at the commit tied to the evidence. A read-only agent examines the code until it can name a cause and cite the exact files. Opslane checks those citations: a cause that points at files the agent never opened, or at code that isn't there, is discarded. Nothing runs at this stage. The E2B sandbox is created later, when Opslane attempts a fix.
 
-## 6. Investigate and fix
+## 5. Fix and verify
 
-For fixable errors, the worker clones the repository (GitHub token or App installation token) to the commit from the frozen evidence bundle and runs an agentic fix loop inside an **E2B sandbox**: read the referenced source, form a root cause, edit, install dependencies, and collect build/test evidence. The verdict is validated: candidate citations are verified against repository files (quoted code must appear within ±5 lines), evidence must cite files the investigation actually read, and filler text is rejected. Failed attempts escalate through model tiers before giving up.
+For an error with a cause in your code, the worker creates a fix job immediately. Error fixes have no additional confidence, reach, or approval gate. In the sandbox, Opslane runs the existing tests before and after the edit, builds the changed repository, and, where possible, proves a test fails on the broken code and passes on the fix. A second model then reviews the diff and evidence and can reject the candidate. What that proof means, and what it doesn't, is in [precision](precision.md).
 
-## 7. Route by confidence — two stages
+## 6. What comes out
 
-Investigation and fixing are separate stages:
+An investigation ends one of three ways:
 
-- **Investigation stage.** Some investigations proceed to the fix stage; others stop here with the **root-cause analysis** persisted as **`investigated`** (no fix has been generated yet), waiting for a human to read it and trigger the fix from the dashboard.
-- **Fix stage** (automatic for above-threshold, human-triggered from `investigated`). The agent writes a fix and declares a failing regression test; fail-first verification runs the test on the base commit (must fail with the declared assertion) and with the fix (must pass). An independent judge reviews the diff, declared test, and verification ledger; the judge may probe the sandbox (up to three commands) and can veto but cannot override mechanical predicates. A `reproduced` fix (red-then-green proof, clean suite, build passed) approved by the judge becomes a draft pull request (`pr_draft`). The exact head SHA is observed in repository CI and promoted to ready on green for human-triggered fixes; automated fixes remain draft. A `checked` fix (reproduction impossible, suite and build clean, quality confirmed) or judge veto preserves the bounded candidate diff and evidence on `needs_human` for manual review.
-- **Anything the worker cannot progress** at either stage → **`needs_human`** with `reason_code`, `reason_message`, and `remediation` — always all three.
+- **A pull request** with a fix Opslane verified.
+- **An insight.** The user pain is real, but the cause is outside your code, so there's nothing to patch.
+- **A stop with a reason.** Opslane couldn't establish a cause, or it's missing a credential or evidence it needs. The issue records a reason code and a next step; see [reason codes](../reference/reason-codes.md).
 
-Terminal outcomes (`needs_human` or `pr_created`) enqueue `issue.triaged` events for notification destinations configured for post-triage delivery.
+Friction issues, such as rage clicks, dead clicks, and form abandonment, follow a nearby path with a separate approval setting. See [friction and session recordings](../guides/friction.md).
 
-One known gap in this contract, stated honestly: if an **investigate** job repeatedly crashes or loses its lease until it dead-letters, its group can currently remain in `analyzing` without a terminal reason — dead-letter reconciliation covers fix jobs only. Tracked as [#25](https://github.com/opslane/opslane-oss/issues/25).
+## 7. Retries
 
-## 8. Human follow-up
-
-From the dashboard: review an `investigated` analysis and trigger the fix, open a `pr_draft` in GitHub to inspect its CI, link a pull request, resolve or archive incidents, or act on a `needs_human` remediation (connect the GitHub App, upload source maps, add context) and retry. Automated draft PRs wait for external CI observation before promotion to ready; human-triggered drafts promote on green CI. Project settings keep draft delivery opt-in and default to verified-only.
+Every job runs under a lease. If a worker dies mid-job, the lease expires and the work is retried with backoff, so a crash costs time but not the result.
