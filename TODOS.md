@@ -187,7 +187,7 @@ It was deliberately left alone by the issue-list polish plan, which is scoped da
 
 **Pros:** members can adopt Opslane solo; matches the original product decision. **Cons:** provisioning mints/rotates a production key — member-level access widens that surface; sibling key routes are admin-gated.
 
-**Context:** Found during the 2026-07-24 /plan-eng-review of Phase 2 (onboarding-10x). The CLI now surfaces a typed `NotAuthorizedError` with "ask an org admin" remediation, so the failure is at least honest. Self-hosted OSS is unaffected (`RequireRoleIfCloud` is transparent there). Re-decide with real cloud data on who actually runs `opslane onboard`.
+**Context:** Found during the 2026-07-24 /plan-eng-review of Phase 2 (onboarding-10x). The removed CLI surfaced a typed `NotAuthorizedError` with "ask an org admin" remediation, so the failure was at least honest. Self-hosted OSS is unaffected (`RequireRoleIfCloud` is transparent there). Re-decide with real cloud data on who actually provisions projects (the CLI entry point for this route was removed 2026-08-23; the dashboard uses `/api/v1/onboarding/setup`).
 
 **Depends on / blocked by:** cloud usage data; a product call, not an eng task.
 

@@ -1,6 +1,6 @@
 # Vite config execution is allowed in a killable child process
 
-- **Status:** ACCEPTED (2026-07-30).
+- **Status:** SUPERSEDED (2026-08-23) — the CLI (`opslane sourcemaps install-plugin`) was removed.
 - **Applies to:** `opslane sourcemaps install-plugin`.
 - **Prompted by:** `docs/design/2026-07-30-s6a-vite-plugin-onboarding.md`.
 

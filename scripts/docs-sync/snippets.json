@@ -54,6 +54,30 @@
     "docs/guides/issues.md": {
       "fences": []
     },
+    "docs/guides/mcp.md": {
+      "fences": [
+        {
+          "language": "bash",
+          "classification": "config-template"
+        },
+        {
+          "language": "bash",
+          "classification": "config-template"
+        },
+        {
+          "language": "json",
+          "classification": "config-template"
+        },
+        {
+          "language": "toml",
+          "classification": "config-template"
+        },
+        {
+          "language": "markdown",
+          "classification": "config-template"
+        }
+      ]
+    },
     "docs/guides/replay-privacy.md": {
       "fences": [
         {
@@ -158,34 +182,6 @@
         {
           "language": "html",
           "classification": "fragment"
-        }
-      ]
-    },
-    "docs/quickstart/agent.md": {
-      "fences": [
-        {
-          "language": "bash",
-          "classification": "illustrative"
-        },
-        {
-          "language": "json",
-          "classification": "expected-output"
-        },
-        {
-          "language": "bash",
-          "classification": "config-template"
-        },
-        {
-          "language": "bash",
-          "classification": "illustrative"
-        },
-        {
-          "language": "bash",
-          "classification": "illustrative"
-        },
-        {
-          "language": "bash",
-          "classification": "config-template"
         }
       ]
     },

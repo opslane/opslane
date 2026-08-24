@@ -24,7 +24,5 @@ eval/results/
 .gstack/
 .context/
 
-# Real-repo Detect eval corpus (cloned on demand by cli/scripts/onboard-eval-corpus.mjs)
-.eval-corpus/
 .verify/
 .playwright-mcp/

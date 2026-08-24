@@ -1,6 +1,6 @@
 # S6a uses a host codemod and config resolution
 
-- **Status:** ACCEPTED (2026-07-30).
+- **Status:** SUPERSEDED (2026-08-23) — the CLI codemod was removed.
 - **Supersedes for S6a:** `docs/design/2026-07-29-keys-sourcemaps-onboarding.md` §5.8.
 - **Evidence:** the 70-config corpus recorded in
   `docs/design/2026-07-30-s6a-vite-plugin-onboarding.md`.

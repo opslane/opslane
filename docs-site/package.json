@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "dev": "astro dev",
-    "build": "astro build && node scripts/check-built-links.mjs && node scripts/check-dark-launch.mjs",
+    "build": "astro build && node scripts/check-built-links.mjs",
     "preview": "astro preview",
     "test": "vitest run"
   },

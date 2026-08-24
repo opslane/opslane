@@ -1,6 +1,5 @@
 ---
 covers:
-  - cli/src/codemods/vite-messages.ts
   - packages/sdk/vite-plugin/**
   - packages/ingestion/handler/sourcemap.go
   - packages/worker/src/source-map.ts

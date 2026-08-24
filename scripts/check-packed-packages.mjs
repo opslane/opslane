@@ -2,14 +2,13 @@
 /**
  * Prove the published npm tarballs work for a real consumer.
  *
- * For each publishable package (@opslane/sdk, @opslane/cli):
+ * For each publishable package (@opslane/sdk):
  *   1. `pnpm pack` the exact tarball npm would ship
  *   2. Assert the tarball contains ONLY allowlisted paths (dist/, package.json,
  *      README*, LICENSE*) — no stray env files, sources, or maps
  *   3. Install the tarball into a fresh, empty consumer project (no workspace)
  *   4. SDK: typecheck real imports with tsc — catches unresolvable type-only
  *      imports from the private @opslane/shared package
- *      CLI: execute the installed bin (--help must exit 0)
  *   5. `npm audit signatures` over the consumer's installed tree
  *
  * Usage: node scripts/check-packed-packages.mjs
@@ -97,20 +96,6 @@ const TARGETS = [
         stdio: 'inherit',
       });
       console.log(`  ✓ Vite plugin builds in a clean consumer; legacy export absent`);
-    },
-  },
-  {
-    name: '@opslane/cli',
-    dir: 'cli',
-    verify: (consumerDir) => {
-      const out = execFileSync(join(consumerDir, 'node_modules', '.bin', 'opslane'), ['--help'], {
-        cwd: consumerDir,
-        encoding: 'utf8',
-      });
-      if (!out.toLowerCase().includes('usage')) {
-        throw new Error(`opslane --help produced unexpected output:\n${out}`);
-      }
-      console.log(`  ✓ installed bin runs (--help)`);
     },
   },
 ];

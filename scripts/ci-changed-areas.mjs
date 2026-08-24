@@ -12,12 +12,9 @@
  * cross-directory imports make one unsafe to derive by hand -- an independent
  * review of the fine-grained version found five real holes:
  *
- *   - docs-site/src/__tests__/agent-quickstart-content.test.ts reads
- *     packages/ingestion/handler/agent_setup.go (ingestion feeds JS)
  *   - packages/ingestion/handler/wire_compat_test.go replays every fixture
  *     under test-fixtures/wire/events, and additions are allowed by the
  *     append-only gate (fixtures feed Go)
- *   - test-e2e/browser-smoke.test.ts imports ../cli/src/* (CLI feeds E2E)
  *   - packages/test-reliability is a workspace package with tsc + vitest unit
  *     tests that run in pnpm test:unit (it feeds JS)
  *   - packages/sdk-python/tests/test_wire_shape.py reads test-fixtures/wire

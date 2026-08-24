@@ -45,7 +45,7 @@ export default defineConfig({
           details: [
             'Self-hosted with Docker Compose. JavaScript browser errors and GitHub repositories are supported end to end.',
             'Reference tables (SDK options, HTTP routes, environment variables, reason codes) are checked against source on every CI run, so they are the authoritative answer for exact names and values.',
-            'Keys come in two scopes: opslane_pk_ ingest keys ship in the browser bundle, opslane_sk_ source-map keys stay in CI.',
+            'Keys come in three scopes: opslane_pk_ ingest keys ship in the browser bundle, opslane_sk_ source-map keys stay in CI, opslane_ak_ MCP keys let a coding agent read incidents.',
           ].join(' '),
           // Reference pages carry the exact names an agent needs; keep them
           // early so a truncated context still contains them.
@@ -109,6 +109,7 @@ export default defineConfig({
           items: [
             { label: 'Environments', slug: 'guides/environments' },
             { label: 'API keys', slug: 'guides/api-keys' },
+            { label: 'Connect a coding agent', slug: 'guides/mcp' },
             { label: 'Slack notifications', slug: 'guides/slack-notifications' },
           ],
         },

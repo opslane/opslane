@@ -9,18 +9,14 @@ import {
   getSetupPRStatus,
   setGitHubConfig,
 } from '../api';
-import { AGENT_ONBOARDING_ENABLED } from '../agent-onboarding';
 import type { GitHubAppStatus, SetupPrStatus } from '../types/api';
 import { GITHUB_PR_URL_OPTIONS, safeUrl } from '../utils';
-import AgentOnboardingCard from '../components/AgentOnboardingCard.vue';
 import CopyButton from '../components/CopyButton.vue';
 import CodeBlock from '../components/CodeBlock.vue';
 import RepoSelector from '../components/RepoSelector.vue';
 import Button from '../components/ui/Button.vue';
 
 const router = useRouter();
-const agentCardEnabled = AGENT_ONBOARDING_ENABLED;
-const origin = window.location.origin;
 
 const step = ref(1);
 const projectName = ref('');
@@ -255,11 +251,6 @@ throw new Error('Hello Opslane!');`;
             >
               Skip for now
             </button>
-          </div>
-
-          <div v-if="agentCardEnabled" class="mt-6">
-            <p class="mb-2 text-xs text-muted">Prefer your terminal?</p>
-            <AgentOnboardingCard :origin="origin" />
           </div>
         </div>
 

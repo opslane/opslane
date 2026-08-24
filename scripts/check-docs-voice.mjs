@@ -47,7 +47,6 @@ export const LEGACY_EXEMPT = new Set([
   'docs/guides/slack-notifications.md',
   'docs/guides/source-maps.md',
   'docs/install.md',
-  'docs/quickstart/agent.md',
   'docs/quickstart/self-host.md',
 ]);
 

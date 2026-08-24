@@ -1,6 +1,6 @@
 # TUI renderer verdict
 
-- **Status:** Accepted — use Ink
+- **Status:** SUPERSEDED (2026-08-23) — the CLI and its TUI were removed. Originally Accepted (use Ink).
 - **Measured:** 2026-07-21
 - **Runtime constraint:** Node.js 22
 - **Packages compared:** `ink@7.1.1` with `@inkjs/ui@2.0.0`; `@opentui/core@0.4.5`
