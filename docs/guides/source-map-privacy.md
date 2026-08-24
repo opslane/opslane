@@ -37,4 +37,4 @@ The upload and resolution paths do not return map content in API errors or expos
 
 ## Retention
 
-Source maps do not expire automatically. Deleting a project removes its database rows and writes a tombstone for the project's object prefix, but no automatic sweeper removes those objects yet. An operator must delete the recorded object prefix and then clear its tombstone, as described in [source maps](source-maps.md#map-custody). Include object-store backups and replicas in your own retention policy.
+Source maps do not expire automatically. Deleting a project removes its database rows, but you delete the stored map files yourself. Include object-store backups and replicas in your own retention policy.

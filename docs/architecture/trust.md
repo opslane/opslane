@@ -1,4 +1,8 @@
 ---
+covers:
+  - packages/sdk/src/scrub.ts
+  - packages/worker/src/repo-clone.ts
+  - packages/ingestion/notify/slack.go
 description: What Opslane collects, where it stays, and what each integration sends out.
 ---
 
@@ -17,14 +21,14 @@ If you identify signed-in users with `setUser`, Opslane stores their id and emai
 
 ## What each integration sends out
 
-You turn these on. Each sends only what it needs:
+You turn these on. Each one sends only what it needs to do its job:
 
-- **GitHub** — Opslane clones your repository to read your code, and opens pull requests.
-- **Anthropic** — the error context and the parts of your code an investigation reads.
-- **E2B** — your repository and the commands to test a fix, in an isolated environment.
-- **Slack** (optional) — issue titles, summaries, and links.
+- **GitHub:** Opslane clones your repository to read your code and open pull requests.
+- **Anthropic:** the error, and the parts of your code Opslane reads while investigating it.
+- **E2B:** the sandbox where a fix is tested. It gets your repository and the commands to run your tests.
+- **Slack** (optional): issue titles, summaries, and links.
 
-With no integrations turned on, nothing leaves your servers.
+Investigating and fixing bugs is the point, so in normal use Opslane does send this data to GitHub, Anthropic, and E2B. What it never does is phone home or call any service you haven't connected. There is no Opslane telemetry.
 
 ## Recordings are the sensitive part
 

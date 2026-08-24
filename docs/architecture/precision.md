@@ -1,4 +1,8 @@
 ---
+covers:
+  - packages/worker/src/pipeline.ts
+  - packages/worker/src/agent-fix.ts
+  - packages/worker/src/harness/fix-judge.ts
 description: What Opslane checks before it opens a pull request, and what that check can't promise.
 ---
 
