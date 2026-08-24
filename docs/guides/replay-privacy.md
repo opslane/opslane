@@ -26,7 +26,7 @@ The current SDK records a continuous rrweb session stream rather than creating a
 
 The browser-side masks described below are the protection applied before upload. Raw gzipped chunks now transit ingestion and are buffered there for validation before they reach object storage. Server-side scrubbing happens afterward, but the raw chunk is fail-closed for application reads: no dashboard, API, or worker read path serves it until scrubbing succeeds and `scrubbed_at` is set. A chunk that never scrubs stays unreadable through the application. This gate does not apply to ingestion process memory or the storage layer itself. Operators and anyone holding the object-storage credentials can access pre-scrub recordings.
 
-Errors refer to the continuous recording with a session pointer; the current SDK does not create `/api/v1/replays/*` one-shot uploads. See the [session replay contract](../contracts/C4-amendments.md) for the exact read and compatibility contracts.
+Errors refer to the continuous recording with a session pointer; the current SDK does not create `/api/v1/replays/*` one-shot uploads. See [what leaves your host](../architecture/trust.md#data-flow-what-leaves-your-host) for the services that receive replay data.
 
 ## What is masked in the browser
 

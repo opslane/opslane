@@ -7,28 +7,31 @@ import type { Loader, LoaderContext, ParseDataOptions } from 'astro/loaders';
 
 import { EDIT_BASE } from '../repo';
 
-const PUBLIC_DOCS_FILES = ['install.md'];
-
-const PUBLIC_DOCS_DIRECTORIES = new Set([
-  'quickstart',
-  'guides',
-  'reference',
-  'architecture',
-  'contracts',
-]);
-
-const CANONICAL_PATTERNS = [
-  ...PUBLIC_DOCS_FILES,
-  ...[...PUBLIC_DOCS_DIRECTORIES].map((directory) => `${directory}/**/*.md`),
+const PUBLIC_DOCS_FILES = [
+  'install.md',
+  'how-it-works.md',
+  'quickstart/self-host.md',
+  'guides/friction.md',
+  'guides/github-app.md',
+  'guides/source-maps.md',
+  'guides/environments.md',
+  'guides/slack-notifications.md',
+  'guides/replay-privacy.md',
+  'guides/source-map-privacy.md',
+  'guides/api-keys.md',
+  'architecture/precision.md',
+  'architecture/trust.md',
+  'reference/sdk-options.md',
+  'reference/http-routes.md',
+  'reference/reason-codes.md',
+  'reference/environment-variables.md',
 ];
+
+const PUBLIC_DOCS_PATHS = new Set(PUBLIC_DOCS_FILES);
 
 export function isAllowedCanonicalPath(filePath: string): boolean {
   const normalized = filePath.replaceAll(path.sep, '/').replace(/^\.\//, '');
-  if (PUBLIC_DOCS_FILES.includes(normalized)) return true;
-  if (!normalized.endsWith('.md')) return false;
-
-  const [directory] = normalized.split('/');
-  return directory !== undefined && PUBLIC_DOCS_DIRECTORIES.has(directory);
+  return PUBLIC_DOCS_PATHS.has(normalized);
 }
 
 export function canonicalId(entry: string): string {
@@ -219,7 +222,7 @@ export function createCanonicalEnricher(canonicalBase: string): DataEnricher {
 export function repoDocsLoader(): Loader {
   const canonical = glob({
     base: '../docs',
-    pattern: CANONICAL_PATTERNS,
+    pattern: PUBLIC_DOCS_FILES,
     generateId: ({ entry }) => canonicalId(entry),
   });
   const site = glob({

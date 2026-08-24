@@ -71,14 +71,15 @@ test('docTypeOf classifies setup, internals, and contract reader intent', () => 
   assert.equal(docTypeOf('docs/guides/react.txt'), null);
 });
 
-test('published policy keeps contracts manual and plans unpublished', () => {
+test('published policy leaves contributor contracts and plans unpublished', () => {
   assert.equal(publishedPolicyOf('docs/guides/react.md'), 'prose');
   assert.equal(publishedPolicyOf('docs/architecture/overview.md'), 'prose');
   assert.equal(publishedPolicyOf('docs/reference/http-routes.md'), 'deterministic');
-  assert.equal(publishedPolicyOf('docs/contracts/C4-amendments.md'), 'manual');
-  assert.equal(publishedPolicyOf('docs/contracts/events.md'), 'manual');
-  assert.equal(publishedPolicyOf('docs/contracts/notifications.md'), 'manual');
-  assert.equal(publishedPolicyOf('docs/contracts/reliability.md'), 'manual');
+  assert.equal(publishedPolicyOf('docs/contracts/C4-amendments.md'), null);
+  assert.equal(publishedPolicyOf('docs/contracts/events.md'), null);
+  assert.equal(publishedPolicyOf('docs/contracts/notifications.md'), null);
+  assert.equal(publishedPolicyOf('docs/contracts/reliability.md'), null);
+  assert.equal(publishedPolicyOf('docs/how-it-works.md'), 'excluded');
   assert.equal(publishedPolicyOf('docs/plans/internal.md'), null);
 });
 
@@ -112,7 +113,6 @@ test('manual contract mappings produce reminders without entering the prose tier
     ],
   );
   assert.deepEqual(manualDocsForChangedPaths(['packages/dashboard/src/main.ts']), []);
-  assert.deepEqual(Object.keys(MANUAL_DOC_COVERS).sort(), PUBLISHED_DOCS_POLICY.manual.slice().sort());
   for (const doc of Object.keys(MANUAL_DOC_COVERS)) assert.equal(isProseTierDoc(doc), false);
 });
 

@@ -1,31 +1,20 @@
 ---
 title: Introduction
-description: What Opslane is, who it is for, and where to start.
+description: What Opslane is and where to start.
 ---
 
 import { CardGrid, LinkCard } from '@astrojs/starlight/components';
 
-Finds the bugs that impact real users. Opens a pull request when it can verify the fix.
+Opslane is an open-source error tracker that fixes the bugs reaching your users.
 
-Opslane watches errors and session recordings from your app and turns them into a short list of issues worth fixing. A factual impact filter and a repository inquiry decide which error issues deserve investigation. When Opslane can verify a fix, it opens a pull request. Otherwise, it records an insight or explains why a person must take over. A daily digest keeps you out of the dashboard.
-
-## Who it is for
-
-Teams who own a production web app and review their own pull requests. Opslane runs on your infrastructure, so you decide what it may touch and where the data goes.
-
-## When to use it
-
-- A bug reached users and you want the fix waiting for you rather than a ticket.
-- Your error tracker holds thousands of events and five of them matter.
-- Users rage-click or hit a dead button, and the console stays silent.
-- You want a record of what ran and what passed before a change reaches review.
+Install the SDK in your app. Opslane turns errors and session recordings into a ranked list of real problems and pull requests that fix them. It runs on your own infrastructure.
 
 ## Start here
 
 <CardGrid>
   <LinkCard
-    title="Self-host Opslane"
-    description="Run the stack locally and send it a first error. No accounts or API keys for the first run."
+    title="Run Opslane locally"
+    description="Start Opslane with Docker Compose and send your first error."
     href="/quickstart/self-host/"
   />
   <LinkCard
@@ -34,23 +23,15 @@ Teams who own a production web app and review their own pull requests. Opslane r
     href="/install/"
   />
   <LinkCard
-    title="How issues work"
-    description="Occurrences, stable issue identity, ranking, and the issue lifecycle."
-    href="/guides/issues/"
+    title="How Opslane works"
+    description="Follow an error from the browser to a verified fix pull request."
+    href="/how-it-works/"
   />
   <LinkCard
-    title="When Opslane opens a pull request"
-    description="When a fix starts, how it is verified, and why a pull request is ready or draft."
-    href="/guides/fix-prs/"
+    title="Connect GitHub"
+    description="Give Opslane access to investigate and fix your code."
+    href="/guides/github-app/"
   />
 </CardGrid>
 
-Evaluating it instead? The [architecture overview](/architecture/overview/) shows the pieces and the trust boundaries, and [trust and security](/architecture/trust/) lists what leaves your host.
-
-## How the docs are organized
-
-**Get started** covers setup: self-hosting the stack, installing the SDK, and connecting GitHub. **How it works** explains the system for someone deciding whether to trust it, including how issues and fix pull requests work. **Configure** covers environments, API keys, and Slack notifications. **Trust and privacy** covers the data-flow model and replay masking.
-
-## License
-
-The SDKs and shared types that run in *your* application are MIT. The rest of Opslane, including the server, worker, agent core, dashboard, and this docs site, is AGPL-3.0-only.
+Opslane's server, worker, dashboard, command-line tool, and docs are AGPL-3.0-only. Its browser and Python SDKs and shared types are MIT licensed.

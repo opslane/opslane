@@ -21,57 +21,67 @@ const SIDEBAR_SOURCE = readFileSync(join(ROOT, 'docs-site/astro.config.mjs'), 'u
 
 test('parses the loader allowlist and sidebar from their authoritative sources', () => {
   assert.deepEqual(parseLoaderAllowlist(LOADER_SOURCE), {
-    files: ['install.md'],
-    directories: ['quickstart', 'guides', 'reference', 'architecture', 'contracts'],
+    files: [
+      'install.md',
+      'how-it-works.md',
+      'quickstart/self-host.md',
+      'guides/friction.md',
+      'guides/github-app.md',
+      'guides/source-maps.md',
+      'guides/environments.md',
+      'guides/slack-notifications.md',
+      'guides/replay-privacy.md',
+      'guides/source-map-privacy.md',
+      'guides/api-keys.md',
+      'architecture/precision.md',
+      'architecture/trust.md',
+      'reference/sdk-options.md',
+      'reference/http-routes.md',
+      'reference/reason-codes.md',
+      'reference/environment-variables.md',
+    ],
   });
-  assert.ok(parseSidebarSlugs(SIDEBAR_SOURCE).includes('guides/issues'));
+  assert.ok(parseSidebarSlugs(SIDEBAR_SOURCE).includes('how-it-works'));
 });
 
 test('real docs tree has explicit policy coverage', () => {
   const result = checkDocsScope({ root: ROOT });
 
   assert.deepEqual(result.problems, []);
-  assert.equal(result.published.length, 27);
+  assert.equal(result.published.length, 17);
   assert.equal(result.navigable.length, parseSidebarSlugs(SIDEBAR_SOURCE).length);
-  assert.equal(result.policies.get('docs/contracts/events.md'), 'manual');
-  assert.equal(result.policies.get('docs/contracts/notifications.md'), 'manual');
+  assert.equal(result.policies.get('docs/how-it-works.md'), 'excluded');
+  assert.equal(result.published.includes('docs/contracts/events.md'), false);
 });
 
 test('allows a published page to be intentionally absent from navigation', () => {
-  const sidebarWithoutIssues = SIDEBAR_SOURCE.replace(
-    /^.*slug: 'guides\/issues'.*\n/m,
+  const sidebarWithoutFriction = SIDEBAR_SOURCE.replace(
+    /^.*slug: 'guides\/friction'.*\n/m,
     '',
   );
-  const result = checkDocsScope({ root: ROOT, sidebarSource: sidebarWithoutIssues });
+  const result = checkDocsScope({ root: ROOT, sidebarSource: sidebarWithoutFriction });
 
   assert.deepEqual(result.problems, []);
-  assert.equal(result.published.includes('docs/guides/issues.md'), true);
-  assert.equal(result.navigable.includes('guides/issues'), false);
+  assert.equal(result.published.includes('docs/guides/friction.md'), true);
+  assert.equal(result.navigable.includes('guides/friction'), false);
 });
 
-test('fails when the published events contract loses its explicit policy', () => {
-  const policyWithoutEvents = {
+test('fails when a published reference page loses its explicit policy', () => {
+  const policyWithoutReferences = {
     ...PUBLISHED_DOCS_POLICY,
-    manual: PUBLISHED_DOCS_POLICY.manual.filter(
-      (path) => path !== 'docs/contracts/events.md',
-    ),
+    deterministic: [],
   };
-  const result = checkDocsScope({ root: ROOT, policy: policyWithoutEvents });
+  const result = checkDocsScope({ root: ROOT, policy: policyWithoutReferences });
 
   assert.ok(
-    result.problems.includes('docs/contracts/events.md is published but has no declared policy'),
+    result.problems.includes('docs/reference/http-routes.md is published but has no declared policy'),
   );
 });
 
-test('fails when a manual contract loses its deterministic staleness mapping', () => {
-  const { ['docs/contracts/events.md']: _events, ...manualMappings } = MANUAL_DOC_COVERS;
-  const result = checkDocsScope({ root: ROOT, manualMappings });
+test('allows contributor contracts to keep deterministic staleness mappings', () => {
+  const result = checkDocsScope({ root: ROOT, manualMappings: MANUAL_DOC_COVERS });
 
-  assert.ok(
-    result.problems.includes(
-      'docs/contracts/events.md is manual but has no deterministic staleness mapping',
-    ),
-  );
+  assert.deepEqual(result.problems, []);
 });
 
 test('fails when sidebar navigation points at a non-published page', () => {
@@ -96,8 +106,8 @@ test('new loader-allowed content enters P instead of being hidden by a duplicate
   writeFileSync(join(root, 'docs/new-public/page.md'), '# New page');
 
   const loaderSource = LOADER_SOURCE.replace(
-    "'contracts',",
-    "'contracts',\n  'new-public',",
+    "'install.md',",
+    "'install.md',\n  'new-public/page.md',",
   );
   const result = checkDocsScope({
     root,
