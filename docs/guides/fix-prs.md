@@ -29,8 +29,10 @@ All of these must hold:
 
 - The worker has its keys: Anthropic for the investigation, E2B for the sandbox, GitHub for the repository.
 - The issue's environment is one you allow automation in. This applies only if you limited automation to chosen environments; see [Environments](environments.md).
+- The issue reached the impact bar: at least two affected users or sessions in the last seven days, counting occurrences inside your action scope (a signed-in user and an anonymous session each count as one). Below that, the issue is watched and nothing investigates it.
+- Opslane admitted it. Once an issue clears the impact bar, Opslane reads your repository and decides whether it is a real product problem worth investigating.
 - Opslane named a cause in your code and cited the files it read; a cause with no cited files goes no further.
-- The issue reached the impact bar: at least one signed-in user, or at least three anonymous sessions in the last seven days. Below that, the analysis is posted and waits for you to press the fix button. Confidence is recorded on the analysis but does not by itself decide whether a fix runs.
+- The diagnosis was high-confidence. High-confidence diagnoses attempt a fix automatically; medium and low confidence post the analysis and wait for you to press the fix button.
 
 ## How investigation works
 
@@ -52,8 +54,8 @@ The result must name the cause and cite the files the investigator read at the r
 
 ### The four outcomes
 
-- **A fix attempt.** The cause is in your code and the issue reached the impact bar: at least one signed-in user, or three anonymous sessions in the last seven days. See the conditions above.
-- **An analysis for you.** The cause is in your code, but the issue has not reached enough users yet. The analysis appears on the issue with a fix button.
+- **A fix attempt.** The cause is in your code, the issue cleared the impact bar, and the diagnosis was high-confidence. See the conditions above.
+- **An analysis for you.** The cause is in your code, but the diagnosis was medium or low confidence. The analysis appears on the issue with a fix button, and you decide whether to run the fix.
 - **A finding outside your code.** The user pain is real and the cause sits outside your code. The issue closes as an insight, not a pull request.
 - **A stop with a reason.** The evidence or credential Opslane needs is missing. The issue records a reason code and a suggested next step; see [reason codes](../reference/reason-codes.md).
 

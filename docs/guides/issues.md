@@ -36,6 +36,8 @@ Five stop reasons cut the score to a tenth: `unfixable_third_party`, `unfixable_
 
 Reach and recency therefore beat raw occurrence counts. One user reloading 400 times ranks below a bug that reached 50 people once.
 
+Ranking only decides order. Whether an issue is investigated at all is a separate bar: it needs at least two affected users or sessions in the last seven days before Opslane reads your repository to weigh it up. Below that, the issue stays watched and nothing investigates it. See [when Opslane opens a pull request](fix-prs.md).
+
 ## Statuses
 
 Statuses group by meaning. An issue can move between the groups in any order.
