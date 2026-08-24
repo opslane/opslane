@@ -33,7 +33,7 @@ Every `needs_human` incident carries a `reason_code`, a `reason_message`, and a 
 | `tests_failed` | Review the candidate diff manually — the agent produced a fix but the test suite still fails, so it may be partial or cause regressions. |
 | `low_confidence_fix` | Review the candidate diff and root-cause writeup, then apply or refine the fix manually — it did not clear the bar for an automatic PR. |
 | `repro_not_achievable` | Review the candidate diff and evidence manually — Opslane could not construct a reliable reproduction test for this error, so the fix is verified only against the existing suite. |
-| `draft_cap_reached` | Review the candidate diff manually or close an existing Opslane draft for this project — the configured open-draft cap was reached, so no additional draft was published. |
+| `draft_cap_reached` | Review or close an existing Opslane draft PR, then retry this fix. The candidate diff remains available on the incident. |
 | `budget_exhausted` | Review the error manually — the agent could not complete within its turn/budget limits. Consider guiding it with more context. |
 | `insufficient_context` | Add a replay, breadcrumbs, or a reproduction so Opslane has enough context to investigate. |
 

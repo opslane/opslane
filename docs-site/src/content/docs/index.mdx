@@ -5,9 +5,9 @@ description: What Opslane is, who it is for, and where to start.
 
 import { CardGrid, LinkCard } from '@astrojs/starlight/components';
 
-Error trackers see stack traces. Opslane knows your product.
+Finds the bugs that impact real users. Opens a pull request when it can verify the fix.
 
-Opslane watches errors and session recordings from your app and turns them into a short list of issues. It picks the issues worth fixing and investigates them against your repository. A fix that builds and passes your tests in a sandbox opens as a pull request. When it can't fix something, it says why. A daily digest keeps you out of the dashboard.
+Opslane watches errors and session recordings from your app and turns them into a short list of issues worth fixing. It investigates the ones that reach real users against your repository, and when it can verify a fix it opens a pull request. When it can't, it says what it found. A daily digest keeps you out of the dashboard.
 
 ## Who it is for
 
@@ -49,15 +49,8 @@ Evaluating it instead? The [architecture overview](/architecture/overview/) show
 
 ## How the docs are organized
 
-**Get started** covers setup: self-hosting the stack and installing the SDK. **How Opslane works** explains the system for someone deciding whether to trust it. **Issues** and **Fixes** cover the two halves of the product loop. **Projects and keys**, **Notifications**, and **Privacy and trust** each cover one area of configuration.
+**Get started** covers setup: self-hosting the stack, installing the SDK, and connecting GitHub. **How it works** explains the system for someone deciding whether to trust it, including how issues and fix pull requests work. **Configure** covers environments, API keys, and Slack notifications. **Trust and privacy** covers the data-flow model and replay masking.
 
-## What Opslane is not
+## License
 
-- **Not an APM or metrics backend.** Opslane ingests application errors and the session context around them: breadcrumbs, network timing, and optional replays. It does not do latency percentiles, distributed tracing, or infrastructure monitoring.
-- **Not autopilot.** Opslane opens pull requests but never merges them. Review and merge stay with the repository owner.
-- **Not a dashboard to babysit.** Conclusions ship as pull requests and issues; the dashboard exists for replays and settings, not triage duty.
-- **Pre-1.0.** The [`POST /api/v1/events` wire contract](/contracts/events/) is append-only and backward-compatible. Other interfaces may still change before 1.0.
-
-## Licensing
-
-The SDKs and shared types that run in *your* application are MIT. The rest of Opslane, including the server, worker, agent core, dashboard, CLI, and this docs site, is AGPL-3.0-only.
+The SDKs and shared types that run in *your* application are MIT. The rest of Opslane, including the server, worker, agent core, dashboard, and this docs site, is AGPL-3.0-only.
