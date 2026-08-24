@@ -324,7 +324,7 @@ export async function investigateError(
     }
     const shape = validateAdjudicationShape(submitted, { requireStructuralShape: true });
     if (shape.status === 'incomplete') {
-      return { ok: false, feedback: resubmitGuidance(shape.reason) };
+      return { ok: false, feedback: resubmitGuidance(shape.code, shape.reason) };
     }
     const derived = deriveOutcome(submitted, resolveCited, quoteAt);
     // Mechanically repairable derivation failures also go back for correction.
@@ -343,9 +343,20 @@ export async function investigateError(
       };
     }
     if (derived.basis === 'unrejected_local_candidates') {
+      // Name the actual defect per candidate: "ungrounded" means the model DID
+      // reject the candidate but the rejection's quote failed the verbatim
+      // check — telling it only to "reject by id" would ask for the thing it
+      // already did.
+      const rejectedIds = new Set((submitted.rejected_candidates ?? []).map((rejection) => rejection.id));
+      const perCandidate = (derived.dispositions ?? [])
+        .filter((entry) => entry.disposition !== 'rejected')
+        .map((entry) => rejectedIds.has(entry.id)
+          ? `${entry.id}: its rejection citation did not check out — the quote must be 8-300 characters copied verbatim from within a few lines of the cited line, in a file you read`
+          : `${entry.id}: not rejected in rejected_candidates`)
+        .join('; ');
       return {
         ok: false,
-        feedback: `${derived.reason}. Either reject each of those candidates by id in rejected_candidates with a grounded citation {path, line, quote} from a file you read, or change your conclusion to the local cause the evidence supports.`,
+        feedback: `${derived.reason}. ${perCandidate}. Fix each rejection's grounded citation {path, line, quote}, or — only if the evidence genuinely supports it — change your conclusion to a local cause.`,
       };
     }
     const verdict = validateVerdict({
@@ -356,7 +367,7 @@ export async function investigateError(
       filesRead: context.filesRead,
     }, resolveCited);
     if (verdict.status === 'incomplete') {
-      return { ok: false, feedback: resubmitGuidance(verdict.reason) };
+      return { ok: false, feedback: resubmitGuidance(verdict.code, verdict.reason) };
     }
     return { ok: true };
   };
@@ -404,6 +415,10 @@ export async function investigateError(
     });
   }
 
+  // The authoritative acceptance pipeline. validateSubmission above is its
+  // pre-acceptance mirror — a rule added here without a matching (or
+  // deliberately omitted) counterpart there silently exempts that rule from
+  // the correction loop. Keep the two in step.
   let decision = deriveOutcome(adjudication, resolveCited, quoteAt);
   if (adjudication) {
     const shape = validateAdjudicationShape(adjudication, { requireStructuralShape: true });

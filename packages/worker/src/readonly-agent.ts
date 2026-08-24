@@ -177,6 +177,23 @@ export async function runReadOnlyAgent(input: ReadOnlyRunInput): Promise<ReadOnl
     : 2;
   /** Rejected submissions returned for correction, counted across both paths. */
   let resubmitsUsed = 0;
+  /**
+   * The most recent rejected terminal submission. If the run then fails before
+   * a corrected resubmit arrives (truncation, prose, exhausted turns), this is
+   * returned as the terminal input rather than dropping an already-paid,
+   * parseable submission — the caller's post-run validation judges it and
+   * records its real defect. Deliberately NOT applied to api_error, whose stop
+   * value drives job-level retry semantics.
+   */
+  let rejectedSubmission: Record<string, unknown> | null = null;
+  const fallbackOr = (result: ReadOnlyRunResult): ReadOnlyRunResult =>
+    rejectedSubmission === null ? result : { ...result, terminalInput: rejectedSubmission, stop: 'terminal' };
+
+  /** The forced-verdict stage makes a call only when this holds — the same
+   * predicate gates both the stage entry and the last-turn retry decision so
+   * the two cannot drift apart. */
+  const forcedStageWillRun = (): boolean =>
+    input.classification !== undefined && filesRead.size >= input.classification.minFilesRead;
 
   /**
    * Rejection feedback for the terminal call, or null to accept. Consults the
@@ -311,7 +328,7 @@ export async function runReadOnlyAgent(input: ReadOnlyRunInput): Promise<ReadOnl
       // call the tool burn the whole budget on prose.
       if (nudged) {
         logger.warn(`${SPAN_PREFIX}: ended without calling ${input.terminalTool.name}`, { turn });
-        return { terminalInput: null, stop: 'no_tool_call', filesRead: [...filesRead], lastModelText, costUsd, usage };
+        return fallbackOr({ terminalInput: null, stop: 'no_tool_call', filesRead: [...filesRead], lastModelText, costUsd, usage });
       }
       nudged = true;
       messages.push({
@@ -328,40 +345,15 @@ export async function runReadOnlyAgent(input: ReadOnlyRunInput): Promise<ReadOnl
       continue;
     }
 
-    if (terminal) {
-      // On the loop's final turn, a rejection has somewhere to send the
-      // correction only if the forced-verdict stage will actually run — which
-      // requires classification AND its evidence gate already met (the stage
-      // returns no_evidence before making a call otherwise). Rejecting with no
-      // retry ahead would drop the submission the post-run validator should
-      // have judged. Accept it instead.
-      const forcedStageWillRun =
-        input.classification !== undefined && filesRead.size >= input.classification.minFilesRead;
-      const retryPossible = forcedStageWillRun || turn < input.maxTurns - 1;
-      const feedback = retryPossible ? rejectTerminal(terminal.input) : null;
-      if (feedback === null) {
-        return { terminalInput: terminal.input, stop: 'terminal', filesRead: [...filesRead], lastModelText, costUsd, usage };
-      }
-      // Every tool_use block needs a tool_result; sibling calls in the rejected
-      // turn are deliberately not executed so the correction happens first.
-      messages.push({
-        role: 'user',
-        content: toolCalls.map((call): Anthropic.ToolResultBlockParam => call.id === terminal.id
-          ? { type: 'tool_result', tool_use_id: call.id, is_error: true, content: feedback }
-          : {
-            type: 'tool_result',
-            tool_use_id: call.id,
-            content: `Not executed: correct and resubmit ${input.terminalTool.name} first.`,
-          }),
-      });
-      continue;
-    }
-
     // The calls in a turn are independent I/O — a grep subprocess and disk
     // reads — so they run together. Promise.all preserves the order the model
-    // asked in, which the tool_result blocks have to match.
+    // asked in, which the tool_result blocks have to match. Terminal calls are
+    // excluded and handled after: siblings execute FIRST so a read_file
+    // batched with the submission counts as read before the submission is
+    // validated — validating on the pre-turn snapshot manufactured a
+    // self-inflicted citation_not_read rejection for exactly that batching.
     const executed = await Promise.all(
-      toolCalls.map(async (call) => {
+      toolCalls.filter((call) => call.name !== input.terminalTool.name).map(async (call) => {
         const attrs: Record<string, string | number | boolean> = {
           'tool.name': call.name,
           [`${SPAN_PREFIX}.turn`]: turn,
@@ -390,17 +382,60 @@ export async function runReadOnlyAgent(input: ReadOnlyRunInput): Promise<ReadOnl
 
     // Recorded after the fan-out, in the order the model asked, so concurrency
     // cannot reorder what the caller reports as the files the agent opened.
-    const results: Anthropic.ToolResultBlockParam[] = [];
+    const outputs = new Map<string, { output: string; read: string | null }>();
     for (const { id, output, read } of executed) {
       if (read) filesRead.add(read);
-      results.push({ type: 'tool_result', tool_use_id: id, content: output });
+      outputs.set(id, { output, read });
     }
+
+    if (terminal) {
+      // On the loop's final turn, a rejection has somewhere to send the
+      // correction only if the forced-verdict stage will actually run.
+      // Rejecting with no retry ahead would drop the submission the post-run
+      // validator should have judged. Accept it instead.
+      const retryPossible = forcedStageWillRun() || turn < input.maxTurns - 1;
+      const feedback = retryPossible ? rejectTerminal(terminal.input) : null;
+      if (feedback === null) {
+        return { terminalInput: terminal.input, stop: 'terminal', filesRead: [...filesRead], lastModelText, costUsd, usage };
+      }
+      rejectedSubmission = terminal.input;
+      // Every tool_use block needs a tool_result, in the model's order:
+      // executed siblings carry their real output, the rejected submission its
+      // feedback, and any duplicate terminal call a stub.
+      messages.push({
+        role: 'user',
+        content: toolCalls.map((call): Anthropic.ToolResultBlockParam => {
+          if (call.id === terminal.id) {
+            return { type: 'tool_result', tool_use_id: call.id, is_error: true, content: feedback };
+          }
+          const result = outputs.get(call.id);
+          if (result !== undefined) {
+            return { type: 'tool_result', tool_use_id: call.id, content: result.output };
+          }
+          return {
+            type: 'tool_result',
+            tool_use_id: call.id,
+            content: `Not executed: a rejected ${input.terminalTool.name} submission is already being corrected.`,
+          };
+        }),
+      });
+      continue;
+    }
+
+    const results: Anthropic.ToolResultBlockParam[] = toolCalls.map((call): Anthropic.ToolResultBlockParam => {
+      const result = outputs.get(call.id);
+      return {
+        type: 'tool_result',
+        tool_use_id: call.id,
+        content: result?.output ?? `Error: Unknown tool "${call.name}"`,
+      };
+    });
     messages.push({ role: 'user', content: results });
   }
 
   if (input.classification) {
-    if (filesRead.size < input.classification.minFilesRead) {
-      return { terminalInput: null, stop: 'no_evidence', filesRead: [...filesRead], lastModelText, costUsd, usage };
+    if (!forcedStageWillRun()) {
+      return fallbackOr({ terminalInput: null, stop: 'no_evidence', filesRead: [...filesRead], lastModelText, costUsd, usage });
     }
 
     messages.push({
@@ -441,7 +476,7 @@ export async function runReadOnlyAgent(input: ReadOnlyRunInput): Promise<ReadOnl
 
       recordUsage(response);
       if (response.stop_reason === 'max_tokens') {
-        return { terminalInput: null, stop: 'truncated', filesRead: [...filesRead], lastModelText, costUsd, usage };
+        return fallbackOr({ terminalInput: null, stop: 'truncated', filesRead: [...filesRead], lastModelText, costUsd, usage });
       }
       const verdictCalls: { id: string; name: string; input: Record<string, unknown> }[] = [];
       for (const block of response.content) {
@@ -452,7 +487,7 @@ export async function runReadOnlyAgent(input: ReadOnlyRunInput): Promise<ReadOnl
       }
       const terminalBlock = verdictCalls.find((call) => call.name === input.terminalTool.name);
       if (!terminalBlock) {
-        return { terminalInput: null, stop: 'no_tool_call', filesRead: [...filesRead], lastModelText, costUsd, usage };
+        return fallbackOr({ terminalInput: null, stop: 'no_tool_call', filesRead: [...filesRead], lastModelText, costUsd, usage });
       }
       const feedback = rejectTerminal(terminalBlock.input);
       if (feedback === null) {
@@ -465,6 +500,7 @@ export async function runReadOnlyAgent(input: ReadOnlyRunInput): Promise<ReadOnl
           usage,
         };
       }
+      rejectedSubmission = terminalBlock.input;
       // Every tool_use block needs a matching tool_result — an unpaired
       // sibling call (or a duplicate terminal call) would fail the next
       // request instead of delivering the correction.
@@ -482,5 +518,5 @@ export async function runReadOnlyAgent(input: ReadOnlyRunInput): Promise<ReadOnl
     }
   }
 
-  return { terminalInput: null, stop: 'turns_exhausted', filesRead: [...filesRead], lastModelText, costUsd, usage };
+  return fallbackOr({ terminalInput: null, stop: 'turns_exhausted', filesRead: [...filesRead], lastModelText, costUsd, usage });
 }

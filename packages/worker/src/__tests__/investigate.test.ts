@@ -344,6 +344,27 @@ describe('a rejected submission is handed back for correction', () => {
     expect(conversation).toContain('"is_error":true');
   });
 
+  it('counts a read_file batched with the submission before validating it', async () => {
+    // The read and the submit arrive in ONE assistant turn. The sibling read
+    // must execute (and land in filesRead) before the submission is validated,
+    // or the citation of the just-read file is rejected as citation_not_read —
+    // a rejection the mechanism itself would have manufactured.
+    const submission = diagnosisResponse();
+    mockMessagesCreate.mockResolvedValueOnce({
+      content: [
+        { type: 'tool_use', id: 'read-1', name: 'read_file', input: { path: 'src/App.vue' } },
+        ...submission.content,
+      ],
+      usage: USAGE,
+    });
+
+    const result = await investigateError('key', makeInput(), tempDir);
+
+    expect(result.outcome).toBe('code_fix');
+    expect(result.filesRead).toContain('src/App.vue');
+    expect(mockMessagesCreate).toHaveBeenCalledTimes(1);
+  });
+
   it('stops asking after the resubmit budget and terminalizes as before', async () => {
     happyPath({
       candidates_considered: [
