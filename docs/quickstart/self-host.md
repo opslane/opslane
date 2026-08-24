@@ -42,7 +42,7 @@ If the `curl` returns `{"status":"ok"}`-style output with HTTP 200, the stack is
 
 ## Path 1: capture and group an error, no credentials
 
-**What this proves:** ingestion, stack resolution, stable issue identity, and the Postgres job queue, without any AI or GitHub account.
+**What this proves:** your app can send an error and Opslane captures and groups it, without any AI or GitHub account.
 
 Seed a test project and its ingest key, then send a fake error:
 
