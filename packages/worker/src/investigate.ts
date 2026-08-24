@@ -13,7 +13,7 @@ import type { RuntimeInfo } from './runtime-info.js';
 import { traceSpan } from './tracing.js';
 import type { TriageResult } from './agent-fix.js';
 import { calculateCost } from '@opslane/agent-core';
-import { validateAdjudicationShape, validateVerdict } from './verdict-validation.js';
+import { resubmitGuidance, validateAdjudicationShape, validateVerdict } from './verdict-validation.js';
 import { quoteWithinWindow } from './quote-at.js';
 
 /**
@@ -284,6 +284,83 @@ export async function investigateError(
     ? `\n\nFiles named by the stack trace, as a starting point only: ${stackFiles.slice(0, 5).join(', ')}`
     : '';
 
+  // One read per cited file per adjudication: a submission citing the same
+  // file across several candidates and rejections must not re-read it each
+  // time in the process that also owns lease heartbeats.
+  const quoteFileCache = new Map<string, string | null>();
+  const resolveCited = (cited: string): string | null => resolveInsideRepo(repoPath, cited);
+  const quoteAt = (resolved: string, line: number, quote: string): boolean => {
+    if (!quoteFileCache.has(resolved)) {
+      try {
+        // The model picks the path, so bound the read the same way
+        // executeReadFile does: a citation into a multi-megabyte vendored or
+        // minified file is not groundable evidence, and slurping it whole
+        // per candidate check would buy nothing but memory pressure.
+        const target = join(repoPath, resolved);
+        quoteFileCache.set(
+          resolved,
+          statSync(target).size > QUOTE_CHECK_MAX_FILE_BYTES ? null : readFileSync(target, 'utf8'),
+        );
+      } catch {
+        quoteFileCache.set(resolved, null);
+      }
+    }
+    const text = quoteFileCache.get(resolved);
+    return text !== null && text !== undefined && quoteWithinWindow(text, line, quote);
+  };
+
+  // Pre-acceptance mirror of the post-run checks below. A defect the model can
+  // repair in one turn — a candidate missing its citation, an unread file in
+  // the evidence — goes back as feedback instead of voiding the whole paid run.
+  // The post-run validation stays authoritative: a submission still broken
+  // after the resubmit budget lands there and terminalizes exactly as before.
+  const validateSubmission = (
+    raw: Record<string, unknown>,
+    context: { filesRead: string[] },
+  ): { ok: true } | { ok: false; feedback: string } => {
+    const submitted = parseAdjudication(raw);
+    if (!submitted) {
+      return { ok: false, feedback: 'best_supported was empty — state the cause in one sentence.' };
+    }
+    const shape = validateAdjudicationShape(submitted, { requireStructuralShape: true });
+    if (shape.status === 'incomplete') {
+      return { ok: false, feedback: resubmitGuidance(shape.reason) };
+    }
+    const derived = deriveOutcome(submitted, resolveCited, quoteAt);
+    // Mechanically repairable derivation failures also go back for correction.
+    // Substantive judgments (insufficient evidence, an unplaced cause) do not:
+    // those are the model's honest answer, not a format defect.
+    if (derived.basis === 'citation_unresolvable') {
+      return {
+        ok: false,
+        feedback: `${derived.reason}. cause_locations[0].path must be the bare repository-relative path of a file that exists in the checkout.`,
+      };
+    }
+    if (derived.basis === 'uncitable_local_claim') {
+      return {
+        ok: false,
+        feedback: `${derived.reason}. A local cause requires at least one cause_locations entry naming the file.`,
+      };
+    }
+    if (derived.basis === 'unrejected_local_candidates') {
+      return {
+        ok: false,
+        feedback: `${derived.reason}. Either reject each of those candidates by id in rejected_candidates with a grounded citation {path, line, quote} from a file you read, or change your conclusion to the local cause the evidence supports.`,
+      };
+    }
+    const verdict = validateVerdict({
+      causeText: submitted.best_supported,
+      claimsCodeCause: derived.outcome === 'code_fix',
+      evidence: submitted.evidence ?? [],
+      agentTaskBrief: submitted.agent_task_brief ?? null,
+      filesRead: context.filesRead,
+    }, resolveCited);
+    if (verdict.status === 'incomplete') {
+      return { ok: false, feedback: resubmitGuidance(verdict.reason) };
+    }
+    return { ok: true };
+  };
+
   const run = await traceSpan('investigation.diagnose', { 'investigation.stage': 'diagnose' }, () =>
     runReadOnlyAgent({
       apiKey,
@@ -299,6 +376,7 @@ export async function investigateError(
       terminalTool: submitDiagnosisTool(),
       repoPath,
       classification: { minFilesRead: 1 },
+      validateTerminal: validateSubmission,
     }));
 
   const filesRead = run.filesRead;
@@ -326,33 +404,7 @@ export async function investigateError(
     });
   }
 
-  // One read per cited file per adjudication: a submission citing the same
-  // file across several candidates and rejections must not re-read it each
-  // time in the process that also owns lease heartbeats.
-  const quoteFileCache = new Map<string, string | null>();
-  let decision = deriveOutcome(
-    adjudication,
-    (cited) => resolveInsideRepo(repoPath, cited),
-    (resolved, line, quote) => {
-      if (!quoteFileCache.has(resolved)) {
-        try {
-          // The model picks the path, so bound the read the same way
-          // executeReadFile does: a citation into a multi-megabyte vendored or
-          // minified file is not groundable evidence, and slurping it whole
-          // per candidate check would buy nothing but memory pressure.
-          const target = join(repoPath, resolved);
-          quoteFileCache.set(
-            resolved,
-            statSync(target).size > QUOTE_CHECK_MAX_FILE_BYTES ? null : readFileSync(target, 'utf8'),
-          );
-        } catch {
-          quoteFileCache.set(resolved, null);
-        }
-      }
-      const text = quoteFileCache.get(resolved);
-      return text !== null && text !== undefined && quoteWithinWindow(text, line, quote);
-    },
-  );
+  let decision = deriveOutcome(adjudication, resolveCited, quoteAt);
   if (adjudication) {
     const shape = validateAdjudicationShape(adjudication, { requireStructuralShape: true });
     if (shape.status === 'incomplete') {
@@ -369,7 +421,7 @@ export async function investigateError(
         evidence: adjudication.evidence ?? [],
         agentTaskBrief: adjudication.agent_task_brief ?? null,
         filesRead,
-      }, (cited) => resolveInsideRepo(repoPath, cited));
+      }, resolveCited);
       if (validation.status === 'incomplete') {
         decision = {
           outcome: 'incomplete',

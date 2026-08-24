@@ -95,6 +95,51 @@ export function validateAdjudicationShape(
   return { status: 'valid' };
 }
 
+/**
+ * Turn a validator reason code into an instruction the model can act on when
+ * the submission is handed back for correction. The reason strings above are
+ * forensic labels; alone they tell the model what failed but not what a
+ * passing submission looks like.
+ */
+export function resubmitGuidance(reason: string): string {
+  const code = reason.split(':')[0]?.trim() ?? '';
+  const citationShape =
+    'a citation is {path, line, quote} where quote is 8-300 characters copied verbatim from near that line ' +
+    'in a file you actually read';
+  switch (code) {
+    case 'candidate_missing_citation':
+      return `${reason} — every local_code or configuration candidate must carry a valid citation (${citationShape}). ` +
+        'A citation whose quote is too short, too long, or not verbatim is dropped and counts as missing. ' +
+        'Add a real citation to that candidate, or change its kind if it does not point at local code.';
+    case 'candidate_missing_id':
+    case 'duplicate_candidate_id':
+      return `${reason} — give every candidate a unique id matching "c1", "c2", … and reference those ids in rejected_candidates.`;
+    case 'missing_rejected_candidates':
+      return `${reason} — include a rejected_candidates array; pass [] if you reject nothing.`;
+    case 'rejection_malformed':
+    case 'rejection_unknown_id':
+    case 'duplicate_rejection_id':
+    case 'empty_rejection_evidence':
+      return `${reason} — each rejection must name an existing candidate id exactly once, with non-empty evidence and a valid citation (${citationShape}).`;
+    case 'legacy_shape':
+      return `${reason} — resubmit with candidate ids and a rejected_candidates array.`;
+    case 'no_citations':
+    case 'citation_malformed':
+    case 'citation_missing_link':
+    case 'citation_unresolvable':
+    case 'citation_not_read':
+      return `${reason} — the evidence array must cite at least one file you read with read_file, using its exact repository path, and each entry needs a non-empty detail and symptomLink.`;
+    case 'missing_brief':
+      return `${reason} — a local code cause needs agent_task_brief: a self-contained markdown brief (symptom, files, cause, change, verification).`;
+    case 'empty_verdict':
+    case 'filler_verdict':
+    case 'filler_brief':
+      return `${reason} — state the actual cause; placeholder text is rejected.`;
+    default:
+      return reason;
+  }
+}
+
 export function validateVerdict(
   verdict: VerdictForValidation,
   resolvePath: (path: string) => string | null,

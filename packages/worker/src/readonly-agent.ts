@@ -61,6 +61,20 @@ export interface ReadOnlyRunInput {
   repoPath: string;
   /** Optional evidence gate followed by one dedicated verdict-only turn. */
   classification?: { minFilesRead: number };
+  /**
+   * Pre-acceptance check on a terminal submission. On failure the feedback goes
+   * back to the model as the rejected call's tool result and the model may
+   * resubmit, up to maxResubmits times across the whole run. Without this hook
+   * the first terminal call ends the run whatever it contains — a one-field
+   * defect the model could fix in a single turn instead discards the entire
+   * paid investigation.
+   */
+  validateTerminal?: (
+    raw: Record<string, unknown>,
+    context: { filesRead: string[] },
+  ) => { ok: true } | { ok: false; feedback: string };
+  /** Resubmissions validateTerminal may trigger. Defaults to 2. */
+  maxResubmits?: number;
 }
 
 /** Prefixes trace span and log names, e.g. "diagnose.read_file". */
@@ -155,6 +169,36 @@ export async function runReadOnlyAgent(input: ReadOnlyRunInput): Promise<ReadOnl
   let costUsd = 0;
   /** Whether the prose-instead-of-tool-call nudge has already been spent. */
   let nudged = false;
+  // Clamped: Infinity or NaN here would make the resubmit budget check
+  // permanently false and turn a consistently rejected verdict into an
+  // unlimited paid loop.
+  const maxResubmits = Number.isFinite(input.maxResubmits ?? 2)
+    ? Math.min(Math.max(Math.trunc(input.maxResubmits ?? 2), 0), 5)
+    : 2;
+  /** Rejected submissions returned for correction, counted across both paths. */
+  let resubmitsUsed = 0;
+
+  /**
+   * Rejection feedback for the terminal call, or null to accept. Consults the
+   * resubmit and spend budgets so an exhausted budget accepts the submission
+   * as-is — the caller's own post-run validation still gets the final word,
+   * and a rejected-but-unaffordable submission reaches it instead of being
+   * dropped.
+   */
+  const rejectTerminal = (raw: Record<string, unknown>): string | null => {
+    if (!input.validateTerminal || resubmitsUsed >= maxResubmits || costUsd > input.budgetUsd) return null;
+    const verdict = input.validateTerminal(raw, { filesRead: [...filesRead] });
+    if (verdict.ok) return null;
+    resubmitsUsed++;
+    logger.info(`${SPAN_PREFIX}: terminal submission rejected, asking for a corrected resubmit`, {
+      resubmit: resubmitsUsed,
+      feedback: verdict.feedback.slice(0, 500),
+    });
+    return (
+      `Your submission was NOT recorded. ${verdict.feedback} ` +
+      `Correct this and call ${input.terminalTool.name} again with the complete submission.`
+    );
+  };
 
   const systemMessages: Anthropic.TextBlockParam[] = [
     { type: 'text', text: input.systemPrompt, cache_control: { type: 'ephemeral' } },
@@ -285,7 +329,32 @@ export async function runReadOnlyAgent(input: ReadOnlyRunInput): Promise<ReadOnl
     }
 
     if (terminal) {
-      return { terminalInput: terminal.input, stop: 'terminal', filesRead: [...filesRead], lastModelText, costUsd, usage };
+      // On the loop's final turn, a rejection has somewhere to send the
+      // correction only if the forced-verdict stage will actually run — which
+      // requires classification AND its evidence gate already met (the stage
+      // returns no_evidence before making a call otherwise). Rejecting with no
+      // retry ahead would drop the submission the post-run validator should
+      // have judged. Accept it instead.
+      const forcedStageWillRun =
+        input.classification !== undefined && filesRead.size >= input.classification.minFilesRead;
+      const retryPossible = forcedStageWillRun || turn < input.maxTurns - 1;
+      const feedback = retryPossible ? rejectTerminal(terminal.input) : null;
+      if (feedback === null) {
+        return { terminalInput: terminal.input, stop: 'terminal', filesRead: [...filesRead], lastModelText, costUsd, usage };
+      }
+      // Every tool_use block needs a tool_result; sibling calls in the rejected
+      // turn are deliberately not executed so the correction happens first.
+      messages.push({
+        role: 'user',
+        content: toolCalls.map((call): Anthropic.ToolResultBlockParam => call.id === terminal.id
+          ? { type: 'tool_result', tool_use_id: call.id, is_error: true, content: feedback }
+          : {
+            type: 'tool_result',
+            tool_use_id: call.id,
+            content: `Not executed: correct and resubmit ${input.terminalTool.name} first.`,
+          }),
+      });
+      continue;
     }
 
     // The calls in a turn are independent I/O — a grep subprocess and disk
@@ -338,43 +407,57 @@ export async function runReadOnlyAgent(input: ReadOnlyRunInput): Promise<ReadOnl
       role: 'user',
       content: 'Exploration is over. Submit your verdict now using only evidence you actually gathered.',
     });
-    markLastUserMessageForCaching(messages);
 
-    let response: Anthropic.Message;
-    try {
-      response = await client.messages.create({
-        model: input.model,
-        max_tokens: 16000,
-        system: systemMessages,
-        messages,
-        tools,
-        tool_choice: { type: 'tool', name: input.terminalTool.name },
-      });
-    } catch (error: unknown) {
-      const detail = error instanceof Error ? error.message : String(error);
-      const status = (error as { status?: unknown }).status;
-      logger.warn(`${SPAN_PREFIX}: classification call failed`, { error: detail, status });
-      return {
-        terminalInput: null,
-        stop: 'api_error',
-        ...(typeof status === 'number' ? { apiErrorStatus: status } : {}),
-        apiErrorDetail: detail,
-        filesRead: [...filesRead],
-        lastModelText,
-        costUsd,
-        usage,
-      };
-    }
+    // Bounded by the shared resubmit budget: each rejected verdict consumes one
+    // resubmit, so this loop runs at most 1 + maxResubmits times.
+    for (;;) {
+      markLastUserMessageForCaching(messages);
 
-    recordUsage(response);
-    if (response.stop_reason === 'max_tokens') {
-      return { terminalInput: null, stop: 'truncated', filesRead: [...filesRead], lastModelText, costUsd, usage };
-    }
-    for (const block of response.content) {
-      if (block.type === 'text') lastModelText = block.text;
-      if (block.type === 'tool_use' && block.name === input.terminalTool.name) {
+      let response: Anthropic.Message;
+      try {
+        response = await client.messages.create({
+          model: input.model,
+          max_tokens: 16000,
+          system: systemMessages,
+          messages,
+          tools,
+          tool_choice: { type: 'tool', name: input.terminalTool.name },
+        });
+      } catch (error: unknown) {
+        const detail = error instanceof Error ? error.message : String(error);
+        const status = (error as { status?: unknown }).status;
+        logger.warn(`${SPAN_PREFIX}: classification call failed`, { error: detail, status });
         return {
-          terminalInput: block.input as Record<string, unknown>,
+          terminalInput: null,
+          stop: 'api_error',
+          ...(typeof status === 'number' ? { apiErrorStatus: status } : {}),
+          apiErrorDetail: detail,
+          filesRead: [...filesRead],
+          lastModelText,
+          costUsd,
+          usage,
+        };
+      }
+
+      recordUsage(response);
+      if (response.stop_reason === 'max_tokens') {
+        return { terminalInput: null, stop: 'truncated', filesRead: [...filesRead], lastModelText, costUsd, usage };
+      }
+      const verdictCalls: { id: string; name: string; input: Record<string, unknown> }[] = [];
+      for (const block of response.content) {
+        if (block.type === 'text') lastModelText = block.text;
+        if (block.type === 'tool_use') {
+          verdictCalls.push({ id: block.id, name: block.name, input: block.input as Record<string, unknown> });
+        }
+      }
+      const terminalBlock = verdictCalls.find((call) => call.name === input.terminalTool.name);
+      if (!terminalBlock) {
+        return { terminalInput: null, stop: 'no_tool_call', filesRead: [...filesRead], lastModelText, costUsd, usage };
+      }
+      const feedback = rejectTerminal(terminalBlock.input);
+      if (feedback === null) {
+        return {
+          terminalInput: terminalBlock.input,
           stop: 'terminal',
           filesRead: [...filesRead],
           lastModelText,
@@ -382,8 +465,21 @@ export async function runReadOnlyAgent(input: ReadOnlyRunInput): Promise<ReadOnl
           usage,
         };
       }
+      // Every tool_use block needs a matching tool_result — an unpaired
+      // sibling call (or a duplicate terminal call) would fail the next
+      // request instead of delivering the correction.
+      messages.push({ role: 'assistant', content: response.content });
+      messages.push({
+        role: 'user',
+        content: verdictCalls.map((call): Anthropic.ToolResultBlockParam => call.id === terminalBlock.id
+          ? { type: 'tool_result', tool_use_id: call.id, is_error: true, content: feedback }
+          : {
+            type: 'tool_result',
+            tool_use_id: call.id,
+            content: `Not executed: correct and resubmit ${input.terminalTool.name} first.`,
+          }),
+      });
     }
-    return { terminalInput: null, stop: 'no_tool_call', filesRead: [...filesRead], lastModelText, costUsd, usage };
   }
 
   return { terminalInput: null, stop: 'turns_exhausted', filesRead: [...filesRead], lastModelText, costUsd, usage };
