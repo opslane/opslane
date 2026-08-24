@@ -31,7 +31,7 @@ reader inside the service network.
 
 ## AI-assisted investigations
 
-Resolved source paths, functions, and positions guide investigation toward the relevant files in the connected repository. Source files that the inquiry, investigator, or fix agent reads can reach the configured model provider. Include that separate data flow in your security and privacy review.
+Opslane uses your source maps to find the relevant files, then reads that source while investigating an error. Source it reads can reach the AI model provider. Include that data flow in your security and privacy review.
 
 The upload and resolution paths do not return map content in API errors or expose a map download route. The dashboard treats resolved stack text as untrusted content.
 

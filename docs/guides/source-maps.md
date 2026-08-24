@@ -38,7 +38,7 @@ The key is a **secret**. Never prefix it with `VITE_` or `NEXT_PUBLIC_`, and nev
 
 ## Get a source-map key
 
-Mint one from the ingestion container. It can upload source maps and nothing else:
+Create one from the ingestion container. It can upload source maps and nothing else:
 
 ```bash
 docker exec <ingestion-container> mint-key \

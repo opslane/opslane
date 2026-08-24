@@ -141,6 +141,6 @@ If your bundle is served from a different origin than your page, add `crossorigi
 
 ## Verify
 
-Trigger an error in your app, then open the dashboard. Ingestion first stores the observation and queues stack resolution. After the worker resolves the stack, ingestion assigns it to a stable issue. Allow a few seconds for those steps. If nothing arrives, check the key prefix, the `endpoint` value on self-hosted installs, and the browser console for SDK warnings (set `debug: true` to see them).
+Trigger an error in your app, then open the dashboard. It should appear as an issue within a few seconds. If nothing arrives, check the key prefix, the `endpoint` value on self-hosted installs, and the browser console for SDK warnings (set `debug: true` to see them).
 
 Every `init` option, with types and defaults: [SDK options](reference/sdk-options.md).

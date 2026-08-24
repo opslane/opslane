@@ -55,7 +55,7 @@ curl -X POST http://localhost:8082/api/v1/events \
   -d '{"timestamp":"2026-01-01T00:00:00Z","error":{"type":"ReferenceError","message":"demo is not defined","stack":"ReferenceError: demo is not defined\n  at app.js:1:1"},"breadcrumbs":[],"context":{"url":"https://example.com","user_agent":"smoke test"},"sdk_version":"0.0.1","platform":"javascript"}'
 ```
 
-The `opslane_pk_...` value is the seed script's test ingest key, quoted at the top of `scripts/seed-e2e.sql`; real deployments mint their own. You should get HTTP `202` with an `error_group_id`. That identifier is a capture handle, not proof that an issue already exists. Within a few seconds the worker resolves the stack, then ingestion assigns the observation to a stable issue. Check it:
+The `opslane_pk_...` value is the seed script's test ingest key, quoted at the top of `scripts/seed-e2e.sql`; real deployments create their own. You should get HTTP `202` back. Give it a few seconds to show up as an issue, then check it:
 
 ```bash
 docker compose exec -T postgres psql -U opslane -d opslane \
@@ -70,9 +70,9 @@ Expected result:
  new    |             |
 ```
 
-The event was captured, its stack resolved, and it was assigned to a `new` issue. Opslane watches the issue but won't send a one-off to the repository inquiry, and with no AI credentials it couldn't run that inquiry anyway. That takes Path 2.
+The event was captured and grouped into a `new` issue. Opslane doesn't investigate a one-off that hasn't reached enough users, and without AI credentials it couldn't investigate anyway. That takes Path 2.
 
-For an error that qualifies for inquiry, the model can choose to investigate, wait for more evidence, or stop. An actionable diagnosis then starts a fix automatically. It does not pass through a confidence, reach, or approval gate. The investigation ultimately produces a pull request, an insight that points outside your code, or a stated reason a person must take over.
+Once an error reaches enough users, Opslane reads your repository and decides whether to investigate it. An investigation ends one of three ways: a pull request with a fix, a note that the cause is outside your code, or a stop with a reason for you to take over.
 
 One note on keys: a project has two key scopes. The seeded `opslane_pk_` **ingest key** can only send events and recordings, and is safe to ship in a browser bundle. Uploading source maps takes a separate `opslane_sk_` **source-map key**, minted with `mint-key`; see the [source maps guide](../guides/source-maps.md).
 

@@ -2,7 +2,7 @@
 covers:
   - packages/ingestion/db/project_keys.go
   - packages/ingestion/cmd/mint-key/main.go
-description: The two project key scopes, how to mint them, and how to rotate them.
+description: The two project key scopes, how to create them, and how to rotate them.
 ---
 
 # API keys
@@ -14,7 +14,7 @@ A project has two kinds of keys. The server enforces what each can do.
 | Looks like | `opslane_pk_...` | `opslane_sk_...` |
 | What it can do | Send events and session recordings | Upload source maps |
 | Where it lives | Inside your browser bundle | In CI |
-| If it leaks | It is already public in your bundle; rotate it only if it is being abused | Revoke it and mint a new one |
+| If it leaks | It is already public in your bundle; rotate it only if it is being abused | Revoke it and create a new one |
 
 No key can read data. Reading requires a signed-in user.
 
@@ -26,7 +26,7 @@ You get an ingest key when the project is created; it is shown once and can't be
 VITE_OPSLANE_API_KEY=opslane_pk_...
 ```
 
-The key ships inside the browser bundle, so a new key takes effect on your next app deploy, not when it is minted.
+The key ships inside the browser bundle, so a new key takes effect on your next app deploy, not the moment you create it.
 
 ## The source-map key
 
@@ -38,7 +38,7 @@ OPSLANE_SOURCEMAP_KEY=opslane_sk_...
 
 Never give it a `VITE_`-style public prefix; that bundles the secret into the browser. The [source maps guide](source-maps.md) covers the Vite plugin that uses it.
 
-## Minting keys on a self-host
+## Create keys on a self-host
 
 The `mint-key` tool ships in the ingestion container:
 
@@ -55,7 +55,7 @@ docker compose exec -T postgres psql -U opslane -d opslane -c "SELECT id, name F
 
 ## Rotating a key
 
-Minting never revokes, so old and new keys can overlap. Mint the new key, deploy it, then revoke the old one with the SQL `mint-key` printed. Revoking one key never touches the others.
+Creating a key never revokes an old one, so the two can overlap. Create the new key, deploy it, then revoke the old one with the SQL `mint-key` printed. Revoking one key never touches the others.
 
 ## When a key is rejected
 
