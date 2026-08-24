@@ -1,40 +1,27 @@
 ---
-covers:
-  - packages/worker/src/pipeline.ts
-  - packages/worker/src/investigate.ts
-  - packages/worker/src/agent-fix.ts
-  - packages/worker/src/harness/**
-description: What a verified fix guarantees, and what it does not.
+description: What Opslane checks before it opens a pull request, and what that check can't promise.
 ---
 
-# What "verified" means
+# When Opslane opens a pull request
 
-Opslane opens pull requests on its own. That is only safe if you can tell a verified fix from an unverified one, and if "verified" means something exact. This page says what verification proves, and what it does not.
+Opslane opens a pull request only after it checks that its fix actually works. Here is what that check is, and what it can't promise.
 
-## What Opslane proves before a fix counts as verified
+## What Opslane checks first
 
-A fix is verified only when all of this held during the run, inside the sandbox, against a real clone of your repository:
+Before you ever see a pull request, Opslane has:
 
-- A targeted test fails on the broken code and passes on the fix, and Opslane ran it both ways to confirm.
-- Your existing test suite gained no new failures when Opslane ran it before and after the edit.
-- The changed repository built successfully, or it has no build step.
-- A second model reviewed the diff and the evidence and approved it.
+- Run your test suite before and after its change, and confirmed nothing that passed before now fails.
+- Built your project, if you have a build step.
+- Where it could, written a new test that fails on the broken code and passes with the fix.
+- Had a second AI model read the change and agree with it.
 
-If the sandbox itself fails partway, when a dependency won't install, the test runner crashes, or a step times out, Opslane records an infrastructure error and retries. That never counts for or against the fix.
+If a fix can't pass those checks, Opslane doesn't open a normal pull request. It opens a draft you have to opt into, or it stops and tells you why.
 
-## What a verified fix guarantees
+## What the check can't promise
 
-- Opslane never labels a fix verified without running that evidence. The pull request body lists the commands and their results, so you can check the work. A pull request that Opslane starts automatically still opens as a draft.
-- When Opslane could not verify a fix, it says so on the pull request, and it opens one only if your project opted in to unverified drafts.
-- Every stopped fix attempt tells you why, with a reason code and a next step.
+- **A passing test isn't proof the bug is gone for your users.** It shows the fix handles the problem under your tests, not that production behaves the same, or that the deeper cause is solved.
+- **Your CI is only as strong as your tests.** If your checks only run a linter, a green result means less than a real test suite.
+- **No performance or security review.** The check is about behavior, not speed, resource use, or new vulnerabilities.
+- **Some bugs can't be reproduced.** An error with no stack trace, no source maps, or a cause in someone else's code is flagged as unfixable instead of guessed at.
 
-## What it does NOT guarantee
-
-- **A passing test is not proof the production error is gone.** The test proves the fix handles the symptom under test conditions. It does not prove production behaves the same, that the deeper root cause is addressed, or that the same kind of error can't happen elsewhere.
-- **Green CI varies in strength.** A repository whose CI only runs a linter tells you less than one with a real test suite. The evidence names the checks that ran, so you can judge what actually passed.
-- **No performance or security review.** The gate checks behavior through tests, not speed, resource use, or new vulnerabilities. Review the pull request as you would a contractor's.
-- **Some errors can't be reproduced.** An error with no application stack frames, no source maps, or a cause in third-party code is marked unfixable rather than guessed at. That is the gate working, not failing.
-
-## Why the gate is strict
-
-One wrong "ready to merge" costs more trust than ten honest drafts or "needs a human" stops. So Opslane keeps unproven work visible without dressing it up as proof. An unverified fix is opt-in and labeled as unverified, and a fix Opslane can't stand behind stops for a human instead of shipping.
+Review every Opslane pull request the way you would a coworker's. It never merges its own.

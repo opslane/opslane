@@ -125,4 +125,4 @@ The worker starts with only `DATABASE_URL` and logs a warning for missing `ANTHR
 | `OPSLANE_MINIO_HOST_PORT` | Host port published for the bundled MinIO (default 9012). Compose interpolation only. `REPLAY_STORE_PUBLIC_ENDPOINT` follows it unless set explicitly. Browsers upload replay chunks to that origin, so the two must agree. |
 | `OPSLANE_INFRA_BIND_ADDR` | Interface the Postgres and MinIO host ports bind to (default `127.0.0.1`; they carry committed dev credentials). Compose interpolation only. Widen it only when loopback is inside a VM, as with Colima or a remote `DOCKER_HOST`. |
 | `OPSLANE_MINIO_READY_TIMEOUT_SECONDS` | How long `minio-setup` waits for MinIO before exiting non-zero with a diagnostic (default 60). Compose interpolation only. |
-| `ENCRYPTION_KEY` | Read by nothing except a sandbox scrub list; at-rest token encryption is not implemented (see [trust](../architecture/trust.md#honest-gaps-current-state)). |
+| `ENCRYPTION_KEY` | Reserved for future encrypted-at-rest token storage; not read by current code. |

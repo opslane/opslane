@@ -20,7 +20,7 @@ Opslane clones your repo at the version where the error happened and reads the c
 
 ### It writes a fix and proves it
 
-When the cause is in your code, Opslane writes a fix and proves it in a sandbox before you see it. It runs your tests before and after the change, builds your project, and where it can, writes a test that fails on the broken code and passes on the fix. A second AI model reviews the diff and can reject it. Only then does a pull request open. [What "verified" means](/architecture/precision/) covers exactly what that proof does and doesn't guarantee.
+When the cause is in your code, Opslane writes a fix and proves it in a sandbox before you see it. It runs your tests before and after the change, builds your project, and where it can, writes a test that fails on the broken code and passes on the fix. A second AI model reviews the diff and can reject it. Only then does a pull request open. [When Opslane opens a pull request](/architecture/precision/) covers what that check does and doesn't promise.
 
 ### What you get
 

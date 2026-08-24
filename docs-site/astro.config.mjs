@@ -28,7 +28,7 @@ export default defineConfig({
     starlight({
       title: 'Opslane',
       customCss: ['./src/styles/theme.css'],
-      description: 'Errors in, verified fix PRs out — or an explicit incident that says why not.',
+      description: 'An open-source error tracker that finds the bugs reaching your users and opens a pull request that fixes them.',
       markdown: { processedDirs: ['../docs'] },
       social: [
         {
@@ -73,7 +73,7 @@ export default defineConfig({
             { label: 'Environments', url: 'https://docs.opslane.com/guides/environments/', description: 'Labels, the project default, and action scope' },
             { label: 'API keys', url: 'https://docs.opslane.com/guides/api-keys/', description: 'Ingest keys, source-map keys, minting, rotation' },
             { label: 'Slack notifications', url: 'https://docs.opslane.com/guides/slack-notifications/', description: 'Webhooks, alerts, and the daily digest' },
-            { label: 'Trust and security model', url: 'https://docs.opslane.com/architecture/trust/', description: 'What each external service receives' },
+            { label: 'Your data', url: 'https://docs.opslane.com/architecture/trust/', description: 'What Opslane collects and what each integration sends out' },
             { label: 'SDK options', url: 'https://docs.opslane.com/reference/sdk-options/', description: 'Every init() option with type and default' },
             { label: 'Reason codes', url: 'https://docs.opslane.com/reference/reason-codes/', description: 'Every needs_human code with its remediation' },
             { label: 'Environment variables', url: 'https://docs.opslane.com/reference/environment-variables/', description: 'Every variable each service reads' },
@@ -95,7 +95,7 @@ export default defineConfig({
           items: [
             { label: 'How Opslane works', slug: 'how-it-works' },
             { label: "Catching bugs that don't throw", slug: 'guides/friction' },
-            { label: 'What "verified" means', slug: 'architecture/precision' },
+            { label: 'When Opslane opens a pull request', slug: 'architecture/precision' },
           ],
         },
         {
@@ -110,7 +110,7 @@ export default defineConfig({
         {
           label: 'Privacy and data',
           items: [
-            { label: 'What leaves your host', slug: 'architecture/trust' },
+            { label: 'Your data', slug: 'architecture/trust' },
             { label: 'Replay privacy and masking', slug: 'guides/replay-privacy' },
             { label: 'Source-map privacy', slug: 'guides/source-map-privacy' },
           ],

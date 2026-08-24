@@ -9,7 +9,7 @@ description: Send post-triage issue alerts and the daily digest to Slack with an
 
 # Slack notifications
 
-Opslane posts Slack messages for **issue alerts** and **daily digests**. Capture itself sends no alert. The current settled-identity error path publishes an issue notification only after triage opens a fix pull request or stops for a person. A noisy issue therefore does not produce one message per occurrence.
+Opslane posts Slack messages for **issue alerts** and **daily digests**. You get one alert per issue, sent after Opslane has decided what to do with it (opened a fix pull request, or stopped for a person), not one message every time the bug happens. A noisy bug is one alert, not a flood.
 
 Delivery goes through a Slack **incoming webhook** you create in your workspace. The webhook URL is the only credential involved; Opslane never needs a Slack bot token or app installation.
 
@@ -23,7 +23,7 @@ Treat that URL as a secret: anyone holding it can post to your channel. Opslane 
 
 ## 2. Add the destination in Opslane
 
-Dashboard > **Settings** > **Integrations** > *Notification integrations*: add a destination, name it, and paste the webhook URL. Select which event types to receive; by default both issue alerts and daily digests are enabled. Choose **Alert after triage** for current error-pipeline notifications. The **Alert immediately** setting remains available for compatibility, but the settled-identity path does not currently publish its source event. Use the test actions to confirm the channel wiring before relying on it.
+Dashboard > **Settings** > **Integrations** > *Notification integrations*: add a destination, name it, and paste the webhook URL. Select which event types to receive; by default both issue alerts and daily digests are enabled. Choose **Alert after triage** so you hear about an issue once Opslane has decided what to do with it. Use the test actions to confirm the channel wiring before relying on it.
 
 Or via the API (session-authenticated; an SDK API key cannot manage destinations):
 
@@ -54,4 +54,4 @@ The full endpoint set (list, update, delete, test) is in [HTTP routes](../refere
 - Webhook URLs are encrypted at rest with a key derived from `JWT_SECRET`. Rotating `JWT_SECRET` invalidates stored webhook configs, and each destination's URL must be re-entered.
 - Every read surface (API responses, dashboard, logs, delivery errors) shows only a redacted fingerprint (`hooks.slack.com/…/****abcd`), never the URL.
 - Destinations must use HTTPS `hooks.slack.com` URLs. `NOTIFY_UNSAFE_EXTRA_WEBHOOK_HOSTS` extends the allowlist for local development and tests only; never set it in production ([environment variables](../reference/environment-variables.md)).
-- What leaves your host, exactly: issue ID and title, first-seen timestamp, project ID and name, and environment name, itemized in [trust](../architecture/trust.md#data-flow-what-leaves-your-host). With no destinations configured, nothing is sent.
+- What leaves your host, exactly: issue ID and title, first-seen timestamp, project ID and name, and environment name, itemized in [Your data](../architecture/trust.md). With no destinations configured, nothing is sent.
