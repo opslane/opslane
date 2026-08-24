@@ -40,7 +40,7 @@ Never give it a `VITE_`-style public prefix; that bundles the secret into the br
 
 ## Create keys on a self-host
 
-The `mint-key` tool ships in the ingestion container:
+The key-creation tool (`mint-key`) ships in the Opslane server container:
 
 ```bash
 docker compose exec ingestion mint-key -project <project-uuid> -scope ingest

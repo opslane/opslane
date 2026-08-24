@@ -33,7 +33,7 @@ reader inside the service network.
 
 Opslane uses your source maps to find the relevant files, then reads that source while investigating an error. Source it reads can reach the AI model provider. Include that data flow in your security and privacy review.
 
-The upload and resolution paths do not return map content in API errors or expose a map download route. The dashboard treats resolved stack text as untrusted content.
+The upload and source-mapping paths do not return map content in API errors or expose a map download route. The dashboard treats stack traces with original source locations as untrusted content.
 
 ## Retention
 

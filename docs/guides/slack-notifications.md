@@ -4,7 +4,7 @@ covers:
   - packages/ingestion/handler/notifications.go
   - packages/ingestion/db/notifications.go
   - packages/dashboard/src/components/IntegrationsSettings.vue
-description: Send post-triage issue alerts and the daily digest to Slack with an incoming webhook.
+description: Send issue alerts after Opslane decides what to do and send the daily summary to Slack with an incoming webhook.
 ---
 
 # Slack notifications
@@ -23,7 +23,8 @@ Treat that URL as a secret: anyone holding it can post to your channel. Opslane 
 
 ## 2. Add the destination in Opslane
 
-Dashboard > **Settings** > **Integrations** > *Notification integrations*: add a destination, name it, and paste the webhook URL. Select which event types to receive; by default both issue alerts and daily digests are enabled. Choose **Alert after triage** so you hear about an issue once Opslane has decided what to do with it. Use the test actions to confirm the channel wiring before relying on it.
+<!-- voice-ok: "Alert after triage" is the exact dashboard setting label and is defined here. -->
+Dashboard > **Settings** > **Integrations** > *Notification integrations*: add a destination, name it, and paste the webhook URL. Select which event types to receive; by default both issue alerts and daily digests are enabled. Choose **Alert after triage**, which waits until Opslane decides whether to fix the issue or hand it to a person. Use the test actions to confirm the channel wiring before relying on it.
 
 Or via the API (session-authenticated; an SDK API key cannot manage destinations):
 
@@ -37,14 +38,14 @@ Omitting `event_types` enables both new issue alerts and daily digests by defaul
 
 Omitting `delivery_policy` defaults to `immediate`. `post_triage` still uses the
 `issue.created` subscription; it is a timing policy, not another event checkbox.
-It sends when triage requires human attention or opens a fix pull request. Insights and decisions not to pursue remain in the daily digest and do not page the channel.
+It sends when Opslane hands the issue to a person or opens a fix pull request. Findings with no application-code cause and decisions not to pursue remain in the daily digest and do not page the channel.
 
 The full endpoint set (list, update, delete, test) is in [HTTP routes](../reference/http-routes.md). To test a specific message type, pass `{"event_type":"digest.daily"}` in the test request body; omitting it sends a test issue alert. On cloud multi-org deployments, creating, updating, deleting, and testing destinations requires the **admin** organization role; self-hosted OSS deployments allow any signed-in org member.
 
 ## Delivery semantics
 
-- Notifications use a transactional outbox. When the pipeline publishes an event, it commits that event and its pending deliveries with the related state change.
-- Post-triage delivery commits with the completed investigation result. Retries of the same job deduplicate, while a reopened issue can alert again after new work finishes.
+- Opslane saves the notification and related issue change in one transaction.
+- It sends after the investigation finishes. Retries do not duplicate the alert, but a reopened issue can alert again after new work finishes.
 - Failed sends retry with backoff and honor Slack's `Retry-After` response on rate limits. Delivery state (`last_delivery`, `recent_failures`) is visible on the destination list.
 - Messages include the issue title, project, environment, first-seen time, and a link to the incident. Set `DASHBOARD_URL` so those links point at your reachable dashboard; without it, messages are delivered without a link.
 - Issue titles are sanitized before formatting: Slack control sequences (like `@channel`) are neutralized and token-shaped strings are masked.
@@ -52,6 +53,6 @@ The full endpoint set (list, update, delete, test) is in [HTTP routes](../refere
 ## Security notes
 
 - Webhook URLs are encrypted at rest with a key derived from `JWT_SECRET`. Rotating `JWT_SECRET` invalidates stored webhook configs, and each destination's URL must be re-entered.
-- Every read surface (API responses, dashboard, logs, delivery errors) shows only a redacted fingerprint (`hooks.slack.com/…/****abcd`), never the URL.
+- Every place that shows the URL, including API responses, the dashboard, logs, and delivery errors, shows only a masked preview (`hooks.slack.com/…/****abcd`), never the full URL.
 - Destinations must use HTTPS `hooks.slack.com` URLs. `NOTIFY_UNSAFE_EXTRA_WEBHOOK_HOSTS` extends the allowlist for local development and tests only; never set it in production ([environment variables](../reference/environment-variables.md)).
 - What leaves your host, exactly: issue ID and title, first-seen timestamp, project ID and name, and environment name, itemized in [Your data](../architecture/trust.md). With no destinations configured, nothing is sent.

@@ -93,11 +93,11 @@ setUser({ id: 'user-123' });
 
 Every independently built bundle that calls `init()` must also call `setUser()` after authentication: the main app, embeds, iframe apps, and portal or extension panels each need their own call.
 
-A bundle that skips `setUser` reports every user as anonymous. Anonymous sessions can still contribute to error impact, but Opslane cannot connect repeat activity to the same person or account, and anonymous activity cannot start a standalone friction issue. The dashboard flags this with **No user identification**. When it names one surface, check that surface's entry point.
+A bundle that skips `setUser` reports every user as anonymous. Anonymous sessions can still contribute to error impact, but Opslane cannot connect repeat activity to the same person or account, and anonymous activity cannot start a standalone session-recording issue. The dashboard flags this with **No user identification**. When it names one bundle or application, check its entry point.
 
 ## Set the environment
 
-`environment` labels where the telemetry came from. Without it, everything lands in the project's default environment, which starts as `production`, so staging traffic reads as production. See [environments](guides/environments.md).
+`environment` labels where the SDK data came from. Without it, everything lands in the project's default environment, which starts as `production`, so staging traffic reads as production. See [environments](guides/environments.md).
 
 Set the variables at build time. For Vite:
 
@@ -125,7 +125,7 @@ try {
 clearUser(); // on logout
 ```
 
-Throw real `Error` objects rather than strings. A string throw arrives with no stack frames, and Opslane triages it as `unfixable_no_app_frames` ([reason codes](reference/reason-codes.md)).
+Throw real `Error` objects rather than strings. A string throw arrives with no stack frames, and Opslane classifies it as `unfixable_no_app_frames` ([reason codes](reference/reason-codes.md)).
 
 ## Upload source maps
 

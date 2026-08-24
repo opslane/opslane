@@ -38,7 +38,7 @@ The key is a **secret**. Never prefix it with `VITE_` or `NEXT_PUBLIC_`, and nev
 
 ## Get a source-map key
 
-Create one from the ingestion container. It can upload source maps and nothing else:
+Create one from the Opslane server container. It can upload source maps and nothing else:
 
 ```bash
 docker exec <ingestion-container> mint-key \
@@ -47,7 +47,7 @@ docker exec <ingestion-container> mint-key \
   -label "production source maps"
 ```
 
-It prints the project's name and repo, so you can check it is the right one, then the key once. To revoke a key later, run the SQL the command prints. Minting a new key never revokes old ones.
+It prints the project's name and repo, so you can check it is the right one, then the key once. To revoke a key later, run the SQL the command prints. Creating a new key never revokes old ones.
 
 Only Vite has a first-party integration today.
 
@@ -57,4 +57,4 @@ Source maps include your original source. Uploading them lets Opslane read that 
 
 ## Check it worked
 
-Trigger an error from your built app and open the event in Opslane. A resolved stack shows real file names and line numbers. If it still shows minified paths, the map did not upload: check that `OPSLANE_SOURCEMAP_KEY` is set in the build and that the build ran the plugin.
+Trigger an error from your built app and open the event in Opslane. The stack trace should show the original file names and line numbers. If it still shows minified paths, the map did not upload: check that `OPSLANE_SOURCEMAP_KEY` is set in the build and that the build ran the plugin.

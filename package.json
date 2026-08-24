@@ -7,7 +7,7 @@
     "node": ">=22.12.0"
   },
   "scripts": {
-    "docs:check": "node scripts/check-docs-drift.mjs",
+    "docs:check": "node scripts/check-docs-drift.mjs && node scripts/check-docs-voice.mjs",
     "docs:map:test": "node --test scripts/__tests__/*.test.mjs .claude/skills/docs-sync/scripts/*.test.mjs",
     "docs:scope": "node scripts/check-docs-scope.mjs",
     "db:up": "docker compose up -d postgres",

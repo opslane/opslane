@@ -31,36 +31,36 @@ When Opslane stops and hands an issue to a person, it records a `reason_code`, a
 | `malformed_diff` | Review the error manually; the agent could not produce a valid, applicable diff. |
 | `verification_failed` | Review the candidate fix manually; Opslane could not verify it satisfied the failing behavior. |
 | `tests_failed` | Review the candidate diff manually; the test suite still fails, so the fix may be partial or cause regressions. |
-| `low_confidence_fix` | Review the candidate diff and evidence manually; the candidate did not pass independent fix review or the required delivery checks. This code does not gate error diagnosis by confidence. |
+| `low_confidence_fix` | Review the candidate diff and evidence manually; the candidate did not pass independent fix review or the checks required before Opslane opens a pull request. This code does not gate error diagnosis by confidence. |
 | `repro_not_achievable` | Review the candidate diff and evidence manually; Opslane could not construct a reliable reproduction test, so it checked the fix against the existing suite but did not call it verified. |
 | `draft_cap_reached` | Review or close an existing Opslane draft PR, then retry this fix. The candidate diff remains available on the incident. |
-| `budget_exhausted` | Review the error manually; the agent could not complete within its turn or budget limits. Consider guiding it with more context. |
+| `budget_exhausted` | Review the error manually; the agent could not complete within its step or budget limits. Consider guiding it with more context. |
 | `insufficient_context` | Add a replay, breadcrumbs, or a reproduction so Opslane has enough context to investigate. |
 
 ## Inputs and artifacts
 
 | Code | Remediation |
 | --- | --- |
-| `sourcemap_unresolved` | Upload source maps for this release (see the SDK build plugin) so the stack trace resolves to original source. |
+| `sourcemap_unresolved` | Upload source maps for this release (see the SDK build plugin) so the stack trace shows original source locations. |
 | `artifact_fetch_failed` | Retry later; Opslane could not fetch a stored artifact needed to analyze this error. |
 
-## Triage verdicts (deliberately not fixed)
+## Issues not fixed automatically
 
 | Code | Remediation |
 | --- | --- |
-| `triage_unfixable` | Review the error manually; triage determined it cannot be fixed with application code changes. |
+| `triage_unfixable` | Review the error manually; Opslane determined it cannot be fixed with application code changes. |
 | `unfixable_no_app_frames` | Add the `crossorigin` attribute to your `<script>` tags (with CORS headers) and throw `Error` objects (not strings) so the SDK captures real stack frames. |
 | `unfixable_test_error` | No action needed; this looks like a deliberate test error thrown to exercise Opslane. |
 | `unfixable_third_party` | Review manually; the error originates entirely in third-party code, so the fix is not in your application source. |
 | `unfixable_infra` | Investigate infrastructure or network behavior such as CORS, DNS, timeouts, and server errors; this is not an application code bug. |
-| `unfixable_no_sourcemap` | Upload source maps for this release so the minified stack trace resolves to original source, then retry. |
+| `unfixable_no_sourcemap` | Upload source maps for this release so the minified stack trace shows original source locations, then retry. |
 
 ## Runtime
 
 | Code | Remediation |
 | --- | --- |
 | `worker_runtime_error` | Review the error manually; the Opslane worker hit an unexpected internal error while processing this issue. |
-| `lease_lost` | No action needed; the job lease expired mid-run and the issue will be retried automatically. |
+| `lease_lost` | No action needed; the worker lost temporary ownership of the job while it was running, and Opslane will retry the issue automatically. |
 | `verification_infra_error` | No immediate action needed; verification infrastructure failed, so the fix could not be proven either way. It will be retried on recurrence; if it persists, check worker logs. |
 
 The [drift check](../../scripts/check-docs-drift.mjs) fails the repository test gate (`pnpm test`, which CI runs) if this page and `shared/src/types.ts` disagree.

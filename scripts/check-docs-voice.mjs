@@ -1,14 +1,15 @@
 // check-docs-voice.mjs — the mechanical floor for docs voice.
 //
-// Scans published prose docs for the two failure classes a machine can catch:
-// em/en dashes outside typography carve-outs, and a banned-vocabulary list.
+// Scans published prose docs for the failure classes a machine can catch:
+// em/en dashes outside typography carve-outs, banned marketing vocabulary,
+// and unexplained project terminology.
 // A jargon watchlist additionally applies to reader-facing setup pages
 // (guides, quickstarts, install), where terms like "rollups" must be glossed
 // or avoided. The judgment layer (jargon in context, comprehension) stays
 // with the writer; this script only makes the floor unskippable.
 //
 // Carve-outs, deliberately narrow:
-//   - fenced code blocks and HTML comments
+//   - fenced and inline code, plus HTML comments
 //   - the list-item separator `- **Term** — text` / `- [link](url) — text`
 //   - a line whose previous line is `<!-- voice-ok: reason -->` (for quoting
 //     a banned word while discussing it)
@@ -18,12 +19,66 @@
 // add a new file to the list.
 
 import { readFileSync } from 'node:fs';
-import { globSync } from 'node:fs';
+
+import { checkDocsScope } from './check-docs-scope.mjs';
 
 export const BANNED_VOCABULARY =
   /\b(proactive(?:ly)?|seamless(?:ly)?|robust(?:ly|ness)?|comprehensive(?:ly)?|leverag(?:e|ed|es|ing)|delv(?:e|es|ed|ing)|pivotal|crucial(?:ly)?|tapestry|game.chang(?:er|ing)|cutting.edge|streamlin(?:e|ed|es|ing)|empower(?:s|ed|ing)?|utiliz(?:e|ed|es|ing)|best practices|at its core|watershed|testament to)\b/i;
 
 export const JARGON_WATCHLIST = /\b(rollups?|telemetry|posture|idempotent)\b/i;
+
+// Keep these expressions out of customer prose. Matchers should stay narrow
+// enough to leave ordinary uses of words such as "resolve" and "claim" alone.
+// Exact identifiers remain available in inline code, and a voice-ok comment
+// can exempt a deliberate use on the same or following line.
+export const PROJECT_TERMINOLOGY = [
+  ['friction', /\bfriction(?:\s+(?:issues?|fix(?:es)?|signals?))?\b/i],
+  ['signal', /\bsignals?\b/i],
+  ['triage', /\b(?:post[- ]?)?triag(?:e|ed|es|ing)\b/i],
+  ['mint', /\bmint(?:s|ed|ing)?\b/i],
+  ['stack resolution', /\bstack[- ]resolution\b/i],
+  ['resolved stack', /\bresolved stacks?\b/i],
+  [
+    'source-map resolution',
+    /(?:\b(?:source[- ]maps?|stack traces?|frames?)\b.{0,60}\b(?:resolv(?:e[sd]?|ing)|resolution)\b|\b(?:resolv(?:e[sd]?|ing)|resolution)\b.{0,60}\b(?:source[- ]maps?|stack traces?|frames?)\b)/i,
+  ],
+  ['observation', /\bobservations?\b/i],
+  ['identity settlement', /\bidentity settlement\b/i],
+  ['settles', /\bsettles?\b/i],
+  ['inquiry', /\binquir(?:y|ies)\b/i],
+  ['adjudication', /\badjudicat(?:e[sd]?|ing|ion)\b/i],
+  ['evidence window', /\bevidence[- ]windows?\b/i],
+  ['selector-only', /\bselector[- ]only\b/i],
+  ['lease', /\bleas(?:e|es|ed|ing)\b/i],
+  ['provisional', /\bprovisional\b/i],
+  ['admitted issue', /\badmitted issues?\b/i],
+  ['scrubbed', /\bscrub(?:s|bed|bing|bers?)\b/i],
+  ['fingerprint', /\bfingerprint(?:s|ed|ing)?\b/i],
+  ['product context', /\bproduct[- ]context\b/i],
+  ['route map', /\broute[- ]maps?\b/i],
+  ['issue round', /\bissue rounds?\b/i],
+  ['reader-facing', /\breader[- ]facing\b/i],
+  ['surface-observed', /\bsurface[- ]observed\b/i],
+  ['re-redacted', /\bre[- ]redacted\b/i],
+  ['fix judge', /\bfix judge\b/i],
+  ['evidence-incomplete', /\bevidence[- ]incomplete\b/i],
+  ['digest cards', /\bdigest cards?\b/i],
+  ['candidate set', /\bcandidate sets?\b/i],
+  ['receipt', /\breceipts?\b/i],
+  ['ingestion component', /\bingestion\b/i],
+  [
+    'agent turns',
+    /(?:\b(?:agent|model|tool)\s+turns?\b|\bturns?\s+(?:for|per|before|after)\s+(?:the\s+)?(?:agent|model|tool)\b|\bturns?\s+or\s+budget\b)/i,
+  ],
+  [
+    'queue claim',
+    /(?:\b(?:claim(?:s|ed|ing)?|claims-per-minute)\b.{0,50}\b(?:jobs?|queue|workers?)\b|\b(?:jobs?|queue|workers?)\b.{0,50}\bclaim(?:s|ed|ing)?\b)/i,
+  ],
+];
+
+export const PROJECT_TERMINOLOGY_ALLOWLIST = new Map([
+  ['docs/guides/friction.md', new Set(['friction', 'friction issue', 'signal'])],
+]);
 
 const JARGON_SCOPED_DIRS = [/^docs\/guides\//, /^docs\/quickstart\//, /^docs\/install\.md$/];
 
@@ -35,21 +90,68 @@ const LIST_SEPARATOR = /^\s*[-*]\s+(\*\*[^*]+\*\*|\[[^\]]+\]\([^)]*\))\s+—\s/;
 export const LEGACY_EXEMPT = new Set([
   // Measured on main, 2026-08-13. Each entry dies with its audit issue.
   'docs/contracts/action-scope.md',
-  'docs-site/src/content/docs/index.mdx',
   'docs/architecture/life-of-an-error.md',
   'docs/architecture/overview.md',
-  'docs/architecture/precision.md',
-  'docs/architecture/trust.md',
   'docs/contracts/events.md',
   'docs/contracts/reliability.md',
-  'docs/guides/github-app.md',
-  'docs/guides/replay-privacy.md',
-  'docs/guides/slack-notifications.md',
-  'docs/guides/source-maps.md',
-  'docs/install.md',
   'docs/quickstart/agent.md',
-  'docs/quickstart/self-host.md',
 ]);
+
+function withoutInlineCode(text) {
+  let prose = '';
+  let cursor = 0;
+  while (cursor < text.length) {
+    if (text[cursor] !== '`') {
+      prose += text[cursor];
+      cursor += 1;
+      continue;
+    }
+
+    let delimiterEnd = cursor;
+    while (text[delimiterEnd] === '`') delimiterEnd += 1;
+    const delimiter = text.slice(cursor, delimiterEnd);
+    let closing = -1;
+    let searchAt = delimiterEnd;
+    while (searchAt < text.length) {
+      const candidate = text.indexOf('`', searchAt);
+      if (candidate === -1) break;
+      let candidateEnd = candidate;
+      while (text[candidateEnd] === '`') candidateEnd += 1;
+      if (candidateEnd - candidate === delimiter.length) {
+        closing = candidate;
+        break;
+      }
+      searchAt = candidateEnd;
+    }
+    if (closing === -1) {
+      prose += delimiter;
+      cursor = delimiterEnd;
+      continue;
+    }
+
+    prose += ' '.repeat(closing + delimiter.length - cursor);
+    cursor = closing + delimiter.length;
+  }
+  return prose;
+}
+
+function projectTerminologyViolations(text, file, line, raw) {
+  const allowlist = PROJECT_TERMINOLOGY_ALLOWLIST.get(file) ?? new Set();
+  const violations = [];
+  for (const [name, pattern] of PROJECT_TERMINOLOGY) {
+    const match = text.match(pattern);
+    if (!match) continue;
+    const matchedText = match[0].toLowerCase();
+    if (allowlist.has(name) || allowlist.has(matchedText)) continue;
+    violations.push({
+      file,
+      line,
+      rule: `project terminology: ${name}`,
+      text: raw.trim().slice(0, 80),
+    });
+  }
+  return violations;
+}
 
 export function scanContent(content, { jargon = false, file = '' } = {}) {
   const violations = [];
@@ -103,32 +205,30 @@ export function scanContent(content, { jargon = false, file = '' } = {}) {
     prevAllows = /<!--\s*voice-ok\b/.test(line);
     if (allowed || /<!--\s*voice-ok\b/.test(line)) return;
 
-    const dashText = LIST_SEPARATOR.test(line) ? text.replace(/\s—\s/, ' ') : text;
+    const proseText = withoutInlineCode(text);
+    const dashText = LIST_SEPARATOR.test(line) ? proseText.replace(/\s—\s/, ' ') : proseText;
     if (/[—–]/.test(dashText)) {
       violations.push({ file, line: n, rule: 'dash', text: line.trim().slice(0, 80) });
     }
-    const vocab = text.match(BANNED_VOCABULARY);
+    const vocab = proseText.match(BANNED_VOCABULARY);
     if (vocab) {
       violations.push({ file, line: n, rule: `vocabulary: ${vocab[1]}`, text: line.trim().slice(0, 80) });
     }
     if (jargon) {
-      const j = text.match(JARGON_WATCHLIST);
+      const j = proseText.match(JARGON_WATCHLIST);
       if (j) {
         violations.push({ file, line: n, rule: `jargon: ${j[1]}`, text: line.trim().slice(0, 80) });
       }
     }
+    violations.push(...projectTerminologyViolations(proseText, file, n, line));
   });
   return violations;
 }
 
 export function checkDocsVoice({ root = '.' } = {}) {
-  const targets = [
-    'README.md',
-    'docs-site/src/content/docs/index.mdx',
-    ...globSync('docs/{install.md,quickstart/*.md,guides/*.md,architecture/*.md,contracts/*.md}', { cwd: root }),
-  ];
+  const targets = docsVoiceTargets({ root });
   const violations = [];
-  for (const file of [...new Set(targets)]) {
+  for (const file of targets) {
     if (LEGACY_EXEMPT.has(file)) continue;
     let content;
     try {
@@ -140,6 +240,13 @@ export function checkDocsVoice({ root = '.' } = {}) {
     violations.push(...scanContent(content, { jargon, file }));
   }
   return violations;
+}
+
+export function docsVoiceTargets({ root = '.' } = {}) {
+  return [...new Set([
+    ...checkDocsScope({ root }).published,
+    'docs-site/src/content/docs/index.mdx',
+  ])];
 }
 
 if (process.argv[1] && import.meta.url.endsWith(process.argv[1].split('/').pop())) {
@@ -154,5 +261,5 @@ if (process.argv[1] && import.meta.url.endsWith(process.argv[1].split('/').pop()
     );
     process.exit(1);
   }
-  console.log('✓ docs voice: no dash or vocabulary violations in non-exempt prose docs');
+  console.log('✓ docs voice: no dash, vocabulary, or project-terminology violations in published prose docs');
 }

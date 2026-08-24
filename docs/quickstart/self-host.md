@@ -27,7 +27,7 @@ docker compose up -d --wait
 curl http://localhost:8082/health
 ```
 
-`docker compose up -d --wait` starts Postgres, MinIO (replay storage), the ingestion API (which also serves the dashboard at <http://localhost:8082>), and the worker, and returns once they report healthy. A one-shot `migrate` service applies all database migrations automatically; you do not run migrations by hand.
+`docker compose up -d --wait` starts Postgres, MinIO (replay storage), the Opslane API service (`ingestion`, which also serves the dashboard at <http://localhost:8082>), and the worker, and returns once they report healthy. A one-shot `migrate` service applies all database migrations automatically; you do not run migrations by hand.
 
 If the `curl` returns `{"status":"ok"}`-style output with HTTP 200, the stack is up.
 
@@ -74,7 +74,7 @@ The event was captured and grouped into a `new` issue. Opslane doesn't investiga
 
 Once an error reaches enough users, Opslane reads your repository and decides whether to investigate it. An investigation ends one of three ways: a pull request with a fix, a note that the cause is outside your code, or a stop with a reason for you to take over.
 
-One note on keys: a project has two key scopes. The seeded `opslane_pk_` **ingest key** can only send events and recordings, and is safe to ship in a browser bundle. Uploading source maps takes a separate `opslane_sk_` **source-map key**, minted with `mint-key`; see the [source maps guide](../guides/source-maps.md).
+One note on keys: a project has two key scopes. The seeded `opslane_pk_` **ingest key** can only send events and recordings, and is safe to ship in a browser bundle. Uploading source maps takes a separate `opslane_sk_` **source-map key**, created with the key-creation command (`mint-key`); see the [source maps guide](../guides/source-maps.md).
 
 ## Path 2: full error-to-PR
 
@@ -124,6 +124,6 @@ docker compose down -v     # stop and delete all local data (destructive)
 
 - **Event returns 401:** the `X-API-Key` value doesn't match a key in the database. Copy the full `opslane_pk_...` value exactly as it appears above (or in `scripts/seed-e2e.sql`); a truncated or edited key can't parse. If the seed never ran, run it now; running it twice is safe.
 - **Event returns 403 `insufficient_scope`:** the key is real but has the wrong scope, usually an `opslane_sk_` source-map key pasted where the ingest key belongs. Send events with the `opslane_pk_` key.
-- **Job stays pending:** check `docker compose ps`: the worker container must be up and healthy. `docker compose logs worker` shows claim/completion lines. Container health only proves the process answers, so if it is green and the job still sits there, ask the worker directly with `docker compose exec worker node -e "fetch('http://localhost:8081/health').then(r=>r.text()).then(console.log)"`. A `stalled` status means work is eligible and nothing is claiming it; `queue_depth` separates jobs that are eligible now from ones held back by retry backoff.
-- **`minio-setup exited (1)` and ingestion never starts:** the stack stops on purpose instead of hanging. Read the `minio-setup:` lines above the exit; they name the check and the fix. The usual cause is another Compose stack holding port 9012 (check `docker ps --filter publish=9012`), in which case set `OPSLANE_MINIO_HOST_PORT` to a free port and re-run. Otherwise `docker compose logs minio` has the real error.
+- **Job stays pending:** check `docker compose ps`: the worker container must be up and healthy. `docker compose logs worker` shows job-start and completion lines. Container health only proves the process answers, so if it is green and the job still sits there, ask the worker directly with `docker compose exec worker node -e "fetch('http://localhost:8081/health').then(r=>r.text()).then(console.log)"`. A `stalled` status means work is eligible and no worker is starting it; `queue_depth` separates jobs that are eligible now from ones held back by retry backoff.
+- **`minio-setup exited (1)` and `ingestion` never starts:** the stack stops on purpose instead of hanging. Read the `minio-setup:` lines above the exit; they name the check and the fix. The usual cause is another Compose stack holding port 9012 (check `docker ps --filter publish=9012`), in which case set `OPSLANE_MINIO_HOST_PORT` to a free port and re-run. Otherwise `docker compose logs minio` has the real error.
 - **Dashboard shows a login page you can't get past:** dashboard sign-in uses GitHub OAuth and needs a GitHub App configured (`GITHUB_APP_CLIENT_ID`, `GITHUB_APP_CLIENT_SECRET`) plus `DASHBOARD_ORIGIN=http://localhost:8082`, all set before `docker compose up`. Without `DASHBOARD_ORIGIN`, a successful GitHub sign-in redirects to port 3000, where nothing is listening in this setup. Path 1 doesn't require the dashboard.

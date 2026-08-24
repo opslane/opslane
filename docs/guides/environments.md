@@ -3,7 +3,7 @@ covers:
   - packages/ingestion/db/environments.go
   - packages/ingestion/db/migrations/032_project_default_environment.sql
   - packages/sdk/src/config.ts
-description: Label telemetry by environment and limit automatic error investigation to chosen ones.
+description: Label app activity by environment and limit automatic error investigation to chosen ones.
 ---
 
 # Environments
@@ -50,7 +50,7 @@ By default, an error in any environment can trigger an investigation, and invest
 - Manually triggered fixes bypass the scope.
 - Projects that never enable the scope behave exactly as before.
 
-The scope only limits error investigation. Session recording and friction detection (the bugs that don't throw) run in every environment, regardless of the scope.
+The scope only limits error investigation. Detection of problems in session recordings that do not throw errors runs in every environment, regardless of the scope.
 
 ## If staging traffic shows up as production
 

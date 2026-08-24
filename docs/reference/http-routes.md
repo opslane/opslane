@@ -3,7 +3,7 @@ description: Every registered HTTP route with its authentication mode.
 ---
 # HTTP routes
 
-All routes registered by the ingestion API (`packages/ingestion/handler/routes.go`). Auth column legend: **none** (public), **poll token** (`X-Opslane-Poll-Token` for one agent session), **SDK** (`X-API-Key` project-scoped public ingest key; rate-limited per project, and origin-gated (unconditionally on the browser-only endpoints, and on `/api/v1/events` only when the request presents `Origin` or `Referer`), and **session** (dashboard JWT cookie or CLI token).
+All routes registered by the Opslane API (`packages/ingestion/handler/routes.go`). Auth column legend: **none** (public), **poll token** (`X-Opslane-Poll-Token` for one automated repository setup), **SDK** (`X-API-Key` project-scoped public ingest key; rate-limited per project, and origin-gated (unconditionally on the browser-only endpoints, and on `/api/v1/events` only when the request presents `Origin` or `Referer`), and **session** (dashboard JWT cookie or CLI token).
 
 These are curated tables, not a stability contract. The API is early-stage and may change. The [drift check](../../scripts/check-docs-drift.mjs) fails the repository test gate (`pnpm test`, which CI runs) if this page and `routes.go` disagree.
 
@@ -27,23 +27,23 @@ These are curated tables, not a stability contract. The API is early-stage and m
 | GET | `/auth/github/callback` | none | Compatibility callback alias for existing GitHub App configurations |
 | GET+POST | `/oauth/authorize` | none | CLI PKCE authorization |
 | POST | `/oauth/token` | none | CLI PKCE token exchange |
-| POST | `/api/v1/agent/setup` | none | Agent-first onboarding start |
-| GET | `/api/v1/agent/poll/{sessionID}` | poll token (`X-Opslane-Poll-Token`) | Agent onboarding poll |
-| GET | `/agent/auth/{sessionID}` | none | Agent onboarding browser auth |
-| GET | `/agent/auth/callback` | none | Agent onboarding callback |
-| POST | `/api/v1/github/webhook` | HMAC | GitHub pull-request and default-branch push receiver, requires `X-GitHub-Delivery` (400 without it); push events enqueue product-context refreshes |
+| POST | `/api/v1/agent/setup` | none | Start automated repository setup |
+| GET | `/api/v1/agent/poll/{sessionID}` | poll token (`X-Opslane-Poll-Token`) | Check automated repository setup status |
+| GET | `/agent/auth/{sessionID}` | none | Browser authentication for automated repository setup |
+| GET | `/agent/auth/callback` | none | Authentication callback for automated repository setup |
+| POST | `/api/v1/github/webhook` | HMAC | Receive GitHub pull-request and default-branch push events; requires `X-GitHub-Delivery` (400 without it). Push events refresh Opslane's understanding of your pages and user actions. |
 
-The agent callback requires `code`, `installation_id`, and UUID `state`; definitive failures are returned by polling as machine-readable reasons. `/auth/callback` dispatches UUID-state GitHub App installs to the agent flow and handles other states through the existing browser-login/install flow.
+The automated-setup callback requires `code`, `installation_id`, and UUID `state`. It returns final failures to the setup client as machine-readable reasons when the client checks status. `/auth/callback` sends GitHub App installs with a UUID `state` to automated setup and handles other states through the existing browser login and installation process.
 
 ## SDK (X-API-Key)
 
 | Method | Path | Origin-gated | Purpose |
 | --- | --- | --- | --- |
-| POST | `/api/v1/events` | browser callers only | Store an error observation and queue stack resolution; capture creates no issue, investigation, or alert |
+| POST | `/api/v1/events` | browser callers only | Store an error event and queue source-map processing. Receiving an error does not immediately create an issue, investigation, or alert. |
 | POST | `/api/v1/replays/init` | yes | Begin a replay upload |
 | POST | `/api/v1/replays/{replayID}/complete` | yes | Finish a replay upload |
 | POST | `/api/v1/replays/{replayID}/fail` | yes | Record a replay upload failure |
-| POST | `/api/v1/sessions/init` | yes | Register a tenant-owned session with optional payload `environment`; returns the recording kill switch |
+| POST | `/api/v1/sessions/init` | yes | Register a tenant-owned session with optional payload `environment`; returns whether the project allows session recording |
 | POST | `/api/v1/sessions/{sessionID}/chunks/{seq}` | yes | Store and commit one gzipped replay chunk (max 5MiB) |
 | POST | `/api/v1/ingest/ping` | no | Verify that a public ingest key still authenticates; returns 204 without project data |
 
@@ -51,7 +51,7 @@ The agent callback requires `code`, `installation_id`, and UUID `state`; definit
 
 | Method | Path | Auth | Purpose |
 | --- | --- | --- | --- |
-| PUT | `/api/v1/sourcemaps/{debugID}` | secret source-map key | Upload one immutable source map after server-side debug-ID verification |
+| PUT | `/api/v1/sourcemaps/{debugID}` | secret source-map key | Upload one immutable source map after the server verifies its build identifier, which matches the map to a built file |
 
 ## Session (dashboard/CLI)
 
@@ -65,20 +65,20 @@ The agent callback requires `code`, `installation_id`, and UUID `state`; definit
 | POST | `/api/v1/invitations` | Cloud org admin: create an active-org invitation |
 | DELETE | `/api/v1/invitations/{invitationID}` | Cloud org admin: revoke an outstanding invitation |
 | POST | `/api/v1/invitations/accept` | Cloud: accept a single-use, verified-email-bound invitation |
-| GET | `/api/v1/admin/overview` | Operator-only cross-tenant observability overview incl. best-effort agent-onboarding funnel (404 unless allowlisted) |
+| GET | `/api/v1/admin/overview` | Operator-only cross-tenant monitoring overview, including best-effort progress through automated repository setup (404 unless allowlisted) |
 | GET | `/api/v1/admin/jobs` | Operator-only recent jobs (404 unless allowlisted) |
-| POST | `/api/v1/onboard/provision` | Provision an org/project for a repo and seal the API key into an agent session for poll delivery |
+| POST | `/api/v1/onboard/provision` | Create an organization and project for a repository, then store the one-time API key for the setup client to retrieve |
 | POST | `/api/v1/onboarding/setup` | First-run setup |
 | GET | `/api/v1/projects` | List projects |
 | POST | `/api/v1/projects` | Create project |
-| PATCH | `/api/v1/projects/{projectID}` | Update project settings, including `friction_autonomy`, `pr_posture`, and a same-project `default_environment_id` (the default field must be an explicit UUID string when present) |
-| GET | `/api/v1/projects/{projectID}/fix-stats` | Per-kind fix generation and PR outcome receipts |
-| GET | `/api/v1/projects/{projectID}/environments` | List all environments, or only surface-observed rows with `used_by=incidents` or `used_by=sessions` |
+| PATCH | `/api/v1/projects/{projectID}` | Update project settings. `friction_autonomy` controls automatic fixes for session-recording issues; `pr_posture` controls whether unverified fixes may open as drafts. A same-project `default_environment_id` must be an explicit UUID string when present. |
+| GET | `/api/v1/projects/{projectID}/fix-stats` | Fix-attempt and pull-request outcome counts by issue type |
+| GET | `/api/v1/projects/{projectID}/environments` | List all environments, or only environments that contain issues with `used_by=incidents` or sessions with `used_by=sessions` |
 | GET | `/api/v1/projects/{projectID}/event-count` | Event count stats |
-| GET | `/api/v1/projects/{projectID}/digest/latest` | Latest delivered daily digest cards, or an empty digest when no run has been delivered |
+| GET | `/api/v1/projects/{projectID}/digest/latest` | Latest delivered daily summary, or an empty summary when none has been delivered |
 | GET | `/api/v1/projects/{projectID}/incidents` | List incidents |
 | GET | `/api/v1/projects/{projectID}/incidents/{incidentID}` | Incident detail |
-| GET | `/api/v1/projects/{projectID}/incidents/{incidentID}/evidence` | Frozen source frames, failed requests, replay pointers, and evidence availability for the open issue round |
+| GET | `/api/v1/projects/{projectID}/incidents/{incidentID}/evidence` | Saved stack frames, failed requests, links to recordings, and available supporting data for the current issue |
 | GET | `/api/v1/projects/{projectID}/notification-destinations` | List project notification destinations and recent delivery state |
 | POST | `/api/v1/projects/{projectID}/notification-destinations` | Create a Slack notification destination |
 | PATCH | `/api/v1/projects/{projectID}/notification-destinations/{destID}` | Update a notification destination |
@@ -86,12 +86,12 @@ The agent callback requires `code`, `installation_id`, and UUID `state`; definit
 | POST | `/api/v1/projects/{projectID}/notification-destinations/{destID}/test` | Send a test notification |
 | GET | `/api/v1/projects/{projectID}/replays/{replayID}` | Fetch a replay |
 | GET | `/api/v1/projects/{projectID}/sessions` | List sessions with filters and keyset pagination |
-| GET | `/api/v1/projects/{projectID}/sessions/{sessionID}` | Session detail and scrubbed chunk manifest |
-| GET | `/api/v1/projects/{projectID}/sessions/{sessionID}/chunks/{seq}` | Fetch one decoded, re-redacted scrubbed chunk |
+| GET | `/api/v1/projects/{projectID}/sessions/{sessionID}` | Session detail and recording metadata with sensitive values removed |
+| GET | `/api/v1/projects/{projectID}/sessions/{sessionID}/chunks/{seq}` | Fetch one decoded, redacted part of the recording |
 | GET | `/api/v1/projects/{projectID}/incidents/{incidentID}/affected-users` | Affected users |
 | GET | `/api/v1/projects/{projectID}/incidents/{incidentID}/sample-event` | Fetch the redacted representative error event for traceback, breadcrumbs, and request context |
-| POST | `/api/v1/projects/{projectID}/incidents/{incidentID}/fix` | Trigger an eligible error or approved friction fix |
-| POST | `/api/v1/projects/{projectID}/incidents/{incidentID}/review` | Request another inquiry for the current open issue round; reuses active review work |
+| POST | `/api/v1/projects/{projectID}/incidents/{incidentID}/fix` | Start a fix for an issue that is ready to fix, whether it came from an error or a session recording |
+| POST | `/api/v1/projects/{projectID}/incidents/{incidentID}/review` | Request another short repository review for the current issue; reuses an investigation already in progress |
 | POST | `/api/v1/projects/{projectID}/incidents/{incidentID}/link-pr` | Record a same-repository GitHub pull request without marking the issue resolved |
 | POST | `/api/v1/projects/{projectID}/incidents/{incidentID}/resolve` | Resolve incident |
 | POST | `/api/v1/projects/{projectID}/incidents/{incidentID}/archive` | Archive incident |
@@ -112,7 +112,7 @@ The agent callback requires `code`, `installation_id`, and UUID `state`; definit
 
 | Method | Path | Auth | Purpose |
 | --- | --- | --- | --- |
-| GET | `/internal/v1/projects/{projectID}/sessions/{sessionID}/chunks/{seq}` | `X-Internal-Token` | Worker fetch of one decoded, re-redacted scrubbed chunk |
+| GET | `/internal/v1/projects/{projectID}/sessions/{sessionID}/chunks/{seq}` | `X-Internal-Token` | Worker fetch of one decoded, redacted part of the recording |
 | GET | `/internal/v1/projects/{projectID}/incidents/{incidentID}/status` | `X-Internal-Token` | Status-only incident read for the deployment smoke test |
 
 ## Method mismatch
