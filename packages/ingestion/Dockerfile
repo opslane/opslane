@@ -8,7 +8,7 @@ COPY packages/dashboard/ packages/dashboard/
 RUN pnpm --filter @opslane/dashboard build
 
 # Stage 2: Build Go service
-FROM golang:1.26-alpine AS builder
+FROM golang:1.27-alpine AS builder
 WORKDIR /app
 COPY packages/ingestion/go.mod packages/ingestion/go.sum ./
 RUN go mod download
