@@ -193,7 +193,9 @@ func FormatIssue(input IssueInput) string {
 	incident := input.Incident
 	evidence := input.Evidence
 	lines := make([]string, 0)
-	if IsFillerRootCause(incident.RootCause) {
+	if incident.Kind == "friction" {
+		lines = append(lines, "Signal: user friction — people tried an action and it silently did nothing (no exception was thrown). The fix is a product decision, not a crash to diagnose.")
+	} else if IsFillerRootCause(incident.RootCause) {
 		lines = append(lines, "Root cause: the investigation did not complete with a usable diagnosis.")
 	} else {
 		lines = append(lines, "Root cause: "+Fence(Truncate(*incident.RootCause, SelectorLimit)))
@@ -217,6 +219,10 @@ func FormatIssue(input IssueInput) string {
 			if failure.ActionSelector != nil {
 				lines = append(lines, "  action: "+Fence(Truncate(*failure.ActionSelector, SelectorLimit)))
 			}
+		}
+		if len(evidence.ReplayPointers) > 0 {
+			pointer := evidence.ReplayPointers[0]
+			lines = append(lines, "", fmt.Sprintf("Replay: watch session %s at t=%d in the dashboard to see it happen.", Fence(pointer.SessionID), pointer.AnchorMS))
 		}
 	} else {
 		locations := sourceLocations(evidence)

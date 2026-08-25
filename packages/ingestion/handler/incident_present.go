@@ -54,6 +54,19 @@ func (d *Dependencies) presentMCPIncident(
 	if err != nil {
 		return nil, nil, err
 	}
+	// Friction incidents have no episode, so the episode-based evidence above
+	// carries no recording. The watchable session is the friction replay; surface
+	// it so the agent can point a human at it.
+	if incident.Kind == "friction" {
+		if sessionID, anchorMs, ok, werr := d.Queries.WatchableSessionForGroup(ctx, incidentID, projectID); werr == nil && ok {
+			formattedEvidence.ReplayPointers = append(formattedEvidence.ReplayPointers, mcpformat.EvidenceReplayPointer{
+				AnchorKind: "friction",
+				SessionID:  sessionID,
+				AnchorMS:   anchorMs,
+			})
+			formattedEvidence.Availability.Recording = "available"
+		}
+	}
 	var state *string
 	if incident.State != "" {
 		state = &incident.State
