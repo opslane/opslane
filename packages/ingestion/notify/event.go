@@ -76,6 +76,9 @@ type DigestPayload struct {
 	HeldBackCount       int                   `json:"held_back_count,omitempty"`
 	ReceiptOverflow     int                   `json:"receipt_overflow,omitempty"`
 	GeneratedCards      []GeneratedDigestCard `json:"generated_cards,omitempty"`
+	// OverflowCount is how many validated cards were deferred past the render
+	// cap; the renderer's "And N more" line reports it.
+	OverflowCount int `json:"overflow_count,omitempty"`
 }
 
 // GeneratedDigestCard is model-authored prose grounded in a frozen candidate.

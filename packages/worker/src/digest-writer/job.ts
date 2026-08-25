@@ -23,7 +23,8 @@ export interface DigestCandidate {
   summary: string;
   prUrl?: string;
   affectedUsers: number;
-  occurrenceCount: number;
+  /** Absent on candidates frozen by pre-v4 ingestion during a deploy window. */
+  occurrenceCount?: number;
   accounts: string[];
   lastSeen: string;
   routePurpose?: string;
@@ -53,10 +54,39 @@ function sameStrings(left: readonly string[], right: readonly string[]): boolean
   return a.length === b.length && a.every((value, index) => value === b[index]);
 }
 
+// Mirrors firstUngroundedNumber in packages/ingestion/digest/validate.go — the
+// Go validator is the authority; a rule widened here without the Go twin (or
+// vice versa) makes cards pass this grounding and then fail publication.
+// \p{Nd}, not \d: ASCII-only scanning would let full-width or Arabic-Indic
+// digits carry fabricated counts past both validators.
+const PROSE_NUMBER = /\p{Nd}+/gu;
+
+/** "1,234" scans as "1234", matching its frozen fact instead of failing as 1 + 234. */
+function normalizeProseNumbers(text: string): string {
+  let current = text;
+  for (;;) {
+    const collapsed = current.replace(/(\p{Nd}),(\p{Nd})/gu, '$1$2');
+    if (collapsed === current) return current;
+    current = collapsed;
+  }
+}
+
+/** Zero-width and bidi format characters pass trims and length checks while
+ * defeating downstream vocabulary and grounding regexes. */
+function stripInvisible(text: string): string {
+  return text.replace(/\p{Cf}/gu, '');
+}
+
 function factNumbers(truth: DigestCandidate): Set<string> {
-  const digits = new Set([String(truth.affectedUsers), String(truth.occurrenceCount)]);
-  for (const source of [truth.title, truth.summary, truth.validAction ?? '', truth.routePurpose ?? '']) {
-    for (const match of source.matchAll(/\d+/g)) digits.add(match[0]);
+  const digits = new Set([String(truth.affectedUsers)]);
+  if (typeof truth.occurrenceCount === 'number') digits.add(String(truth.occurrenceCount));
+  // Accounts and the PR number are facts the prompt orders copied exactly;
+  // digits inside them ("42Floors") must not fail the day's digest.
+  const prNumber = /\/pull\/(\d+)$/.exec(truth.prUrl ?? '');
+  if (prNumber?.[1]) digits.add(prNumber[1]);
+  const sources = [truth.title, truth.summary, truth.validAction ?? '', truth.routePurpose ?? '', ...truth.accounts];
+  for (const source of sources) {
+    for (const match of normalizeProseNumbers(source).matchAll(PROSE_NUMBER)) digits.add(match[0]);
   }
   return digits;
 }
@@ -73,7 +103,10 @@ function groundPayload(raw: unknown, candidates: DigestCandidate[]): DigestPaylo
     if (card.claimedUsers !== undefined && card.claimedUsers !== truth.affectedUsers) {
       throw new Error(`unsupported count for ${card.episodeId}: claimed ${card.claimedUsers}, stored ${truth.affectedUsers}`);
     }
-    if (card.claimedOccurrences !== undefined && card.claimedOccurrences !== truth.occurrenceCount) {
+    // typeof check: a candidate frozen by pre-v4 ingestion during a deploy
+    // window has no occurrenceCount; a claim against it must not fail the run.
+    if (card.claimedOccurrences !== undefined && typeof truth.occurrenceCount === 'number'
+      && card.claimedOccurrences !== truth.occurrenceCount) {
       throw new Error(`unsupported occurrence count for ${card.episodeId}: claimed ${card.claimedOccurrences}, stored ${truth.occurrenceCount}`);
     }
     if (card.accounts !== undefined && !sameStrings(card.accounts, truth.accounts)) {
@@ -83,8 +116,11 @@ function groundPayload(raw: unknown, candidates: DigestCandidate[]): DigestPaylo
       throw new Error(`unsupported link for ${card.episodeId}`);
     }
     const numbers = factNumbers(truth);
-    for (const field of [card.title, card.copy, card.action]) {
-      for (const match of field.matchAll(/\d+/g)) {
+    const title = stripInvisible(card.title ?? '');
+    const copy = stripInvisible(card.copy);
+    const action = stripInvisible(card.action);
+    for (const field of [title, copy, action]) {
+      for (const match of normalizeProseNumbers(field).matchAll(PROSE_NUMBER)) {
         if (!numbers.has(match[0])) {
           throw new Error(`ungrounded number ${match[0]} in card for ${card.episodeId}`);
         }
@@ -92,9 +128,12 @@ function groundPayload(raw: unknown, candidates: DigestCandidate[]): DigestPaylo
     }
     return {
       ...card,
+      ...(card.title === undefined ? {} : { title }),
+      copy,
+      action,
       label: truth.episodeSequence > 1 ? 'returned' as const : 'new' as const,
       claimedUsers: truth.affectedUsers,
-      claimedOccurrences: truth.occurrenceCount,
+      ...(typeof truth.occurrenceCount === 'number' ? { claimedOccurrences: truth.occurrenceCount } : {}),
       accounts: truth.accounts,
       ...(truth.prUrl ? { prUrl: truth.prUrl } : {}),
     };
@@ -145,8 +184,8 @@ export async function loadFrozenDigestRun(runId: string, projectId: string): Pro
 
 export const DIGEST_SYSTEM_PROMPT = `Write today's operations cards from only the frozen facts supplied.
 The reader is a busy product owner. Every card has exactly three parts:
-1. title — what broke, in the user's words, under 60 characters. Name the action that failed ("Send invoice does nothing"), never the error text or a stack frame.
-2. copy — two or three short sentences. Start with the people affected: "N people tried to <what they were doing> and couldn't." — derive what they were doing from routePurpose and summary; if the facts do not say what they were doing, describe the symptom without inventing intent ("N people hit an error while <route purpose>"). Use "person" when N is 1; when affectedUsers is 0, describe the problem without a people count. Then say what actually happened and the consequence. You may cite occurrenceCount for repeated attempts ("They clicked Send 34 times"). Use ONLY numbers present in this candidate's facts — any other number fails validation — and set claimedUsers and claimedOccurrences to the counts you used. If episodeSequence is greater than 1, say the problem is back (do not claim it was fixed before; you do not know that).
+1. title — what broke, in the user's words, under 80 characters (aim for a short phrase). Name the action that failed ("Send invoice does nothing"), never the error text or a stack frame.
+2. copy — two or three short sentences. Start with the people affected: "N people tried to <what they were doing> and couldn't." — derive what they were doing from routePurpose and summary; if the facts do not say what they were doing, describe the symptom without inventing intent ("N people hit an error while <route purpose>"). Use "person" when N is 1; when affectedUsers is 0, describe the problem without a people count. Then say what actually happened and the consequence. Keep copy under 300 characters. You may cite occurrenceCount for repeated attempts ("They clicked Send 34 times"). Use ONLY numbers present in this candidate's facts — any other number fails validation — and set claimedUsers and claimedOccurrences to the counts you used. If episodeSequence is greater than 1, say the problem is back (do not claim it was fixed before; you do not know that).
 3. action — one imperative instruction for the reader, based on this candidate's validAction. Do not start it with a label like "Needs you" or "Ready" — the message template adds that. If the candidate has replaySessionId, the instruction may tell the reader to watch the replay.
 Every candidate must appear exactly once in included or deferred. Include every candidate by default. Defer one only when it is redundant with an included card, and never defer the candidate with the most affected users. A deferral reason states the specific redundancy, never that the item awaits review.
 Copy counts, account names, and links exactly; never invent them.

@@ -7,6 +7,7 @@ import {
   type DigestPayload,
   type DigestWriterDependencies,
 } from '../digest-writer/job.js';
+import { digestPayloadTool } from '../digest-writer/schema.js';
 
 function candidate(index: number, overrides: Partial<DigestCandidate> = {}): DigestCandidate {
   return {
@@ -111,11 +112,17 @@ describe('digest writer', () => {
     expect(await writeDigest('run-1', 'project-1', replay)).toEqual(stored);
   });
 
-  it('requires a card title and grounds claimed occurrences', async () => {
+  it('requires a title of the model, tolerates its absence on replay, and grounds claimed occurrences', async () => {
     const frozen = candidate(1, { occurrenceCount: 34, affectedUsers: 18 });
-    await expect(writeDigest('run-1', 'project-1', dependencies([frozen], {
+    // The tool schema still demands a title from the model; the parser only
+    // tolerates absence so pre-v4 stored payloads can replay (Go falls back
+    // to the frozen candidate title).
+    expect((digestPayloadTool().input_schema as { properties: { included: { items: { required: string[] } } } })
+      .properties.included.items.required).toContain('title');
+    const replayed = await writeDigest('run-1', 'project-1', dependencies([frozen], {
       included: [{ episodeId: frozen.episodeId, copy: 'c', action: 'a' }], deferred: [],
-    }))).rejects.toThrow(/title/);
+    }));
+    expect(replayed.included[0]?.title).toBeUndefined();
     await expect(writeDigest('run-1', 'project-1', dependencies([frozen], {
       included: [{ episodeId: frozen.episodeId, title: 't', copy: 'c', action: 'a', claimedOccurrences: 99 }], deferred: [],
     }))).rejects.toThrow(/occurrence/);

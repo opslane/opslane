@@ -96,11 +96,25 @@ func FreezeCandidates(ctx context.Context, pool *pgxpool.Pool, projectID string,
 			if replayFloor.Equal(time.Unix(0, 0).UTC()) {
 				replayFloor = time.Time{}
 			}
+			// The lookup runs under a savepoint: a server-side SQL error would
+			// otherwise abort the whole freeze transaction, and the very next
+			// snapshot INSERT would fail with "current transaction is aborted" —
+			// making the warn-and-continue fallback below a lie for exactly the
+			// database errors it exists to survive.
+			if _, err := tx.Exec(ctx, `SAVEPOINT digest_replay_lookup`); err != nil {
+				return "", nil, fmt.Errorf("open replay lookup savepoint: %w", err)
+			}
 			if id, anchor, ok, lookupErr := ingestiondb.WatchableSessionForGroupOn(ctx, tx, candidate.IssueID, projectID, replayFloor); lookupErr != nil {
 				slog.Warn("digest replay lookup failed; freezing without replay", "group_id", candidate.IssueID, "error", lookupErr)
+				if _, err := tx.Exec(ctx, `ROLLBACK TO SAVEPOINT digest_replay_lookup`); err != nil {
+					return "", nil, fmt.Errorf("roll back replay lookup savepoint: %w", err)
+				}
 			} else if ok {
 				candidate.ReplaySessionID = id
 				candidate.ReplayAnchorMs = anchor
+			}
+			if _, err := tx.Exec(ctx, `RELEASE SAVEPOINT digest_replay_lookup`); err != nil {
+				return "", nil, fmt.Errorf("release replay lookup savepoint: %w", err)
 			}
 			snapshot, err := json.Marshal(candidate)
 			if err != nil {
@@ -137,10 +151,16 @@ func selectCandidates(ctx context.Context, q digestQuerier, projectID string, at
 		          FROM error_group_affected_users eau
 		          JOIN end_users eu ON eu.id=eau.end_user_id AND eu.project_id=ep.project_id
 		         WHERE eau.error_group_id=g.id),
-		       COALESCE((SELECT array_agg(DISTINCT eu.account_name ORDER BY eu.account_name)
-		          FROM error_group_affected_users eau
-		          JOIN end_users eu ON eu.id=eau.end_user_id AND eu.project_id=ep.project_id
-		         WHERE eau.error_group_id=g.id AND NULLIF(btrim(eu.account_name),'') IS NOT NULL), '{}'),
+		       COALESCE((SELECT array_agg(name) FROM (
+		          SELECT DISTINCT eu.account_name AS name
+		            FROM error_group_affected_users eau
+		            JOIN end_users eu ON eu.id=eau.end_user_id AND eu.project_id=ep.project_id
+		           WHERE eau.error_group_id=g.id AND NULLIF(btrim(eu.account_name),'') IS NOT NULL
+		           ORDER BY eu.account_name
+		           -- Bounded: the names feed a model prompt and one Slack context
+		           -- line; a group touching thousands of named accounts must not
+		           -- balloon the frozen snapshot or the prompt.
+		           LIMIT 8) capped), '{}'),
 		       g.last_seen,
 		       COALESCE((SELECT rm.purpose FROM route_map rm
 		                  WHERE rm.project_id=ep.project_id

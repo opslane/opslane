@@ -17,6 +17,11 @@ type DigestCard struct {
 	AffectedUsers int      `json:"affected_users"`
 	Accounts      []string `json:"accounts"`
 	PRURL         string   `json:"pr_url,omitempty"`
+	// Schema v4 additions; zero-valued on cards stored before v4.
+	Outcome         string `json:"outcome,omitempty"`
+	OccurrenceCount int    `json:"occurrence_count,omitempty"`
+	ReplayURL       string `json:"replay_url,omitempty"`
+	PRNumber        int    `json:"pr_number,omitempty"`
 }
 
 type DigestInput struct {
@@ -130,8 +135,14 @@ func FormatDigest(input DigestInput) string {
 		}
 		lines = append(lines, fmt.Sprintf("- %s  %s", card.IncidentID, Fence(Truncate(card.Title, TitleLimit))))
 		line := "  " + affected
+		if card.Outcome != "" {
+			line += "  outcome: " + card.Outcome
+		}
 		if card.PRURL != "" {
 			line += "  PR: " + card.PRURL
+		}
+		if card.ReplayURL != "" {
+			line += "  replay: " + card.ReplayURL
 		}
 		lines = append(lines, line)
 		if card.Action != "" {

@@ -2,9 +2,17 @@ import type Anthropic from '@anthropic-ai/sdk';
 
 export type DigestLabel = 'new' | 'returned';
 
+/** Title cap enforced here, in the Go validator, and stated in the prompt. */
+export const DIGEST_TITLE_MAX = 80;
+/** Copy/action cap; the renderer truncates at 300 runes, so anything longer
+ * would be validated in full and then cut with its meaning changed. */
+export const DIGEST_TEXT_MAX = 300;
+
 export interface DigestCard {
   episodeId: string;
-  title: string;
+  /** Absent only when replaying a payload stored by the pre-v4 writer; the
+   * Go validator falls back to the frozen candidate title. */
+  title?: string;
   copy: string;
   action: string;
   label: DigestLabel;
@@ -108,15 +116,30 @@ export function parseDigestPayload(raw: unknown): Omit<DigestPayload, 'included'
       && (!Array.isArray(card['accounts']) || card['accounts'].some((account) => typeof account !== 'string' || account.trim() === ''))) {
       throw new Error(`included[${index}].accounts must be non-empty strings`);
     }
-    const title = text(card['title'], `included[${index}].title`);
-    if ([...title].length > 80) {
-      throw new Error(`included[${index}].title must be at most 80 characters`);
+    // title is required of the model by the tool schema, but optional here:
+    // this parser also replays payloads stored by the pre-v4 writer, and the
+    // Go validator has a frozen-title fallback for those.
+    const title = card['title'] === undefined ? undefined : text(card['title'], `included[${index}].title`);
+    if (title !== undefined && [...title].length > DIGEST_TITLE_MAX) {
+      throw new Error(`included[${index}].title must be at most ${DIGEST_TITLE_MAX} characters`);
+    }
+    const copy = text(card['copy'], `included[${index}].copy`);
+    const action = text(card['action'], `included[${index}].action`);
+    if (title !== undefined) {
+      // Length caps apply to writer-authored (titled) cards only; legacy
+      // replayed payloads keep render-time truncation.
+      if ([...copy].length > DIGEST_TEXT_MAX) {
+        throw new Error(`included[${index}].copy must be at most ${DIGEST_TEXT_MAX} characters`);
+      }
+      if ([...action].length > DIGEST_TEXT_MAX) {
+        throw new Error(`included[${index}].action must be at most ${DIGEST_TEXT_MAX} characters`);
+      }
     }
     return {
       episodeId: text(card['episodeId'], `included[${index}].episodeId`),
-      title,
-      copy: text(card['copy'], `included[${index}].copy`),
-      action: text(card['action'], `included[${index}].action`),
+      ...(title === undefined ? {} : { title }),
+      copy,
+      action,
       ...(typeof card['claimedUsers'] === 'number' ? { claimedUsers: card['claimedUsers'] } : {}),
       ...(typeof card['claimedOccurrences'] === 'number' ? { claimedOccurrences: card['claimedOccurrences'] } : {}),
       ...(Array.isArray(card['accounts']) ? { accounts: card['accounts'].map((account) => String(account).trim()) } : {}),

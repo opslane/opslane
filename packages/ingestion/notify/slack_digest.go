@@ -36,7 +36,10 @@ func formatSlackDigest(payload EventPayload) ([]byte, string, error) {
 	return formatSlackDigestV1(payload)
 }
 
-const digestV4CardCap = 9
+// DigestV4CardCap is the most cards one v4 digest renders. Exported because
+// the validator enforces it too: cards past the cap must be deferred there,
+// not silently receipted as published (see digest/validate.go).
+const DigestV4CardCap = 9
 
 func formatSlackDigestV4(payload EventPayload) ([]byte, string, error) {
 	digest := payload.Digest
@@ -48,12 +51,16 @@ func formatSlackDigestV4(payload EventPayload) ([]byte, string, error) {
 			decisions = append(decisions, card)
 		case "verified_fix":
 			fixes = append(fixes, card)
+		default:
+			// Unreachable today (freeze admits exactly two outcomes), but a
+			// future outcome must not vanish without a trace.
+			slog.Warn("digest card outcome is not renderable", "incident_id", card.IncidentID, "outcome", card.Outcome)
 		}
 	}
 	allCards := append(append([]GeneratedDigestCard(nil), decisions...), fixes...)
 	rendered := allCards
-	if len(rendered) > digestV4CardCap {
-		rendered = rendered[:digestV4CardCap]
+	if len(rendered) > DigestV4CardCap {
+		rendered = rendered[:DigestV4CardCap]
 	}
 	renderedDecisions := make([]GeneratedDigestCard, 0, len(rendered))
 	renderedFixes := make([]GeneratedDigestCard, 0, len(rendered))
@@ -99,7 +106,13 @@ func formatSlackDigestV4(payload EventPayload) ([]byte, string, error) {
 			}
 		}
 	}
-	if overflow := len(allCards) - len(rendered); overflow > 0 {
+	// The validator defers overflow cards and reports the count; the local
+	// difference is the belt for payloads that somehow still exceed the cap.
+	overflow := digest.OverflowCount
+	if local := len(allCards) - len(rendered); local > overflow {
+		overflow = local
+	}
+	if overflow > 0 {
 		label := fmt.Sprintf("And %d more on the dashboard", overflow)
 		blocks = append(blocks, digestContextBlock(slackDigestLink(payload.DashboardURL, label)))
 	}
@@ -147,14 +160,25 @@ func digestV4Summary(rawDate string, decisions, fixes int) string {
 func digestV4CardBlocks(payload EventPayload, card GeneratedDigestCard, position int, leadIn string) []map[string]any {
 	text := "*" + cleanProse(card.Title, 80) + "*\n" +
 		cleanProse(card.Copy, digestDetailMax) + "\n*" + leadIn + ":* " + cleanProse(card.Action, digestDetailMax)
-	noun := "users"
-	if card.AffectedUsers == 1 {
-		noun = "user"
+	// No people fragment at zero: the prompt tells the writer to describe a
+	// zero-user problem without a count, and "👥 0 users" would contradict the
+	// card's own copy (v3 hid the count the same way).
+	contextParts := make([]string, 0, 2)
+	if card.AffectedUsers > 0 {
+		noun := "users"
+		if card.AffectedUsers == 1 {
+			noun = "user"
+		}
+		contextParts = append(contextParts, fmt.Sprintf("👥 %d %s", card.AffectedUsers, noun))
 	}
-	context := fmt.Sprintf("👥 %d %s", card.AffectedUsers, noun)
 	if len(card.Accounts) > 0 {
-		context += " · " + cleanProse(strings.Join(card.Accounts, ", "), digestDetailMax)
+		accounts := cleanProse(strings.Join(card.Accounts, ", "), digestDetailMax)
+		if len(contextParts) == 0 {
+			accounts = "👥 " + accounts
+		}
+		contextParts = append(contextParts, accounts)
 	}
+	context := strings.Join(contextParts, " · ")
 	buttons := make([]map[string]any, 0, 2)
 	if card.Outcome == "needs_human" && card.ReplayURL != "" {
 		buttons = append(buttons, digestButton("digest_replay_"+strconv.Itoa(position), "Watch replay", card.ReplayURL, "primary"))
@@ -169,7 +193,10 @@ func digestV4CardBlocks(payload EventPayload, card GeneratedDigestCard, position
 	if issueURL := BuildIncidentURL(payload.DashboardURL, card.IncidentID, payload.Project.ID); issueURL != "" {
 		buttons = append(buttons, digestButton("digest_issue_"+strconv.Itoa(position), "View issue", issueURL, ""))
 	}
-	blocks := []map[string]any{digestSectionBlock(text), digestContextBlock(context)}
+	blocks := []map[string]any{digestSectionBlock(text)}
+	if context != "" {
+		blocks = append(blocks, digestContextBlock(context))
+	}
 	if len(buttons) > 0 {
 		blocks = append(blocks, map[string]any{"type": "actions", "elements": buttons})
 	}
