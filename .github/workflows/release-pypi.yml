@@ -15,7 +15,7 @@ permissions:
 jobs:
   build:
     name: Build artifacts (credential-free)
-    if: github.repository == 'opslane/opslane-oss'
+    if: github.repository == 'opslane/opslane'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

@@ -21,8 +21,8 @@ No other tools are required for Path 1. Nothing here needs Node, Go, or pnpm; ev
 ## Start the stack
 
 ```bash
-git clone https://github.com/opslane/opslane-oss.git
-cd opslane-oss
+git clone https://github.com/opslane/opslane.git
+cd opslane
 docker compose up -d --wait
 curl http://localhost:8082/health
 ```

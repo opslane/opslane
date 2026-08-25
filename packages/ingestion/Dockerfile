@@ -18,7 +18,7 @@ RUN CGO_ENABLED=0 go build -o /mint-key ./cmd/mint-key
 
 # Stage 3: Final image
 FROM alpine:3.24
-LABEL org.opencontainers.image.source="https://github.com/opslane/opslane-oss"
+LABEL org.opencontainers.image.source="https://github.com/opslane/opslane"
 LABEL org.opencontainers.image.description="Opslane ingestion service"
 RUN apk add --no-cache ca-certificates wget postgresql16-client
 RUN addgroup -S ingestion && adduser -S ingestion -G ingestion

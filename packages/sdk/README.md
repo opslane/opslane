@@ -1,6 +1,6 @@
 # @opslane/sdk
 
-Browser error-monitoring SDK for [Opslane](https://github.com/opslane/opslane-oss) — an AI-powered production error-resolution engine. The SDK captures unhandled errors, console/network breadcrumbs, and (optionally) session replays, and ships them to your Opslane instance, which investigates each error and opens a verified fix PR or files an actionable incident.
+Browser error-monitoring SDK for [Opslane](https://github.com/opslane/opslane) — an AI-powered production error-resolution engine. The SDK captures unhandled errors, console/network breadcrumbs, and (optionally) session replays, and ships them to your Opslane instance, which investigates each error and opens a verified fix PR or files an actionable incident.
 
 The SDK is MIT licensed. It never throws into your application code: every hook is wrapped so an SDK failure cannot break your app.
 
@@ -130,7 +130,7 @@ clearUser();
 - Captured URLs are scrubbed of query strings, userinfo, and token-bearing hashes; captured text is scrubbed of JWTs, `Bearer` tokens, and `password`/`secret`/`api_key`-style key-value pairs before leaving the browser.
 - Use `beforeSend` to drop or redact anything scrubbing doesn't cover.
 
-See [replay privacy and masking](https://github.com/opslane/opslane-oss/blob/main/docs/guides/replay-privacy.md) for what replay data may contain.
+See [replay privacy and masking](https://github.com/opslane/opslane/blob/main/docs/guides/replay-privacy.md) for what replay data may contain.
 
 ## License
 

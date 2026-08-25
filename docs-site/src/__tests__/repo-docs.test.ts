@@ -112,7 +112,7 @@ describe('canonical enricher', () => {
     expect(props.data.title).toBe('React');
     expect(props.data.slug).toBe('guides/friction');
     expect(props.data.editUrl).toBe(
-      'https://github.com/opslane/opslane-oss/edit/main/docs/guides/friction.md',
+      'https://github.com/opslane/opslane/edit/main/docs/guides/friction.md',
     );
   });
 
