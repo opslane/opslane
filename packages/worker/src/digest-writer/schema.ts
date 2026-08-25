@@ -4,10 +4,12 @@ export type DigestLabel = 'new' | 'returned';
 
 export interface DigestCard {
   episodeId: string;
+  title: string;
   copy: string;
   action: string;
   label: DigestLabel;
   claimedUsers?: number;
+  claimedOccurrences?: number;
   accounts?: string[];
   prUrl?: string;
 }
@@ -30,12 +32,14 @@ export const DIGEST_PAYLOAD_SCHEMA = {
       type: 'array',
       items: {
         type: 'object',
-        required: ['episodeId', 'copy', 'action'],
+        required: ['episodeId', 'title', 'copy', 'action'],
         properties: {
           episodeId: { type: 'string', minLength: 1 },
+          title: { type: 'string', minLength: 1 },
           copy: { type: 'string', minLength: 1 },
           action: { type: 'string', minLength: 1 },
           claimedUsers: { type: 'integer' },
+          claimedOccurrences: { type: 'integer' },
           accounts: { type: 'array', items: { type: 'string', minLength: 1 } },
           prUrl: { type: 'string', minLength: 1 },
         },
@@ -91,20 +95,30 @@ export function parseDigestPayload(raw: unknown): Omit<DigestPayload, 'included'
     const card = record(value, `included[${index}]`);
     // label is absent from the model schema, but present when replaying a
     // payload already grounded and stored by the writer.
-    exactKeys(card, new Set(['episodeId', 'copy', 'action', 'claimedUsers', 'accounts', 'prUrl', 'label']), `included[${index}]`);
+    exactKeys(card, new Set(['episodeId', 'title', 'copy', 'action', 'claimedUsers', 'claimedOccurrences', 'accounts', 'prUrl', 'label']), `included[${index}]`);
     if (card['claimedUsers'] !== undefined
       && (!Number.isInteger(card['claimedUsers']) || (card['claimedUsers'] as number) < 0)) {
       throw new Error(`included[${index}].claimedUsers must be a non-negative integer`);
+    }
+    if (card['claimedOccurrences'] !== undefined
+      && (!Number.isInteger(card['claimedOccurrences']) || (card['claimedOccurrences'] as number) < 0)) {
+      throw new Error(`included[${index}].claimedOccurrences must be a non-negative integer`);
     }
     if (card['accounts'] !== undefined
       && (!Array.isArray(card['accounts']) || card['accounts'].some((account) => typeof account !== 'string' || account.trim() === ''))) {
       throw new Error(`included[${index}].accounts must be non-empty strings`);
     }
+    const title = text(card['title'], `included[${index}].title`);
+    if ([...title].length > 80) {
+      throw new Error(`included[${index}].title must be at most 80 characters`);
+    }
     return {
       episodeId: text(card['episodeId'], `included[${index}].episodeId`),
+      title,
       copy: text(card['copy'], `included[${index}].copy`),
       action: text(card['action'], `included[${index}].action`),
       ...(typeof card['claimedUsers'] === 'number' ? { claimedUsers: card['claimedUsers'] } : {}),
+      ...(typeof card['claimedOccurrences'] === 'number' ? { claimedOccurrences: card['claimedOccurrences'] } : {}),
       ...(Array.isArray(card['accounts']) ? { accounts: card['accounts'].map((account) => String(account).trim()) } : {}),
       ...(card['prUrl'] !== undefined ? { prUrl: text(card['prUrl'], `included[${index}].prUrl`) } : {}),
     };

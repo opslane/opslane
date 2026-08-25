@@ -367,6 +367,7 @@ const frictionCandidateSQL = `
     JOIN sessions s ON s.id = fs.session_id AND s.project_id = fs.project_id
     JOIN error_groups g ON g.id = $1 AND g.project_id = $2
    WHERE fs.incident_id = $1 AND fs.project_id = $2
+     AND ($3::timestamptz IS NULL OR fs.occurred_at >= $3)
      AND fs.adjudication_status = 'accepted'
      AND fs.retracted_at IS NULL AND fs.superseded_by IS NULL
      AND s.status <> 'deleting'
@@ -385,6 +386,7 @@ SELECT cand.session_id, cand.anchor_ms FROM (
       FROM error_events e
       JOIN sessions s ON s.id = e.session_id AND s.project_id = e.project_id
      WHERE e.error_group_id = $1 AND e.project_id = $2
+       AND ($3::timestamptz IS NULL OR e."timestamp" >= $3)
        AND e.session_id IS NOT NULL AND s.status <> 'deleting'
      ORDER BY e.session_id, e.created_at DESC, e.id DESC
   ) per_session
@@ -453,8 +455,13 @@ SELECT cand.session_id, cand.started_at, crashes.crash_count, cand.anchor_ms,
 
 // groupKind resolves an incident's lane; found=false when the group does not
 // exist in the tenant.
-func (q *Queries) groupKind(ctx context.Context, errorGroupID, projectID string) (kind string, found bool, err error) {
-	err = q.pool.QueryRow(ctx,
+// RowQuerier is implemented by pgx pools, connections, and transactions.
+type RowQuerier interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func groupKindOn(ctx context.Context, q RowQuerier, errorGroupID, projectID string) (kind string, found bool, err error) {
+	err = q.QueryRow(ctx,
 		`SELECT kind FROM error_groups WHERE id=$1 AND project_id=$2`, errorGroupID, projectID).Scan(&kind)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", false, nil
@@ -463,6 +470,10 @@ func (q *Queries) groupKind(ctx context.Context, errorGroupID, projectID string)
 		return "", false, err
 	}
 	return kind, true, nil
+}
+
+func (q *Queries) groupKind(ctx context.Context, errorGroupID, projectID string) (kind string, found bool, err error) {
+	return groupKindOn(ctx, q.pool, errorGroupID, projectID)
 }
 
 // SessionPointerForGroup resolves pointer identity independently of chunk
@@ -488,9 +499,11 @@ func (q *Queries) SessionPointerForGroup(ctx context.Context, errorGroupID, proj
 		  LIMIT 1`
 	if kind == "friction" {
 		query = `SELECT cand.session_id, cand.occurred_at FROM (` + frictionCandidateSQL + `
-		   LIMIT 1) cand`
+	   LIMIT 1) cand`
+		err = q.pool.QueryRow(ctx, query, errorGroupID, projectID, nil).Scan(&sessionID, &errorAt)
+	} else {
+		err = q.pool.QueryRow(ctx, query, errorGroupID, projectID).Scan(&sessionID, &errorAt)
 	}
-	err = q.pool.QueryRow(ctx, query, errorGroupID, projectID).Scan(&sessionID, &errorAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", time.Time{}, false, nil
 	}
@@ -505,7 +518,13 @@ func (q *Queries) SessionPointerForGroup(ctx context.Context, errorGroupID, proj
 // snapshot. The span may contain gaps in v1. anchorMs is absolute client-clock
 // epoch milliseconds, matching the dashboard's ?t= contract.
 func (q *Queries) WatchableSessionForGroup(ctx context.Context, errorGroupID, projectID string) (sessionID string, anchorMs int64, ok bool, err error) {
-	kind, found, err := q.groupKind(ctx, errorGroupID, projectID)
+	return WatchableSessionForGroupOn(ctx, q.pool, errorGroupID, projectID, time.Time{})
+}
+
+// WatchableSessionForGroupOn is the transaction-capable watchable-session
+// lookup. A non-zero since value excludes incident activity before that time.
+func WatchableSessionForGroupOn(ctx context.Context, q RowQuerier, errorGroupID, projectID string, since time.Time) (sessionID string, anchorMs int64, ok bool, err error) {
+	kind, found, err := groupKindOn(ctx, q, errorGroupID, projectID)
 	if err != nil {
 		return "", 0, false, fmt.Errorf("watchable session group kind: %w", err)
 	}
@@ -517,7 +536,11 @@ func (q *Queries) WatchableSessionForGroup(ctx context.Context, errorGroupID, pr
 	if kind == "friction" {
 		query = watchableFrictionSessionSQL
 	}
-	err = q.pool.QueryRow(ctx, query, errorGroupID, projectID).Scan(&sessionID, &anchorMs)
+	var floor any
+	if !since.IsZero() {
+		floor = since
+	}
+	err = q.QueryRow(ctx, query, errorGroupID, projectID, floor).Scan(&sessionID, &anchorMs)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", 0, false, nil
 	}

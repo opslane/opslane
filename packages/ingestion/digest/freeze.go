@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	ingestiondb "github.com/opslane/opslane/packages/ingestion/db"
 )
 
 // Candidate is the immutable fact envelope supplied to the daily writer.
@@ -22,10 +24,13 @@ type Candidate struct {
 	Summary         string    `json:"summary"`
 	PRURL           string    `json:"prUrl,omitempty"`
 	AffectedUsers   int       `json:"affectedUsers"`
+	OccurrenceCount int       `json:"occurrenceCount"`
 	Accounts        []string  `json:"accounts"`
 	LastSeen        time.Time `json:"lastSeen"`
 	RoutePurpose    string    `json:"routePurpose,omitempty"`
 	DecidedAt       time.Time `json:"decidedAt"`
+	ReplaySessionID string    `json:"replaySessionId,omitempty"`
+	ReplayAnchorMs  int64     `json:"replayAnchorMs,omitempty"`
 	// ValidAction is the reader-facing follow-up the card must offer: the
 	// investigator's remediation for needs_human, the PR review for a
 	// verified fix. A candidate with no derivable action is not useful and
@@ -82,11 +87,21 @@ func FreezeCandidates(ctx context.Context, pool *pgxpool.Pool, projectID string,
 	}
 
 	if inserted {
-		candidates, err := selectCandidates(ctx, tx, projectID, at, windowFrom)
+		candidates, replayFloors, err := selectCandidates(ctx, tx, projectID, at, windowFrom)
 		if err != nil {
 			return "", nil, err
 		}
-		for _, candidate := range candidates {
+		for i, candidate := range candidates {
+			replayFloor := replayFloors[i]
+			if replayFloor.Equal(time.Unix(0, 0).UTC()) {
+				replayFloor = time.Time{}
+			}
+			if id, anchor, ok, lookupErr := ingestiondb.WatchableSessionForGroupOn(ctx, tx, candidate.IssueID, projectID, replayFloor); lookupErr != nil {
+				slog.Warn("digest replay lookup failed; freezing without replay", "group_id", candidate.IssueID, "error", lookupErr)
+			} else if ok {
+				candidate.ReplaySessionID = id
+				candidate.ReplayAnchorMs = anchor
+			}
 			snapshot, err := json.Marshal(candidate)
 			if err != nil {
 				return "", nil, fmt.Errorf("marshal candidate %s: %w", candidate.EpisodeID, err)
@@ -113,11 +128,11 @@ type digestQuerier interface {
 	Query(context.Context, string, ...any) (pgx.Rows, error)
 }
 
-func selectCandidates(ctx context.Context, q digestQuerier, projectID string, at, windowFrom time.Time) ([]Candidate, error) {
+func selectCandidates(ctx context.Context, q digestQuerier, projectID string, at, windowFrom time.Time) ([]Candidate, []time.Time, error) {
 	rows, err := q.Query(ctx, `
 		SELECT ep.id::text, ep.sequence, g.id::text, g.title,
 		       d.outcome, COALESCE(NULLIF(btrim(d.diagnosis->>'summary'),''), d.decision_reason),
-		       COALESCE(g.pr_url,''),
+		       COALESCE(g.pr_url,''), g.occurrence_count,
 		       (SELECT count(DISTINCT eau.end_user_id)::int
 		          FROM error_group_affected_users eau
 		          JOIN end_users eu ON eu.id=eau.end_user_id AND eu.project_id=ep.project_id
@@ -131,7 +146,12 @@ func selectCandidates(ctx context.Context, q digestQuerier, projectID string, at
 		                  WHERE rm.project_id=ep.project_id
 		                    AND g.page_url_normalized LIKE '%' || rm.pattern || '%'
 		                  ORDER BY length(rm.pattern) DESC LIMIT 1),''),
-		       d.decided_at, action.text
+		       d.decided_at, action.text,
+		       COALESCE((SELECT max(prev.closed_at)
+		                   FROM issue_episodes prev
+		                  WHERE prev.project_id=ep.project_id
+		                    AND prev.canonical_issue_id=ep.canonical_issue_id
+		                    AND prev.id<>ep.id), 'epoch'::timestamptz) AS replay_floor
 		  FROM issue_episodes ep
 		  JOIN error_groups g ON g.id=ep.canonical_issue_id AND g.project_id=ep.project_id
 		  JOIN LATERAL (
@@ -167,30 +187,33 @@ func selectCandidates(ctx context.Context, q digestQuerier, projectID string, at
 		            AND publication.episode_id=ep.id AND publication.channel='digest')
 		 ORDER BY g.last_seen DESC,ep.id`, projectID, at, windowFrom)
 	if err != nil {
-		return nil, fmt.Errorf("select digest candidates: %w", err)
+		return nil, nil, fmt.Errorf("select digest candidates: %w", err)
 	}
 	defer rows.Close()
 	candidates := make([]Candidate, 0)
+	replayFloors := make([]time.Time, 0)
 	for rows.Next() {
 		var candidate Candidate
+		var replayFloor time.Time
 		if err := rows.Scan(
 			&candidate.EpisodeID, &candidate.EpisodeSequence, &candidate.IssueID,
-			&candidate.Title, &candidate.Outcome, &candidate.Summary, &candidate.PRURL,
+			&candidate.Title, &candidate.Outcome, &candidate.Summary, &candidate.PRURL, &candidate.OccurrenceCount,
 			&candidate.AffectedUsers, &candidate.Accounts, &candidate.LastSeen,
-			&candidate.RoutePurpose, &candidate.DecidedAt, &candidate.ValidAction,
+			&candidate.RoutePurpose, &candidate.DecidedAt, &candidate.ValidAction, &replayFloor,
 		); err != nil {
-			return nil, fmt.Errorf("scan digest candidate: %w", err)
+			return nil, nil, fmt.Errorf("scan digest candidate: %w", err)
 		}
 		candidate.Label = "new"
 		if candidate.EpisodeSequence > 1 {
 			candidate.Label = "returned"
 		}
 		candidates = append(candidates, candidate)
+		replayFloors = append(replayFloors, replayFloor)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("read digest candidates: %w", err)
+		return nil, nil, fmt.Errorf("read digest candidates: %w", err)
 	}
-	return candidates, nil
+	return candidates, replayFloors, nil
 }
 
 func loadFrozenCandidates(ctx context.Context, q digestQuerier, projectID, runID string) ([]Candidate, error) {

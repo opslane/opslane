@@ -43,6 +43,7 @@ describeDb('digest writer database handoff', () => {
       episodeId, episodeSequence: 2, label: 'returned', issueId,
       title: 'Checkout failed', outcome: 'verified_fix', summary: 'A null cart blocked payment.',
       prUrl: 'https://github.com/acme/shop/pull/42', affectedUsers: 9,
+      occurrenceCount: 34,
       accounts: ['Acme'], lastSeen: '2026-08-20T08:00:00Z', decidedAt: '2026-08-20T08:30:00Z',
     };
     runId = (await pool.query<{ id: string }>(
@@ -71,7 +72,7 @@ describeDb('digest writer database handoff', () => {
       loadRun: loadFrozenDigestRun,
       askModel: async () => ({
         included: [{
-          episodeId, copy: 'Nine users at Acme cannot check out.', action: 'Review the verified fix.',
+          episodeId, title: 'Checkout is blocked', copy: 'Nine users at Acme cannot check out.', action: 'Review the verified fix.',
           claimedUsers: 9, accounts: ['Acme'], prUrl: frozen.prUrl,
         }],
         deferred: [],

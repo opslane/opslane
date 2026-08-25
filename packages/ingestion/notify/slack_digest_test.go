@@ -3,6 +3,7 @@ package notify
 import (
 	"encoding/json"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -300,6 +301,160 @@ func TestFormatSlackDigestV3RendersAuthoredActionAndReturnedLabel(t *testing.T) 
 		if !strings.Contains(text, want) {
 			t.Errorf("v3 digest omitted %q: %s", want, text)
 		}
+	}
+}
+
+func formatV4Blocks(t *testing.T, payload EventPayload) ([]map[string]any, string) {
+	t.Helper()
+	body, _, err := FormatSlack(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded struct {
+		Blocks []map[string]any `json:"blocks"`
+	}
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	return decoded.Blocks, string(body)
+}
+
+func blockText(block map[string]any) string {
+	if text, ok := block["text"].(map[string]any); ok {
+		if value, ok := text["text"].(string); ok {
+			return value
+		}
+	}
+	if elements, ok := block["elements"].([]any); ok && len(elements) > 0 {
+		if element, ok := elements[0].(map[string]any); ok {
+			if value, ok := element["text"].(string); ok {
+				return value
+			}
+		}
+	}
+	return ""
+}
+
+func TestFormatSlackDigestV4NativeLayout(t *testing.T) {
+	payload := EventPayload{
+		Version: 1, EventType: "digest.daily", Project: ProjectRef{ID: "p1", Name: "Acme Invoicing"},
+		DashboardURL: "https://app.example",
+		Digest: &DigestPayload{SchemaVersion: 4, Date: "2026-08-24", GeneratedCards: []GeneratedDigestCard{
+			{IncidentID: "decision-1", Title: "Send invoice does nothing", Outcome: "needs_human", Copy: "18 people tried to send an invoice and couldn't. The request stopped before saving.", Action: "Watch the replay and choose whether to retry.", AffectedUsers: 18, Accounts: []string{"Northwind Traders", "Globex"}, ReplayURL: "https://app.example/sessions/s1?t=4200"},
+			{IncidentID: "fix-1", Title: "Checkout stops before payment", Outcome: "verified_fix", Copy: "4 people couldn't pay. The cart failed to load.", Action: "Review and merge the fix.", AffectedUsers: 4, PRURL: "https://github.com/acme/shop/pull/6", PRNumber: 6},
+			{IncidentID: "decision-2", Title: "Export never starts", Outcome: "needs_human", Copy: "1 person couldn't export data.", Action: "Choose the safe fallback.", AffectedUsers: 1},
+			{IncidentID: "fix-2", Title: "Search results disappear", Outcome: "verified_fix", Copy: "2 people couldn't search.", Action: "Review and merge the fix.", AffectedUsers: 2, PRURL: "https://github.com/acme/shop/pull/not-a-number"},
+			{IncidentID: "fix-3", Title: "Profile fails to save", Outcome: "verified_fix", Copy: "3 people couldn't save a profile.", Action: "Confirm the remediation.", AffectedUsers: 3},
+		}},
+	}
+	blocks, body := formatV4Blocks(t, payload)
+	if got := blockText(blocks[0]); got != "Daily digest · Acme Invoicing" {
+		t.Fatalf("header = %q", got)
+	}
+	if got := blockText(blocks[1]); got != "Aug 24 · 5 issues that matter · 2 need a decision · 3 fixes ready to merge" {
+		t.Fatalf("summary = %q", got)
+	}
+	decisionHeader := strings.Index(body, "Needs a decision")
+	decisionCard := strings.Index(body, "Send invoice does nothing")
+	fixHeader := strings.Index(body, "Fixes ready to merge")
+	fixCard := strings.Index(body, "Checkout stops before payment")
+	if !(decisionHeader < decisionCard && decisionCard < fixHeader && fixHeader < fixCard) {
+		t.Fatalf("outcome groups rendered out of order: %s", body)
+	}
+	for _, want := range []string{
+		"*Send invoice does nothing*\\n18 people tried to send an invoice and couldn't. The request stopped before saving.\\n*Needs you:* Watch the replay and choose whether to retry.",
+		"👥 18 users · Northwind Traders, Globex", "Watch replay", "Review PR #6", "Review fix PR", "*Ready:* Review and merge the fix.",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("v4 digest missing %q: %s", want, body)
+		}
+	}
+	if strings.Contains(body, "Watched") || strings.Contains(body, "only opens a PR") {
+		t.Fatalf("legacy footer leaked into v4: %s", body)
+	}
+
+	labelsByIncident := map[string][]string{}
+	currentIncident := ""
+	for _, block := range blocks {
+		text := blockText(block)
+		for _, incident := range []string{"decision-1", "decision-2", "fix-1", "fix-2", "fix-3"} {
+			if strings.Contains(text, strings.TrimSuffix(map[string]string{
+				"decision-1": "Send invoice does nothing", "decision-2": "Export never starts", "fix-1": "Checkout stops before payment", "fix-2": "Search results disappear", "fix-3": "Profile fails to save",
+			}[incident], "")) {
+				currentIncident = incident
+			}
+		}
+		if block["type"] != "actions" {
+			continue
+		}
+		for _, raw := range block["elements"].([]any) {
+			button := raw.(map[string]any)
+			labelsByIncident[currentIncident] = append(labelsByIncident[currentIncident], button["text"].(map[string]any)["text"].(string))
+			if strings.HasPrefix(button["action_id"].(string), "digest_replay_") || strings.HasPrefix(button["action_id"].(string), "digest_pr_") {
+				if button["style"] != "primary" {
+					t.Errorf("primary action lacks style: %+v", button)
+				}
+			}
+		}
+	}
+	if got := labelsByIncident["decision-2"]; len(got) != 1 || got[0] != "View issue" {
+		t.Errorf("decision without replay buttons = %v", got)
+	}
+	if got := labelsByIncident["fix-3"]; len(got) != 1 || got[0] != "View issue" {
+		t.Errorf("remediation-only fix buttons = %v", got)
+	}
+}
+
+func TestFormatSlackDigestV4SummaryEmptyAndOverflow(t *testing.T) {
+	one := EventPayload{Version: 1, EventType: "digest.daily", Project: ProjectRef{ID: "p", Name: "p"}, DashboardURL: "https://app.example",
+		Digest: &DigestPayload{SchemaVersion: 4, Date: "2026-08-24", GeneratedCards: []GeneratedDigestCard{{IncidentID: "i", Outcome: "needs_human", Title: "Problem", Copy: "It broke.", Action: "Decide.", AffectedUsers: 1}}}}
+	blocks, body := formatV4Blocks(t, one)
+	if got := blockText(blocks[1]); got != "Aug 24 · 1 issue that matters · 1 needs a decision" {
+		t.Fatalf("singular summary = %q", got)
+	}
+	if strings.Contains(body, "fix ready") {
+		t.Fatalf("empty fixes fragment rendered: %s", body)
+	}
+
+	empty := one
+	empty.Digest = &DigestPayload{SchemaVersion: 4, Date: "2026-08-24"}
+	blocks, body = formatV4Blocks(t, empty)
+	if len(blocks) != 3 || blockText(blocks[1]) != "Aug 24" || !strings.Contains(body, "Nothing needs your attention today.") {
+		t.Fatalf("empty digest = %s", body)
+	}
+
+	cards := make([]GeneratedDigestCard, 12)
+	for index := range cards {
+		cards[index] = GeneratedDigestCard{IncidentID: "issue-" + strconv.Itoa(index), Outcome: "needs_human", Title: "Problem " + strconv.Itoa(index), Copy: "It broke.", Action: "Decide."}
+	}
+	overflow := one
+	overflow.Digest = &DigestPayload{SchemaVersion: 4, Date: "2026-08-24", GeneratedCards: cards}
+	blocks, body = formatV4Blocks(t, overflow)
+	actions := 0
+	for _, block := range blocks {
+		if block["type"] == "actions" {
+			actions++
+		}
+	}
+	if actions != 9 || !strings.Contains(body, "And 3 more on the dashboard") || len(blocks) > 50 {
+		t.Fatalf("overflow rendering: actions=%d blocks=%d body=%s", actions, len(blocks), body)
+	}
+}
+
+func TestFormatSlackDigestV4CleansProseAndKeepsButtonURLPlain(t *testing.T) {
+	payload := EventPayload{Version: 1, EventType: "digest.daily", Project: ProjectRef{ID: "p", Name: "p"}, DashboardURL: "https://app.example",
+		Digest: &DigestPayload{SchemaVersion: 4, Date: "bad-date", GeneratedCards: []GeneratedDigestCard{{
+			IncidentID: "i", Outcome: "needs_human", Title: "<fake> & *bold*", Copy: "user@example.com\nforged", Action: "Choose <now>.", ReplayURL: "https://app.example/sessions/s1?token=secret",
+		}}}}
+	_, body := formatV4Blocks(t, payload)
+	if strings.Contains(body, "<fake>") || strings.Contains(body, "user@example.com") || !strings.Contains(body, "&lt;fake&gt;") {
+		t.Fatalf("prose was not cleaned: %s", body)
+	}
+	if strings.Contains(body, "&amp;token") || !strings.Contains(body, `"url":"https://app.example/sessions/s1`) {
+		t.Fatalf("button URL was mrkdwn-escaped or omitted: %s", body)
+	}
+	if !strings.Contains(body, "bad-date") {
+		t.Fatalf("raw invalid date fallback missing: %s", body)
 	}
 }
 

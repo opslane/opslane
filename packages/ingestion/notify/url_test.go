@@ -25,3 +25,30 @@ func TestBuildIncidentURL(t *testing.T) {
 		})
 	}
 }
+
+func TestBuildSessionURL(t *testing.T) {
+	cases := []struct {
+		name string
+		base string
+		want string
+	}{
+		{"https", "https://app.example.com/base/?old=1", "https://app.example.com/base/sessions/session%2F1?t=4200"},
+		{"empty", "", ""},
+		{"empty session", "https://app.example.com", ""},
+		{"loopback", "http://127.0.0.1:3000", ""},
+		{"credentials", "https://user:pass@app.example.com", ""},
+		{"wrong scheme", "javascript:alert(1)", ""},
+		{"fragment", "https://app.example.com/#fragment", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sessionID := "session/1"
+			if tc.name == "empty session" {
+				sessionID = ""
+			}
+			if got := BuildSessionURL(tc.base, sessionID, 4200); got != tc.want {
+				t.Fatalf("got %q want %q", got, tc.want)
+			}
+		})
+	}
+}
