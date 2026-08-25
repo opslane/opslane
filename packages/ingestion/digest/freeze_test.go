@@ -69,6 +69,138 @@ func seedFreezeDiagnosis(t *testing.T, pool *pgxpool.Pool, projectID, episodeID,
 	})
 }
 
+func seedFreezeReplay(t *testing.T, pool *pgxpool.Pool, projectID, environmentID, episodeID, sessionID string, anchor time.Time) {
+	t.Helper()
+	ctx := context.Background()
+	var groupID string
+	if err := pool.QueryRow(ctx, `SELECT canonical_issue_id::text FROM issue_episodes
+		WHERE project_id=$1 AND id=$2`, projectID, episodeID).Scan(&groupID); err != nil {
+		t.Fatalf("load replay group: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO sessions
+		(id,project_id,environment_id,started_at,last_chunk_at)
+		VALUES ($1,$2,$3,$4,$4)`, sessionID, projectID, environmentID, anchor.Add(-time.Minute)); err != nil {
+		t.Fatalf("seed replay session: %v", err)
+	}
+	first, last := anchor.Add(-20*time.Second).UnixMilli(), anchor.Add(20*time.Second).UnixMilli()
+	if _, err := pool.Exec(ctx, `INSERT INTO session_chunks
+		(session_id,seq,project_id,object_key,has_full_snapshot,scrubbed_at,first_event_ms,last_event_ms)
+		VALUES ($1,0,$2,$3,true,now(),$4,$5)`, sessionID, projectID, "digest/"+sessionID, first, last); err != nil {
+		t.Fatalf("seed replay chunk: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO error_events
+		(project_id,environment_id,error_group_id,session_id,"timestamp",error_type,error_message,stack_trace_raw,created_at)
+		VALUES ($1,$2,$3,$4,$5,'TypeError','boom','at test',$5)`,
+		projectID, environmentID, groupID, sessionID, anchor); err != nil {
+		t.Fatalf("seed replay event: %v", err)
+	}
+}
+
+func TestFreezeCapturesOccurrenceAndReplayFacts(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	f := seedDigestFixture(t, pool, now)
+	episodeID := seedFreezeEpisode(t, pool, f.ProjectID, f.EnvID, now.Add(-2*time.Hour), 1)
+	seedFreezeDiagnosis(t, pool, f.ProjectID, episodeID, "needs_human", now.Add(-time.Hour))
+	if _, err := pool.Exec(ctx, `UPDATE error_groups SET occurrence_count=34
+		WHERE id=(SELECT canonical_issue_id FROM issue_episodes WHERE id=$1)`, episodeID); err != nil {
+		t.Fatal(err)
+	}
+	seedFreezeReplay(t, pool, f.ProjectID, f.EnvID, episodeID, "digest-replay-"+uuid.NewString(), now.Add(-2*time.Hour))
+
+	_, candidates, err := FreezeCandidates(ctx, pool, f.ProjectID, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates) != 1 {
+		t.Fatalf("candidates: got %d", len(candidates))
+	}
+	if candidates[0].OccurrenceCount != 34 {
+		t.Fatalf("occurrence: got %d", candidates[0].OccurrenceCount)
+	}
+	if candidates[0].ReplaySessionID == "" || candidates[0].ReplayAnchorMs == 0 {
+		t.Fatalf("replay facts not frozen: %+v", candidates[0])
+	}
+}
+
+func TestFreezeSucceedsWithoutWatchableReplay(t *testing.T) {
+	pool := testPool(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	f := seedDigestFixture(t, pool, now)
+	episodeID := seedFreezeEpisode(t, pool, f.ProjectID, f.EnvID, now.Add(-2*time.Hour), 1)
+	seedFreezeDiagnosis(t, pool, f.ProjectID, episodeID, "needs_human", now.Add(-time.Hour))
+
+	_, candidates, err := FreezeCandidates(context.Background(), pool, f.ProjectID, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates) != 1 || candidates[0].ReplaySessionID != "" || candidates[0].ReplayAnchorMs != 0 {
+		t.Fatalf("unexpected replay facts: %+v", candidates)
+	}
+}
+
+func TestFreezeReplayFloorUsesPreviousEpisodeClose(t *testing.T) {
+	tests := []struct {
+		name        string
+		sequence    int
+		openedAt    time.Duration
+		withCurrent bool
+		wantCurrent bool
+	}{
+		{name: "returned excludes replay before prior close", sequence: 2, withCurrent: false},
+		{name: "returned selects replay after prior close", sequence: 2, withCurrent: true, wantCurrent: true},
+		{name: "first episode keeps replay before open", sequence: 1, openedAt: -time.Hour},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := testPool(t)
+			ctx := context.Background()
+			now := time.Now().UTC().Truncate(time.Second)
+			f := seedDigestFixture(t, pool, now)
+			episodeID := seedFreezeEpisode(t, pool, f.ProjectID, f.EnvID, now.Add(-3*time.Hour), tc.sequence)
+			seedFreezeDiagnosis(t, pool, f.ProjectID, episodeID, "needs_human", now.Add(-30*time.Minute))
+			var groupID string
+			if err := pool.QueryRow(ctx, `SELECT canonical_issue_id::text FROM issue_episodes WHERE id=$1`, episodeID).Scan(&groupID); err != nil {
+				t.Fatal(err)
+			}
+			if tc.sequence == 2 {
+				if _, err := pool.Exec(ctx, `INSERT INTO issue_episodes
+					(project_id,canonical_issue_id,sequence,opened_at,closed_at)
+					VALUES ($1,$2,1,$3,$4)`, f.ProjectID, groupID, now.Add(-6*time.Hour), now.Add(-2*time.Hour)); err != nil {
+					t.Fatal(err)
+				}
+			} else if _, err := pool.Exec(ctx, `UPDATE issue_episodes SET opened_at=$2 WHERE id=$1`, episodeID, now.Add(tc.openedAt)); err != nil {
+				t.Fatal(err)
+			}
+			oldID := "digest-old-" + uuid.NewString()
+			seedFreezeReplay(t, pool, f.ProjectID, f.EnvID, episodeID, oldID, now.Add(-3*time.Hour))
+			currentID := ""
+			if tc.withCurrent {
+				currentID = "digest-current-" + uuid.NewString()
+				seedFreezeReplay(t, pool, f.ProjectID, f.EnvID, episodeID, currentID, now.Add(-time.Hour))
+			}
+
+			_, candidates, err := FreezeCandidates(ctx, pool, f.ProjectID, now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(candidates) != 1 {
+				t.Fatalf("candidates: got %d", len(candidates))
+			}
+			want := oldID
+			if tc.sequence == 2 && !tc.wantCurrent {
+				want = ""
+			} else if tc.wantCurrent {
+				want = currentID
+			}
+			if candidates[0].ReplaySessionID != want {
+				t.Fatalf("replay = %q, want %q", candidates[0].ReplaySessionID, want)
+			}
+		})
+	}
+}
+
 func TestFreezeAllowsANewlyReadyActionOnAQuietProblem(t *testing.T) {
 	pool := testPool(t)
 	ctx := context.Background()
