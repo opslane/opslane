@@ -22,7 +22,7 @@ An error threw an exception. Follow the resolved source file and line, understan
 
 A friction issue is a person trying to do something and silently getting nothing back. No exception was thrown. There is no single correct fix — the right behavior is a product call, and it is not yours to make. Do not pick a fix and implement it. Your job is to make the decision easy for the human, then build their choice.
 
-1. Understand it, briefly. Read the route, the element, and watch the replay Opslane points at. Read the code path that handles the action. Say in one line what the user was trying to do and what stopped them, grounded in the code and the replay, not a guess from the selector.
+1. Understand it, briefly. Read the route and the element. Opslane points at a session replay (a session id and timestamp to open in the dashboard); you cannot watch it from here, so treat it as a signal and, if you need what it shows, ask the human to watch it. Read the code path that handles the action, and say in one line what the user was trying to do and what stopped them, grounded in the code, not a guess from the selector.
 
 2. Frame the decision and ask. Turn the fix into a real choice and put it to the human with `AskUserQuestion`. Give two to four concrete options that lead to different code, each with its tradeoff in plain terms, and mark the one you recommend and why. Ask about the behavior, never the implementation. For "Send does nothing when the tax ID is missing":
    - Block and explain (recommended) — keep the block, but disable Send with a clear reason and a link to add the tax ID. Safe, no invoices sent wrong.

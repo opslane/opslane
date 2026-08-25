@@ -68,12 +68,15 @@ Ask the agent to call `opslane_digest` to test the connection. A missing, invali
 <!-- voice-ok: friction is the issue kind shown by MCP and used by the skill -->
 Opslane ships a Claude Code skill so the agent works a digest item the way you would. It fixes a diagnosed error on its own. For a friction issue, where the right fix is a product call, it stops and asks you which behavior you want before it writes any code.
 
-The skill lives at `examples/agent-skills/opslane/SKILL.md`. Copy it into your repo:
+The skill lives at `examples/agent-skills/opslane/SKILL.md`. Download it into your repo:
 
 ```bash
 mkdir -p .claude/skills/opslane
-cp examples/agent-skills/opslane/SKILL.md .claude/skills/opslane/SKILL.md
+curl -fsSL https://raw.githubusercontent.com/opslane/opslane-oss/main/examples/agent-skills/opslane/SKILL.md \
+  -o .claude/skills/opslane/SKILL.md
 ```
+
+If you already have an Opslane checkout, copy `examples/agent-skills/opslane/SKILL.md` from it instead.
 
 Then ask the agent what is broken in production, and it will read the digest, open an issue, and either fix it or ask you the product question first.
 

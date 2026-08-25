@@ -6,7 +6,8 @@ Install it in your repo:
 
 ```bash
 mkdir -p .claude/skills/opslane
-cp path/to/examples/agent-skills/opslane/SKILL.md .claude/skills/opslane/SKILL.md
+curl -fsSL https://raw.githubusercontent.com/opslane/opslane-oss/main/examples/agent-skills/opslane/SKILL.md \
+  -o .claude/skills/opslane/SKILL.md
 ```
 
-It uses the Opslane MCP tools. Connect the MCP first — see [docs/guides/mcp.md](../../../docs/guides/mcp.md).
+It uses the Opslane MCP tools. Connect the MCP first: see [docs/guides/mcp.md](../../../docs/guides/mcp.md).
