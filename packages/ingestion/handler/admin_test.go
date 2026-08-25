@@ -103,6 +103,14 @@ func TestRedactAdminErrorSwallowsEndpointBearingProjectKey(t *testing.T) {
 	}
 }
 
+func TestRedactAdminErrorSwallowsAPIKey(t *testing.T) {
+	const key = "opslane_ak_mzxw6ytboi3damrrgi3tknzxgq_E2EAPISECRETAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	got := redactAdminError("request rejected for key " + key + " end")
+	if strings.Contains(got, "opslane_ak_") || strings.Contains(got, "E2EAPISECRET") {
+		t.Fatalf("redacted error leaked api key: %s", got)
+	}
+}
+
 func TestRedactAdminErrorPreservesBenignText(t *testing.T) {
 	in := "disk-space exhausted while writing task-output to /var/tmp"
 	if got := redactAdminError(in); got != in {

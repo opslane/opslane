@@ -74,7 +74,7 @@ The event was captured and grouped into a `new` issue. Opslane doesn't investiga
 
 Once an error reaches enough users, Opslane reads your repository and decides whether to investigate it. An investigation ends one of three ways: a pull request with a fix, a note that the cause is outside your code, or a stop with a reason for you to take over.
 
-One note on keys: a project has two key scopes. The seeded `opslane_pk_` **ingest key** can only send events and recordings, and is safe to ship in a browser bundle. Uploading source maps takes a separate `opslane_sk_` **source-map key**, created with the key-creation command (`mint-key`); see the [source maps guide](../guides/source-maps.md).
+This quickstart uses two kinds of keys. The seeded `opslane_pk_` **ingest key** can only send events and recordings, and is safe to ship in a browser bundle. Uploading source maps takes a separate `opslane_sk_` **source-map key**, created with the key-creation command (`mint-key`); see the [source maps guide](../guides/source-maps.md).
 
 ## Path 2: full error-to-PR
 

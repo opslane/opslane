@@ -3,7 +3,7 @@ description: Every registered HTTP route with its authentication mode.
 ---
 # HTTP routes
 
-All routes registered by the Opslane API (`packages/ingestion/handler/routes.go`). Auth column legend: **none** (public), **poll token** (`X-Opslane-Poll-Token` for one automated repository setup), **SDK** (`X-API-Key` project-scoped public ingest key; rate-limited per project, and origin-gated (unconditionally on the browser-only endpoints, and on `/api/v1/events` only when the request presents `Origin` or `Referer`), and **session** (dashboard JWT cookie or CLI token).
+All routes registered by the Opslane API (`packages/ingestion/handler/routes.go`). Auth column legend: **none** (public), **poll token** (`X-Opslane-Poll-Token` for one automated repository setup), **SDK** (`X-API-Key` project-scoped public ingest key; rate-limited per project, and origin-gated on browser requests), and **session** (signed-in dashboard session).
 
 These are curated tables, not a stability contract. The API is early-stage and may change. The [drift check](../../scripts/check-docs-drift.mjs) fails the repository test gate (`pnpm test`, which CI runs) if this page and `routes.go` disagree.
 
@@ -18,20 +18,21 @@ These are curated tables, not a stability contract. The API is early-stage and m
 | POST | `/auth/password` | none | Sign in with provider-managed email and password; issues local session cookies |
 | POST | `/auth/signup` | none | Create a provider account and begin required email verification |
 | POST | `/auth/verify-email` | none | Complete email verification and issue local session cookies |
-| POST | `/auth/oauth/verify-email` | flow cookie + same origin | Complete a hosted OAuth email challenge and resume the browser or CLI flow |
+| POST | `/auth/oauth/verify-email` | flow cookie + same origin | Complete a hosted OAuth email challenge and resume sign-in |
 | POST | `/auth/password/forgot` | none | Send a password-reset email with an enumeration-safe response |
 | POST | `/auth/password/reset` | none | Set a new password from a reset token and revoke local refresh sessions |
 | GET | `/auth/login` | none | Begin the configured identity-provider sign-in |
 | GET | `/auth/github` | none | Compatibility redirect to `/auth/login` |
 | GET | `/auth/callback` | none | Configured identity-provider callback |
 | GET | `/auth/github/callback` | none | Compatibility callback alias for existing GitHub App configurations |
-| GET+POST | `/oauth/authorize` | none | CLI PKCE authorization |
-| POST | `/oauth/token` | none | CLI PKCE token exchange |
+| GET+POST | `/oauth/authorize` | none | Begin an authorization request using PKCE |
+| POST | `/oauth/token` | none | Exchange a PKCE authorization code for a session token |
 | POST | `/api/v1/agent/setup` | none | Start automated repository setup |
 | GET | `/api/v1/agent/poll/{sessionID}` | poll token (`X-Opslane-Poll-Token`) | Check automated repository setup status |
 | GET | `/agent/auth/{sessionID}` | none | Browser authentication for automated repository setup |
 | GET | `/agent/auth/callback` | none | Authentication callback for automated repository setup |
 | POST | `/api/v1/github/webhook` | HMAC | Receive GitHub pull-request and default-branch push events; requires `X-GitHub-Delivery` (400 without it). Push events refresh Opslane's understanding of your pages and user actions. |
+| POST | `/mcp` | MCP key in `Authorization: Bearer ...` | Call the remote MCP tools for one project |
 
 The automated-setup callback requires `code`, `installation_id`, and UUID `state`. It returns final failures to the setup client as machine-readable reasons when the client checks status. `/auth/callback` sends GitHub App installs with a UUID `state` to automated setup and handles other states through the existing browser login and installation process.
 
@@ -53,7 +54,7 @@ The automated-setup callback requires `code`, `installation_id`, and UUID `state
 | --- | --- | --- | --- |
 | PUT | `/api/v1/sourcemaps/{debugID}` | secret source-map key | Upload one immutable source map after the server verifies its build identifier, which matches the map to a built file |
 
-## Session (dashboard/CLI)
+## Signed-in dashboard
 
 | Method | Path | Purpose |
 | --- | --- | --- |
@@ -76,8 +77,11 @@ The automated-setup callback requires `code`, `installation_id`, and UUID `state
 | GET | `/api/v1/projects/{projectID}/environments` | List all environments, or only environments that contain issues with `used_by=incidents` or sessions with `used_by=sessions` |
 | GET | `/api/v1/projects/{projectID}/event-count` | Event count stats |
 | GET | `/api/v1/projects/{projectID}/digest/latest` | Latest delivered daily summary, or an empty summary when none has been delivered |
-| GET | `/api/v1/projects/{projectID}/incidents` | List incidents |
-| GET | `/api/v1/projects/{projectID}/incidents/{incidentID}` | Incident detail |
+| POST | `/api/v1/projects/{projectID}/api-keys` | Create an MCP key; the `opslane_ak_` secret is returned once (admin) |
+| GET | `/api/v1/projects/{projectID}/api-keys` | List the project's MCP keys without showing their secrets (admin) |
+| DELETE | `/api/v1/projects/{projectID}/api-keys/{keyID}` | Revoke an MCP key (admin) |
+| GET | `/api/v1/projects/{projectID}/incidents` | List issues |
+| GET | `/api/v1/projects/{projectID}/incidents/{incidentID}` | Issue detail |
 | GET | `/api/v1/projects/{projectID}/incidents/{incidentID}/evidence` | Saved stack frames, failed requests, links to recordings, and available supporting data for the current issue |
 | GET | `/api/v1/projects/{projectID}/notification-destinations` | List project notification destinations and recent delivery state |
 | POST | `/api/v1/projects/{projectID}/notification-destinations` | Create a Slack notification destination |
@@ -93,12 +97,12 @@ The automated-setup callback requires `code`, `installation_id`, and UUID `state
 | POST | `/api/v1/projects/{projectID}/incidents/{incidentID}/fix` | Start a fix for an issue that is ready to fix, whether it came from an error or a session recording |
 | POST | `/api/v1/projects/{projectID}/incidents/{incidentID}/review` | Request another short repository review for the current issue; reuses an investigation already in progress |
 | POST | `/api/v1/projects/{projectID}/incidents/{incidentID}/link-pr` | Record a same-repository GitHub pull request without marking the issue resolved |
-| POST | `/api/v1/projects/{projectID}/incidents/{incidentID}/resolve` | Resolve incident |
-| POST | `/api/v1/projects/{projectID}/incidents/{incidentID}/archive` | Archive incident |
-| POST | `/api/v1/projects/{projectID}/incidents/{incidentID}/unarchive` | Unarchive incident |
+| POST | `/api/v1/projects/{projectID}/incidents/{incidentID}/resolve` | Resolve issue |
+| POST | `/api/v1/projects/{projectID}/incidents/{incidentID}/archive` | Archive issue |
+| POST | `/api/v1/projects/{projectID}/incidents/{incidentID}/unarchive` | Restore archived issue |
 | GET | `/api/v1/projects/{projectID}/accounts` | List B2B accounts |
 | GET | `/api/v1/projects/{projectID}/accounts/{accountID}` | Account detail |
-| GET | `/api/v1/projects/{projectID}/accounts/{accountID}/incidents` | Account incidents |
+| GET | `/api/v1/projects/{projectID}/accounts/{accountID}/incidents` | Issues for one account |
 | GET | `/api/v1/github/setup` | GitHub App install callback |
 | GET | `/api/v1/github/status` | GitHub App status |
 | GET | `/api/v1/github/repos` | List installable repos |
@@ -113,7 +117,7 @@ The automated-setup callback requires `code`, `installation_id`, and UUID `state
 | Method | Path | Auth | Purpose |
 | --- | --- | --- | --- |
 | GET | `/internal/v1/projects/{projectID}/sessions/{sessionID}/chunks/{seq}` | `X-Internal-Token` | Worker fetch of one decoded, redacted part of the recording |
-| GET | `/internal/v1/projects/{projectID}/incidents/{incidentID}/status` | `X-Internal-Token` | Status-only incident read for the deployment smoke test |
+| GET | `/internal/v1/projects/{projectID}/incidents/{incidentID}/status` | `X-Internal-Token` | Read one issue's status for the deployment smoke test |
 
 ## Method mismatch
 

@@ -48,6 +48,30 @@
         }
       ]
     },
+    "docs/guides/mcp.md": {
+      "fences": [
+        {
+          "language": "bash",
+          "classification": "config-template"
+        },
+        {
+          "language": "bash",
+          "classification": "config-template"
+        },
+        {
+          "language": "json",
+          "classification": "config-template"
+        },
+        {
+          "language": "toml",
+          "classification": "config-template"
+        },
+        {
+          "language": "markdown",
+          "classification": "config-template"
+        }
+      ]
+    },
     "docs/guides/replay-privacy.md": {
       "fences": [
         {

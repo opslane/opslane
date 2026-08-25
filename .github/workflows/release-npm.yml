@@ -38,7 +38,7 @@ jobs:
       - name: Install (lifecycle scripts blocked)
         run: pnpm install --frozen-lockfile --ignore-scripts
       - name: Build publishable packages
-        run: pnpm --filter @opslane/sdk... --filter @opslane/cli... build
+        run: pnpm --filter @opslane/sdk... build
       - name: Clean-consumer tarball checks
         run: node scripts/check-packed-packages.mjs
 
@@ -70,7 +70,7 @@ jobs:
       - name: Install (lifecycle scripts blocked)
         run: pnpm install --frozen-lockfile --ignore-scripts
       - name: Build publishable packages
-        run: pnpm --filter @opslane/sdk... --filter @opslane/cli... build
+        run: pnpm --filter @opslane/sdk... build
       - name: Version PR or publish
         uses: changesets/action@a45c4d594aa4e2c509dc14a9f2b3b67ba3780d0d # v1.9.0
         with:

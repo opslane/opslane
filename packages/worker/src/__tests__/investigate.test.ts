@@ -77,11 +77,16 @@ function diagnosisResponse(overrides: Record<string, unknown> = {}) {
   };
 }
 
-/** The single agent reads what it needs and submits once. */
+/**
+ * The single agent reads what it needs and submits. The diagnosis response
+ * repeats for the whole run: a submission the pre-acceptance validator rejects
+ * is asked for again, so an unchanged bad answer models the agent that cannot
+ * correct itself and exhausts the resubmit budget.
+ */
 function happyPath(overrides: Record<string, unknown> = {}): void {
   mockMessagesCreate
     .mockResolvedValueOnce(toolUseResponse([{ name: 'read_file', input: { path: 'src/App.vue' } }]))
-    .mockResolvedValueOnce(diagnosisResponse(overrides));
+    .mockResolvedValue(diagnosisResponse(overrides));
 }
 
 beforeEach(async () => {
@@ -298,6 +303,83 @@ describe('the agent never names an outcome', () => {
 
     expect(result.outcome).toBe('incomplete');
     expect(result.decisionReason).toMatch(/^filler_verdict:/);
+  });
+});
+
+describe('a rejected submission is handed back for correction', () => {
+  it('recovers a diagnosis whose first submission missed one citation', async () => {
+    const missingCitation = {
+      candidates_considered: [
+        { statement: 'items defaults to null and is mapped during render', kind: 'local_code', id: 'c1',
+          citation: { path: 'src/App.vue', line: 1, quote: 'items.map(i => i.name)' } },
+        // The auxiliary local candidate the agent forgot to ground — the c6 shape.
+        { statement: 'A watcher clears items during navigation', kind: 'local_code', id: 'c2', citation: null },
+      ],
+      rejected_candidates: [],
+    };
+    mockMessagesCreate
+      .mockResolvedValueOnce(toolUseResponse([{ name: 'read_file', input: { path: 'src/App.vue' } }]))
+      .mockResolvedValueOnce(diagnosisResponse(missingCitation))
+      .mockResolvedValueOnce(diagnosisResponse({
+        candidates_considered: [
+          { statement: 'items defaults to null and is mapped during render', kind: 'local_code', id: 'c1',
+            citation: { path: 'src/App.vue', line: 1, quote: 'items.map(i => i.name)' } },
+          { statement: 'A watcher clears items during navigation', kind: 'local_code', id: 'c2',
+            citation: { path: 'src/App.vue', line: 1, quote: 'items.map(i => i.name)' } },
+        ],
+        rejected_candidates: [],
+      }));
+
+    const result = await investigateError('key', makeInput(), tempDir);
+
+    expect(result.outcome).toBe('code_fix');
+    expect(result.decisionBasis).toBe('local_defect');
+
+    // The correction request reached the model as an error tool result naming
+    // the defect, not as a silent retry. (The messages array is shared and
+    // mutated across turns, so assert on the conversation, not on position.)
+    const resubmitRequest = mockMessagesCreate.mock.calls[2]![0] as { messages: unknown };
+    const conversation = JSON.stringify(resubmitRequest.messages);
+    expect(conversation).toContain('candidate_missing_citation: c2');
+    expect(conversation).toContain('"is_error":true');
+  });
+
+  it('counts a read_file batched with the submission before validating it', async () => {
+    // The read and the submit arrive in ONE assistant turn. The sibling read
+    // must execute (and land in filesRead) before the submission is validated,
+    // or the citation of the just-read file is rejected as citation_not_read —
+    // a rejection the mechanism itself would have manufactured.
+    const submission = diagnosisResponse();
+    mockMessagesCreate.mockResolvedValueOnce({
+      content: [
+        { type: 'tool_use', id: 'read-1', name: 'read_file', input: { path: 'src/App.vue' } },
+        ...submission.content,
+      ],
+      usage: USAGE,
+    });
+
+    const result = await investigateError('key', makeInput(), tempDir);
+
+    expect(result.outcome).toBe('code_fix');
+    expect(result.filesRead).toContain('src/App.vue');
+    expect(mockMessagesCreate).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops asking after the resubmit budget and terminalizes as before', async () => {
+    happyPath({
+      candidates_considered: [
+        { statement: 'Ungrounded local claim', kind: 'local_code', id: 'c1', citation: null },
+      ],
+      rejected_candidates: [],
+    });
+
+    const result = await investigateError('key', makeInput(), tempDir);
+
+    expect(result.outcome).toBe('incomplete');
+    expect(result.decisionBasis).toBe('invalid_verdict');
+    expect(result.decisionReason).toMatch(/^candidate_missing_citation:/);
+    // One read turn, the initial submission, and exactly two resubmit attempts.
+    expect(mockMessagesCreate).toHaveBeenCalledTimes(4);
   });
 });
 

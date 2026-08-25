@@ -19,6 +19,7 @@ const PUBLIC_DOCS_FILES = [
   'guides/replay-privacy.md',
   'guides/source-map-privacy.md',
   'guides/api-keys.md',
+  'guides/mcp.md',
   'architecture/precision.md',
   'architecture/trust.md',
   'reference/sdk-options.md',

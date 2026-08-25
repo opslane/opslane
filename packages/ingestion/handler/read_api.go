@@ -551,26 +551,22 @@ func (d *Dependencies) GetIncident(w http.ResponseWriter, r *http.Request) {
 	}
 
 	incidentID := chi.URLParam(r, "incidentID")
-	group, err := d.Queries.GetErrorGroup(r.Context(), projectID, incidentID)
+	inc, group, err := d.presentIncident(r.Context(), projectID, incidentID)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "failed to get incident")
 		return
 	}
-	if group == nil {
+	if inc == nil || group == nil {
 		writeJSONError(w, http.StatusNotFound, "incident not found")
 		return
 	}
 
-	inc := toIncidentJSON(*group)
-	if pipeline, err := d.Queries.IssuePipelineRecords(r.Context(), projectID, []string{incidentID}); err == nil {
-		attachPipelineState(&inc, pipeline[incidentID])
-	}
 	if group.InvestigationReadiness != nil && *group.InvestigationReadiness == "eligible" {
 		if brief, err := d.Queries.GetLatestAgentTaskBrief(r.Context(), projectID, incidentID); err == nil && brief != nil {
 			inc.AgentTaskBrief = brief
 		}
 	}
-	d.attachReceiptAndRecordings(r.Context(), projectID, incidentID, *group, &inc)
+	d.attachReceiptAndRecordings(r.Context(), projectID, incidentID, *group, inc)
 	environments, err := d.Queries.ListGroupEnvironments(r.Context(), projectID, incidentID)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "failed to get incident environments")
@@ -1314,13 +1310,12 @@ func (d *Dependencies) LinkIncidentPR(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	repo, number, ok := parseGitHubPR(request.URL)
-	if !ok {
-		writeJSONError(w, http.StatusBadRequest,
-			"url must be a GitHub pull request, for example https://github.com/owner/repo/pull/123")
-		return
-	}
-	if err := d.Queries.LinkPR(r.Context(), projectID, incidentID, request.URL, repo, number); err != nil {
+	if err := d.linkIncidentPR(r.Context(), projectID, incidentID, request.URL); err != nil {
+		if errors.Is(err, errInvalidGitHubPR) {
+			writeJSONError(w, http.StatusBadRequest,
+				"url must be a GitHub pull request, for example https://github.com/owner/repo/pull/123")
+			return
+		}
 		switch {
 		case errors.Is(err, db.ErrIncidentNotFound):
 			writeJSONError(w, http.StatusNotFound, "no such incident")

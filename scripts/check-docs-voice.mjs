@@ -90,11 +90,8 @@ const LIST_SEPARATOR = /^\s*[-*]\s+(\*\*[^*]+\*\*|\[[^\]]+\]\([^)]*\))\s+—\s/;
 export const LEGACY_EXEMPT = new Set([
   // Measured on main, 2026-08-13. Each entry dies with its audit issue.
   'docs/contracts/action-scope.md',
-  'docs/architecture/life-of-an-error.md',
-  'docs/architecture/overview.md',
   'docs/contracts/events.md',
   'docs/contracts/reliability.md',
-  'docs/quickstart/agent.md',
 ]);
 
 function withoutInlineCode(text) {

@@ -32,11 +32,11 @@ The stored, server-enforced permission of a project key (`ingest` or
 the database is the law.
 
 **User session**:
-A logged-in human (dashboard or CLI). The only way to read customer data —
+A logged-in human (dashboard). The only way to read customer data —
 no project key of any scope can read.
 
 **Reserved: `opslane_rk_`**:
-A reserved prefix (refused by CLI env writers) with no implementation. Do
+A reserved prefix with no implementation. Do
 not mint or repurpose without a design.
 
 **Legacy `def_` keys**:

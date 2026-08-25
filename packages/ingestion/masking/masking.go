@@ -43,7 +43,7 @@ func IsSensitiveHeader(name string) bool {
 // apiKeyPrefixRe matches well-known API key prefixes followed by their value.
 // The value class includes base64url underscores and legacy UUID hyphens.
 var apiKeyPrefixRe = regexp.MustCompile(
-	`(?i)(sk_live_|sk_test_|AKIA|ghp_|gho_|def_|opslane_pk_|opslane_sk_)[A-Za-z0-9_-]+`)
+	`(?i)(sk_live_|sk_test_|AKIA|ghp_|gho_|def_|opslane_pk_|opslane_sk_|opslane_ak_)[A-Za-z0-9_-]+`)
 
 // urlCredRe matches userinfo credentials in any URI scheme, not just HTTP:
 // exception messages routinely embed DSNs (postgres://, redis://, amqp://)
@@ -84,7 +84,7 @@ func RedactHeaders(headers map[string]string) map[string]string {
 //
 // Two categories of patterns are handled:
 //  1. API key prefixes (sk_live_, sk_test_, AKIA, ghp_, gho_, def_,
-//     opslane_pk_, opslane_sk_) followed by key characters.
+//     opslane_pk_, opslane_sk_, opslane_ak_) followed by key characters.
 //  2. JSON key-value pairs where the key is password, passwd, secret,
 //     or token (case-insensitive) -- the value is redacted.
 func RedactBody(body string) string {

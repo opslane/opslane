@@ -672,8 +672,7 @@ export { opslaneVitePlugin as opslane };
 // hard-fail stub) was removed in 3.0.0. opslane() uploads maps itself when
 // OPSLANE_SOURCEMAP_KEY is set — that one variable carries the upload URL, so
 // the separate endpoint variable is gone too. Old imports now fail at build
-// time with a missing-export error, and `opslane sourcemaps install-plugin`
-// still detects and reports configs that reference the old name.
+// time with a missing-export error.
 
 
 function stripMapSuffix(filePath: string): string {

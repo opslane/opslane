@@ -50,6 +50,10 @@ var (
 	}
 	keyAuthMu       sync.Mutex
 	keyAuthOutcomes = map[string]*atomic.Uint64{}
+	mcpAuthMu       sync.Mutex
+	mcpAuthOutcomes = map[string]*atomic.Uint64{
+		"ok": {}, "missing": {}, "invalid": {}, "wrong_scope": {}, "expired": {}, "lookup_error": {},
+	}
 
 	// Histogram for ingest duration (seconds)
 	ingestDuration struct {
@@ -199,6 +203,15 @@ func RecordKeyAuth(outcome string) {
 	counter.Add(1)
 }
 
+func RecordMCPAuth(outcome string) {
+	mcpAuthMu.Lock()
+	counter, ok := mcpAuthOutcomes[outcome]
+	mcpAuthMu.Unlock()
+	if ok {
+		counter.Add(1)
+	}
+}
+
 // RecordIngestError increments the error counter for the given error type.
 func RecordIngestError(errType string) {
 	ingestErrorsTotal.mu.Lock()
@@ -333,6 +346,15 @@ func Metrics(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "opslane_key_auth_total{outcome=%q} %d\n", outcome, counter.Load())
 	}
 	keyAuthMu.Unlock()
+	fmt.Fprintln(w)
+
+	fmt.Fprintln(w, "# HELP opslane_mcp_auth_total MCP bearer authentication outcomes")
+	fmt.Fprintln(w, "# TYPE opslane_mcp_auth_total counter")
+	mcpAuthMu.Lock()
+	for outcome, counter := range mcpAuthOutcomes {
+		fmt.Fprintf(w, "opslane_mcp_auth_total{outcome=%q} %d\n", outcome, counter.Load())
+	}
+	mcpAuthMu.Unlock()
 	fmt.Fprintln(w)
 
 	// opslane_ingest_errors_total

@@ -23,7 +23,6 @@ This is a single-context repo:
 │   ├── ingestion/
 │   ├── worker/
 │   └── dashboard/
-├── cli/
 └── shared/
 ```
 

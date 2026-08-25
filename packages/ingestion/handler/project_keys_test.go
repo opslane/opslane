@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/opslane/opslane/packages/ingestion/db"
@@ -87,6 +88,60 @@ func TestProjectKeyMiddlewareStatuses(t *testing.T) {
 			}
 			if body.Code != tc.code {
 				t.Errorf("code = %q, want %q", body.Code, tc.code)
+			}
+		})
+	}
+}
+
+func TestProjectKeyMiddlewareExpiryAcrossScopes(t *testing.T) {
+	_, q, pool := authTestRouter(t)
+	ctx := context.Background()
+	org, err := q.CreateOrg(ctx, "middleware-expiry-"+uuid.NewString())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { cleanupTenantHandler(t, pool, org.ID) })
+	project, err := q.CreateProject(ctx, org.ID, "expiry", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		scope, endpoint string
+	}{
+		{db.ScopeIngest, ""},
+		{db.ScopeSourcemaps, "https://ingest.test"},
+	} {
+		t.Run(tc.scope, func(t *testing.T) {
+			future, err := q.CreateProjectKey(ctx, project.ID, tc.scope, "future", nil, tc.endpoint)
+			if err != nil {
+				t.Fatal(err)
+			}
+			past, err := q.CreateProjectKey(ctx, project.ID, tc.scope, "past", nil, tc.endpoint)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := pool.Exec(ctx, `
+				UPDATE project_api_keys
+				SET expires_at = CASE key_id WHEN $1 THEN $3::timestamptz ELSE $4::timestamptz END
+				WHERE key_id IN ($1, $2)`, future.KeyID, past.KeyID,
+				time.Now().Add(time.Hour), time.Now().Add(-time.Hour)); err != nil {
+				t.Fatal(err)
+			}
+			protected := (&handler.Dependencies{Queries: q}).ProjectKey(tc.scope)(http.HandlerFunc(
+				func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }))
+			request := func(raw string) int {
+				req := httptest.NewRequest(http.MethodPost, "/", nil)
+				req.Header.Set("X-API-Key", raw)
+				rec := httptest.NewRecorder()
+				protected.ServeHTTP(rec, req)
+				return rec.Code
+			}
+			if got := request(future.Raw); got != http.StatusNoContent {
+				t.Fatalf("future key status = %d", got)
+			}
+			if got := request(past.Raw); got != http.StatusUnauthorized {
+				t.Fatalf("past key status = %d", got)
 			}
 		})
 	}

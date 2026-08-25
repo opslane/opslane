@@ -45,7 +45,7 @@ export default defineConfig({
           details: [
             'Self-hosted with Docker Compose. JavaScript browser errors and GitHub repositories are supported end to end.',
             'Reference tables (SDK options, HTTP routes, environment variables, reason codes) are checked against source on every CI run, so they are the authoritative answer for exact names and values.',
-            'Keys come in two scopes: opslane_pk_ ingest keys ship in the browser bundle, opslane_sk_ source-map keys stay in CI.',
+            'Keys come in three scopes: opslane_pk_ ingest keys ship in the browser bundle, opslane_sk_ source-map keys stay in CI, and opslane_ak_ MCP keys let a coding agent read issues.',
           ].join(' '),
           // Reference pages carry the exact names an agent needs; keep them
           // early so a truncated context still contains them.
@@ -71,7 +71,8 @@ export default defineConfig({
             { label: 'How Opslane works', url: 'https://docs.opslane.com/how-it-works/', description: 'From captured errors to verified fix pull requests' },
             { label: 'Friction and session recordings', url: 'https://docs.opslane.com/guides/friction/', description: 'Rage clicks, dead clicks, and promotion' },
             { label: 'Environments', url: 'https://docs.opslane.com/guides/environments/', description: 'Labels, the project default, and action scope' },
-            { label: 'API keys', url: 'https://docs.opslane.com/guides/api-keys/', description: 'Ingest keys, source-map keys, minting, rotation' },
+            { label: 'API keys', url: 'https://docs.opslane.com/guides/api-keys/', description: 'Ingest, source-map, and MCP keys; creation and rotation' },
+            { label: 'Connect a coding agent', url: 'https://docs.opslane.com/guides/mcp/', description: 'Connect Claude Code or Codex to the remote MCP server' },
             { label: 'Slack notifications', url: 'https://docs.opslane.com/guides/slack-notifications/', description: 'Webhooks, alerts, and the daily digest' },
             { label: 'Your data', url: 'https://docs.opslane.com/architecture/trust/', description: 'What Opslane collects and what each integration sends out' },
             { label: 'SDK options', url: 'https://docs.opslane.com/reference/sdk-options/', description: 'Every init() option with type and default' },
@@ -105,6 +106,7 @@ export default defineConfig({
             { label: 'Upload source maps', slug: 'guides/source-maps' },
             { label: 'Environments', slug: 'guides/environments' },
             { label: 'Notifications', slug: 'guides/slack-notifications' },
+            { label: 'Connect a coding agent', slug: 'guides/mcp' },
           ],
         },
         {

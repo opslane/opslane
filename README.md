@@ -116,7 +116,7 @@ Exact permissions and environment variables are in the [self-host quickstart](do
 - [Self-host quickstart](docs/quickstart/self-host.md): the local run and the full error-to-PR path, in detail
 - [Install guide](docs/install.md): add the SDK to your app
 - [Guides](docs/guides): React, Vue, vanilla JS, source maps, GitHub App, Slack notifications, replay privacy
-- [Architecture](docs/architecture/overview.md): components, trust boundaries, life of an error
+- [How Opslane works](docs/how-it-works.md): the path from a browser error to a verified fix pull request
 - [Trust and data flow](docs/architecture/trust.md): what each integration receives and what leaves your infrastructure
 - [Reference](docs/reference): SDK options, HTTP routes, environment variables, reason codes, checked against source by [`scripts/check-docs-drift.mjs`](scripts/check-docs-drift.mjs) in CI
 

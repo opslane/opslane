@@ -52,7 +52,7 @@ export class InvalidApiKeyError extends Error {
     super(
       `[opslane] refusing to initialize: apiKey must start with "${PUBLIC_KEY_PREFIX}". ` +
       `Got "${prefixSeen}". Only the public ingest key belongs in browser code. ` +
-      `A key starting with "opslane_sk_" is a secret and must never ship in a bundle.`,
+      `Keys starting with "opslane_sk_" or "opslane_ak_" are secrets and must never ship in a bundle.`,
     );
     this.name = 'InvalidApiKeyError';
   }

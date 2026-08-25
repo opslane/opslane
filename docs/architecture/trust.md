@@ -27,6 +27,7 @@ You turn these on. Each one sends only what it needs to do its job:
 - **Anthropic:** the error, and the parts of your code Opslane reads while investigating it.
 - **E2B:** the sandbox where a fix is tested. It gets your repository and the commands to run your tests.
 - **Slack** (optional): issue titles, summaries, and links.
+- **MCP:** a coding agent you connect can read your issues and their evidence, and link a pull request.
 
 Investigating and fixing bugs is the point, so in normal use Opslane does send this data to GitHub, Anthropic, and E2B. What it never does is phone home or call any service you haven't connected. There is no Opslane telemetry.
 

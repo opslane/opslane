@@ -33,6 +33,7 @@ test('parses the loader allowlist and sidebar from their authoritative sources',
       'guides/replay-privacy.md',
       'guides/source-map-privacy.md',
       'guides/api-keys.md',
+      'guides/mcp.md',
       'architecture/precision.md',
       'architecture/trust.md',
       'reference/sdk-options.md',
@@ -48,7 +49,7 @@ test('real docs tree has explicit policy coverage', () => {
   const result = checkDocsScope({ root: ROOT });
 
   assert.deepEqual(result.problems, []);
-  assert.equal(result.published.length, 17);
+  assert.equal(result.published.length, 18);
   assert.equal(result.navigable.length, parseSidebarSlugs(SIDEBAR_SOURCE).length);
   assert.equal(result.policies.get('docs/how-it-works.md'), 'excluded');
   assert.equal(result.published.includes('docs/contracts/events.md'), false);

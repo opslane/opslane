@@ -9,8 +9,6 @@ import {
   verifyEmail,
   verifyOAuthEmail,
 } from '../api';
-import { AGENT_ONBOARDING_ENABLED } from '../agent-onboarding';
-import AgentOnboardingCard from '../components/AgentOnboardingCard.vue';
 import EyeIcon from '../components/icons/EyeIcon.vue';
 import EyeSlashIcon from '../components/icons/EyeSlashIcon.vue';
 import LastUsedBadge from '../components/LastUsedBadge.vue';
@@ -28,8 +26,6 @@ import Button from '../components/ui/Button.vue';
 import type { SocialProviderId } from '../types/api';
 
 const router = useRouter();
-const agentCardEnabled = AGENT_ONBOARDING_ENABLED;
-const origin = window.location.origin;
 const {
   mode,
   config,
@@ -321,15 +317,6 @@ onMounted(() => {
             </Button>
           </form>
         </div>
-
-        <template v-if="agentCardEnabled && (mode === 'redirect' || mode === 'signin' || mode === 'signup')">
-          <div class="my-6 flex items-center gap-3">
-            <div class="h-px flex-1 bg-border"></div>
-            <span class="text-xs text-faint">or</span>
-            <div class="h-px flex-1 bg-border"></div>
-          </div>
-          <AgentOnboardingCard :origin="origin" />
-        </template>
       </div>
     </div>
     <LoginShowcase />

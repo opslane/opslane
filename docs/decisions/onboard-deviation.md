@@ -1,6 +1,6 @@
 # Apply cannot deviate from the approved plan
 
-- **Status:** ACCEPTED (2026-07-28). Ratifies behaviour the code already has.
+- **Status:** SUPERSEDED (2026-08-23) — the CLI onboarding agent was removed. Originally ACCEPTED (2026-07-28), ratifying behaviour the code had.
 - **Verified against:** `cli/src/onboard/policy.ts`, `cli/src/onboard/engine.ts` at commit `8fe33b1`.
 - **Prompted by:** the onboarding TUI plan (`docs/plans/2026-07-27-onboarding-tui-ux.md`), which
   in revisions 1–5 promised that a write outside the plan would "stop and ask". It cannot, and

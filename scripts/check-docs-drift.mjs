@@ -8,8 +8,7 @@
 //      with documented-but-unread vars allowed only in the dead-config section
 //   4. SdkInitOptions keys and defaults vs docs/reference/sdk-options.md
 //   5. ReasonCode union vs docs/reference/reason-codes.md
-//   6. CLI agent terminal statuses vs docs/reference/cli-agent-contract.md
-//   7. Local paths linked from llms.txt exist
+//   6. Local paths linked from llms.txt exist
 //
 // Run: pnpm docs:check  (wired into the root `pnpm test` gate)
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
@@ -41,12 +40,14 @@ function registeredRoutes() {
   for (const line of src.split('\n')) {
     const routeM = line.match(/r\.Route\("([^"]+)"/);
     const methodM = line.match(/\.(Get|Post|Put|Patch|Delete|HandleFunc)\("(\/[^"]*)"/);
+    const mcpM = line.match(/r\.Handle\(\"(\/mcp)\"/);
     if (methodM && !routeM) {
       const prefix = prefixStack.map((p) => p.prefix).join('');
       const path = normalize(prefix + methodM[2]);
       const method = methodM[1] === 'HandleFunc' ? 'ANY' : methodM[1].toUpperCase();
       routes.add(`${method} ${path}`);
     }
+    if (mcpM) routes.add(`POST ${normalize(mcpM[1])}`);
     depth += (line.match(/{/g) ?? []).length - (line.match(/}/g) ?? []).length;
     if (routeM) prefixStack.push({ prefix: routeM[1], depth });
     while (prefixStack.length && depth < prefixStack.at(-1).depth) prefixStack.pop();
@@ -219,50 +220,7 @@ if (countM && Number(countM[1]) !== codes.length) {
   problems.push(`reason-codes.md says "${countM[1]} codes total" but shared/src/types.ts defines ${codes.length}`);
 }
 
-// ---------- 6. CLI agent terminal statuses (exact ordered table) ----------
-const contractSrc = read('cli/src/contract.ts');
-const contractCallPattern = /agentStatus\(\s*("(?:\\.|[^"\\])*")\s*,\s*("(?:\\.|[^"\\])*")\s*,\s*([01])\s*,\s*("(?:\\.|[^"\\])*")\s*,\s*("(?:\\.|[^"\\])*")\s*\)/g;
-const codeAgentStatuses = [...contractSrc.matchAll(contractCallPattern)].map((m) => ({
-  command: JSON.parse(m[1]),
-  status: JSON.parse(m[2]),
-  exitCode: Number(m[3]),
-  stream: JSON.parse(m[4]),
-  meaning: JSON.parse(m[5]),
-}));
-if (codeAgentStatuses.length === 0) problems.push('could not parse AGENT_STATUSES from cli/src/contract.ts');
-
-const agentContractDoc = read('docs/reference/cli-agent-contract.md');
-const contractStart = '<!-- BEGIN AGENT_STATUS_CONTRACT -->';
-const contractEnd = '<!-- END AGENT_STATUS_CONTRACT -->';
-const contractStartAt = agentContractDoc.indexOf(contractStart);
-const contractEndAt = agentContractDoc.indexOf(contractEnd);
-const docAgentStatuses = [];
-if (contractStartAt < 0 || contractEndAt <= contractStartAt) {
-  problems.push('docs/reference/cli-agent-contract.md is missing ordered status-table markers');
-} else {
-  const contractTable = agentContractDoc.slice(contractStartAt + contractStart.length, contractEndAt);
-  for (const line of contractTable.split('\n')) {
-    if (!line.startsWith('| `')) continue;
-    const cells = line.split('|').slice(1, -1).map((cell) => cell.trim());
-    const unquote = (cell) => cell.match(/^`([\s\S]*)`$/)?.[1];
-    if (cells.length !== 5 || !unquote(cells[0]) || !unquote(cells[1]) || !/^[01]$/.test(cells[2]) || !unquote(cells[3])) {
-      problems.push(`invalid CLI agent contract status row: ${line}`);
-      continue;
-    }
-    docAgentStatuses.push({
-      command: unquote(cells[0]),
-      status: unquote(cells[1]),
-      exitCode: Number(cells[2]),
-      stream: unquote(cells[3]),
-      meaning: cells[4],
-    });
-  }
-}
-if (JSON.stringify(docAgentStatuses) !== JSON.stringify(codeAgentStatuses)) {
-  problems.push('docs/reference/cli-agent-contract.md status table does not exactly match cli/src/contract.ts AGENT_STATUSES');
-}
-
-// ---------- 7. llms.txt local paths ----------
+// ---------- 6. llms.txt local paths ----------
 const llms = read('llms.txt');
 let llmsPathCount = 0;
 for (const m of llms.matchAll(/\[[^\]]*\]\(([^)]+)\)/g)) {
@@ -278,7 +236,7 @@ for (const m of llms.matchAll(/\[[^\]]*\]\(([^)]+)\)/g)) {
   }
 }
 
-// ---------- 8. every published doc appears in llms.txt ----------
+// ---------- 7. every published doc appears in llms.txt ----------
 // llms.txt is the machine entry point. A published page missing from it is
 // invisible to any agent that starts there, which is how it silently drifted
 // twelve pages behind the docs tree.
@@ -300,5 +258,5 @@ if (problems.length > 0) {
   process.exit(1);
 }
 console.log(
-  `✓ no docs drift: ${routes.size} routes, ${codeVars.size} env vars, ${optionKeys.length} SDK options, ${codes.length} reason codes, ${codeAgentStatuses.length} CLI agent status variants, and ${llmsPathCount} llms.txt paths all consistent`
+  `✓ no docs drift: ${routes.size} routes, ${codeVars.size} env vars, ${optionKeys.length} SDK options, ${codes.length} reason codes, and ${llmsPathCount} llms.txt paths all consistent`
 );

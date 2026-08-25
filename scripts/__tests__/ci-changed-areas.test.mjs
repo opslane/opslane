@@ -31,7 +31,6 @@ test('source, tests, fixtures, scripts, and lockfiles all turn every area on', (
     'packages/sdk-python/src/opslane/__init__.py',
     'packages/test-reliability/src/system.ts',
     'shared/src/contracts.ts',
-    'cli/src/init.ts',
     'test-e2e/browser-smoke.test.ts',
     'test-fixtures/wire/events/v1.2.0-full.json',
     'scripts/run-migrations.sh',

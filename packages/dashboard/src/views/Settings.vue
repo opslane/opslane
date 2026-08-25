@@ -12,10 +12,15 @@ import {
   deleteGitHubConfig,
   getGitHubAppStatus,
   getMe,
+  listAPIKeys,
+  createAPIKey,
+  revokeAPIKey,
   type Project,
   type Environment,
   type FixStats,
   type ProjectProvisioningResponse,
+  type ManagedAPIKey,
+  type CreatedAPIKey,
 } from '../api';
 import type { AuthMembership, GitHubConfig, GitHubAppStatus } from '../types/api';
 import { formatDate, safeUrl } from '../utils';
@@ -44,7 +49,7 @@ const activeRole = ref<AuthMembership['role']>();
 const settingsTabs = computed(() => [
   { id: 'project', label: 'Project' },
   { id: 'environments', label: 'Environments' },
-  { id: 'api-keys', label: 'API Keys' },
+  ...(activeRole.value !== 'member' ? [{ id: 'api-keys', label: 'API Keys' }] : []),
   { id: 'integrations', label: 'Integrations' },
   ...(activeRole.value ? [{ id: 'organization', label: 'Organization' }] : []),
 ]);
@@ -139,6 +144,19 @@ const actionScopeError = ref('');
 // projects.value; without this guard their saves would wipe unsaved scope edits.
 let actionScopeServerState = '';
 
+// Secret API keys for remote MCP clients.
+const apiKeys = ref<ManagedAPIKey[]>([]);
+const loadingAPIKeys = ref(false);
+const apiKeyError = ref('');
+const apiKeyLabel = ref('');
+const apiKeyExpiry = ref('');
+const creatingAPIKey = ref(false);
+const revokingAPIKeyID = ref('');
+const createdAPIKey = ref<CreatedAPIKey | null>(null);
+const apiKeyAcknowledged = ref(false);
+const mcpEndpoint = `${window.location.origin}/mcp`;
+let apiKeyRequestToken = 0;
+
 // GitHub integration
 const githubConfig = ref<GitHubConfig | null>(null);
 const loadingGithub = ref(false);
@@ -176,7 +194,10 @@ watch(selectedProjectId, () => {
   prPostureSaving.value = false;
   digestTimezoneSaveToken += 1;
   digestTimezoneSaving.value = false;
+  createdAPIKey.value = null;
+  apiKeyAcknowledged.value = false;
   void loadAutonomyAndStats();
+  if (activeTab.value === 'api-keys') void loadManagedAPIKeys();
 }, { immediate: true });
 watch(projects, () => {
   // The projects list changes in two ways: the async load on mount (the
@@ -394,6 +415,9 @@ function switchTab(tab: SettingsTab): void {
   if (tab === 'environments' && environments.value.length === 0 && pid) {
     loadEnvironments(pid);
   }
+  if (tab === 'api-keys' && pid && canProvision.value) {
+    void loadManagedAPIKeys();
+  }
 }
 
 async function loadEnvironments(pid: string): Promise<void> {
@@ -405,6 +429,74 @@ async function loadEnvironments(pid: string): Promise<void> {
   } finally {
     loadingEnvs.value = false;
   }
+}
+
+async function loadManagedAPIKeys(): Promise<void> {
+  const projectId = selectedProjectId.value;
+  const requestToken = ++apiKeyRequestToken;
+  apiKeyError.value = '';
+  apiKeys.value = [];
+  if (!projectId || !canProvision.value) return;
+  loadingAPIKeys.value = true;
+  try {
+    const keys = await listAPIKeys(projectId);
+    if (requestToken === apiKeyRequestToken && selectedProjectId.value === projectId) {
+      apiKeys.value = keys;
+    }
+  } catch (caught: unknown) {
+    if (requestToken === apiKeyRequestToken) {
+      apiKeyError.value = caught instanceof Error ? caught.message : 'Failed to load API keys';
+    }
+  } finally {
+    if (requestToken === apiKeyRequestToken) loadingAPIKeys.value = false;
+  }
+}
+
+async function handleCreateAPIKey(): Promise<void> {
+  const projectId = selectedProjectId.value;
+  const label = apiKeyLabel.value.trim();
+  if (!projectId || !label || creatingAPIKey.value || !canProvision.value) return;
+  creatingAPIKey.value = true;
+  apiKeyError.value = '';
+  try {
+    const expiresAt = apiKeyExpiry.value ? new Date(apiKeyExpiry.value).toISOString() : null;
+    createdAPIKey.value = await createAPIKey(projectId, { label, expires_at: expiresAt });
+    apiKeyAcknowledged.value = false;
+    apiKeyLabel.value = '';
+    apiKeyExpiry.value = '';
+    await loadManagedAPIKeys();
+  } catch (caught: unknown) {
+    apiKeyError.value = caught instanceof Error ? caught.message : 'Failed to create API key';
+  } finally {
+    creatingAPIKey.value = false;
+  }
+}
+
+async function handleRevokeAPIKey(key: ManagedAPIKey): Promise<void> {
+  const projectId = selectedProjectId.value;
+  if (!projectId || revokingAPIKeyID.value || !canProvision.value) return;
+  if (!window.confirm(`Revoke “${key.label}”? Clients using it will stop working immediately.`)) return;
+  revokingAPIKeyID.value = key.key_id;
+  apiKeyError.value = '';
+  try {
+    await revokeAPIKey(projectId, key.key_id);
+    await loadManagedAPIKeys();
+  } catch (caught: unknown) {
+    apiKeyError.value = caught instanceof Error ? caught.message : 'Failed to revoke API key';
+  } finally {
+    revokingAPIKeyID.value = '';
+  }
+}
+
+function dismissCreatedAPIKey(): void {
+  if (!apiKeyAcknowledged.value) return;
+  createdAPIKey.value = null;
+  apiKeyAcknowledged.value = false;
+}
+
+function displayExpiry(value: string | null): string {
+  if (!value) return 'Never';
+  return new Date(value).toLocaleDateString(undefined, { dateStyle: 'medium' });
 }
 
 function isDefaultEnvironment(environment: Environment): boolean {
@@ -843,11 +935,73 @@ async function handleDisconnectGithub(): Promise<void> {
     </div>
 
     <!-- API Keys tab -->
-    <div v-if="activeTab === 'api-keys'" id="settings-api-keys-panel" role="tabpanel" aria-labelledby="settings-api-keys-tab" tabindex="0">
-      <p class="text-sm text-muted">
-        API keys are created by <code>opslane onboard</code> in your repository.
-        Managing them here is coming with source-map settings.
-      </p>
+    <div v-if="activeTab === 'api-keys' && canProvision" id="settings-api-keys-panel" role="tabpanel" aria-labelledby="settings-api-keys-tab" tabindex="0" class="space-y-6">
+      <div>
+        <h3 class="text-sm font-medium text-text">Remote MCP API keys</h3>
+        <p class="mt-1 text-sm text-muted">
+          Secret, project-scoped credentials for Claude Code, Codex, and other server-side clients.
+          Never put an <code>opslane_ak_</code> key in browser code.
+        </p>
+      </div>
+
+      <form id="api-key-create-form" class="space-y-3 rounded-lg border border-border bg-surface p-4" @submit.prevent="handleCreateAPIKey">
+        <h4 class="text-sm font-medium text-text">Create key</h4>
+        <TextInput id="api-key-label" v-model="apiKeyLabel" label="Label" name="api-key-label" maxlength="100" placeholder="Claude Code on work laptop" required />
+        <label class="block text-sm font-medium text-muted" for="api-key-expiry">
+          Expires (optional)
+          <input
+            id="api-key-expiry"
+            v-model="apiKeyExpiry"
+            type="datetime-local"
+            class="mt-1 block w-full rounded-md border border-border bg-surface-subtle px-3 py-2 text-sm text-text focus:border-accent focus:ring-1 focus:ring-accent"
+          />
+        </label>
+        <Button variant="primary" type="submit" :disabled="creatingAPIKey || !apiKeyLabel.trim()">
+          {{ creatingAPIKey ? 'Creating...' : 'Create secret API key' }}
+        </Button>
+      </form>
+
+      <section v-if="createdAPIKey" class="rounded-lg border border-warning/40 bg-warning/10 p-4" aria-live="polite">
+        <h4 class="text-sm font-semibold text-text">Save this key now</h4>
+        <p class="mt-1 text-xs text-muted">It is shown only once. Configure your MCP client with <code>{{ mcpEndpoint }}</code> and this bearer token.</p>
+        <div class="relative mt-3 break-all rounded-md bg-surface-subtle p-3 pr-12 font-mono text-sm text-text">
+          <span v-text="createdAPIKey.token"></span>
+          <div class="absolute right-2 top-2"><CopyButton :text="createdAPIKey.token" /></div>
+        </div>
+        <p class="mt-3 font-mono text-xs text-muted">OPSLANE_API_KEY=&lt;paste the key above&gt;</p>
+        <label class="mt-3 flex items-start gap-2 text-sm text-muted">
+          <input id="api-key-acknowledged" v-model="apiKeyAcknowledged" type="checkbox" class="mt-0.5" />
+          <span>I have copied and stored this key securely.</span>
+        </label>
+        <Button class="mt-3" variant="primary" :disabled="!apiKeyAcknowledged" @click="dismissCreatedAPIKey">Done</Button>
+      </section>
+
+      <p v-if="apiKeyError" role="alert" class="text-sm text-danger" v-text="apiKeyError"></p>
+      <div v-if="loadingAPIKeys" class="text-sm text-muted">Loading API keys...</div>
+      <div v-else-if="apiKeys.length === 0" class="rounded-lg border border-border bg-surface p-4 text-sm text-muted">No remote MCP API keys yet.</div>
+      <ul v-else class="space-y-2">
+        <li v-for="key in apiKeys" :key="key.key_id" class="rounded-lg border border-border bg-surface p-4">
+          <div class="flex items-start justify-between gap-4">
+            <div class="min-w-0">
+              <div class="text-sm font-medium text-text" v-text="key.label"></div>
+              <div class="mt-1 break-all font-mono text-xs text-muted" v-text="key.redacted"></div>
+              <div class="mt-2 text-xs text-faint">
+                Created {{ formatDate(key.created_at) }} · Expires {{ displayExpiry(key.expires_at) }} · {{ key.status }}
+              </div>
+            </div>
+            <Button
+              v-if="key.status === 'active'"
+              :data-revoke-api-key="key.key_id"
+              variant="dangerSubtle"
+              size="sm"
+              :disabled="Boolean(revokingAPIKeyID)"
+              @click="handleRevokeAPIKey(key)"
+            >
+              {{ revokingAPIKeyID === key.key_id ? 'Revoking...' : 'Revoke' }}
+            </Button>
+          </div>
+        </li>
+      </ul>
     </div>
 
     <div v-if="activeTab === 'organization'" id="settings-organization-panel" role="tabpanel" aria-labelledby="settings-organization-tab" tabindex="0">

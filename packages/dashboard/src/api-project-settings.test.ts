@@ -2,13 +2,52 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { createProject, listEnvironments, listIncidents, listSessions, updateProject } from './api';
+import {
+  createAPIKey,
+  createProject,
+  listAPIKeys,
+  listEnvironments,
+  listIncidents,
+  listSessions,
+  revokeAPIKey,
+  updateProject,
+} from './api';
 
 afterEach(() => {
   vi.unstubAllGlobals();
 });
 
 describe('project settings API', () => {
+
+  it('creates, lists, and revokes project-scoped API keys', async () => {
+    const created = {
+      key_id: 'aaaaaaaaaaaaaaaaaaaaaaaaaa',
+      token: 'opslane_ak_aaaaaaaaaaaaaaaaaaaaaaaaaa_SECRET',
+      label: 'Codex',
+      scope: 'api' as const,
+      expires_at: null,
+    };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: true, status: 201, json: async () => created })
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => [] })
+      .mockResolvedValueOnce({ ok: true, status: 204 });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(createAPIKey('project-1', { label: 'Codex', expires_at: null })).resolves.toEqual(created);
+    await expect(listAPIKeys('project-1')).resolves.toEqual([]);
+    await expect(revokeAPIKey('project-1', created.key_id)).resolves.toBeUndefined();
+
+    expect(fetchMock.mock.calls).toEqual([
+      ['/api/v1/projects/project-1/api-keys', expect.objectContaining({
+        method: 'POST', credentials: 'include', body: JSON.stringify({ label: 'Codex', expires_at: null }),
+      })],
+      ['/api/v1/projects/project-1/api-keys', expect.objectContaining({ credentials: 'include' })],
+      ['/api/v1/projects/project-1/api-keys/aaaaaaaaaaaaaaaaaaaaaaaaaa', expect.objectContaining({
+        method: 'DELETE', credentials: 'include',
+      })],
+    ]);
+  });
+
   it('sends the digest timezone as a partial project PATCH', async () => {
     const project = {
       id: 'project-1',
