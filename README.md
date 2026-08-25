@@ -72,12 +72,12 @@ Opslane has four parts:
 
 An error travels through those parts like this:
 
-1. **Capture.** The SDK sends errors and session recordings to the ingestion service (two lines to install). Everything is stored, and nothing alerts on its own, so one stray error stays quiet.
-2. **Group.** Opslane uses your source maps to turn the minified stack trace back into real file names, then groups errors by where they happen in your code. The same bug is one issue, even after a redeploy, and if it comes back after a fix it's marked as returned. Opslane drops noise from browser extensions and other sites.
+1. **Capture.** The SDK sends errors and session recordings to the ingestion service. Two lines to install.
+2. **Group.** Opslane turns minified stack traces back into real file names using your source maps, and groups every occurrence of the same bug into one issue.
 3. **Qualify.** Before investigating, Opslane checks how many users hit the bug and how recently, then reads your repo to decide whether it's a real product problem. Only bugs that pass both checks get investigated.
 4. **Investigate.** The worker clones your repo and reads the code until it finds the cause. If it can't point to the exact files, it stops instead of guessing.
 5. **Verify.** The fix goes into a sandbox where your build and tests run. Everything that passed before has to pass again, and a second model reviews the change.
-6. **Deliver.** A fix that passes becomes a pull request. A fix it couldn't verify becomes a draft, if you allow drafts. When there's no fix, you get the reason and the call to make. A daily Slack digest covers what broke, what got fixed, and what needs you.
+6. **Deliver.** A fix that passes becomes a pull request. When there's no fix, you get the reason and the call to make. A daily Slack digest covers what broke, what got fixed, and what needs you.
 
 ```mermaid
 flowchart LR
@@ -87,8 +87,7 @@ flowchart LR
     Q -->|real problem| D[Investigate in your repo]
     D --> V{Fix verified?}
     V -->|yes| PR[Pull request]
-    V -->|couldn't verify| DR[Draft PR]
-    V -->|no fix found| HR[Written-up reason for you]
+    V -->|no| HR[Written-up reason for you]
 ```
 
 Opslane calls three outside services: Anthropic to investigate, E2B to run the sandbox, and GitHub for clones and pull requests. Everything else runs on your own stack: Postgres for state and the job queue, and S3-compatible storage for session recordings (MinIO in the bundled setup). There's no Redis or separate queue to run. JavaScript apps are supported end to end today.
