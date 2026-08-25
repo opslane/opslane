@@ -29,6 +29,7 @@ let recordedWidth = 1280;
 let recordedHeight = 720;
 let resizeObserver: ResizeObserver | null = null;
 let appliedSignature = '';
+let pendingFrame: number | null = null;
 
 function applyScale() {
   const el = containerRef.value;
@@ -42,6 +43,17 @@ function applyScale() {
   appliedSignature = signature;
   el.style.setProperty('--replay-scale', String(scale));
   el.style.height = `${height}px`;
+}
+
+// applyScale writes height on the element the ResizeObserver watches. Deferring
+// to the next frame keeps that write out of the observer's own callback, which
+// avoids the benign "ResizeObserver loop" console warning on every real resize.
+function scheduleScale() {
+  if (pendingFrame !== null) return;
+  pendingFrame = requestAnimationFrame(() => {
+    pendingFrame = null;
+    applyScale();
+  });
 }
 
 function buildPlayer() {
@@ -73,7 +85,7 @@ function buildPlayer() {
     if (dims?.height && dims.height > 0) recordedHeight = dims.height;
     applyScale();
   });
-  resizeObserver = new ResizeObserver(() => applyScale());
+  resizeObserver = new ResizeObserver(() => scheduleScale());
   resizeObserver.observe(containerRef.value);
   const metaTotal = r.getMetaData().totalTime;
   duration.value = Math.max(0, (metaTotal > 0 ? metaTotal : replayDurationMs(events)) / 1000);
@@ -100,6 +112,10 @@ function destroyPlayer() {
   if (resizeObserver) {
     resizeObserver.disconnect();
     resizeObserver = null;
+  }
+  if (pendingFrame !== null) {
+    cancelAnimationFrame(pendingFrame);
+    pendingFrame = null;
   }
   appliedSignature = '';
   if (containerRef.value) {
@@ -208,11 +224,10 @@ watch(
 </template>
 
 <style scoped>
-.replay-container {
-  min-height: 360px;
-  overflow: hidden;
-}
-
+/* Height is set to recordedHeight * scale from JS (a CSS transform does not
+   affect layout), so no min-height here: a fixed floor would leave dead space
+   under a short replay. The template element carries `overflow-hidden`, which
+   clips the scaled wrapper. */
 /* Scale the whole rrweb wrapper (iframe + cursor overlay) to fit the container
    at the recorded viewport's coordinate space. Do NOT stretch the iframe on its
    own: that reflows a responsive recording and drifts the replayed clicks. */

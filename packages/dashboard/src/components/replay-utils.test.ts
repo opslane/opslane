@@ -90,4 +90,9 @@ describe('replayViewport', () => {
   it('falls back to defaults for a zero or missing dimension', () => {
     expect(replayViewport([meta(0, 0)])).toEqual({ width: 1280, height: 720 });
   });
+
+  it('falls back to a coherent pair when only one dimension is valid', () => {
+    expect(replayViewport([meta(1050, 0)])).toEqual({ width: 1280, height: 720 });
+    expect(replayViewport([meta(0, 820)])).toEqual({ width: 1280, height: 720 });
+  });
 });

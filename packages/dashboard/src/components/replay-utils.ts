@@ -38,9 +38,13 @@ export function ensureReplayMeta(events: eventWithTime[]): eventWithTime[] {
 export function replayViewport(events: eventWithTime[]): { width: number; height: number } {
   const meta = events.find((event) => event.type === 4);
   const data = meta?.data as { width?: number; height?: number } | undefined;
-  const width = data?.width && data.width > 0 ? data.width : 1280;
-  const height = data?.height && data.height > 0 ? data.height : 720;
-  return { width, height };
+  // All-or-nothing: a Meta event missing either dimension is not a usable
+  // viewport, so fall back to a coherent default pair rather than mixing a real
+  // width with a default height (which would distort the aspect ratio).
+  if (data && data.width && data.width > 0 && data.height && data.height > 0) {
+    return { width: data.width, height: data.height };
+  }
+  return { width: 1280, height: 720 };
 }
 
 export function replayDurationMs(events: eventWithTime[]): number {
