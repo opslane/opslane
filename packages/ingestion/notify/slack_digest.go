@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/opslane/opslane/packages/ingestion/masking"
 	"github.com/opslane/opslane/packages/ingestion/narrative"
@@ -23,13 +24,196 @@ func formatSlackDigest(payload EventPayload) ([]byte, string, error) {
 	if payload.Digest == nil {
 		return nil, "application/json", fmt.Errorf("digest.daily payload missing digest body")
 	}
+	if payload.Digest.SchemaVersion >= 4 {
+		return formatSlackDigestV4(payload)
+	}
+	if payload.Digest.SchemaVersion >= 3 {
+		return formatSlackDigestV3(payload)
+	}
 	if payload.Digest.SchemaVersion >= 2 {
-		if payload.Digest.SchemaVersion >= 3 {
-			return formatSlackDigestV3(payload)
-		}
 		return formatSlackDigestV2(payload)
 	}
 	return formatSlackDigestV1(payload)
+}
+
+// DigestV4CardCap is the most cards one v4 digest renders. Exported because
+// the validator enforces it too: cards past the cap must be deferred there,
+// not silently receipted as published (see digest/validate.go).
+const DigestV4CardCap = 9
+
+func formatSlackDigestV4(payload EventPayload) ([]byte, string, error) {
+	digest := payload.Digest
+	decisions := make([]GeneratedDigestCard, 0)
+	fixes := make([]GeneratedDigestCard, 0)
+	for _, card := range digest.GeneratedCards {
+		switch card.Outcome {
+		case "needs_human":
+			decisions = append(decisions, card)
+		case "verified_fix":
+			fixes = append(fixes, card)
+		default:
+			// Unreachable today (freeze admits exactly two outcomes), but a
+			// future outcome must not vanish without a trace.
+			slog.Warn("digest card outcome is not renderable", "incident_id", card.IncidentID, "outcome", card.Outcome)
+		}
+	}
+	allCards := append(append([]GeneratedDigestCard(nil), decisions...), fixes...)
+	rendered := allCards
+	if len(rendered) > DigestV4CardCap {
+		rendered = rendered[:DigestV4CardCap]
+	}
+	renderedDecisions := make([]GeneratedDigestCard, 0, len(rendered))
+	renderedFixes := make([]GeneratedDigestCard, 0, len(rendered))
+	for _, card := range rendered {
+		if card.Outcome == "needs_human" {
+			renderedDecisions = append(renderedDecisions, card)
+		} else {
+			renderedFixes = append(renderedFixes, card)
+		}
+	}
+
+	blocks := []map[string]any{
+		{
+			"type": "header",
+			"text": map[string]any{"type": "plain_text", "text": truncate("Daily digest · "+cleanProse(payload.Project.Name, headerMax), headerMax), "emoji": true},
+		},
+		{
+			"type":     "context",
+			"elements": []map[string]any{{"type": "mrkdwn", "text": digestV4Summary(digest.Date, len(decisions), len(fixes))}},
+		},
+	}
+	if len(allCards) == 0 {
+		blocks = append(blocks, digestSectionBlock("Nothing needs your attention today."))
+	}
+	position := 0
+	if len(renderedDecisions) > 0 {
+		blocks = append(blocks, digestSectionBlock("⚠️ *Needs a decision*"))
+		for index, card := range renderedDecisions {
+			blocks = append(blocks, digestV4CardBlocks(payload, card, position, "Needs you")...)
+			position++
+			if index < len(renderedDecisions)-1 {
+				blocks = append(blocks, map[string]any{"type": "divider"})
+			}
+		}
+	}
+	if len(renderedFixes) > 0 {
+		blocks = append(blocks, digestSectionBlock("✅ *Fixes ready to merge*"))
+		for index, card := range renderedFixes {
+			blocks = append(blocks, digestV4CardBlocks(payload, card, position, "Ready")...)
+			position++
+			if index < len(renderedFixes)-1 {
+				blocks = append(blocks, map[string]any{"type": "divider"})
+			}
+		}
+	}
+	// The validator defers overflow cards and reports the count; the local
+	// difference is the belt for payloads that somehow still exceed the cap.
+	overflow := digest.OverflowCount
+	if local := len(allCards) - len(rendered); local > overflow {
+		overflow = local
+	}
+	if overflow > 0 {
+		label := fmt.Sprintf("And %d more on the dashboard", overflow)
+		blocks = append(blocks, digestContextBlock(slackDigestLink(payload.DashboardURL, label)))
+	}
+
+	var body bytes.Buffer
+	encoder := json.NewEncoder(&body)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(map[string]any{"blocks": blocks}); err != nil {
+		return nil, "application/json", err
+	}
+	return body.Bytes(), "application/json", nil
+}
+
+func digestV4Summary(rawDate string, decisions, fixes int) string {
+	date := rawDate
+	if parsed, err := time.Parse("2006-01-02", rawDate); err == nil {
+		date = parsed.Format("Jan 2")
+	}
+	total := decisions + fixes
+	if total == 0 {
+		return date
+	}
+	issueNoun, matterVerb := "issues", "matter"
+	if total == 1 {
+		issueNoun, matterVerb = "issue", "matters"
+	}
+	parts := []string{date, fmt.Sprintf("%d %s that %s", total, issueNoun, matterVerb)}
+	if decisions > 0 {
+		verb := "need"
+		if decisions == 1 {
+			verb = "needs"
+		}
+		parts = append(parts, fmt.Sprintf("%d %s a decision", decisions, verb))
+	}
+	if fixes > 0 {
+		noun := "fixes"
+		if fixes == 1 {
+			noun = "fix"
+		}
+		parts = append(parts, fmt.Sprintf("%d %s ready to merge", fixes, noun))
+	}
+	return strings.Join(parts, " · ")
+}
+
+func digestV4CardBlocks(payload EventPayload, card GeneratedDigestCard, position int, leadIn string) []map[string]any {
+	text := "*" + cleanProse(card.Title, 80) + "*\n" +
+		cleanProse(card.Copy, digestDetailMax) + "\n*" + leadIn + ":* " + cleanProse(card.Action, digestDetailMax)
+	// No people fragment at zero: the prompt tells the writer to describe a
+	// zero-user problem without a count, and "👥 0 users" would contradict the
+	// card's own copy (v3 hid the count the same way).
+	contextParts := make([]string, 0, 2)
+	if card.AffectedUsers > 0 {
+		noun := "users"
+		if card.AffectedUsers == 1 {
+			noun = "user"
+		}
+		contextParts = append(contextParts, fmt.Sprintf("👥 %d %s", card.AffectedUsers, noun))
+	}
+	if len(card.Accounts) > 0 {
+		accounts := cleanProse(strings.Join(card.Accounts, ", "), digestDetailMax)
+		if len(contextParts) == 0 {
+			accounts = "👥 " + accounts
+		}
+		contextParts = append(contextParts, accounts)
+	}
+	context := strings.Join(contextParts, " · ")
+	buttons := make([]map[string]any, 0, 2)
+	if card.Outcome == "needs_human" && card.ReplayURL != "" {
+		buttons = append(buttons, digestButton("digest_replay_"+strconv.Itoa(position), "Watch replay", card.ReplayURL, "primary"))
+	}
+	if card.Outcome == "verified_fix" && card.PRURL != "" {
+		label := "Review fix PR"
+		if card.PRNumber > 0 {
+			label = "Review PR #" + strconv.Itoa(card.PRNumber)
+		}
+		buttons = append(buttons, digestButton("digest_pr_"+strconv.Itoa(position), label, card.PRURL, "primary"))
+	}
+	if issueURL := BuildIncidentURL(payload.DashboardURL, card.IncidentID, payload.Project.ID); issueURL != "" {
+		buttons = append(buttons, digestButton("digest_issue_"+strconv.Itoa(position), "View issue", issueURL, ""))
+	}
+	blocks := []map[string]any{digestSectionBlock(text)}
+	if context != "" {
+		blocks = append(blocks, digestContextBlock(context))
+	}
+	if len(buttons) > 0 {
+		blocks = append(blocks, map[string]any{"type": "actions", "elements": buttons})
+	}
+	return blocks
+}
+
+func digestButton(actionID, text, buttonURL, style string) map[string]any {
+	button := map[string]any{
+		"type":      "button",
+		"action_id": actionID,
+		"text":      map[string]any{"type": "plain_text", "text": truncate(text, 75), "emoji": true},
+		"url":       strings.TrimSpace(masking.RedactURL(masking.RedactBody(buttonURL))),
+	}
+	if style != "" {
+		button["style"] = style
+	}
+	return button
 }
 
 func formatSlackDigestV3(payload EventPayload) ([]byte, string, error) {

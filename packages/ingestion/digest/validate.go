@@ -6,12 +6,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"os"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -24,13 +27,15 @@ type writtenDigestPayload struct {
 }
 
 type writtenDigestCard struct {
-	EpisodeID    string   `json:"episodeId"`
-	Copy         string   `json:"copy"`
-	Action       string   `json:"action"`
-	Label        string   `json:"label"`
-	ClaimedUsers *int     `json:"claimedUsers,omitempty"`
-	Accounts     []string `json:"accounts,omitempty"`
-	PRURL        string   `json:"prUrl,omitempty"`
+	EpisodeID          string   `json:"episodeId"`
+	Title              string   `json:"title,omitempty"`
+	Copy               string   `json:"copy"`
+	Action             string   `json:"action"`
+	Label              string   `json:"label"`
+	ClaimedUsers       *int     `json:"claimedUsers,omitempty"`
+	ClaimedOccurrences *int     `json:"claimedOccurrences,omitempty"`
+	Accounts           []string `json:"accounts,omitempty"`
+	PRURL              string   `json:"prUrl,omitempty"`
 }
 
 type deferredDigestItem struct {
@@ -65,6 +70,39 @@ func ValidateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string) e
 // internalVocabulary matches pipeline state words as whole tokens. The customer
 // message may never carry them; validation fails closed when a writer leaks one.
 var internalVocabulary = regexp.MustCompile(`(?i)(^|[^a-z0-9_])(needs_human|verified_fix|report_ready|do_not_pursue|unable_to_establish_cause)($|[^a-z0-9_])`)
+// \p{Nd}, not \d: Go's \d is ASCII-only, so full-width or Arabic-Indic digits
+// ("４０００ users") would sail past the grounding scan entirely. Any decimal
+// digit in any script is scanned; non-ASCII digit runs can never match the
+// ASCII fact set, so they are rejected rather than invisible.
+var proseNumber = regexp.MustCompile(`\p{Nd}+`)
+
+// digitGroupSeparator collapses "1,234" to "1234" before scanning, so a
+// normally formatted count matches its frozen fact instead of tokenizing as
+// two ungrounded numbers and failing the whole digest.
+var digitGroupSeparator = regexp.MustCompile(`(\p{Nd}),(\p{Nd})`)
+
+func normalizeProseNumbers(text string) string {
+	for {
+		collapsed := digitGroupSeparator.ReplaceAllString(text, "$1$2")
+		if collapsed == text {
+			return collapsed
+		}
+		text = collapsed
+	}
+}
+
+// stripInvisible removes format-category runes (zero-width spaces and joiners,
+// bidi controls) from writer output before validation and rendering. They pass
+// TrimSpace and rune counts while defeating the vocabulary regex
+// ("needs_​human") and enabling RTL visual spoofing in Slack.
+func stripInvisible(text string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.Is(unicode.Cf, r) {
+			return -1
+		}
+		return r
+	}, text)
+}
 
 func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string) error {
 	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
@@ -116,17 +154,44 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string) e
 			return fmt.Errorf("duplicate action for episode %s", card.EpisodeID)
 		}
 		accounted[card.EpisodeID] = "included"
+		// Stripped BEFORE every check and carried through to the rendered card:
+		// zero-width and bidi characters pass TrimSpace and rune counts while
+		// defeating the vocabulary regex and blanking titles.
+		card.Title = stripInvisible(card.Title)
+		card.Copy = stripInvisible(card.Copy)
+		card.Action = stripInvisible(card.Action)
 		if strings.TrimSpace(card.Copy) == "" || strings.TrimSpace(card.Action) == "" {
 			return fmt.Errorf("malformed card for episode %s", card.EpisodeID)
 		}
-		if internalVocabulary.MatchString(card.Copy) || internalVocabulary.MatchString(card.Action) {
+		if internalVocabulary.MatchString(card.Title) || internalVocabulary.MatchString(card.Copy) || internalVocabulary.MatchString(card.Action) {
 			return fmt.Errorf("internal vocabulary in card for episode %s", card.EpisodeID)
+		}
+		if len([]rune(strings.TrimSpace(card.Title))) > 80 {
+			return fmt.Errorf("title for episode %s exceeds 80 characters", card.EpisodeID)
+		}
+		// Enforced here, not at render: the renderer truncates at 300 runes
+		// AFTER validation, and a cut inside grounded prose can change meaning
+		// (dropping "…and couldn't", splitting a digit run). Legacy title-less
+		// payloads predate the writer contract and keep render truncation.
+		if card.Title != "" {
+			if len([]rune(card.Copy)) > 300 {
+				return fmt.Errorf("copy for episode %s exceeds 300 characters", card.EpisodeID)
+			}
+			if len([]rune(card.Action)) > 300 {
+				return fmt.Errorf("action for episode %s exceeds 300 characters", card.EpisodeID)
+			}
 		}
 		if card.Label != candidate.Label {
 			return fmt.Errorf("unsupported label for episode %s", card.EpisodeID)
 		}
 		if card.ClaimedUsers != nil && *card.ClaimedUsers != candidate.AffectedUsers {
 			return fmt.Errorf("unsupported count for episode %s", card.EpisodeID)
+		}
+		if card.ClaimedOccurrences != nil && *card.ClaimedOccurrences != candidate.OccurrenceCount {
+			return fmt.Errorf("unsupported occurrence count for episode %s", card.EpisodeID)
+		}
+		if number, ok := firstUngroundedNumber(card, candidate); ok {
+			return fmt.Errorf("ungrounded number %s in card for episode %s", number, card.EpisodeID)
 		}
 		if card.Accounts != nil && !equalStringSet(card.Accounts, candidate.Accounts) {
 			return fmt.Errorf("unsupported accounts for episode %s", card.EpisodeID)
@@ -137,14 +202,34 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string) e
 		if card.PRURL != "" && !projectPullRequest(card.PRURL, run.GithubRepo) {
 			return fmt.Errorf("link for episode %s is outside the project repository", card.EpisodeID)
 		}
+		// The rendered button always carries candidate.PRURL, so the frozen URL
+		// is validated directly — checking only the model's echo would skip the
+		// repository gate whenever the echo field is omitted.
+		if candidate.PRURL != "" && !projectPullRequest(candidate.PRURL, run.GithubRepo) {
+			return fmt.Errorf("frozen link for episode %s is outside the project repository", card.EpisodeID)
+		}
 		if err := candidateStillPublishable(ctx, tx, run.ProjectID, candidate); err != nil {
 			return err
 		}
+		title := strings.TrimSpace(card.Title)
+		if title == "" {
+			title = truncateRunes(stripInvisible(candidate.Title), 80)
+		}
+		replayURL := notify.BuildSessionURL(os.Getenv("DASHBOARD_URL"), candidate.ReplaySessionID, candidate.ReplayAnchorMs)
+		if replayURL == "" && candidate.ReplaySessionID != "" {
+			// The URL is baked into the outbox event, so a misconfigured (empty
+			// or loopback) DASHBOARD_URL silently drops every Watch replay
+			// button and retries never recover it. Loud, or invisible forever.
+			slog.Warn("digest replay URL rejected; card renders without its replay button",
+				"episode_id", candidate.EpisodeID, "dashboard_url_set", os.Getenv("DASHBOARD_URL") != "")
+		}
 		generated = append(generated, notify.GeneratedDigestCard{
 			EpisodeID: candidate.EpisodeID, IncidentID: candidate.IssueID,
-			Title: candidate.Title, Label: candidate.Label, Copy: strings.TrimSpace(card.Copy),
+			Title: title, Label: candidate.Label, Outcome: candidate.Outcome, Copy: strings.TrimSpace(card.Copy),
 			Action: strings.TrimSpace(card.Action), AffectedUsers: candidate.AffectedUsers,
-			Accounts: candidate.Accounts, PRURL: candidate.PRURL,
+			OccurrenceCount: candidate.OccurrenceCount, Accounts: candidate.Accounts, PRURL: candidate.PRURL,
+			ReplayURL: replayURL,
+			PRNumber:  prNumber(candidate.PRURL),
 		})
 	}
 	for _, item := range payload.Deferred {
@@ -168,6 +253,26 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string) e
 		}
 	}
 
+	// The renderer shows at most DigestV4CardCap cards, so cards past the cap
+	// must NOT be marked included here: an issue_publications receipt for a
+	// never-rendered card would exclude that issue from every future digest —
+	// it silently disappears without ever reaching the reader. Overflow cards
+	// are deferred instead (decisions keep priority), which the freeze
+	// re-admits into the next digest.
+	overflowReasons := make(map[string]string)
+	sort.SliceStable(generated, func(i, j int) bool {
+		return generated[i].Outcome == "needs_human" && generated[j].Outcome != "needs_human"
+	})
+	overflowCount := 0
+	if len(generated) > notify.DigestV4CardCap {
+		for _, dropped := range generated[notify.DigestV4CardCap:] {
+			accounted[dropped.EpisodeID] = "deferred"
+			overflowReasons[dropped.EpisodeID] = "digest overflow: held for the next digest"
+		}
+		overflowCount = len(generated) - notify.DigestV4CardCap
+		generated = generated[:notify.DigestV4CardCap]
+	}
+
 	eventPayload := notify.EventPayload{
 		Version: 1, EventType: "digest.daily", RunID: runID,
 		Project:      notify.ProjectRef{ID: run.ProjectID, Name: run.ProjectName},
@@ -175,8 +280,9 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string) e
 		Digest: &notify.DigestPayload{
 			Date:           run.RunDate,
 			Window:         notify.DigestWindow{From: run.WindowFrom, To: run.WindowTo},
-			SchemaVersion:  3,
+			SchemaVersion:  4,
 			GeneratedCards: generated,
+			OverflowCount:  overflowCount,
 		},
 	}
 	if err := eventPayload.Validate(); err != nil {
@@ -190,6 +296,7 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string) e
 	for episodeID, outcome := range accounted {
 		reason := ""
 		if outcome == "deferred" {
+			reason = overflowReasons[episodeID]
 			for _, item := range payload.Deferred {
 				if item.EpisodeID == episodeID {
 					reason = strings.TrimSpace(item.Reason)
@@ -282,6 +389,60 @@ func equalStringSet(left, right []string) bool {
 		}
 	}
 	return true
+}
+
+func firstUngroundedNumber(card writtenDigestCard, candidate Candidate) (string, bool) {
+	allowed := map[string]struct{}{
+		strconv.Itoa(candidate.AffectedUsers):   {},
+		strconv.Itoa(candidate.OccurrenceCount): {},
+	}
+	// The prompt orders the writer to copy account names and links exactly, so
+	// digits inside them ("42Floors", PR #42) must be grounded facts — without
+	// this, a faithfully copied account name fails the entire day's digest.
+	if number := prNumber(candidate.PRURL); number > 0 {
+		allowed[strconv.Itoa(number)] = struct{}{}
+	}
+	sources := []string{candidate.Title, candidate.Summary, candidate.ValidAction, candidate.RoutePurpose}
+	sources = append(sources, candidate.Accounts...)
+	for _, source := range sources {
+		for _, number := range proseNumber.FindAllString(normalizeProseNumbers(source), -1) {
+			allowed[number] = struct{}{}
+		}
+	}
+	for _, field := range []string{card.Title, card.Copy, card.Action} {
+		for _, number := range proseNumber.FindAllString(normalizeProseNumbers(field), -1) {
+			if _, ok := allowed[number]; !ok {
+				return number, true
+			}
+		}
+	}
+	return "", false
+}
+
+func truncateRunes(value string, limit int) string {
+	runes := []rune(strings.TrimSpace(value))
+	if len(runes) <= limit {
+		return string(runes)
+	}
+	return string(runes[:limit])
+}
+
+// prNumber extracts the pull-request number, or 0. It reuses the same path
+// shape projectPullRequest validates.
+func prNumber(prURL string) int {
+	u, err := url.Parse(prURL)
+	if err != nil {
+		return 0
+	}
+	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+	if len(parts) != 4 || parts[2] != "pull" {
+		return 0
+	}
+	n, err := strconv.Atoi(parts[3])
+	if err != nil {
+		return 0
+	}
+	return n
 }
 
 func projectPullRequest(raw, repo string) bool {
