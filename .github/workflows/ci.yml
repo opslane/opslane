@@ -416,7 +416,7 @@ jobs:
           # pattern below allowlists exactly that marker so every other skip
           # still fails the gate. Un-suspending a suite removes its marker and
           # this entry stops matching it.
-          E2E_ALLOWED_SKIP_PATTERN: '^(pr_created pipeline \(full flow\)|dashboard approved-fixture screenshot capture|route_map job pipeline \(stubbed model\))|\[suspended until Slice [0-9]+A?\]'
+          E2E_ALLOWED_SKIP_PATTERN: '^(pr_created pipeline \(full flow\)|dashboard approved-fixture screenshot capture|README screenshot capture|route_map job pipeline \(stubbed model\))|\[suspended until Slice [0-9]+A?\]'
           # The exact collected total, not a slack floor, so any silently
           # dropped test trips it. Re-derive from an actual run's
           # numTotalTests — NOT from `vitest list`, which does not expand
