@@ -25,9 +25,9 @@
 
 ---
 
-Your error tracker logs thousands of alerts, and you can't tell which ones hurt users. The worst bugs don't even throw an exception: a dead button, a form nobody can submit. You hear about those when a customer complains.
+Your error tracker logs thousands of alerts, and you can't tell which ones hurt users. The worst bugs don't even throw an exception: confusing UX, a dead button, a form nobody can submit. You hear about those when a customer complains. Or worse, churns.
 
-Opslane learns your product from your code and real user sessions, ranks issues by how many users hit them, and investigates the ones that matter. When it can verify a fix, it opens a pull request. When it can't, it hands you the investigation and the decision.
+Opslane learns your product from your code and by watching user sessions, ranks issues by how many users hit them, and investigates the ones that matter. When it can verify a fix, it opens a pull request. When it can't, it hands your coding agent, the details of the investigation.
 
 You review a pull request, not a dashboard.
 
@@ -36,8 +36,6 @@ You review a pull request, not a dashboard.
 <p align="center"><sub><a href="https://youtu.be/ccuOTYQMeYg">▶ Watch the demo</a>: a production error becomes a verified pull request.</sub></p>
 
 ## See it work
-
-Opslane groups the error, reads your repo, finds the root cause, verifies the fix in a sandbox, and opens the pull request. You work from the coding agent you already use: Opslane's MCP tools hand it the digest, the evidence, and the root cause, and link the finished PR back to the issue.
 
 <img src="docs/assets/readme/coding-agent.png" alt="A Claude Code session working the Opslane digest over MCP: pull the digest, read an issue's root cause, make the product call, fix it, run the tests, and link the PR back to the issue" width="100%">
 
@@ -49,11 +47,11 @@ Opslane groups the error, reads your repo, finds the root cause, verifies the fi
 
 <p align="center"><sub>The daily Slack digest: what broke, what's ready to merge, what needs a decision. Images show demo data.</sub></p>
 
-- **Know which bugs hit users.** The same crash from 500 people is one issue, ranked by how many users hit it. Not 500 alerts. One Slack digest a day, and nothing when nothing needs you.
-- **Catch bugs that never throw an error.** Dead buttons and abandoned forms show up in the session recordings, even when the console is clean.
-- **The fix is a pull request.** Opslane investigates in your repo and opens a PR only after it checks its own work: your tests pass before and after, the build passes, and a second model reviews the diff. You review and merge; Opslane never merges its own PRs.
-- **Work from your coding agent.** The bugs worth fixing, and the evidence behind each one, land in the coding agent you already use. No dashboard to open.
-- **See what the user saw.** When session recording is on, each issue links to the recording behind it: the clicks, pages, and requests that led up to it.
+- **Know which bugs hit users.** The same crash from 500 users is grouped into one issue. Issues are ranked by their impact. You get one Opslane digest a day.
+- **Catch bugs that never throw an error.** Understand sources of user frustration. Dead buttons and abandoned forms don't throw exceptions but they show up in the session recordings.
+- **The fix is a pull request.** Opslane investigates in your repo and opens a PR only after it checks its own work: your tests pass before and after, the build passes, and a second model reviews the diff. You review and merge.
+- **Work from your coding agent.** Use the Opslane MCP in your coding agent. Opslane tells you the bugs that need your attention and provide all the context to your agents.
+- **See what the user saw.** Each issue links to the recording behind it: the clicks, pages, and requests that led up to it.
 
 <img src="docs/assets/readme/sessions-list.png" alt="Recorded sessions showing errors, rage clicks, dead clicks, and form abandons per session" width="100%">
 
@@ -66,7 +64,7 @@ Opslane has four parts:
 | Component | What it does |
 | --- | --- |
 | Browser SDK | Captures errors and session recordings in the user's browser, with input masking on by default |
-| Ingestion service | Receives what the SDK sends, groups errors so one bug is one issue, ranks them by how many users they hit, and serves the dashboard |
+| Ingestion service | Receives what the SDK sends, groups errors, ranks them by how many users they hit |
 | Worker | Investigates issues, writes and verifies a fix in a sandbox, and opens the pull request |
 | Dashboard | Web app for browsing issues, watching replays, and changing project settings |
 
