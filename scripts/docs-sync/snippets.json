@@ -67,7 +67,7 @@
           "classification": "config-template"
         },
         {
-          "language": "markdown",
+          "language": "bash",
           "classification": "config-template"
         }
       ]

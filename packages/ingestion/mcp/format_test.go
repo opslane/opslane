@@ -107,9 +107,76 @@ func TestFormatIssueSuppressesFillerAndFencesFrictionEvidence(t *testing.T) {
 			Availability:   EvidenceAvailability{Recording: "missing", SourceMap: "missing"},
 		},
 	})
-	if strings.Contains(strings.ToLower(got), "placeholder") || !strings.Contains(got, "investigation did not complete") ||
-		!strings.Contains(got, "/api/assets/:id") || strings.Contains(got, "</untrusted> Dead") {
-		t.Fatalf("formatted friction issue:\n%s", got)
+	if !strings.Contains(got, "Signal: user friction") {
+		t.Fatalf("missing friction signal:\n%s", got)
+	}
+	// Regressions preserved: no error filler, no leaked filler root cause, failed
+	// request pattern still renders, untrusted title stays fenced.
+	if strings.Contains(got, "investigation did not complete") {
+		t.Fatalf("friction issue leaked error filler:\n%s", got)
+	}
+	if strings.Contains(strings.ToLower(got), "placeholder") || strings.Contains(got, "</untrusted> Dead") {
+		t.Fatalf("friction issue leaked unsafe content:\n%s", got)
+	}
+	if !strings.Contains(got, "/api/assets/:id") {
+		t.Fatalf("missing failed request pattern:\n%s", got)
+	}
+}
+
+// The typical friction issue is a silent no-op with NO failed request. The
+// replay line must still render, proving it is gated on ReplayPointers, not on
+// FailedRequests.
+func TestFormatIssueFrictionReplayWithoutFailedRequests(t *testing.T) {
+	route := "/invoices"
+	selector := "button.send"
+	got := FormatIssue(IssueInput{
+		Incident: MCPIncident{ID: "i", Kind: "friction", Title: "Send does nothing", Status: "awaiting_approval",
+			PageURLNormalized: &route, ElementSelector: &selector},
+		Evidence: IssueEvidence{
+			ReplayPointers: []EvidenceReplayPointer{{AnchorKind: "friction", SessionID: "sess_abc", AnchorMS: 4200}},
+			Availability:   EvidenceAvailability{Recording: "available", SourceMap: "missing"},
+		},
+	})
+	if !strings.Contains(got, "Signal: user friction") {
+		t.Fatalf("missing friction signal:\n%s", got)
+	}
+	if strings.Contains(got, "Failing request:") {
+		t.Fatalf("rendered a failing-request block with no failed requests:\n%s", got)
+	}
+	if !strings.Contains(got, "sess_abc") || !strings.Contains(got, "t=4200") {
+		t.Fatalf("missing replay pointer:\n%s", got)
+	}
+}
+
+// A friction issue with no watchable session must omit the replay line entirely.
+func TestFormatIssueFrictionNoReplay(t *testing.T) {
+	route := "/invoices"
+	got := FormatIssue(IssueInput{
+		Incident: MCPIncident{ID: "i", Kind: "friction", Title: "Send does nothing", Status: "awaiting_approval",
+			PageURLNormalized: &route},
+		Evidence: IssueEvidence{Availability: EvidenceAvailability{Recording: "missing", SourceMap: "missing"}},
+	})
+	if !strings.Contains(got, "Signal: user friction") {
+		t.Fatalf("missing friction signal:\n%s", got)
+	}
+	if strings.Contains(got, "Replay:") {
+		t.Fatalf("rendered a replay line with no pointer:\n%s", got)
+	}
+}
+
+// Non-friction (error) issues are unchanged: root cause / resolved source, no
+// friction signal line.
+func TestFormatIssueNonFrictionUnchanged(t *testing.T) {
+	rc := "TypeError: undefined is not a function"
+	got := FormatIssue(IssueInput{
+		Incident: MCPIncident{ID: "i", Kind: "error", Title: "Boom", Status: "investigating", RootCause: &rc},
+		Evidence: IssueEvidence{Availability: EvidenceAvailability{Recording: "missing", SourceMap: "missing"}},
+	})
+	if strings.Contains(got, "Signal: user friction") {
+		t.Fatalf("error issue leaked the friction signal:\n%s", got)
+	}
+	if !strings.Contains(got, "Root cause:") {
+		t.Fatalf("error issue missing root cause:\n%s", got)
 	}
 }
 
