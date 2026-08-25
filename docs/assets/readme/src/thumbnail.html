@@ -1,0 +1,47 @@
+<!-- Source for docs/assets/readme/demo-thumbnail.jpg. Render with:
+  google-chrome --headless --disable-gpu --hide-scrollbars --force-device-scale-factor=2 \
+    --screenshot=thumb2x.png --window-size=1280,720 --virtual-time-budget=10000 thumbnail.html
+then export as JPEG (quality ~90). Needs network access for the Google Fonts stylesheet. -->
+<link href="https://fonts.googleapis.com/css2?family=K2D:wght@400;500;600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  * { margin:0; box-sizing:border-box; }
+  body { width:1280px; height:720px; overflow:hidden; position:relative;
+         background:#0B0D12; font-family:'Inter',sans-serif; }
+  .glow { position:absolute; inset:0;
+          background:
+            radial-gradient(900px 500px at 78% 45%, rgba(45,212,191,.14), transparent 60%),
+            radial-gradient(700px 420px at 12% 88%, rgba(45,212,191,.07), transparent 60%); }
+  .grid { position:absolute; inset:0; opacity:.35;
+          background-image:linear-gradient(rgba(255,255,255,.035) 1px, transparent 1px),
+                           linear-gradient(90deg, rgba(255,255,255,.035) 1px, transparent 1px);
+          background-size:48px 48px; }
+  .logo { position:absolute; top:44px; left:56px; display:flex; align-items:center; gap:13px; }
+  .logo img { height:40px; }
+  .logo span { color:#F5F5F5; font:500 38px/1 'K2D'; letter-spacing:.5px; }
+  .left { position:absolute; left:56px; top:210px; width:490px; }
+  h1 { color:#F5F5F5; font:600 54px/1.16 'K2D'; letter-spacing:.2px; }
+  h1 em { font-style:normal; color:#2DD4BF; }
+  .sub { margin-top:26px; color:#98A2B3; font:400 24px/1.45 'Inter'; }
+  .pill { margin-top:34px; display:inline-flex; align-items:center; gap:12px;
+          background:rgba(45,212,191,.1); border:1px solid rgba(45,212,191,.35);
+          border-radius:999px; padding:12px 24px; color:#2DD4BF; font:500 21px 'Inter'; }
+  .pill .tri { width:0; height:0; border-left:14px solid #2DD4BF;
+               border-top:9px solid transparent; border-bottom:9px solid transparent; }
+  .shotwrap { position:absolute; left:600px; top:96px; width:840px; }
+  .term { border-radius:14px; overflow:hidden; border:1px solid rgba(255,255,255,.16);
+          box-shadow:0 40px 90px rgba(0,0,0,.6), 0 0 0 1px rgba(0,0,0,.4);
+          transform:perspective(1600px) rotateY(-6deg) rotateX(1.5deg); transform-origin:left center; }
+  .term img { display:block; width:100%; }
+</style>
+<body>
+  <div class="glow"></div><div class="grid"></div>
+  <div class="logo"><img src="mark.svg"><span>Opslane</span></div>
+  <div class="left">
+    <h1>Production error to <em>verified&nbsp;PR</em></h1>
+    <p class="sub">Watch Opslane find the bug, prove the fix, and open the pull request.</p>
+    <span class="pill"><span class="tri"></span>Watch the demo</span>
+  </div>
+  <div class="shotwrap"><div class="term">
+    <img src="../coding-agent.png">
+  </div></div>
+</body>

@@ -1,0 +1,68 @@
+<!-- Source for docs/assets/readme/slack-digest.png. Render with:
+  google-chrome --headless --disable-gpu --hide-scrollbars --default-background-color=00000000 \
+    --force-device-scale-factor=2 --screenshot=out.png --window-size=1030,1010 --virtual-time-budget=10000 digest.html
+then crop to the alpha bounding box (threshold ~40). Needs network access for the Google Fonts stylesheet. -->
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  * { margin:0; box-sizing:border-box; }
+  body { background:transparent; padding:8px; width:1010px; font-family:'Inter',sans-serif; }
+  .win { background:#0F1117; border:1px solid rgba(255,255,255,.13); border-radius:14px;
+         box-shadow:0 24px 60px rgba(0,0,0,.5); overflow:hidden; color:#D1D7E0; }
+  .chan { padding:16px 24px; border-bottom:1px solid rgba(255,255,255,.09);
+          font-weight:700; font-size:19px; color:#F5F5F5; }
+  .chan .hash { color:#8A93A6; font-weight:500; margin-right:6px; }
+  .msg { display:flex; gap:16px; padding:22px 24px 28px; }
+  .avatar { width:44px; height:44px; border-radius:9px; background:#D97742; flex:none;
+            display:flex; align-items:center; justify-content:center; }
+  .avatar img { width:28px; height:28px; }
+  .head { display:flex; align-items:baseline; gap:9px; }
+  .head b { color:#F5F5F5; font-size:17px; }
+  .head .app { background:#2A3040; color:#98A2B3; font-size:11px; font-weight:600;
+               padding:2px 5px; border-radius:3px; letter-spacing:.3px; }
+  .head .ts { color:#8A93A6; font-size:13.5px; }
+  .content { font-size:16.5px; line-height:1.5; }
+  .title { margin-top:10px; font-weight:700; font-size:18.5px; color:#F5F5F5; }
+  .summary { margin-top:5px; color:#98A2B3; }
+  .summary b { color:#D1D7E0; }
+  hr { border:none; border-top:1px solid rgba(255,255,255,.1); margin:18px 0; }
+  .sect { font-weight:700; font-size:17.5px; color:#F5F5F5; }
+  .sect .note { font-weight:400; color:#8A93A6; font-size:16px; }
+  .issue { margin-top:14px; }
+  .issue h4 { font-size:17px; color:#F5F5F5; }
+  .issue p { margin-top:5px; color:#B4BCC9; }
+  .issue p b { color:#F5F5F5; }
+  .meta { margin-top:9px; color:#8A93A6; font-size:14.5px; }
+  .btns { margin-top:12px; display:flex; gap:10px; }
+  .btn { border-radius:7px; padding:9px 16px; font-weight:600; font-size:15px; }
+  .btn.primary { background:#1E7A5A; color:#fff; }
+  .btn.ghost { border:1px solid rgba(255,255,255,.25); color:#D1D7E0; }
+</style>
+<body><div class="win">
+  <div class="chan"><span class="hash">#</span>opslane</div>
+  <div class="msg">
+    <div class="avatar"><img src="mark.svg"></div>
+    <div class="content">
+      <div class="head"><b>Opslane Alerts</b><span class="app">APP</span><span class="ts">11:20 AM</span></div>
+      <div class="title">Daily digest &middot; Acme Invoicing</div>
+      <div class="summary">Aug 24 &middot; <b>5 issues that matter</b> &middot; 2 need a decision &middot; 3 fixes ready to merge</div>
+      <hr>
+      <div class="sect"><span style="color:#F5B83D">&#9650;</span> Needs a decision</div>
+      <div class="issue">
+        <h4>Send invoice does nothing</h4>
+        <p>18 people tried to send an invoice to bill a customer, and couldn't. They clicked Send 34 times and nothing happened, so the invoice never went out.</p>
+        <p><b>Needs you:</b> watch the replay, then make Send explain why it's blocked when the tax ID is missing, or let it through. Open the fix and link it.</p>
+        <div class="meta">18 users &middot; Northwind Traders, Globex, Initech</div>
+        <div class="btns"><span class="btn primary">&#9654; Watch replay</span><span class="btn ghost">View issue</span></div>
+      </div>
+      <hr>
+      <div class="sect"><span style="display:inline-flex;width:22px;height:22px;border-radius:5px;background:#1E7A5A;color:#fff;font-size:15px;align-items:center;justify-content:center;vertical-align:-3px">&#10003;</span> Fixes ready to merge <span class="note">&middot; Opslane only opens a PR it can verify</span></div>
+      <div class="issue">
+        <h4>Invoice total crashed on a null amount</h4>
+        <p>342 people opened a draft invoice and got a blank screen instead of the totals, so they couldn't read or finish the invoice.</p>
+        <p><b>Ready:</b> Opslane opened a verified fix. Review and merge PR #6, reproduced red to green, CI green.</p>
+        <div class="meta">342 users &middot; Northwind Traders, Globex, Initech, Umbrella</div>
+        <div class="btns"><span class="btn primary">Review PR #6</span><span class="btn ghost">View issue</span></div>
+      </div>
+    </div>
+  </div>
+</div></body>

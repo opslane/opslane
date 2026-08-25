@@ -1,8 +1,29 @@
-<!-- PLACEHOLDER: hero banner image (dark/light variants). Suggested: logo + tagline "Watches your users, fixes your app." -->
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/readme/logo-dark.png">
+    <img src="docs/assets/readme/logo-light.png" alt="Opslane" width="260">
+  </picture>
+</p>
 
-# Opslane
+<p align="center">
+  <strong>Finds the bugs that impact real users. Opens a PR when it's sure.</strong>
+</p>
 
-**Finds the bugs that impact real users. Opens a PR when it's sure.**
+<p align="center">
+  <a href="https://github.com/opslane/opslane-oss/actions/workflows/ci.yml"><img src="https://github.com/opslane/opslane-oss/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/opslane/opslane-oss?color=8250df" alt="License"></a>
+  <a href="https://discord.gg/uWcEKv2bXt"><img src="https://img.shields.io/badge/Discord-join%20the%20community-5865F2?logo=discord&logoColor=white" alt="Discord"></a>
+</p>
+
+<p align="center">
+  <a href="docs">Docs</a> ·
+  <a href="docs/quickstart/self-host.md">Self-host quickstart</a> ·
+  <a href="docs/install.md">Install the SDK</a> ·
+  <a href="https://discord.gg/uWcEKv2bXt">Discord</a> ·
+  <a href="https://github.com/opslane/opslane-oss/issues">Issue tracker</a>
+</p>
+
+---
 
 Your error tracker logs thousands of alerts, and you can't tell which ones actually hurt users. The worst ones don't even throw an exception: a dead button, a form nobody can submit. You only hear about those when a customer complains.
 
@@ -10,27 +31,35 @@ Opslane learns your product from your code and real user sessions, ranks issues 
 
 You review a pull request instead of triaging a dashboard, and the bug is gone before the next customer hits it.
 
-[Docs](docs) · [Self-host quickstart](docs/quickstart/self-host.md) · [Install the SDK](docs/install.md) · [Issue tracker](https://github.com/opslane/opslane-oss/issues)
+<a href="https://youtu.be/ccuOTYQMeYg"><img src="docs/assets/readme/demo-thumbnail.jpg" alt="Watch the Opslane demo: from a production error to a verified pull request" width="100%"></a>
+
+<p align="center"><sub><a href="https://youtu.be/ccuOTYQMeYg">▶ Watch the demo</a> — from a production error to a verified pull request.</sub></p>
 
 ## See it work
 
-### Error to pull request
+From a production error to a reviewed fix: Opslane groups the error, reads your repo, finds the root cause, verifies the fix in a sandbox, and opens the pull request. You work the queue from the coding agent you already use — Opslane's MCP tools serve the digest, the evidence, and the root cause, and link the PR back to the issue.
 
-<!-- PLACEHOLDER: full product tour — video or GIF. One uninterrupted path: error → grouped issue → investigation evidence → pull request. -->
+<img src="docs/assets/readme/coding-agent.png" alt="A Claude Code session working the Opslane digest over MCP: pull the digest, read an issue's root cause, make the product call, fix it, run the tests, and link the PR back to the issue" width="100%">
 
-### A merged production fix
-
-<!-- PLACEHOLDER: screenshot of a real merged Opslane PR (e.g. #1232) — title, root-cause explanation, evidence section, diff. Scrub anything private; link the PR here. -->
+<p align="center"><sub>The daily queue, worked from your coding agent: digest → root cause → product call → fix → tests → linked PR.</sub></p>
 
 Over two weeks spanning July and August 2026, one production app sent Opslane 7,415 events. Opslane opened one pull request: a fix for a crash users had hit 614 times. A human reviewed and merged it.
 
 ## What it does
+
+<img src="docs/assets/readme/slack-digest.png" alt="The daily Slack digest: which issues matter, which fixes are ready to merge, and which need a human decision, each written in plain product terms with user counts" width="100%">
+
+<p align="center"><sub>One Slack digest a day: what broke, what's ready to merge, what needs a decision — and nothing when nothing needs you. Images show demo data.</sub></p>
 
 - **Know which bugs hit users.** The same crash from 500 people is one issue ranked by impact, not 500 alerts to sort through. One Slack digest a day, and nothing when nothing needs you.
 - **Catch bugs that never throw an error.** Dead buttons and abandoned forms show up in the session recordings, even when the console is clean.
 - **The fix is a pull request.** Opslane investigates in your repo and opens a PR only after it checks its own work: your tests pass before and after, the build passes, and a second model reviews the diff. You review and merge; Opslane never merges its own PRs.
 - **Work from your coding agent.** The bugs worth fixing, and the evidence behind each one, land in the coding agent you already use. No dashboard to open.
 - **See what the user saw.** When session recording is on, each issue links to the recording behind it: the clicks, pages, and requests that led up to it.
+
+<img src="docs/assets/readme/sessions-list.png" alt="Recorded sessions with their signals: errors, rage clicks, dead clicks, and form abandons per session" width="100%">
+
+<p align="center"><sub>Session recordings carry the signals that never hit the console: rage clicks, dead clicks, abandoned forms.</sub></p>
 
 ## How it works
 
@@ -119,6 +148,10 @@ Exact permissions and environment variables are in the [self-host quickstart](do
 - [How Opslane works](docs/how-it-works.md): the path from a browser error to a verified fix pull request
 - [Trust and data flow](docs/architecture/trust.md): what each integration receives and what leaves your infrastructure
 - [Reference](docs/reference): SDK options, HTTP routes, environment variables, reason codes, checked against source by [`scripts/check-docs-drift.mjs`](scripts/check-docs-drift.mjs) in CI
+
+## Community
+
+Join the [Opslane Discord](https://discord.gg/uWcEKv2bXt) to ask questions, share what you're seeing in production, or follow development.
 
 ## License
 

@@ -1,0 +1,51 @@
+<!-- Source for docs/assets/readme/coding-agent.png. Render with:
+  google-chrome --headless --disable-gpu --hide-scrollbars --default-background-color=00000000 \
+    --force-device-scale-factor=2 --screenshot=out.png --window-size=1030,860 --virtual-time-budget=10000 terminal.html
+then crop to the alpha bounding box (threshold ~40). Needs network access for the Google Fonts stylesheet. -->
+<link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  * { margin:0; box-sizing:border-box; }
+  body { background:transparent; padding:8px; width:1010px; }
+  .win { background:#0B0D12; border:1px solid rgba(255,255,255,.13); border-radius:14px;
+         box-shadow:0 24px 60px rgba(0,0,0,.5); overflow:hidden;
+         font-family:'Fira Code',monospace; font-size:16.5px; line-height:1.5; }
+  .bar { display:flex; align-items:center; gap:8px; padding:14px 18px;
+         border-bottom:1px solid rgba(255,255,255,.09); color:#8A93A6; }
+  .dot { width:12px; height:12px; border-radius:50%; background:#2A3040; }
+  .bar span { margin-left:8px; font-size:15px; }
+  .body { padding:26px 30px 30px; color:#C7CEDA; }
+  .row { margin-top:16px; }
+  .row:first-child { margin-top:0; }
+  .prompt { color:#E8853B; }
+  .prompt .caret { font-weight:600; }
+  .tool { color:#C7CEDA; }
+  .tool .bullet { color:#E8853B; }
+  .tool b { color:#F5F5F5; font-weight:600; }
+  .tool .dim { color:#8A93A6; }
+  .out { color:#8A93A6; padding-left:24px; }
+  .out .tick { color:#4A5266; }
+  .choice { padding-left:24px; color:#8A93A6; }
+  .choice .sel { color:#E8853B; }
+  .done { color:#C7CEDA; }
+  .done .bullet { color:#3ECF8E; }
+</style>
+<body><div class="win">
+  <div class="bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span>claude</span></div>
+  <div class="body">
+    <div class="row prompt"><span class="caret">&#10095;</span> lets work on the opslane digest for today</div>
+    <div class="row tool"><span class="bullet">&#9679;</span> opslane - <b>opslane_digest</b> <span class="dim">(MCP)</span></div>
+    <div class="out"><span class="tick">&#8990;</span> 5 issues that matter, 2 need a decision, 3 fixes ready to merge</div>
+    <div class="row tool"><span class="bullet">&#9679;</span> opslane - <b>opslane_issue</b> <span class="dim">(MCP)</span></div>
+    <div class="out"><span class="tick">&#8990;</span> "Send invoice does nothing" &middot; 18 users, no error thrown<br>&nbsp;&nbsp;root cause: sendInvoice returns { sent: false } when there is no tax ID</div>
+    <div class="row tool"><span class="bullet">&#9679;</span> This is a product call. How should Send behave with no tax ID?</div>
+    <div class="choice"><span class="sel">&#10095; block and explain why it can't send</span><br>&nbsp;&nbsp;let it send without a tax ID<br>&nbsp;&nbsp;collect the tax ID earlier in the flow</div>
+    <div class="out"><span class="tick">&#8990;</span> you chose: block and explain</div>
+    <div class="row tool"><span class="bullet">&#9679;</span> <b>Update</b><span class="dim">(src/lib/send.ts)</span></div>
+    <div class="out"><span class="tick">&#8990;</span> block and explain: Send is disabled with an inline reason</div>
+    <div class="row tool"><span class="bullet">&#9679;</span> <b>Bash</b><span class="dim">(npx vitest run)</span></div>
+    <div class="out"><span class="tick">&#8990;</span> Test Files 3 passed &middot; Tests 12 passed</div>
+    <div class="row tool"><span class="bullet">&#9679;</span> opslane - <b>opslane_link_pr</b> <span class="dim">(MCP)</span></div>
+    <div class="out"><span class="tick">&#8990;</span> Linked github.com/acme/invoicing/pull/14 &middot; resolves on merge</div>
+    <div class="row done"><span class="bullet">&#9679;</span> Done. PR #14 is open and linked. Send now explains why it is blocked instead of failing silently.</div>
+  </div>
+</div></body>
