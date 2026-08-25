@@ -1,5 +1,5 @@
 FROM node:22-slim
-LABEL org.opencontainers.image.source="https://github.com/opslane/opslane-oss"
+LABEL org.opencontainers.image.source="https://github.com/opslane/opslane"
 LABEL org.opencontainers.image.description="Opslane worker service"
 
 RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates patch \

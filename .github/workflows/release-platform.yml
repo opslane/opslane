@@ -28,7 +28,7 @@ concurrency:
 jobs:
   release:
     name: Validate, tag, promote, publish
-    if: github.repository == 'opslane/opslane-oss'
+    if: github.repository == 'opslane/opslane'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:

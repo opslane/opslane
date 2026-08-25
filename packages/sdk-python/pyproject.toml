@@ -27,8 +27,8 @@ dependencies = []
 dev = ["pytest>=8", "flask>=3", "gunicorn>=22"]
 
 [project.urls]
-Homepage = "https://github.com/opslane/opslane-oss"
-Repository = "https://github.com/opslane/opslane-oss"
+Homepage = "https://github.com/opslane/opslane"
+Repository = "https://github.com/opslane/opslane"
 
 [tool.hatch.build.targets.wheel]
 packages = ["opslane"]

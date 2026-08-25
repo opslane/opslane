@@ -50,9 +50,9 @@ it('rewrites public docs to routes and other repository files to GitHub', () => 
 
   expect(links.map((node) => node.url)).toEqual([
     '/architecture/trust/?view=full#masking',
-    'https://github.com/opslane/opslane-oss/blob/main/docs/plans/internal.md',
-    'https://github.com/opslane/opslane-oss/blob/main/packages/sdk/README.md#install',
-    'https://github.com/opslane/opslane-oss/blob/main/scripts/check-docs-drift.mjs?raw=1',
+    'https://github.com/opslane/opslane/blob/main/docs/plans/internal.md',
+    'https://github.com/opslane/opslane/blob/main/packages/sdk/README.md#install',
+    'https://github.com/opslane/opslane/blob/main/scripts/check-docs-drift.mjs?raw=1',
     '/architecture/trust/#masking',
     '#same-page',
     'https://example.com/docs.md',
@@ -71,8 +71,8 @@ it('rewrites repository images to the raw host so excluded assets never enter th
   unified().use(remarkRepoLinks, { repoRoot }).runSync(tree, { path: sourcePath });
 
   expect(images.map((node) => node.url)).toEqual([
-    'https://raw.githubusercontent.com/opslane/opslane-oss/main/docs/evidence/issue-54/diagram.png',
-    'https://raw.githubusercontent.com/opslane/opslane-oss/main/docs/architecture/trust.md',
+    'https://raw.githubusercontent.com/opslane/opslane/main/docs/evidence/issue-54/diagram.png',
+    'https://raw.githubusercontent.com/opslane/opslane/main/docs/architecture/trust.md',
   ]);
 });
 

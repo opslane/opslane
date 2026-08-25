@@ -24,7 +24,7 @@ jobs:
   # hold publish credentials.
   verify:
     name: Clean-consumer tarball checks
-    if: github.repository == 'opslane/opslane-oss'
+    if: github.repository == 'opslane/opslane'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -47,7 +47,7 @@ jobs:
   # installs happen here.
   release:
     name: Version PR or publish
-    if: github.repository == 'opslane/opslane-oss'
+    if: github.repository == 'opslane/opslane'
     needs: [verify]
     runs-on: ubuntu-latest
     timeout-minutes: 25

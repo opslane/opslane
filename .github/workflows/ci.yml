@@ -20,7 +20,7 @@ jobs:
   # reports SUCCESS to the status API, not pending -- so if an individual job
   # below is ever marked required directly, a filtered-out PR would pass with
   # that check green and nothing behind it. Check before changing:
-  #   gh api repos/opslane/opslane-oss/branches/main/protection \
+  #   gh api repos/opslane/opslane/branches/main/protection \
   #     --jq '.required_status_checks.contexts'
   #
   # This workflow runs on `pull_request`, so the classifier, the ci-ok checker,

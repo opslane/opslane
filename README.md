@@ -10,8 +10,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/opslane/opslane-oss/actions/workflows/ci.yml"><img src="https://github.com/opslane/opslane-oss/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/opslane/opslane-oss?color=8250df" alt="License"></a>
+  <a href="https://github.com/opslane/opslane/actions/workflows/ci.yml"><img src="https://github.com/opslane/opslane/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/opslane/opslane?color=8250df" alt="License"></a>
   <a href="https://discord.gg/uWcEKv2bXt"><img src="https://img.shields.io/badge/Discord-join%20the%20community-5865F2?logo=discord&logoColor=white" alt="Discord"></a>
 </p>
 
@@ -20,7 +20,7 @@
   <a href="docs/quickstart/self-host.md">Self-host quickstart</a> ·
   <a href="docs/install.md">Install the SDK</a> ·
   <a href="https://discord.gg/uWcEKv2bXt">Discord</a> ·
-  <a href="https://github.com/opslane/opslane-oss/issues">Issue tracker</a>
+  <a href="https://github.com/opslane/opslane/issues">Issue tracker</a>
 </p>
 
 ---
@@ -100,8 +100,8 @@ Opslane calls three outside services: Anthropic to investigate, E2B to run the s
 Prerequisites: Docker with Compose v2 and free host ports 8082, 5434, and 9012. No accounts or API keys needed for this first run.
 
 ```bash
-git clone https://github.com/opslane/opslane-oss.git
-cd opslane-oss
+git clone https://github.com/opslane/opslane.git
+cd opslane
 docker compose up -d --wait
 curl http://localhost:8082/health
 ```
@@ -161,4 +161,4 @@ Opslane is [AGPL-3.0](LICENSE). The browser and Python SDKs and the shared types
 
 Opslane is pre-1.0: the [`POST /api/v1/events` wire contract](docs/contracts/events.md) is stable and backward-compatible, but other interfaces may still change.
 
-Bug reports and feature requests are welcome on the [issue tracker](https://github.com/opslane/opslane-oss/issues). For development setup, codebase conventions, and the verification bar for changes, see [AGENTS.md](AGENTS.md).
+Bug reports and feature requests are welcome on the [issue tracker](https://github.com/opslane/opslane/issues). For development setup, codebase conventions, and the verification bar for changes, see [AGENTS.md](AGENTS.md).

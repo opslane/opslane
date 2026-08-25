@@ -72,7 +72,7 @@ The skill lives at `examples/agent-skills/opslane/SKILL.md`. Download it into yo
 
 ```bash
 mkdir -p .claude/skills/opslane
-curl -fsSL https://raw.githubusercontent.com/opslane/opslane-oss/main/examples/agent-skills/opslane/SKILL.md \
+curl -fsSL https://raw.githubusercontent.com/opslane/opslane/main/examples/agent-skills/opslane/SKILL.md \
   -o .claude/skills/opslane/SKILL.md
 ```
 
