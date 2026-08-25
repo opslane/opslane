@@ -6,7 +6,7 @@
 </p>
 
 <p align="center">
-  <strong>Finds the bugs that impact real users. Opens a PR when it's sure.</strong>
+  <strong>Fix bugs that your users run into.</strong>
 </p>
 
 <p align="center">
@@ -25,41 +25,39 @@
 
 ---
 
-Your error tracker logs thousands of alerts, and you can't tell which ones actually hurt users. The worst ones don't even throw an exception: a dead button, a form nobody can submit. You only hear about those when a customer complains.
+Your error tracker logs thousands of alerts, and you can't tell which ones hurt users. The worst bugs don't even throw an exception: a dead button, a form nobody can submit. You hear about those when a customer complains.
 
-Opslane learns your product from your code and real user sessions, ranks issues by how many users hit them, and investigates the ones that matter. When it can verify a fix, it opens a pull request. When it can't, it hands you the investigation and the decision to make.
+Opslane learns your product from your code and real user sessions, ranks issues by how many users hit them, and investigates the ones that matter. When it can verify a fix, it opens a pull request. When it can't, it hands you the investigation and the decision.
 
-You review a pull request instead of triaging a dashboard, and the bug is gone before the next customer hits it.
+You review a pull request, not a dashboard.
 
 <a href="https://youtu.be/ccuOTYQMeYg"><img src="docs/assets/readme/demo-thumbnail.jpg" alt="Watch the Opslane demo: from a production error to a verified pull request" width="100%"></a>
 
-<p align="center"><sub><a href="https://youtu.be/ccuOTYQMeYg">▶ Watch the demo</a> — from a production error to a verified pull request.</sub></p>
+<p align="center"><sub><a href="https://youtu.be/ccuOTYQMeYg">▶ Watch the demo</a>: a production error becomes a verified pull request.</sub></p>
 
 ## See it work
 
-From a production error to a reviewed fix: Opslane groups the error, reads your repo, finds the root cause, verifies the fix in a sandbox, and opens the pull request. You work the queue from the coding agent you already use — Opslane's MCP tools serve the digest, the evidence, and the root cause, and link the PR back to the issue.
+Opslane groups the error, reads your repo, finds the root cause, verifies the fix in a sandbox, and opens the pull request. You work from the coding agent you already use: Opslane's MCP tools hand it the digest, the evidence, and the root cause, and link the finished PR back to the issue.
 
 <img src="docs/assets/readme/coding-agent.png" alt="A Claude Code session working the Opslane digest over MCP: pull the digest, read an issue's root cause, make the product call, fix it, run the tests, and link the PR back to the issue" width="100%">
 
-<p align="center"><sub>The daily queue, worked from your coding agent: digest → root cause → product call → fix → tests → linked PR.</sub></p>
-
-Over two weeks spanning July and August 2026, one production app sent Opslane 7,415 events. Opslane opened one pull request: a fix for a crash users had hit 614 times. A human reviewed and merged it.
+<p align="center"><sub>Read the digest, make the product call, fix it, link the PR. All from the terminal.</sub></p>
 
 ## What it does
 
 <img src="docs/assets/readme/slack-digest.png" alt="The daily Slack digest: which issues matter, which fixes are ready to merge, and which need a human decision, each written in plain product terms with user counts" width="100%">
 
-<p align="center"><sub>One Slack digest a day: what broke, what's ready to merge, what needs a decision — and nothing when nothing needs you. Images show demo data.</sub></p>
+<p align="center"><sub>The daily Slack digest: what broke, what's ready to merge, what needs a decision. Images show demo data.</sub></p>
 
-- **Know which bugs hit users.** The same crash from 500 people is one issue ranked by impact, not 500 alerts to sort through. One Slack digest a day, and nothing when nothing needs you.
+- **Know which bugs hit users.** The same crash from 500 people is one issue, ranked by how many users hit it. Not 500 alerts. One Slack digest a day, and nothing when nothing needs you.
 - **Catch bugs that never throw an error.** Dead buttons and abandoned forms show up in the session recordings, even when the console is clean.
 - **The fix is a pull request.** Opslane investigates in your repo and opens a PR only after it checks its own work: your tests pass before and after, the build passes, and a second model reviews the diff. You review and merge; Opslane never merges its own PRs.
 - **Work from your coding agent.** The bugs worth fixing, and the evidence behind each one, land in the coding agent you already use. No dashboard to open.
 - **See what the user saw.** When session recording is on, each issue links to the recording behind it: the clicks, pages, and requests that led up to it.
 
-<img src="docs/assets/readme/sessions-list.png" alt="Recorded sessions with their signals: errors, rage clicks, dead clicks, and form abandons per session" width="100%">
+<img src="docs/assets/readme/sessions-list.png" alt="Recorded sessions showing errors, rage clicks, dead clicks, and form abandons per session" width="100%">
 
-<p align="center"><sub>Session recordings carry the signals that never hit the console: rage clicks, dead clicks, abandoned forms.</sub></p>
+<p align="center"><sub>Session recordings catch what never hits the console: rage clicks, dead clicks, abandoned forms.</sub></p>
 
 ## How it works
 
@@ -68,18 +66,18 @@ Opslane has four parts:
 | Component | What it does |
 | --- | --- |
 | Browser SDK | Captures errors and session recordings in the user's browser, with input masking on by default |
-| Ingestion service | Receives what the SDK sends, groups errors so one bug is one issue, ranks them by user impact, and serves the dashboard |
+| Ingestion service | Receives what the SDK sends, groups errors so one bug is one issue, ranks them by how many users they hit, and serves the dashboard |
 | Worker | Investigates issues, writes and verifies a fix in a sandbox, and opens the pull request |
 | Dashboard | Web app for browsing issues, watching replays, and changing project settings |
 
 An error travels through those parts like this:
 
-1. **Capture.** The SDK sends errors and session recordings to the ingestion service (two lines to install). Everything is stored, but nothing is triaged yet, so one error firing once doesn't turn into an alert.
-2. **Group.** Opslane uses your source maps to turn the minified stack trace back into real file names, then groups errors by where they happen in your code. The same bug is one issue, even after a redeploy, and if it comes back after a fix it's marked as returned. Noise from browser extensions and other sites is dropped.
+1. **Capture.** The SDK sends errors and session recordings to the ingestion service. Two lines to install.
+2. **Group.** Opslane turns minified stack traces back into real file names using your source maps, and groups every occurrence of the same bug into one issue.
 3. **Qualify.** Before investigating, Opslane checks how many users hit the bug and how recently, then reads your repo to decide whether it's a real product problem. Only bugs that pass both checks get investigated.
 4. **Investigate.** The worker clones your repo and reads the code until it finds the cause. If it can't point to the exact files, it stops instead of guessing.
 5. **Verify.** The fix goes into a sandbox where your build and tests run. Everything that passed before has to pass again, and a second model reviews the change.
-6. **Deliver.** A fix that passes becomes a pull request. One Opslane couldn't verify becomes a draft, if you allow drafts. When there's no fix, you get the reason and the call to make. A daily Slack digest covers what broke, what got fixed, and what needs you.
+6. **Deliver.** A fix that passes becomes a pull request. When there's no fix, you get the reason and the call to make. A daily Slack digest covers what broke, what got fixed, and what needs you.
 
 ```mermaid
 flowchart LR
@@ -89,8 +87,7 @@ flowchart LR
     Q -->|real problem| D[Investigate in your repo]
     D --> V{Fix verified?}
     V -->|yes| PR[Pull request]
-    V -->|couldn't verify| DR[Draft PR]
-    V -->|no fix found| HR[Written-up reason for you]
+    V -->|no| HR[Written-up reason for you]
 ```
 
 Opslane calls three outside services: Anthropic to investigate, E2B to run the sandbox, and GitHub for clones and pull requests. Everything else runs on your own stack: Postgres for state and the job queue, and S3-compatible storage for session recordings (MinIO in the bundled setup). There's no Redis or separate queue to run. JavaScript apps are supported end to end today.
@@ -118,7 +115,7 @@ curl -X POST http://localhost:8082/api/v1/events \
   -d '{"timestamp":"2026-01-01T00:00:00Z","error":{"type":"ReferenceError","message":"demo is not defined","stack":"ReferenceError: demo is not defined\n  at app.js:1:1"},"breadcrumbs":[],"context":{"url":"https://example.com","user_agent":"smoke test"},"sdk_version":"0.0.1"}'
 ```
 
-The `opslane_pk_...` value is the test project's seeded public ingest key; real deployments mint their own. Give the worker a few seconds, then check the result (re-run if the row hasn't appeared yet):
+The `opslane_pk_...` value is the test project's seeded public ingest key; real deployments create their own. Give the worker a few seconds, then check the result (re-run if the row hasn't appeared yet):
 
 ```bash
 docker compose exec -T postgres psql -U opslane -d opslane \
@@ -131,7 +128,7 @@ docker compose exec -T postgres psql -U opslane -d opslane \
  new    |             |
 ```
 
-Opslane captured the event, resolved its stack, and grouped it into a new issue. It watches the issue but won't investigate a one-off that hasn't reached enough users yet. To see the full investigate-and-fix path, you need an issue real users are hitting, plus a few credentials:
+Opslane captured the event, mapped the stack trace back to your source files, and grouped it into a new issue. It watches the issue but won't investigate a one-off that hasn't reached enough users yet. To see the full investigate-and-fix path, you need an issue real users are hitting, plus a few credentials:
 
 - **Dashboard sign-in:** a GitHub App, or WorkOS for cloud deployments.
 - **Investigation:** `ANTHROPIC_API_KEY`.
