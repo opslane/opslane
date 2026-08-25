@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { eventWithTime } from '@rrweb/types';
-import { crashSeekMs, ensureReplayMeta, formatTime, isActiveEvent, replayDurationMs, sortedReplayEvents } from './replay-utils';
+import { crashSeekMs, ensureReplayMeta, formatTime, isActiveEvent, replayDurationMs, replayViewport, sortedReplayEvents } from './replay-utils';
 
 const ev = (timestamp: number, type: number, source?: number): eventWithTime =>
   ({ timestamp, type, data: source === undefined ? {} : { source } } as unknown as eventWithTime);
@@ -72,5 +72,22 @@ describe('ensureReplayMeta', () => {
   it('leaves a stream with Meta untouched', () => {
     const events = [ev(1000, 4), ev(1000, 2)];
     expect(ensureReplayMeta(events)).toBe(events);
+  });
+});
+
+describe('replayViewport', () => {
+  const meta = (width: number, height: number): eventWithTime =>
+    ({ timestamp: 1000, type: 4, data: { width, height } } as unknown as eventWithTime);
+
+  it('reads the recorded viewport from the first Meta event', () => {
+    expect(replayViewport([meta(1050, 820), ev(1000, 2)])).toEqual({ width: 1050, height: 820 });
+  });
+
+  it('falls back to 1280x720 when no Meta event is present', () => {
+    expect(replayViewport([ev(1000, 2), ev(2000, 3, 1)])).toEqual({ width: 1280, height: 720 });
+  });
+
+  it('falls back to defaults for a zero or missing dimension', () => {
+    expect(replayViewport([meta(0, 0)])).toEqual({ width: 1280, height: 720 });
   });
 });

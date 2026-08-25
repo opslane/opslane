@@ -3,7 +3,7 @@ import { onMounted, onUnmounted, ref, watch } from 'vue';
 import { Replayer } from 'rrweb';
 import type { eventWithTime } from '@rrweb/types';
 import 'rrweb/dist/style.css';
-import { crashSeekMs, ensureReplayMeta, formatTime, replayDurationMs, sortedReplayEvents } from './replay-utils';
+import { crashSeekMs, ensureReplayMeta, formatTime, replayDurationMs, replayViewport, sortedReplayEvents } from './replay-utils';
 
 const props = defineProps<{
   events: eventWithTime[];
@@ -21,6 +21,29 @@ const speed = ref(1);
 const showSpeedMenu = ref(false);
 let timer: ReturnType<typeof setInterval> | null = null;
 
+// rrweb renders the replay at the recorded viewport size and draws the cursor in
+// recorded coordinates. We scale the whole `.replayer-wrapper` (iframe + cursor
+// together) to fit the container instead of stretching the iframe, so a wider
+// recording does not reflow and drift the click positions. See replay-utils.
+let recordedWidth = 1280;
+let recordedHeight = 720;
+let resizeObserver: ResizeObserver | null = null;
+let appliedSignature = '';
+
+function applyScale() {
+  const el = containerRef.value;
+  if (!el || recordedWidth <= 0) return;
+  const available = el.clientWidth;
+  if (available <= 0) return;
+  const scale = Math.min(1, available / recordedWidth);
+  const height = Math.round(recordedHeight * scale);
+  const signature = `${scale}:${height}`;
+  if (signature === appliedSignature) return;
+  appliedSignature = signature;
+  el.style.setProperty('--replay-scale', String(scale));
+  el.style.height = `${height}px`;
+}
+
 function buildPlayer() {
   if (!containerRef.value || !props.events || props.events.length === 0) return;
   containerRef.value.innerHTML = '';
@@ -36,6 +59,22 @@ function buildPlayer() {
   });
 
   replayer.value = r;
+
+  const viewport = replayViewport(events);
+  recordedWidth = viewport.width;
+  recordedHeight = viewport.height;
+  appliedSignature = '';
+  applyScale();
+  // The recorded viewport can change mid-session (e.g. a browser resize); rrweb
+  // re-lays-out and emits 'resize', so rescale to the new dimensions.
+  r.on('resize', (payload) => {
+    const dims = payload as { width?: number; height?: number };
+    if (dims?.width && dims.width > 0) recordedWidth = dims.width;
+    if (dims?.height && dims.height > 0) recordedHeight = dims.height;
+    applyScale();
+  });
+  resizeObserver = new ResizeObserver(() => applyScale());
+  resizeObserver.observe(containerRef.value);
   const metaTotal = r.getMetaData().totalTime;
   duration.value = Math.max(0, (metaTotal > 0 ? metaTotal : replayDurationMs(events)) / 1000);
 
@@ -57,6 +96,15 @@ function destroyPlayer() {
   if (timer) {
     clearInterval(timer);
     timer = null;
+  }
+  if (resizeObserver) {
+    resizeObserver.disconnect();
+    resizeObserver = null;
+  }
+  appliedSignature = '';
+  if (containerRef.value) {
+    containerRef.value.style.removeProperty('--replay-scale');
+    containerRef.value.style.removeProperty('height');
   }
   if (replayer.value) {
     try {
@@ -162,10 +210,18 @@ watch(
 <style scoped>
 .replay-container {
   min-height: 360px;
+  overflow: hidden;
+}
+
+/* Scale the whole rrweb wrapper (iframe + cursor overlay) to fit the container
+   at the recorded viewport's coordinate space. Do NOT stretch the iframe on its
+   own: that reflows a responsive recording and drifts the replayed clicks. */
+.replay-container :deep(.replayer-wrapper) {
+  transform: scale(var(--replay-scale, 1));
+  transform-origin: top left;
 }
 
 .replay-container :deep(iframe) {
-  width: 100%;
   border: 0;
 }
 </style>
