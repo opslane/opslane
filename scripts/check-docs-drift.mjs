@@ -40,12 +40,14 @@ function registeredRoutes() {
   for (const line of src.split('\n')) {
     const routeM = line.match(/r\.Route\("([^"]+)"/);
     const methodM = line.match(/\.(Get|Post|Put|Patch|Delete|HandleFunc)\("(\/[^"]*)"/);
+    const mcpM = line.match(/r\.Handle\(\"(\/mcp)\"/);
     if (methodM && !routeM) {
       const prefix = prefixStack.map((p) => p.prefix).join('');
       const path = normalize(prefix + methodM[2]);
       const method = methodM[1] === 'HandleFunc' ? 'ANY' : methodM[1].toUpperCase();
       routes.add(`${method} ${path}`);
     }
+    if (mcpM) routes.add(`POST ${normalize(mcpM[1])}`);
     depth += (line.match(/{/g) ?? []).length - (line.match(/}/g) ?? []).length;
     if (routeM) prefixStack.push({ prefix: routeM[1], depth });
     while (prefixStack.length && depth < prefixStack.at(-1).depth) prefixStack.pop();

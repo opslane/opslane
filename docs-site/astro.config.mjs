@@ -28,7 +28,7 @@ export default defineConfig({
     starlight({
       title: 'Opslane',
       customCss: ['./src/styles/theme.css'],
-      description: 'Errors in, verified fix PRs out — or an explicit incident that says why not.',
+      description: 'An open-source error tracker that finds the bugs reaching your users and opens a pull request that fixes them.',
       markdown: { processedDirs: ['../docs'] },
       social: [
         {
@@ -45,7 +45,7 @@ export default defineConfig({
           details: [
             'Self-hosted with Docker Compose. JavaScript browser errors and GitHub repositories are supported end to end.',
             'Reference tables (SDK options, HTTP routes, environment variables, reason codes) are checked against source on every CI run, so they are the authoritative answer for exact names and values.',
-            'Keys come in three scopes: opslane_pk_ ingest keys ship in the browser bundle, opslane_sk_ source-map keys stay in CI, opslane_ak_ MCP keys let a coding agent read incidents.',
+            'Keys come in three scopes: opslane_pk_ ingest keys ship in the browser bundle, opslane_sk_ source-map keys stay in CI, and opslane_ak_ MCP keys let a coding agent read issues.',
           ].join(' '),
           // Reference pages carry the exact names an agent needs; keep them
           // early so a truncated context still contains them.
@@ -68,13 +68,13 @@ export default defineConfig({
             { label: 'Install the SDK', url: 'https://docs.opslane.com/install/', description: 'React, Vue, or vanilla setup, identity, and environment labels' },
             { label: 'Connect GitHub', url: 'https://docs.opslane.com/guides/github-app/', description: 'GitHub App or token, permissions, webhooks' },
             { label: 'Source maps', url: 'https://docs.opslane.com/guides/source-maps/', description: 'Vite plugin and OPSLANE_SOURCEMAP_KEY' },
-            { label: 'How issues work', url: 'https://docs.opslane.com/guides/issues/', description: 'Grouping, ranking, statuses, dropped noise' },
+            { label: 'How Opslane works', url: 'https://docs.opslane.com/how-it-works/', description: 'From captured errors to verified fix pull requests' },
             { label: 'Friction and session recordings', url: 'https://docs.opslane.com/guides/friction/', description: 'Rage clicks, dead clicks, and promotion' },
-            { label: 'Investigation and fix pull requests', url: 'https://docs.opslane.com/guides/fix-prs/', description: 'When a PR opens, and ready vs draft' },
             { label: 'Environments', url: 'https://docs.opslane.com/guides/environments/', description: 'Labels, the project default, and action scope' },
-            { label: 'API keys', url: 'https://docs.opslane.com/guides/api-keys/', description: 'Ingest keys, source-map keys, minting, rotation' },
+            { label: 'API keys', url: 'https://docs.opslane.com/guides/api-keys/', description: 'Ingest, source-map, and MCP keys; creation and rotation' },
+            { label: 'Connect a coding agent', url: 'https://docs.opslane.com/guides/mcp/', description: 'Connect Claude Code or Codex to the remote MCP server' },
             { label: 'Slack notifications', url: 'https://docs.opslane.com/guides/slack-notifications/', description: 'Webhooks, alerts, and the daily digest' },
-            { label: 'Trust and security model', url: 'https://docs.opslane.com/architecture/trust/', description: 'What each external service receives' },
+            { label: 'Your data', url: 'https://docs.opslane.com/architecture/trust/', description: 'What Opslane collects and what each integration sends out' },
             { label: 'SDK options', url: 'https://docs.opslane.com/reference/sdk-options/', description: 'Every init() option with type and default' },
             { label: 'Reason codes', url: 'https://docs.opslane.com/reference/reason-codes/', description: 'Every needs_human code with its remediation' },
             { label: 'Environment variables', url: 'https://docs.opslane.com/reference/environment-variables/', description: 'Every variable each service reads' },
@@ -89,36 +89,42 @@ export default defineConfig({
             { label: 'Introduction', link: '/' },
             { label: 'Run Opslane locally', slug: 'quickstart/self-host' },
             { label: 'Install the SDK', slug: 'install' },
-            { label: 'Connect GitHub', slug: 'guides/github-app' },
-            { label: 'Source maps', slug: 'guides/source-maps' },
           ],
         },
         {
           label: 'How it works',
           items: [
-            { label: 'How issues work', slug: 'guides/issues' },
-            { label: 'Friction and session recordings', slug: 'guides/friction' },
-            { label: 'Investigation and fix pull requests', slug: 'guides/fix-prs' },
-            { label: 'What "verified" means', slug: 'architecture/precision' },
-            { label: 'Architecture overview', slug: 'architecture/overview' },
-            { label: 'Life of an error', slug: 'architecture/life-of-an-error' },
+            { label: 'How Opslane works', slug: 'how-it-works' },
+            { label: "Catching bugs that don't throw", slug: 'guides/friction' },
+            { label: 'When Opslane opens a pull request', slug: 'architecture/precision' },
           ],
         },
         {
-          label: 'Configure',
+          label: 'Connect your project',
           items: [
+            { label: 'Connect GitHub', slug: 'guides/github-app' },
+            { label: 'Upload source maps', slug: 'guides/source-maps' },
             { label: 'Environments', slug: 'guides/environments' },
-            { label: 'API keys', slug: 'guides/api-keys' },
+            { label: 'Notifications', slug: 'guides/slack-notifications' },
             { label: 'Connect a coding agent', slug: 'guides/mcp' },
-            { label: 'Slack notifications', slug: 'guides/slack-notifications' },
           ],
         },
         {
-          label: 'Trust and privacy',
+          label: 'Privacy and data',
           items: [
-            { label: 'Trust and security model', slug: 'architecture/trust' },
+            { label: 'Your data', slug: 'architecture/trust' },
             { label: 'Replay privacy and masking', slug: 'guides/replay-privacy' },
             { label: 'Source-map privacy', slug: 'guides/source-map-privacy' },
+          ],
+        },
+        {
+          label: 'Reference',
+          items: [
+            { label: 'SDK options', slug: 'reference/sdk-options' },
+            { label: 'HTTP routes', slug: 'reference/http-routes' },
+            { label: 'Reason codes', slug: 'reference/reason-codes' },
+            { label: 'Environment variables', slug: 'reference/environment-variables' },
+            { label: 'API keys', slug: 'guides/api-keys' },
           ],
         },
       ],

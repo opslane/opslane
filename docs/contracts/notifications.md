@@ -1,52 +1,17 @@
 ---
-description: Notification subscription, delivery-policy, and internal outbox event contracts.
+description: Which issue events notification destinations receive and when Opslane publishes them.
 ---
 
 # Notification events
 
-Notification destinations subscribe to `issue.created` and/or `digest.daily`.
-`issue.triaged` is an internal outbox and formatter event, not a selectable
-subscription.
+Notification destinations can subscribe to issue notifications and daily digests. Issue destinations choose between immediate and post-triage delivery, but the current settled-identity error path does not publish an immediate issue-created event. Capturing an observation never sends an alert.
 
-For an `issue.created` subscription, `delivery_policy` controls delivery time:
+Choose post-triage delivery when you want a message after an error investigation opens a pull request or stops for a person. Insights and decisions not to pursue appear in the daily digest instead. Daily digests summarize activity over a window rather than posting once per captured occurrence.
 
-- `immediate` (the default) delivers `issue.created` when automation first
-  enqueues a new group.
-- `post_triage` suppresses that ingest-time delivery and delivers one
-  `issue.triaged` message when the group transitions to `needs_human` or
-  `pr_created`.
+## Post-triage payload
 
-`insight` and `not_actionable` outcomes do not produce `issue.triaged`; they are
-reported through the daily digest. Changing delivery policy does not change the
-destination's `issue.created` subscription.
+The versioned `issue.triaged` envelope identifies the issue, project, environment, dashboard URL, terminal outcome, and recent impact. Labels come from a fixed formatter table. The payload does not include model-written root-cause or reason text, which keeps untrusted prose out of Slack and generic webhooks.
 
-## `issue.triaged` payload
+Publishing uses a transactional outbox. When Opslane publishes an event, it commits the event and its destination deliveries with the related state change. Delivery workers can then retry without losing the notification or sending a second logical message for the same completed job. A reopened issue can notify again after new work reaches a new outcome.
 
-The version 1 envelope contains the issue, project, environment, dashboard URL,
-and a templated `outcome`:
-
-```json
-{
-  "version": 1,
-  "event_type": "issue.triaged",
-  "issue": { "id": "...", "title": "...", "first_seen": "..." },
-  "project": { "id": "...", "name": "..." },
-  "environment": "production",
-  "dashboard_url": "https://...",
-  "outcome": {
-    "status": "needs_human",
-    "reason_code": "insufficient_context",
-    "label": "Needs review — no verified cause",
-    "impact": { "users_7d": 2, "anon_sessions_7d": 3 }
-  }
-}
-```
-
-The payload never includes model-written `reason_message` or `root_cause` text.
-Labels come from a fixed table keyed by terminal status and reason code, so a
-successful PR is always announced as `Fix PR opened`.
-
-The deduplication key is
-`issue.triaged:<group-id>:<terminal-job-id>`. Retrying the same terminal job
-therefore delivers once, while a reopened regression with a new job can notify
-again.
+`issue.triaged` is an internal formatter and outbox event, not a selectable subscription name. Destinations continue to subscribe to issue notifications and use their delivery policy to select timing.

@@ -1,7 +1,8 @@
 ---
 covers:
   - packages/sdk/vite-plugin/**
-  - packages/ingestion/handler/sourcemap.go
+  - packages/ingestion/handler/sourcemap_upload.go
+  - packages/ingestion/minio/client.go
   - packages/worker/src/source-map.ts
 description: Where uploaded source maps are stored and who can read them.
 ---
@@ -19,10 +20,9 @@ The Vite plugin generates hidden maps, uploads them from the build, and removes
 them from the deploy output. They are not referenced by browser bundles and
 must not be published to your CDN.
 
-Opslane stores maps under a project-specific prefix. Database identities also
-include the project, so identical third-party bundles are not deduplicated
-across customers. Storage is private, encrypted at rest, and reached over TLS.
-There is no public or presigned download URL.
+Opslane stores maps under a project-specific object prefix. Database identities also include the project, so identical third-party bundles are not deduplicated across customers. Opslane exposes no public, presigned, or dashboard download route.
+
+The application does not enforce transport encryption or object-store encryption. Those protections depend on the endpoint and storage policy you configure. Use HTTPS for the object-store endpoint and enable encryption at rest in your S3-compatible service.
 
 The source-map secret key is write-only: it can create an upload batch and send
 files, but it cannot read maps or other project data. Dashboard and session
@@ -31,19 +31,10 @@ reader inside the service network.
 
 ## AI-assisted investigations
 
-Resolved source paths, functions, and snippets are used during investigations. The snippets
-sent to the fix agent therefore reach the configured AI model provider. This is
-the product working as intended, but it is a separate data flow from storing the
-map and should be included in your own security and privacy review.
+Opslane uses your source maps to find the relevant files, then reads that source while investigating an error. Source it reads can reach the AI model provider. Include that data flow in your security and privacy review.
 
-Map content and resolved source must not enter logs, error responses, or
-metrics. The dashboard renders resolved source as untrusted text; it never
-renders or downloads the map file itself.
+The upload and source-mapping paths do not return map content in API errors or expose a map download route. The dashboard treats stack traces with original source locations as untrusted content.
 
 ## Retention
 
-Source maps do not expire automatically yet. Project deletion removes the
-project's map objects and cached resolved event snippets, subject to the
-deployment's backup-retention policy. If that retention is unsuitable, do not
-enable source-map upload until an appropriate policy is available.
-
+Source maps do not expire automatically. Deleting a project removes its database rows, but you delete the stored map files yourself. Include object-store backups and replicas in your own retention policy.

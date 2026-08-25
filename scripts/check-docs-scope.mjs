@@ -47,7 +47,6 @@ export function parseLoaderAllowlist(source) {
   if (typeof source !== 'string') throw new TypeError('loader source must be a string');
   return {
     files: declarationStrings(source, 'PUBLIC_DOCS_FILES'),
-    directories: declarationStrings(source, 'PUBLIC_DOCS_DIRECTORIES'),
   };
 }
 
@@ -87,10 +86,7 @@ function* walkMarkdown(directory) {
 }
 
 function isLoaderAllowed(path, allowlist) {
-  if (allowlist.files.includes(path)) return true;
-  if (!path.endsWith('.md')) return false;
-  const [directory] = path.split('/');
-  return allowlist.directories.includes(directory);
+  return allowlist.files.includes(path);
 }
 
 function canonicalSlug(path) {
@@ -186,7 +182,7 @@ export function checkDocsScope({
     }
   }
   for (const path of Object.keys(manualMappings)) {
-    if (!(policy.manual ?? []).includes(path)) {
+    if (published.includes(path) && !(policy.manual ?? []).includes(path)) {
       problems.push(`${path} has a manual staleness mapping but is not manual policy`);
     }
   }

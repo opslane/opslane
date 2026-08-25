@@ -29,9 +29,6 @@
         }
       ]
     },
-    "docs/guides/fix-prs.md": {
-      "fences": []
-    },
     "docs/guides/friction.md": {
       "fences": []
     },
@@ -50,9 +47,6 @@
           "classification": "illustrative"
         }
       ]
-    },
-    "docs/guides/issues.md": {
-      "fences": []
     },
     "docs/guides/mcp.md": {
       "fences": [
@@ -87,14 +81,6 @@
         {
           "language": "ts",
           "classification": "fragment"
-        },
-        {
-          "language": "ts",
-          "classification": "fragment"
-        },
-        {
-          "language": "ts",
-          "classification": "fragment"
         }
       ]
     },
@@ -120,35 +106,7 @@
           "classification": "config-template"
         },
         {
-          "language": "dotenv",
-          "classification": "config-template"
-        },
-        {
           "language": "bash",
-          "classification": "config-template"
-        },
-        {
-          "language": "bash",
-          "classification": "config-template"
-        },
-        {
-          "language": "sql",
-          "classification": "config-template"
-        },
-        {
-          "language": "bash",
-          "classification": "config-template"
-        },
-        {
-          "language": "bash",
-          "classification": "config-template"
-        },
-        {
-          "language": "sql",
-          "classification": "config-template"
-        },
-        {
-          "language": "sql",
           "classification": "config-template"
         }
       ]

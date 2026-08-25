@@ -15,14 +15,8 @@ export const PUBLISHED_DOCS_POLICY = Object.freeze({
     'docs/architecture/**/*.md',
   ]),
   deterministic: Object.freeze(['docs/reference/**/*.md']),
-  manual: Object.freeze([
-    'docs/contracts/C4-amendments.md',
-    'docs/contracts/action-scope.md',
-    'docs/contracts/events.md',
-    'docs/contracts/notifications.md',
-    'docs/contracts/reliability.md',
-  ]),
-  excluded: Object.freeze([]),
+  manual: Object.freeze([]),
+  excluded: Object.freeze(['docs/how-it-works.md']),
 });
 
 // Contracts remain human-maintained because their wording is normative. These

@@ -83,7 +83,12 @@ describe('canonical docs metadata', () => {
 
   it('allows only explicitly public documentation paths', () => {
     expect(isAllowedCanonicalPath('install.md')).toBe(true);
-    expect(isAllowedCanonicalPath('guides/react.md')).toBe(true);
+    expect(isAllowedCanonicalPath('how-it-works.md')).toBe(true);
+    expect(isAllowedCanonicalPath('guides/friction.md')).toBe(true);
+    expect(isAllowedCanonicalPath('guides/react.md')).toBe(false);
+    expect(isAllowedCanonicalPath('quickstart/agent.md')).toBe(false);
+    expect(isAllowedCanonicalPath('architecture/overview.md')).toBe(false);
+    expect(isAllowedCanonicalPath('contracts/events.md')).toBe(false);
     expect(isAllowedCanonicalPath('plans/internal.md')).toBe(false);
     expect(isAllowedCanonicalPath('agents/domain.md')).toBe(false);
     expect(isAllowedCanonicalPath('evidence/run.md')).toBe(false);
@@ -96,24 +101,24 @@ describe('canonical enricher', () => {
 
   it('derives title and edit URL from the canonical file', async () => {
     const base = mkdtempSync(path.join(tmpdir(), 'opslane-docs-'));
-    const filePath = path.join(base, 'guides/react.md');
+    const filePath = path.join(base, 'guides/friction.md');
     mkdirSync(path.dirname(filePath), { recursive: true });
     writeFileSync(filePath, '# React\n\nBody.');
 
     const enrich = createCanonicalEnricher(base);
-    const props = { id: 'guides/react', data: {} as Record<string, unknown>, filePath };
+    const props = { id: 'guides/friction', data: {} as Record<string, unknown>, filePath };
     await enrich(props as ParseDataOptions<Record<string, unknown>>, parseData);
 
     expect(props.data.title).toBe('React');
-    expect(props.data.slug).toBe('guides/react');
+    expect(props.data.slug).toBe('guides/friction');
     expect(props.data.editUrl).toBe(
-      'https://github.com/opslane/opslane-oss/edit/main/docs/guides/react.md',
+      'https://github.com/opslane/opslane-oss/edit/main/docs/guides/friction.md',
     );
   });
 
   it('rejects entries with a missing source file', async () => {
     const enrich = createCanonicalEnricher('/tmp/nonexistent-base');
-    const props = { id: 'guides/react', data: {}, filePath: '/tmp/nonexistent-base/guides/react.md' };
+    const props = { id: 'guides/friction', data: {}, filePath: '/tmp/nonexistent-base/guides/friction.md' };
     await expect(
       enrich(props as ParseDataOptions<Record<string, unknown>>, parseData),
     ).rejects.toThrow('no readable source file');

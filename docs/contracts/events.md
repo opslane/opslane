@@ -21,8 +21,8 @@ outage we cannot hotfix.
   for every released SDK version. Add a new `v<version>-*.json` pair for every
   browser SDK release, or a `python-v<version>-*.json` pair for every Python SDK
   release, even when no other field changes; never edit or delete an existing
-  file. Everything under `test-fixtures/wire/` is append-only — including its
-  README — so document fixture provenance here instead.
+  file. Everything under `test-fixtures/wire/` is append-only, including its
+  README, so document fixture provenance here instead.
 
 ## Response
 
@@ -31,7 +31,7 @@ outage we cannot hotfix.
 | Field | Meaning |
 | --- | --- |
 | `event_id` | Identifier for the stored observation. Empty when the event was suppressed. |
-| `group_id` | **Provisional capture handle.** It identifies the processing item the event landed in; clients must not treat it as a stable issue identifier and must make no assumption about its representation, which may change between releases. Once identity settlement lands, reads through it will resolve or redirect to the canonical issue. |
+| `group_id` | **Provisional capture handle.** It identifies the processing item the event landed in. Capture creates no issue, investigation, or alert. Clients must not treat this value as a stable issue identifier or assume anything about its representation. |
 | `error_group_id` | Deprecated alias for `group_id`, retained for compatibility. The two fields always carry the same value. |
 
 Suppressed events return all three identifier fields empty plus
@@ -65,12 +65,10 @@ the old fixtures still pass. Editing or removing an existing fixture: apply the
 
 ## Environment field
 
-SDK 1.1.0 adds the optional top-level `environment` string. The corresponding
-frozen fixtures are `v1.1.0-minimal.json` (field omitted) and
-`v1.1.0-full.json` (`"environment": "staging"`). Older payloads remain valid.
+The optional top-level `environment` string labels where an observation occurred. Older payloads that omit it remain valid.
 
-The server accepts exact, case-sensitive labels made from 1–64 letters, digits,
-dots, underscores, or hyphens. A valid label selects the matching project
+The server accepts exact, case-sensitive labels made from 1-64 letters, digits,
+dots, `_`, or `-`. A valid label selects the matching project
 environment, creating it in the same transaction as the first committed event
 when necessary. An absent, empty, or invalid label uses the project's current
 default without rejecting the event; invalid raw values are not persisted.
@@ -80,68 +78,47 @@ event label does not create an unused environment.
 
 ## Build provenance and debug images
 
-Browser SDK 3.0.0 adds two optional top-level fields:
+Browser events may include two optional top-level fields:
 
-- `commit_sha` is a lowercase 40- or 64-character hexadecimal commit ID.
+- `commit_sha` identifies the deployed source revision.
 - `debug_meta` is an object whose optional `images` member is an array of
   `{ "type": "sourcemap", "code_file": "<exact bundle URL>", "debug_id": "<UUID>" }`.
 
-The corresponding frozen fixtures are `v3.0.0-minimal.json` (both fields
-omitted) and `v3.0.0-full.json` (both populated). Older payloads remain valid.
+Older payloads that omit both fields remain valid.
 
 Debug-image metadata is advisory and must never make event ingestion fail.
 Ingestion sanitizes it before storage:
 
-- malformed containers or `images` values become `{ "images": [] }`;
-- each image must be an object with type `sourcemap`, an exact 1–4096-byte
-  control-character-free `code_file`, and a lowercase UUID-shaped `debug_id`;
-- duplicate `(code_file, debug_id)` pairs are collapsed in first-seen order;
-- if one `code_file` names multiple IDs, every image for that file is discarded;
-- at most 64 valid images are retained.
+- malformed containers become an empty image list;
+- each image must identify a source map, an exact bundle URL, and a valid debug ID;
+- duplicate pairs collapse to one entry;
+- conflicting IDs for one bundle are discarded rather than guessed.
 
-`debug_meta.images[].debug_id` participates in error grouping. When
-`GROUPING_DEBUG_ID_FRAMES` is enabled, a JavaScript frame's bundle URL is
-replaced by its debug ID before fingerprinting, so a bundle URL that varies per
-page load (for example a Forge iframe's `_ctx_` segment) no longer splits one
-bug across many issues. It matches on the literal `code_file` string with the
-query stripped; relative, `webpack://`, `blob:`, and `.js.map`-vs-`.js` frames
-do not match and group exactly as before. Events without `debug_meta`, and all
-non-JavaScript platforms, are grouped exactly as before. Frames whose bundle
-name already carries a content hash (`index-<hash>.js`) also keep their existing
-identity: that name is already collapsed to a deploy-stable form, so a per-build
-debug ID there would split one bug across deploys.
+When `GROUPING_DEBUG_ID_FRAMES` is enabled, valid debug metadata helps normalize JavaScript bundle frames whose URLs change between page loads. It is an early capture hint, not the final issue identity. Stack resolution runs first, then ingestion uses raw and resolved aliases to keep one bug attached to one issue across deploys. Events without usable debug metadata continue through the normal raw-stack path.
 
 An invalid `commit_sha` is discarded independently of otherwise valid debug
 images. Unknown fields remain tolerated under the append-only event contract.
 
 ## Network timings
 
-Browser SDK 4.1.0 adds the optional top-level `network_timings` array. Each entry
+Browser events may include an optional top-level `network_timings` array. Each entry
 describes one observed browser request:
 
-- `transport` — `fetch` or `xhr`
-- `method` — a 1–16-byte uppercase HTTP token
-- `url` — 1–2048 bytes, no control characters
-- `started_at_ms` — epoch milliseconds
-- `duration_ms` — start to terminal event, 0–600000
-- `ttfb_ms` — optional; time to response headers, 0–600000
-- `outcome` — `ok`, `http_error`, `timeout`, `abort`, `network_error`, or `in_flight`
-- `status` — optional integer, 100–599
+- `transport` - browser request API
+- `method` - HTTP method
+- `url` - request URL
+- `started_at_ms` - request start time
+- `duration_ms` - elapsed time to the observed terminal event
+- `ttfb_ms` - optional time to response headers
+- `outcome` - observed request outcome
+- `status` - optional HTTP status
 
-The corresponding frozen fixtures are `v4.1.0-minimal.json` (field omitted) and
-`v4.1.0-full.json` (field populated). Older payloads remain valid.
+Older payloads that omit the array remain valid. The shared wire types and frozen fixtures define accepted values.
 
 `duration_ms` is transport-dependent: `fetch` resolves when response headers
 arrive, while XHR `loadend` fires after the transfer completes. `ttfb_ms` is the
 comparable field across both. A fetch entry never reflects response-body time.
 
-The array is not chronological. The browser SDK emits still-running requests
-first, oldest start first, each with `outcome: "in_flight"`; the remaining slots
-hold settled requests, most recently settled first. Sort on `started_at_ms` if a
-consumer needs time order.
+The array is not guaranteed to be chronological. Sort on `started_at_ms` if a consumer needs time order.
 
-Timing data is advisory and must never make event ingestion fail. Ingestion
-sanitizes it before storage: a non-array container becomes `[]`; entries failing
-any constraint above are dropped individually; at most 20 entries are retained in
-first-seen order. URLs are redacted server-side — userinfo, the full query string,
-and token-bearing fragments are stripped regardless of what the client sent.
+Timing data is advisory and must never make event ingestion fail. Ingestion sanitizes it before storage and drops invalid entries individually. URLs are redacted server-side: user information, the full query string, and token-bearing fragments are stripped regardless of what the client sent.

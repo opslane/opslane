@@ -1,31 +1,20 @@
 ---
 title: Introduction
-description: What Opslane is, who it is for, and where to start.
+description: What Opslane is and where to start.
 ---
 
 import { CardGrid, LinkCard } from '@astrojs/starlight/components';
 
-Error trackers see stack traces. Opslane knows your product.
+Opslane is an open-source error tracker that fixes the bugs reaching your users.
 
-Opslane watches errors and session recordings from your app and turns them into a short list of issues. It picks the issues worth fixing and investigates them against your repository. A fix that builds and passes your tests in a sandbox opens as a pull request. When it can't fix something, it says why. A daily digest keeps you out of the dashboard.
-
-## Who it is for
-
-Teams who own a production web app and review their own pull requests. Opslane runs on your infrastructure, so you decide what it may touch and where the data goes.
-
-## When to use it
-
-- A bug reached users and you want the fix waiting for you rather than a ticket.
-- Your error tracker holds thousands of events and five of them matter.
-- Users rage-click or hit a dead button, and the console stays silent.
-- You want a record of what ran and what passed before a change reaches review.
+Install the SDK in your app. Opslane turns errors and session recordings into a ranked list of real problems and pull requests that fix them.
 
 ## Start here
 
 <CardGrid>
   <LinkCard
-    title="Self-host Opslane"
-    description="Run the stack locally and send it a first error. No accounts or API keys for the first run."
+    title="Run Opslane locally"
+    description="Start Opslane with Docker Compose and send your first error."
     href="/quickstart/self-host/"
   />
   <LinkCard
@@ -34,30 +23,15 @@ Teams who own a production web app and review their own pull requests. Opslane r
     href="/install/"
   />
   <LinkCard
-    title="How issues work"
-    description="Occurrences, grouping, ranking, and the statuses in the list."
-    href="/guides/issues/"
+    title="How Opslane works"
+    description="Follow an error from the browser to a verified fix pull request."
+    href="/how-it-works/"
   />
   <LinkCard
-    title="When Opslane opens a pull request"
-    description="The three paths to a fix, and what a ready pull request means."
-    href="/guides/fix-prs/"
+    title="Connect GitHub"
+    description="Give Opslane access to investigate and fix your code."
+    href="/guides/github-app/"
   />
 </CardGrid>
 
-Evaluating it instead? The [architecture overview](/architecture/overview/) shows the pieces and the trust boundaries, and [trust and security](/architecture/trust/) lists what leaves your host.
-
-## How the docs are organized
-
-**Get started** covers setup: self-hosting the stack and installing the SDK. **How Opslane works** explains the system for someone deciding whether to trust it. **Issues** and **Fixes** cover the two halves of the product loop. **Projects and keys**, **Notifications**, and **Privacy and trust** each cover one area of configuration.
-
-## What Opslane is not
-
-- **Not an APM or metrics backend.** Opslane ingests application errors and the session context around them: breadcrumbs, network timing, and optional replays. It does not do latency percentiles, distributed tracing, or infrastructure monitoring.
-- **Not autopilot.** Opslane opens pull requests but never merges them. Review and merge stay with the repository owner.
-- **Not a dashboard to babysit.** Conclusions ship as pull requests and issues; the dashboard exists for replays and settings, not triage duty.
-- **Pre-1.0.** The [`POST /api/v1/events` wire contract](/contracts/events/) is append-only and backward-compatible. Other interfaces may still change before 1.0.
-
-## Licensing
-
-The SDKs and shared types that run in *your* application are MIT. The rest of Opslane, including the server, worker, agent core, dashboard, and this docs site, is AGPL-3.0-only.
+Opslane's server, worker, dashboard, and docs are AGPL-3.0-only. Its browser and Python SDKs and shared types are MIT licensed.

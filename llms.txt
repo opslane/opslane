@@ -1,61 +1,39 @@
 # Opslane
 
-> Opslane watches errors and session recordings from a web app, investigates the ones worth fixing against the connected repository, and opens a pull request whose build and tests ran in a sandbox. When it cannot fix something it records a reason code. Self-hosted with Docker Compose. Server, worker, agent core, and dashboard are AGPL-3.0-only; the SDKs and shared types are MIT.
+> Opslane watches errors and session recordings from a web app, investigates the ones worth fixing against the connected repository, and opens a pull request after its build and tests pass in a sandbox. When it cannot fix something, it records a plain reason and a next step. You run Opslane on your own infrastructure with Docker Compose. The server, worker, agent core, and dashboard are AGPL-3.0-only; the SDKs and shared types are MIT.
 
-Every page below is plain Markdown in this repository and is published at https://docs.opslane.com. Paths are repo-relative; the published URL drops the `docs/` prefix and the `.md` suffix.
+Every page below is published at https://docs.opslane.com. Each link points to its source file in this repository.
 
-## Start here
+## Get started
 
-- [Introduction](docs-site/src/content/docs/index.mdx): what Opslane is, who it is for, what it is not
-- [Run Opslane locally](docs/quickstart/self-host.md): Docker Compose stack, a seeded project, and a first event that ends in `needs_human` without credentials
-- [Install the SDK](docs/install.md): React, Vue, and vanilla setup; `setUser` and why anonymous users cost you ranking and friction; environment labels; source-map pointer
-- [Connect GitHub](docs/guides/github-app.md): GitHub App or personal access token, permissions, webhook events
-- [Source maps](docs/guides/source-maps.md): the Vite plugin, `OPSLANE_SOURCEMAP_KEY`, build diagnostics, verification
+- [Introduction](docs-site/src/content/docs/index.mdx): what Opslane is and where to start
+- [Run Opslane locally](docs/quickstart/self-host.md): Docker Compose stack, a seeded project, and a first event that stops with a clear reason when fix credentials are absent
+- [Install the SDK](docs/install.md): React, Vue, and vanilla setup; signed-in user IDs; environment labels; source-map uploads
 
 ## How it works
 
-- [How issues work](docs/guides/issues.md): occurrences vs issues vs affected users, fingerprint inputs, dropped noise, the ranking formula, status groups
-- [Friction and session recordings](docs/guides/friction.md): rage clicks and dead clicks, what the analyzer extracts, the five-signed-in-user promotion bar, insight endings
-- [Investigation and fix pull requests](docs/guides/fix-prs.md): the three paths to a PR, the impact bar, what the investigator reads, citation validation, ready vs draft
-- [What "verified" means](docs/architecture/precision.md): evidence tiers, the ready and draft gates, and what verification does not guarantee
-- [Architecture overview](docs/architecture/overview.md): components, trust boundaries, Postgres as the queue
-- [Life of an error](docs/architecture/life-of-an-error.md): the pipeline stage by stage
+- [How Opslane works](docs/how-it-works.md): the path from a browser error to an issue, a fix pull request, or a clear reason to stop
+- [Catching bugs that don't throw](docs/guides/friction.md): dead buttons, blocked forms, session recording analysis, and approval before fixes
+- [What "verified" means](docs/architecture/precision.md): the checks behind a ready or draft pull request and what those checks do not guarantee
 
-## Configure
+## Connect your project
 
+- [Connect GitHub](docs/guides/github-app.md): GitHub App or personal access token, permissions, webhook events
+- [Upload source maps](docs/guides/source-maps.md): the Vite plugin, `OPSLANE_SOURCEMAP_KEY`, build diagnostics, verification
 - [Environments](docs/guides/environments.md): label resolution, the project default, and limiting automatic error investigation by environment
-- [API keys](docs/guides/api-keys.md): `opslane_pk_` ingest keys and `opslane_sk_` source-map keys, minting, rotation, 401 vs 403
+- [Notifications](docs/guides/slack-notifications.md): Slack webhooks, new-issue alerts, and the daily digest
 - [Connect a coding agent](docs/guides/mcp.md): wire Claude Code or Codex to the remote MCP server with an `opslane_ak_` key
-- [Slack notifications](docs/guides/slack-notifications.md): incoming webhooks, new-issue alerts, the daily digest
 
-## Trust and privacy
+## Privacy and data
 
-- [Trust and security model](docs/architecture/trust.md): what each external service receives, credential storage, retention, honest gaps
+- [What leaves your host](docs/architecture/trust.md): what each external service receives, credential storage, retention, and current gaps
 - [Replay privacy and masking](docs/guides/replay-privacy.md): capture defaults, masking classes, server-side scrubbing, retention
 - [Source-map privacy](docs/guides/source-map-privacy.md): where uploaded source lives and who can read it
 
-## Reference (checked against source in CI)
+## Reference
 
 - [SDK options](docs/reference/sdk-options.md): every `init()` option with type and default
 - [HTTP routes](docs/reference/http-routes.md): every registered route with its auth mode
+- [Reason codes](docs/reference/reason-codes.md): every reason Opslane can stop and ask for help, with the next step for each one
 - [Environment variables](docs/reference/environment-variables.md): every variable each service reads, including known dead config
-- [Reason codes](docs/reference/reason-codes.md): every `needs_human` reason code with its remediation
-
-## Contracts
-
-- [Event API contract](docs/contracts/events.md): the append-only wire rules for `POST /api/v1/events`
-- [Notification contract](docs/contracts/notifications.md): subscriptions, delivery timing, and the internal post-triage payload
-- [Reliability contract](docs/contracts/reliability.md): machine-checkable properties of the event-to-resolution pipeline
-- [Session replay contract](docs/contracts/C4-amendments.md): chunk, pointer, scrub, and retention invariants
-- [Action scope contract](docs/contracts/action-scope.md): what environment scoping gates, and what it deliberately does not
-
-## Contributing and agents
-
-- [AGENTS.md](AGENTS.md): repository conventions, verification requirements, guardrails
-- [SDK README](packages/sdk/README.md): install, framework integrations, config table, privacy defaults
-- Issue tracker: https://github.com/opslane/opslane-oss/issues
-
-## Not yet written (tracked)
-
-- Production self-hosting operations: backups, scaling, upgrades (issue #23)
-- A hosted quickstart; Opslane is self-hosted today (issue #21)
+- [API keys](docs/guides/api-keys.md): ingest, source-map, and MCP keys; creation, rotation, 401 vs 403

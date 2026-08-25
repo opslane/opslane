@@ -3,7 +3,7 @@ covers:
   - packages/ingestion/db/environments.go
   - packages/ingestion/db/migrations/032_project_default_environment.sql
   - packages/sdk/src/config.ts
-description: Label telemetry by environment and limit automatic error investigation to chosen ones.
+description: Label app activity by environment and limit automatic error investigation to chosen ones.
 ---
 
 # Environments
@@ -45,12 +45,12 @@ The issue list filters by environment, and each issue carries per-environment co
 
 By default, an error in any environment can trigger an investigation, and investigations cost real money and can open pull requests. If you don't want staging errors doing that, enable the scope under **Settings → Environments** and pick the environments allowed to trigger error investigation.
 
-- Events outside the scope still ingest, group, and show up in the per-environment counts. The scope controls investigation, not data.
+- Errors outside the scope are still captured, grouped, and counted. The scope only controls whether Opslane investigates them, not whether it stores them.
 - The scope fails closed: enabled with an empty list means no environment triggers an error investigation.
 - Manually triggered fixes bypass the scope.
 - Projects that never enable the scope behave exactly as before.
 
-The scope covers error investigation only. Session recording, session analysis, friction issues, and the fix pull requests the friction pipeline opens under your autonomy setting run in every environment regardless of the scope.
+The scope only limits error investigation. Detection of problems in session recordings that do not throw errors runs in every environment, regardless of the scope.
 
 ## If staging traffic shows up as production
 
