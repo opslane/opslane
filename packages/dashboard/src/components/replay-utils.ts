@@ -28,6 +28,25 @@ export function ensureReplayMeta(events: eventWithTime[]): eventWithTime[] {
   return [synthetic, ...events];
 }
 
+/**
+ * The recorded viewport, taken from rrweb's first Meta event. The player scales
+ * the replay to fit its container using this as the source coordinate space, so
+ * that the replayed cursor (drawn in recorded coordinates) stays aligned with
+ * the reflowed page. Falls back to the same 1280x720 default ensureReplayMeta
+ * injects for recordings that never carried a Meta event.
+ */
+export function replayViewport(events: eventWithTime[]): { width: number; height: number } {
+  const meta = events.find((event) => event.type === 4);
+  const data = meta?.data as { width?: number; height?: number } | undefined;
+  // All-or-nothing: a Meta event missing either dimension is not a usable
+  // viewport, so fall back to a coherent default pair rather than mixing a real
+  // width with a default height (which would distort the aspect ratio).
+  if (data && data.width && data.width > 0 && data.height && data.height > 0) {
+    return { width: data.width, height: data.height };
+  }
+  return { width: 1280, height: 720 };
+}
+
 export function replayDurationMs(events: eventWithTime[]): number {
   if (!events || events.length < 2) return 0;
   return Math.max(0, events[events.length - 1].timestamp - events[0].timestamp);
