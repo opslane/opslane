@@ -15,6 +15,7 @@ import (
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/opslane/opslane/packages/ingestion/db"
 	mcpformat "github.com/opslane/opslane/packages/ingestion/mcp"
+	"github.com/opslane/opslane/packages/ingestion/usageevents"
 )
 
 var mcpLimiter = newRateLimiter(120)
@@ -96,7 +97,7 @@ func (d *Dependencies) registerMCPTools(server *mcpsdk.Server) {
 		Name: "opslane_digest",
 		Description: "The issues selected for the latest delivered Opslane digest, as facts. " +
 			"Start here when working the daily digest.",
-	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, _ noArguments) (*mcpsdk.CallToolResult, any, error) {
+	}, trackTool("opslane_digest", func(ctx context.Context, _ *mcpsdk.CallToolRequest, _ noArguments) (*mcpsdk.CallToolResult, any, error) {
 		projectID := ProjectIDFromCtx(ctx)
 		runDate, rawCards, err := d.Queries.LatestDeliveredDigest(ctx, projectID)
 		if err != nil {
@@ -118,7 +119,7 @@ func (d *Dependencies) registerMCPTools(server *mcpsdk.Server) {
 			ProjectLabel: projectID,
 		})
 		return textToolResult(body), nil, nil
-	})
+	}))
 
 	type issueArguments struct {
 		ID string `json:"id" jsonschema:"Full incident UUID, or a dashboard URL containing it"`
@@ -127,7 +128,7 @@ func (d *Dependencies) registerMCPTools(server *mcpsdk.Server) {
 		Name: "opslane_issue",
 		Description: "Everything Opslane knows about one issue, including its diagnosis, " +
 			"resolved source frames, failing requests, state, and pull request.",
-	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, input issueArguments) (*mcpsdk.CallToolResult, any, error) {
+	}, trackTool("opslane_issue", func(ctx context.Context, _ *mcpsdk.CallToolRequest, input issueArguments) (*mcpsdk.CallToolResult, any, error) {
 		incidentID, ok := parseIncidentID(input.ID)
 		if !ok {
 			return errorToolResult("Could not read an incident id. Pass the full UUID or the dashboard URL from the digest."), nil, nil
@@ -143,7 +144,7 @@ func (d *Dependencies) registerMCPTools(server *mcpsdk.Server) {
 			Incident: *incident,
 			Evidence: *evidence,
 		})), nil, nil
-	})
+	}))
 
 	type linkPRArguments struct {
 		ID  string `json:"id" jsonschema:"Full incident UUID, or a dashboard URL containing it"`
@@ -153,7 +154,7 @@ func (d *Dependencies) registerMCPTools(server *mcpsdk.Server) {
 		Name: "opslane_link_pr",
 		Description: "Record a GitHub pull request on an Opslane issue. This marks a PR as " +
 			"in flight; it does not claim the issue is resolved.",
-	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, input linkPRArguments) (*mcpsdk.CallToolResult, any, error) {
+	}, trackTool("opslane_link_pr", func(ctx context.Context, _ *mcpsdk.CallToolRequest, input linkPRArguments) (*mcpsdk.CallToolResult, any, error) {
 		incidentID, ok := parseIncidentID(input.ID)
 		if !ok {
 			return errorToolResult("Could not read an incident id. Pass the full UUID or the dashboard URL from the digest."), nil, nil
@@ -173,7 +174,22 @@ func (d *Dependencies) registerMCPTools(server *mcpsdk.Server) {
 			}
 		}
 		return textToolResult(fmt.Sprintf("Linked %s to %s. The issue will resolve through the merge workflow.", input.URL, incidentID)), nil, nil
-	})
+	}))
+}
+
+func trackTool[In, Out any](
+	name string,
+	h func(context.Context, *mcpsdk.CallToolRequest, In) (*mcpsdk.CallToolResult, Out, error),
+) func(context.Context, *mcpsdk.CallToolRequest, In) (*mcpsdk.CallToolResult, Out, error) {
+	return func(ctx context.Context, req *mcpsdk.CallToolRequest, input In) (*mcpsdk.CallToolResult, Out, error) {
+		result, output, err := h(ctx, req, input)
+		if err == nil && result != nil && !result.IsError {
+			usageevents.Emit("mcp_tool_used", map[string]string{
+				"tool": name, "project_id": ProjectIDFromCtx(ctx), "org_id": OrgIDFromCtx(ctx),
+			})
+		}
+		return result, output, err
+	}
 }
 
 func textToolResult(body string) *mcpsdk.CallToolResult {

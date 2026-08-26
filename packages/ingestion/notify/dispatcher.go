@@ -24,6 +24,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/opslane/opslane/packages/ingestion/masking"
+	"github.com/opslane/opslane/packages/ingestion/usageevents"
 )
 
 const (
@@ -363,7 +364,7 @@ func (d *Dispatcher) deliverClaim(ctx context.Context, claim deliveryClaim) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			outcome := Outcome{Class: "retry", Reason: "delivery_panic"}
-			d.finishClaim(ctx, claim, projectID, destType, outcome, false)
+			d.finishClaim(ctx, claim, projectID, destType, nil, outcome, false)
 		}
 	}()
 
@@ -376,42 +377,42 @@ func (d *Dispatcher) deliverClaim(ctx context.Context, claim deliveryClaim) {
 		WHERE e.id = $1`, claim.EventID, claim.DestinationID,
 	).Scan(&projectID, &payloadJSON, &destType, &enabled, &configEncrypted)
 	if errors.Is(err, pgx.ErrNoRows) {
-		d.finishClaim(ctx, claim, projectID, destType, Outcome{Class: "permanent", Reason: "destination_or_event_missing"}, false)
+		d.finishClaim(ctx, claim, projectID, destType, nil, Outcome{Class: "permanent", Reason: "destination_or_event_missing"}, false)
 		return
 	}
 	if err != nil {
-		d.finishClaim(ctx, claim, projectID, destType, Outcome{Class: "retry", Reason: "delivery_load_failed"}, false)
+		d.finishClaim(ctx, claim, projectID, destType, nil, Outcome{Class: "retry", Reason: "delivery_load_failed"}, false)
 		return
 	}
 	if !enabled {
-		d.finishClaim(ctx, claim, projectID, destType, Outcome{Class: "permanent", Reason: "destination_disabled"}, false)
+		d.finishClaim(ctx, claim, projectID, destType, nil, Outcome{Class: "permanent", Reason: "destination_disabled"}, false)
 		return
 	}
 	if d.cipher == nil {
-		d.finishClaim(ctx, claim, projectID, destType, Outcome{Class: "permanent", Reason: "config_cipher_unavailable"}, false)
+		d.finishClaim(ctx, claim, projectID, destType, nil, Outcome{Class: "permanent", Reason: "config_cipher_unavailable"}, false)
 		return
 	}
 
 	plaintext, err := d.cipher.Open(configEncrypted, ConfigAAD(claim.DestinationID, projectID, destType))
 	if err != nil {
-		d.finishClaim(ctx, claim, projectID, destType, Outcome{Class: "permanent", Reason: "config_decrypt_failed"}, false)
+		d.finishClaim(ctx, claim, projectID, destType, nil, Outcome{Class: "permanent", Reason: "config_decrypt_failed"}, false)
 		return
 	}
 	var config destinationConfig
 	if err := json.Unmarshal(plaintext, &config); err != nil || config.WebhookURL == "" {
-		d.finishClaim(ctx, claim, projectID, destType, Outcome{Class: "permanent", Reason: "config_invalid"}, false)
+		d.finishClaim(ctx, claim, projectID, destType, nil, Outcome{Class: "permanent", Reason: "config_invalid"}, false)
 		return
 	}
 	var payload EventPayload
 	if err := json.Unmarshal(payloadJSON, &payload); err != nil {
-		d.finishClaim(ctx, claim, projectID, destType, Outcome{Class: "permanent", Reason: "event_payload_invalid"}, false)
+		d.finishClaim(ctx, claim, projectID, destType, nil, Outcome{Class: "permanent", Reason: "event_payload_invalid"}, false)
 		return
 	}
 
-	d.finishClaim(ctx, claim, projectID, destType, d.sender.Send(ctx, destType, config.WebhookURL, payload), true)
+	d.finishClaim(ctx, claim, projectID, destType, &payload, d.sender.Send(ctx, destType, config.WebhookURL, payload), true)
 }
 
-func (d *Dispatcher) finishClaim(ctx context.Context, claim deliveryClaim, projectID, destType string, outcome Outcome, metricRecorded bool) {
+func (d *Dispatcher) finishClaim(ctx context.Context, claim deliveryClaim, projectID, destType string, payload *EventPayload, outcome Outcome, metricRecorded bool) {
 	// Sender records HTTP outcomes itself. Pre-send dispatcher outcomes still
 	// need to appear in the same metric.
 	if !metricRecorded {
@@ -426,6 +427,19 @@ func (d *Dispatcher) finishClaim(ctx context.Context, claim deliveryClaim, proje
 	}
 	if !updated {
 		return
+	}
+	if outcome.Class == "delivered" && payload != nil && payload.EventType == "digest.daily" {
+		props := map[string]string{
+			"project_id":   projectID,
+			"project_name": payload.Project.Name,
+			"run_id":       payload.RunID,
+		}
+		if payload.Digest != nil {
+			props["date"] = payload.Digest.Date
+			props["new_issues"] = strconv.Itoa(len(payload.Digest.TopNewIssues))
+			props["needs_human_backlog"] = strconv.Itoa(payload.Digest.NeedsHumanBacklog)
+		}
+		usageevents.Emit("digest_delivered", props)
 	}
 	terminal := outcome.Class == "permanent" || (outcome.Class == "retry" && claim.Attempts >= claim.MaxAttempts)
 	if terminal {

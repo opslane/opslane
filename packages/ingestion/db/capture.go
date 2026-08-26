@@ -15,10 +15,13 @@ import (
 // bucket. Environment fields preserve the ingest-path metrics contract while
 // identity is settled asynchronously.
 type CaptureReceipt struct {
-	EventID             string
-	CaptureHandle       string
-	EnvironmentOutcome  EnvironmentOutcome
-	EnvironmentDiverged bool
+	EventID               string
+	CaptureHandle         string
+	EnvironmentOutcome    EnvironmentOutcome
+	EnvironmentDiverged   bool
+	EnvironmentID         string
+	FirstEvent            bool
+	EnvironmentAgeSeconds int64
 }
 
 // CaptureError stores one observation and schedules its resolution. It creates
@@ -120,6 +123,26 @@ func (q *Queries) CaptureError(ctx context.Context, p IngestParams) (*CaptureRec
 		}
 	}
 
+	// Claim the environment's first event before the bucket upsert so the
+	// serialized same-fingerprint window below stays one statement wide.
+	var firstEvent bool
+	var environmentAgeSeconds int64
+	err = tx.QueryRow(ctx, `
+		UPDATE environments
+		   SET first_event_at = now()
+		 WHERE id = $1 AND first_event_at IS NULL
+		 RETURNING floor(EXTRACT(EPOCH FROM (first_event_at - created_at)))::bigint`,
+		environmentID,
+	).Scan(&environmentAgeSeconds)
+	switch {
+	case err == nil:
+		firstEvent = true
+	case errors.Is(err, pgx.ErrNoRows):
+		// The environment was already claimed.
+	default:
+		return nil, fmt.Errorf("claim first event: %w", err)
+	}
+
 	// Upsert the shared bucket last: ON CONFLICT takes a row lock that
 	// serializes every same-fingerprint capture until commit, so the lock
 	// window must cover one statement, not the whole transaction.
@@ -139,6 +162,8 @@ func (q *Queries) CaptureError(ctx context.Context, p IngestParams) (*CaptureRec
 	return &CaptureReceipt{
 		EventID: eventID, CaptureHandle: rawFingerprint,
 		EnvironmentOutcome: environmentOutcome, EnvironmentDiverged: environmentDiverged,
+		EnvironmentID: environmentID, FirstEvent: firstEvent,
+		EnvironmentAgeSeconds: environmentAgeSeconds,
 	}, nil
 }
 

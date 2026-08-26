@@ -181,6 +181,9 @@ func TestProvisionAgentSession_NewOrgUserProjectKey(t *testing.T) {
 		t.Fatalf("provision: %v", err)
 	}
 	cleanup.org(result.OrgID)
+	if !result.Created || result.UserID == "" {
+		t.Fatalf("new agent provision result = %+v, want created user", result)
+	}
 
 	after, err := q.GetAgentSession(ctx, session.ID)
 	if err != nil {
@@ -322,6 +325,9 @@ func TestProvisionAgentSession_ReturningUserUsesExistingOrg(t *testing.T) {
 	}
 	if result.OrgID != org.ID {
 		t.Fatalf("project org = %s, want existing org %s", result.OrgID, org.ID)
+	}
+	if result.Created || result.UserID != user.ID {
+		t.Fatalf("returning agent provision result = %+v, want existing user %s", result, user.ID)
 	}
 
 	var projectOrg string

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -15,6 +16,7 @@ import (
 	"github.com/opslane/opslane/packages/ingestion/db"
 	"github.com/opslane/opslane/packages/ingestion/grouping"
 	"github.com/opslane/opslane/packages/ingestion/masking"
+	"github.com/opslane/opslane/packages/ingestion/usageevents"
 )
 
 var rePlatformToken = regexp.MustCompile(`^[a-z0-9_-]{1,32}$`)
@@ -275,6 +277,7 @@ func (d *Dependencies) ingestErrorEvent(w http.ResponseWriter, r *http.Request, 
 		writeJSONError(w, http.StatusInternalServerError, "failed to process event")
 		return
 	}
+	emitFirstSDKEvent(receipt, projectID, payload.Environment)
 	RecordEnvironmentResolution(receipt.EnvironmentOutcome)
 	if receipt.EnvironmentDiverged {
 		RecordEnvironmentSessionDivergence()
@@ -297,6 +300,17 @@ func (d *Dependencies) ingestErrorEvent(w http.ResponseWriter, r *http.Request, 
 		"group_id":       receipt.CaptureHandle,
 		"error_group_id": receipt.CaptureHandle,
 	})
+}
+
+func emitFirstSDKEvent(receipt *db.CaptureReceipt, projectID, environmentName string) {
+	if receipt != nil && receipt.FirstEvent {
+		usageevents.Emit("sdk_first_event_received", map[string]string{
+			"project_id":        projectID,
+			"environment_id":    receipt.EnvironmentID,
+			"environment_name":  environmentName,
+			"environment_age_s": strconv.FormatInt(receipt.EnvironmentAgeSeconds, 10),
+		})
+	}
 }
 
 type validatedDebugImage struct {

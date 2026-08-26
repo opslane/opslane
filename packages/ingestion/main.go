@@ -23,6 +23,7 @@ import (
 	"github.com/opslane/opslane/packages/ingestion/resolve"
 	"github.com/opslane/opslane/packages/ingestion/retention"
 	"github.com/opslane/opslane/packages/ingestion/scrubber"
+	"github.com/opslane/opslane/packages/ingestion/usageevents"
 )
 
 func main() {
@@ -148,6 +149,12 @@ func main() {
 
 	queries := db.New(pool)
 	queries.DashboardURL = os.Getenv("DASHBOARD_URL")
+	if raw := os.Getenv("USAGE_EVENTS_SLACK_WEBHOOK"); raw != "" {
+		if err := usageevents.Configure(raw); err != nil {
+			slog.Error("usage events disabled: invalid USAGE_EVENTS_SLACK_WEBHOOK")
+		}
+	}
+	slog.Info("usage events", "enabled", usageevents.Enabled())
 	go func() {
 		ran, err := queries.RunRollupBackfill(context.Background())
 		if err != nil {
@@ -254,7 +261,7 @@ func main() {
 			filterInterval = time.Duration(parsed) * time.Second
 		}
 	}
-	go filter.NewDispatcher(pool).Start(ctx, filterInterval)
+	go filter.NewDispatcher(pool, queries.DashboardURL).Start(ctx, filterInterval)
 	slog.Info("issue filter sweep started", "interval", filterInterval.String())
 
 	prioritySweeper := &priority.Sweeper{Pool: pool}

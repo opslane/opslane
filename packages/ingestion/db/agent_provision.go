@@ -39,6 +39,8 @@ type AgentProvisionInput struct {
 type AgentProvisionResult struct {
 	OrgID     string
 	ProjectID string
+	UserID    string
+	Created   bool
 }
 
 // ProvisionAgentSession performs the complete agent onboarding write set in
@@ -154,6 +156,7 @@ func (q *Queries) ProvisionAgentSession(ctx context.Context, in AgentProvisionIn
 			return nil, fmt.Errorf("legacy installation lookup: %w", err)
 		}
 	}
+	created := false
 	if orgID != "" {
 		if userID == "" {
 			return fail("org_exists_needs_invite", ErrAgentOrgExistsNeedsInvite)
@@ -193,6 +196,7 @@ func (q *Queries) ProvisionAgentSession(ctx context.Context, in AgentProvisionIn
 		).Scan(&userID); err != nil {
 			return nil, fmt.Errorf("create user: %w", err)
 		}
+		created = true
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO memberships (user_id, org_id, role) VALUES ($1, $2, 'owner')
 			 ON CONFLICT (user_id, org_id) DO NOTHING`, userID, orgID); err != nil {
@@ -281,5 +285,5 @@ func (q *Queries) ProvisionAgentSession(ctx context.Context, in AgentProvisionIn
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit agent provision: %w", err)
 	}
-	return &AgentProvisionResult{OrgID: orgID, ProjectID: project.ID}, nil
+	return &AgentProvisionResult{OrgID: orgID, ProjectID: project.ID, UserID: userID, Created: created}, nil
 }

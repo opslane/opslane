@@ -20,16 +20,23 @@ vi.mock('../pr.js', () => ({
   createGitHubClient: vi.fn(),
 }));
 
+vi.mock('../usage-events.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../usage-events.js')>();
+  return { ...actual, emitUsageEvent: vi.fn() };
+});
+
 const { runAgentFix } = await import('../agent-fix.js');
 const { gitCommitAndPush, validateDiffPaths } = await import('../repo-clone.js');
 const { createPR, createGitHubClient } = await import('../pr.js');
 const { runPipeline } = await import('../pipeline.js');
+const { emitUsageEvent } = await import('../usage-events.js');
 
 const mockRunAgentFix = vi.mocked(runAgentFix);
 const mockGitCommitAndPush = vi.mocked(gitCommitAndPush);
 const mockValidateDiffPaths = vi.mocked(validateDiffPaths);
 const mockCreatePR = vi.mocked(createPR);
 const mockCreateGitHubClient = vi.mocked(createGitHubClient);
+const mockEmitUsageEvent = vi.mocked(emitUsageEvent);
 
 const VALID_DIFF = '--- a/f.ts\n+++ b/f.ts\n@@ -1 +1 @@\n-old\n+new\n';
 const FIX_NARRATIVE: FixNarrative = {
@@ -224,6 +231,12 @@ describe('runPipeline', () => {
       incidentUrl: 'https://app.opslane.com/incidents/group-12345678?project_id=project-1',
     }), expect.any(Function));
     expect(result.narrative).toEqual(FIX_NARRATIVE);
+    expect(mockEmitUsageEvent).toHaveBeenCalledWith('fix_pr_opened', expect.objectContaining({
+      project_id: 'project-1',
+      error_group_id: 'group-12345678',
+      pr_url: 'https://github.com/org/repo/pull/99',
+      draft: 'true',
+    }));
   });
 
   it('preserves the friction commit subject and suggestion PR contract', async () => {
@@ -495,6 +508,7 @@ describe('runPipeline', () => {
 
     expect(result.status).toBe('needs_human');
     expect(result.reason?.reason_code).toBe('missing_github_token');
+    expect(mockEmitUsageEvent).not.toHaveBeenCalled();
   });
 
   it('returns a valid needs_human result with all reason fields populated', async () => {

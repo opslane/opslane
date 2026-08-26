@@ -22,6 +22,7 @@ import type { DerivedDecision } from './classify.js';
 import type { RouteMapRow } from './route-map.js';
 import type { RouteClaim } from './product-context/schema.js';
 import { logger, safeErrorMessage } from './logger.js';
+import { emitUsageEvent, incidentUrlFor } from './usage-events.js';
 import type { LedgerEntry } from './verification-ledger.js';
 
 const { Pool } = pg;
@@ -1285,7 +1286,7 @@ export async function updateGroupStatus(
     const dedupParam = `$${values.length + 2}`;
     values.push(payload ? JSON.stringify(payload) : null, triagedDedupKey(errorGroupId, terminalJobId ?? 'non-terminal'));
 
-    const result = await client.query(
+    const result = await client.query<{ id: string; previous_status: string }>(
     `WITH ${ownedCte}
      prior AS MATERIALIZED (
        SELECT id, status AS previous_status
@@ -1323,12 +1324,22 @@ export async function updateGroupStatus(
      )${triagedOutboxCte({
        statusParam: '$3', projectParam: '$2', payloadParam, dedupParam,
      })}
-     SELECT id FROM updated_group`,
+     SELECT id, previous_status FROM updated_group`,
     values,
     );
     if (lease && (result.rowCount ?? 0) === 0) throw new LeaseLostError(lease.id);
 
     await client.query('COMMIT');
+    const previousStatus = result.rows[0]?.previous_status;
+    if (status === 'needs_human' && previousStatus !== undefined && previousStatus !== 'needs_human') {
+      emitUsageEvent('needs_human_created', {
+        error_group_id: errorGroupId,
+        project_id: projectId,
+        reason: reason?.reason_message ?? '',
+        reason_code: reason?.reason_code ?? '',
+        url: incidentUrlFor(errorGroupId, projectId),
+      });
+    }
   } catch (error) {
     await client.query('ROLLBACK').catch(() => {});
     throw error;
@@ -2822,7 +2833,7 @@ export async function updateGroupInvestigation(
       payload ? JSON.stringify(payload) : null,
       triagedDedupKey(errorGroupId, terminalJobId ?? 'non-terminal'),
     );
-    const result = await client.query(
+    const result = await client.query<{ id: string; previous_status: string }>(
       `WITH ${ownedCte}
        prior AS MATERIALIZED (
          SELECT id, status AS previous_status
@@ -2856,7 +2867,7 @@ export async function updateGroupInvestigation(
      )${triagedOutboxCte({
        statusParam: '$3', projectParam: '$2', payloadParam, dedupParam,
      })}
-     SELECT id FROM updated_group`,
+     SELECT id, previous_status FROM updated_group`,
       values,
     );
     if (lease && (result.rowCount ?? 0) === 0) {
@@ -2866,6 +2877,16 @@ export async function updateGroupInvestigation(
       await insertDiagnosisDecision(client, errorGroupId, projectId, fields.decision);
     }
     await client.query('COMMIT');
+    const previousStatus = result.rows[0]?.previous_status;
+    if (status === 'needs_human' && previousStatus !== undefined && previousStatus !== 'needs_human') {
+      emitUsageEvent('needs_human_created', {
+        error_group_id: errorGroupId,
+        project_id: projectId,
+        reason: reason?.reason_message ?? '',
+        reason_code: reason?.reason_code ?? '',
+        url: incidentUrlFor(errorGroupId, projectId),
+      });
+    }
   } catch (err: unknown) {
     await client.query('ROLLBACK');
     throw err;

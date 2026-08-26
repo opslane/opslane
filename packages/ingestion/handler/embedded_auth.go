@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/opslane/opslane/packages/ingestion/auth"
+	"github.com/opslane/opslane/packages/ingestion/usageevents"
 )
 
 // authProviderTimeout bounds each identity-provider (WorkOS) call so a slow or
@@ -32,12 +33,12 @@ type passwordResetSessionStore interface {
 
 // completeEmbeddedLogin mirrors the provisioning and local-session tail of the
 // OAuth callback for the JSON embedded-auth flow.
-func (d *Dependencies) completeEmbeddedLogin(w http.ResponseWriter, r *http.Request, identity auth.Identity) {
+func (d *Dependencies) completeEmbeddedLogin(w http.ResponseWriter, r *http.Request, identity auth.Identity, flow string) {
 	if d.Queries == nil {
 		writeJSONError(w, http.StatusInternalServerError, "authentication is not configured")
 		return
 	}
-	userID, _, err := d.Queries.ProvisionFromIdentity(r.Context(), identity)
+	userID, orgID, created, err := d.Queries.ProvisionFromIdentity(r.Context(), identity)
 	if err != nil {
 		slog.Error("embedded login provisioning failed", "error", err)
 		writeJSONError(w, http.StatusConflict, "could not provision identity")
@@ -49,6 +50,23 @@ func (d *Dependencies) completeEmbeddedLogin(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	d.issueTokenPairCookie(w, r, user.ID, user.OrgID, user.Email, user.Name, uuid.NewString())
+	// A signup form that authenticated an already-existing account is an
+	// interactive login too; only the verify flow stays silent for returning
+	// users.
+	emitProvisioningUsage(identity, userID, orgID, created, flow == "login" || flow == "signup")
+}
+
+func emitProvisioningUsage(identity auth.Identity, userID, orgID string, created, interactiveLogin bool) {
+	if created {
+		usageevents.Emit("user_signed_up", map[string]string{
+			"email": identity.Email, "provider": identity.Provider,
+			"user_id": userID, "org_id": orgID,
+		})
+	} else if interactiveLogin {
+		usageevents.Emit("user_logged_in", map[string]string{
+			"email": identity.Email, "user_id": userID, "org_id": orgID,
+		})
+	}
 }
 
 func writeAuthFlowError(w http.ResponseWriter, err error, invalidMessage string) {
@@ -162,7 +180,7 @@ func (d *Dependencies) PasswordLogin(w http.ResponseWriter, r *http.Request) {
 		writeAuthFlowError(w, err, "invalid email or password")
 		return
 	}
-	d.completeEmbeddedLogin(w, r, identity)
+	d.completeEmbeddedLogin(w, r, identity, "login")
 }
 
 func (d *Dependencies) Signup(w http.ResponseWriter, r *http.Request) {
@@ -213,7 +231,7 @@ func (d *Dependencies) Signup(w http.ResponseWriter, r *http.Request) {
 		writeAuthFlowError(w, err, "invalid email or password")
 		return
 	}
-	d.completeEmbeddedLogin(w, r, identity)
+	d.completeEmbeddedLogin(w, r, identity, "signup")
 }
 
 type verifyEmailRequest struct {
@@ -246,7 +264,7 @@ func (d *Dependencies) VerifyEmail(w http.ResponseWriter, r *http.Request) {
 		writeAuthFlowError(w, err, "invalid or expired verification code")
 		return
 	}
-	d.completeEmbeddedLogin(w, r, identity)
+	d.completeEmbeddedLogin(w, r, identity, "verify")
 }
 
 type forgotPasswordRequest struct {

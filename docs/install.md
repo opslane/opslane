@@ -144,3 +144,11 @@ If your bundle is served from a different origin than your page, add `crossorigi
 Trigger an error in your app, then open the dashboard. It should appear as an issue within a few seconds. If nothing arrives, check the key prefix, the `endpoint` value on self-hosted installs, and the browser console for SDK warnings (set `debug: true` to see them).
 
 Every `init` option, with types and defaults: [SDK options](reference/sdk-options.md).
+
+## Optional operator usage notifications
+
+Self-hosted operators can set `USAGE_EVENTS_SLACK_WEBHOOK` on both server-side services to send best-effort notifications to a Slack incoming webhook. When unset, usage notifications are fully disabled.
+
+The notifications cover user signup and login, an environment's first SDK event, issue admission, fix PR creation, needs-human outcomes, delivered digests, and successful MCP tool calls. Delivery is fire-and-forget and is not an audit log.
+
+> **Privacy:** These messages can contain customer email addresses and error titles. Send them only to a private channel whose membership matches your production-data access policy, and store the webhook as a deployment secret.

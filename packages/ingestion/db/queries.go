@@ -2530,39 +2530,39 @@ func (q *Queries) HasVerifiedIdentityEmail(ctx context.Context, userID, email st
 }
 
 // ProvisionFromIdentity creates or links a cloud identity atomically.
-func (q *Queries) ProvisionFromIdentity(ctx context.Context, identity auth.Identity) (userID, orgID string, err error) {
+func (q *Queries) ProvisionFromIdentity(ctx context.Context, identity auth.Identity) (userID, orgID string, created bool, err error) {
 	tx, err := q.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
-		return "", "", fmt.Errorf("begin identity provisioning: %w", err)
+		return "", "", false, fmt.Errorf("begin identity provisioning: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	userID, orgID, err = q.ProvisionFromIdentityTx(ctx, tx, identity)
+	userID, orgID, created, err = q.ProvisionFromIdentityTx(ctx, tx, identity)
 	if err != nil {
-		return "", "", err
+		return "", "", false, err
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return "", "", fmt.Errorf("commit identity provisioning: %w", err)
+		return "", "", false, fmt.Errorf("commit identity provisioning: %w", err)
 	}
-	return userID, orgID, nil
+	return userID, orgID, created, nil
 }
 
 // ProvisionFromIdentityTx is the transaction-scoped core, exposed so concurrency
 // tests can begin two independent transactions at the same time.
-func (q *Queries) ProvisionFromIdentityTx(ctx context.Context, tx pgx.Tx, identity auth.Identity) (string, string, error) {
+func (q *Queries) ProvisionFromIdentityTx(ctx context.Context, tx pgx.Tx, identity auth.Identity) (string, string, bool, error) {
 	provider := strings.TrimSpace(identity.Provider)
 	subject := strings.TrimSpace(identity.ProviderSubject)
 	email := NormalizeEmail(identity.Email)
 	if provider == "" || subject == "" || email == "" {
-		return "", "", fmt.Errorf("provision identity: provider, subject, and email are required")
+		return "", "", false, fmt.Errorf("provision identity: provider, subject, and email are required")
 	}
 
 	if err := lockIdentityTx(ctx, tx, provider, subject); err != nil {
-		return "", "", err
+		return "", "", false, err
 	}
 	if identity.EmailVerified {
 		if err := lockEmailTx(ctx, tx, email); err != nil {
-			return "", "", err
+			return "", "", false, err
 		}
 	}
 
@@ -2572,45 +2572,47 @@ func (q *Queries) ProvisionFromIdentityTx(ctx context.Context, tx pgx.Tx, identi
 		 FROM auth_identities ai JOIN users u ON u.id = ai.user_id
 		 WHERE ai.provider = $1 AND ai.provider_subject = $2`, provider, subject).Scan(&userID, &orgID)
 	if err != nil && err != pgx.ErrNoRows {
-		return "", "", fmt.Errorf("resolve identity in provisioning: %w", err)
+		return "", "", false, fmt.Errorf("resolve identity in provisioning: %w", err)
 	}
 	if err == nil {
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO memberships (user_id, org_id, role) VALUES ($1, $2, 'owner')
 			 ON CONFLICT (user_id, org_id) DO UPDATE SET role = 'owner'`, userID, orgID); err != nil {
-			return "", "", fmt.Errorf("ensure identity owner membership: %w", err)
+			return "", "", false, fmt.Errorf("ensure identity owner membership: %w", err)
 		}
 		if _, err := tx.Exec(ctx,
 			`UPDATE auth_identities SET provider_email = $3,
 			 email_verified = email_verified OR $4
 			 WHERE provider = $1 AND provider_subject = $2`, provider, subject, email, identity.EmailVerified); err != nil {
-			return "", "", fmt.Errorf("refresh identity details: %w", err)
+			return "", "", false, fmt.Errorf("refresh identity details: %w", err)
 		}
-		return userID, orgID, nil
+		return userID, orgID, false, nil
 	}
 
 	if identity.EmailVerified {
 		err = tx.QueryRow(ctx,
 			`SELECT id, org_id FROM users WHERE lower(email) = $1`, email).Scan(&userID, &orgID)
 		if err != nil && err != pgx.ErrNoRows {
-			return "", "", fmt.Errorf("find verified email user: %w", err)
+			return "", "", false, fmt.Errorf("find verified email user: %w", err)
 		}
 	} else {
 		var existingID string
 		err = tx.QueryRow(ctx, `SELECT id FROM users WHERE lower(email) = $1`, email).Scan(&existingID)
 		if err == nil {
-			return "", "", fmt.Errorf("provision identity: unverified email cannot link an existing account")
+			return "", "", false, fmt.Errorf("provision identity: unverified email cannot link an existing account")
 		}
 		if err != pgx.ErrNoRows {
-			return "", "", fmt.Errorf("check unverified email: %w", err)
+			return "", "", false, fmt.Errorf("check unverified email: %w", err)
 		}
 		// Fail closed: never create an account for an unverified email. Otherwise
 		// an attacker seeds a user+org under a victim's address, and the victim's
 		// later verified login is adopted into that attacker-owned org.
-		return "", "", fmt.Errorf("provision identity: unverified email cannot create an account")
+		return "", "", false, fmt.Errorf("provision identity: unverified email cannot create an account")
 	}
 
+	created := false
 	if userID == "" {
+		created = true
 		orgName := strings.TrimSpace(identity.Username)
 		if orgName == "" {
 			orgName = strings.TrimSpace(identity.Name)
@@ -2620,20 +2622,20 @@ func (q *Queries) ProvisionFromIdentityTx(ctx context.Context, tx pgx.Tx, identi
 		}
 		if err := tx.QueryRow(ctx,
 			`INSERT INTO orgs (name) VALUES ($1) RETURNING id`, orgName).Scan(&orgID); err != nil {
-			return "", "", fmt.Errorf("create identity org: %w", err)
+			return "", "", false, fmt.Errorf("create identity org: %w", err)
 		}
 		if err := tx.QueryRow(ctx,
 			`INSERT INTO users (org_id, email, password_hash, name, avatar_url)
 			 VALUES ($1, $2, NULL, $3, NULLIF($4, '')) RETURNING id`,
 			orgID, email, identity.Name, identity.AvatarURL).Scan(&userID); err != nil {
-			return "", "", fmt.Errorf("create identity user: %w", err)
+			return "", "", false, fmt.Errorf("create identity user: %w", err)
 		}
 	}
 
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO memberships (user_id, org_id, role) VALUES ($1, $2, 'owner')
 		 ON CONFLICT (user_id, org_id) DO UPDATE SET role = 'owner'`, userID, orgID); err != nil {
-		return "", "", fmt.Errorf("ensure owner membership: %w", err)
+		return "", "", false, fmt.Errorf("ensure owner membership: %w", err)
 	}
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO auth_identities
@@ -2641,19 +2643,19 @@ func (q *Queries) ProvisionFromIdentityTx(ctx context.Context, tx pgx.Tx, identi
 		 VALUES ($1, $2, $3, $4, $5)
 		 ON CONFLICT (provider, provider_subject) DO NOTHING`,
 		userID, provider, subject, email, identity.EmailVerified); err != nil {
-		return "", "", fmt.Errorf("insert provisioned identity: %w", err)
+		return "", "", false, fmt.Errorf("insert provisioned identity: %w", err)
 	}
 
 	var owner string
 	if err := tx.QueryRow(ctx,
 		`SELECT user_id FROM auth_identities WHERE provider = $1 AND provider_subject = $2`,
 		provider, subject).Scan(&owner); err != nil {
-		return "", "", fmt.Errorf("validate provisioned identity: %w", err)
+		return "", "", false, fmt.Errorf("validate provisioned identity: %w", err)
 	}
 	if owner != userID {
-		return "", "", fmt.Errorf("%w: %s:%s", ErrIdentityConflict, provider, subject)
+		return "", "", false, fmt.Errorf("%w: %s:%s", ErrIdentityConflict, provider, subject)
 	}
-	return userID, orgID, nil
+	return userID, orgID, created, nil
 }
 
 // lockIdentityTx and lockEmailTx are shared by every identity provisioning
