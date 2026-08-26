@@ -25,7 +25,7 @@
 
 ---
 
-Opslane finds user-facing issues and investigates them. It only opens a PR if it can verify the fix.
+Opslane finds user-facing bugs and investigates them. It only opens a PR if it can verify the fix.
 
 It records every session. That means it sees the errors, and it also sees the bugs that never throw an exception: the button that does nothing, the form people give up on, the dropdown that closes before anyone can pick from it. Each one is ranked by how many users hit it. The ones that matter get investigated. Some of those fixes become PRs. Some need your attention, so you can drive the resolution.
 
