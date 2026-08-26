@@ -29,10 +29,6 @@ Opslane finds user-facing bugs and investigates them. It only opens a PR if it c
 
 It records every session. That means it sees the errors, and it also sees the bugs that never throw an exception: the button that does nothing, the form people give up on, the dropdown that closes before anyone can pick from it. Each one is ranked by how many users hit it. The ones that matter get investigated. Some of those fixes become PRs. Some need your attention, so you can drive the resolution.
 
-<img src="docs/assets/readme/sessions-list.png" alt="Recorded sessions showing errors, rage clicks, dead clicks, and form abandons per session" width="100%">
-
-<p align="center"><sub>Session recordings catch what never hits the console: rage clicks, dead clicks, abandoned forms.</sub></p>
-
 <a href="https://youtu.be/ccuOTYQMeYg"><img src="docs/assets/readme/demo-thumbnail.jpg" alt="Watch the Opslane demo: from a production error to a verified pull request" width="100%"></a>
 
 <p align="center"><sub><a href="https://youtu.be/ccuOTYQMeYg">▶ Watch the demo</a>: a production error becomes a verified pull request.</sub></p>
@@ -43,15 +39,15 @@ It records every session. That means it sees the errors, and it also sees the bu
 
 <p align="center"><sub>Read the digest, make the product call, fix it, link the PR. All from the terminal.</sub></p>
 
+<img src="docs/assets/readme/slack-digest.png" alt="The daily Slack digest: which issues matter, which fixes are ready to merge, and which need a human decision, each written in plain product terms with user counts" width="100%">
+
+<p align="center"><sub>The daily Slack digest: what broke, what's ready to merge, what needs a decision. Images show demo data.</sub></p>
+
 ## Principles
 
 - **Agent-first.** I never want to open an error dashboard again. Opslane ships an MCP server, so your coding agent pulls the digest, reads the investigation, and fixes the bug from the terminal.
 - **It learns your product.** From your code, and from watching people use it. Better context, better investigations.
 - **One Docker Compose file.** Postgres and MinIO. That's the whole stack.
-
-<img src="docs/assets/readme/slack-digest.png" alt="The daily Slack digest: which issues matter, which fixes are ready to merge, and which need a human decision, each written in plain product terms with user counts" width="100%">
-
-<p align="center"><sub>The daily Slack digest: what broke, what's ready to merge, what needs a decision. Images show demo data.</sub></p>
 
 ## How it works
 
@@ -88,7 +84,7 @@ Opslane calls three outside services: Anthropic to investigate, E2B to run the s
 
 ## Run it locally
 
-Prerequisites: Docker with Compose v2 and free host ports 8082, 5434, and 9012. No accounts or API keys needed for this first run.
+Prerequisites: Docker with Compose v2. No accounts or API keys needed for this first run.
 
 ```bash
 git clone https://github.com/opslane/opslane.git
