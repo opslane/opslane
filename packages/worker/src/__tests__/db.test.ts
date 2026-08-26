@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { purgeDiagnosisDecisions } from './purge-diagnosis-decisions.js';
 import { purgeFixRunLedger } from './purge-fix-run-ledger.js';
 import pg from 'pg';
@@ -14,7 +15,6 @@ import {
   updateGroupInvestigation,
   updateGroupAndCreateFixJob,
   updateJobTraceUrl,
-  recordSetupPrResult,
   getPool,
   closePool,
   reserveDelivery,
@@ -955,7 +955,27 @@ describeDb('db.ts integration tests', () => {
     });
   });
 
-  describe('claimJob', () => {
+	describe('claimJob', () => {
+		it('never claims retired setup_pr jobs and settlement removes them from queue depth', async () => {
+			await testPool.query(
+				`INSERT INTO error_group_jobs (project_id, status, job_type)
+				 VALUES ($1, 'pending', 'setup_pr')`,
+				[testProjectId],
+			);
+
+			await expect(claimJob('retired-setup-worker', 60_000)).resolves.toBeNull();
+			const migration = readFileSync(
+				new URL('../../../ingestion/db/migrations/063_retire_setup_pr_jobs.sql', import.meta.url),
+				'utf8',
+			);
+			await testPool.query(migration);
+			expect((await getQueueDepth()).find((row) => row.jobType === 'setup_pr')).toBeUndefined();
+			const settled = await testPool.query<{ status: string }>(
+				`SELECT status FROM error_group_jobs WHERE project_id = $1 AND job_type = 'setup_pr'`,
+				[testProjectId],
+			);
+			expect(settled.rows).toEqual([{ status: 'dead_letter' }]);
+		});
     it('should claim a pending job and set claimed status', async () => {
       const { jobId } = await seedErrorGroupAndJob();
 
@@ -1159,7 +1179,6 @@ describeDb('db.ts integration tests', () => {
         'error_fix',
         'investigate',
         'fix',
-        'setup_pr',
         'session_analysis',
         'ci_watch',
         'route_map',
@@ -2127,14 +2146,6 @@ describeDb('db.ts integration tests', () => {
             otherGroup.rows[0]!.id,
             otherProject.rows[0]!.id,
             { rootCause: 'cross-tenant mutation' },
-            claim!,
-          ),
-        ).rejects.toThrow('lease lost');
-        await expect(
-          recordSetupPrResult(
-            otherProject.rows[0]!.id,
-            'opening',
-            {},
             claim!,
           ),
         ).rejects.toThrow('lease lost');
