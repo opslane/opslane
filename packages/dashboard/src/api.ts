@@ -1,7 +1,7 @@
 import type {
   Incident, AffectedUser, Account, IncidentFilters,
   SampleEvent,
-  GitHubConfig, GitHubAppStatus, GitHubRepo, SetupPrStatus,
+  GitHubConfig, GitHubAppStatus, GitHubRepo,
   SessionDetail, SessionFilters, SessionListResponse,
   AdminOverview, AdminJobsResponse, HealthResponse,
   AuthConfig, AuthUser, ForgotPasswordResult, OrgInvitation,
@@ -582,16 +582,6 @@ export function getGitHubAppStatus(): Promise<GitHubAppStatus> {
 
 export function listGitHubRepos(): Promise<GitHubRepo[]> {
   return fetchJSON<GitHubRepo[]>('/github/repos');
-}
-
-// === Project setup PR ===
-
-export function triggerSetupPR(projectId: string): Promise<{ job_id: string; status: string }> {
-  return postJSON<{ job_id: string; status: string }>(`/projects/${projectId}/setup-pr`, {});
-}
-
-export function getSetupPRStatus(projectId: string): Promise<SetupPrStatus> {
-  return fetchJSON<SetupPrStatus>(`/projects/${projectId}/setup-pr`);
 }
 
 export function listIncidents(

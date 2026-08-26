@@ -401,13 +401,6 @@ export interface OnboardingState {
 	slack_connected: boolean;
 }
 
-export interface SetupPrStatus {
-  status: '' | 'pending' | 'opening' | 'open' | 'already_installed' | 'failed';
-  pr_url: string | null;
-  pr_number: number | null;
-  error?: string;
-}
-
 // === Admin observability ===
 
 export type AdminJobStatus =
@@ -421,6 +414,7 @@ export type AdminJobType =
   | 'investigate'
   | 'fix'
   | 'error_fix'
+  // historical only: retired job type, rows persist as dead_letter
   | 'setup_pr'
   | 'ci_watch'
   | 'session_analysis'
