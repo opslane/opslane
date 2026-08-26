@@ -75,6 +75,29 @@ createApp(App).use(opslaneVuePlugin).mount('#app');
 
 The plugin hooks `app.config.errorHandler`, keeping any handler you already registered, and tags each error with the failing component's name and lifecycle hook.
 
+### Next.js
+
+Initialize Opslane in a client component so the browser-only error handlers are installed after hydration. Create `app/opslane-provider.tsx`:
+
+```tsx
+'use client';
+import { useEffect } from 'react';
+import { init } from '@opslane/sdk';
+
+export function OpslaneProvider({ children }: { children: React.ReactNode }) {
+  useEffect(() => {
+    init({
+      apiKey: 'opslane_pk_...',
+      environment: 'development',
+      endpoint: 'https://your-opslane-instance.example.com', // omit for hosted Opslane
+    });
+  }, []);
+  return <>{children}</>;
+}
+```
+
+Then wrap `{children}` with `<OpslaneProvider>` in `app/layout.tsx`.
+
 ### Vanilla JavaScript
 
 ```ts

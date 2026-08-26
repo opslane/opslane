@@ -533,13 +533,13 @@ export function testNotificationDestination(
 }
 
 export function onboardingSetup(
-  projectName: string,
-  githubRepo: string
+	projectName: string,
+	idempotencyToken: string,
 ): Promise<OnboardingSetupResponse> {
-  return postJSON<OnboardingSetupResponse>('/onboarding/setup', {
-    project_name: projectName,
-    github_repo: githubRepo || undefined,
-  });
+	return postJSON<OnboardingSetupResponse>('/onboarding/setup', {
+		project_name: projectName,
+		idempotency_token: idempotencyToken,
+	});
 }
 
 export function getOnboardingState(): Promise<OnboardingState> {

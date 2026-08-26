@@ -1,428 +1,486 @@
 <script setup lang="ts">
-import { computed, ref, onMounted, onUnmounted } from 'vue';
+import { computed, onMounted, onUnmounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import {
-  onboardingSetup,
+  completeOnboarding,
+  createAPIKey,
+  createNotificationDestination,
   getEventStatus,
   getGitHubAppStatus,
-  triggerSetupPR,
-  getSetupPRStatus,
+  getMe,
+  getOnboardingState,
+  listProjects,
+  onboardingSetup,
   setGitHubConfig,
+  testNotificationDestination,
+  updateNotificationDestination,
+  updateProject,
 } from '../api';
-import type { GitHubAppStatus, SetupPrStatus } from '../types/api';
+import type { GitHubAppStatus, OnboardingState } from '../types/api';
 import { GITHUB_PR_URL_OPTIONS, safeUrl } from '../utils';
-import CopyButton from '../components/CopyButton.vue';
 import CodeBlock from '../components/CodeBlock.vue';
 import RepoSelector from '../components/RepoSelector.vue';
 import Button from '../components/ui/Button.vue';
 
-const router = useRouter();
+type Step = 'create_project' | 'install_sdk' | 'connect_github' | 'connect_slack' | 'done';
 
-const step = ref(1);
-const projectName = ref('');
-const selectedRepo = ref('');
+const router = useRouter();
+const step = ref<Step>('create_project');
+const state = ref<OnboardingState | null>(null);
 const projectId = ref('');
 const apiKey = ref('');
-const hasEvents = ref(false);
 const error = ref('');
 const loading = ref(false);
+const needsAdmin = ref(false);
 
-// GitHub App status
-const githubAppStatus = ref<GitHubAppStatus | null>(null);
-const loadingGitHub = ref(true);
-
-// Step 4 setup PR state
-const setupPr = ref<SetupPrStatus>({ status: '', pr_url: null, pr_number: null });
-const setupPrHref = computed(() => safeUrl(setupPr.value.pr_url, GITHUB_PR_URL_OPTIONS));
-const setupError = ref('');
-const setupLoading = ref(false);
-const setupTimer = ref<ReturnType<typeof setInterval>>();
-
-// Step 5 polling
-const pollInterval = ref<ReturnType<typeof setInterval>>();
-
-const steps = [
-  { num: 1, label: 'Connect GitHub' },
-  { num: 2, label: 'Create project' },
-  { num: 3, label: 'API key' },
-  { num: 4, label: 'Install SDK' },
-  { num: 5, label: 'Test it' },
+const steps: Array<{ id: Exclude<Step, 'done'>; label: string }> = [
+  { id: 'create_project', label: 'Create project' },
+  { id: 'install_sdk', label: 'Install SDK' },
+  { id: 'connect_github', label: 'Connect GitHub' },
+  { id: 'connect_slack', label: 'Connect Slack' },
 ];
+const activeStepNumber = computed(() => {
+  if (step.value === 'done') return steps.length + 1;
+  return steps.findIndex((candidate) => candidate.id === step.value) + 1;
+});
+
+async function restoreProjectStorage(): Promise<void> {
+  try {
+    const projects = await listProjects();
+    const match = projects.find((project) => project.id === projectId.value) ?? projects[0];
+    if (match) {
+      localStorage.setItem('opslane_project_id', match.id);
+      localStorage.setItem('opslane_project_name', match.name);
+    }
+  } catch {
+    // App.vue also repairs project storage after navigation.
+  }
+}
 
 onMounted(async () => {
   try {
-    githubAppStatus.value = await getGitHubAppStatus();
-    // Auto-advance if already installed
-    if (githubAppStatus.value.installed) {
-      step.value = 2;
+    const me = await getMe();
+    if (me.active_role === 'member') {
+      needsAdmin.value = true;
+      return;
     }
   } catch {
-    // If we can't check status, skip to create project
-    step.value = 2;
-  } finally {
-    loadingGitHub.value = false;
+    // The authenticated state request below remains authoritative for entry.
+  }
+
+  try {
+    const serverState = await getOnboardingState();
+    state.value = serverState;
+    projectId.value = serverState.project_id ?? '';
+    if (projectId.value) await restoreProjectStorage();
+    if (serverState.onboarding_complete) {
+      localStorage.setItem('opslane_onboarding_complete', '1');
+      await router.push('/');
+      return;
+    }
+    if (serverState.next_step === 'done') {
+      step.value = 'connect_slack';
+      await finish();
+      return;
+    }
+    step.value = serverState.next_step;
+    if (step.value === 'install_sdk') await ensureKeyAndPoll();
+    if (step.value === 'connect_github' && serverState.github_mode === 'app') {
+      await loadGitHubStatus();
+    }
+  } catch (caught: unknown) {
+    error.value = caught instanceof Error ? caught.message : 'Could not load onboarding state';
   }
 });
+
+const projectName = ref('');
+const idempotencyToken = globalThis.crypto?.randomUUID?.()
+  ?? `onboarding-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
 async function submitProject(): Promise<void> {
   error.value = '';
   loading.value = true;
   try {
-    const result = await onboardingSetup(projectName.value, selectedRepo.value);
+    const result = await onboardingSetup(projectName.value, idempotencyToken);
     projectId.value = result.project.id;
     apiKey.value = result.api_key.raw_key;
     localStorage.setItem('opslane_project_id', result.project.id);
     localStorage.setItem('opslane_project_name', result.project.name);
-    step.value = 3;
-  } catch (err: unknown) {
-    error.value = err instanceof Error ? err.message : 'Setup failed';
+    step.value = 'install_sdk';
+    startEventPolling();
+  } catch (caught: unknown) {
+    error.value = caught instanceof Error ? caught.message : 'Setup failed';
   } finally {
     loading.value = false;
   }
 }
 
-function keySaved(): void {
-  step.value = 4;
-  void openSetupPR();
-}
+const framework = ref<'vue' | 'react' | 'nextjs' | 'other'>('vue');
+const hasEvents = ref(false);
+const latestGroupId = ref<string | null>(null);
+const pollTimer = ref<ReturnType<typeof setInterval>>();
+const keyError = ref('');
+const keyLoading = ref(false);
 
-function continueToTest(): void {
-  step.value = 5;
-  startPolling();
-}
-
-async function openSetupPR(): Promise<void> {
-  if (!projectId.value) return;
-  if (!selectedRepo.value) {
-    setupPr.value = { status: 'failed', pr_url: null, pr_number: null, error: 'Choose a GitHub repository before opening the install PR.' };
-    return;
+const hostedOrigin = 'https://app.opslane.com';
+const endpointLine = computed(() => (
+  window.location.origin === hostedOrigin ? '' : `\n  endpoint: '${window.location.origin}',`
+));
+const initSnippet = computed(() => {
+  const common = `init({\n  apiKey: '${apiKey.value}',\n  environment: 'development',${endpointLine.value}\n});`;
+  switch (framework.value) {
+    case 'vue':
+      return `import { createApp } from 'vue';\nimport { init, opslaneVuePlugin } from '@opslane/sdk';\nimport App from './App.vue';\n\n${common}\n\ncreateApp(App).use(opslaneVuePlugin).mount('#app');`;
+    case 'react':
+      return `import { createRoot } from 'react-dom/client';\nimport { init } from '@opslane/sdk';\nimport { OpslaneErrorBoundary } from '@opslane/sdk/react';\nimport App from './App';\n\n${common}\n\ncreateRoot(document.getElementById('root')!).render(\n  <OpslaneErrorBoundary fallback={<p>Something went wrong.</p>}>\n    <App />\n  </OpslaneErrorBoundary>\n);`;
+    case 'nextjs':
+      return `// app/opslane-provider.tsx\n'use client';\nimport { useEffect } from 'react';\nimport { init } from '@opslane/sdk';\n\nexport function OpslaneProvider({ children }: { children: React.ReactNode }) {\n  useEffect(() => {\n    ${common.replace(/\n/g, '\n    ')}\n  }, []);\n  return <>{children}</>;\n}\n// Wrap {children} with <OpslaneProvider> in app/layout.tsx.`;
+    default:
+      return `import { init } from '@opslane/sdk';\n\n${common}`;
   }
-
-  setupError.value = '';
-  setupLoading.value = true;
-  setupPr.value = { status: 'pending', pr_url: null, pr_number: null };
-  if (setupTimer.value) clearInterval(setupTimer.value);
-
-  try {
-    await setGitHubConfig(projectId.value, { github_repo: selectedRepo.value });
-    await triggerSetupPR(projectId.value);
-    await refreshSetupPR();
-    setupTimer.value = setInterval(() => {
-      void refreshSetupPR();
-    }, 3000);
-  } catch (err: unknown) {
-    setupError.value = err instanceof Error ? err.message : 'Failed to open setup PR';
-    setupPr.value = { status: 'failed', pr_url: null, pr_number: null, error: setupError.value };
-  } finally {
-    setupLoading.value = false;
+});
+const installSnippet = 'npm install @opslane/sdk';
+const testButtonSnippet = computed(() => {
+  switch (framework.value) {
+    case 'vue':
+      return `<button @click="() => { throw new Error('opslane-test') }">Test Opslane</button>`;
+    case 'react':
+    case 'nextjs':
+      return `<button onClick={() => { throw new Error('opslane-test'); }}>Test Opslane</button>`;
+    default:
+      return `<button onclick="throw new Error('opslane-test')">Test Opslane</button>`;
   }
-}
+});
 
-async function refreshSetupPR(): Promise<void> {
-  if (!projectId.value) return;
-  try {
-    setupPr.value = await getSetupPRStatus(projectId.value);
-    if (['open', 'already_installed', 'failed'].includes(setupPr.value.status) && setupTimer.value) {
-      clearInterval(setupTimer.value);
-      setupTimer.value = undefined;
+async function ensureKeyAndPoll(): Promise<void> {
+  if (!apiKey.value && projectId.value) {
+    keyError.value = '';
+    keyLoading.value = true;
+    try {
+      const minted = await createAPIKey(projectId.value, {
+        label: 'onboarding', expires_at: null, scope: 'ingest',
+      });
+      apiKey.value = minted.token;
+    } catch (caught: unknown) {
+      keyError.value = caught instanceof Error ? caught.message : 'Could not create an API key';
+      return;
+    } finally {
+      keyLoading.value = false;
     }
-  } catch {
-    // Non-fatal; keep polling.
   }
+  if (apiKey.value) startEventPolling();
 }
 
-function startPolling(): void {
-  if (pollInterval.value) clearInterval(pollInterval.value);
-  pollInterval.value = setInterval(async () => {
+let pollInFlight = false;
+function startEventPolling(): void {
+  if (pollTimer.value) clearInterval(pollTimer.value);
+  pollTimer.value = setInterval(async () => {
+    if (pollInFlight || !projectId.value) return;
+    pollInFlight = true;
     try {
       const status = await getEventStatus(projectId.value);
       if (status.has_events) {
         hasEvents.value = true;
-        if (pollInterval.value) clearInterval(pollInterval.value);
+        latestGroupId.value = status.latest_error_group_id;
+        if (pollTimer.value) clearInterval(pollTimer.value);
       }
     } catch {
-      // Non-fatal, keep polling
+      // Keep polling through transient errors.
+    } finally {
+      pollInFlight = false;
     }
   }, 3000);
 }
 
-onUnmounted(() => {
-  if (pollInterval.value) clearInterval(pollInterval.value);
-  if (setupTimer.value) clearInterval(setupTimer.value);
-});
-
-function goToDashboard(): void {
-  router.push('/');
+async function continueFromSdk(): Promise<void> {
+  step.value = 'connect_github';
+  if (state.value?.github_mode !== 'pat') await loadGitHubStatus();
 }
 
-const viteEnvSnippet = computed(() => `VITE_OPSLANE_API_KEY=${apiKey.value}
-VITE_OPSLANE_RELEASE=<your git SHA>`);
-const testSnippet = `// Add this anywhere in your app to test:
-throw new Error('Hello Opslane!');`;
+const githubAppStatus = ref<GitHubAppStatus | null>(null);
+const patRepo = ref('');
+const selectedRepo = ref('');
+const githubError = ref('');
+const githubBusy = ref(false);
+const installHref = computed(() => safeUrl(
+  githubAppStatus.value?.install_url ?? '', GITHUB_PR_URL_OPTIONS,
+));
+
+async function loadGitHubStatus(): Promise<void> {
+  try {
+    githubAppStatus.value = await getGitHubAppStatus();
+  } catch {
+    githubAppStatus.value = null;
+  }
+}
+
+async function attachRepo(repo: string): Promise<void> {
+  if (!repo.trim()) return;
+  githubError.value = '';
+  githubBusy.value = true;
+  try {
+    await setGitHubConfig(projectId.value, { github_repo: repo.trim() });
+    window.dispatchEvent(new Event('opslane-integrations-changed'));
+    if (state.value?.slack_connected) await finish();
+    else step.value = 'connect_slack';
+  } catch (caught: unknown) {
+    githubError.value = caught instanceof Error ? caught.message : 'Could not connect the repository';
+  } finally {
+    githubBusy.value = false;
+  }
+}
+
+function deferGitHub(): void {
+  step.value = 'connect_slack';
+}
+
+const slackWebhookUrl = ref('');
+const slackError = ref('');
+const slackBusy = ref(false);
+const slackDestId = ref('');
+const digestTimezone = ref(Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC');
+
+async function connectSlack(): Promise<void> {
+  slackError.value = '';
+  slackBusy.value = true;
+  try {
+    if (!slackDestId.value) {
+      const created = await createNotificationDestination(projectId.value, {
+        name: 'Daily digest',
+        webhook_url: slackWebhookUrl.value,
+        enabled: false,
+        event_types: ['digest.daily'],
+        delivery_policy: 'post_triage',
+      });
+      slackDestId.value = created.id;
+    } else {
+      await updateNotificationDestination(projectId.value, slackDestId.value, {
+        webhook_url: slackWebhookUrl.value,
+      });
+    }
+    const result = await testNotificationDestination(projectId.value, slackDestId.value, {
+      eventType: 'issue.created',
+    });
+    if (!result.ok) {
+      slackError.value = `We couldn't reach that webhook (${result.classification}). Check the URL and try again.`;
+      return;
+    }
+    await updateNotificationDestination(projectId.value, slackDestId.value, { enabled: true });
+    try {
+      await updateProject(projectId.value, { digest_timezone: digestTimezone.value });
+    } catch {
+      // Timezone is best-effort and can be corrected in Settings.
+    }
+    window.dispatchEvent(new Event('opslane-integrations-changed'));
+    await finish();
+  } catch (caught: unknown) {
+    slackError.value = caught instanceof Error ? caught.message : 'Could not connect Slack';
+  } finally {
+    slackBusy.value = false;
+  }
+}
+
+async function deferSlack(): Promise<void> {
+  await finish();
+}
+
+async function finish(): Promise<void> {
+  error.value = '';
+  try {
+    await completeOnboarding();
+    localStorage.setItem('opslane_onboarding_complete', '1');
+    await restoreProjectStorage();
+    step.value = 'done';
+  } catch (caught: unknown) {
+    error.value = caught instanceof Error ? caught.message : 'Could not complete setup';
+  }
+}
+
+function goToDashboard(): void {
+  void router.push('/');
+}
+
+onUnmounted(() => {
+  if (pollTimer.value) clearInterval(pollTimer.value);
+});
 </script>
 
 <template>
   <div class="min-h-screen bg-background flex flex-col">
-    <!-- Progress indicator -->
-    <div class="bg-surface border-b border-border">
-      <div class="max-w-2xl mx-auto px-6 py-4">
-        <div class="flex items-center justify-between">
-          <div
-            v-for="(s, idx) in steps"
-            :key="s.num"
-            class="flex items-center"
-            :class="idx < steps.length - 1 ? 'flex-1' : ''"
-          >
-            <div class="flex items-center">
-              <div
-                v-if="step > s.num"
-                class="flex h-8 w-8 items-center justify-center rounded-full bg-accent"
-              >
-                <svg class="h-5 w-5 text-on-accent" viewBox="0 0 20 20" fill="currentColor">
-                  <path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd" />
-                </svg>
-              </div>
-              <div
-                v-else-if="step === s.num"
-                class="flex h-8 w-8 items-center justify-center rounded-full border-2 border-accent text-sm font-medium text-accent"
-                v-text="s.num"
-              ></div>
-              <div
-                v-else
-                class="flex h-8 w-8 items-center justify-center rounded-full border-2 border-border text-sm font-medium text-faint"
-                v-text="s.num"
-              ></div>
-              <span
-                class="ml-2 text-sm font-medium hidden sm:inline"
-                :class="step >= s.num ? 'text-text' : 'text-faint'"
-                v-text="s.label"
-              ></span>
-            </div>
+    <div v-if="needsAdmin" class="flex min-h-screen items-center justify-center px-6">
+      <div class="max-w-lg rounded-lg border border-border bg-surface p-8 text-center">
+        <h1 class="text-2xl font-semibold text-text">Ask an organization admin to finish setup</h1>
+        <p class="mt-3 text-sm text-muted">
+          An admin needs to create the first project and integration credentials. You can return here after they finish.
+        </p>
+      </div>
+    </div>
+
+    <template v-else>
+      <div class="border-b border-border bg-surface">
+        <div class="mx-auto max-w-3xl px-6 py-4">
+          <div class="flex items-center justify-between">
             <div
-              v-if="idx < steps.length - 1"
-              class="flex-1 mx-4 h-0.5"
-              :class="step > s.num ? 'bg-accent' : 'bg-border'"
-            ></div>
+              v-for="(progressStep, index) in steps"
+              :key="progressStep.id"
+              class="flex items-center"
+              :class="index < steps.length - 1 ? 'flex-1' : ''"
+            >
+              <div class="flex items-center">
+                <div
+                  class="flex h-8 w-8 items-center justify-center rounded-full border-2 text-sm font-medium"
+                  :class="activeStepNumber > index + 1
+                    ? 'border-accent bg-accent text-on-accent'
+                    : activeStepNumber === index + 1
+                      ? 'border-accent text-accent'
+                      : 'border-border text-faint'"
+                >
+                  {{ activeStepNumber > index + 1 ? '✓' : index + 1 }}
+                </div>
+                <span
+                  class="ml-2 hidden text-sm font-medium sm:inline"
+                  :class="activeStepNumber >= index + 1 ? 'text-text' : 'text-faint'"
+                >{{ progressStep.label }}</span>
+              </div>
+              <div
+                v-if="index < steps.length - 1"
+                class="mx-4 h-0.5 flex-1"
+                :class="activeStepNumber > index + 1 ? 'bg-accent' : 'bg-border'"
+              ></div>
+            </div>
           </div>
         </div>
       </div>
-    </div>
 
-    <!-- Step content -->
-    <div class="flex-1 flex items-start justify-center pt-12 pb-8">
-      <div class="max-w-lg w-full mx-6">
+      <div class="flex flex-1 items-start justify-center py-12">
+        <div class="mx-6 w-full max-w-lg">
+          <div v-if="error" class="mb-4 rounded-md border border-danger/30 bg-danger/10 p-3 text-sm text-danger" v-text="error"></div>
 
-        <!-- Step 1: Connect GitHub -->
-        <div v-if="step === 1">
-          <h1 class="text-2xl font-semibold text-text mb-2">Connect GitHub</h1>
-          <p class="text-sm text-muted mb-6">
-            Install the Opslane GitHub App to enable automated fix PRs.
-          </p>
+          <section v-if="step === 'create_project'">
+            <h1 class="text-2xl font-semibold text-text">Create your project</h1>
+            <p class="mt-2 text-sm text-muted">Name the app you want Opslane to monitor.</p>
+            <form class="mt-6 space-y-4" @submit.prevent="submitProject">
+              <div>
+                <label for="project-name" class="block text-sm font-medium text-muted">Project name</label>
+                <input
+                  id="project-name"
+                  v-model="projectName"
+                  required
+                  autofocus
+                  :disabled="loading"
+                  placeholder="My App"
+                  class="mt-1 block w-full rounded-md border border-border bg-surface-subtle px-3 py-2 text-sm text-text"
+                />
+              </div>
+              <Button type="submit" variant="primary" class="w-full" :busy="loading" :disabled="!projectName.trim()">
+                Create project
+              </Button>
+            </form>
+          </section>
 
-          <div v-if="loadingGitHub" class="text-sm text-muted">Checking GitHub status...</div>
+          <section v-else-if="step === 'install_sdk'">
+            <h1 class="text-2xl font-semibold text-text">Install the SDK</h1>
+            <p class="mt-2 text-sm text-muted">Add Opslane, initialize it early, then throw one temporary test error.</p>
 
-          <div v-else-if="githubAppStatus?.installed" class="space-y-4">
-            <div class="flex items-center gap-2">
-              <span class="inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium bg-success/10 text-success">
-                Connected
-              </span>
-              <span class="text-sm text-muted">GitHub App is installed</span>
+            <div v-if="keyError" class="mt-6 space-y-3">
+              <p class="text-sm text-danger" v-text="keyError"></p>
+              <Button data-testid="retry-mint" variant="primary" @click="ensureKeyAndPoll">Retry</Button>
             </div>
-            <Button variant="primary" class="w-full" @click="step = 2">
-              Continue
-            </Button>
-          </div>
-
-          <div v-else class="space-y-4">
-            <a
-              v-if="githubAppStatus?.install_url"
-              :href="safeUrl(githubAppStatus.install_url)"
-              class="w-full flex items-center justify-center gap-3 rounded-md border border-border bg-surface px-4 py-3 text-sm font-medium text-text hover:bg-surface-subtle focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-2 focus:ring-offset-background"
-            >
-              <svg class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
-                <path fill-rule="evenodd" d="M10 0C4.477 0 0 4.477 0 10c0 4.42 2.865 8.166 6.839 9.49.5.092.682-.217.682-.482 0-.237-.008-.866-.013-1.7-2.782.604-3.369-1.34-3.369-1.34-.454-1.156-1.11-1.464-1.11-1.464-.908-.62.069-.608.069-.608 1.003.07 1.531 1.03 1.531 1.03.892 1.529 2.341 1.087 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.11-4.555-4.943 0-1.091.39-1.984 1.029-2.683-.103-.253-.446-1.27.098-2.647 0 0 .84-.269 2.75 1.025A9.564 9.564 0 0110 4.844c.85.004 1.705.115 2.504.337 1.909-1.294 2.747-1.025 2.747-1.025.546 1.377.203 2.394.1 2.647.64.699 1.028 1.592 1.028 2.683 0 3.842-2.339 4.687-4.566 4.935.359.309.678.919.678 1.852 0 1.336-.012 2.415-.012 2.743 0 .267.18.578.688.48C17.137 18.163 20 14.418 20 10c0-5.523-4.477-10-10-10z" clip-rule="evenodd" />
-              </svg>
-              Install GitHub App
-            </a>
-
-            <button
-              @click="step = 2"
-              class="w-full text-sm text-muted hover:text-text underline"
-            >
-              Skip for now
-            </button>
-          </div>
-        </div>
-
-        <!-- Step 2: Create project -->
-        <div v-if="step === 2">
-          <h1 class="text-2xl font-semibold text-text mb-2">Create your project</h1>
-          <p class="text-sm text-muted mb-6">Set up your first project to start monitoring errors.</p>
-
-          <form @submit.prevent="submitProject" class="space-y-4">
-            <div>
-              <label for="project-name" class="block text-sm font-medium text-muted">
-                Project name
-              </label>
-              <input
-                id="project-name"
-                v-model="projectName"
-                type="text"
-                required
-                autofocus
-                :disabled="loading"
-                placeholder="My App"
-                class="mt-1 block w-full rounded-md border border-border bg-surface-subtle px-3 py-2 text-sm text-text focus:border-accent focus:ring-1 focus:ring-accent disabled:opacity-50"
-              />
-            </div>
-
-            <div v-if="githubAppStatus?.installed">
-              <label class="block text-sm font-medium text-muted">
-                Repository
-              </label>
-              <div class="mt-1">
-                <RepoSelector v-model="selectedRepo" />
+            <p v-else-if="keyLoading || !apiKey" class="mt-6 text-sm text-muted">Creating a browser ingest key…</p>
+            <div v-else class="mt-6 space-y-5">
+              <CodeBlock :code="installSnippet" />
+              <div class="flex flex-wrap gap-2" role="tablist" aria-label="Framework">
+                <button
+                  v-for="option in ['vue', 'react', 'nextjs', 'other'] as const"
+                  :key="option"
+                  type="button"
+                  class="rounded-md border px-3 py-1.5 text-sm capitalize"
+                  :class="framework === option ? 'border-accent text-accent' : 'border-border text-muted'"
+                  @click="framework = option"
+                >{{ option === 'nextjs' ? 'Next.js' : option }}</button>
+              </div>
+              <CodeBlock :code="initSnippet" />
+              <div>
+                <p class="mb-2 text-sm text-muted">Temporarily add this button and click it:</p>
+                <CodeBlock :code="testButtonSnippet" />
+              </div>
+              <div v-if="!hasEvents" class="flex items-center gap-3 rounded-md border border-border bg-surface p-4 text-sm text-muted">
+                <span class="h-4 w-4 animate-spin rounded-full border-2 border-accent border-r-transparent"></span>
+                Waiting for your first event…
+              </div>
+              <div v-else class="space-y-4 rounded-md border border-success/30 bg-success/10 p-4">
+                <p class="text-sm text-success">Event received. View <a
+                  data-testid="latest-group-link"
+                  :href="latestGroupId ? '/issues/' + latestGroupId : '/'"
+                  class="underline"
+                >the latest error Opslane captured</a>.</p>
+                <p class="text-xs text-muted">You can delete the test button now. Move the key to an environment variable before committing.</p>
+                <Button data-testid="sdk-continue" variant="primary" @click="continueFromSdk">Continue</Button>
               </div>
             </div>
-            <div v-else>
-              <label for="github-repo" class="block text-sm font-medium text-muted">
-                GitHub repository
-                <span class="text-faint font-normal">(optional)</span>
-              </label>
-              <input
-                id="github-repo"
-                v-model="selectedRepo"
-                type="text"
-                :disabled="loading"
-                placeholder="owner/repo"
-                class="mt-1 block w-full rounded-md border border-border bg-surface-subtle px-3 py-2 text-sm text-text focus:border-accent focus:ring-1 focus:ring-accent disabled:opacity-50"
-              />
-              <p class="mt-1 text-xs text-muted">Install the GitHub App in Settings to enable repo access.</p>
+          </section>
+
+          <section v-else-if="step === 'connect_github'">
+            <h1 class="text-2xl font-semibold text-text">Connect GitHub</h1>
+            <p class="mt-2 text-sm text-muted">Connect a repository so Opslane can open verified fix PRs.</p>
+            <p v-if="githubError" class="mt-4 text-sm text-danger" v-text="githubError"></p>
+
+            <form v-if="state?.github_mode === 'pat'" class="mt-6 space-y-4" @submit.prevent="attachRepo(patRepo)">
+              <div>
+                <label for="pat-repo" class="block text-sm font-medium text-muted">Repository</label>
+                <input id="pat-repo" v-model="patRepo" required placeholder="owner/repo" class="mt-1 w-full rounded-md border border-border bg-surface-subtle px-3 py-2 text-sm text-text" />
+              </div>
+              <Button type="submit" variant="primary" class="w-full" :busy="githubBusy" :disabled="!patRepo.trim()">Connect repository</Button>
+            </form>
+            <div v-else class="mt-6 space-y-4">
+              <a
+                v-if="installHref && !githubAppStatus?.installed"
+                :href="installHref"
+                target="_blank"
+                rel="noopener noreferrer"
+                class="flex w-full items-center justify-center rounded-md bg-accent px-4 py-3 text-sm font-medium text-on-accent"
+              >Install GitHub App</a>
+              <Button v-if="!githubAppStatus?.installed" class="w-full" @click="loadGitHubStatus">Check again</Button>
+              <div v-else class="space-y-3">
+                <RepoSelector v-model="selectedRepo" :disabled="githubBusy" />
+                <Button variant="primary" class="w-full" :busy="githubBusy" :disabled="!selectedRepo" @click="attachRepo(selectedRepo)">Connect repository</Button>
+              </div>
+              <p v-if="!githubAppStatus?.installed" class="text-xs text-muted">Waiting for GitHub? Ask an admin to approve the installation, or continue for now.</p>
             </div>
-
-            <div v-if="error" class="text-sm text-danger" v-text="error"></div>
-
-            <Button variant="primary" class="w-full" type="submit" :disabled="loading || !projectName.trim()">
-              {{ loading ? 'Creating...' : 'Create project' }}
-            </Button>
-          </form>
-        </div>
-
-        <!-- Step 3: API key -->
-        <div v-if="step === 3">
-          <h1 class="text-2xl font-semibold text-text mb-2">Your API key</h1>
-          <p class="text-sm text-muted mb-6">Use this key to connect your application to Opslane.</p>
-
-          <div class="rounded-lg bg-surface-subtle text-text p-4 font-mono text-sm break-all relative">
-            <span v-text="apiKey"></span>
-            <div class="absolute top-2 right-2">
-              <CopyButton :text="apiKey" />
-            </div>
-          </div>
-
-          <div class="mt-3 rounded-md bg-warning/10 border border-warning/20 p-3">
-            <p class="text-sm text-warning">
-              Save this key -- you won't see it again.
-            </p>
-          </div>
-
-          <Button variant="primary" class="mt-6 w-full" @click="keySaved">
-            I've saved my key
-          </Button>
-        </div>
-
-        <!-- Step 4: Install SDK -->
-        <div v-if="step === 4">
-          <h1 class="text-2xl font-semibold text-text mb-2">Install the SDK</h1>
-          <p class="text-sm text-muted mb-6">Opslane is opening a setup PR against your repository.</p>
-
-          <div v-if="setupPr.status === 'pending' || setupPr.status === 'opening' || setupLoading" class="rounded-md border border-border bg-surface p-4">
-            <div class="flex items-center gap-3 text-sm text-muted">
-              <svg class="h-5 w-5 animate-spin text-accent" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-              </svg>
-              Opening your install PR...
-            </div>
-            <p class="mt-3 text-xs text-muted">This can take a few minutes while the agent edits and builds your app.</p>
-          </div>
-
-          <div v-else-if="setupPr.status === 'open'" class="space-y-4">
-            <a
-              v-if="setupPrHref"
-              :href="setupPrHref"
-              target="_blank"
-              rel="noopener noreferrer"
-              class="w-full flex items-center justify-center rounded-md bg-accent px-4 py-3 text-sm font-medium text-on-accent hover:bg-accent/90"
-            >
-              Review & merge install PR<span v-if="setupPr.pr_number">&nbsp;#{{ setupPr.pr_number }}</span>
-            </a>
-
-            <div class="rounded-md border border-warning/20 bg-warning/10 p-3">
-              <p class="text-sm text-warning mb-2">Add this key as a build environment variable before deploying.</p>
-              <CodeBlock :code="viteEnvSnippet" />
-            </div>
-
-            <Button variant="primary" class="w-full" @click="continueToTest">
-              I've merged it
-            </Button>
-          </div>
-
-          <div v-else-if="setupPr.status === 'already_installed'" class="space-y-4">
-            <div class="rounded-md border border-success/20 bg-success/10 p-4 text-sm text-success">
-              Opslane is already installed in this repository.
-            </div>
-            <Button variant="primary" class="w-full" @click="continueToTest">Send a test error</Button>
-          </div>
-
-          <div v-else class="space-y-4">
-            <div class="rounded-md border border-danger/20 bg-danger/10 p-4">
-              <p class="text-sm text-danger" v-text="setupPr.error || setupError || 'Opslane could not open the setup PR.'"></p>
-            </div>
-            <Button variant="primary" class="w-full" @click="openSetupPR">Retry</Button>
-          </div>
-        </div>
-
-        <!-- Step 5: Test it -->
-        <div v-if="step === 5">
-          <h1 class="text-2xl font-semibold text-text mb-2">Test it!</h1>
-
-          <div v-if="!hasEvents">
-            <p class="text-sm text-muted mb-6">
-              Trigger a test error in your app to verify the integration.
-            </p>
-
-            <CodeBlock :code="testSnippet" />
-
-            <div class="mt-6 flex items-center gap-3 text-sm text-muted">
-              <svg class="h-5 w-5 animate-spin text-accent" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-              </svg>
-              Waiting for your first event...
-            </div>
-
-            <button
-              @click="goToDashboard"
-              class="mt-6 text-sm text-muted hover:text-text underline"
-            >
-              Skip for now
+            <button data-testid="defer-github" type="button" class="mt-6 w-full text-sm text-muted underline hover:text-text" @click="deferGitHub">
+              Do this later
             </button>
-          </div>
+          </section>
 
-          <div v-else class="text-center py-8">
-            <svg class="h-16 w-16 text-success mx-auto mb-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-            </svg>
-            <h2 class="text-lg font-medium text-text">Event received!</h2>
-            <p class="mt-1 text-sm text-muted">Your integration is working. Welcome to Opslane.</p>
+          <section v-else-if="step === 'connect_slack'">
+            <h1 class="text-2xl font-semibold text-text">Connect Slack</h1>
+            <p class="mt-2 text-sm text-muted">Send your daily digest to a Slack channel.</p>
+            <form data-testid="slack-connect" class="mt-6 space-y-4" @submit.prevent="connectSlack">
+              <div>
+                <label for="slack-webhook-url" class="block text-sm font-medium text-muted">Incoming webhook URL</label>
+                <input id="slack-webhook-url" v-model="slackWebhookUrl" type="url" required placeholder="https://hooks.slack.com/services/…" class="mt-1 w-full rounded-md border border-border bg-surface-subtle px-3 py-2 text-sm text-text" />
+                <a href="https://github.com/opslane/opslane/blob/main/docs/guides/slack-notifications.md" target="_blank" rel="noopener noreferrer" class="mt-1 inline-block text-xs text-accent underline">How to create a Slack webhook</a>
+              </div>
+              <div>
+                <label for="digest-timezone" class="block text-sm font-medium text-muted">Digest timezone</label>
+                <input id="digest-timezone" v-model="digestTimezone" class="mt-1 w-full rounded-md border border-border bg-surface-subtle px-3 py-2 text-sm text-text" />
+              </div>
+              <p v-if="slackError" class="text-sm text-danger" v-text="slackError"></p>
+              <Button type="submit" variant="primary" class="w-full" :busy="slackBusy" :disabled="!slackWebhookUrl.trim()">Send test and connect</Button>
+              <button data-testid="defer-slack" type="button" class="w-full text-sm text-muted underline hover:text-text" @click="deferSlack">
+                Do this later
+              </button>
+            </form>
+          </section>
 
-            <Button variant="primary" class="mt-6" @click="goToDashboard">
-              Go to dashboard
-            </Button>
-          </div>
+          <section v-else class="py-8 text-center">
+            <div class="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-success/10 text-2xl text-success">✓</div>
+            <h1 class="mt-4 text-2xl font-semibold text-text">You are set up</h1>
+            <p class="mt-2 text-sm text-muted">Opslane received your first event. Move the browser key to an environment variable before you commit.</p>
+            <Button variant="primary" class="mt-6" @click="goToDashboard">Go to dashboard</Button>
+          </section>
         </div>
       </div>
-    </div>
+    </template>
   </div>
 </template>
