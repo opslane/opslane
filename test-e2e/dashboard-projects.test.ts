@@ -103,6 +103,7 @@ describe('first-class projects dashboard', () => {
     }]);
     await context.addInitScript(({ projectId, environmentId }) => {
       localStorage.setItem('opslane_authed', '1');
+      localStorage.setItem('opslane_onboarding_complete', '1');
       if (!localStorage.getItem('opslane_project_id')) {
         localStorage.setItem('opslane_project_id', projectId);
         localStorage.setItem('opslane_project_name', 'First project');
