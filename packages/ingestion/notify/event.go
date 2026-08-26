@@ -74,6 +74,9 @@ type DigestPayload struct {
 	NeedsHumanBacklog   int                   `json:"needs_human_backlog"`
 	Watching            DigestWatching        `json:"watching"`
 	SchemaVersion       int                   `json:"schema_version,omitempty"`
+	// Timezone is the project's digest timezone; the renderer uses it to show
+	// calendar dates (the waiting-since line) in the reader's local day.
+	Timezone            string                `json:"timezone,omitempty"`
 	ReceiptItems        []ReceiptItem         `json:"receipt_items,omitempty"`
 	TriageCounts        *DigestTriageCounts   `json:"triage_counts,omitempty"`
 	HeldBackCount       int                   `json:"held_back_count,omitempty"`

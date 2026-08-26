@@ -21,6 +21,26 @@ const (
 	reasonIncluded            = "included"
 )
 
+// knownReasonCodes is the closed vocabulary a ledger row may carry. Both
+// reconcileActionable and the SLA unknown_reason_code diagnostic derive their
+// allowlists from this slice, so adding a reason constant without appending it
+// here makes every row carrying it a loud reconciliation finding. That is the
+// point: the drift breaks visibly instead of silently.
+var knownReasonCodes = []string{
+	reasonIncluded, reasonSnoozed, reasonErrorLaneIneligible,
+	reasonNotPublishable, reasonFrozenLaneOwns, reasonCappedOverflow,
+}
+
+// actionableStatusSQL is the SQL membership list for statuses that require a
+// human. digest/sla.go and handler.SnoozeIncident embed the same pair, and the
+// migration 062 trigger hardcodes it; a status joining this set must update
+// all four sites together.
+const actionableStatusSQL = `('awaiting_approval','needs_human')`
+
+// actionableReceiptCap bounds the digest's actionable section: the top
+// (cap-1) candidates by impact plus the single oldest waiting item.
+const actionableReceiptCap = 5
+
 type actionableCandidate struct {
 	GroupID               string
 	Kind                  string
@@ -57,7 +77,7 @@ func loadActionableCandidates(ctx context.Context, tx pgx.Tx, projectID string) 
 		  FROM error_groups g
 		  LEFT JOIN LATERAL (` + diagnosisValidationLateralSQL + `) d ON true
 		 WHERE g.project_id=$1
-		   AND g.status IN ('awaiting_approval','needs_human')
+		   AND g.status IN ` + actionableStatusSQL + `
 		 ORDER BY g.actionable_since NULLS LAST,g.id`
 	rows, err := tx.Query(ctx, query, projectID)
 	if err != nil {
@@ -149,12 +169,12 @@ func selectActionable(eligible []actionableCandidate) (picked []actionableCandid
 		}
 		return left.GroupID < right.GroupID
 	})
-	if len(byImpact) <= 5 {
+	if len(byImpact) <= actionableReceiptCap {
 		return byImpact, 0
 	}
 
-	picked = append(picked, byImpact[:4]...)
-	inPicked := make(map[string]bool, 4)
+	picked = append(picked, byImpact[:actionableReceiptCap-1]...)
+	inPicked := make(map[string]bool, actionableReceiptCap-1)
 	for _, candidate := range picked {
 		inPicked[candidate.GroupID] = true
 	}
@@ -173,7 +193,7 @@ func selectActionable(eligible []actionableCandidate) (picked []actionableCandid
 	if oldest != nil {
 		picked = append(picked, *oldest)
 	} else {
-		picked = append(picked, byImpact[4])
+		picked = append(picked, byImpact[actionableReceiptCap-1])
 	}
 	return picked, len(eligible) - len(picked)
 }
@@ -255,12 +275,19 @@ func writeActionableLedger(ctx context.Context, tx pgx.Tx, runID string, eval ev
 	return nil
 }
 
+// reconcileActionable is a tripwire, not an independent invariant check:
+// evaluateActionable assigns every candidate a reason from the same
+// vocabulary, so under today's code the mismatch branch is unreachable. It
+// fires only when a future edit emits a reason missing from
+// knownReasonCodes, which is exactly the drift it exists to make loud. Do
+// not read a quiet reconcile as proof the selection was correct.
 func reconcileActionable(eval evaluation) (string, error) {
 	accounted := len(eval.Included)
-	allowed := map[string]bool{
-		reasonSnoozed: true, reasonErrorLaneIneligible: true,
-		reasonNotPublishable: true, reasonFrozenLaneOwns: true,
-		reasonCappedOverflow: true,
+	allowed := make(map[string]bool, len(knownReasonCodes))
+	for _, reason := range knownReasonCodes {
+		if reason != reasonIncluded {
+			allowed[reason] = true
+		}
 	}
 	for _, reason := range eval.Excluded {
 		if allowed[reason] {

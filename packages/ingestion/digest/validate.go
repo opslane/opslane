@@ -48,6 +48,7 @@ type validationRun struct {
 	ProjectName string
 	GithubRepo  string
 	Status      string
+	Timezone    string
 	RunDate     string
 	WindowFrom  time.Time
 	WindowTo    time.Time
@@ -115,10 +116,10 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string) e
 	var run validationRun
 	if err := tx.QueryRow(ctx, `
 		SELECT r.project_id::text,p.name,COALESCE(p.github_repo,''),r.status,
-		       r.run_date::text,r.window_from,r.window_to,COALESCE(r.writer_payload,r.payload)
+		       p.digest_timezone,r.run_date::text,r.window_from,r.window_to,COALESCE(r.writer_payload,r.payload)
 		  FROM digest_runs r JOIN projects p ON p.id=r.project_id
 		 WHERE r.id=$1 FOR UPDATE OF r`, runID).Scan(
-		&run.ProjectID, &run.ProjectName, &run.GithubRepo, &run.Status,
+		&run.ProjectID, &run.ProjectName, &run.GithubRepo, &run.Status, &run.Timezone,
 		&run.RunDate, &run.WindowFrom, &run.WindowTo, &run.Payload,
 	); err != nil {
 		return fmt.Errorf("load digest run: %w", err)
@@ -265,6 +266,15 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string) e
 		return generated[i].Outcome == "needs_human" && generated[j].Outcome != "needs_human"
 	})
 	overflowCount := 0
+	// The cross-lane dedup set is built from the PRE-truncation card list: a
+	// card deferred past the render cap is re-admitted to tomorrow's frozen
+	// digest, and letting today's receipt lane also deliver it would show the
+	// same incident twice across two days while today's overflow count
+	// contradicts the receipts below it.
+	frozenIncidentIDs := make(map[string]bool, len(generated))
+	for _, card := range generated {
+		frozenIncidentIDs[card.IncidentID] = true
+	}
 	if len(generated) > notify.DigestV4CardCap {
 		for _, dropped := range generated[notify.DigestV4CardCap:] {
 			accounted[dropped.EpisodeID] = "deferred"
@@ -292,10 +302,6 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string) e
 	}
 	var actionableEval evaluation
 	if actionableErr == nil {
-		frozenIncidentIDs := make(map[string]bool, len(generated))
-		for _, card := range generated {
-			frozenIncidentIDs[card.IncidentID] = true
-		}
 		actionableCandidates, err := loadActionableCandidates(ctx, tx, run.ProjectID)
 		if err != nil {
 			actionableErr = err
@@ -352,6 +358,7 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string) e
 				To:   run.WindowTo.UTC().Format(time.RFC3339Nano),
 			},
 			SchemaVersion:   4,
+			Timezone:        run.Timezone,
 			GeneratedCards:  generated,
 			OverflowCount:   overflowCount,
 			ReceiptItems:    receiptItems,

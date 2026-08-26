@@ -1383,6 +1383,12 @@ func (d *Dependencies) SnoozeIncident(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	incidentID := chi.URLParam(r, "incidentID")
+	if _, err := uuid.Parse(incidentID); err != nil {
+		// A malformed id is indistinguishable from a missing incident to the
+		// caller; mapping it to 404 keeps probe traffic out of the 5xx budget.
+		writeJSONError(w, http.StatusNotFound, "no such incident")
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<14)
 	var body struct {
 		Until json.RawMessage `json:"until"`

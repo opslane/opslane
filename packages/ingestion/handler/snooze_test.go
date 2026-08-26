@@ -77,6 +77,23 @@ func TestSnoozeIncidentContractAndAuthorization(t *testing.T) {
 	if response := post(router, projectID, actionableID, `{"until":"`+tooFar+`"}`, token); response.Code != http.StatusBadRequest {
 		t.Fatalf("over-30-day status=%d body=%s", response.Code, response.Body.String())
 	}
+	if response := post(router, projectID, actionableID, `{"until":123}`, token); response.Code != http.StatusBadRequest {
+		t.Fatalf("numeric-until status=%d body=%s", response.Code, response.Body.String())
+	}
+	if response := post(router, projectID, actionableID, `{"until":"tomorrow"}`, token); response.Code != http.StatusBadRequest {
+		t.Fatalf("non-RFC3339 status=%d body=%s", response.Code, response.Body.String())
+	}
+	if response := post(router, projectID, actionableID, `{bad json`, token); response.Code != http.StatusBadRequest {
+		t.Fatalf("malformed-body status=%d body=%s", response.Code, response.Body.String())
+	}
+	if response := post(router, projectID, "not-a-uuid", `{"until":null}`, token); response.Code != http.StatusNotFound {
+		t.Fatalf("non-uuid incident status=%d body=%s", response.Code, response.Body.String())
+	}
+	// Exactly the cap is allowed; a minute inside it avoids clock-edge flakes.
+	atCap := time.Now().UTC().Add(30*24*time.Hour - time.Minute).Format(time.RFC3339)
+	if response := post(router, projectID, actionableID, `{"until":"`+atCap+`"}`, token); response.Code != http.StatusNoContent {
+		t.Fatalf("at-cap status=%d body=%s", response.Code, response.Body.String())
+	}
 
 	wanted := time.Now().UTC().Add(7 * 24 * time.Hour).Truncate(time.Second)
 	if response := post(router, projectID, actionableID, `{"until":"`+wanted.Format(time.RFC3339)+`"}`, token); response.Code != http.StatusNoContent {

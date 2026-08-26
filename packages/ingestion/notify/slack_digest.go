@@ -413,17 +413,32 @@ func digestReceiptCardBlocks(payload EventPayload, item ReceiptItem, receiptLine
 	}
 
 	links := make([]string, 0, 4)
-	if clock, err := time.Parse(time.RFC3339Nano, payload.Digest.Window.To); err == nil &&
-		item.ActionableSince != nil && !item.ActionableSince.After(clock) {
-		days := int(clock.Sub(*item.ActionableSince).Hours() / 24)
-		label := fmt.Sprintf("%d days", days)
-		if days == 1 {
-			label = "1 day"
+	if item.ActionableSince != nil {
+		clock, err := time.Parse(time.RFC3339Nano, payload.Digest.Window.To)
+		switch {
+		case err != nil:
+			// Sibling non-renderable skips warn; dropping the aging line must be
+			// just as visible, or a window format drift silently removes it.
+			slog.Warn("digest receipt aging line dropped: window is not RFC3339Nano",
+				"incident_id", item.IncidentID, "window_to", payload.Digest.Window.To)
+		case !item.ActionableSince.After(clock):
+			location := time.UTC
+			if payload.Digest.Timezone != "" {
+				if loc, locErr := time.LoadLocation(payload.Digest.Timezone); locErr == nil {
+					location = loc
+				}
+			}
+			days := int(clock.Sub(*item.ActionableSince).Hours() / 24)
+			label := fmt.Sprintf("%d days", days)
+			if days == 1 {
+				label = "1 day"
+			}
+			if days == 0 {
+				label = "today"
+			}
+			links = append(links, fmt.Sprintf("waiting on you since %s (%s)",
+				item.ActionableSince.In(location).Format("Jan 2"), label))
 		}
-		if days == 0 {
-			label = "today"
-		}
-		links = append(links, fmt.Sprintf("waiting on you since %s (%s)", item.ActionableSince.Format("Jan 2"), label))
 	}
 	if (item.ReceiptState == "pr_open" || item.ReceiptState == "pr_draft") && item.PRURL != "" {
 		label := "Review fix PR"

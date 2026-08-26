@@ -117,6 +117,7 @@ func logSLADiagnostics(report SLAReport) {
 	logFindings("missing_run", report.MissingRuns)
 	logFindings("omitted_actionable", report.OmittedActionable)
 	logFindings("reconciliation_failure", report.ReconciliationFailures)
+	logFindings("long_snooze", report.LongSnoozes)
 }
 
 func (s *Scheduler) projects(ctx context.Context) ([]scheduledProject, error) {

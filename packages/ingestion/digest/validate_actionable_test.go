@@ -293,3 +293,60 @@ func TestLoadActionableCandidatesKeepsEveryLedgerCandidateOnce(t *testing.T) {
 		t.Errorf("multiple-diagnosis candidate was not included exactly once: %+v", evaluation.Included)
 	}
 }
+
+// A failure inside the actionable lane must degrade, never abort the digest:
+// the run still delivers, receipts are withheld (no receipts without their
+// ledger), and the payload carries the fallback alert. The failure is induced
+// by renaming the ledger table for the duration of the run.
+func TestValidateDegradesWhenActionableLedgerUnavailable(t *testing.T) {
+	pool := testPool(t)
+	now := time.Now().UTC()
+	fixture := seedDigestFixture(t, pool, now)
+	t.Cleanup(func() { cleanupActionableDiagnoses(t, pool, fixture.ProjectID) })
+	seedDestination(t, pool, fixture.ProjectID, []string{"digest.daily"})
+	seedActionableGroup(t, pool, fixture.ProjectID, fixture.EnvID, "friction", "awaiting_approval", now.Add(-time.Hour))
+
+	if _, err := pool.Exec(context.Background(), `ALTER TABLE digest_run_candidate_evaluations RENAME TO drce_degrade_test`); err != nil {
+		t.Fatal(err)
+	}
+	restored := false
+	restore := func() {
+		if restored {
+			return
+		}
+		restored = true
+		if _, err := pool.Exec(context.Background(), `ALTER TABLE drce_degrade_test RENAME TO digest_run_candidate_evaluations`); err != nil {
+			t.Fatalf("restore ledger table: %v", err)
+		}
+	}
+	defer restore()
+
+	runID := publishEmptyWrittenRun(t, pool, fixture.ProjectID, now)
+	restore()
+
+	var status, alert string
+	var receipts int
+	if err := pool.QueryRow(context.Background(), `SELECT status,
+		COALESCE(rendered_payload->'digest'->>'delivery_alert',''),
+		COALESCE(jsonb_array_length(rendered_payload->'digest'->'receipt_items'),0)
+		FROM digest_runs WHERE id=$1`, runID).Scan(&status, &alert, &receipts); err != nil {
+		t.Fatal(err)
+	}
+	if status != "delivered" {
+		t.Fatalf("degraded run status=%q, want delivered", status)
+	}
+	if receipts != 0 {
+		t.Fatalf("receipts published without a ledger: %d", receipts)
+	}
+	if alert != "Actionable findings could not be evaluated for this digest." {
+		t.Fatalf("delivery alert=%q", alert)
+	}
+	var ledgerRows int
+	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM digest_run_candidate_evaluations
+		WHERE digest_run_id=$1`, runID).Scan(&ledgerRows); err != nil {
+		t.Fatal(err)
+	}
+	if ledgerRows != 0 {
+		t.Fatalf("ledger rows exist for a degraded run: %d", ledgerRows)
+	}
+}

@@ -104,3 +104,37 @@ func TestSelectActionableFallsBackToFifthByImpactWithoutAgeStamps(t *testing.T) 
 		t.Fatalf("picked=%+v overflow=%d", picked, overflow)
 	}
 }
+
+func TestReconcileActionableTripwire(t *testing.T) {
+	impact := int64(5)
+	candidate := actionableCandidate{GroupID: "g1", Kind: "friction", Status: "awaiting_approval", ImpactVisits: &impact}
+	// Fully accounted: one included candidate, nothing pending.
+	clean := evaluation{
+		Included:   []actionableCandidate{candidate},
+		Excluded:   map[string]string{},
+		Candidates: []actionableCandidate{candidate},
+	}
+	if alert, err := reconcileActionable(clean); alert != "" || err != nil {
+		t.Fatalf("clean evaluation flagged: alert=%q err=%v", alert, err)
+	}
+	// A reason outside knownReasonCodes trips the wire.
+	other := actionableCandidate{GroupID: "g2", Kind: "friction", Status: "awaiting_approval"}
+	drifted := evaluation{
+		Included:   []actionableCandidate{candidate},
+		Excluded:   map[string]string{"g2": "made_up_reason"},
+		Candidates: []actionableCandidate{candidate, other},
+	}
+	alert, err := reconcileActionable(drifted)
+	if err == nil || alert != "1 items are pending but could not be rendered" {
+		t.Fatalf("drifted evaluation not flagged: alert=%q err=%v", alert, err)
+	}
+}
+
+func TestToReceiptItemsRejectsUnsupportedCandidates(t *testing.T) {
+	if _, err := toReceiptItems([]actionableCandidate{{GroupID: "g", Kind: "insight", Status: "awaiting_approval"}}); err == nil {
+		t.Fatal("unsupported kind accepted")
+	}
+	if _, err := toReceiptItems([]actionableCandidate{{GroupID: "g", Kind: "friction", Status: "resolved"}}); err == nil {
+		t.Fatal("unsupported status accepted")
+	}
+}

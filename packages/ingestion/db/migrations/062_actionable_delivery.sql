@@ -1,6 +1,10 @@
 -- 062_actionable_delivery.sql -- repeat actionable delivery and its audit ledger.
 -- Additive and safe for old binaries, which ignore these columns and table.
 
+-- Transactional: the runner applies files statement-by-statement, and the
+-- DROP TRIGGER/CREATE TRIGGER pair must never leave a window with no
+-- lifecycle trigger on a live database. Nothing here needs CONCURRENTLY.
+BEGIN;
 ALTER TABLE error_groups ADD COLUMN IF NOT EXISTS actionable_since TIMESTAMPTZ;
 ALTER TABLE error_groups ADD COLUMN IF NOT EXISTS snoozed_until TIMESTAMPTZ;
 
@@ -66,3 +70,13 @@ CREATE INDEX IF NOT EXISTS idx_drce_group
 CREATE INDEX IF NOT EXISTS idx_error_groups_actionable
   ON error_groups (project_id, actionable_since)
   WHERE status IN ('awaiting_approval', 'needs_human');
+
+-- Repair for any pre-trigger drift: a row that left the actionable statuses
+-- while no lifecycle trigger existed keeps stale stamps the stamping backfill
+-- above cannot fix.
+UPDATE error_groups
+   SET actionable_since = NULL, snoozed_until = NULL
+ WHERE status NOT IN ('awaiting_approval','needs_human')
+   AND (actionable_since IS NOT NULL OR snoozed_until IS NOT NULL);
+
+COMMIT;
