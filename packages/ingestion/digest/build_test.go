@@ -163,6 +163,15 @@ func seedDigestFixtureWithSessionAge(t *testing.T, pool *pgxpool.Pool, now time.
 			`DELETE FROM sessions WHERE project_id IN (SELECT id FROM projects WHERE org_id = $1)`,
 			`DELETE FROM end_users WHERE project_id IN (SELECT id FROM projects WHERE org_id = $1)`,
 			`DELETE FROM error_groups WHERE project_id IN (SELECT id FROM projects WHERE org_id = $1)`,
+			// Jobs are not only created by digest tests: the priority sweeper's
+			// pass (priority/sweeper.go) inserts error_group_jobs for every
+			// project it scans, and under `go test ./...` its package runs in
+			// parallel against this shared database. Without these two deletes,
+			// DELETE FROM projects races that sweep and fails on
+			// error_group_jobs_project_id_fkey (observed on main pushes
+			// 33015197337 and 33016532031).
+			`DELETE FROM job_usage WHERE job_id IN (SELECT id FROM error_group_jobs WHERE project_id IN (SELECT id FROM projects WHERE org_id = $1))`,
+			`DELETE FROM error_group_jobs WHERE project_id IN (SELECT id FROM projects WHERE org_id = $1)`,
 			`UPDATE projects SET default_environment_id = NULL WHERE org_id = $1`,
 			`DELETE FROM environments WHERE project_id IN (SELECT id FROM projects WHERE org_id = $1)`,
 			`DELETE FROM projects WHERE org_id = $1`,
