@@ -3766,6 +3766,22 @@ func (q *Queries) HasEvents(ctx context.Context, projectID string) (bool, error)
 	return exists, nil
 }
 
+// LatestErrorGroupID returns the most recently active error group, or nil.
+func (q *Queries) LatestErrorGroupID(ctx context.Context, projectID string) (*string, error) {
+	var id string
+	err := q.pool.QueryRow(ctx,
+		`SELECT id::text FROM error_groups WHERE project_id = $1 ORDER BY last_seen DESC, id DESC LIMIT 1`,
+		projectID,
+	).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("latest error group: %w", err)
+	}
+	return &id, nil
+}
+
 // VerifyEnvironmentAccess checks that an environment belongs to the given org.
 // Returns the project_id if the environment is owned, empty string if not found.
 func (q *Queries) VerifyEnvironmentAccess(ctx context.Context, orgID, envID string) (string, error) {
