@@ -23,9 +23,6 @@ var ErrTokenReuse = errors.New("refresh token reuse detected")
 // that is not in the fix-triggerable state for its kind.
 var ErrNotInvestigated = errors.New("incident not in a fix-triggerable state")
 
-// ErrNoGithubRepo indicates the project has no repo configured for a setup PR.
-var ErrNoGithubRepo = errors.New("project has no github_repo")
-
 // ErrOrgOnboarded rejects onboarding setup for an org whose wizard already completed.
 var ErrOrgOnboarded = errors.New("org already onboarded")
 
@@ -1789,81 +1786,6 @@ func (q *Queries) TriggerFixJob(ctx context.Context, projectID, groupID, guidanc
 	}
 
 	return jobID, nil
-}
-
-// EnqueueSetupPrJob enqueues a setup_pr job for the project. Idempotent: returns
-// the existing pending/claimed job id if one is already in flight. Tenant-scoped by orgID.
-func (q *Queries) EnqueueSetupPrJob(ctx context.Context, orgID, projectID string) (string, error) {
-	tx, err := q.pool.Begin(ctx)
-	if err != nil {
-		return "", fmt.Errorf("begin tx: %w", err)
-	}
-	defer tx.Rollback(ctx)
-
-	var repo *string
-	err = tx.QueryRow(ctx, `SELECT github_repo FROM projects WHERE id = $1 AND org_id = $2`, projectID, orgID).Scan(&repo)
-	if err == pgx.ErrNoRows {
-		return "", ErrNoGithubRepo
-	}
-	if err != nil {
-		return "", fmt.Errorf("lookup project: %w", err)
-	}
-	if repo == nil || *repo == "" {
-		return "", ErrNoGithubRepo
-	}
-
-	var existing string
-	err = tx.QueryRow(ctx,
-		`SELECT id FROM error_group_jobs
-		  WHERE project_id = $1 AND job_type = 'setup_pr' AND status IN ('pending','claimed')
-		  ORDER BY created_at DESC LIMIT 1`,
-		projectID,
-	).Scan(&existing)
-	if err == nil {
-		if cErr := tx.Commit(ctx); cErr != nil {
-			return "", fmt.Errorf("commit tx: %w", cErr)
-		}
-		return existing, nil
-	}
-	if err != pgx.ErrNoRows {
-		return "", fmt.Errorf("check in-flight: %w", err)
-	}
-
-	var jobID string
-	err = tx.QueryRow(ctx,
-		`INSERT INTO error_group_jobs (project_id, job_type) VALUES ($1, 'setup_pr') RETURNING id`,
-		projectID,
-	).Scan(&jobID)
-	if err != nil {
-		return "", fmt.Errorf("insert setup_pr job: %w", err)
-	}
-	if _, err = tx.Exec(ctx, `UPDATE projects SET setup_pr_status = 'pending', setup_pr_error = NULL WHERE id = $1`, projectID); err != nil {
-		return "", fmt.Errorf("set project status: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return "", fmt.Errorf("commit tx: %w", err)
-	}
-	return jobID, nil
-}
-
-type SetupPrInfo struct {
-	Status   *string
-	PRURL    *string
-	PRNumber *int
-	Error    *string
-}
-
-func (q *Queries) GetSetupPrStatus(ctx context.Context, orgID, projectID string) (*SetupPrInfo, error) {
-	var s SetupPrInfo
-	err := q.pool.QueryRow(ctx,
-		`SELECT setup_pr_status, setup_pr_url, setup_pr_number, setup_pr_error
-		   FROM projects WHERE id = $1 AND org_id = $2`,
-		projectID, orgID,
-	).Scan(&s.Status, &s.PRURL, &s.PRNumber, &s.Error)
-	if err != nil {
-		return nil, fmt.Errorf("get setup pr status: %w", err)
-	}
-	return &s, nil
 }
 
 // === Replay + Source Map ===

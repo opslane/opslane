@@ -106,4 +106,8 @@ func TestOnboardingStateAndCompleteShareTheEventGate(t *testing.T) {
 	if second.Code != http.StatusOK {
 		t.Fatalf("second complete status=%d body=%s", second.Code, second.Body.String())
 	}
+	retiredSetupPR := request(http.MethodPost, "/api/v1/projects/"+provisioned.Project.ID+"/setup-pr", `{}`)
+	if retiredSetupPR.Code != http.StatusNotFound {
+		t.Fatalf("retired setup-pr route status=%d body=%s", retiredSetupPR.Code, retiredSetupPR.Body.String())
+	}
 }
