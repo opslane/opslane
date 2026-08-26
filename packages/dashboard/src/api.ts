@@ -5,9 +5,9 @@ import type {
   SessionDetail, SessionFilters, SessionListResponse,
   AdminOverview, AdminJobsResponse, HealthResponse,
   AuthConfig, AuthUser, ForgotPasswordResult, OrgInvitation,
-  NotificationDestination, NotificationDestinationList, NotificationTestResult,
+	NotificationDestination, NotificationDestinationList, NotificationEventType, NotificationTestResult,
   OAuthEmailVerificationResult, PasswordAuthResult, ResetPasswordResult,
-  ManagedAPIKey, CreatedAPIKey,
+	ManagedAPIKey, CreatedAPIKey, OnboardingState,
 } from './types/api';
 export type {
   AuthConfig, AuthMembership, AuthUser, ForgotPasswordResult, OrgInvitation,
@@ -199,7 +199,8 @@ export interface OnboardingSetupResponse {
 }
 
 export interface EventStatus {
-  has_events: boolean;
+	has_events: boolean;
+	latest_error_group_id: string | null;
 }
 
 // === Project D: replay ===
@@ -460,8 +461,8 @@ export function listAPIKeys(projectId: string): Promise<ManagedAPIKey[]> {
 }
 
 export function createAPIKey(
-  projectId: string,
-  input: { label: string; expires_at: string | null },
+	projectId: string,
+	input: { label: string; expires_at: string | null; scope?: 'api' | 'ingest' },
 ): Promise<CreatedAPIKey> {
   return postJSON<CreatedAPIKey>(`/projects/${projectId}/api-keys`, input);
 }
@@ -479,8 +480,14 @@ export function listNotificationDestinations(
 }
 
 export function createNotificationDestination(
-  projectId: string,
-  data: { name: string; webhook_url: string; delivery_policy?: NotificationDestination['delivery_policy'] },
+	projectId: string,
+	data: {
+		name: string;
+		webhook_url: string;
+		enabled?: boolean;
+		event_types?: NotificationEventType[];
+		delivery_policy?: NotificationDestination['delivery_policy'];
+	},
 ): Promise<NotificationDestination> {
   return postJSON<NotificationDestination>(
     `/projects/${projectId}/notification-destinations`,
@@ -533,6 +540,14 @@ export function onboardingSetup(
     project_name: projectName,
     github_repo: githubRepo || undefined,
   });
+}
+
+export function getOnboardingState(): Promise<OnboardingState> {
+	return fetchJSON<OnboardingState>('/onboarding/state');
+}
+
+export function completeOnboarding(): Promise<{ onboarding_complete: boolean }> {
+	return postJSON<{ onboarding_complete: boolean }>('/onboarding/complete', {});
 }
 
 export function getEventStatus(projectId: string): Promise<EventStatus> {

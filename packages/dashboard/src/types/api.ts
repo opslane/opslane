@@ -13,6 +13,8 @@ export interface AuthUser {
   name: string;
   is_admin: boolean;
   memberships?: AuthMembership[];
+	// Present on GET /auth/me; token-issuance responses may omit it.
+  onboarding_complete?: boolean;
 }
 
 export type SocialProviderId = 'google' | 'github';
@@ -56,7 +58,7 @@ export interface OrgInvitation {
 
 export interface ManagedAPIKey {
   key_id: string;
-  scope: 'api';
+	scope: 'api' | 'ingest';
   label: string;
   status: 'active' | 'revoked';
   redacted: string;
@@ -71,7 +73,7 @@ export interface CreatedAPIKey {
   key_id: string;
   token: string;
   label: string;
-  scope: 'api';
+	scope: 'api' | 'ingest';
   expires_at: string | null;
 }
 
@@ -387,6 +389,16 @@ export interface GitHubRepo {
   full_name: string;
   private: boolean;
   default_branch: string;
+}
+
+export interface OnboardingState {
+	onboarding_complete: boolean;
+	next_step: 'create_project' | 'install_sdk' | 'connect_github' | 'connect_slack' | 'done';
+	project_id: string | null;
+	has_events: boolean;
+	github_connected: boolean;
+	github_mode: 'app' | 'pat';
+	slack_connected: boolean;
 }
 
 export interface SetupPrStatus {
