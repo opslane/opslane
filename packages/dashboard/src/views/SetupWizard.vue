@@ -182,7 +182,10 @@ function startEventPolling(): void {
       if (status.has_events) {
         hasEvents.value = true;
         latestGroupId.value = status.latest_error_group_id;
-        if (pollTimer.value) clearInterval(pollTimer.value);
+        // Grouping is async: has_events flips before the error group exists.
+        // Keep polling until the group id arrives so the success link points
+        // at the captured error rather than degrading to the issues list.
+        if (latestGroupId.value && pollTimer.value) clearInterval(pollTimer.value);
       }
     } catch {
       // Keep polling through transient errors.
@@ -249,7 +252,8 @@ async function connectSlack(): Promise<void> {
         name: 'Daily digest',
         webhook_url: slackWebhookUrl.value,
         enabled: false,
-        event_types: ['digest.daily'],
+        // No event_types: the server default subscribes both issue.created and
+        // digest.daily, matching what Settings creates.
         delivery_policy: 'post_triage',
       });
       slackDestId.value = created.id;

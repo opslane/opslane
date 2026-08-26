@@ -104,7 +104,7 @@ describe('SetupWizard', () => {
     await wrapper.get('[data-testid="slack-connect"]').trigger('submit');
     await flushPromises();
     expect(api.createNotificationDestination).toHaveBeenCalledWith('p1', expect.objectContaining({
-      enabled: false, delivery_policy: 'post_triage', event_types: ['digest.daily'],
+      enabled: false, delivery_policy: 'post_triage',
     }));
     expect(api.updateNotificationDestination).toHaveBeenCalledWith('p1', 'd1', { enabled: true });
     expect(api.completeOnboarding).toHaveBeenCalled();
