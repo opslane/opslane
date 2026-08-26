@@ -476,7 +476,7 @@ export interface Account {
   last_seen: string;
 }
 
-export type JobType = 'error_fix' | 'investigate' | 'fix' | 'setup_pr' | 'session_analysis' | 'ci_watch' | 'route_map' | 'product_context' | 'issue_inquiry' | 'digest_write' | 'score_sync' | 'stack_resolve';
+export type JobType = 'error_fix' | 'investigate' | 'fix' | 'session_analysis' | 'ci_watch' | 'route_map' | 'product_context' | 'issue_inquiry' | 'digest_write' | 'score_sync' | 'stack_resolve';
 
 export type PRPosture = 'verified_only' | 'draft_when_unverified';
 
@@ -505,14 +505,6 @@ export interface SessionChunkEnvelope {
     chunked_at: number;
   };
 }
-
-/** Status of the one-time "install Opslane SDK" PR for a project. */
-export type SetupPrStatus =
-  | 'pending'
-  | 'opening'
-  | 'open'
-  | 'already_installed'
-  | 'failed';
 
 export type {
   Adjudication,

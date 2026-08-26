@@ -13,6 +13,8 @@ export interface AuthUser {
   name: string;
   is_admin: boolean;
   memberships?: AuthMembership[];
+	// Present on GET /auth/me; token-issuance responses may omit it.
+  onboarding_complete?: boolean;
 }
 
 export type SocialProviderId = 'google' | 'github';
@@ -56,7 +58,7 @@ export interface OrgInvitation {
 
 export interface ManagedAPIKey {
   key_id: string;
-  scope: 'api';
+	scope: 'api' | 'ingest';
   label: string;
   status: 'active' | 'revoked';
   redacted: string;
@@ -71,7 +73,7 @@ export interface CreatedAPIKey {
   key_id: string;
   token: string;
   label: string;
-  scope: 'api';
+	scope: 'api' | 'ingest';
   expires_at: string | null;
 }
 
@@ -389,11 +391,14 @@ export interface GitHubRepo {
   default_branch: string;
 }
 
-export interface SetupPrStatus {
-  status: '' | 'pending' | 'opening' | 'open' | 'already_installed' | 'failed';
-  pr_url: string | null;
-  pr_number: number | null;
-  error?: string;
+export interface OnboardingState {
+	onboarding_complete: boolean;
+	next_step: 'create_project' | 'install_sdk' | 'connect_github' | 'connect_slack' | 'done';
+	project_id: string | null;
+	has_events: boolean;
+	github_connected: boolean;
+	github_mode: 'app' | 'pat';
+	slack_connected: boolean;
 }
 
 // === Admin observability ===
@@ -409,6 +414,7 @@ export type AdminJobType =
   | 'investigate'
   | 'fix'
   | 'error_fix'
+  // historical only: retired job type, rows persist as dead_letter
   | 'setup_pr'
   | 'ci_watch'
   | 'session_analysis'

@@ -37,6 +37,9 @@ func TestAdminJobsRejectsInvalidFiltersBeforeQuerying(t *testing.T) {
 }
 
 func TestAdminJobsAllowsCIWatchFilter(t *testing.T) {
+	if _, ok := adminJobTypes["setup_pr"]; ok {
+		t.Fatal("retired setup_pr job type remains in the admin filter allowlist")
+	}
 	if _, ok := adminJobTypes["ci_watch"]; !ok {
 		t.Fatal("ci_watch is missing from the admin job-type allowlist")
 	}

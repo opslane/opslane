@@ -3,11 +3,13 @@ package github
 import (
 	"crypto/rsa"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -58,6 +60,9 @@ type InstallationToken struct {
 type installationReposResponse struct {
 	Repositories []Repo `json:"repositories"`
 }
+
+// ErrRepoNotFound reports a repository the token cannot see.
+var ErrRepoNotFound = errors.New("repository not found or not accessible")
 
 // GenerateAppJWT creates a signed RS256 JWT for GitHub App authentication.
 // The JWT is valid for 10 minutes as required by GitHub.
@@ -163,6 +168,49 @@ func ListInstallationRepos(installationToken string) ([]Repo, error) {
 	}
 
 	return allRepos, nil
+}
+
+// githubNamePattern matches GitHub's owner/repository identifier charset.
+// PathEscape leaves '.' untouched, so without this check an owner of ".."
+// becomes /repos/../<name> — a dot-segment GitHub normalizes into an
+// arbitrary API path hit with the server's token.
+var githubNamePattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
+
+// GetRepo fetches one repository using a PAT or other bearer token.
+func GetRepo(token, owner, name string) (*Repo, error) {
+	for _, segment := range []string{owner, name} {
+		if segment == "." || segment == ".." || !githubNamePattern.MatchString(segment) {
+			return nil, ErrRepoNotFound
+		}
+	}
+	reqURL := githubAPIBase + "/repos/" + url.PathEscape(owner) + "/" + url.PathEscape(name)
+	req, err := http.NewRequest(http.MethodGet, reqURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create get repo request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	response, err := httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("get repo: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode == http.StatusNotFound {
+		return nil, ErrRepoNotFound
+	}
+	if response.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("github get repo: status %d", response.StatusCode)
+	}
+	var repo Repo
+	if err := json.NewDecoder(response.Body).Decode(&repo); err != nil {
+		return nil, fmt.Errorf("decode repo: %w", err)
+	}
+	// A 200 whose payload is not the requested repository (redirect debris,
+	// dot-segment normalization) must not persist an empty or foreign name.
+	if !strings.EqualFold(repo.FullName, owner+"/"+name) {
+		return nil, ErrRepoNotFound
+	}
+	return &repo, nil
 }
 
 // ListUserInstallations returns the installation IDs visible to a user access

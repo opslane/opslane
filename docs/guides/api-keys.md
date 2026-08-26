@@ -19,9 +19,11 @@ A project has three kinds of keys. The server enforces what each can do.
 
 The ingest and source-map keys cannot read your data. The MCP key can read a project's issues and link pull requests, which is why it is a secret you keep out of client code.
 
+**Settings → API keys** lists both ingest and MCP keys with masked values. Project admins can revoke either kind there. The API response's `scope` field is `ingest` for browser keys and `api` for MCP keys.
+
 ## The ingest key
 
-You get an ingest key when the project is created; it is shown once and can't be retrieved later. The SDK refuses any key that doesn't start with `opslane_pk_`.
+You get an ingest key when the project is created; it is shown once and can't be retrieved later. The onboarding wizard can create another ingest key when you resume on a different browser. The SDK refuses any key that doesn't start with `opslane_pk_`.
 
 ```bash
 VITE_OPSLANE_API_KEY=opslane_pk_...
@@ -61,6 +63,8 @@ docker compose exec -T postgres psql -U opslane -d opslane -c "SELECT id, name F
 ```
 
 `mint-key` creates ingest and source-map keys. Create MCP keys from **Project settings → API keys** in the dashboard.
+
+The session-authenticated `POST /api/v1/projects/{projectID}/api-keys` endpoint also accepts an optional `scope` field. Omit it or pass `"api"` for an MCP key; pass `"ingest"` for a browser key. List and revoke operations cover both scopes.
 
 ## Rotating a key
 

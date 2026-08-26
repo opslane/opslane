@@ -108,7 +108,10 @@ function defaultBody(method: string, pathname: string): unknown {
     return { provider: 'embedded', supports_password: true, supports_signup: true, supports_reset: true, social_providers: [] };
   }
   if (pathname === '/api/v1/auth/me') {
-    return { id: 'user-1', org_id: 'org-1', email: 'mock@example.test', name: 'Mock Operator', is_admin: true, active_role: 'owner', memberships: [] };
+    // onboarding_complete stays false so the /setup smoke renders the wizard
+    // instead of bouncing to the dashboard; the seeded localStorage flag keeps
+    // the router guard open for every other route.
+    return { id: 'user-1', org_id: 'org-1', email: 'mock@example.test', name: 'Mock Operator', is_admin: true, active_role: 'owner', memberships: [], onboarding_complete: false };
   }
   if (pathname === '/api/v1/projects') {
     return [{ id: 'project-1', name: 'Acme (mock)', github_repo: 'example/mock', friction_autonomy: 'ask_first', pr_posture: 'verified_only', default_environment_id: 'env-production', action_scope_enabled: false, action_environment_ids: [], digest_timezone: 'UTC', created_at: '2026-01-01T00:00:00Z' }];
@@ -131,6 +134,10 @@ function defaultBody(method: string, pathname: string): unknown {
   if (pathname === '/api/v1/admin/overview') return mockAdminOverview();
   if (pathname === '/api/v1/admin/jobs') return { jobs: [] };
   if (pathname === '/health') return { status: 'ok', checks: {}, version: 'mock', uptime_seconds: 1 };
+  if (pathname === '/api/v1/onboarding/state') {
+    return { onboarding_complete: false, next_step: 'connect_github', project_id: 'project-1', has_events: true, github_connected: false, github_mode: 'app', slack_connected: false };
+  }
+  if (pathname === '/api/v1/onboarding/complete' && method === 'POST') return { onboarding_complete: true };
   if (pathname === '/api/v1/github/status') return { installed: true, installation_id: 1, install_url: 'https://github.com/apps/example' };
   if (pathname === '/api/v1/github/repos') return [];
   if (/\/fix-stats$/.test(pathname)) {
@@ -316,7 +323,13 @@ export async function startDashboardMockHarness(
     await context.addInitScript((seed) => {
       localStorage.clear();
       sessionStorage.clear();
-      if (seed.authenticated) localStorage.setItem('opslane_authed', '1');
+      if (seed.authenticated) {
+        localStorage.setItem('opslane_authed', '1');
+        // The router's onboarding guard treats this cached flag as session
+        // state; a planted authed session without it bounces every page to
+        // /setup (the wizard itself re-checks the server).
+        localStorage.setItem('opslane_onboarding_complete', '1');
+      }
       if (seed.projectId) localStorage.setItem('opslane_project_id', seed.projectId);
       if (seed.projectName) localStorage.setItem('opslane_project_name', seed.projectName);
     }, fixture);

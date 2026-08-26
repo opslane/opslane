@@ -8,6 +8,7 @@ import OrgSwitcher from './components/OrgSwitcher.vue';
 import ProjectSwitcher from './components/ProjectSwitcher.vue';
 import AppRail from './components/layout/AppRail.vue';
 import NavDrawer from './components/layout/NavDrawer.vue';
+import OnboardingBanners from './components/OnboardingBanners.vue';
 import { getProjectId } from './utils';
 
 const route = useRoute();
@@ -187,8 +188,9 @@ watch(
       class="app-main min-w-0"
       :class="!isFullPage ? 'px-4 py-6 sm:px-6 md:ml-56 md:px-8 md:py-8' : ''"
     >
-      <div :class="!isFullPage ? 'mx-auto w-full max-w-7xl' : ''">
-        <router-view v-slot="{ Component }">
+		<div :class="!isFullPage ? 'mx-auto w-full max-w-7xl' : ''">
+			<OnboardingBanners v-if="!isFullPage" />
+			<router-view v-slot="{ Component }">
           <component
             :is="Component"
             :key="`${activeProjectId}:${$route.fullPath}`"

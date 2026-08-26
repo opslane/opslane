@@ -60,6 +60,7 @@ type notificationListJSON struct {
 type createNotificationDestinationRequest struct {
 	Name           string   `json:"name"`
 	WebhookURL     string   `json:"webhook_url"`
+	Enabled        *bool    `json:"enabled"`
 	EventTypes     []string `json:"event_types"`
 	DeliveryPolicy string   `json:"delivery_policy"`
 }
@@ -188,7 +189,7 @@ func (d *Dependencies) CreateNotificationDestinationEndpoint(w http.ResponseWrit
 		ConfigFingerprint: notify.FingerprintURL(request.WebhookURL),
 		EventTypes:        request.EventTypes,
 		DeliveryPolicy:    request.DeliveryPolicy,
-		Enabled:           true,
+		Enabled:           request.Enabled == nil || *request.Enabled,
 	})
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "failed to create notification destination")

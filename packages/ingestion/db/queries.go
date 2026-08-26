@@ -23,8 +23,8 @@ var ErrTokenReuse = errors.New("refresh token reuse detected")
 // that is not in the fix-triggerable state for its kind.
 var ErrNotInvestigated = errors.New("incident not in a fix-triggerable state")
 
-// ErrNoGithubRepo indicates the project has no repo configured for a setup PR.
-var ErrNoGithubRepo = errors.New("project has no github_repo")
+// ErrOrgOnboarded rejects onboarding setup for an org whose wizard already completed.
+var ErrOrgOnboarded = errors.New("org already onboarded")
 
 // ErrIdentityConflict indicates that a provider subject is already owned by a
 // different local user. Callers must fail closed rather than issue a session.
@@ -451,6 +451,78 @@ func (q *Queries) ProvisionProject(
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("provision project: commit: %w", err)
+	}
+	return result, nil
+}
+
+// OnboardingProvision is the wizard's project bootstrap. It serializes setup
+// per org so concurrent retries cannot create duplicate first projects.
+func (q *Queries) OnboardingProvision(
+	ctx context.Context,
+	orgID, name string,
+	githubRepo *string,
+	idempotencyToken string,
+) (*ProjectProvisioning, error) {
+	tx, err := q.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("onboarding provision: begin: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('onboard-' || $1))`, orgID); err != nil {
+		return nil, fmt.Errorf("onboarding provision: lock: %w", err)
+	}
+
+	var onboardedAt *time.Time
+	if err := tx.QueryRow(ctx, `SELECT onboarded_at FROM orgs WHERE id = $1`, orgID).Scan(&onboardedAt); err != nil {
+		return nil, fmt.Errorf("onboarding provision: org lookup: %w", err)
+	}
+	if onboardedAt != nil {
+		return nil, ErrOrgOnboarded
+	}
+
+	var result *ProjectProvisioning
+	var existing Project
+	err = tx.QueryRow(ctx, `
+		SELECT id, org_id, name, github_repo, default_branch, friction_autonomy,
+		       pr_posture, default_environment_id, digest_timezone, created_at
+		FROM projects
+		WHERE org_id = $1
+		ORDER BY created_at DESC, id DESC
+		LIMIT 1`, orgID,
+	).Scan(
+		&existing.ID, &existing.OrgID, &existing.Name, &existing.GithubRepo,
+		&existing.DefaultBranch, &existing.FrictionAutonomy, &existing.PrPosture,
+		&existing.DefaultEnvironmentID, &existing.DigestTimezone, &existing.CreatedAt,
+	)
+	switch {
+	case err == nil:
+		environment, envErr := q.EnsureProjectDefaultEnvironmentTx(ctx, tx, existing.ID)
+		if envErr != nil {
+			return nil, fmt.Errorf("onboarding provision: %w", envErr)
+		}
+		key, keyErr := q.CreateProjectKeyTx(ctx, tx, existing.ID, ScopeIngest, "onboarding", nil, "")
+		if keyErr != nil {
+			return nil, fmt.Errorf("onboarding provision: %w", keyErr)
+		}
+		if existing.DefaultEnvironmentID == nil {
+			existing.DefaultEnvironmentID = &environment.ID
+		}
+		result = &ProjectProvisioning{Project: existing, Environment: *environment, APIKey: *key}
+	case errors.Is(err, pgx.ErrNoRows):
+		result, err = q.provisionProjectTx(ctx, tx, orgID, name, githubRepo, idempotencyToken)
+		if err != nil {
+			return nil, err
+		}
+	default:
+		return nil, fmt.Errorf("onboarding provision: project lookup: %w", err)
+	}
+
+	if err := RevokeExcessOnboardingKeysTx(ctx, tx, result.Project.ID); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("onboarding provision: commit: %w", err)
 	}
 	return result, nil
 }
@@ -1714,81 +1786,6 @@ func (q *Queries) TriggerFixJob(ctx context.Context, projectID, groupID, guidanc
 	}
 
 	return jobID, nil
-}
-
-// EnqueueSetupPrJob enqueues a setup_pr job for the project. Idempotent: returns
-// the existing pending/claimed job id if one is already in flight. Tenant-scoped by orgID.
-func (q *Queries) EnqueueSetupPrJob(ctx context.Context, orgID, projectID string) (string, error) {
-	tx, err := q.pool.Begin(ctx)
-	if err != nil {
-		return "", fmt.Errorf("begin tx: %w", err)
-	}
-	defer tx.Rollback(ctx)
-
-	var repo *string
-	err = tx.QueryRow(ctx, `SELECT github_repo FROM projects WHERE id = $1 AND org_id = $2`, projectID, orgID).Scan(&repo)
-	if err == pgx.ErrNoRows {
-		return "", ErrNoGithubRepo
-	}
-	if err != nil {
-		return "", fmt.Errorf("lookup project: %w", err)
-	}
-	if repo == nil || *repo == "" {
-		return "", ErrNoGithubRepo
-	}
-
-	var existing string
-	err = tx.QueryRow(ctx,
-		`SELECT id FROM error_group_jobs
-		  WHERE project_id = $1 AND job_type = 'setup_pr' AND status IN ('pending','claimed')
-		  ORDER BY created_at DESC LIMIT 1`,
-		projectID,
-	).Scan(&existing)
-	if err == nil {
-		if cErr := tx.Commit(ctx); cErr != nil {
-			return "", fmt.Errorf("commit tx: %w", cErr)
-		}
-		return existing, nil
-	}
-	if err != pgx.ErrNoRows {
-		return "", fmt.Errorf("check in-flight: %w", err)
-	}
-
-	var jobID string
-	err = tx.QueryRow(ctx,
-		`INSERT INTO error_group_jobs (project_id, job_type) VALUES ($1, 'setup_pr') RETURNING id`,
-		projectID,
-	).Scan(&jobID)
-	if err != nil {
-		return "", fmt.Errorf("insert setup_pr job: %w", err)
-	}
-	if _, err = tx.Exec(ctx, `UPDATE projects SET setup_pr_status = 'pending', setup_pr_error = NULL WHERE id = $1`, projectID); err != nil {
-		return "", fmt.Errorf("set project status: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return "", fmt.Errorf("commit tx: %w", err)
-	}
-	return jobID, nil
-}
-
-type SetupPrInfo struct {
-	Status   *string
-	PRURL    *string
-	PRNumber *int
-	Error    *string
-}
-
-func (q *Queries) GetSetupPrStatus(ctx context.Context, orgID, projectID string) (*SetupPrInfo, error) {
-	var s SetupPrInfo
-	err := q.pool.QueryRow(ctx,
-		`SELECT setup_pr_status, setup_pr_url, setup_pr_number, setup_pr_error
-		   FROM projects WHERE id = $1 AND org_id = $2`,
-		projectID, orgID,
-	).Scan(&s.Status, &s.PRURL, &s.PRNumber, &s.Error)
-	if err != nil {
-		return nil, fmt.Errorf("get setup pr status: %w", err)
-	}
-	return &s, nil
 }
 
 // === Replay + Source Map ===
@@ -3691,6 +3688,95 @@ func (q *Queries) HasEvents(ctx context.Context, projectID string) (bool, error)
 		return false, fmt.Errorf("has events: %w", err)
 	}
 	return exists, nil
+}
+
+// LatestErrorGroupID returns the most recently active error group, or nil.
+func (q *Queries) LatestErrorGroupID(ctx context.Context, projectID string) (*string, error) {
+	var id string
+	err := q.pool.QueryRow(ctx,
+		`SELECT id::text FROM error_groups WHERE project_id = $1 ORDER BY last_seen DESC, id DESC LIMIT 1`,
+		projectID,
+	).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("latest error group: %w", err)
+	}
+	return &id, nil
+}
+
+// OrgOnboarded reports the stored wizard completion fact for an org.
+func (q *Queries) OrgOnboarded(ctx context.Context, orgID string) (bool, error) {
+	var onboardedAt *time.Time
+	if err := q.pool.QueryRow(ctx,
+		`SELECT onboarded_at FROM orgs WHERE id = $1`, orgID,
+	).Scan(&onboardedAt); err != nil {
+		return false, fmt.Errorf("org onboarded: %w", err)
+	}
+	return onboardedAt != nil, nil
+}
+
+// NewestProjectIDAndRepo returns the newest project and its attached repo.
+func (q *Queries) NewestProjectIDAndRepo(ctx context.Context, orgID string) (*string, *string, error) {
+	var id string
+	var repo *string
+	err := q.pool.QueryRow(ctx, `
+		SELECT id::text, github_repo
+		FROM projects
+		WHERE org_id = $1
+		ORDER BY created_at DESC, id DESC
+		LIMIT 1`, orgID,
+	).Scan(&id, &repo)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil, nil
+	}
+	if err != nil {
+		return nil, nil, fmt.Errorf("newest project: %w", err)
+	}
+	return &id, repo, nil
+}
+
+// HasEnabledDigestDestination reports whether a project has a live daily digest destination.
+func (q *Queries) HasEnabledDigestDestination(ctx context.Context, projectID string) (bool, error) {
+	var exists bool
+	err := q.pool.QueryRow(ctx, `
+		SELECT EXISTS(
+			SELECT 1
+			FROM notification_destinations
+			WHERE project_id = $1
+			  AND enabled
+			  AND 'digest.daily' = ANY(event_types)
+		)`, projectID,
+	).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("has digest destination: %w", err)
+	}
+	return exists, nil
+}
+
+// MarkOrgOnboarded records completion once; replays are no-ops.
+func (q *Queries) MarkOrgOnboarded(ctx context.Context, orgID string) error {
+	// Same advisory lock as OnboardingProvision: without it, complete can land
+	// between provision's onboarded check and its commit, letting a setup call
+	// return 201 on an org that just became onboarded.
+	tx, err := q.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("mark onboarded: begin: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('onboard-' || $1))`, orgID); err != nil {
+		return fmt.Errorf("mark onboarded: lock: %w", err)
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE orgs SET onboarded_at = now() WHERE id = $1 AND onboarded_at IS NULL`, orgID,
+	); err != nil {
+		return fmt.Errorf("mark onboarded: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("mark onboarded: commit: %w", err)
+	}
+	return nil
 }
 
 // VerifyEnvironmentAccess checks that an environment belongs to the given org.

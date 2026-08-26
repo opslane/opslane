@@ -582,9 +582,10 @@ async function handleConnectGithub(): Promise<void> {
   connectingGithub.value = true;
   githubError.value = '';
   try {
-    githubConfig.value = await setGitHubConfig(pid, {
-      github_repo: selectedRepo.value,
-    });
+		githubConfig.value = await setGitHubConfig(pid, {
+			github_repo: selectedRepo.value,
+		});
+		window.dispatchEvent(new Event('opslane-integrations-changed'));
     selectedRepo.value = '';
   } catch (err: unknown) {
     githubError.value = err instanceof Error ? err.message : 'Failed to connect GitHub';
@@ -598,8 +599,9 @@ async function handleDisconnectGithub(): Promise<void> {
   if (!pid) return;
   disconnectingGithub.value = true;
   try {
-    await deleteGitHubConfig(pid);
-    githubConfig.value = null;
+		await deleteGitHubConfig(pid);
+		githubConfig.value = null;
+		window.dispatchEvent(new Event('opslane-integrations-changed'));
   } catch {
     // Non-fatal
   } finally {

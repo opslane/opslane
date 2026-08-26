@@ -261,6 +261,86 @@ func (q *Queries) CreateProjectKeyTx(
 	return minted, nil
 }
 
+const onboardingKeyCap = 5
+
+const excessOnboardingKeysSQL = `
+	UPDATE project_api_keys
+	SET revoked_at = now()
+	WHERE project_id = $1
+	  AND scope = 'ingest'
+	  AND label = 'onboarding'
+	  AND revoked_at IS NULL
+	  AND key_id NOT IN (
+		SELECT key_id
+		FROM project_api_keys
+		WHERE project_id = $1
+		  AND scope = 'ingest'
+		  AND label = 'onboarding'
+		  AND revoked_at IS NULL
+		ORDER BY created_at DESC, id DESC
+		LIMIT $2
+	  )`
+
+// RevokeExcessOnboardingKeysTx keeps only the newest live onboarding ingest keys.
+func RevokeExcessOnboardingKeysTx(ctx context.Context, tx pgx.Tx, projectID string) error {
+	if _, err := tx.Exec(ctx, excessOnboardingKeysSQL, projectID, onboardingKeyCap); err != nil {
+		return fmt.Errorf("revoke excess onboarding keys: %w", err)
+	}
+	return nil
+}
+
+// CreateIngestKeyCapped mints an ingest key and enforces the onboarding cap
+// in one transaction, so a cap failure cannot leave an extra live key behind.
+// A per-project advisory lock serializes concurrent mints: without it, two
+// READ COMMITTED transactions each see their own newest-N window and can
+// commit six live keys (or both target the same victim and revoke none).
+func (q *Queries) CreateIngestKeyCapped(
+	ctx context.Context,
+	orgID, projectID, label string,
+	createdByUserID *string,
+) (*MintedProjectKey, *APIKeyRecord, error) {
+	tx, err := q.pool.Begin(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("create ingest key: begin: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('keycap-' || $1))`, projectID); err != nil {
+		return nil, nil, fmt.Errorf("create ingest key: lock: %w", err)
+	}
+
+	var projectExists bool
+	if err := tx.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM projects WHERE id = $1 AND org_id = $2)`,
+		projectID, orgID,
+	).Scan(&projectExists); err != nil {
+		return nil, nil, fmt.Errorf("create ingest key: project scope: %w", err)
+	}
+	if !projectExists {
+		return nil, nil, pgx.ErrNoRows
+	}
+
+	minted, err := q.CreateProjectKeyTx(ctx, tx, projectID, ScopeIngest, label, createdByUserID, "")
+	if err != nil {
+		return nil, nil, err
+	}
+	if label == "onboarding" {
+		if err := RevokeExcessOnboardingKeysTx(ctx, tx, projectID); err != nil {
+			return nil, nil, err
+		}
+	}
+	record := &APIKeyRecord{KeyID: minted.KeyID, Scope: minted.Scope, Label: label, CreatedBy: createdByUserID}
+	if err := tx.QueryRow(ctx,
+		`SELECT created_at FROM project_api_keys WHERE id = $1`, minted.ID,
+	).Scan(&record.CreatedAt); err != nil {
+		return nil, nil, fmt.Errorf("create ingest key: read back: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, nil, fmt.Errorf("create ingest key: commit: %w", err)
+	}
+	return minted, record, nil
+}
+
 func (q *Queries) CreateAPIKey(
 	ctx context.Context,
 	orgID, projectID, label, createdByUserID string,
@@ -297,7 +377,7 @@ func (q *Queries) ListAPIKeys(ctx context.Context, orgID, projectID string) ([]A
 		       k.expires_at, k.revoked_at, k.revoked_by_user_id
 		FROM project_api_keys k
 		JOIN projects p ON p.id = k.project_id AND p.org_id = $1
-		WHERE k.project_id = $2 AND k.scope = 'api'
+		WHERE k.project_id = $2 AND k.scope IN ('api', 'ingest')
 		ORDER BY k.created_at DESC, k.id DESC`, orgID, projectID)
 	if err != nil {
 		return nil, fmt.Errorf("list api keys: %w", err)
@@ -329,7 +409,7 @@ func (q *Queries) RevokeAPIKey(
 		    revoked_by_user_id = COALESCE(k.revoked_by_user_id, $4)
 		FROM projects p
 		WHERE p.id = k.project_id AND p.org_id = $1
-		  AND k.project_id = $2 AND k.key_id = $3 AND k.scope = 'api'`,
+		  AND k.project_id = $2 AND k.key_id = $3 AND k.scope IN ('api', 'ingest')`,
 		orgID, projectID, keyID, revokedByUserID)
 	if err != nil {
 		return false, fmt.Errorf("revoke api key: %w", err)

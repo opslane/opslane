@@ -89,12 +89,22 @@ func TestAPIKeyCreateListRevokeScoped(t *testing.T) {
 	if err := json.NewDecoder(listed.Body).Decode(&listBody); err != nil {
 		t.Fatal(err)
 	}
-	if len(listBody) != 1 || listBody[0].KeyID != createBody.KeyID || listBody[0].Scope != db.ScopeAPI ||
-		listBody[0].Status != "active" || listBody[0].Redacted != "opslane_ak_"+createBody.KeyID+"_…" {
+	var listedCreated, listedIngest bool
+	for _, key := range listBody {
+		if key.KeyID == createBody.KeyID && key.Scope == db.ScopeAPI && key.Status == "active" &&
+			key.Redacted == "opslane_ak_"+createBody.KeyID+"_…" {
+			listedCreated = true
+		}
+		if key.KeyID == ingest.KeyID && key.Scope == db.ScopeIngest &&
+			key.Redacted == "opslane_pk_"+ingest.KeyID+"_…" {
+			listedIngest = true
+		}
+	}
+	if !listedCreated || !listedIngest {
 		t.Fatalf("listed api keys = %+v", listBody)
 	}
-	if strings.Contains(listed.Body.String(), createBody.Token) || strings.Contains(listed.Body.String(), ingest.KeyID) {
-		t.Fatalf("list leaked plaintext or ingest sibling: %s", listed.Body.String())
+	if strings.Contains(listed.Body.String(), createBody.Token) || strings.Contains(listed.Body.String(), ingest.Raw) {
+		t.Fatalf("list leaked plaintext: %s", listed.Body.String())
 	}
 
 	foreign := request(http.MethodPost, "/api/v1/projects/"+projectB+"/api-keys", `{"label":"foreign"}`)
@@ -127,5 +137,130 @@ func TestAPIKeyCreateListRevokeScoped(t *testing.T) {
 	if missing := request(http.MethodDelete,
 		"/api/v1/projects/"+projectA+"/api-keys/aaaaaaaaaaaaaaaaaaaaaaaaaa", ""); missing.Code != http.StatusNotFound {
 		t.Fatalf("missing revoke status = %d", missing.Code)
+	}
+}
+
+func TestIngestScopeKeyLifecycleAndCap(t *testing.T) {
+	deps, pool := testDeps(t)
+	ctx := context.Background()
+	orgID, projectID, _, _ := seedTenant(t, deps.Queries)
+	t.Cleanup(func() { cleanupTenantHandler(t, pool, orgID) })
+	user, err := deps.Queries.CreateUserGitHub(ctx, orgID,
+		"ingest-key-admin-"+time.Now().Format("150405.000000000")+"@example.test",
+		"Ingest Key Admin", time.Now().UnixNano(), "ingest-key-admin", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := deps.Queries.CreateMembership(ctx, user.ID, orgID, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	deps.JWTSecret = sessionReadSecret
+	token, err := auth.SignAccessToken(sessionReadSecret, user.ID, orgID, user.Email)
+	if err != nil {
+		t.Fatal(err)
+	}
+	router := handler.NewRouterWithPool(deps, pool)
+	request := func(method, path, body string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+token)
+		if body != "" {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, req)
+		return response
+	}
+
+	var lastKeyID string
+	for i := 0; i < 6; i++ {
+		created := request(http.MethodPost, "/api/v1/projects/"+projectID+"/api-keys",
+			`{"label":"onboarding","expires_at":null,"scope":"ingest"}`)
+		if created.Code != http.StatusCreated {
+			t.Fatalf("create %d: %d %s", i, created.Code, created.Body.String())
+		}
+		var body struct {
+			KeyID string `json:"key_id"`
+			Token string `json:"token"`
+			Scope string `json:"scope"`
+		}
+		if err := json.NewDecoder(created.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if body.Scope != db.ScopeIngest || !strings.HasPrefix(body.Token, "opslane_pk_") {
+			t.Fatalf("wrong scope/prefix: %+v", body)
+		}
+		lastKeyID = body.KeyID
+	}
+
+	listed := request(http.MethodGet, "/api/v1/projects/"+projectID+"/api-keys", "")
+	if listed.Code != http.StatusOK {
+		t.Fatalf("list status=%d body=%s", listed.Code, listed.Body.String())
+	}
+	var keys []struct {
+		KeyID  string `json:"key_id"`
+		Scope  string `json:"scope"`
+		Label  string `json:"label"`
+		Status string `json:"status"`
+	}
+	if err := json.NewDecoder(listed.Body).Decode(&keys); err != nil {
+		t.Fatal(err)
+	}
+	live := 0
+	for _, key := range keys {
+		if key.Scope == db.ScopeIngest && key.Label == "onboarding" && key.Status == "active" {
+			live++
+		}
+	}
+	if live != 5 {
+		t.Fatalf("cap failed: %d live ingest keys", live)
+	}
+
+	revoked := request(http.MethodDelete,
+		"/api/v1/projects/"+projectID+"/api-keys/"+lastKeyID, "")
+	if revoked.Code != http.StatusNoContent {
+		t.Fatalf("revoke ingest key: %d body=%s", revoked.Code, revoked.Body.String())
+	}
+}
+
+func TestCreateAPIKeyScopeValidation(t *testing.T) {
+	deps, pool := testDeps(t)
+	ctx := context.Background()
+	orgID, projectID, _, _ := seedTenant(t, deps.Queries)
+	t.Cleanup(func() { cleanupTenantHandler(t, pool, orgID) })
+	user, err := deps.Queries.CreateUserGitHub(ctx, orgID,
+		"scope-validation-"+time.Now().Format("150405.000000000")+"@example.test",
+		"Scope Validation", time.Now().UnixNano(), "scope-validation", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := deps.Queries.CreateMembership(ctx, user.ID, orgID, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	deps.JWTSecret = sessionReadSecret
+	token, err := auth.SignAccessToken(sessionReadSecret, user.ID, orgID, user.Email)
+	if err != nil {
+		t.Fatal(err)
+	}
+	router := handler.NewRouterWithPool(deps, pool)
+	request := func(body string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/projects/"+projectID+"/api-keys", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, req)
+		return response
+	}
+
+	// Unknown scope is rejected, not defaulted.
+	if res := request(`{"label":"x","expires_at":null,"scope":"bogus"}`); res.Code != http.StatusBadRequest {
+		t.Fatalf("bogus scope: got %d want 400 (%s)", res.Code, res.Body.String())
+	}
+
+	// Ingest keys have no expiry support; a supplied expires_at must not be
+	// silently dropped.
+	if res := request(`{"label":"onboarding","expires_at":"2030-01-01T00:00:00Z","scope":"ingest"}`); res.Code != http.StatusBadRequest {
+		t.Fatalf("ingest+expires_at: got %d want 400 (%s)", res.Code, res.Body.String())
 	}
 }

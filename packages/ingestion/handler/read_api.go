@@ -1194,9 +1194,16 @@ func (d *Dependencies) GetEventCountEndpoint(w http.ResponseWriter, r *http.Requ
 		writeJSONError(w, http.StatusInternalServerError, "failed to check events")
 		return
 	}
+	latest, err := d.Queries.LatestErrorGroupID(r.Context(), projectID)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "failed to check events")
+		return
+	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]bool{"has_events": hasEvents})
+	json.NewEncoder(w).Encode(map[string]any{
+		"has_events": hasEvents, "latest_error_group_id": latest,
+	})
 }
 
 // TriggerFix creates a fix job for an incident in its kind-specific trigger state.
