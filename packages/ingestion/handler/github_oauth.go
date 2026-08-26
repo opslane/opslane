@@ -424,11 +424,15 @@ func (d *Dependencies) completeOAuthIdentity(ctx context.Context, identity auth.
 	}
 
 	var user *db.User
+	var created bool
 	var err error
 	if d.cloudAuthEnabled() {
-		userID, _, provisionErr := d.Queries.ProvisionFromIdentity(ctx, identity)
+		userID, orgID, provisioned, provisionErr := d.Queries.ProvisionFromIdentity(ctx, identity)
 		if provisionErr != nil {
 			return nil, fmt.Errorf("provision cloud identity: %w", provisionErr)
+		}
+		if provisioned {
+			emitProvisioningUsage(identity, userID, orgID, true, false)
 		}
 		user, err = d.Queries.GetUserByID(ctx, userID)
 		if err != nil {
@@ -437,8 +441,9 @@ func (d *Dependencies) completeOAuthIdentity(ctx context.Context, identity auth.
 		if user == nil {
 			return nil, fmt.Errorf("load provisioned user: not found")
 		}
+		created = provisioned
 	} else {
-		user, err = d.provisionGitHubIdentityContext(ctx, identity)
+		user, created, err = d.provisionGitHubIdentityContext(ctx, identity)
 		if err != nil {
 			return nil, fmt.Errorf("provision GitHub identity: %w", err)
 		}
@@ -479,6 +484,9 @@ func (d *Dependencies) completeOAuthIdentity(ctx context.Context, identity auth.
 	if err := d.Queries.StoreRefreshToken(ctx, user.ID, hashRefresh, uuid.NewString(), sessionOrgID, time.Now().Add(refreshTokenTTL)); err != nil {
 		return nil, fmt.Errorf("store refresh token: %w", err)
 	}
+	if !created {
+		emitProvisioningUsage(identity, user.ID, user.OrgID, false, true)
+	}
 	return &oauthCompletion{
 		Mode: completionBrowser, RedirectTo: d.DashboardOrigin + "/auth/complete",
 		AccessToken: accessToken, RefreshToken: rawRefresh, OrgID: sessionOrgID,
@@ -517,17 +525,18 @@ func (d *Dependencies) GitHubOAuthCallback(w http.ResponseWriter, r *http.Reques
 }
 
 func (d *Dependencies) provisionGitHubIdentity(r *http.Request, identity auth.Identity) (*db.User, error) {
-	return d.provisionGitHubIdentityContext(r.Context(), identity)
+	user, _, err := d.provisionGitHubIdentityContext(r.Context(), identity)
+	return user, err
 }
 
-func (d *Dependencies) provisionGitHubIdentityContext(ctx context.Context, identity auth.Identity) (*db.User, error) {
+func (d *Dependencies) provisionGitHubIdentityContext(ctx context.Context, identity auth.Identity) (*db.User, bool, error) {
 	githubID, err := strconv.ParseInt(identity.ProviderSubject, 10, 64)
 	if err != nil {
-		return nil, fmt.Errorf("invalid GitHub subject: %w", err)
+		return nil, false, fmt.Errorf("invalid GitHub subject: %w", err)
 	}
 	userID, err := d.Queries.GetUserIDByIdentity(ctx, "github", identity.ProviderSubject)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	var user *db.User
 	if userID != "" {
@@ -536,19 +545,20 @@ func (d *Dependencies) provisionGitHubIdentityContext(ctx context.Context, ident
 		user, err = d.Queries.GetUserByGitHubID(ctx, githubID)
 	}
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
+	created := false
 	if user == nil {
 		existing, err := d.Queries.GetUserByEmail(ctx, identity.Email)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		if existing != nil {
 			if !identity.EmailVerified {
-				return nil, fmt.Errorf("unverified GitHub email cannot link an existing account")
+				return nil, false, fmt.Errorf("unverified GitHub email cannot link an existing account")
 			}
 			if err := d.Queries.LinkUserGitHub(ctx, existing.ID, githubID, identity.Username, identity.AvatarURL); err != nil {
-				return nil, err
+				return nil, false, err
 			}
 			user = existing
 		} else {
@@ -556,17 +566,19 @@ func (d *Dependencies) provisionGitHubIdentityContext(ctx context.Context, ident
 			// attacker can seed an org under a victim's address and be adopted into
 			// it when the victim later signs in with their verified email.
 			if !identity.EmailVerified {
-				return nil, fmt.Errorf("unverified GitHub email cannot create an account")
+				return nil, false, fmt.Errorf("unverified GitHub email cannot create an account")
 			}
 			org, err := d.Queries.CreateOrg(ctx, identity.Username)
 			if err != nil {
-				return nil, err
+				return nil, false, err
 			}
 			user, err = d.Queries.CreateUserGitHub(ctx, org.ID, identity.Email,
 				identity.Name, githubID, identity.Username, identity.AvatarURL)
 			if err != nil {
-				return nil, err
+				return nil, false, err
 			}
+			created = true
+			emitProvisioningUsage(identity, user.ID, user.OrgID, true, false)
 		}
 	}
 	// RequireMembership 403s any session without a memberships row; GitHub
@@ -575,21 +587,21 @@ func (d *Dependencies) provisionGitHubIdentityContext(ctx context.Context, ident
 	// downgraded) role.
 	role, err := d.Queries.GetMembership(ctx, user.ID, user.OrgID)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if role == "" {
 		if err := d.Queries.CreateMembership(ctx, user.ID, user.OrgID, "owner"); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 	}
 	if err := d.Queries.UpdateUserGitHub(ctx, user.ID, identity.Username, identity.AvatarURL, identity.Email); err != nil {
 		slog.Warn("refresh GitHub profile failed", "user_id", user.ID, "error", err)
 	}
 	if err := d.Queries.UpsertIdentityDetails(ctx, user.ID, "github", identity.ProviderSubject, identity.Email, identity.EmailVerified); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	user.Email = db.NormalizeEmail(identity.Email)
-	return user, nil
+	return user, created, nil
 }
 
 func (d *Dependencies) applyCombinedGitHubInstallation(r *http.Request, user *db.User, identity auth.Identity, targetOrgID string) error {

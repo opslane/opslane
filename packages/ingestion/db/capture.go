@@ -15,10 +15,13 @@ import (
 // bucket. Environment fields preserve the ingest-path metrics contract while
 // identity is settled asynchronously.
 type CaptureReceipt struct {
-	EventID             string
-	CaptureHandle       string
-	EnvironmentOutcome  EnvironmentOutcome
-	EnvironmentDiverged bool
+	EventID               string
+	CaptureHandle         string
+	EnvironmentOutcome    EnvironmentOutcome
+	EnvironmentDiverged   bool
+	EnvironmentID         string
+	FirstEvent            bool
+	EnvironmentAgeSeconds int64
 }
 
 // CaptureError stores one observation and schedules its resolution. It creates
@@ -133,12 +136,32 @@ func (q *Queries) CaptureError(ctx context.Context, p IngestParams) (*CaptureRec
 		return nil, fmt.Errorf("upsert capture bucket: %w", err)
 	}
 
+	var firstEvent bool
+	var environmentAgeSeconds int64
+	err = tx.QueryRow(ctx, `
+		UPDATE environments
+		   SET first_event_at = now()
+		 WHERE id = $1 AND first_event_at IS NULL
+		 RETURNING floor(EXTRACT(EPOCH FROM (first_event_at - created_at)))::bigint`,
+		environmentID,
+	).Scan(&environmentAgeSeconds)
+	switch {
+	case err == nil:
+		firstEvent = true
+	case errors.Is(err, pgx.ErrNoRows):
+		// The environment was already claimed.
+	default:
+		return nil, fmt.Errorf("claim first event: %w", err)
+	}
+
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit capture: %w", err)
 	}
 	return &CaptureReceipt{
 		EventID: eventID, CaptureHandle: rawFingerprint,
 		EnvironmentOutcome: environmentOutcome, EnvironmentDiverged: environmentDiverged,
+		EnvironmentID: environmentID, FirstEvent: firstEvent,
+		EnvironmentAgeSeconds: environmentAgeSeconds,
 	}, nil
 }
 

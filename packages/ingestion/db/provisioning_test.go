@@ -24,6 +24,7 @@ func TestProvisionFromIdentityIsIdempotentAndConcurrentSafe(t *testing.T) {
 
 	type result struct {
 		userID, orgID string
+		created       bool
 		err           error
 	}
 	results := make(chan result, 2)
@@ -40,11 +41,11 @@ func TestProvisionFromIdentityIsIdempotentAndConcurrentSafe(t *testing.T) {
 			defer tx.Rollback(ctx)
 			ready.Done()
 			<-start
-			userID, orgID, err := q.ProvisionFromIdentityTx(ctx, tx, identity)
+			userID, orgID, created, err := q.ProvisionFromIdentityTx(ctx, tx, identity)
 			if err == nil {
 				err = tx.Commit(ctx)
 			}
-			results <- result{userID: userID, orgID: orgID, err: err}
+			results <- result{userID: userID, orgID: orgID, created: created, err: err}
 		}()
 	}
 	ready.Wait()
@@ -56,11 +57,17 @@ func TestProvisionFromIdentityIsIdempotentAndConcurrentSafe(t *testing.T) {
 	if first.userID != second.userID || first.orgID != second.orgID {
 		t.Fatalf("different results: %+v / %+v", first, second)
 	}
+	if first.created == second.created {
+		t.Fatalf("exactly one concurrent provision should create the user: %+v / %+v", first, second)
+	}
 	t.Cleanup(func() { cleanupTenant(t, pool, first.orgID) })
 
-	replayedUser, replayedOrg, err := q.ProvisionFromIdentity(ctx, identity)
+	replayedUser, replayedOrg, replayCreated, err := q.ProvisionFromIdentity(ctx, identity)
 	if err != nil || replayedUser != first.userID || replayedOrg != first.orgID {
 		t.Fatalf("replay got (%q,%q) err=%v", replayedUser, replayedOrg, err)
+	}
+	if replayCreated {
+		t.Fatal("replayed provisioning reported a newly created user")
 	}
 	role, err := q.GetMembership(ctx, first.userID, first.orgID)
 	if err != nil || role != "owner" {
@@ -83,18 +90,21 @@ func TestProvisionFromIdentityVerifiedEmailGate(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, _, err := q.ProvisionFromIdentity(ctx, auth.Identity{
+	if _, _, _, err := q.ProvisionFromIdentity(ctx, auth.Identity{
 		Provider: "workos", ProviderSubject: "unverified-" + user.ID,
 		Email: db.NormalizeEmail(email), EmailVerified: false,
 	}); err == nil {
 		t.Fatal("unverified identity unexpectedly linked existing email")
 	}
-	linkedUser, linkedOrg, err := q.ProvisionFromIdentity(ctx, auth.Identity{
+	linkedUser, linkedOrg, created, err := q.ProvisionFromIdentity(ctx, auth.Identity{
 		Provider: "workos", ProviderSubject: "verified-" + user.ID,
 		Email: db.NormalizeEmail(email), EmailVerified: true,
 	})
 	if err != nil || linkedUser != user.ID || linkedOrg != org.ID {
 		t.Fatalf("verified link got (%q,%q) err=%v", linkedUser, linkedOrg, err)
+	}
+	if created {
+		t.Fatal("linking a verified identity to an existing user reported created")
 	}
 	role, _ := q.GetMembership(ctx, user.ID, org.ID)
 	if role != "owner" {

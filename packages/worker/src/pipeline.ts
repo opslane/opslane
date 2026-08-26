@@ -20,6 +20,7 @@ import {
 } from './narrative.js';
 import { createLedgerRecorder } from './verification-ledger.js';
 import { insertFixRunLedger } from './db.js';
+import { emitUsageEvent } from './usage-events.js';
 
 export interface PipelineInput {
   platform?: Platform;
@@ -363,6 +364,15 @@ export async function runPipeline(input: PipelineInput): Promise<PipelineResult>
       evidence: fixResult.evidence,
     };
   }
+
+  emitUsageEvent('fix_pr_opened', {
+    project_id: input.projectId,
+    error_group_id: input.errorGroupId,
+    pr_url: prResult.prUrl,
+    draft: deliveryPosture === 'draft' ? 'true' : 'false',
+    incident_url: incidentUrl ?? '',
+    title: input.title,
+  });
 
   return {
     status: deliveryPosture === 'draft' ? 'pr_draft' : 'pr_created',

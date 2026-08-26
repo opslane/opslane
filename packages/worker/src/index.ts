@@ -1617,6 +1617,9 @@ export async function processFixJob(job: ClaimedJob & { errorGroupId: string }, 
 
 async function main(): Promise<void> {
   logger.info('Opslane worker starting');
+  logger.info('usage events', {
+    enabled: Boolean(process.env['USAGE_EVENTS_SLACK_WEBHOOK']),
+  });
 
   // Clone checkouts orphaned by a crashed worker process. Age-gated inside:
   // a live long fix run's directory is never touched.

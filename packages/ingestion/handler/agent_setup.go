@@ -468,6 +468,9 @@ func (d *Dependencies) AgentAuthCallback(w http.ResponseWriter, r *http.Request)
 	})
 	switch {
 	case err == nil:
+		emitProvisioningUsage(auth.Identity{
+			Provider: "github", Email: email,
+		}, res.UserID, res.OrgID, res.Created, false)
 		slog.Info("agent session provisioned", "session_id", sessionID,
 			"org_id", res.OrgID, "project_id", res.ProjectID, "repo", canonical)
 		agentResultPage(w, http.StatusOK, "Done!",
