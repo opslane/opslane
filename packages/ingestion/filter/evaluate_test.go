@@ -140,6 +140,18 @@ func TestFilterAdmitsTwoIdentifiedUsers(t *testing.T) {
 	}
 }
 
+func TestFilterNoEventsUsesHonestErrorLaneReason(t *testing.T) {
+	pool := testPool(t)
+	fixture := seedEpisode(t, pool)
+	decision, err := Evaluate(context.Background(), pool, fixture.projectID, fixture.episodeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.Outcome != "watch" || decision.Reason != "no error events linked to this episode yet" {
+		t.Fatalf("decision=%+v", decision)
+	}
+}
+
 func TestFilterOutcomesAndAffectedUnitCounting(t *testing.T) {
 	tests := []struct {
 		name      string

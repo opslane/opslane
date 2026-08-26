@@ -214,3 +214,59 @@ func TestDispatcherPromptVersionDrainRequiresNewEvidence(t *testing.T) {
 		t.Fatalf("third Tick enqueued = %d, want 1 (new evidence drains the stale prompt)", enqueued)
 	}
 }
+
+func TestDispatcherSkipsFrictionEvaluationButStillClosesResolvedEpisodes(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	errorEpisode := seedEpisode(t, pool)
+	frictionEpisode := seedEpisode(t, pool)
+	if _, err := pool.Exec(ctx, `UPDATE error_groups SET kind='friction'
+		WHERE id=(SELECT canonical_issue_id FROM issue_episodes WHERE id=$1)`, frictionEpisode.episodeID); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		seedIdentifiedEvent(t, pool, errorEpisode, time.Now())
+		seedIdentifiedEvent(t, pool, frictionEpisode, time.Now())
+	}
+
+	evaluated, enqueued, err := (&Dispatcher{pool: pool, projectID: errorEpisode.projectID}).Tick(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if evaluated != 1 || enqueued != 1 {
+		t.Fatalf("error Tick evaluated=%d enqueued=%d, want 1/1", evaluated, enqueued)
+	}
+	evaluated, enqueued, err = (&Dispatcher{pool: pool, projectID: frictionEpisode.projectID}).Tick(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if evaluated != 0 || enqueued != 0 {
+		t.Fatalf("friction Tick evaluated=%d enqueued=%d, want 0/0", evaluated, enqueued)
+	}
+	var frictionDecisions, frictionJobs int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM issue_decisions WHERE episode_id=$1`, frictionEpisode.episodeID).Scan(&frictionDecisions); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM error_group_jobs
+		WHERE episode_id=$1 AND job_type='issue_inquiry'`, frictionEpisode.episodeID).Scan(&frictionJobs); err != nil {
+		t.Fatal(err)
+	}
+	if frictionDecisions != 0 || frictionJobs != 0 {
+		t.Fatalf("friction decisions/jobs=%d/%d, want 0/0", frictionDecisions, frictionJobs)
+	}
+
+	if _, err := pool.Exec(ctx, `UPDATE error_groups SET status='resolved'
+		WHERE id=(SELECT canonical_issue_id FROM issue_episodes WHERE id=$1)`, frictionEpisode.episodeID); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := (&Dispatcher{pool: pool, projectID: frictionEpisode.projectID}).Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var closed bool
+	if err := pool.QueryRow(ctx, `SELECT closed_at IS NOT NULL FROM issue_episodes WHERE id=$1`, frictionEpisode.episodeID).Scan(&closed); err != nil {
+		t.Fatal(err)
+	}
+	if !closed {
+		t.Error("resolved friction episode was not closed")
+	}
+}

@@ -81,7 +81,7 @@ func evaluateAt(ctx context.Context, q queryRower, projectID, episodeID string, 
 	switch {
 	case !facts.hasInScope:
 		decision.Outcome = "watch"
-		decision.Reason = "no observations in the project's action scope"
+		decision.Reason = "no error events linked to this episode yet"
 	case facts.lastSeen == nil || facts.lastSeen.Before(at.Add(-livenessWindow)):
 		decision.Outcome = "inactive"
 		if facts.lastSeen == nil {

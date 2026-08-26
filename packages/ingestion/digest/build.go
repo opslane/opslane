@@ -16,6 +16,37 @@ type accountSummary struct {
 	more  int
 }
 
+const diagnosisValidationLateralSQL = `
+	SELECT EXISTS (
+	  SELECT 1 FROM (
+	    SELECT dd.outcome, dd.diagnosis
+	      FROM diagnosis_decisions dd
+	     WHERE dd.error_group_id = g.id AND dd.project_id = g.project_id
+	       -- Fix verification rows describe delivery, not diagnosis, and must
+	       -- not shadow the investigation row this predicate validates.
+	       AND dd.model <> 'deterministic-fix-verification'
+	     ORDER BY dd.decided_at DESC, dd.id DESC
+	     LIMIT 1
+	  ) latest
+	  WHERE latest.outcome IN ('code_fix','not_actionable','needs_human')
+	    AND (CASE WHEN jsonb_typeof(latest.diagnosis->'evidence') = 'array'
+	              THEN jsonb_array_length(latest.diagnosis->'evidence') >= 1
+	               AND NOT EXISTS (
+	                 SELECT 1 FROM jsonb_array_elements(latest.diagnosis->'evidence') e
+	                  WHERE btrim(coalesce(e->>'path','')) = ''
+	                     OR btrim(coalesce(e->>'detail','')) = ''
+	                     OR btrim(coalesce(e->>'symptomLink','')) = ''
+	               )
+	              ELSE false END)
+	    AND (latest.outcome <> 'code_fix'
+	         OR (NULLIF(btrim(latest.diagnosis->>'agentTaskBrief'), '') IS NOT NULL
+	             AND latest.diagnosis->>'agentTaskBrief' !~* '^\s*(placeholder|tbd|to be determined)\M'))
+	) AS has_validated_diagnosis,
+	(SELECT dd.decided_at FROM diagnosis_decisions dd
+	  WHERE dd.error_group_id=g.id AND dd.project_id=g.project_id
+	    AND dd.model <> 'deterministic-fix-verification'
+	  ORDER BY dd.decided_at DESC,dd.id DESC LIMIT 1) AS diagnosis_decided_at`
+
 var (
 	fillerExcerpt = regexp.MustCompile(`(?i)^\s*(placeholder|tbd|to be determined)\b`)
 	// One predicate block feeds two queries: the aggregate counts run over every
@@ -24,43 +55,7 @@ var (
 	// failures can never consume LIMIT slots and starve renderable receipts.
 	receiptItemsFromClause = `
 		  FROM error_groups g
-		 CROSS JOIN LATERAL (
-		    SELECT EXISTS (
-		      SELECT 1 FROM (
-		        SELECT dd.outcome, dd.diagnosis
-		          FROM diagnosis_decisions dd
-		         WHERE dd.error_group_id = g.id AND dd.project_id = g.project_id
-		           -- The fix phase appends a delivery-outcome row (model
-		           -- 'deterministic-fix-verification', diagnosis NULL) after the
-		           -- investigation's diagnosis row. It documents what delivery
-		           -- achieved, not what was diagnosed, so it must not shadow the
-		           -- diagnosis row this predicate exists to read.
-		           AND dd.model <> 'deterministic-fix-verification'
-		         ORDER BY dd.decided_at DESC, dd.id DESC
-		         LIMIT 1
-		      ) latest
-		      -- 'needs_human' joined the vocabulary when insight and parked
-		      -- results started persisting their terminal outcome; the diagnosis
-		      -- shape checks below still gate rows without a usable diagnosis.
-		      WHERE latest.outcome IN ('code_fix','not_actionable','needs_human')
-		        AND (CASE WHEN jsonb_typeof(latest.diagnosis->'evidence') = 'array'
-		                  THEN jsonb_array_length(latest.diagnosis->'evidence') >= 1
-		                   AND NOT EXISTS (
-		                     SELECT 1 FROM jsonb_array_elements(latest.diagnosis->'evidence') e
-		                      WHERE btrim(coalesce(e->>'path','')) = ''
-		                         OR btrim(coalesce(e->>'detail','')) = ''
-		                         OR btrim(coalesce(e->>'symptomLink','')) = ''
-		                   )
-		                  ELSE false END)
-		        AND (latest.outcome <> 'code_fix'
-		             OR (NULLIF(btrim(latest.diagnosis->>'agentTaskBrief'), '') IS NOT NULL
-		                 AND latest.diagnosis->>'agentTaskBrief' !~* '^\s*(placeholder|tbd|to be determined)\M'))
-		    ) AS has_validated_diagnosis,
-		    (SELECT dd.decided_at FROM diagnosis_decisions dd
-		      WHERE dd.error_group_id=g.id AND dd.project_id=g.project_id
-		        AND dd.model <> 'deterministic-fix-verification'
-		      ORDER BY dd.decided_at DESC,dd.id DESC LIMIT 1) AS diagnosis_decided_at
-		  ) d
+		 CROSS JOIN LATERAL (` + diagnosisValidationLateralSQL + `) d
 		 CROSS JOIN LATERAL (
 		    SELECT (COALESCE(g.root_cause, '') !~* '^\s*(placeholder|tbd|to be determined)\M')
 		           AND CASE

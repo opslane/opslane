@@ -43,6 +43,7 @@ const DigestV4CardCap = 9
 
 func formatSlackDigestV4(payload EventPayload) ([]byte, string, error) {
 	digest := payload.Digest
+	receipts := renderableDigestReceipts(digest)
 	decisions := make([]GeneratedDigestCard, 0)
 	fixes := make([]GeneratedDigestCard, 0)
 	for _, card := range digest.GeneratedCards {
@@ -79,22 +80,37 @@ func formatSlackDigestV4(payload EventPayload) ([]byte, string, error) {
 		},
 		{
 			"type":     "context",
-			"elements": []map[string]any{{"type": "mrkdwn", "text": digestV4Summary(digest.Date, len(decisions), len(fixes))}},
+			"elements": []map[string]any{{"type": "mrkdwn", "text": digestV4Summary(digest.Date, len(decisions)+len(receipts), len(fixes))}},
 		},
 	}
-	if len(allCards) == 0 {
+	if len(allCards) == 0 && len(receipts) == 0 {
 		blocks = append(blocks, digestSectionBlock("Nothing needs your attention today."))
 	}
 	position := 0
-	if len(renderedDecisions) > 0 {
+	if len(renderedDecisions) > 0 || len(receipts) > 0 {
 		blocks = append(blocks, digestSectionBlock("⚠️ *Needs a decision*"))
-		for index, card := range renderedDecisions {
-			blocks = append(blocks, digestV4CardBlocks(payload, card, position, "Needs you")...)
-			position++
-			if index < len(renderedDecisions)-1 {
+		needDivider := false
+		for _, card := range renderedDecisions {
+			if needDivider {
 				blocks = append(blocks, map[string]any{"type": "divider"})
 			}
+			blocks = append(blocks, digestV4CardBlocks(payload, card, position, "Needs you")...)
+			position++
+			needDivider = true
 		}
+		for _, receipt := range receipts {
+			if needDivider {
+				blocks = append(blocks, map[string]any{"type": "divider"})
+			}
+			blocks = append(blocks, digestReceiptCardBlocks(payload, receipt.item, receipt.line)...)
+			needDivider = true
+		}
+	}
+	if digest.ReceiptOverflow > 0 {
+		blocks = append(blocks, digestContextBlock(narrative.OverflowLine(digest.ReceiptOverflow)))
+	}
+	if digest.DeliveryAlert != "" {
+		blocks = append(blocks, digestContextBlock("⚠️ "+cleanProse(digest.DeliveryAlert, digestDetailMax)))
 	}
 	if len(renderedFixes) > 0 {
 		blocks = append(blocks, digestSectionBlock("✅ *Fixes ready to merge*"))
@@ -314,6 +330,23 @@ type renderableReceipt struct {
 	line string
 }
 
+func renderableDigestReceipts(digest *DigestPayload) []renderableReceipt {
+	renderable := make([]renderableReceipt, 0, len(digest.ReceiptItems))
+	for _, item := range digest.ReceiptItems {
+		if item.Kind != "error" && item.Kind != "friction" {
+			slog.Warn("digest receipt kind is not renderable", "incident_id", item.IncidentID, "kind", item.Kind)
+			continue
+		}
+		line, ok := narrative.ReceiptLine(item.ReceiptState, item.HasValidatedDiagnosis)
+		if !ok {
+			slog.Warn("digest receipt state is not renderable", "incident_id", item.IncidentID, "state", item.ReceiptState)
+			continue
+		}
+		renderable = append(renderable, renderableReceipt{item: item, line: line})
+	}
+	return renderable
+}
+
 func formatSlackDigestV2(payload EventPayload) ([]byte, string, error) {
 	digest := payload.Digest
 	projectName := cleanProse(payload.Project.Name, headerMax)
@@ -335,19 +368,7 @@ func formatSlackDigestV2(payload EventPayload) ([]byte, string, error) {
 		},
 	}
 
-	renderable := make([]renderableReceipt, 0, len(digest.ReceiptItems))
-	for _, item := range digest.ReceiptItems {
-		if item.Kind != "error" && item.Kind != "friction" {
-			slog.Warn("digest receipt kind is not renderable", "incident_id", item.IncidentID, "kind", item.Kind)
-			continue
-		}
-		line, ok := narrative.ReceiptLine(item.ReceiptState, item.HasValidatedDiagnosis)
-		if !ok {
-			slog.Warn("digest receipt state is not renderable", "incident_id", item.IncidentID, "state", item.ReceiptState)
-			continue
-		}
-		renderable = append(renderable, renderableReceipt{item: item, line: line})
-	}
+	renderable := renderableDigestReceipts(digest)
 
 	counts := DigestTriageCounts{}
 	if digest.TriageCounts != nil {
@@ -363,6 +384,9 @@ func formatSlackDigestV2(payload EventPayload) ([]byte, string, error) {
 	}
 	if digest.HeldBackCount > 0 {
 		blocks = append(blocks, digestContextBlock(narrative.HeldBackLine(digest.HeldBackCount)))
+	}
+	if digest.DeliveryAlert != "" {
+		blocks = append(blocks, digestContextBlock("⚠️ "+cleanProse(digest.DeliveryAlert, digestDetailMax)))
 	}
 	blocks = append(blocks, digestWatchingBlocks(digest.Watching)...)
 
@@ -388,7 +412,34 @@ func digestReceiptCardBlocks(payload EventPayload, item ReceiptItem, receiptLine
 		text += "\nInvestigation: " + cleanProse(item.RootCauseExcerpt, digestDetailMax)
 	}
 
-	links := make([]string, 0, 3)
+	links := make([]string, 0, 4)
+	if item.ActionableSince != nil {
+		clock, err := time.Parse(time.RFC3339Nano, payload.Digest.Window.To)
+		switch {
+		case err != nil:
+			// Sibling non-renderable skips warn; dropping the aging line must be
+			// just as visible, or a window format drift silently removes it.
+			slog.Warn("digest receipt aging line dropped: window is not RFC3339Nano",
+				"incident_id", item.IncidentID, "window_to", payload.Digest.Window.To)
+		case !item.ActionableSince.After(clock):
+			location := time.UTC
+			if payload.Digest.Timezone != "" {
+				if loc, locErr := time.LoadLocation(payload.Digest.Timezone); locErr == nil {
+					location = loc
+				}
+			}
+			days := int(clock.Sub(*item.ActionableSince).Hours() / 24)
+			label := fmt.Sprintf("%d days", days)
+			if days == 1 {
+				label = "1 day"
+			}
+			if days == 0 {
+				label = "today"
+			}
+			links = append(links, fmt.Sprintf("waiting on you since %s (%s)",
+				item.ActionableSince.In(location).Format("Jan 2"), label))
+		}
+	}
 	if (item.ReceiptState == "pr_open" || item.ReceiptState == "pr_draft") && item.PRURL != "" {
 		label := "Review fix PR"
 		if item.ReceiptState == "pr_draft" {

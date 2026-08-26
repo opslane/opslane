@@ -48,9 +48,10 @@ type validationRun struct {
 	ProjectName string
 	GithubRepo  string
 	Status      string
+	Timezone    string
 	RunDate     string
-	WindowFrom  string
-	WindowTo    string
+	WindowFrom  time.Time
+	WindowTo    time.Time
 	Payload     []byte
 }
 
@@ -70,6 +71,7 @@ func ValidateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string) e
 // internalVocabulary matches pipeline state words as whole tokens. The customer
 // message may never carry them; validation fails closed when a writer leaks one.
 var internalVocabulary = regexp.MustCompile(`(?i)(^|[^a-z0-9_])(needs_human|verified_fix|report_ready|do_not_pursue|unable_to_establish_cause)($|[^a-z0-9_])`)
+
 // \p{Nd}, not \d: Go's \d is ASCII-only, so full-width or Arabic-Indic digits
 // ("４０００ users") would sail past the grounding scan entirely. Any decimal
 // digit in any script is scanned; non-ASCII digit runs can never match the
@@ -114,10 +116,10 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string) e
 	var run validationRun
 	if err := tx.QueryRow(ctx, `
 		SELECT r.project_id::text,p.name,COALESCE(p.github_repo,''),r.status,
-		       r.run_date::text,r.window_from::text,r.window_to::text,COALESCE(r.writer_payload,r.payload)
+		       p.digest_timezone,r.run_date::text,r.window_from,r.window_to,COALESCE(r.writer_payload,r.payload)
 		  FROM digest_runs r JOIN projects p ON p.id=r.project_id
 		 WHERE r.id=$1 FOR UPDATE OF r`, runID).Scan(
-		&run.ProjectID, &run.ProjectName, &run.GithubRepo, &run.Status,
+		&run.ProjectID, &run.ProjectName, &run.GithubRepo, &run.Status, &run.Timezone,
 		&run.RunDate, &run.WindowFrom, &run.WindowTo, &run.Payload,
 	); err != nil {
 		return fmt.Errorf("load digest run: %w", err)
@@ -264,6 +266,15 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string) e
 		return generated[i].Outcome == "needs_human" && generated[j].Outcome != "needs_human"
 	})
 	overflowCount := 0
+	// The cross-lane dedup set is built from the PRE-truncation card list: a
+	// card deferred past the render cap is re-admitted to tomorrow's frozen
+	// digest, and letting today's receipt lane also deliver it would show the
+	// same incident twice across two days while today's overflow count
+	// contradicts the receipts below it.
+	frozenIncidentIDs := make(map[string]bool, len(generated))
+	for _, card := range generated {
+		frozenIncidentIDs[card.IncidentID] = true
+	}
 	if len(generated) > notify.DigestV4CardCap {
 		for _, dropped := range generated[notify.DigestV4CardCap:] {
 			accounted[dropped.EpisodeID] = "deferred"
@@ -273,16 +284,86 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string) e
 		generated = generated[:notify.DigestV4CardCap]
 	}
 
+	// Actionable receipts and their candidate ledger are one publication unit:
+	// ledger "included" plus this run's delivered status is the durable receipt
+	// publication record. Episode-keyed issue_publications remains owned by the
+	// frozen lane above. A savepoint keeps failures in this additive lane from
+	// suppressing otherwise valid frozen cards.
+	receiptItems := []notify.ReceiptItem(nil)
+	receiptOverflow := 0
+	deliveryAlert := ""
+	if _, err := tx.Exec(ctx, `SAVEPOINT actionable_delivery`); err != nil {
+		return fmt.Errorf("open actionable delivery savepoint: %w", err)
+	}
+	var actionableErr error
+	var actionableEvaluatedAt time.Time
+	if err := tx.QueryRow(ctx, `SELECT transaction_timestamp()`).Scan(&actionableEvaluatedAt); err != nil {
+		actionableErr = fmt.Errorf("load actionable evaluation clock: %w", err)
+	}
+	var actionableEval evaluation
+	if actionableErr == nil {
+		actionableCandidates, err := loadActionableCandidates(ctx, tx, run.ProjectID)
+		if err != nil {
+			actionableErr = err
+		} else {
+			actionableEval = evaluateActionable(actionableCandidates, frozenIncidentIDs, actionableEvaluatedAt)
+		}
+	}
+	if actionableErr == nil {
+		var err error
+		receiptItems, err = toReceiptItems(actionableEval.Included)
+		if err != nil {
+			actionableErr = fmt.Errorf("map actionable receipts: %w", err)
+		}
+		receiptOverflow = actionableEval.Overflow
+	}
+	if actionableErr == nil {
+		if err := writeActionableLedger(ctx, tx, runID, actionableEval, actionableEvaluatedAt); err != nil {
+			actionableErr = err
+		}
+	}
+	if actionableErr == nil {
+		var err error
+		deliveryAlert, err = reconcileActionable(actionableEval)
+		if err != nil {
+			actionableErr = fmt.Errorf("digest reconciliation failed: %w", err)
+		}
+	}
+	if actionableErr != nil {
+		if ctx.Err() != nil {
+			return fmt.Errorf("evaluate actionable digest candidates: %w", ctx.Err())
+		}
+		slog.Error("actionable digest delivery degraded", "run_id", runID, "project_id", run.ProjectID, "error", actionableErr)
+		if _, err := tx.Exec(ctx, `ROLLBACK TO SAVEPOINT actionable_delivery`); err != nil {
+			return fmt.Errorf("roll back actionable delivery savepoint: %w", err)
+		}
+		receiptItems = nil
+		receiptOverflow = 0
+		if deliveryAlert == "" {
+			deliveryAlert = "Actionable findings could not be evaluated for this digest."
+		}
+	}
+	if _, err := tx.Exec(ctx, `RELEASE SAVEPOINT actionable_delivery`); err != nil {
+		return fmt.Errorf("release actionable delivery savepoint: %w", err)
+	}
+
 	eventPayload := notify.EventPayload{
 		Version: 1, EventType: "digest.daily", RunID: runID,
 		Project:      notify.ProjectRef{ID: run.ProjectID, Name: run.ProjectName},
 		DashboardURL: strings.TrimRight(os.Getenv("DASHBOARD_URL"), "/"),
 		Digest: &notify.DigestPayload{
-			Date:           run.RunDate,
-			Window:         notify.DigestWindow{From: run.WindowFrom, To: run.WindowTo},
-			SchemaVersion:  4,
-			GeneratedCards: generated,
-			OverflowCount:  overflowCount,
+			Date: run.RunDate,
+			Window: notify.DigestWindow{
+				From: run.WindowFrom.UTC().Format(time.RFC3339Nano),
+				To:   run.WindowTo.UTC().Format(time.RFC3339Nano),
+			},
+			SchemaVersion:   4,
+			Timezone:        run.Timezone,
+			GeneratedCards:  generated,
+			OverflowCount:   overflowCount,
+			ReceiptItems:    receiptItems,
+			ReceiptOverflow: receiptOverflow,
+			DeliveryAlert:   deliveryAlert,
 		},
 	}
 	if err := eventPayload.Validate(); err != nil {

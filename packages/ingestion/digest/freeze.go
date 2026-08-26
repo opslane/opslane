@@ -173,7 +173,12 @@ func selectCandidates(ctx context.Context, q digestQuerier, projectID string, at
 		                    AND prev.canonical_issue_id=ep.canonical_issue_id
 		                    AND prev.id<>ep.id), 'epoch'::timestamptz) AS replay_floor
 		  FROM issue_episodes ep
-		  JOIN error_groups g ON g.id=ep.canonical_issue_id AND g.project_id=ep.project_id
+		  -- kind='error' matches the filter sweep, which no longer evaluates
+	  -- friction episodes; without this guard a friction episode with
+	  -- historical decisions would stay frozen-eligible on facts that can
+	  -- never refresh. Friction reaches the digest through the actionable
+	  -- receipts lane instead.
+	  JOIN error_groups g ON g.id=ep.canonical_issue_id AND g.project_id=ep.project_id AND g.kind='error'
 		  JOIN LATERAL (
 		    SELECT dd.outcome,dd.decision_reason,dd.diagnosis,dd.decided_at
 		      FROM diagnosis_decisions dd

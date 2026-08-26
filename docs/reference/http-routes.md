@@ -101,6 +101,7 @@ The automated-setup callback requires `code`, `installation_id`, and UUID `state
 | POST | `/api/v1/projects/{projectID}/incidents/{incidentID}/link-pr` | Record a same-repository GitHub pull request without marking the issue resolved |
 | POST | `/api/v1/projects/{projectID}/incidents/{incidentID}/resolve` | Resolve issue |
 | POST | `/api/v1/projects/{projectID}/incidents/{incidentID}/archive` | Archive issue |
+| POST | `/api/v1/projects/{projectID}/incidents/{incidentID}/snooze` | Snooze an actionable issue for up to 30 days; a null or past `until` clears the snooze |
 | POST | `/api/v1/projects/{projectID}/incidents/{incidentID}/unarchive` | Restore archived issue |
 | GET | `/api/v1/projects/{projectID}/accounts` | List B2B accounts |
 | GET | `/api/v1/projects/{projectID}/accounts/{accountID}` | Account detail |
