@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1371,6 +1372,77 @@ func (d *Dependencies) ArchiveIncident(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	d.respondWithIncident(w, r, projectID, incidentID)
+}
+
+// SnoozeIncident defers an actionable incident for at most thirty days. A
+// null or past timestamp clears the snooze.
+// POST /api/v1/projects/{projectID}/incidents/{incidentID}/snooze
+func (d *Dependencies) SnoozeIncident(w http.ResponseWriter, r *http.Request) {
+	projectID := chi.URLParam(r, "projectID")
+	if !d.verifyProjectAccess(w, r, projectID) {
+		return
+	}
+	incidentID := chi.URLParam(r, "incidentID")
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<14)
+	var body struct {
+		Until json.RawMessage `json:"until"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if body.Until == nil {
+		writeJSONError(w, http.StatusBadRequest, "until is required (RFC3339 or null)")
+		return
+	}
+
+	now := time.Now().UTC()
+	var until *time.Time
+	if string(bytes.TrimSpace(body.Until)) != "null" {
+		var raw string
+		if err := json.Unmarshal(body.Until, &raw); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "until must be RFC3339 or null")
+			return
+		}
+		parsed, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, "until must be RFC3339 or null")
+			return
+		}
+		if parsed.After(now.Add(30 * 24 * time.Hour)) {
+			writeJSONError(w, http.StatusBadRequest, "until cannot be more than 30 days from now")
+			return
+		}
+		if parsed.After(now) {
+			parsed = parsed.UTC()
+			until = &parsed
+		}
+	}
+
+	result, err := d.Queries.Pool().Exec(r.Context(), `UPDATE error_groups
+		SET snoozed_until=$1,updated_at=now()
+		WHERE id=$2 AND project_id=$3
+		  AND status IN ('awaiting_approval','needs_human')`, until, incidentID, projectID)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "failed to snooze incident")
+		return
+	}
+	if result.RowsAffected() == 0 {
+		var exists bool
+		if err := d.Queries.Pool().QueryRow(r.Context(), `SELECT EXISTS (
+			SELECT 1 FROM error_groups WHERE id=$1 AND project_id=$2
+		)`, incidentID, projectID).Scan(&exists); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "failed to snooze incident")
+			return
+		}
+		if !exists {
+			writeJSONError(w, http.StatusNotFound, "no such incident")
+			return
+		}
+		writeJSONError(w, http.StatusConflict, "incident is not actionable")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // UnarchiveIncident restores an archived incident to a conservative kind-safe state.

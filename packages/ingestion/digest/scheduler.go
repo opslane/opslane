@@ -89,7 +89,34 @@ func (s *Scheduler) Tick(ctx context.Context) error {
 			}
 		}
 	}
+	// These are diagnostics, not routed alerts. Logging after run processing
+	// makes a tick's durable outcome visible without making diagnostics capable
+	// of blocking the delivery state machine.
+	if report, err := CheckDeliverySLA(ctx, s.pool, "", now); err != nil {
+		slog.Error("digest delivery SLA diagnostics failed", "error", err)
+	} else {
+		logSLADiagnostics(report)
+	}
 	return nil
+}
+
+func logSLADiagnostics(report SLAReport) {
+	logFindings := func(class string, findings []SLAFinding) {
+		for _, finding := range findings {
+			slog.Error("digest delivery SLA diagnostic",
+				"class", class,
+				"diagnostic_query", finding.Diagnostic,
+				"project_id", finding.ProjectID,
+				"run_id", finding.RunID,
+				"error_group_id", finding.ErrorGroupID,
+			)
+		}
+	}
+	logFindings("stuck_run", report.StuckRuns)
+	logFindings("failed_run", report.FailedRuns)
+	logFindings("missing_run", report.MissingRuns)
+	logFindings("omitted_actionable", report.OmittedActionable)
+	logFindings("reconciliation_failure", report.ReconciliationFailures)
 }
 
 func (s *Scheduler) projects(ctx context.Context) ([]scheduledProject, error) {

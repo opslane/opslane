@@ -1,6 +1,9 @@
 package notify
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 // EventPayload is the versioned, add-only notification payload.
 type EventPayload struct {
@@ -78,7 +81,8 @@ type DigestPayload struct {
 	GeneratedCards      []GeneratedDigestCard `json:"generated_cards,omitempty"`
 	// OverflowCount is how many validated cards were deferred past the render
 	// cap; the renderer's "And N more" line reports it.
-	OverflowCount int `json:"overflow_count,omitempty"`
+	OverflowCount int    `json:"overflow_count,omitempty"`
+	DeliveryAlert string `json:"delivery_alert,omitempty"`
 }
 
 // GeneratedDigestCard is model-authored prose grounded in a frozen candidate.
@@ -125,8 +129,9 @@ type ReceiptItem struct {
 	// RootCauseExcerpt: a validated diagnosis whose group carries no root_cause
 	// sanitizes to an empty excerpt, and the card would then deny a cause the
 	// item was admitted for having.
-	HasValidatedDiagnosis bool     `json:"has_validated_diagnosis,omitempty"`
-	ClusterIncidentIDs    []string `json:"cluster_incident_ids,omitempty"`
+	HasValidatedDiagnosis bool       `json:"has_validated_diagnosis,omitempty"`
+	ClusterIncidentIDs    []string   `json:"cluster_incident_ids,omitempty"`
+	ActionableSince       *time.Time `json:"actionable_since,omitempty"`
 }
 
 type DigestWindow struct {

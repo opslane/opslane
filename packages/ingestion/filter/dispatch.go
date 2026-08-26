@@ -120,6 +120,8 @@ func (d *Dispatcher) staleEpisodes(ctx context.Context) ([]episodeRef, error) {
 	rows, err := d.pool.Query(ctx, `
 		SELECT ep.project_id::text,ep.id::text
 		  FROM issue_episodes ep
+		  JOIN error_groups g
+		    ON g.project_id=ep.project_id AND g.id=ep.canonical_issue_id AND g.kind='error'
 		  LEFT JOIN LATERAL (
 		    SELECT decision,rule_version,decided_at
 		      FROM issue_decisions d
@@ -167,6 +169,8 @@ func (d *Dispatcher) inquiryCandidates(ctx context.Context) ([]episodeRef, error
 	rows, err := d.pool.Query(ctx, `
 		SELECT ep.project_id::text,ep.id::text,COALESCE(jobs.max_input_version,0)+1
 		  FROM issue_episodes ep
+		  JOIN error_groups g
+		    ON g.project_id=ep.project_id AND g.id=ep.canonical_issue_id AND g.kind='error'
 		  JOIN LATERAL (
 		    SELECT decision,users_7d+anon_7d AS affected_units,decided_at
 		      FROM issue_decisions d

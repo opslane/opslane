@@ -163,6 +163,7 @@ func NewRouterWithPool(deps *Dependencies, pool *pgxpool.Pool) *chi.Mux {
 		r.With(deps.AuthenticateUserSession).Post("/projects/{projectID}/incidents/{incidentID}/link-pr", deps.LinkIncidentPR)
 		r.With(deps.AuthenticateUserSession).Post("/projects/{projectID}/incidents/{incidentID}/resolve", deps.ResolveIncident)
 		r.With(deps.AuthenticateUserSession).Post("/projects/{projectID}/incidents/{incidentID}/archive", deps.ArchiveIncident)
+		r.With(deps.AuthenticateUserSession).Post("/projects/{projectID}/incidents/{incidentID}/snooze", deps.SnoozeIncident)
 		r.With(deps.AuthenticateUserSession).Post("/projects/{projectID}/incidents/{incidentID}/unarchive", deps.UnarchiveIncident)
 
 		// B2B Accounts

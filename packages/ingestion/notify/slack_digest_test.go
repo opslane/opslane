@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestFormatSlackDigestGolden(t *testing.T) {
@@ -438,6 +439,64 @@ func TestFormatSlackDigestV4SummaryEmptyAndOverflow(t *testing.T) {
 	}
 	if actions != 9 || !strings.Contains(body, "And 3 more on the dashboard") || len(blocks) > 50 {
 		t.Fatalf("overflow rendering: actions=%d blocks=%d body=%s", actions, len(blocks), body)
+	}
+}
+
+func TestFormatSlackDigestV4RendersActionableReceiptAgeAndDeliveryAlert(t *testing.T) {
+	clock := time.Date(2026, 8, 25, 9, 0, 0, 0, time.UTC)
+	actionableSince := clock.Add(-12 * 24 * time.Hour)
+	payload := EventPayload{
+		Version: 1, EventType: "digest.daily", Project: ProjectRef{ID: "p", Name: "Shop"},
+		DashboardURL: "https://app.example",
+		Digest: &DigestPayload{
+			SchemaVersion: 4, Date: "2026-08-25",
+			Window: DigestWindow{From: clock.Add(-24 * time.Hour).Format(time.RFC3339), To: clock.Format(time.RFC3339)},
+			ReceiptItems: []ReceiptItem{{
+				Kind: "friction", IncidentID: "friction-1", Title: "Checkout button does nothing",
+				OccurrenceCount: 17, ReceiptState: "awaiting_approval",
+				HasValidatedDiagnosis: true, ActionableSince: &actionableSince,
+			}},
+			DeliveryAlert: "1 item is pending but could not be rendered",
+		},
+	}
+	_, body := formatV4Blocks(t, payload)
+	for _, want := range []string{
+		"1 issue that matters · 1 needs a decision",
+		"Checkout button does nothing",
+		"waiting on you since Aug 13 (12 days)",
+		"1 item is pending but could not be rendered",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("v4 actionable digest missing %q: %s", want, body)
+		}
+	}
+}
+
+func TestDigestReceiptAgeLineBoundaries(t *testing.T) {
+	clock := time.Date(2026, 8, 25, 9, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name  string
+		stamp *time.Time
+		want  string
+	}{
+		{name: "one day", stamp: func() *time.Time { v := clock.Add(-24 * time.Hour); return &v }(), want: "waiting on you since Aug 24 (1 day)"},
+		{name: "today", stamp: func() *time.Time { v := clock.Add(-2 * time.Hour); return &v }(), want: "waiting on you since Aug 25 (today)"},
+		{name: "future", stamp: func() *time.Time { v := clock.Add(time.Minute); return &v }()},
+		{name: "nil"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := EventPayload{Version: 1, EventType: "digest.daily", Project: ProjectRef{ID: "p", Name: "p"},
+				Digest: &DigestPayload{SchemaVersion: 4, Date: "2026-08-25", Window: DigestWindow{To: clock.Format(time.RFC3339)},
+					ReceiptItems: []ReceiptItem{{Kind: "error", IncidentID: "i", Title: "Issue", ReceiptState: "awaiting_approval", HasValidatedDiagnosis: true, ActionableSince: tc.stamp}}}}
+			_, body := formatV4Blocks(t, payload)
+			if tc.want != "" && !strings.Contains(body, tc.want) {
+				t.Fatalf("missing %q: %s", tc.want, body)
+			}
+			if tc.want == "" && strings.Contains(body, "waiting on you since") {
+				t.Fatalf("unexpected age line: %s", body)
+			}
+		})
 	}
 }
 
