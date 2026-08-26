@@ -31,10 +31,25 @@ var (
 	webhookURL string
 	sink       func(event string, props map[string]string)
 	sem        = make(chan struct{}, maxConcurrent)
-	inflight   sync.WaitGroup
-	client     = &http.Client{Timeout: sendTimeout}
-	logger     = slog.Default()
+	// mcp_tool_used is the only per-customer-call event, so it gets its own
+	// small pool: an MCP client hammering tools can exhaust at most semMCP,
+	// never the slots signup/first-event/digest sends rely on.
+	semMCP   = make(chan struct{}, 2)
+	inflight sync.WaitGroup
+	client   = &http.Client{Timeout: sendTimeout}
+	// logger is a test seam. nil means "resolve slog.Default() at call time":
+	// this package initializes before main() installs the JSON handler, so a
+	// default captured here would bypass structured logging forever.
+	logger *slog.Logger
 )
+
+func warn(msg string, args ...any) {
+	l := logger
+	if l == nil {
+		l = slog.Default()
+	}
+	l.Warn(msg, args...)
+}
 
 // Configure validates and stores the webhook URL. On error the package is
 // left disabled, so invalid configuration cannot leave a stale URL active.
@@ -77,19 +92,23 @@ func Emit(event string, props map[string]string) {
 		}()
 		return
 	}
+	pool := sem
+	if event == "mcp_tool_used" {
+		pool = semMCP
+	}
 	select {
-	case sem <- struct{}{}:
+	case pool <- struct{}{}:
 	default:
-		logger.Warn("usage event dropped: send queue full", "event", event)
+		warn("usage event dropped: send queue full", "event", event)
 		return
 	}
 	inflight.Add(1)
 	go func() {
 		defer inflight.Done()
-		defer func() { <-sem }()
+		defer func() { <-pool }()
 		defer func() {
 			if recover() != nil {
-				logger.Warn("usage event send panicked", "event", event)
+				warn("usage event send panicked", "event", event)
 			}
 		}()
 		send(target, event, copied)
@@ -120,26 +139,26 @@ func send(target, event string, props map[string]string) {
 	encoder.SetEscapeHTML(false)
 	err := encoder.Encode(map[string]string{"text": text})
 	if err != nil {
-		logger.Warn("usage event marshal failed", "event", event)
+		warn("usage event marshal failed", "event", event)
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), sendTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, &body)
 	if err != nil {
-		logger.Warn("usage event request build failed", "event", event)
+		warn("usage event request build failed", "event", event)
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := client.Do(req)
 	if err != nil {
-		logger.Warn("usage event send failed", "event", event)
+		warn("usage event send failed", "event", event)
 		return
 	}
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		logger.Warn("usage event rejected", "event", event, "status", resp.StatusCode)
+		warn("usage event rejected", "event", event, "status", resp.StatusCode)
 	}
 }
 

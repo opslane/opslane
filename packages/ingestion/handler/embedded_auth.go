@@ -50,7 +50,10 @@ func (d *Dependencies) completeEmbeddedLogin(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	d.issueTokenPairCookie(w, r, user.ID, user.OrgID, user.Email, user.Name, uuid.NewString())
-	emitProvisioningUsage(identity, userID, orgID, created, flow == "login")
+	// A signup form that authenticated an already-existing account is an
+	// interactive login too; only the verify flow stays silent for returning
+	// users.
+	emitProvisioningUsage(identity, userID, orgID, created, flow == "login" || flow == "signup")
 }
 
 func emitProvisioningUsage(identity auth.Identity, userID, orgID string, created, interactiveLogin bool) {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -271,10 +272,14 @@ func (d *Dispatcher) admitOne(ctx context.Context, projectID, episodeID string, 
 	}
 	admitted := tag.RowsAffected() == 1
 	if admitted {
+		// Re-admissions at a higher input version ping again by design (a new
+		// inquiry round); input_version lets the operator tell round 1 from a
+		// prompt-bump or evidence-growth re-admission at a glance.
 		props := map[string]string{
-			"project_id": projectID,
-			"issue_id":   issueID,
-			"episode_id": episodeID,
+			"project_id":    projectID,
+			"issue_id":      issueID,
+			"episode_id":    episodeID,
+			"input_version": strconv.Itoa(inputVersion),
 		}
 		if incidentURL := notify.BuildIncidentURL(d.dashboardURL, issueID, projectID); incidentURL != "" {
 			props["url"] = incidentURL

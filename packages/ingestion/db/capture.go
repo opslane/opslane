@@ -123,19 +123,8 @@ func (q *Queries) CaptureError(ctx context.Context, p IngestParams) (*CaptureRec
 		}
 	}
 
-	// Upsert the shared bucket last: ON CONFLICT takes a row lock that
-	// serializes every same-fingerprint capture until commit, so the lock
-	// window must cover one statement, not the whole transaction.
-	if _, err := tx.Exec(ctx,
-		`INSERT INTO error_capture_buckets (project_id, raw_fingerprint, identity_version)
-		 VALUES ($1, $2, $3)
-		 ON CONFLICT (project_id, identity_version, raw_fingerprint)
-		 DO UPDATE SET last_seen = now()`,
-		p.ProjectID, rawFingerprint, identity.IdentityVersion,
-	); err != nil {
-		return nil, fmt.Errorf("upsert capture bucket: %w", err)
-	}
-
+	// Claim the environment's first event before the bucket upsert so the
+	// serialized same-fingerprint window below stays one statement wide.
 	var firstEvent bool
 	var environmentAgeSeconds int64
 	err = tx.QueryRow(ctx, `
@@ -152,6 +141,19 @@ func (q *Queries) CaptureError(ctx context.Context, p IngestParams) (*CaptureRec
 		// The environment was already claimed.
 	default:
 		return nil, fmt.Errorf("claim first event: %w", err)
+	}
+
+	// Upsert the shared bucket last: ON CONFLICT takes a row lock that
+	// serializes every same-fingerprint capture until commit, so the lock
+	// window must cover one statement, not the whole transaction.
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO error_capture_buckets (project_id, raw_fingerprint, identity_version)
+		 VALUES ($1, $2, $3)
+		 ON CONFLICT (project_id, identity_version, raw_fingerprint)
+		 DO UPDATE SET last_seen = now()`,
+		p.ProjectID, rawFingerprint, identity.IdentityVersion,
+	); err != nil {
+		return nil, fmt.Errorf("upsert capture bucket: %w", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
