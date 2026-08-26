@@ -69,17 +69,19 @@ The automated-setup callback requires `code`, `installation_id`, and UUID `state
 | GET | `/api/v1/admin/overview` | Operator-only cross-tenant monitoring overview, including best-effort progress through automated repository setup (404 unless allowlisted) |
 | GET | `/api/v1/admin/jobs` | Operator-only recent jobs (404 unless allowlisted) |
 | POST | `/api/v1/onboard/provision` | Create an organization and project for a repository, then store the one-time API key for the setup client to retrieve |
-| POST | `/api/v1/onboarding/setup` | First-run setup |
+| POST | `/api/v1/onboarding/setup` | Create or resume the first project and return a fresh ingest key |
+| GET | `/api/v1/onboarding/state` | Read server-derived onboarding facts and the next step |
+| POST | `/api/v1/onboarding/complete` | Mark onboarding complete after the project receives its first event; GitHub and Slack are optional (admin on cloud) |
 | GET | `/api/v1/projects` | List projects |
 | POST | `/api/v1/projects` | Create project |
 | PATCH | `/api/v1/projects/{projectID}` | Update project settings. `friction_autonomy` controls automatic fixes for session-recording issues; `pr_posture` controls whether unverified fixes may open as drafts. A same-project `default_environment_id` must be an explicit UUID string when present. |
 | GET | `/api/v1/projects/{projectID}/fix-stats` | Fix-attempt and pull-request outcome counts by issue type |
 | GET | `/api/v1/projects/{projectID}/environments` | List all environments, or only environments that contain issues with `used_by=incidents` or sessions with `used_by=sessions` |
-| GET | `/api/v1/projects/{projectID}/event-count` | Event count stats |
+| GET | `/api/v1/projects/{projectID}/event-count` | Return `has_events` and the nullable `latest_error_group_id` |
 | GET | `/api/v1/projects/{projectID}/digest/latest` | Latest delivered daily summary, or an empty summary when none has been delivered |
-| POST | `/api/v1/projects/{projectID}/api-keys` | Create an MCP key; the `opslane_ak_` secret is returned once (admin) |
-| GET | `/api/v1/projects/{projectID}/api-keys` | List the project's MCP keys without showing their secrets (admin) |
-| DELETE | `/api/v1/projects/{projectID}/api-keys/{keyID}` | Revoke an MCP key (admin) |
+| POST | `/api/v1/projects/{projectID}/api-keys` | Create an MCP key or, with `scope: "ingest"`, a browser ingest key; the secret is returned once (admin) |
+| GET | `/api/v1/projects/{projectID}/api-keys` | List the project's MCP and ingest keys without showing their secrets (admin) |
+| DELETE | `/api/v1/projects/{projectID}/api-keys/{keyID}` | Revoke an MCP or ingest key (admin) |
 | GET | `/api/v1/projects/{projectID}/incidents` | List issues |
 | GET | `/api/v1/projects/{projectID}/incidents/{incidentID}` | Issue detail |
 | GET | `/api/v1/projects/{projectID}/incidents/{incidentID}/evidence` | Saved stack frames, failed requests, links to recordings, and available supporting data for the current issue |
@@ -109,8 +111,6 @@ The automated-setup callback requires `code`, `installation_id`, and UUID `state
 | PUT | `/api/v1/projects/{projectID}/github` | Set project repo config |
 | GET | `/api/v1/projects/{projectID}/github` | Get project repo config |
 | DELETE | `/api/v1/projects/{projectID}/github` | Remove project repo config |
-| POST | `/api/v1/projects/{projectID}/setup-pr` | Open SDK setup PR |
-| GET | `/api/v1/projects/{projectID}/setup-pr` | Setup PR status |
 
 ## Internal service reads
 

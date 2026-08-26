@@ -13,6 +13,8 @@ The SDK sends your app's errors and session recordings to Opslane. Setup is one 
 
 Before you start, you need an ingest key for your project. The SDK accepts only keys beginning with `opslane_pk_`. See [API keys](guides/api-keys.md).
 
+The onboarding wizard puts this key directly in its setup snippet so you can send a test event immediately. The key ships in your bundle; move it to an environment variable before committing.
+
 > **Privacy:** session recording is on by default. Review [replay privacy and masking](guides/replay-privacy.md) before you deploy.
 
 ## Install
@@ -38,8 +40,8 @@ import { OpslaneErrorBoundary } from '@opslane/sdk/react';
 import App from './App';
 
 init({
-  apiKey: import.meta.env.VITE_OPSLANE_API_KEY,
-  environment: import.meta.env.VITE_OPSLANE_ENVIRONMENT ?? 'development',
+  apiKey: 'opslane_pk_...',
+  environment: 'development',
   endpoint: 'https://your-opslane-instance.example.com', // omit for hosted Opslane
 });
 
@@ -63,8 +65,8 @@ import { init, setUser, opslaneVuePlugin } from '@opslane/sdk';
 import App from './App.vue';
 
 init({
-  apiKey: import.meta.env.VITE_OPSLANE_API_KEY,
-  environment: import.meta.env.VITE_OPSLANE_ENVIRONMENT ?? 'development',
+  apiKey: 'opslane_pk_...',
+  environment: 'development',
   endpoint: 'https://your-opslane-instance.example.com', // omit for hosted Opslane
 });
 
@@ -97,6 +99,7 @@ export function OpslaneProvider({ children }: { children: React.ReactNode }) {
 ```
 
 Then wrap `{children}` with `<OpslaneProvider>` in `app/layout.tsx`.
+Call `setUser` from a client component after sign-in, as you would in React or Vue. If your app already has a client-side authentication provider, you can initialize Opslane there instead of adding a separate provider.
 
 ### Vanilla JavaScript
 
@@ -105,7 +108,7 @@ import { init, setUser } from '@opslane/sdk';
 
 init({
   apiKey: 'opslane_pk_...',
-  environment: 'production',
+  environment: 'development',
   endpoint: 'https://your-opslane-instance.example.com', // omit for hosted Opslane
 });
 
@@ -131,7 +134,7 @@ VITE_OPSLANE_ENVIRONMENT=staging
 
 For Next.js, use `NEXT_PUBLIC_OPSLANE_API_KEY` and `NEXT_PUBLIC_OPSLANE_ENVIRONMENT` and read them from `process.env`.
 
-Keep the ingest key in your deploy platform or CI secret store rather than the repository. The key ships in your bundle and is safe to expose, but a committed key is slow to rotate.
+Keep the ingest key in your deploy platform or CI secret store rather than the repository. Browsers can read the key from the built bundle, but a committed key is slow to rotate.
 
 ## Capture errors yourself
 
@@ -164,6 +167,8 @@ If your bundle is served from a different origin than your page, add `crossorigi
 
 ## Verify
 
-Trigger an error in your app, then open the dashboard. It should appear as an issue within a few seconds. If nothing arrives, check the key prefix, the `endpoint` value on self-hosted installs, and the browser console for SDK warnings (set `debug: true` to see them).
+Temporarily render a button that throws `new Error('opslane-test')`, then click it. Use `onClick={() => { throw new Error('opslane-test'); }}` in React or Next.js, `@click="() => { throw new Error('opslane-test') }"` in Vue, or `onclick="throw new Error('opslane-test')"` in HTML.
+
+The error should appear as an issue within a few seconds. Delete the test button after Opslane receives it. If nothing arrives, check the key prefix, the `endpoint` value on self-hosted installs, and the browser console for SDK warnings (set `debug: true` to see them).
 
 Every `init` option, with types and defaults: [SDK options](reference/sdk-options.md).
