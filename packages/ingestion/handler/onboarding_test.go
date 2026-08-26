@@ -44,7 +44,7 @@ func onboardingHTTP(t *testing.T, router http.Handler, method, path, token, body
 	t.Helper()
 	request := httptest.NewRequest(method, path, strings.NewReader(body))
 	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("X-Forwarded-For", "198.51.100.200")
+	request.Header.Set("X-Forwarded-For", token)
 	request.AddCookie(&http.Cookie{Name: handler.AccessCookieName, Value: token})
 	response := httptest.NewRecorder()
 	router.ServeHTTP(response, request)

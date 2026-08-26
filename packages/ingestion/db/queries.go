@@ -3782,6 +3782,65 @@ func (q *Queries) LatestErrorGroupID(ctx context.Context, projectID string) (*st
 	return &id, nil
 }
 
+// OrgOnboarded reports the stored wizard completion fact for an org.
+func (q *Queries) OrgOnboarded(ctx context.Context, orgID string) (bool, error) {
+	var onboardedAt *time.Time
+	if err := q.pool.QueryRow(ctx,
+		`SELECT onboarded_at FROM orgs WHERE id = $1`, orgID,
+	).Scan(&onboardedAt); err != nil {
+		return false, fmt.Errorf("org onboarded: %w", err)
+	}
+	return onboardedAt != nil, nil
+}
+
+// NewestProjectIDAndRepo returns the newest project and its attached repo.
+func (q *Queries) NewestProjectIDAndRepo(ctx context.Context, orgID string) (*string, *string, error) {
+	var id string
+	var repo *string
+	err := q.pool.QueryRow(ctx, `
+		SELECT id::text, github_repo
+		FROM projects
+		WHERE org_id = $1
+		ORDER BY created_at DESC, id DESC
+		LIMIT 1`, orgID,
+	).Scan(&id, &repo)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil, nil
+	}
+	if err != nil {
+		return nil, nil, fmt.Errorf("newest project: %w", err)
+	}
+	return &id, repo, nil
+}
+
+// HasEnabledDigestDestination reports whether a project has a live daily digest destination.
+func (q *Queries) HasEnabledDigestDestination(ctx context.Context, projectID string) (bool, error) {
+	var exists bool
+	err := q.pool.QueryRow(ctx, `
+		SELECT EXISTS(
+			SELECT 1
+			FROM notification_destinations
+			WHERE project_id = $1
+			  AND enabled
+			  AND 'digest.daily' = ANY(event_types)
+		)`, projectID,
+	).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("has digest destination: %w", err)
+	}
+	return exists, nil
+}
+
+// MarkOrgOnboarded records completion once; replays are no-ops.
+func (q *Queries) MarkOrgOnboarded(ctx context.Context, orgID string) error {
+	if _, err := q.pool.Exec(ctx,
+		`UPDATE orgs SET onboarded_at = now() WHERE id = $1 AND onboarded_at IS NULL`, orgID,
+	); err != nil {
+		return fmt.Errorf("mark onboarded: %w", err)
+	}
+	return nil
+}
+
 // VerifyEnvironmentAccess checks that an environment belongs to the given org.
 // Returns the project_id if the environment is owned, empty string if not found.
 func (q *Queries) VerifyEnvironmentAccess(ctx context.Context, orgID, envID string) (string, error) {
