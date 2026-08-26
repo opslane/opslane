@@ -42,9 +42,79 @@ func setGitHubConfigFixture(
 	}
 	return &Dependencies{
 		Queries:             q,
+		GitHubAppSlug:       "opslane-test",
 		GitHubAppID:         "1",
 		GitHubAppPrivateKey: callbackTestKey(t),
 	}, q, org.ID, project.ID, installationID
+}
+
+func TestSetGitHubConfigPATModeValidatesBeforePersisting(t *testing.T) {
+	t.Run("reachable", func(t *testing.T) {
+		deps, q, orgID, projectID, _ := setGitHubConfigFixture(t)
+		deps.GitHubAppSlug = ""
+		t.Setenv("GITHUB_TOKEN", "test-token")
+		restore := gh.OverrideHTTPClientForTests(&http.Client{
+			Transport: handlerRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				if req.URL.Path != "/repos/owner/repo" || req.Header.Get("Authorization") != "Bearer test-token" {
+					t.Fatalf("unexpected request: %s %s", req.URL.Path, req.Header.Get("Authorization"))
+				}
+				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header),
+					Body: io.NopCloser(strings.NewReader(`{"full_name":"Owner/Repo","default_branch":"trunk"}`))}, nil
+			}),
+		})
+		defer restore()
+
+		response := httptest.NewRecorder()
+		deps.SetGitHubConfig(response, newSetGitHubConfigRequest(orgID, projectID, "owner/repo"))
+		if response.Code != http.StatusOK {
+			t.Fatalf("code=%d body=%s", response.Code, response.Body.String())
+		}
+		project, err := q.GetProjectByOrgID(context.Background(), orgID, projectID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if project.GithubRepo == nil || *project.GithubRepo != "Owner/Repo" ||
+			project.DefaultBranch == nil || *project.DefaultBranch != "trunk" {
+			t.Fatalf("persisted project=%+v", project)
+		}
+	})
+
+	t.Run("inaccessible", func(t *testing.T) {
+		deps, q, orgID, projectID, _ := setGitHubConfigFixture(t)
+		deps.GitHubAppSlug = ""
+		t.Setenv("GITHUB_TOKEN", "test-token")
+		restore := gh.OverrideHTTPClientForTests(&http.Client{
+			Transport: handlerRoundTripperFunc(func(*http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: http.StatusNotFound, Header: make(http.Header),
+					Body: io.NopCloser(strings.NewReader(`{}`))}, nil
+			}),
+		})
+		defer restore()
+
+		response := httptest.NewRecorder()
+		deps.SetGitHubConfig(response, newSetGitHubConfigRequest(orgID, projectID, "owner/missing"))
+		if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "not reachable") {
+			t.Fatalf("code=%d body=%s", response.Code, response.Body.String())
+		}
+		project, err := q.GetProjectByOrgID(context.Background(), orgID, projectID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if project.GithubRepo != nil {
+			t.Fatalf("inaccessible repo persisted: %v", *project.GithubRepo)
+		}
+	})
+
+	t.Run("missing token", func(t *testing.T) {
+		deps, _, orgID, projectID, _ := setGitHubConfigFixture(t)
+		deps.GitHubAppSlug = ""
+		t.Setenv("GITHUB_TOKEN", "")
+		response := httptest.NewRecorder()
+		deps.SetGitHubConfig(response, newSetGitHubConfigRequest(orgID, projectID, "owner/repo"))
+		if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "GITHUB_TOKEN") {
+			t.Fatalf("code=%d body=%s", response.Code, response.Body.String())
+		}
+	})
 }
 
 func newSetGitHubConfigRequest(

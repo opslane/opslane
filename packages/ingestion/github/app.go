@@ -3,6 +3,7 @@ package github
 import (
 	"crypto/rsa"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -58,6 +59,9 @@ type InstallationToken struct {
 type installationReposResponse struct {
 	Repositories []Repo `json:"repositories"`
 }
+
+// ErrRepoNotFound reports a repository the token cannot see.
+var ErrRepoNotFound = errors.New("repository not found or not accessible")
 
 // GenerateAppJWT creates a signed RS256 JWT for GitHub App authentication.
 // The JWT is valid for 10 minutes as required by GitHub.
@@ -163,6 +167,33 @@ func ListInstallationRepos(installationToken string) ([]Repo, error) {
 	}
 
 	return allRepos, nil
+}
+
+// GetRepo fetches one repository using a PAT or other bearer token.
+func GetRepo(token, owner, name string) (*Repo, error) {
+	reqURL := githubAPIBase + "/repos/" + url.PathEscape(owner) + "/" + url.PathEscape(name)
+	req, err := http.NewRequest(http.MethodGet, reqURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create get repo request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	response, err := httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("get repo: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode == http.StatusNotFound {
+		return nil, ErrRepoNotFound
+	}
+	if response.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("github get repo: status %d", response.StatusCode)
+	}
+	var repo Repo
+	if err := json.NewDecoder(response.Body).Decode(&repo); err != nil {
+		return nil, fmt.Errorf("decode repo: %w", err)
+	}
+	return &repo, nil
 }
 
 // ListUserInstallations returns the installation IDs visible to a user access
