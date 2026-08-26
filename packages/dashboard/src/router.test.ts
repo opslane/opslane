@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { createMemoryHistory, createRouter } from 'vue-router';
 import { router as appRouter, routes } from './router';
 
@@ -9,6 +9,10 @@ function testRouter() {
 }
 
 describe('pre-rename detail links', () => {
+  afterEach(() => {
+    localStorage.clear();
+  });
+
   it('redirects /incidents/:id to /issues/:id', async () => {
     const router = testRouter();
     await router.push('/incidents/abc');

@@ -976,6 +976,34 @@ describeDb('db.ts integration tests', () => {
 			);
 			expect(settled.rows).toEqual([{ status: 'dead_letter' }]);
 		});
+
+		it('settlement dead-letters expired-lease claimed setup_pr rows but spares live leases', async () => {
+			const expired = await testPool.query<{ id: string }>(
+				`INSERT INTO error_group_jobs (project_id, status, job_type, worker_id, claimed_at, lease_expires_at)
+				 VALUES ($1, 'claimed', 'setup_pr', 'old-worker', now() - interval '10 minutes', now() - interval '5 minutes')
+				 RETURNING id`,
+				[testProjectId],
+			);
+			const live = await testPool.query<{ id: string }>(
+				`INSERT INTO error_group_jobs (project_id, status, job_type, worker_id, claimed_at, lease_expires_at)
+				 VALUES ($1, 'claimed', 'setup_pr', 'old-worker', now(), now() + interval '5 minutes')
+				 RETURNING id`,
+				[testProjectId],
+			);
+			const migration = readFileSync(
+				new URL('../../../ingestion/db/migrations/063_retire_setup_pr_jobs.sql', import.meta.url),
+				'utf8',
+			);
+			await testPool.query(migration);
+			const statuses = await testPool.query<{ id: string; status: string }>(
+				`SELECT id, status FROM error_group_jobs WHERE id = ANY($1::uuid[])`,
+				[[expired.rows[0]!.id, live.rows[0]!.id]],
+			);
+			const byId = new Map(statuses.rows.map((r) => [r.id, r.status]));
+			expect(byId.get(expired.rows[0]!.id)).toBe('dead_letter');
+			// An actively leased row is left for its worker (or the next boot's replay).
+			expect(byId.get(live.rows[0]!.id)).toBe('claimed');
+		});
     it('should claim a pending job and set claimed status', async () => {
       const { jobId } = await seedErrorGroupAndJob();
 

@@ -222,3 +222,45 @@ func TestIngestScopeKeyLifecycleAndCap(t *testing.T) {
 		t.Fatalf("revoke ingest key: %d body=%s", revoked.Code, revoked.Body.String())
 	}
 }
+
+func TestCreateAPIKeyScopeValidation(t *testing.T) {
+	deps, pool := testDeps(t)
+	ctx := context.Background()
+	orgID, projectID, _, _ := seedTenant(t, deps.Queries)
+	t.Cleanup(func() { cleanupTenantHandler(t, pool, orgID) })
+	user, err := deps.Queries.CreateUserGitHub(ctx, orgID,
+		"scope-validation-"+time.Now().Format("150405.000000000")+"@example.test",
+		"Scope Validation", time.Now().UnixNano(), "scope-validation", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := deps.Queries.CreateMembership(ctx, user.ID, orgID, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	deps.JWTSecret = sessionReadSecret
+	token, err := auth.SignAccessToken(sessionReadSecret, user.ID, orgID, user.Email)
+	if err != nil {
+		t.Fatal(err)
+	}
+	router := handler.NewRouterWithPool(deps, pool)
+	request := func(body string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/projects/"+projectID+"/api-keys", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, req)
+		return response
+	}
+
+	// Unknown scope is rejected, not defaulted.
+	if res := request(`{"label":"x","expires_at":null,"scope":"bogus"}`); res.Code != http.StatusBadRequest {
+		t.Fatalf("bogus scope: got %d want 400 (%s)", res.Code, res.Body.String())
+	}
+
+	// Ingest keys have no expiry support; a supplied expires_at must not be
+	// silently dropped.
+	if res := request(`{"label":"onboarding","expires_at":"2030-01-01T00:00:00Z","scope":"ingest"}`); res.Code != http.StatusBadRequest {
+		t.Fatalf("ingest+expires_at: got %d want 400 (%s)", res.Code, res.Body.String())
+	}
+}

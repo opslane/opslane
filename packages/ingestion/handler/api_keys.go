@@ -79,6 +79,12 @@ func (d *Dependencies) CreateAPIKey(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "scope must be api or ingest")
 		return
 	}
+	if input.Scope == db.ScopeIngest && input.ExpiresAt != nil {
+		// Ingest keys have no expiry support; silently dropping the field
+		// would mint a non-expiring key the caller believes is bounded.
+		writeJSONError(w, http.StatusBadRequest, "expires_at is not supported for ingest keys")
+		return
+	}
 
 	var minted *db.MintedProjectKey
 	var record *db.APIKeyRecord

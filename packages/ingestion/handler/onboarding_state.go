@@ -38,7 +38,16 @@ func (d *Dependencies) evaluateOnboarding(r *http.Request, orgID string) (onboar
 
 	if onboarded {
 		state.NextStep = "done"
-		state.HasEvents = true
+		// has_events stays a truthful data fact even post-completion (a
+		// backfilled org may never have ingested); completion-wins lives in
+		// next_step alone. Degrade open on error: completion is already set.
+		if projectID != nil {
+			if hasEvents, optionalErr := d.Queries.HasEvents(r.Context(), *projectID); optionalErr == nil {
+				state.HasEvents = hasEvents
+			} else {
+				state.HasEvents = true
+			}
+		}
 		state.GitHubConnected = d.optionalGitHubConnected(r, orgID, repo)
 		if projectID != nil {
 			if connected, optionalErr := d.Queries.HasEnabledDigestDestination(r.Context(), *projectID); optionalErr == nil {

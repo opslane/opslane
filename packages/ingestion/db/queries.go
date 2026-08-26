@@ -3755,10 +3755,24 @@ func (q *Queries) HasEnabledDigestDestination(ctx context.Context, projectID str
 
 // MarkOrgOnboarded records completion once; replays are no-ops.
 func (q *Queries) MarkOrgOnboarded(ctx context.Context, orgID string) error {
-	if _, err := q.pool.Exec(ctx,
+	// Same advisory lock as OnboardingProvision: without it, complete can land
+	// between provision's onboarded check and its commit, letting a setup call
+	// return 201 on an org that just became onboarded.
+	tx, err := q.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("mark onboarded: begin: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('onboard-' || $1))`, orgID); err != nil {
+		return fmt.Errorf("mark onboarded: lock: %w", err)
+	}
+	if _, err := tx.Exec(ctx,
 		`UPDATE orgs SET onboarded_at = now() WHERE id = $1 AND onboarded_at IS NULL`, orgID,
 	); err != nil {
 		return fmt.Errorf("mark onboarded: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("mark onboarded: commit: %w", err)
 	}
 	return nil
 }

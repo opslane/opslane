@@ -557,7 +557,7 @@ function sessionAnalysisCapFromEnv(): number {
  * 2. session_analysis is capped: it is claimable only while fewer than
  *    `sessionAnalysisCap` analysis jobs hold a live lease.
  * 3. Within the remaining work, the analysis lane and the interactive lane
- *    production jobs alternate: analysis is preferred only when
+ *    (investigate/fix/error_fix) alternate: analysis is preferred only when
  *    its most recent claim is older than the interactive lane's. A fix
  *    backlog therefore cannot starve analysis, and an analysis backlog
  *    cannot starve fixes, without any scheduler state outside the jobs table.

@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -169,8 +170,19 @@ func ListInstallationRepos(installationToken string) ([]Repo, error) {
 	return allRepos, nil
 }
 
+// githubNamePattern matches GitHub's owner/repository identifier charset.
+// PathEscape leaves '.' untouched, so without this check an owner of ".."
+// becomes /repos/../<name> — a dot-segment GitHub normalizes into an
+// arbitrary API path hit with the server's token.
+var githubNamePattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
+
 // GetRepo fetches one repository using a PAT or other bearer token.
 func GetRepo(token, owner, name string) (*Repo, error) {
+	for _, segment := range []string{owner, name} {
+		if segment == "." || segment == ".." || !githubNamePattern.MatchString(segment) {
+			return nil, ErrRepoNotFound
+		}
+	}
 	reqURL := githubAPIBase + "/repos/" + url.PathEscape(owner) + "/" + url.PathEscape(name)
 	req, err := http.NewRequest(http.MethodGet, reqURL, nil)
 	if err != nil {
@@ -192,6 +204,11 @@ func GetRepo(token, owner, name string) (*Repo, error) {
 	var repo Repo
 	if err := json.NewDecoder(response.Body).Decode(&repo); err != nil {
 		return nil, fmt.Errorf("decode repo: %w", err)
+	}
+	// A 200 whose payload is not the requested repository (redirect debris,
+	// dot-segment normalization) must not persist an empty or foreign name.
+	if !strings.EqualFold(repo.FullName, owner+"/"+name) {
+		return nil, ErrRepoNotFound
 	}
 	return &repo, nil
 }

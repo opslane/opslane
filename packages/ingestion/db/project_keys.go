@@ -289,16 +289,11 @@ func RevokeExcessOnboardingKeysTx(ctx context.Context, tx pgx.Tx, projectID stri
 	return nil
 }
 
-// RevokeExcessOnboardingKeys is the pool variant used outside an existing transaction.
-func (q *Queries) RevokeExcessOnboardingKeys(ctx context.Context, projectID string) error {
-	if _, err := q.pool.Exec(ctx, excessOnboardingKeysSQL, projectID, onboardingKeyCap); err != nil {
-		return fmt.Errorf("revoke excess onboarding keys: %w", err)
-	}
-	return nil
-}
-
 // CreateIngestKeyCapped mints an ingest key and enforces the onboarding cap
 // in one transaction, so a cap failure cannot leave an extra live key behind.
+// A per-project advisory lock serializes concurrent mints: without it, two
+// READ COMMITTED transactions each see their own newest-N window and can
+// commit six live keys (or both target the same victim and revoke none).
 func (q *Queries) CreateIngestKeyCapped(
 	ctx context.Context,
 	orgID, projectID, label string,
@@ -309,6 +304,10 @@ func (q *Queries) CreateIngestKeyCapped(
 		return nil, nil, fmt.Errorf("create ingest key: begin: %w", err)
 	}
 	defer tx.Rollback(ctx)
+
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('keycap-' || $1))`, projectID); err != nil {
+		return nil, nil, fmt.Errorf("create ingest key: lock: %w", err)
+	}
 
 	var projectExists bool
 	if err := tx.QueryRow(ctx,
@@ -330,12 +329,14 @@ func (q *Queries) CreateIngestKeyCapped(
 			return nil, nil, err
 		}
 	}
+	record := &APIKeyRecord{KeyID: minted.KeyID, Scope: minted.Scope, Label: label, CreatedBy: createdByUserID}
+	if err := tx.QueryRow(ctx,
+		`SELECT created_at FROM project_api_keys WHERE id = $1`, minted.ID,
+	).Scan(&record.CreatedAt); err != nil {
+		return nil, nil, fmt.Errorf("create ingest key: read back: %w", err)
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, nil, fmt.Errorf("create ingest key: commit: %w", err)
-	}
-	record := &APIKeyRecord{
-		KeyID: minted.KeyID, Scope: minted.Scope, Label: label,
-		CreatedBy: createdByUserID, CreatedAt: time.Now().UTC(),
 	}
 	return minted, record, nil
 }

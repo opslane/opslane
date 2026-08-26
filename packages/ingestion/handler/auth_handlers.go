@@ -18,6 +18,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/opslane/opslane/packages/ingestion/auth"
 	"github.com/opslane/opslane/packages/ingestion/db"
 )
@@ -343,11 +344,16 @@ func (d *Dependencies) AuthMe(w http.ResponseWriter, r *http.Request) {
 		response.ActiveRole = RoleFromCtx(r.Context())
 	}
 	onboarded, err := d.Queries.OrgOnboarded(r.Context(), OrgIDFromCtx(r.Context()))
-	if err != nil {
+	switch {
+	case err == nil:
+		response.OnboardingComplete = &onboarded
+	case errors.Is(err, pgx.ErrNoRows):
+		// A legacy session whose claims carry no resolvable org must not turn
+		// the auth hot path into a 500; omit the field instead.
+	default:
 		writeJSONError(w, http.StatusInternalServerError, "failed to load onboarding state")
 		return
 	}
-	response.OnboardingComplete = &onboarded
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
 }

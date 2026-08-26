@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/opslane/opslane/packages/ingestion/auth"
 	gh "github.com/opslane/opslane/packages/ingestion/github"
 )
 
@@ -52,6 +53,14 @@ func (d *Dependencies) SetGitHubConfig(w http.ResponseWriter, r *http.Request) {
 	orgID := OrgIDFromCtx(r.Context())
 	var fullName, defaultBranch string
 	if d.GitHubAppSlug == "" {
+		// PAT mode exercises the instance-wide GITHUB_TOKEN. Unlike the App
+		// branch there is no per-org installation binding, so gate it the way
+		// the other integration mutations are gated: cloud requires an org
+		// admin; self-hosted single-tenant (no cloud auth) stays open.
+		if d.cloudAuthEnabled() && !auth.RoleSatisfies(RoleFromCtx(r.Context()), "admin") {
+			writeJSONError(w, http.StatusForbidden, "organization admin required")
+			return
+		}
 		token := strings.TrimSpace(os.Getenv("GITHUB_TOKEN"))
 		if token == "" {
 			writeJSONError(w, http.StatusBadRequest, "configure GITHUB_TOKEN or install the GitHub App")

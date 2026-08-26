@@ -9,6 +9,7 @@ import {
   getGitHubAppStatus,
   getMe,
   getOnboardingState,
+  listNotificationDestinations,
   listProjects,
   onboardingSetup,
   setGitHubConfig,
@@ -60,6 +61,15 @@ async function restoreProjectStorage(): Promise<void> {
 onMounted(async () => {
   try {
     const me = await getMe();
+    // Completion wins over the member gate: a member of an already-onboarded
+    // org (e.g. a pre-deploy session with no cached flag) must reach the
+    // dashboard, not sit on "ask an admin" forever.
+    if (me.onboarding_complete) {
+      localStorage.setItem('opslane_onboarding_complete', '1');
+      await restoreProjectStorage();
+      await router.push('/');
+      return;
+    }
     if (me.active_role === 'member') {
       needsAdmin.value = true;
       return;
@@ -104,6 +114,7 @@ async function submitProject(): Promise<void> {
     const result = await onboardingSetup(projectName.value, idempotencyToken);
     projectId.value = result.project.id;
     apiKey.value = result.api_key.raw_key;
+    localStorage.setItem(`opslane_onboarding_key_${result.project.id}`, result.api_key.raw_key);
     localStorage.setItem('opslane_project_id', result.project.id);
     localStorage.setItem('opslane_project_name', result.project.name);
     step.value = 'install_sdk';
@@ -154,6 +165,16 @@ const testButtonSnippet = computed(() => {
 
 async function ensureKeyAndPoll(): Promise<void> {
   if (!apiKey.value && projectId.value) {
+    // The ingest key is public by design (it ships in the browser bundle), so
+    // caching the raw value per project is safe — and it stops every reload
+    // from minting another key, which would walk the pasted key off the
+    // five-newest cap after a handful of refreshes.
+    const cached = localStorage.getItem(`opslane_onboarding_key_${projectId.value}`);
+    if (cached) {
+      apiKey.value = cached;
+      startEventPolling();
+      return;
+    }
     keyError.value = '';
     keyLoading.value = true;
     try {
@@ -161,6 +182,7 @@ async function ensureKeyAndPoll(): Promise<void> {
         label: 'onboarding', expires_at: null, scope: 'ingest',
       });
       apiKey.value = minted.token;
+      localStorage.setItem(`opslane_onboarding_key_${projectId.value}`, minted.token);
     } catch (caught: unknown) {
       keyError.value = caught instanceof Error ? caught.message : 'Could not create an API key';
       return;
@@ -247,6 +269,17 @@ async function connectSlack(): Promise<void> {
   slackError.value = '';
   slackBusy.value = true;
   try {
+    if (!slackDestId.value) {
+      // A failed earlier attempt (possibly in another session) leaves a
+      // disabled wizard row behind; adopt it instead of stacking duplicates.
+      try {
+        const existing = await listNotificationDestinations(projectId.value);
+        const leftover = existing.destinations.find(
+          (d) => !d.enabled && d.name === 'Daily digest',
+        );
+        if (leftover) slackDestId.value = leftover.id;
+      } catch { /* adoption is best-effort; fall through to create */ }
+    }
     if (!slackDestId.value) {
       const created = await createNotificationDestination(projectId.value, {
         name: 'Daily digest',
