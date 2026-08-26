@@ -142,6 +142,27 @@ func TestNotificationDestinationCRUDAndTestEndpointOSS(t *testing.T) {
 	}
 }
 
+func TestCreateDisabledNotificationDestination(t *testing.T) {
+	_, router, orgID, projectID, _ := notificationRouter(t, false, nil)
+	token := notificationToken(t, "disabled-destination-user", orgID, "disabled@example.com")
+	created := notificationHTTP(t, router, http.MethodPost,
+		"/api/v1/projects/"+projectID+"/notification-destinations", token,
+		map[string]any{
+			"name": "Daily digest", "webhook_url": "https://hooks.slack.com/services/T0/B0/secret",
+			"enabled": false,
+		},
+	)
+	if created.Code != http.StatusCreated || !strings.Contains(created.Body.String(), `"enabled":false`) {
+		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
+	}
+
+	listed := notificationHTTP(t, router, http.MethodGet,
+		"/api/v1/projects/"+projectID+"/notification-destinations", token, nil)
+	if listed.Code != http.StatusOK || !strings.Contains(listed.Body.String(), `"enabled":false`) {
+		t.Fatalf("list status=%d body=%s", listed.Code, listed.Body.String())
+	}
+}
+
 func TestNotificationDestinationTestEventType(t *testing.T) {
 	var sinkCalls atomic.Int64
 	sink := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
