@@ -127,6 +127,8 @@ func NewRouterWithPool(deps *Dependencies, pool *pgxpool.Pool) *chi.Mux {
 		// Onboarding
 		r.With(deps.AuthenticateUserSession, deps.RequireRoleIfCloud("admin")).Post("/onboard/provision", deps.OnboardProvision)
 		r.With(deps.AuthenticateUserSession, deps.RequireRoleIfCloud("admin")).Post("/onboarding/setup", deps.OnboardingSetup)
+		r.With(deps.AuthenticateUserSession).Get("/onboarding/state", deps.OnboardingState)
+		r.With(deps.AuthenticateUserSession, deps.RequireRoleIfCloud("admin")).Post("/onboarding/complete", deps.OnboardingComplete)
 
 		// Project CRUD
 		r.With(deps.AuthenticateUserSession).Get("/projects", deps.ListProjects)
@@ -188,9 +190,6 @@ func NewRouterWithPool(deps *Dependencies, pool *pgxpool.Pool) *chi.Mux {
 		r.With(deps.AuthenticateUserSession, deps.requireIntegrationAdmin).Delete("/projects/{projectID}/notification-destinations/{destID}", deps.DeleteNotificationDestinationEndpoint)
 		r.With(deps.AuthenticateUserSession, deps.requireIntegrationAdmin).Post("/projects/{projectID}/notification-destinations/{destID}/test", deps.TestNotificationDestinationEndpoint)
 
-		// Setup PR
-		r.With(deps.AuthenticateUserSession).Post("/projects/{projectID}/setup-pr", deps.SetupPR)
-		r.With(deps.AuthenticateUserSession).Get("/projects/{projectID}/setup-pr", deps.GetSetupPR)
 	})
 
 	// Serve dashboard SPA (must be last — catch-all).

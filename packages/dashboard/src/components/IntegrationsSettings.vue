@@ -42,6 +42,10 @@ function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback;
 }
 
+function notifyIntegrationsChanged(): void {
+	window.dispatchEvent(new Event('opslane-integrations-changed'));
+}
+
 async function loadDestinations(projectId: string): Promise<void> {
   const token = ++loadToken;
   destinationsProjectId.value = '';
@@ -84,11 +88,12 @@ async function createDestination(): Promise<void> {
   creating.value = true;
   loadError.value = '';
   try {
-    await createNotificationDestination(props.projectId, {
+		await createNotificationDestination(props.projectId, {
       name,
       webhook_url: webhookURL,
       delivery_policy: newDeliveryPolicy.value,
-    });
+		});
+		notifyIntegrationsChanged();
     newName.value = '';
     newWebhookURL.value = '';
     newDeliveryPolicy.value = 'immediate';
@@ -110,7 +115,8 @@ async function setEnabled(destination: NotificationDestination, enabled: boolean
   setMutationPending(destination.id, true);
   loadError.value = '';
   try {
-    await updateNotificationDestination(props.projectId, destination.id, { enabled });
+		await updateNotificationDestination(props.projectId, destination.id, { enabled });
+		notifyIntegrationsChanged();
     await refresh();
   } catch (error: unknown) {
     loadError.value = errorMessage(error, 'Failed to update notification destination');
@@ -139,9 +145,10 @@ async function setEventType(
   setMutationPending(destination.id, true);
   loadError.value = '';
   try {
-    await updateNotificationDestination(props.projectId, destination.id, {
-      event_types: eventTypes,
-    });
+		await updateNotificationDestination(props.projectId, destination.id, {
+			event_types: eventTypes,
+		});
+		notifyIntegrationsChanged();
     await refresh();
   } catch (error: unknown) {
     loadError.value = errorMessage(error, 'Failed to update notification subscriptions');
@@ -168,9 +175,10 @@ async function setDeliveryPolicy(
   setMutationPending(destination.id, true);
   loadError.value = '';
   try {
-    await updateNotificationDestination(props.projectId, destination.id, {
-      delivery_policy: deliveryPolicy,
-    });
+		await updateNotificationDestination(props.projectId, destination.id, {
+			delivery_policy: deliveryPolicy,
+		});
+		notifyIntegrationsChanged();
     await refresh();
   } catch (error: unknown) {
     loadError.value = errorMessage(error, 'Failed to update alert timing');
@@ -191,7 +199,8 @@ async function removeDestination(destination: NotificationDestination): Promise<
   setMutationPending(destination.id, true);
   loadError.value = '';
   try {
-    await deleteNotificationDestination(props.projectId, destination.id);
+		await deleteNotificationDestination(props.projectId, destination.id);
+		notifyIntegrationsChanged();
     await refresh();
   } catch (error: unknown) {
     loadError.value = errorMessage(error, 'Failed to delete notification destination');
@@ -211,11 +220,12 @@ async function sendTest(
   delete previousResults[destination.id];
   testResults.value = previousResults;
   try {
-    const result = await testNotificationDestination(
+		const result = await testNotificationDestination(
       props.projectId,
       destination.id,
       eventType ? { eventType } : undefined,
-    );
+		);
+		notifyIntegrationsChanged();
     const status = result.status_code ? ` (HTTP ${result.status_code})` : '';
     testResults.value = {
       ...testResults.value,

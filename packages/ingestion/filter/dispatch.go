@@ -5,10 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/opslane/opslane/packages/ingestion/identity"
+	"github.com/opslane/opslane/packages/ingestion/notify"
+	"github.com/opslane/opslane/packages/ingestion/usageevents"
 )
 
 // ASCII "filter". This differs from every other background sweeper lock.
@@ -25,8 +28,9 @@ const InquiryPromptVersion = 1
 const sweepBatchLimit = 500
 
 type Dispatcher struct {
-	pool      *pgxpool.Pool
-	projectID string
+	pool         *pgxpool.Pool
+	projectID    string
+	dashboardURL string
 }
 
 type episodeRef struct {
@@ -35,8 +39,8 @@ type episodeRef struct {
 	inputVersion int
 }
 
-func NewDispatcher(pool *pgxpool.Pool) *Dispatcher {
-	return &Dispatcher{pool: pool}
+func NewDispatcher(pool *pgxpool.Pool, dashboardURL string) *Dispatcher {
+	return &Dispatcher{pool: pool, dashboardURL: dashboardURL}
 }
 
 // Tick evaluates stale open episodes, freezes evidence for newly admitted
@@ -270,7 +274,23 @@ func (d *Dispatcher) admitOne(ctx context.Context, projectID, episodeID string, 
 	if err := tx.Commit(ctx); err != nil {
 		return false, fmt.Errorf("commit filter admission: %w", err)
 	}
-	return tag.RowsAffected() == 1, nil
+	admitted := tag.RowsAffected() == 1
+	if admitted {
+		// Re-admissions at a higher input version ping again by design (a new
+		// inquiry round); input_version lets the operator tell round 1 from a
+		// prompt-bump or evidence-growth re-admission at a glance.
+		props := map[string]string{
+			"project_id":    projectID,
+			"issue_id":      issueID,
+			"episode_id":    episodeID,
+			"input_version": strconv.Itoa(inputVersion),
+		}
+		if incidentURL := notify.BuildIncidentURL(d.dashboardURL, issueID, projectID); incidentURL != "" {
+			props["url"] = incidentURL
+		}
+		usageevents.Emit("issue_created", props)
+	}
+	return admitted, nil
 }
 
 func (d *Dispatcher) Start(ctx context.Context, interval time.Duration) {

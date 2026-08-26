@@ -1,4 +1,4 @@
--- 062_actionable_delivery.sql -- repeat actionable delivery and its audit ledger.
+-- 064_actionable_delivery.sql -- repeat actionable delivery and its audit ledger.
 -- Additive and safe for old binaries, which ignore these columns and table.
 
 -- Transactional: the runner applies files statement-by-statement, and the

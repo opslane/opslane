@@ -23,8 +23,8 @@ var ErrTokenReuse = errors.New("refresh token reuse detected")
 // that is not in the fix-triggerable state for its kind.
 var ErrNotInvestigated = errors.New("incident not in a fix-triggerable state")
 
-// ErrNoGithubRepo indicates the project has no repo configured for a setup PR.
-var ErrNoGithubRepo = errors.New("project has no github_repo")
+// ErrOrgOnboarded rejects onboarding setup for an org whose wizard already completed.
+var ErrOrgOnboarded = errors.New("org already onboarded")
 
 // ErrIdentityConflict indicates that a provider subject is already owned by a
 // different local user. Callers must fail closed rather than issue a session.
@@ -451,6 +451,78 @@ func (q *Queries) ProvisionProject(
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("provision project: commit: %w", err)
+	}
+	return result, nil
+}
+
+// OnboardingProvision is the wizard's project bootstrap. It serializes setup
+// per org so concurrent retries cannot create duplicate first projects.
+func (q *Queries) OnboardingProvision(
+	ctx context.Context,
+	orgID, name string,
+	githubRepo *string,
+	idempotencyToken string,
+) (*ProjectProvisioning, error) {
+	tx, err := q.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("onboarding provision: begin: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('onboard-' || $1))`, orgID); err != nil {
+		return nil, fmt.Errorf("onboarding provision: lock: %w", err)
+	}
+
+	var onboardedAt *time.Time
+	if err := tx.QueryRow(ctx, `SELECT onboarded_at FROM orgs WHERE id = $1`, orgID).Scan(&onboardedAt); err != nil {
+		return nil, fmt.Errorf("onboarding provision: org lookup: %w", err)
+	}
+	if onboardedAt != nil {
+		return nil, ErrOrgOnboarded
+	}
+
+	var result *ProjectProvisioning
+	var existing Project
+	err = tx.QueryRow(ctx, `
+		SELECT id, org_id, name, github_repo, default_branch, friction_autonomy,
+		       pr_posture, default_environment_id, digest_timezone, created_at
+		FROM projects
+		WHERE org_id = $1
+		ORDER BY created_at DESC, id DESC
+		LIMIT 1`, orgID,
+	).Scan(
+		&existing.ID, &existing.OrgID, &existing.Name, &existing.GithubRepo,
+		&existing.DefaultBranch, &existing.FrictionAutonomy, &existing.PrPosture,
+		&existing.DefaultEnvironmentID, &existing.DigestTimezone, &existing.CreatedAt,
+	)
+	switch {
+	case err == nil:
+		environment, envErr := q.EnsureProjectDefaultEnvironmentTx(ctx, tx, existing.ID)
+		if envErr != nil {
+			return nil, fmt.Errorf("onboarding provision: %w", envErr)
+		}
+		key, keyErr := q.CreateProjectKeyTx(ctx, tx, existing.ID, ScopeIngest, "onboarding", nil, "")
+		if keyErr != nil {
+			return nil, fmt.Errorf("onboarding provision: %w", keyErr)
+		}
+		if existing.DefaultEnvironmentID == nil {
+			existing.DefaultEnvironmentID = &environment.ID
+		}
+		result = &ProjectProvisioning{Project: existing, Environment: *environment, APIKey: *key}
+	case errors.Is(err, pgx.ErrNoRows):
+		result, err = q.provisionProjectTx(ctx, tx, orgID, name, githubRepo, idempotencyToken)
+		if err != nil {
+			return nil, err
+		}
+	default:
+		return nil, fmt.Errorf("onboarding provision: project lookup: %w", err)
+	}
+
+	if err := RevokeExcessOnboardingKeysTx(ctx, tx, result.Project.ID); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("onboarding provision: commit: %w", err)
 	}
 	return result, nil
 }
@@ -1716,81 +1788,6 @@ func (q *Queries) TriggerFixJob(ctx context.Context, projectID, groupID, guidanc
 	return jobID, nil
 }
 
-// EnqueueSetupPrJob enqueues a setup_pr job for the project. Idempotent: returns
-// the existing pending/claimed job id if one is already in flight. Tenant-scoped by orgID.
-func (q *Queries) EnqueueSetupPrJob(ctx context.Context, orgID, projectID string) (string, error) {
-	tx, err := q.pool.Begin(ctx)
-	if err != nil {
-		return "", fmt.Errorf("begin tx: %w", err)
-	}
-	defer tx.Rollback(ctx)
-
-	var repo *string
-	err = tx.QueryRow(ctx, `SELECT github_repo FROM projects WHERE id = $1 AND org_id = $2`, projectID, orgID).Scan(&repo)
-	if err == pgx.ErrNoRows {
-		return "", ErrNoGithubRepo
-	}
-	if err != nil {
-		return "", fmt.Errorf("lookup project: %w", err)
-	}
-	if repo == nil || *repo == "" {
-		return "", ErrNoGithubRepo
-	}
-
-	var existing string
-	err = tx.QueryRow(ctx,
-		`SELECT id FROM error_group_jobs
-		  WHERE project_id = $1 AND job_type = 'setup_pr' AND status IN ('pending','claimed')
-		  ORDER BY created_at DESC LIMIT 1`,
-		projectID,
-	).Scan(&existing)
-	if err == nil {
-		if cErr := tx.Commit(ctx); cErr != nil {
-			return "", fmt.Errorf("commit tx: %w", cErr)
-		}
-		return existing, nil
-	}
-	if err != pgx.ErrNoRows {
-		return "", fmt.Errorf("check in-flight: %w", err)
-	}
-
-	var jobID string
-	err = tx.QueryRow(ctx,
-		`INSERT INTO error_group_jobs (project_id, job_type) VALUES ($1, 'setup_pr') RETURNING id`,
-		projectID,
-	).Scan(&jobID)
-	if err != nil {
-		return "", fmt.Errorf("insert setup_pr job: %w", err)
-	}
-	if _, err = tx.Exec(ctx, `UPDATE projects SET setup_pr_status = 'pending', setup_pr_error = NULL WHERE id = $1`, projectID); err != nil {
-		return "", fmt.Errorf("set project status: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return "", fmt.Errorf("commit tx: %w", err)
-	}
-	return jobID, nil
-}
-
-type SetupPrInfo struct {
-	Status   *string
-	PRURL    *string
-	PRNumber *int
-	Error    *string
-}
-
-func (q *Queries) GetSetupPrStatus(ctx context.Context, orgID, projectID string) (*SetupPrInfo, error) {
-	var s SetupPrInfo
-	err := q.pool.QueryRow(ctx,
-		`SELECT setup_pr_status, setup_pr_url, setup_pr_number, setup_pr_error
-		   FROM projects WHERE id = $1 AND org_id = $2`,
-		projectID, orgID,
-	).Scan(&s.Status, &s.PRURL, &s.PRNumber, &s.Error)
-	if err != nil {
-		return nil, fmt.Errorf("get setup pr status: %w", err)
-	}
-	return &s, nil
-}
-
 // === Replay + Source Map ===
 
 // ReplayArtifact represents a screenshot or recording artifact for a replay.
@@ -2530,39 +2527,39 @@ func (q *Queries) HasVerifiedIdentityEmail(ctx context.Context, userID, email st
 }
 
 // ProvisionFromIdentity creates or links a cloud identity atomically.
-func (q *Queries) ProvisionFromIdentity(ctx context.Context, identity auth.Identity) (userID, orgID string, err error) {
+func (q *Queries) ProvisionFromIdentity(ctx context.Context, identity auth.Identity) (userID, orgID string, created bool, err error) {
 	tx, err := q.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
-		return "", "", fmt.Errorf("begin identity provisioning: %w", err)
+		return "", "", false, fmt.Errorf("begin identity provisioning: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	userID, orgID, err = q.ProvisionFromIdentityTx(ctx, tx, identity)
+	userID, orgID, created, err = q.ProvisionFromIdentityTx(ctx, tx, identity)
 	if err != nil {
-		return "", "", err
+		return "", "", false, err
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return "", "", fmt.Errorf("commit identity provisioning: %w", err)
+		return "", "", false, fmt.Errorf("commit identity provisioning: %w", err)
 	}
-	return userID, orgID, nil
+	return userID, orgID, created, nil
 }
 
 // ProvisionFromIdentityTx is the transaction-scoped core, exposed so concurrency
 // tests can begin two independent transactions at the same time.
-func (q *Queries) ProvisionFromIdentityTx(ctx context.Context, tx pgx.Tx, identity auth.Identity) (string, string, error) {
+func (q *Queries) ProvisionFromIdentityTx(ctx context.Context, tx pgx.Tx, identity auth.Identity) (string, string, bool, error) {
 	provider := strings.TrimSpace(identity.Provider)
 	subject := strings.TrimSpace(identity.ProviderSubject)
 	email := NormalizeEmail(identity.Email)
 	if provider == "" || subject == "" || email == "" {
-		return "", "", fmt.Errorf("provision identity: provider, subject, and email are required")
+		return "", "", false, fmt.Errorf("provision identity: provider, subject, and email are required")
 	}
 
 	if err := lockIdentityTx(ctx, tx, provider, subject); err != nil {
-		return "", "", err
+		return "", "", false, err
 	}
 	if identity.EmailVerified {
 		if err := lockEmailTx(ctx, tx, email); err != nil {
-			return "", "", err
+			return "", "", false, err
 		}
 	}
 
@@ -2572,45 +2569,47 @@ func (q *Queries) ProvisionFromIdentityTx(ctx context.Context, tx pgx.Tx, identi
 		 FROM auth_identities ai JOIN users u ON u.id = ai.user_id
 		 WHERE ai.provider = $1 AND ai.provider_subject = $2`, provider, subject).Scan(&userID, &orgID)
 	if err != nil && err != pgx.ErrNoRows {
-		return "", "", fmt.Errorf("resolve identity in provisioning: %w", err)
+		return "", "", false, fmt.Errorf("resolve identity in provisioning: %w", err)
 	}
 	if err == nil {
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO memberships (user_id, org_id, role) VALUES ($1, $2, 'owner')
 			 ON CONFLICT (user_id, org_id) DO UPDATE SET role = 'owner'`, userID, orgID); err != nil {
-			return "", "", fmt.Errorf("ensure identity owner membership: %w", err)
+			return "", "", false, fmt.Errorf("ensure identity owner membership: %w", err)
 		}
 		if _, err := tx.Exec(ctx,
 			`UPDATE auth_identities SET provider_email = $3,
 			 email_verified = email_verified OR $4
 			 WHERE provider = $1 AND provider_subject = $2`, provider, subject, email, identity.EmailVerified); err != nil {
-			return "", "", fmt.Errorf("refresh identity details: %w", err)
+			return "", "", false, fmt.Errorf("refresh identity details: %w", err)
 		}
-		return userID, orgID, nil
+		return userID, orgID, false, nil
 	}
 
 	if identity.EmailVerified {
 		err = tx.QueryRow(ctx,
 			`SELECT id, org_id FROM users WHERE lower(email) = $1`, email).Scan(&userID, &orgID)
 		if err != nil && err != pgx.ErrNoRows {
-			return "", "", fmt.Errorf("find verified email user: %w", err)
+			return "", "", false, fmt.Errorf("find verified email user: %w", err)
 		}
 	} else {
 		var existingID string
 		err = tx.QueryRow(ctx, `SELECT id FROM users WHERE lower(email) = $1`, email).Scan(&existingID)
 		if err == nil {
-			return "", "", fmt.Errorf("provision identity: unverified email cannot link an existing account")
+			return "", "", false, fmt.Errorf("provision identity: unverified email cannot link an existing account")
 		}
 		if err != pgx.ErrNoRows {
-			return "", "", fmt.Errorf("check unverified email: %w", err)
+			return "", "", false, fmt.Errorf("check unverified email: %w", err)
 		}
 		// Fail closed: never create an account for an unverified email. Otherwise
 		// an attacker seeds a user+org under a victim's address, and the victim's
 		// later verified login is adopted into that attacker-owned org.
-		return "", "", fmt.Errorf("provision identity: unverified email cannot create an account")
+		return "", "", false, fmt.Errorf("provision identity: unverified email cannot create an account")
 	}
 
+	created := false
 	if userID == "" {
+		created = true
 		orgName := strings.TrimSpace(identity.Username)
 		if orgName == "" {
 			orgName = strings.TrimSpace(identity.Name)
@@ -2620,20 +2619,20 @@ func (q *Queries) ProvisionFromIdentityTx(ctx context.Context, tx pgx.Tx, identi
 		}
 		if err := tx.QueryRow(ctx,
 			`INSERT INTO orgs (name) VALUES ($1) RETURNING id`, orgName).Scan(&orgID); err != nil {
-			return "", "", fmt.Errorf("create identity org: %w", err)
+			return "", "", false, fmt.Errorf("create identity org: %w", err)
 		}
 		if err := tx.QueryRow(ctx,
 			`INSERT INTO users (org_id, email, password_hash, name, avatar_url)
 			 VALUES ($1, $2, NULL, $3, NULLIF($4, '')) RETURNING id`,
 			orgID, email, identity.Name, identity.AvatarURL).Scan(&userID); err != nil {
-			return "", "", fmt.Errorf("create identity user: %w", err)
+			return "", "", false, fmt.Errorf("create identity user: %w", err)
 		}
 	}
 
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO memberships (user_id, org_id, role) VALUES ($1, $2, 'owner')
 		 ON CONFLICT (user_id, org_id) DO UPDATE SET role = 'owner'`, userID, orgID); err != nil {
-		return "", "", fmt.Errorf("ensure owner membership: %w", err)
+		return "", "", false, fmt.Errorf("ensure owner membership: %w", err)
 	}
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO auth_identities
@@ -2641,19 +2640,19 @@ func (q *Queries) ProvisionFromIdentityTx(ctx context.Context, tx pgx.Tx, identi
 		 VALUES ($1, $2, $3, $4, $5)
 		 ON CONFLICT (provider, provider_subject) DO NOTHING`,
 		userID, provider, subject, email, identity.EmailVerified); err != nil {
-		return "", "", fmt.Errorf("insert provisioned identity: %w", err)
+		return "", "", false, fmt.Errorf("insert provisioned identity: %w", err)
 	}
 
 	var owner string
 	if err := tx.QueryRow(ctx,
 		`SELECT user_id FROM auth_identities WHERE provider = $1 AND provider_subject = $2`,
 		provider, subject).Scan(&owner); err != nil {
-		return "", "", fmt.Errorf("validate provisioned identity: %w", err)
+		return "", "", false, fmt.Errorf("validate provisioned identity: %w", err)
 	}
 	if owner != userID {
-		return "", "", fmt.Errorf("%w: %s:%s", ErrIdentityConflict, provider, subject)
+		return "", "", false, fmt.Errorf("%w: %s:%s", ErrIdentityConflict, provider, subject)
 	}
-	return userID, orgID, nil
+	return userID, orgID, created, nil
 }
 
 // lockIdentityTx and lockEmailTx are shared by every identity provisioning
@@ -3689,6 +3688,95 @@ func (q *Queries) HasEvents(ctx context.Context, projectID string) (bool, error)
 		return false, fmt.Errorf("has events: %w", err)
 	}
 	return exists, nil
+}
+
+// LatestErrorGroupID returns the most recently active error group, or nil.
+func (q *Queries) LatestErrorGroupID(ctx context.Context, projectID string) (*string, error) {
+	var id string
+	err := q.pool.QueryRow(ctx,
+		`SELECT id::text FROM error_groups WHERE project_id = $1 ORDER BY last_seen DESC, id DESC LIMIT 1`,
+		projectID,
+	).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("latest error group: %w", err)
+	}
+	return &id, nil
+}
+
+// OrgOnboarded reports the stored wizard completion fact for an org.
+func (q *Queries) OrgOnboarded(ctx context.Context, orgID string) (bool, error) {
+	var onboardedAt *time.Time
+	if err := q.pool.QueryRow(ctx,
+		`SELECT onboarded_at FROM orgs WHERE id = $1`, orgID,
+	).Scan(&onboardedAt); err != nil {
+		return false, fmt.Errorf("org onboarded: %w", err)
+	}
+	return onboardedAt != nil, nil
+}
+
+// NewestProjectIDAndRepo returns the newest project and its attached repo.
+func (q *Queries) NewestProjectIDAndRepo(ctx context.Context, orgID string) (*string, *string, error) {
+	var id string
+	var repo *string
+	err := q.pool.QueryRow(ctx, `
+		SELECT id::text, github_repo
+		FROM projects
+		WHERE org_id = $1
+		ORDER BY created_at DESC, id DESC
+		LIMIT 1`, orgID,
+	).Scan(&id, &repo)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil, nil
+	}
+	if err != nil {
+		return nil, nil, fmt.Errorf("newest project: %w", err)
+	}
+	return &id, repo, nil
+}
+
+// HasEnabledDigestDestination reports whether a project has a live daily digest destination.
+func (q *Queries) HasEnabledDigestDestination(ctx context.Context, projectID string) (bool, error) {
+	var exists bool
+	err := q.pool.QueryRow(ctx, `
+		SELECT EXISTS(
+			SELECT 1
+			FROM notification_destinations
+			WHERE project_id = $1
+			  AND enabled
+			  AND 'digest.daily' = ANY(event_types)
+		)`, projectID,
+	).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("has digest destination: %w", err)
+	}
+	return exists, nil
+}
+
+// MarkOrgOnboarded records completion once; replays are no-ops.
+func (q *Queries) MarkOrgOnboarded(ctx context.Context, orgID string) error {
+	// Same advisory lock as OnboardingProvision: without it, complete can land
+	// between provision's onboarded check and its commit, letting a setup call
+	// return 201 on an org that just became onboarded.
+	tx, err := q.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("mark onboarded: begin: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('onboard-' || $1))`, orgID); err != nil {
+		return fmt.Errorf("mark onboarded: lock: %w", err)
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE orgs SET onboarded_at = now() WHERE id = $1 AND onboarded_at IS NULL`, orgID,
+	); err != nil {
+		return fmt.Errorf("mark onboarded: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("mark onboarded: commit: %w", err)
+	}
+	return nil
 }
 
 // VerifyEnvironmentAccess checks that an environment belongs to the given org.

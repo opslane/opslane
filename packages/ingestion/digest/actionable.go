@@ -33,7 +33,7 @@ var knownReasonCodes = []string{
 
 // actionableStatusSQL is the SQL membership list for statuses that require a
 // human. digest/sla.go and handler.SnoozeIncident embed the same pair, and the
-// migration 062 trigger hardcodes it; a status joining this set must update
+// migration 064 trigger hardcodes it; a status joining this set must update
 // all four sites together.
 const actionableStatusSQL = `('awaiting_approval','needs_human')`
 

@@ -43,6 +43,7 @@ systems use it for a branch name.
 | `DASHBOARD_DIR` | no | Directory of built dashboard SPA to serve (set in the Docker image) |
 | `DASHBOARD_ORIGIN` | no | Allowed dashboard origin for CORS **and** the OAuth redirect target. For the bundled Compose setup, set `http://localhost:8082`. This is separate from the worker's `DASHBOARD_URL`, which supplies links in pull requests and notifications. |
 | `DASHBOARD_URL` | no | Public or private HTTP(S) dashboard base URL used for notification links shown to users. Configure it explicitly; loopback URLs are rejected, and `DASHBOARD_ORIGIN` is not used as a fallback. This mirrors the worker variable of the same name. |
+| `USAGE_EVENTS_SLACK_WEBHOOK` | no | Slack incoming webhook for best-effort operator usage notifications. Unset disables them. Configure the same private-channel webhook on both server-side services. |
 | `GROUPING_DEBUG_ID_FRAMES` | no (`false`) | Uses valid SDK build identifiers to normalize temporary JavaScript stack-frame locations whose bundle URL changes between page loads. A build identifier is embedded in a built file and its source map so Opslane can match them. Only the literal `true` enables this setting, and the server reads it once at startup. Keep it consistent across server replicas. After source-map processing, Opslane groups each error into its final issue. |
 | `NOTIFY_UNSAFE_EXTRA_WEBHOOK_HOSTS` | no | **Development/test only.** Comma-separated exact `host[:port]` additions to the Slack webhook allowlist; added hosts may use HTTP. Never set this in production. |
 | `GITHUB_APP_ID` | for GitHub App | App ID |
@@ -89,6 +90,7 @@ The Opslane server reads **only** the `REPLAY_STORE_*` names; `MINIO_*` names ap
 | `GITHUB_TOKEN` | one of the two GitHub modes | PAT for clone + PR |
 | `GITHUB_APP_ID` / `GITHUB_APP_PRIVATE_KEY` | the other mode | GitHub App installation tokens |
 | `DASHBOARD_URL` | no | Public or private HTTP(S) dashboard base URL used for incident links in PR bodies and notifications. Configure it explicitly; loopback URLs are rejected, and the Opslane server's `DASHBOARD_ORIGIN` is not used as a fallback. |
+| `USAGE_EVENTS_SLACK_WEBHOOK` | no | Slack incoming webhook for best-effort operator usage notifications. Unset disables them. Messages can contain customer email addresses and error titles, so use a private channel. |
 | `WORKER_ID` | no (generated) | Stable worker identity used when one worker takes temporary ownership of a job |
 | `POLL_INTERVAL_MS` | no (5000) | How long the worker waits when the queue is empty (it drains continuously while work exists). Accepted range 50-300000; out-of-range or non-integer values log a warning and fall back to the default |
 | `SHUTDOWN_GRACE_MS` | no (25000) | Maximum time to wait for the poll loop during shutdown. Must stay below the platform's container termination grace period, or the container is killed before the graceful path runs. Compose sets `stop_grace_period: 30s` on the worker for this reason; Docker's 10s default is *below* the 25s grace. Accepted range 1000-120000; out-of-range values log a warning and fall back to the default |

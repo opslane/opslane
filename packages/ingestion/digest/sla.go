@@ -107,7 +107,7 @@ func CheckDeliverySLA(ctx context.Context, pool *pgxpool.Pool, projectID string,
 	// Class 3 — delivered-but-omitted. Scoped three ways: the project must be
 	// able to deliver at all, the latest delivered run must be recent, and that
 	// run must carry at least one ledger row. The last guard keeps the deploy
-	// day quiet: runs delivered before migration 062 predate the ledger, and
+	// day quiet: runs delivered before migration 064 predate the ledger, and
 	// flagging the whole backfilled actionable backlog against them every tick
 	// would bury the real omissions this diagnostic exists to catch.
 	report.OmittedActionable, err = queryFindings(ctx, pool, "omitted_actionable", `

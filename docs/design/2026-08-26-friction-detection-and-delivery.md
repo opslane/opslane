@@ -122,7 +122,7 @@ The parked incidents get reviewed **now**, not as a milestone; real findings don
 
 ### M1 rollback notes
 
-- Migration 062 deploys before the binary and is additive. Old binaries ignore
+- Migration 064 deploys before the binary and is additive. Old binaries ignore
   `actionable_since`, `snoozed_until`, and
   `digest_run_candidate_evaluations`.
 - Rolling the binary back silently stops repeat delivery and snooze enforcement;

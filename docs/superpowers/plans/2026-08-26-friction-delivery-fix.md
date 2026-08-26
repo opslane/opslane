@@ -22,11 +22,11 @@
 
 ---
 
-### Task 1: Migration 062 — actionable/snooze lifecycle trigger + decision ledger
+### Task 1: Migration 064 — actionable/snooze lifecycle trigger + decision ledger
 
 **Files:**
-- Create: `packages/ingestion/db/migrations/062_actionable_delivery.sql`
-- Test: `packages/ingestion/db/migration_062_test.go`
+- Create: `packages/ingestion/db/migrations/064_actionable_delivery.sql`
+- Test: `packages/ingestion/db/migration_064_test.go`
 
 **Interfaces:**
 - Produces: `error_groups.actionable_since timestamptz`, `error_groups.snoozed_until timestamptz`; trigger `error_groups_actionable_lifecycle` (INSERT and UPDATE); table `digest_run_candidate_evaluations` with PK `(digest_run_id, error_group_id)` and FK to both parents.
@@ -48,7 +48,7 @@
 - [ ] **Step 3: Write the migration.**
 
 ```sql
--- 062_actionable_delivery.sql
+-- 064_actionable_delivery.sql
 ALTER TABLE error_groups ADD COLUMN IF NOT EXISTS actionable_since timestamptz;
 ALTER TABLE error_groups ADD COLUMN IF NOT EXISTS snoozed_until timestamptz;
 
@@ -119,7 +119,7 @@ The UPDATE trigger is scoped to the three governed columns, so occurrence-count 
 
 - [ ] **Step 4: Green + idempotency.** `go test ./db -run TestMigration062 -v` → PASS; `go test ./db -run TestMigrations -v` (reapplication) → PASS.
 
-- [ ] **Step 5: Commit.** `git commit -m "feat(digest): actionable/snooze lifecycle + candidate ledger (migration 062; additive, old-binary safe)"`
+- [ ] **Step 5: Commit.** `git commit -m "feat(digest): actionable/snooze lifecycle + candidate ledger (migration 064; additive, old-binary safe)"`
 
 ---
 

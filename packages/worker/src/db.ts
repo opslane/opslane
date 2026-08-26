@@ -10,7 +10,6 @@ import type {
   JobType,
   NeedsHumanReason,
   PRPosture,
-  SetupPrStatus,
 } from '@opslane/shared';
 import {
   reconcileDeadLetteredSessionAnalysis,
@@ -22,6 +21,7 @@ import type { DerivedDecision } from './classify.js';
 import type { RouteMapRow } from './route-map.js';
 import type { RouteClaim } from './product-context/schema.js';
 import { logger, safeErrorMessage } from './logger.js';
+import { emitUsageEvent, incidentUrlFor } from './usage-events.js';
 import type { LedgerEntry } from './verification-ledger.js';
 
 const { Pool } = pg;
@@ -558,7 +558,7 @@ function sessionAnalysisCapFromEnv(): number {
  * 2. session_analysis is capped: it is claimable only while fewer than
  *    `sessionAnalysisCap` analysis jobs hold a live lease.
  * 3. Within the remaining work, the analysis lane and the interactive lane
- *    (investigate/fix/setup_pr) alternate: analysis is preferred only when
+ *    (investigate/fix/error_fix) alternate: analysis is preferred only when
  *    its most recent claim is older than the interactive lane's. A fix
  *    backlog therefore cannot starve analysis, and an analysis backlog
  *    cannot starve fixes, without any scheduler state outside the jobs table.
@@ -622,7 +622,7 @@ export async function claimJob(
          AND available_at <= now()
          -- Claim only job types this worker can dispatch. New types stay
          -- pending until a handler ships and joins this list.
-         AND job_type IN ('setup_pr','session_analysis','ci_watch','route_map','product_context','issue_inquiry','digest_write',
+		 AND job_type IN ('session_analysis','ci_watch','route_map','product_context','issue_inquiry','digest_write',
                           'score_sync','stack_resolve','fix','investigate','error_fix')
          AND (job_type <> 'session_analysis'
               OR (SELECT COUNT(*) FROM error_group_jobs
@@ -1285,7 +1285,7 @@ export async function updateGroupStatus(
     const dedupParam = `$${values.length + 2}`;
     values.push(payload ? JSON.stringify(payload) : null, triagedDedupKey(errorGroupId, terminalJobId ?? 'non-terminal'));
 
-    const result = await client.query(
+    const result = await client.query<{ id: string; previous_status: string }>(
     `WITH ${ownedCte}
      prior AS MATERIALIZED (
        SELECT id, status AS previous_status
@@ -1323,12 +1323,22 @@ export async function updateGroupStatus(
      )${triagedOutboxCte({
        statusParam: '$3', projectParam: '$2', payloadParam, dedupParam,
      })}
-     SELECT id FROM updated_group`,
+     SELECT id, previous_status FROM updated_group`,
     values,
     );
     if (lease && (result.rowCount ?? 0) === 0) throw new LeaseLostError(lease.id);
 
     await client.query('COMMIT');
+    const previousStatus = result.rows[0]?.previous_status;
+    if (status === 'needs_human' && previousStatus !== undefined && previousStatus !== 'needs_human') {
+      emitUsageEvent('needs_human_created', {
+        error_group_id: errorGroupId,
+        project_id: projectId,
+        reason: reason?.reason_message ?? '',
+        reason_code: reason?.reason_code ?? '',
+        url: incidentUrlFor(errorGroupId, projectId),
+      });
+    }
   } catch (error) {
     await client.query('ROLLBACK').catch(() => {});
     throw error;
@@ -2422,52 +2432,6 @@ export async function cacheProjectDefaultBranch(
   }
 }
 
-export async function recordSetupPrResult(
-  projectId: string,
-  status: SetupPrStatus,
-  fields: { pr_url?: string; pr_number?: number; error?: string } = {},
-  lease?: JobLease,
-): Promise<void> {
-  const pool = getPool();
-  const ownedCte = lease
-    ? `WITH owned AS (
-         SELECT id FROM error_group_jobs
-         WHERE id = $6
-           AND worker_id = $7
-           AND lease_generation = $8::bigint
-           AND project_id = $1
-           AND error_group_id IS NOT DISTINCT FROM $9::uuid
-           AND status = 'claimed'
-           AND lease_expires_at > now()
-         FOR UPDATE
-       )`
-    : '';
-  const result = await pool.query(
-    `${ownedCte}
-     UPDATE projects
-        SET setup_pr_status = $2,
-            setup_pr_url = COALESCE($3, setup_pr_url),
-            setup_pr_number = COALESCE($4, setup_pr_number),
-            setup_pr_error = $5
-      WHERE id = $1
-        ${lease ? 'AND EXISTS (SELECT 1 FROM owned)' : ''}
-      RETURNING id`,
-    [
-      projectId,
-      status,
-      fields.pr_url ?? null,
-      fields.pr_number ?? null,
-      fields.error ?? null,
-      ...(lease
-        ? [lease.id, lease.workerId, lease.leaseGeneration, lease.errorGroupId]
-        : []),
-    ],
-  );
-  if (lease && (result.rowCount ?? 0) === 0) {
-    throw new LeaseLostError(lease.id);
-  }
-}
-
 export interface ReplayData {
   id: string;
   session_id: string;
@@ -2822,7 +2786,7 @@ export async function updateGroupInvestigation(
       payload ? JSON.stringify(payload) : null,
       triagedDedupKey(errorGroupId, terminalJobId ?? 'non-terminal'),
     );
-    const result = await client.query(
+    const result = await client.query<{ id: string; previous_status: string }>(
       `WITH ${ownedCte}
        prior AS MATERIALIZED (
          SELECT id, status AS previous_status
@@ -2856,7 +2820,7 @@ export async function updateGroupInvestigation(
      )${triagedOutboxCte({
        statusParam: '$3', projectParam: '$2', payloadParam, dedupParam,
      })}
-     SELECT id FROM updated_group`,
+     SELECT id, previous_status FROM updated_group`,
       values,
     );
     if (lease && (result.rowCount ?? 0) === 0) {
@@ -2866,6 +2830,16 @@ export async function updateGroupInvestigation(
       await insertDiagnosisDecision(client, errorGroupId, projectId, fields.decision);
     }
     await client.query('COMMIT');
+    const previousStatus = result.rows[0]?.previous_status;
+    if (status === 'needs_human' && previousStatus !== undefined && previousStatus !== 'needs_human') {
+      emitUsageEvent('needs_human_created', {
+        error_group_id: errorGroupId,
+        project_id: projectId,
+        reason: reason?.reason_message ?? '',
+        reason_code: reason?.reason_code ?? '',
+        url: incidentUrlFor(errorGroupId, projectId),
+      });
+    }
   } catch (err: unknown) {
     await client.query('ROLLBACK');
     throw err;

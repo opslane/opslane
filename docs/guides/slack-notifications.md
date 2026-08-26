@@ -4,6 +4,7 @@ covers:
   - packages/ingestion/handler/notifications.go
   - packages/ingestion/db/notifications.go
   - packages/dashboard/src/components/IntegrationsSettings.vue
+  - packages/dashboard/src/views/SetupWizard.vue
 description: Send issue alerts after Opslane decides what to do and send the daily summary to Slack with an incoming webhook.
 ---
 
@@ -26,13 +27,17 @@ Treat that URL as a secret: anyone holding it can post to your channel. Opslane 
 <!-- voice-ok: "Alert after triage" is the exact dashboard setting label and is defined here. -->
 Dashboard > **Settings** > **Integrations** > *Notification integrations*: add a destination, name it, and paste the webhook URL. Select which event types to receive; by default both issue alerts and daily digests are enabled. Choose **Alert after triage**, which waits until Opslane decides whether to fix the issue or hand it to a person. Use the test actions to confirm the channel wiring before relying on it.
 
+The onboarding wizard configures a daily digest safely: it creates the destination disabled, sends a test issue alert, and enables the destination only when Slack accepts the test. A failed test leaves the destination disabled, and retrying updates the same row. You can also choose **Do this later**; the dashboard keeps a Slack reminder visible until an enabled daily-digest destination exists.
+
 Or via the API (session-authenticated; an SDK API key cannot manage destinations):
 
 ```bash
 curl -X POST "https://your-instance/api/v1/projects/$PROJECT_ID/notification-destinations" \
   -H 'Content-Type: application/json' \
-  -d '{"name":"#eng-alerts","webhook_url":"https://hooks.slack.com/services/...","delivery_policy":"post_triage"}'
+  -d '{"name":"#eng-alerts","webhook_url":"https://hooks.slack.com/services/...","enabled":false,"event_types":["digest.daily"],"delivery_policy":"post_triage"}'
 ```
+
+Test the returned destination ID with `POST /api/v1/projects/{projectID}/notification-destinations/{destID}/test`. Patch `enabled` to `true` only when the response contains `"ok":true`.
 
 Omitting `event_types` enables both new issue alerts and daily digests by default; pass `"event_types":["issue.created"]` to receive only issue alerts or `"event_types":["digest.daily"]` for only digests.
 

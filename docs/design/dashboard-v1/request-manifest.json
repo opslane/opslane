@@ -279,20 +279,6 @@
       "redirect": "/login on failed refresh"
     },
     {
-      "method": "POST",
-      "path": "/api/v1/projects/{projectId}/setup-pr",
-      "source": "api.ts:triggerSetupPR",
-      "pollIntervalMs": null,
-      "redirect": "/login on failed refresh"
-    },
-    {
-      "method": "GET",
-      "path": "/api/v1/projects/{projectId}/setup-pr",
-      "source": "api.ts:getSetupPRStatus",
-      "pollIntervalMs": 3000,
-      "redirect": "/login on failed refresh"
-    },
-    {
       "method": "GET",
       "path": "/api/v1/projects/{projectId}/incidents",
       "query": [
@@ -425,6 +411,20 @@
       "source": "App.vue:logout (known deviation outside api.ts)",
       "pollIntervalMs": null,
       "redirect": "/login after best-effort completion"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/onboarding/state",
+      "source": "api.ts:getOnboardingState",
+      "pollIntervalMs": null,
+      "redirect": "/login on failed refresh"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/onboarding/complete",
+      "source": "api.ts:completeOnboarding",
+      "pollIntervalMs": null,
+      "redirect": "/login on failed refresh"
     }
   ]
 }

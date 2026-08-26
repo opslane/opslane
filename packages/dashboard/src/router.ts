@@ -54,11 +54,16 @@ router.beforeEach((to) => {
     return { name: 'issues' };
   }
 
-  // Redirect to setup if authenticated but no project configured
-  if (authed && routeNeedsProject(to.name)) {
-    const hasProject = !!localStorage.getItem('opslane_project_id');
-    if (!hasProject) {
-      return { name: 'setup' };
+	// The completion flag is a cache for the synchronous guard. SetupWizard
+	// rechecks server state, so stale false costs one redirect and stale true is
+	// corrected on the next login. A missing project id alone must NOT bounce an
+	// onboarded session back to /setup: the wizard's push('/') would then loop
+	// against this guard whenever project restore lagged; App.vue's checkProject
+	// syncs the project id (and routes truly project-less orgs) after mount.
+	if (authed && routeNeedsProject(to.name)) {
+		const onboarded = localStorage.getItem('opslane_onboarding_complete') === '1';
+		if (!onboarded) {
+			return { name: 'setup' };
     }
   }
 });

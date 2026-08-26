@@ -146,6 +146,7 @@ describe.skipIf(!configured || !playwrightAvailable)('dashboard environment filt
     }]);
     await context.addInitScript(({ projectId }) => {
       localStorage.setItem('opslane_authed', '1');
+      localStorage.setItem('opslane_onboarding_complete', '1');
       localStorage.setItem('opslane_project_id', projectId);
       localStorage.setItem('opslane_project_name', 'Phase 2 E2E');
     }, { projectId: tenant.projectId });

@@ -18,6 +18,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/opslane/opslane/packages/ingestion/auth"
 	"github.com/opslane/opslane/packages/ingestion/db"
 )
@@ -156,14 +157,15 @@ type tokenResponse struct {
 }
 
 type userJSON struct {
-	ID          string          `json:"id"`
-	OrgID       string          `json:"org_id"`
-	ActiveOrgID string          `json:"active_org_id,omitempty"`
-	Email       string          `json:"email"`
-	Name        string          `json:"name"`
-	IsAdmin     bool            `json:"is_admin"`
-	Memberships []db.Membership `json:"memberships,omitempty"`
-	ActiveRole  string          `json:"active_role,omitempty"`
+	ID                 string          `json:"id"`
+	OrgID              string          `json:"org_id"`
+	ActiveOrgID        string          `json:"active_org_id,omitempty"`
+	Email              string          `json:"email"`
+	Name               string          `json:"name"`
+	IsAdmin            bool            `json:"is_admin"`
+	Memberships        []db.Membership `json:"memberships,omitempty"`
+	ActiveRole         string          `json:"active_role,omitempty"`
+	OnboardingComplete *bool           `json:"onboarding_complete,omitempty"`
 }
 
 func (d *Dependencies) mintTokenPair(ctx context.Context, userID, orgID, email, familyID string) (string, string, error) {
@@ -340,6 +342,17 @@ func (d *Dependencies) AuthMe(w http.ResponseWriter, r *http.Request) {
 		response.Memberships = memberships
 		response.ActiveOrgID = OrgIDFromCtx(r.Context())
 		response.ActiveRole = RoleFromCtx(r.Context())
+	}
+	onboarded, err := d.Queries.OrgOnboarded(r.Context(), OrgIDFromCtx(r.Context()))
+	switch {
+	case err == nil:
+		response.OnboardingComplete = &onboarded
+	case errors.Is(err, pgx.ErrNoRows):
+		// A legacy session whose claims carry no resolvable org must not turn
+		// the auth hot path into a 500; omit the field instead.
+	default:
+		writeJSONError(w, http.StatusInternalServerError, "failed to load onboarding state")
+		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)

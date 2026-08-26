@@ -2,10 +2,13 @@ package handler
 
 import (
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/opslane/opslane/packages/ingestion/db"
 )
 
@@ -29,8 +32,9 @@ func (d *Dependencies) OnboardingSetup(w http.ResponseWriter, r *http.Request) {
 
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<16) // 64KB
 	var req struct {
-		ProjectName string `json:"project_name"`
-		GithubRepo  string `json:"github_repo"`
+		ProjectName      string `json:"project_name"`
+		IdempotencyToken string `json:"idempotency_token"`
+		GithubRepo       string `json:"github_repo"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid request body")
@@ -45,48 +49,23 @@ func (d *Dependencies) OnboardingSetup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Use a transaction for atomicity
-	tx, err := d.Queries.Pool().Begin(r.Context())
-	if err != nil {
-		slog.Error("onboarding: begin tx", "error", err)
-		writeJSONError(w, http.StatusInternalServerError, "internal error")
-		return
+	if strings.TrimSpace(req.IdempotencyToken) == "" {
+		req.IdempotencyToken = uuid.NewString()
 	}
-	defer tx.Rollback(r.Context())
-
-	// 1. Create project (github_repo is nullable — pass nil if empty)
 	var githubRepo *string
 	if req.GithubRepo != "" {
 		githubRepo = &req.GithubRepo
 	}
-	project, err := d.Queries.CreateProjectTx(r.Context(), tx, orgID, req.ProjectName, githubRepo)
-	if err != nil {
-		slog.Error("onboarding: create project", "error", err)
-		writeJSONError(w, http.StatusInternalServerError, "failed to create project")
-		return
-	}
 
-	// 2. Initialize the project default and production environment.
-	env, err := d.Queries.EnsureProjectDefaultEnvironmentTx(r.Context(), tx, project.ID)
-	if err != nil {
-		slog.Error("onboarding: create environment", "error", err)
-		writeJSONError(w, http.StatusInternalServerError, "failed to create environment")
-		return
-	}
-	project.DefaultEnvironmentID = &env.ID
-
-	// 3. Create API key
-	apiKey, err := d.Queries.CreateProjectKeyTx(
-		r.Context(), tx, project.ID, db.ScopeIngest, "onboarding", nil, "",
+	result, err := d.Queries.OnboardingProvision(
+		r.Context(), orgID, req.ProjectName, githubRepo, req.IdempotencyToken,
 	)
-	if err != nil {
-		slog.Error("onboarding: create api key", "error", err)
-		writeJSONError(w, http.StatusInternalServerError, "failed to create API key")
+	if errors.Is(err, db.ErrOrgOnboarded) {
+		writeJSONError(w, http.StatusConflict, "org already onboarded")
 		return
 	}
-
-	if err := tx.Commit(r.Context()); err != nil {
-		slog.Error("onboarding: commit tx", "error", err)
+	if err != nil {
+		slog.Error("onboarding: provision", "error", err)
 		writeJSONError(w, http.StatusInternalServerError, "failed to complete setup")
 		return
 	}
@@ -94,11 +73,11 @@ func (d *Dependencies) OnboardingSetup(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(map[string]any{
-		"project":     toProjectJSON(*project, false, []string{}),
-		"environment": environmentJSON{ID: env.ID, ProjectID: env.ProjectID, Name: env.Name, CreatedAt: env.CreatedAt.Format(time.RFC3339)},
+		"project":     toProjectJSON(result.Project, false, []string{}),
+		"environment": environmentJSON{ID: result.Environment.ID, ProjectID: result.Environment.ProjectID, Name: result.Environment.Name, CreatedAt: result.Environment.CreatedAt.Format(time.RFC3339)},
 		"api_key": map[string]any{
-			"id":      apiKey.ID,
-			"raw_key": apiKey.Raw,
+			"id":      result.APIKey.ID,
+			"raw_key": result.APIKey.Raw,
 		},
 	})
 }

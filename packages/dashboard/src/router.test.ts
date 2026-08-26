@@ -1,14 +1,18 @@
 // @vitest-environment jsdom
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { createMemoryHistory, createRouter } from 'vue-router';
-import { routes } from './router';
+import { router as appRouter, routes } from './router';
 
 function testRouter() {
   return createRouter({ history: createMemoryHistory(), routes });
 }
 
 describe('pre-rename detail links', () => {
+  afterEach(() => {
+    localStorage.clear();
+  });
+
   it('redirects /incidents/:id to /issues/:id', async () => {
     const router = testRouter();
     await router.push('/incidents/abc');
@@ -29,4 +33,21 @@ describe('pre-rename detail links', () => {
     await router.push('/');
     expect(router.currentRoute.value.name).toBe('issues');
   });
+});
+
+describe('onboarding guard', () => {
+	it('requires both a selected project and the completion cache', async () => {
+		localStorage.setItem('opslane_authed', '1');
+		localStorage.setItem('opslane_project_id', 'project-1');
+		localStorage.removeItem('opslane_onboarding_complete');
+
+		await appRouter.push('/');
+		expect(appRouter.currentRoute.value.name).toBe('setup');
+
+		localStorage.setItem('opslane_onboarding_complete', '1');
+		await appRouter.push('/');
+		expect(appRouter.currentRoute.value.name).toBe('issues');
+
+		localStorage.clear();
+	});
 });

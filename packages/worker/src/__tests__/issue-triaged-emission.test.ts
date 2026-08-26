@@ -1,6 +1,11 @@
 import { readFileSync } from 'node:fs';
 import pg from 'pg';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+
+vi.mock('../usage-events.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../usage-events.js')>();
+  return { ...actual, emitUsageEvent: vi.fn() };
+});
 
 import {
   closePool,
@@ -10,6 +15,7 @@ import {
   updateGroupStatus,
 } from '../db.js';
 import type { JobLease } from '../db.js';
+import { emitUsageEvent } from '../usage-events.js';
 
 const databaseURL = process.env['DATABASE_URL'];
 const describeDb = databaseURL ? describe : describe.skip;
@@ -32,6 +38,7 @@ describeDb('issue.triaged emission', () => {
   });
 
   beforeEach(async () => {
+    vi.mocked(emitUsageEvent).mockClear();
     await pool.query(
       `DELETE FROM outbound_deliveries
        WHERE event_id IN (SELECT id FROM outbound_events WHERE project_id = $1)`,
@@ -116,6 +123,12 @@ describeDb('issue.triaged emission', () => {
     await updateGroupStatus(groupId, projectId, 'needs_human', { reason, terminalFixJobId: jobId });
     await updateGroupStatus(groupId, projectId, 'needs_human', { reason, terminalFixJobId: jobId });
     expect(await countEvents(groupId)).toBe(1);
+    expect(emitUsageEvent).toHaveBeenCalledTimes(1);
+    expect(emitUsageEvent).toHaveBeenCalledWith('needs_human_created', expect.objectContaining({
+      error_group_id: groupId,
+      project_id: projectId,
+      reason: 'SENTINEL_MODEL_PROSE',
+    }));
 
     const payload = (await pool.query<{ payload: unknown }>(
       `SELECT payload FROM outbound_events WHERE project_id = $1 AND event_type = 'issue.triaged'`,
@@ -183,6 +196,9 @@ describeDb('issue.triaged emission', () => {
       terminalJobId: investigation.jobId,
     });
     expect(await countEvents(investigation.groupId)).toBe(1);
+    expect(emitUsageEvent).toHaveBeenCalledWith('needs_human_created', expect.objectContaining({
+      error_group_id: investigation.groupId,
+    }));
 
     const finalized = await seedGroupAndJob('fixing');
     const finalizeLease = await claim(finalized.jobId, finalized.groupId);

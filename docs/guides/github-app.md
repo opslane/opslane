@@ -3,7 +3,6 @@ covers:
   - packages/worker/src/github-app.ts
   - packages/worker/src/pr.ts
   - packages/worker/src/repo-clone.ts
-  - packages/worker/src/setup-pr.ts
   - packages/ingestion/auth/github_provider.go
   - packages/ingestion/handler/agent_setup.go
   - packages/ingestion/handler/routes.go
@@ -15,24 +14,24 @@ description: Give Opslane access to your repository with a GitHub App or a perso
 
 Opslane needs access to your repository to read your code, open pull requests, and watch your CI. There are two ways to give it access. Pick one.
 
-## Quick way: a personal access token
+## Personal access token mode
 
-Good for trying Opslane on a repo or two. Create a GitHub token with **Contents** read/write, **Pull requests** read/write, and read access to **Checks** and **Commit statuses**. (A classic token's `repo` scope covers all of these.) Then:
+Use this mode when self-hosting without a GitHub App. Create a GitHub token with **Contents** read/write, **Pull requests** read/write, and read access to **Checks** and **Commit statuses**. A classic token's `repo` scope covers all of these. Leave `GITHUB_APP_SLUG` unset, then start Opslane with the token:
 
 ```bash
 export GITHUB_TOKEN=github_pat_...
 docker compose up -d
 ```
 
-A token only lets Opslane clone, open PRs, and read CI. It doesn't power dashboard sign-in or the repo picker, so set each project's repo through the API instead of the dashboard:
+A token lets Opslane clone repositories, open pull requests, and read CI. It does not power dashboard sign-in or the GitHub App repo picker. During onboarding, enter the repository as `owner/repo`; Opslane verifies that `GITHUB_TOKEN` can reach it before saving the project setting. You can also attach a repository through the session-authenticated API:
 
 ```bash
 PUT /api/v1/projects/{projectID}/github
 ```
 
-## Full way: a GitHub App
+## GitHub App mode
 
-Use a GitHub App for anything beyond a quick trial. It scopes access to the repos you pick and powers dashboard sign-in.
+Use a GitHub App to scope access to selected repositories and power dashboard sign-in. The onboarding wizard presents the App install link, waits for the installation, and then opens the repo picker. If a GitHub organization admin must approve the installation, choose **Do this later** and finish onboarding; the dashboard keeps a GitHub reminder visible until the installation and repository connection are complete.
 
 On **hosted Opslane** the App already exists: Settings → GitHub → Install, pick your repositories, done.
 
@@ -59,7 +58,7 @@ If you created the App before Opslane read CI, approve the **Checks** and **Comm
 
 ## Point a project at a repo
 
-Each project maps to one repository. In the dashboard: project → Settings → GitHub → pick the repo. Opslane stores only the repo name and authenticates through your App or token each time it acts.
+Each project maps to one repository. In App mode, open project → Settings → GitHub and pick the repo. In PAT mode, enter `owner/repo` in the onboarding wizard or call the project GitHub endpoint. Opslane stores only the repo name and authenticates through your App or token each time it acts.
 
 ## What Opslane does with the access
 

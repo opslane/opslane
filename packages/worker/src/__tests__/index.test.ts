@@ -93,7 +93,6 @@ vi.mock('../investigate.js', () => ({
 vi.mock('../pipeline.js', () => ({ runPipeline: vi.fn() }));
 vi.mock('../poller.js', () => ({ createPoller: vi.fn(() => ({ start: vi.fn(), stop: vi.fn() })) }));
 vi.mock('../github-app.js', () => ({ getInstallationToken: vi.fn() }));
-vi.mock('../setup-pr.js', () => ({ processSetupPrJob: vi.fn() }));
 vi.mock('../route-map.js', () => ({ processRouteMapJob: vi.fn() }));
 vi.mock('../product-context/job.js', () => ({ runProductContext: vi.fn() }));
 vi.mock('../inquiry/job.js', () => ({ runInquiry: vi.fn() }));

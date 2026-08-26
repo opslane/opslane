@@ -126,6 +126,10 @@
           "classification": "fragment"
         },
         {
+          "language": "tsx",
+          "classification": "fragment"
+        },
+        {
           "language": "ts",
           "classification": "fragment"
         },

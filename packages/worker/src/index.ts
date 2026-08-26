@@ -27,7 +27,6 @@ import { createPoller } from './poller.js';
 import { buildRepoUrl, cloneFailureReason, cloneRepo, isRetriableCloneFailure, sweepAbandonedClones } from './repo-clone.js';
 import { getInstallationToken } from './github-app.js';
 import { type ReplaySignals } from './pr.js';
-import { processSetupPrJob } from './setup-pr.js';
 
 import type { ResolvedFrame } from './source-map.js';
 import { framesFromEnvelope } from './resolve-stack.js';
@@ -334,11 +333,6 @@ export async function processJobInner(job: ClaimedJob, signal: AbortSignal): Pro
     project_id: job.projectId,
     attempt: job.attempts + 1,
   });
-
-  if (job.jobType === 'setup_pr') {
-    await processSetupPrJob(job, signal);
-    return;
-  }
 
   if (job.jobType === 'session_analysis') {
     if (!job.sessionId) throw new Error(`Job ${job.id} missing session_id`);
@@ -1617,6 +1611,9 @@ export async function processFixJob(job: ClaimedJob & { errorGroupId: string }, 
 
 async function main(): Promise<void> {
   logger.info('Opslane worker starting');
+  logger.info('usage events', {
+    enabled: Boolean(process.env['USAGE_EVENTS_SLACK_WEBHOOK']),
+  });
 
   // Clone checkouts orphaned by a crashed worker process. Age-gated inside:
   // a live long fix run's directory is never touched.
