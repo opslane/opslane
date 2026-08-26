@@ -297,6 +297,49 @@ func (q *Queries) RevokeExcessOnboardingKeys(ctx context.Context, projectID stri
 	return nil
 }
 
+// CreateIngestKeyCapped mints an ingest key and enforces the onboarding cap
+// in one transaction, so a cap failure cannot leave an extra live key behind.
+func (q *Queries) CreateIngestKeyCapped(
+	ctx context.Context,
+	orgID, projectID, label string,
+	createdByUserID *string,
+) (*MintedProjectKey, *APIKeyRecord, error) {
+	tx, err := q.pool.Begin(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("create ingest key: begin: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	var projectExists bool
+	if err := tx.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM projects WHERE id = $1 AND org_id = $2)`,
+		projectID, orgID,
+	).Scan(&projectExists); err != nil {
+		return nil, nil, fmt.Errorf("create ingest key: project scope: %w", err)
+	}
+	if !projectExists {
+		return nil, nil, pgx.ErrNoRows
+	}
+
+	minted, err := q.CreateProjectKeyTx(ctx, tx, projectID, ScopeIngest, label, createdByUserID, "")
+	if err != nil {
+		return nil, nil, err
+	}
+	if label == "onboarding" {
+		if err := RevokeExcessOnboardingKeysTx(ctx, tx, projectID); err != nil {
+			return nil, nil, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, nil, fmt.Errorf("create ingest key: commit: %w", err)
+	}
+	record := &APIKeyRecord{
+		KeyID: minted.KeyID, Scope: minted.Scope, Label: label,
+		CreatedBy: createdByUserID, CreatedAt: time.Now().UTC(),
+	}
+	return minted, record, nil
+}
+
 func (q *Queries) CreateAPIKey(
 	ctx context.Context,
 	orgID, projectID, label, createdByUserID string,
@@ -333,7 +376,7 @@ func (q *Queries) ListAPIKeys(ctx context.Context, orgID, projectID string) ([]A
 		       k.expires_at, k.revoked_at, k.revoked_by_user_id
 		FROM project_api_keys k
 		JOIN projects p ON p.id = k.project_id AND p.org_id = $1
-		WHERE k.project_id = $2 AND k.scope = 'api'
+		WHERE k.project_id = $2 AND k.scope IN ('api', 'ingest')
 		ORDER BY k.created_at DESC, k.id DESC`, orgID, projectID)
 	if err != nil {
 		return nil, fmt.Errorf("list api keys: %w", err)
@@ -365,7 +408,7 @@ func (q *Queries) RevokeAPIKey(
 		    revoked_by_user_id = COALESCE(k.revoked_by_user_id, $4)
 		FROM projects p
 		WHERE p.id = k.project_id AND p.org_id = $1
-		  AND k.project_id = $2 AND k.key_id = $3 AND k.scope = 'api'`,
+		  AND k.project_id = $2 AND k.key_id = $3 AND k.scope IN ('api', 'ingest')`,
 		orgID, projectID, keyID, revokedByUserID)
 	if err != nil {
 		return false, fmt.Errorf("revoke api key: %w", err)
