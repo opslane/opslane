@@ -26,6 +26,9 @@ var ErrNotInvestigated = errors.New("incident not in a fix-triggerable state")
 // ErrNoGithubRepo indicates the project has no repo configured for a setup PR.
 var ErrNoGithubRepo = errors.New("project has no github_repo")
 
+// ErrOrgOnboarded rejects onboarding setup for an org whose wizard already completed.
+var ErrOrgOnboarded = errors.New("org already onboarded")
+
 // ErrIdentityConflict indicates that a provider subject is already owned by a
 // different local user. Callers must fail closed rather than issue a session.
 var ErrIdentityConflict = errors.New("auth identity belongs to a different user")
@@ -451,6 +454,78 @@ func (q *Queries) ProvisionProject(
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("provision project: commit: %w", err)
+	}
+	return result, nil
+}
+
+// OnboardingProvision is the wizard's project bootstrap. It serializes setup
+// per org so concurrent retries cannot create duplicate first projects.
+func (q *Queries) OnboardingProvision(
+	ctx context.Context,
+	orgID, name string,
+	githubRepo *string,
+	idempotencyToken string,
+) (*ProjectProvisioning, error) {
+	tx, err := q.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("onboarding provision: begin: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('onboard-' || $1))`, orgID); err != nil {
+		return nil, fmt.Errorf("onboarding provision: lock: %w", err)
+	}
+
+	var onboardedAt *time.Time
+	if err := tx.QueryRow(ctx, `SELECT onboarded_at FROM orgs WHERE id = $1`, orgID).Scan(&onboardedAt); err != nil {
+		return nil, fmt.Errorf("onboarding provision: org lookup: %w", err)
+	}
+	if onboardedAt != nil {
+		return nil, ErrOrgOnboarded
+	}
+
+	var result *ProjectProvisioning
+	var existing Project
+	err = tx.QueryRow(ctx, `
+		SELECT id, org_id, name, github_repo, default_branch, friction_autonomy,
+		       pr_posture, default_environment_id, digest_timezone, created_at
+		FROM projects
+		WHERE org_id = $1
+		ORDER BY created_at DESC, id DESC
+		LIMIT 1`, orgID,
+	).Scan(
+		&existing.ID, &existing.OrgID, &existing.Name, &existing.GithubRepo,
+		&existing.DefaultBranch, &existing.FrictionAutonomy, &existing.PrPosture,
+		&existing.DefaultEnvironmentID, &existing.DigestTimezone, &existing.CreatedAt,
+	)
+	switch {
+	case err == nil:
+		environment, envErr := q.EnsureProjectDefaultEnvironmentTx(ctx, tx, existing.ID)
+		if envErr != nil {
+			return nil, fmt.Errorf("onboarding provision: %w", envErr)
+		}
+		key, keyErr := q.CreateProjectKeyTx(ctx, tx, existing.ID, ScopeIngest, "onboarding", nil, "")
+		if keyErr != nil {
+			return nil, fmt.Errorf("onboarding provision: %w", keyErr)
+		}
+		if existing.DefaultEnvironmentID == nil {
+			existing.DefaultEnvironmentID = &environment.ID
+		}
+		result = &ProjectProvisioning{Project: existing, Environment: *environment, APIKey: *key}
+	case errors.Is(err, pgx.ErrNoRows):
+		result, err = q.provisionProjectTx(ctx, tx, orgID, name, githubRepo, idempotencyToken)
+		if err != nil {
+			return nil, err
+		}
+	default:
+		return nil, fmt.Errorf("onboarding provision: project lookup: %w", err)
+	}
+
+	if err := RevokeExcessOnboardingKeysTx(ctx, tx, result.Project.ID); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("onboarding provision: commit: %w", err)
 	}
 	return result, nil
 }

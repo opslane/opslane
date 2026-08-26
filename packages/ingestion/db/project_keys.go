@@ -261,6 +261,42 @@ func (q *Queries) CreateProjectKeyTx(
 	return minted, nil
 }
 
+const onboardingKeyCap = 5
+
+const excessOnboardingKeysSQL = `
+	UPDATE project_api_keys
+	SET revoked_at = now()
+	WHERE project_id = $1
+	  AND scope = 'ingest'
+	  AND label = 'onboarding'
+	  AND revoked_at IS NULL
+	  AND key_id NOT IN (
+		SELECT key_id
+		FROM project_api_keys
+		WHERE project_id = $1
+		  AND scope = 'ingest'
+		  AND label = 'onboarding'
+		  AND revoked_at IS NULL
+		ORDER BY created_at DESC, id DESC
+		LIMIT $2
+	  )`
+
+// RevokeExcessOnboardingKeysTx keeps only the newest live onboarding ingest keys.
+func RevokeExcessOnboardingKeysTx(ctx context.Context, tx pgx.Tx, projectID string) error {
+	if _, err := tx.Exec(ctx, excessOnboardingKeysSQL, projectID, onboardingKeyCap); err != nil {
+		return fmt.Errorf("revoke excess onboarding keys: %w", err)
+	}
+	return nil
+}
+
+// RevokeExcessOnboardingKeys is the pool variant used outside an existing transaction.
+func (q *Queries) RevokeExcessOnboardingKeys(ctx context.Context, projectID string) error {
+	if _, err := q.pool.Exec(ctx, excessOnboardingKeysSQL, projectID, onboardingKeyCap); err != nil {
+		return fmt.Errorf("revoke excess onboarding keys: %w", err)
+	}
+	return nil
+}
+
 func (q *Queries) CreateAPIKey(
 	ctx context.Context,
 	orgID, projectID, label, createdByUserID string,
