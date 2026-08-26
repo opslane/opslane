@@ -41,7 +41,8 @@ export function markAuthed(): void {
 }
 
 export function clearAuth(): void {
-  localStorage.removeItem(AUTHED_KEY);
+	localStorage.removeItem(AUTHED_KEY);
+	localStorage.removeItem('opslane_onboarding_complete');
   // Historical pre-cookie key names — do not rename.
   localStorage.removeItem('defender_access_token');
   localStorage.removeItem('defender_refresh_token');

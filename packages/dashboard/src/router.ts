@@ -54,11 +54,14 @@ router.beforeEach((to) => {
     return { name: 'issues' };
   }
 
-  // Redirect to setup if authenticated but no project configured
-  if (authed && routeNeedsProject(to.name)) {
-    const hasProject = !!localStorage.getItem('opslane_project_id');
-    if (!hasProject) {
-      return { name: 'setup' };
+	// The completion flag is a cache for the synchronous guard. SetupWizard
+	// rechecks server state, so stale false costs one redirect and stale true is
+	// corrected on the next login.
+	if (authed && routeNeedsProject(to.name)) {
+		const hasProject = !!localStorage.getItem('opslane_project_id');
+		const onboarded = localStorage.getItem('opslane_onboarding_complete') === '1';
+		if (!hasProject || !onboarded) {
+			return { name: 'setup' };
     }
   }
 });
