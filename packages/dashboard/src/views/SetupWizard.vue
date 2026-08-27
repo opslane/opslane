@@ -238,6 +238,29 @@ async function loadGitHubStatus(): Promise<void> {
   }
 }
 
+// The App install happens on github.com in another tab and never calls back
+// into this one, so after the user heads there we poll status until the
+// installation lands (or the step is left). No manual "check again" needed.
+const installStarted = ref(false);
+const githubStatusTimer = ref<ReturnType<typeof setInterval>>();
+function startGitHubStatusPolling(): void {
+  installStarted.value = true;
+  if (githubStatusTimer.value) clearInterval(githubStatusTimer.value);
+  githubStatusTimer.value = setInterval(async () => {
+    await loadGitHubStatus();
+    if (githubAppStatus.value?.installed && githubStatusTimer.value) {
+      clearInterval(githubStatusTimer.value);
+      githubStatusTimer.value = undefined;
+    }
+  }, 4000);
+}
+function stopGitHubStatusPolling(): void {
+  if (githubStatusTimer.value) {
+    clearInterval(githubStatusTimer.value);
+    githubStatusTimer.value = undefined;
+  }
+}
+
 async function attachRepo(repo: string): Promise<void> {
   if (!repo.trim()) return;
   githubError.value = '';
@@ -255,6 +278,7 @@ async function attachRepo(repo: string): Promise<void> {
 }
 
 function deferGitHub(): void {
+  stopGitHubStatusPolling();
   step.value = 'connect_slack';
 }
 
@@ -338,6 +362,7 @@ function goToDashboard(): void {
 
 onUnmounted(() => {
   if (pollTimer.value) clearInterval(pollTimer.value);
+  stopGitHubStatusPolling();
 });
 </script>
 
@@ -474,13 +499,17 @@ onUnmounted(() => {
                 target="_blank"
                 rel="noopener noreferrer"
                 class="flex w-full items-center justify-center rounded-md bg-accent px-4 py-3 text-sm font-medium text-on-accent"
+                data-testid="github-install"
+                @click="startGitHubStatusPolling"
               >Install GitHub App</a>
-              <Button v-if="!githubAppStatus?.installed" class="w-full" @click="loadGitHubStatus">Check again</Button>
-              <div v-else class="space-y-3">
+              <div v-if="githubAppStatus?.installed" class="space-y-3">
                 <RepoSelector v-model="selectedRepo" :disabled="githubBusy" />
                 <Button variant="primary" class="w-full" :busy="githubBusy" :disabled="!selectedRepo" @click="attachRepo(selectedRepo)">Connect repository</Button>
               </div>
-              <p v-if="!githubAppStatus?.installed" class="text-xs text-muted">Waiting for GitHub? Ask an admin to approve the installation, or continue for now.</p>
+              <p v-else-if="installStarted" class="flex items-center gap-2 text-xs text-muted">
+                <span class="h-3 w-3 animate-spin rounded-full border-2 border-accent border-r-transparent"></span>
+                Waiting for GitHub — we'll detect the installation automatically. If your org needs an admin to approve it, you can continue for now.
+              </p>
             </div>
             <button data-testid="defer-github" type="button" class="mt-6 w-full text-sm text-muted underline hover:text-text" @click="deferGitHub">
               Do this later
