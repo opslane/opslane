@@ -137,6 +137,22 @@ describe('SetupWizard', () => {
     wrapper.unmount();
   });
 
+  it('shows the GitHub waiting state only after the install link is clicked, then polls', async () => {
+    api.getOnboardingState.mockResolvedValue({
+      ...baseState, next_step: 'connect_github', project_id: 'p1', has_events: true,
+    });
+    const wrapper = mount(SetupWizard);
+    await flushPromises();
+    expect(wrapper.text()).not.toContain('Check again');
+    expect(wrapper.text()).not.toContain('Waiting for GitHub');
+    const initialCalls = api.getGitHubAppStatus.mock.calls.length;
+    await wrapper.get('[data-testid="github-install"]').trigger('click');
+    expect(wrapper.text()).toContain('Waiting for GitHub');
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(api.getGitHubAppStatus.mock.calls.length).toBeGreaterThan(initialCalls);
+    wrapper.unmount();
+  });
+
   it('shows completion failure instead of the done screen', async () => {
     api.getOnboardingState.mockResolvedValue({
       ...baseState, next_step: 'connect_github', project_id: 'p1', has_events: true,
