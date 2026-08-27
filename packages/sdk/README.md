@@ -19,7 +19,7 @@ import { init } from '@opslane/sdk';
 
 init({
   apiKey: import.meta.env.VITE_OPSLANE_API_KEY,
-  endpoint: 'https://your-opslane-instance.example.com', // omit for hosted Opslane
+  endpoint: 'https://your-opslane-instance.example.com', // https://app.opslane.com for hosted Opslane
   release: import.meta.env.VITE_OPSLANE_RELEASE,          // e.g. your git SHA
 });
 ```

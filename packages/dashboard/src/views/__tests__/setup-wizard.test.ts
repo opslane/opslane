@@ -70,6 +70,8 @@ describe('SetupWizard', () => {
       label: 'onboarding', expires_at: null, scope: 'ingest',
     });
     expect(wrapper.text()).toContain('opslane_pk_resume');
+    // The snippet always carries an explicit endpoint (the SDK default is not trusted).
+    expect(wrapper.text()).toContain(`endpoint: '${window.location.origin}'`);
     expect(localStorage.getItem('opslane_project_id')).toBe('p1');
     expect(api.onboardingSetup).not.toHaveBeenCalled();
     wrapper.unmount();
