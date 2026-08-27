@@ -10,6 +10,13 @@ updates:
         update-types:
           - minor
           - patch
+      npm-majors:
+        update-types:
+          - major
+  - package-ecosystem: pip
+    directory: '/packages/sdk-python'
+    schedule:
+      interval: monthly
   - package-ecosystem: gomod
     directory: '/packages/ingestion'
     schedule:
@@ -17,10 +24,10 @@ updates:
   - package-ecosystem: github-actions
     directory: '/'
     schedule:
-      interval: weekly
+      interval: monthly
   - package-ecosystem: docker
     directories:
       - '/packages/ingestion'
       - '/packages/worker'
     schedule:
-      interval: weekly
+      interval: monthly
