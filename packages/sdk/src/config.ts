@@ -44,7 +44,7 @@ export interface SdkInitOptions {
   beforeSend?: BeforeSendHook;
 }
 
-const DEFAULT_ENDPOINT = 'https://api.opslane.com';
+const DEFAULT_ENDPOINT = 'https://app.opslane.com';
 const PUBLIC_KEY_PREFIX = 'opslane_pk_';
 
 export class InvalidApiKeyError extends Error {

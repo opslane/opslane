@@ -87,7 +87,7 @@ The server owns step derivation: `GET /api/v1/onboarding/state` returns the fact
 
 ### 5.2 Snippet step (dashboard) — the one hard gate
 
-Framework tabs (Vue / React / Next.js / Other), key inline, `environment: 'development'`, and an endpoint rule with a deterministic source of truth: the dashboard is served by the ingestion service, so `window.location.origin` *is* the ingest endpoint. Include `endpoint: origin` unless the origin equals the compile-time hosted constant `https://app.opslane.com`.
+Framework tabs (Vue / React / Next.js / Other), key inline, `environment: 'development'`, and an endpoint rule with a deterministic source of truth: the dashboard is served by the ingestion service, so `window.location.origin` *is* the ingest endpoint. The snippet always includes `endpoint: origin`; no hosted special case (omission left hosted users on the SDK's default endpoint, which pointed at an unwired hostname).
 
 **Why the key is inline** (killing the show-once ceremony): it's `ScopeIngest` (`opslane_pk_`), write-only, ships in the browser bundle by design, and `docs/install.md:111` already documents it as safe to expose. The honest cost, stated in the same doc: a committed key is slow to rotate. Accepted for activation speed; the success screen nudges "move it to an env var before you commit".
 
@@ -195,7 +195,7 @@ v1 chooses completion over enforcement, and the cost is stated flat: a user can 
 **M2 — Wizard rewrite**
 
 1. New order renders; project creation is name-only with an idempotency token; no setup-PR call remains in the wizard.
-2. Snippet shows a real working `opslane_pk_` key on first load and after a full browser reset (mint-on-resume), correct per tab; self-hosted origin gets `endpoint`; hosted omits it.
+2. Snippet shows a real working `opslane_pk_` key on first load and after a full browser reset (mint-on-resume), correct per tab; the snippet always includes `endpoint` set to the dashboard origin (the SDK's baked-in default proved wrong for hosted, so omission is no longer a case).
 3. Following snippet + test button in `test-fixtures/vue-app` against a live stack flips the listener green within one poll interval; success links `latest_error_group_id`.
 4. Reload/cleared-browser at every step resumes at the correct step from server facts; an org with `onboarded_at` never sees the wizard; a projectless legacy org does.
 5. Cannot advance past step 2 without `has_events`; GitHub and Slack steps each advance via success or "do this later"; finishing calls `/onboarding/complete`, which succeeds with both integrations deferred and refuses without events.

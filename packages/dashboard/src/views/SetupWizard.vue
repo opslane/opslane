@@ -133,9 +133,13 @@ const pollTimer = ref<ReturnType<typeof setInterval>>();
 const keyError = ref('');
 const keyLoading = ref(false);
 
-const hostedOrigin = 'https://app.opslane.com';
+// Always emit the endpoint. The dashboard is served by the ingestion service,
+// so window.location.origin is the correct ingest endpoint everywhere --
+// including hosted. Omitting it on hosted left users on the SDK's baked-in
+// default, which pointed at a hostname that was never wired up (the CORS
+// failure every hosted onboarding hit).
 const endpointLine = computed(() => (
-  window.location.origin === hostedOrigin ? '' : `\n  endpoint: '${window.location.origin}',`
+  `\n  endpoint: '${window.location.origin}',`
 ));
 const initSnippet = computed(() => {
   const common = `init({\n  apiKey: '${apiKey.value}',\n  environment: 'development',${endpointLine.value}\n});`;
