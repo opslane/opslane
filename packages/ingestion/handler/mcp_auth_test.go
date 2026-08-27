@@ -17,6 +17,8 @@ import (
 	"github.com/opslane/opslane/packages/ingestion/handler"
 )
 
+const mcpInitializeBody = `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}`
+
 func TestMCPBearerAuth(t *testing.T) {
 	var logs bytes.Buffer
 	previousLogger := slog.Default()
@@ -55,8 +57,7 @@ func TestMCPBearerAuth(t *testing.T) {
 	router := handler.NewRouterWithPool(deps, pool)
 	request := func(token string, cancelled bool) *httptest.ResponseRecorder {
 		t.Helper()
-		req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(
-			`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}`))
+		req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(mcpInitializeBody))
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Accept", "application/json, text/event-stream")
 		if token != "" {
@@ -150,8 +151,6 @@ func decodeInitializeResult(t *testing.T, body []byte) {
 	}
 }
 
-const mcpInitializeBody = `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}`
-
 // Prod delivers ALB traffic to the container through the ECS Service Connect
 // Envoy agent, so the server accepts the connection on 127.0.0.1 while Host
 // stays the public domain. The SDK's DNS-rebinding localhost protection must
@@ -189,8 +188,15 @@ func TestMCPBehindLoopbackProxy(t *testing.T) {
 		t.Fatalf("valid key: status = %d, want 200, body = %s", rec.Code, rec.Body.String())
 	} else {
 		decodeInitializeResult(t, rec.Body.Bytes())
+		// With the SDK's Host backstop disabled, browser-side safety of /mcp
+		// rests on no CORS grant ever being emitted for it. Pin that.
+		if origin := rec.Header().Get("Access-Control-Allow-Origin"); origin != "" {
+			t.Fatalf("/mcp response grants CORS origin %q; browser access must stay blocked", origin)
+		}
 	}
-	// Disabling the Host check must not loosen the bearer gate in this shape.
+	// These pin the auth-before-transport ordering: the bearer gate runs ahead
+	// of the transport (and its disabled Host check), so a future middleware
+	// reordering that exposed the transport unauthenticated would fail here.
 	if rec := request(""); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("missing token: status = %d, want 401, body = %s", rec.Code, rec.Body.String())
 	}
