@@ -89,7 +89,10 @@ describe('SetupWizard', () => {
     expect(wrapper.find('[data-testid="sdk-continue"]').exists()).toBe(false);
     await vi.advanceTimersByTimeAsync(6001);
     await flushPromises();
-    expect(wrapper.get('[data-testid="latest-group-link"]').attributes('href')).toContain('g1');
+    // Deliberately no link to the captured error: it is a throwaway test
+    // error and navigating away mid-wizard is a drop-off point.
+    expect(wrapper.find('[data-testid="latest-group-link"]').exists()).toBe(false);
+    expect(wrapper.text()).toContain('Event received');
     await wrapper.get('[data-testid="sdk-continue"]').trigger('click');
     await flushPromises();
     expect(wrapper.text()).toContain('Connect GitHub');

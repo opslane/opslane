@@ -97,7 +97,7 @@ Framework tabs (Vue / React / Next.js / Other), key inline, `environment: 'devel
 <button onClick={() => { throw new Error('opslane-test'); }}>Test Opslane</button>
 ```
 
-The listener polls `event-count` (which gains `latest_error_group_id`; today it returns only `has_events`, `read_api.go:1184`) and links the latest captured group. Copy says "the latest error Opslane captured": if the app was already erroring, that group may not be `opslane-test`, and v1 does not do marker matching (follow-up issue). There is no way to advance past this screen without an event; Vue and React tab content follows `docs/install.md`, and the Next.js tab is new content shipped with a matching install.md section in the same PR.
+The listener polls `event-count` until `has_events` flips. The success panel confirms the capture in place and deliberately does NOT link the captured error: it is a throwaway test error, and a mid-wizard link invites navigation away from the flow. The dashboard shows the issues list right after completion. There is no way to advance past this screen without an event; Vue and React tab content follows `docs/install.md`, and the Next.js tab is new content shipped with a matching install.md section in the same PR.
 
 ### 5.3 GitHub step (deferable)
 

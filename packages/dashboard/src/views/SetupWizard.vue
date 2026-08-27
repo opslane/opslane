@@ -128,7 +128,6 @@ async function submitProject(): Promise<void> {
 
 const framework = ref<'vue' | 'react' | 'nextjs' | 'other'>('vue');
 const hasEvents = ref(false);
-const latestGroupId = ref<string | null>(null);
 const pollTimer = ref<ReturnType<typeof setInterval>>();
 const keyError = ref('');
 const keyLoading = ref(false);
@@ -207,11 +206,7 @@ function startEventPolling(): void {
       const status = await getEventStatus(projectId.value);
       if (status.has_events) {
         hasEvents.value = true;
-        latestGroupId.value = status.latest_error_group_id;
-        // Grouping is async: has_events flips before the error group exists.
-        // Keep polling until the group id arrives so the success link points
-        // at the captured error rather than degrading to the issues list.
-        if (latestGroupId.value && pollTimer.value) clearInterval(pollTimer.value);
+        if (pollTimer.value) clearInterval(pollTimer.value);
       }
     } catch {
       // Keep polling through transient errors.
@@ -449,12 +444,11 @@ onUnmounted(() => {
                 <span class="h-4 w-4 animate-spin rounded-full border-2 border-accent border-r-transparent"></span>
                 Waiting for your first event…
               </div>
+              <!-- No link to the captured error here: it is a throwaway test
+                   error, and navigating away mid-wizard is a drop-off point.
+                   The dashboard shows their issues right after the flow ends. -->
               <div v-else class="space-y-4 rounded-md border border-success/30 bg-success/10 p-4">
-                <p class="text-sm text-success">Event received. View <a
-                  data-testid="latest-group-link"
-                  :href="latestGroupId ? '/issues/' + latestGroupId : '/'"
-                  class="underline"
-                >the latest error Opslane captured</a>.</p>
+                <p class="text-sm text-success">Event received — Opslane captured your test error.</p>
                 <p class="text-xs text-muted">You can delete the test button now. Move the key to an environment variable before committing.</p>
                 <Button data-testid="sdk-continue" variant="primary" @click="continueFromSdk">Continue</Button>
               </div>
