@@ -3,7 +3,10 @@ package handler_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,6 +16,8 @@ import (
 	"github.com/opslane/opslane/packages/ingestion/db"
 	"github.com/opslane/opslane/packages/ingestion/handler"
 )
+
+const mcpInitializeBody = `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}`
 
 func TestMCPBearerAuth(t *testing.T) {
 	var logs bytes.Buffer
@@ -52,8 +57,7 @@ func TestMCPBearerAuth(t *testing.T) {
 	router := handler.NewRouterWithPool(deps, pool)
 	request := func(token string, cancelled bool) *httptest.ResponseRecorder {
 		t.Helper()
-		req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(
-			`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}`))
+		req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(mcpInitializeBody))
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Accept", "application/json, text/event-stream")
 		if token != "" {
@@ -121,4 +125,123 @@ func TestMCPBearerAuth(t *testing.T) {
 			t.Fatal("structured auth logs leaked a bearer token")
 		}
 	}
+}
+
+// decodeInitializeResult asserts the body is a successful JSON-RPC initialize
+// response for the opslane server, not merely HTTP 200 (JSON-RPC errors also
+// ride on 200).
+func decodeInitializeResult(t *testing.T, body []byte) {
+	t.Helper()
+	var response struct {
+		Error  *struct{ Message string } `json:"error"`
+		Result *struct {
+			ServerInfo struct {
+				Name string `json:"name"`
+			} `json:"serverInfo"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(body, &response); err != nil {
+		t.Fatalf("decode initialize response: %v, body = %s", err, body)
+	}
+	if response.Error != nil {
+		t.Fatalf("initialize returned JSON-RPC error: %+v, body = %s", response.Error, body)
+	}
+	if response.Result == nil || response.Result.ServerInfo.Name != "opslane" {
+		t.Fatalf("initialize result missing serverInfo.name=opslane, body = %s", body)
+	}
+}
+
+// Prod delivers ALB traffic to the container through the ECS Service Connect
+// Envoy agent, so the server accepts the connection on 127.0.0.1 while Host
+// stays the public domain. The SDK's DNS-rebinding localhost protection must
+// not reject that combination — and the bearer gate in front of it must be
+// unaffected by disabling it.
+func TestMCPBehindLoopbackProxy(t *testing.T) {
+	deps, pool := testDeps(t)
+	ctx := context.Background()
+	orgID, projectID, _, _ := seedTenant(t, deps.Queries)
+	t.Cleanup(func() { cleanupTenantHandler(t, pool, orgID) })
+
+	apiKey, err := deps.Queries.CreateProjectKey(ctx, projectID, db.ScopeAPI, "mcp", nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	router := handler.NewRouterWithPool(deps, pool)
+	request := func(token string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(mcpInitializeBody))
+		req.Host = "app.opslane.com"
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json, text/event-stream")
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		req = req.WithContext(context.WithValue(req.Context(), http.LocalAddrContextKey,
+			&net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 8080}))
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		return rec
+	}
+
+	if rec := request(apiKey.Raw); rec.Code != http.StatusOK {
+		t.Fatalf("valid key: status = %d, want 200, body = %s", rec.Code, rec.Body.String())
+	} else {
+		decodeInitializeResult(t, rec.Body.Bytes())
+		// With the SDK's Host backstop disabled, browser-side safety of /mcp
+		// rests on no CORS grant ever being emitted for it. Pin that.
+		if origin := rec.Header().Get("Access-Control-Allow-Origin"); origin != "" {
+			t.Fatalf("/mcp response grants CORS origin %q; browser access must stay blocked", origin)
+		}
+	}
+	// These pin the auth-before-transport ordering: the bearer gate runs ahead
+	// of the transport (and its disabled Host check), so a future middleware
+	// reordering that exposed the transport unauthenticated would fail here.
+	if rec := request(""); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("missing token: status = %d, want 401, body = %s", rec.Code, rec.Body.String())
+	}
+	if rec := request("sk_invalid_token"); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("invalid token: status = %d, want 401, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+// Same scenario over a real loopback socket, so net/http populates
+// LocalAddrContextKey exactly as prod does.
+func TestMCPBehindLoopbackProxyRealSocket(t *testing.T) {
+	deps, pool := testDeps(t)
+	ctx := context.Background()
+	orgID, projectID, _, _ := seedTenant(t, deps.Queries)
+	t.Cleanup(func() { cleanupTenantHandler(t, pool, orgID) })
+
+	apiKey, err := deps.Queries.CreateProjectKey(ctx, projectID, db.ScopeAPI, "mcp", nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	server := httptest.NewServer(handler.NewRouterWithPool(deps, pool))
+	t.Cleanup(server.Close)
+	client := &http.Client{Timeout: 10 * time.Second}
+
+	req, err := http.NewRequest(http.MethodPost, server.URL+"/mcp", strings.NewReader(mcpInitializeBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Host = "app.opslane.com"
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	req.Header.Set("Authorization", "Bearer "+apiKey.Raw)
+
+	response, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body = %s", response.StatusCode, body)
+	}
+	decodeInitializeResult(t, body)
 }

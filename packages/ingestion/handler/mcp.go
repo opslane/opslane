@@ -34,6 +34,11 @@ func (d *Dependencies) MCPHandler() http.Handler {
 			Stateless:           true,
 			JSONResponse:        true,
 			MaxRequestBodyBytes: 1 << 20,
+			// This is a remote server behind bearer auth, but ECS Service
+			// Connect's Envoy agent hands ALB traffic to the container over
+			// 127.0.0.1 with the public Host intact, which the SDK's
+			// DNS-rebinding localhost protection would reject with a 403.
+			DisableLocalhostProtection: true,
 		},
 	)
 
