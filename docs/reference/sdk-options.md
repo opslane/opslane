@@ -8,7 +8,7 @@ All options accepted by `init()` from `@opslane/sdk`, mirrored from `SdkInitOpti
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
 | `apiKey` | `string` | *(required)* | Project-scoped public ingest key. It must start with `opslane_pk_`; `init` refuses to start without it. |
-| `endpoint` | `string` | `https://api.opslane.com` | Your Opslane instance; validated as an http(s) URL. |
+| `endpoint` | `string` | `https://app.opslane.com` | Your Opslane instance; validated as an http(s) URL. |
 | `release` | `string` | `''` | Optional immutable deployment identifier; source maps match by debug ID. |
 | `environment` | `string` | `''` | Optional deployment name sent with events and session initialization. The server uses it only when payload overrides are enabled for the project; existing session environment assignment takes precedence. |
 | `maxBreadcrumbs` | `number` | `50` | Ring-buffer size for breadcrumbs attached to each event. |
