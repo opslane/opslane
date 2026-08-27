@@ -29,7 +29,7 @@
     "tailwindcss": "^4.1.0",
     "typescript": "^5.4.0",
     "vite": "^8.2.2",
-    "vitest": "^2.1.0",
+    "vitest": "^3.2.6",
     "vue-tsc": "^3.3.11"
   }
 }
