@@ -128,7 +128,6 @@ async function submitProject(): Promise<void> {
 
 const framework = ref<'vue' | 'react' | 'nextjs' | 'other'>('vue');
 const hasEvents = ref(false);
-const latestGroupId = ref<string | null>(null);
 const pollTimer = ref<ReturnType<typeof setInterval>>();
 const keyError = ref('');
 const keyLoading = ref(false);
@@ -207,11 +206,7 @@ function startEventPolling(): void {
       const status = await getEventStatus(projectId.value);
       if (status.has_events) {
         hasEvents.value = true;
-        latestGroupId.value = status.latest_error_group_id;
-        // Grouping is async: has_events flips before the error group exists.
-        // Keep polling until the group id arrives so the success link points
-        // at the captured error rather than degrading to the issues list.
-        if (latestGroupId.value && pollTimer.value) clearInterval(pollTimer.value);
+        if (pollTimer.value) clearInterval(pollTimer.value);
       }
     } catch {
       // Keep polling through transient errors.
@@ -235,11 +230,49 @@ const installHref = computed(() => safeUrl(
   githubAppStatus.value?.install_url ?? '', GITHUB_PR_URL_OPTIONS,
 ));
 
+const githubStatusFailed = ref(false);
 async function loadGitHubStatus(): Promise<void> {
   try {
     githubAppStatus.value = await getGitHubAppStatus();
+    githubStatusFailed.value = false;
   } catch {
-    githubAppStatus.value = null;
+    // Keep the last known status so a transient failure mid-poll doesn't
+    // blank the Install link; flag a failure only when we have nothing to
+    // show, which renders the retry affordance instead of a dead end.
+    githubStatusFailed.value = !githubAppStatus.value;
+  }
+}
+
+// The App install happens on github.com in another tab and never calls back
+// into this one, so after the user heads there we poll status until the
+// installation lands (or the step is left). No manual "check again" needed.
+const installStarted = ref(false);
+const githubStatusTimer = ref<ReturnType<typeof setInterval>>();
+const githubPollInFlight = ref(false);
+async function pollGitHubStatusOnce(): Promise<void> {
+  // The in-flight guard keeps slow responses from overlapping, which also
+  // prevents an out-of-order stale result overwriting an installed:true.
+  if (githubPollInFlight.value) return;
+  githubPollInFlight.value = true;
+  try {
+    await loadGitHubStatus();
+  } finally {
+    githubPollInFlight.value = false;
+  }
+  if (githubAppStatus.value?.installed) stopGitHubStatusPolling();
+}
+function startGitHubStatusPolling(): void {
+  installStarted.value = true;
+  if (githubStatusTimer.value) clearInterval(githubStatusTimer.value);
+  void pollGitHubStatusOnce();
+  githubStatusTimer.value = setInterval(() => {
+    void pollGitHubStatusOnce();
+  }, 4000);
+}
+function stopGitHubStatusPolling(): void {
+  if (githubStatusTimer.value) {
+    clearInterval(githubStatusTimer.value);
+    githubStatusTimer.value = undefined;
   }
 }
 
@@ -260,6 +293,7 @@ async function attachRepo(repo: string): Promise<void> {
 }
 
 function deferGitHub(): void {
+  stopGitHubStatusPolling();
   step.value = 'connect_slack';
 }
 
@@ -343,6 +377,7 @@ function goToDashboard(): void {
 
 onUnmounted(() => {
   if (pollTimer.value) clearInterval(pollTimer.value);
+  stopGitHubStatusPolling();
 });
 </script>
 
@@ -449,12 +484,11 @@ onUnmounted(() => {
                 <span class="h-4 w-4 animate-spin rounded-full border-2 border-accent border-r-transparent"></span>
                 Waiting for your first event…
               </div>
+              <!-- No link to the captured error here: it is a throwaway test
+                   error, and navigating away mid-wizard is a drop-off point.
+                   The dashboard shows their issues right after the flow ends. -->
               <div v-else class="space-y-4 rounded-md border border-success/30 bg-success/10 p-4">
-                <p class="text-sm text-success">Event received. View <a
-                  data-testid="latest-group-link"
-                  :href="latestGroupId ? '/issues/' + latestGroupId : '/'"
-                  class="underline"
-                >the latest error Opslane captured</a>.</p>
+                <p class="text-sm text-success">Event received — Opslane captured your test error.</p>
                 <p class="text-xs text-muted">You can delete the test button now. Move the key to an environment variable before committing.</p>
                 <Button data-testid="sdk-continue" variant="primary" @click="continueFromSdk">Continue</Button>
               </div>
@@ -480,13 +514,21 @@ onUnmounted(() => {
                 target="_blank"
                 rel="noopener noreferrer"
                 class="flex w-full items-center justify-center rounded-md bg-accent px-4 py-3 text-sm font-medium text-on-accent"
+                data-testid="github-install"
+                @click="startGitHubStatusPolling"
               >Install GitHub App</a>
-              <Button v-if="!githubAppStatus?.installed" class="w-full" @click="loadGitHubStatus">Check again</Button>
-              <div v-else class="space-y-3">
+              <div v-if="githubAppStatus?.installed" class="space-y-3">
                 <RepoSelector v-model="selectedRepo" :disabled="githubBusy" />
                 <Button variant="primary" class="w-full" :busy="githubBusy" :disabled="!selectedRepo" @click="attachRepo(selectedRepo)">Connect repository</Button>
               </div>
-              <p v-if="!githubAppStatus?.installed" class="text-xs text-muted">Waiting for GitHub? Ask an admin to approve the installation, or continue for now.</p>
+              <p v-else-if="githubStatusFailed" class="text-sm text-danger">
+                Couldn't reach GitHub status.
+                <button data-testid="github-status-retry" type="button" class="underline" @click="loadGitHubStatus">Try again</button>
+              </p>
+              <p v-else-if="installStarted" class="flex items-center gap-2 text-xs text-muted">
+                <span class="h-3 w-3 animate-spin rounded-full border-2 border-accent border-r-transparent"></span>
+                Waiting for GitHub — we'll detect the installation automatically. If your org needs an admin to approve it, you can continue for now.
+              </p>
             </div>
             <button data-testid="defer-github" type="button" class="mt-6 w-full text-sm text-muted underline hover:text-text" @click="deferGitHub">
               Do this later

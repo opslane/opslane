@@ -89,7 +89,10 @@ describe('SetupWizard', () => {
     expect(wrapper.find('[data-testid="sdk-continue"]').exists()).toBe(false);
     await vi.advanceTimersByTimeAsync(6001);
     await flushPromises();
-    expect(wrapper.get('[data-testid="latest-group-link"]').attributes('href')).toContain('g1');
+    // Deliberately no link to the captured error: it is a throwaway test
+    // error and navigating away mid-wizard is a drop-off point.
+    expect(wrapper.find('[data-testid="latest-group-link"]').exists()).toBe(false);
+    expect(wrapper.text()).toContain('Event received');
     await wrapper.get('[data-testid="sdk-continue"]').trigger('click');
     await flushPromises();
     expect(wrapper.text()).toContain('Connect GitHub');
@@ -131,6 +134,73 @@ describe('SetupWizard', () => {
     await flushPromises();
     expect(api.updateNotificationDestination).not.toHaveBeenCalledWith('p1', 'd1', { enabled: true });
     expect(wrapper.text()).toContain("couldn't reach that webhook");
+    wrapper.unmount();
+  });
+
+  it('shows the GitHub waiting state only after the install link is clicked, then polls', async () => {
+    api.getOnboardingState.mockResolvedValue({
+      ...baseState, next_step: 'connect_github', project_id: 'p1', has_events: true,
+    });
+    const wrapper = mount(SetupWizard);
+    await flushPromises();
+    expect(wrapper.text()).not.toContain('Check again');
+    expect(wrapper.text()).not.toContain('Waiting for GitHub');
+    const initialCalls = api.getGitHubAppStatus.mock.calls.length;
+    await wrapper.get('[data-testid="github-install"]').trigger('click');
+    expect(wrapper.text()).toContain('Waiting for GitHub');
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(api.getGitHubAppStatus.mock.calls.length).toBeGreaterThan(initialCalls);
+    wrapper.unmount();
+    const callsAtUnmount = api.getGitHubAppStatus.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(12000);
+    expect(api.getGitHubAppStatus.mock.calls.length).toBe(callsAtUnmount);
+  });
+
+  it('stops polling GitHub status once the installation lands', async () => {
+    api.getOnboardingState.mockResolvedValue({
+      ...baseState, next_step: 'connect_github', project_id: 'p1', has_events: true,
+    });
+    const wrapper = mount(SetupWizard);
+    await flushPromises();
+    api.getGitHubAppStatus.mockResolvedValue({
+      installed: true, installation_id: 7, install_url: null,
+    });
+    await wrapper.get('[data-testid="github-install"]').trigger('click');
+    await flushPromises();
+    const callsAfterInstall = api.getGitHubAppStatus.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(12000);
+    expect(api.getGitHubAppStatus.mock.calls.length).toBe(callsAfterInstall);
+    expect(wrapper.text()).toContain('Connect repository');
+    wrapper.unmount();
+  });
+
+  it('keeps the Install link through a transient poll failure', async () => {
+    api.getOnboardingState.mockResolvedValue({
+      ...baseState, next_step: 'connect_github', project_id: 'p1', has_events: true,
+    });
+    const wrapper = mount(SetupWizard);
+    await flushPromises();
+    await wrapper.get('[data-testid="github-install"]').trigger('click');
+    api.getGitHubAppStatus.mockRejectedValue(new Error('network blip'));
+    await vi.advanceTimersByTimeAsync(4000);
+    await flushPromises();
+    expect(wrapper.find('[data-testid="github-install"]').exists()).toBe(true);
+    expect(wrapper.text()).not.toContain("Couldn't reach GitHub status");
+    wrapper.unmount();
+  });
+
+  it('offers a retry instead of a dead end when the first status fetch fails', async () => {
+    api.getOnboardingState.mockResolvedValue({
+      ...baseState, next_step: 'connect_github', project_id: 'p1', has_events: true,
+    });
+    api.getGitHubAppStatus.mockRejectedValueOnce(new Error('boom'));
+    const wrapper = mount(SetupWizard);
+    await flushPromises();
+    expect(wrapper.find('[data-testid="github-install"]').exists()).toBe(false);
+    expect(wrapper.text()).toContain("Couldn't reach GitHub status");
+    await wrapper.get('[data-testid="github-status-retry"]').trigger('click');
+    await flushPromises();
+    expect(wrapper.find('[data-testid="github-install"]').exists()).toBe(true);
     wrapper.unmount();
   });
 
