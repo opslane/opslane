@@ -230,11 +230,16 @@ const installHref = computed(() => safeUrl(
   githubAppStatus.value?.install_url ?? '', GITHUB_PR_URL_OPTIONS,
 ));
 
+const githubStatusFailed = ref(false);
 async function loadGitHubStatus(): Promise<void> {
   try {
     githubAppStatus.value = await getGitHubAppStatus();
+    githubStatusFailed.value = false;
   } catch {
-    githubAppStatus.value = null;
+    // Keep the last known status so a transient failure mid-poll doesn't
+    // blank the Install link; flag a failure only when we have nothing to
+    // show, which renders the retry affordance instead of a dead end.
+    githubStatusFailed.value = !githubAppStatus.value;
   }
 }
 
@@ -243,15 +248,25 @@ async function loadGitHubStatus(): Promise<void> {
 // installation lands (or the step is left). No manual "check again" needed.
 const installStarted = ref(false);
 const githubStatusTimer = ref<ReturnType<typeof setInterval>>();
+const githubPollInFlight = ref(false);
+async function pollGitHubStatusOnce(): Promise<void> {
+  // The in-flight guard keeps slow responses from overlapping, which also
+  // prevents an out-of-order stale result overwriting an installed:true.
+  if (githubPollInFlight.value) return;
+  githubPollInFlight.value = true;
+  try {
+    await loadGitHubStatus();
+  } finally {
+    githubPollInFlight.value = false;
+  }
+  if (githubAppStatus.value?.installed) stopGitHubStatusPolling();
+}
 function startGitHubStatusPolling(): void {
   installStarted.value = true;
   if (githubStatusTimer.value) clearInterval(githubStatusTimer.value);
-  githubStatusTimer.value = setInterval(async () => {
-    await loadGitHubStatus();
-    if (githubAppStatus.value?.installed && githubStatusTimer.value) {
-      clearInterval(githubStatusTimer.value);
-      githubStatusTimer.value = undefined;
-    }
+  void pollGitHubStatusOnce();
+  githubStatusTimer.value = setInterval(() => {
+    void pollGitHubStatusOnce();
   }, 4000);
 }
 function stopGitHubStatusPolling(): void {
@@ -506,6 +521,10 @@ onUnmounted(() => {
                 <RepoSelector v-model="selectedRepo" :disabled="githubBusy" />
                 <Button variant="primary" class="w-full" :busy="githubBusy" :disabled="!selectedRepo" @click="attachRepo(selectedRepo)">Connect repository</Button>
               </div>
+              <p v-else-if="githubStatusFailed" class="text-sm text-danger">
+                Couldn't reach GitHub status.
+                <button data-testid="github-status-retry" type="button" class="underline" @click="loadGitHubStatus">Try again</button>
+              </p>
               <p v-else-if="installStarted" class="flex items-center gap-2 text-xs text-muted">
                 <span class="h-3 w-3 animate-spin rounded-full border-2 border-accent border-r-transparent"></span>
                 Waiting for GitHub — we'll detect the installation automatically. If your org needs an admin to approve it, you can continue for now.
