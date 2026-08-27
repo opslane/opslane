@@ -1,6 +1,6 @@
 {
   "name": "@opslane/sdk",
-  "version": "4.1.0",
+  "version": "4.1.1",
   "type": "module",
   "description": "Browser error monitoring SDK for Opslane",
   "license": "MIT",
