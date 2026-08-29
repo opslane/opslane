@@ -27,6 +27,7 @@ type writtenDigestPayload struct {
 }
 
 type writtenDigestCard struct {
+	ErrorGroupID       string   `json:"errorGroupId,omitempty"`
 	EpisodeID          string   `json:"episodeId"`
 	Title              string   `json:"title,omitempty"`
 	Copy               string   `json:"copy"`
@@ -39,8 +40,9 @@ type writtenDigestCard struct {
 }
 
 type deferredDigestItem struct {
-	EpisodeID string `json:"episodeId"`
-	Reason    string `json:"reason"`
+	ErrorGroupID string `json:"errorGroupId,omitempty"`
+	EpisodeID    string `json:"episodeId,omitempty"`
+	Reason       string `json:"reason"`
 }
 
 type validationRun struct {
@@ -52,7 +54,70 @@ type validationRun struct {
 	RunDate     string
 	WindowFrom  time.Time
 	WindowTo    time.Time
+	CreatedAt   time.Time
 	Payload     []byte
+	Mode        UnifiedCardsMode
+}
+
+func candidateIdentity(candidate Candidate) string {
+	if candidate.ErrorGroupID != "" {
+		return candidate.ErrorGroupID
+	}
+	return candidate.EpisodeID
+}
+
+func cardIdentity(errorGroupID, episodeID string) string {
+	if errorGroupID != "" {
+		return errorGroupID
+	}
+	return episodeID
+}
+
+// capDigestDelivery mirrors the renderer's decision -> receipt -> fix order.
+// Publication accounting uses its returned slices, so no card hidden by the
+// renderer can acquire a durable publication receipt.
+func capDigestDelivery(
+	generated []notify.GeneratedDigestCard,
+	receipts []notify.ReceiptItem,
+	generatedOverflow int,
+	receiptOverflow int,
+) ([]notify.GeneratedDigestCard, []notify.ReceiptItem, int, int, []string) {
+	decisions := make([]notify.GeneratedDigestCard, 0, len(generated))
+	fixes := make([]notify.GeneratedDigestCard, 0, len(generated))
+	for _, card := range generated {
+		if card.Outcome == "needs_human" {
+			decisions = append(decisions, card)
+		} else {
+			fixes = append(fixes, card)
+		}
+	}
+
+	remaining := notify.DigestV4CardCap
+	keptDecisions := min(len(decisions), remaining)
+	remaining -= keptDecisions
+	keptReceipts := min(len(receipts), remaining)
+	remaining -= keptReceipts
+	keptFixes := min(len(fixes), remaining)
+
+	dropped := make([]string, 0,
+		len(decisions)-keptDecisions+len(receipts)-keptReceipts+len(fixes)-keptFixes)
+	for _, card := range decisions[keptDecisions:] {
+		dropped = append(dropped, card.IncidentID)
+	}
+	for _, item := range receipts[keptReceipts:] {
+		dropped = append(dropped, item.IncidentID)
+	}
+	for _, card := range fixes[keptFixes:] {
+		dropped = append(dropped, card.IncidentID)
+	}
+
+	keptGenerated := make([]notify.GeneratedDigestCard, 0, keptDecisions+keptFixes)
+	keptGenerated = append(keptGenerated, decisions[:keptDecisions]...)
+	keptGenerated = append(keptGenerated, fixes[:keptFixes]...)
+	return keptGenerated, receipts[:keptReceipts],
+		generatedOverflow + len(decisions) - keptDecisions + len(fixes) - keptFixes,
+		receiptOverflow + len(receipts) - keptReceipts,
+		dropped
 }
 
 // ValidateAndPublish rechecks model output against the immutable snapshots and
@@ -106,6 +171,303 @@ func stripInvisible(text string) string {
 	}, text)
 }
 
+func containsDigit(value string) bool {
+	for _, r := range value {
+		if unicode.IsDigit(r) {
+			return true
+		}
+	}
+	return false
+}
+
+// validateUnifiedWrittenCard checks one authored or cached card and, when it
+// refuses a CACHED one, retires exactly that cache row. Without this a copy the
+// validator rejects stays current and demotes its card to a receipt every day
+// forever; with it, tomorrow's run re-authors.
+func validateUnifiedWrittenCard(
+	ctx context.Context,
+	tx pgx.Tx,
+	run validationRun,
+	card writtenDigestCard,
+	candidate Candidate,
+) (writtenDigestCard, string, error) {
+	validated, renderMode, err := checkUnifiedWrittenCard(ctx, tx, run, card, candidate)
+	if err == nil || candidate.CachedCard == nil || candidate.SpellStartedAt == nil {
+		return validated, renderMode, err
+	}
+	var infrastructureError unifiedInfrastructureError
+	if errors.As(err, &infrastructureError) {
+		// The savepoint is about to roll back; another statement on this
+		// transaction would only turn a degraded section into a failed run.
+		return validated, renderMode, err
+	}
+	// Keyed by the full primary key, never by group alone: a concurrent writer
+	// may already have retired this row and made a newer one current, and a
+	// late validator must not clobber that replacement.
+	if _, retireErr := tx.Exec(ctx, `UPDATE digest_card_copy SET invalidated_at=now()
+		WHERE error_group_id=$1 AND spell_started_at=$2 AND authored_at=$3
+		  AND invalidated_at IS NULL
+		  AND EXISTS (SELECT 1 FROM error_groups g
+		    WHERE g.id=digest_card_copy.error_group_id AND g.project_id=$4)`,
+		candidate.ErrorGroupID, *candidate.SpellStartedAt,
+		candidate.CachedCard.AuthoredAt, run.ProjectID); retireErr != nil {
+		return validated, renderMode, unifiedInfrastructureError{
+			fmt.Errorf("retire rejected digest card cache for %s: %w", candidate.ErrorGroupID, retireErr)}
+	}
+	slog.Warn("rejected digest card cache retired", "diagnostic", "cache_rejected",
+		"error_group_id", candidate.ErrorGroupID, "error", err)
+	return validated, renderMode, err
+}
+
+func checkUnifiedWrittenCard(
+	ctx context.Context,
+	tx pgx.Tx,
+	run validationRun,
+	card writtenDigestCard,
+	candidate Candidate,
+) (writtenDigestCard, string, error) {
+	identity := candidateIdentity(candidate)
+	card.Title = stripInvisible(card.Title)
+	card.Copy = stripInvisible(card.Copy)
+	card.Action = stripInvisible(card.Action)
+	// The instruction line has exactly one correct value, so the model does not
+	// own it: overwrite rather than compare. Demoting a good card over wording
+	// would waste the authoring call and hide the incident behind a receipt.
+	// This runs before every check below, so the stamped value is what gets
+	// length-checked, cached, and rendered.
+	if candidate.SpellStartedAt != nil && candidate.ValidAction != "" {
+		if strings.TrimSpace(card.Action) != candidate.ValidAction {
+			slog.Info("digest card action replaced by the state function",
+				"diagnostic", "action_overwritten", "error_group_id", candidate.ErrorGroupID,
+				"model_action", strings.TrimSpace(card.Action), "state_action", candidate.ValidAction)
+		}
+		card.Action = candidate.ValidAction
+	}
+	if strings.TrimSpace(card.Title) == "" || strings.TrimSpace(card.Copy) == "" || strings.TrimSpace(card.Action) == "" {
+		return card, "", fmt.Errorf("malformed card for %s", identity)
+	}
+	if internalVocabulary.MatchString(card.Title) || internalVocabulary.MatchString(card.Copy) || internalVocabulary.MatchString(card.Action) {
+		return card, "", fmt.Errorf("internal vocabulary in card for %s", identity)
+	}
+	if len([]rune(strings.TrimSpace(card.Title))) > 80 || len([]rune(card.Copy)) > 300 || len([]rune(card.Action)) > 300 {
+		return card, "", fmt.Errorf("card length exceeded for %s", identity)
+	}
+	if containsDigit(card.Copy) || containsDigit(card.Action) {
+		return card, "", fmt.Errorf("authored copy/action contains a numeric glyph for %s", identity)
+	}
+	if card.Label != candidate.Label {
+		return card, "", fmt.Errorf("unsupported label for %s", identity)
+	}
+	if card.ClaimedUsers != nil && *card.ClaimedUsers != candidate.AffectedUsers {
+		return card, "", fmt.Errorf("unsupported count for %s", identity)
+	}
+	if card.ClaimedOccurrences != nil && *card.ClaimedOccurrences != candidate.OccurrenceCount {
+		return card, "", fmt.Errorf("unsupported occurrence count for %s", identity)
+	}
+	if card.Accounts != nil && !equalStringSet(card.Accounts, candidate.Accounts) {
+		return card, "", fmt.Errorf("unsupported accounts for %s", identity)
+	}
+	if card.PRURL != "" && card.PRURL != candidate.PRURL {
+		return card, "", fmt.Errorf("unsupported link for %s", identity)
+	}
+	if candidate.PRURL != "" && !projectPullRequest(candidate.PRURL, run.GithubRepo) {
+		return card, "", fmt.Errorf("frozen link for %s is outside the project repository", identity)
+	}
+	current, err := candidateStillUnified(ctx, tx, run.ProjectID, candidate)
+	if err != nil {
+		return card, "", err
+	}
+	if !current {
+		return card, "", unifiedCandidateChangedError{identity: identity}
+	}
+
+	renderMode := "authored"
+	if candidate.CachedCard != nil {
+		cached := candidate.CachedCard
+		if card.Title != cached.Title || card.Copy != cached.Copy || card.Action != cached.Action || cached.Fingerprint != candidate.Fingerprint {
+			return card, "", fmt.Errorf("cached card for %s changed in transit", identity)
+		}
+		return card, "cached", nil
+	}
+	if number, ok := firstUngroundedNumber(card, candidate); ok {
+		return card, "", fmt.Errorf("ungrounded number %s in card for %s", number, identity)
+	}
+	card, cachedMode, err := cacheValidatedCard(ctx, tx, run, candidate, card)
+	if err != nil {
+		return card, "", err
+	}
+	if cachedMode != "" {
+		renderMode = cachedMode
+	}
+	return card, renderMode, nil
+}
+
+func candidateStillUnified(ctx context.Context, tx pgx.Tx, projectID string, frozen Candidate) (bool, error) {
+	actionable := frozen.SpellStartedAt != nil
+	if !actionable {
+		if err := candidateStillPublishable(ctx, tx, projectID, frozen); err != nil {
+			var queryError candidateQueryError
+			if errors.As(err, &queryError) && !errors.Is(err, pgx.ErrNoRows) {
+				return false, unifiedInfrastructureError{err}
+			}
+			return false, nil
+		}
+	}
+	var status, title, signalType, rootCause, mitigation, diffIdentity, routePurpose, prURL, remediation, reasonMessage string
+	var hasValidatedDiagnosis, hasSavedDiff bool
+	var snoozedUntil, actionableSince *time.Time
+	if err := tx.QueryRow(ctx, `SELECT g.status::text,g.title,COALESCE(g.signal_type,''),
+		COALESCE(g.root_cause,''),COALESCE(g.suggested_mitigation,''),
+		md5(COALESCE(g.candidate_diff,'')),NULLIF(btrim(g.candidate_diff),'') IS NOT NULL,
+		g.snoozed_until,g.actionable_since,
+		COALESCE((SELECT rm.purpose FROM route_map rm
+		 WHERE rm.project_id=g.project_id AND g.page_url_normalized LIKE '%' || rm.pattern || '%'
+		 ORDER BY length(rm.pattern) DESC LIMIT 1),''),COALESCE(g.pr_url,''),
+		COALESCE(g.remediation,''),COALESCE(g.reason_message,''),
+		validity.has_validated_diagnosis
+		FROM error_groups g
+		LEFT JOIN LATERAL (`+diagnosisValidationLateralSQL+`) validity ON true
+		WHERE g.project_id=$1 AND g.id=$2`, projectID, frozen.ErrorGroupID).Scan(
+		&status, &title, &signalType, &rootCause, &mitigation, &diffIdentity, &hasSavedDiff,
+		&snoozedUntil, &actionableSince, &routePurpose, &prURL, &remediation, &reasonMessage,
+		&hasValidatedDiagnosis,
+	); err != nil {
+		if err == pgx.ErrNoRows {
+			return false, nil
+		}
+		return false, unifiedInfrastructureError{fmt.Errorf("reload unified candidate %s: %w", frozen.ErrorGroupID, err)}
+	}
+	if actionable {
+		switch status {
+		case "awaiting_approval", "needs_human", "pr_created", "pr_draft":
+		default:
+			return false, nil
+		}
+		if snoozedUntil != nil && snoozedUntil.After(time.Now()) {
+			return false, nil
+		}
+		if actionableSince == nil || !actionableSince.Equal(*frozen.SpellStartedAt) {
+			return false, nil
+		}
+	}
+	current := frozen
+	current.Status, current.Title, current.SignalType = status, title, signalType
+	current.RootCause, current.Mitigation, current.DiffIdentity = rootCause, mitigation, diffIdentity
+	current.RoutePurpose, current.SpellStartedAt, current.PRURL = routePurpose, actionableSince, prURL
+	current.HasValidatedDiagnosis = hasValidatedDiagnosis
+	if actionable {
+		// One reload path for both kinds in ON: the action is the state
+		// function's, never stored prose, and never an episode's diagnosis.
+		current.Summary = rootCause
+		if current.Summary == "" {
+			current.Summary = title
+		}
+		current.HasSavedDiff = hasSavedDiff
+		current.ValidAction = digestAction(status, hasSavedDiff, prURL)
+		current.Outcome = onCardOutcome(status)
+		current.NotCardEligible = !onCardEligible(status, prURL, rootCause, hasSavedDiff, hasValidatedDiagnosis)
+	} else {
+		var outcome, summary string
+		var decidedAt time.Time
+		if err := tx.QueryRow(ctx, `SELECT d.outcome,
+			COALESCE(NULLIF(btrim(d.diagnosis->>'summary'),''),d.decision_reason),d.decided_at
+			FROM diagnosis_decisions d WHERE d.project_id=$1 AND d.episode_id=$2
+			ORDER BY d.decided_at DESC,d.id DESC LIMIT 1`, projectID, frozen.EpisodeID).Scan(
+			&outcome, &summary, &decidedAt,
+		); err != nil {
+			if err == pgx.ErrNoRows {
+				return false, nil
+			}
+			return false, unifiedInfrastructureError{fmt.Errorf("reload unified diagnosis %s: %w", frozen.EpisodeID, err)}
+		}
+		current.Outcome, current.Summary, current.DecidedAt = outcome, summary, decidedAt
+		if outcome == "verified_fix" && prURL != "" {
+			current.ValidAction = "Review the fix PR."
+		} else {
+			current.ValidAction = strings.TrimSpace(remediation)
+			if current.ValidAction == "" {
+				current.ValidAction = strings.TrimSpace(reasonMessage)
+			}
+		}
+	}
+	rows, err := tx.Query(ctx, `SELECT DISTINCT eu.account_name
+		FROM error_group_affected_users eau JOIN end_users eu ON eu.id=eau.end_user_id
+		WHERE eau.error_group_id=$1 AND eu.project_id=$2 AND NULLIF(btrim(eu.account_name),'') IS NOT NULL
+		ORDER BY eu.account_name LIMIT 8`, frozen.ErrorGroupID, projectID)
+	if err != nil {
+		return false, unifiedInfrastructureError{fmt.Errorf("reload unified accounts %s: %w", frozen.ErrorGroupID, err)}
+	}
+	current.Accounts = []string{}
+	for rows.Next() {
+		var account string
+		if err := rows.Scan(&account); err != nil {
+			rows.Close()
+			return false, unifiedInfrastructureError{fmt.Errorf("reload unified account %s: %w", frozen.ErrorGroupID, err)}
+		}
+		current.Accounts = append(current.Accounts, account)
+	}
+	rows.Close()
+	if rows.Err() != nil {
+		return false, unifiedInfrastructureError{fmt.Errorf("reload unified accounts %s: %w", frozen.ErrorGroupID, rows.Err())}
+	}
+	return candidateFingerprint(current, digestPromptVersion, digestValidatorVersion) == frozen.Fingerprint, nil
+}
+
+type unifiedInfrastructureError struct{ err error }
+
+func (e unifiedInfrastructureError) Error() string { return e.err.Error() }
+func (e unifiedInfrastructureError) Unwrap() error { return e.err }
+
+type unifiedCandidateChangedError struct{ identity string }
+
+func (e unifiedCandidateChangedError) Error() string {
+	return fmt.Sprintf("candidate %s changed after freeze", e.identity)
+}
+
+func cacheValidatedCard(ctx context.Context, tx pgx.Tx, run validationRun, candidate Candidate, card writtenDigestCard) (writtenDigestCard, string, error) {
+	if candidate.SpellStartedAt == nil || candidate.Fingerprint == "" {
+		return card, "", nil
+	}
+	if _, err := tx.Exec(ctx, `UPDATE digest_card_copy SET invalidated_at=now()
+		WHERE error_group_id=$1 AND spell_started_at=$2 AND invalidated_at IS NULL
+		  AND input_fingerprint<>$3 AND authored_at < $4
+		  AND EXISTS (SELECT 1 FROM error_groups g
+		    WHERE g.id=digest_card_copy.error_group_id AND g.project_id=$5)`, candidate.ErrorGroupID,
+		*candidate.SpellStartedAt, candidate.Fingerprint, run.CreatedAt, run.ProjectID); err != nil {
+		return card, "", unifiedInfrastructureError{fmt.Errorf("retire stale digest card cache for %s: %w", candidate.ErrorGroupID, err)}
+	}
+	command, err := tx.Exec(ctx, `INSERT INTO digest_card_copy
+		(error_group_id,spell_started_at,input_fingerprint,title,copy,action,model,prompt_version)
+		SELECT $1,$2,$3,$4,$5,$6,'digest-writer',$7
+		FROM error_groups g WHERE g.id=$1 AND g.project_id=$8
+		ON CONFLICT (error_group_id,spell_started_at) WHERE invalidated_at IS NULL DO NOTHING`,
+		candidate.ErrorGroupID, *candidate.SpellStartedAt, candidate.Fingerprint,
+		strings.TrimSpace(card.Title), strings.TrimSpace(card.Copy), strings.TrimSpace(card.Action),
+		digestPromptVersion, run.ProjectID)
+	if err != nil {
+		return card, "", unifiedInfrastructureError{fmt.Errorf("cache validated digest card for %s: %w", candidate.ErrorGroupID, err)}
+	}
+	if command.RowsAffected() == 0 {
+		var winner, title, copy, action string
+		if err := tx.QueryRow(ctx, `SELECT c.input_fingerprint,c.title,c.copy,c.action
+			FROM digest_card_copy c JOIN error_groups g ON g.id=c.error_group_id
+			WHERE g.project_id=$1 AND c.error_group_id=$2 AND c.spell_started_at=$3
+			  AND c.invalidated_at IS NULL`, run.ProjectID, candidate.ErrorGroupID,
+			*candidate.SpellStartedAt).Scan(&winner, &title, &copy, &action); err != nil {
+			return card, "", unifiedInfrastructureError{fmt.Errorf("load digest cache winner for %s: %w", candidate.ErrorGroupID, err)}
+		}
+		if winner == candidate.Fingerprint {
+			card.Title, card.Copy, card.Action = title, copy, action
+			return card, "cached", nil
+		} else {
+			slog.Warn("digest cache conflict", "diagnostic", "cache_conflict",
+				"error_group_id", candidate.ErrorGroupID, "run_mode", run.Mode,
+				"candidate_fingerprint", candidate.Fingerprint, "winner_fingerprint", winner)
+		}
+	}
+	return card, "authored", nil
+}
+
 func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string) error {
 	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
@@ -116,11 +478,12 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string) e
 	var run validationRun
 	if err := tx.QueryRow(ctx, `
 		SELECT r.project_id::text,p.name,COALESCE(p.github_repo,''),r.status,
-		       p.digest_timezone,r.run_date::text,r.window_from,r.window_to,COALESCE(r.writer_payload,r.payload)
+		       p.digest_timezone,r.run_date::text,r.window_from,r.window_to,
+		       r.created_at,COALESCE(r.writer_payload,r.payload),r.unified_cards_mode
 		  FROM digest_runs r JOIN projects p ON p.id=r.project_id
 		 WHERE r.id=$1 FOR UPDATE OF r`, runID).Scan(
 		&run.ProjectID, &run.ProjectName, &run.GithubRepo, &run.Status, &run.Timezone,
-		&run.RunDate, &run.WindowFrom, &run.WindowTo, &run.Payload,
+		&run.RunDate, &run.WindowFrom, &run.WindowTo, &run.CreatedAt, &run.Payload, &run.Mode,
 	); err != nil {
 		return fmt.Errorf("load digest run: %w", err)
 	}
@@ -141,21 +504,98 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string) e
 	if err != nil {
 		return err
 	}
-	byEpisode := make(map[string]Candidate, len(candidates))
+	byIdentity := make(map[string]Candidate, len(candidates)*2)
 	for _, candidate := range candidates {
-		byEpisode[candidate.EpisodeID] = candidate
+		if candidate.ErrorGroupID != "" {
+			byIdentity[candidate.ErrorGroupID] = candidate
+		}
+		if candidate.EpisodeID != "" {
+			byIdentity[candidate.EpisodeID] = candidate
+		}
+	}
+	unifiedSavepointOpen := false
+	unifiedDegraded := false
+	unifiedDeliveryAlert := ""
+	if run.Mode != UnifiedCardsOff {
+		if _, err := tx.Exec(ctx, `SAVEPOINT unified_card_section`); err != nil {
+			return fmt.Errorf("open unified card savepoint: %w", err)
+		}
+		unifiedSavepointOpen = true
+	}
+	rollbackUnified := func(cause error) error {
+		if !unifiedSavepointOpen || unifiedDegraded {
+			return nil
+		}
+		if _, err := tx.Exec(ctx, `ROLLBACK TO SAVEPOINT unified_card_section`); err != nil {
+			return fmt.Errorf("roll back unified card section after %v: %w", cause, err)
+		}
+		unifiedDegraded = true
+		unifiedDeliveryAlert = "Authored digest cards could not be finalized; showing receipts instead."
+		slog.Error("unified digest card section degraded", "run_id", runID,
+			"project_id", run.ProjectID, "error", cause)
+		return nil
 	}
 	accounted := make(map[string]string, len(candidates))
+	renderModes := make(map[string]string, len(candidates))
+	// Why an incident fell back to its receipt. The freeze already stamped
+	// "never_card_eligible" for candidates publishable() refused; these are the
+	// ones that were card-eligible and lost the card at validation.
+	receiptReasons := make(map[string]string, len(candidates))
+	overflowReasons := make(map[string]string)
+	excludedReasons := make(map[string]string)
 	generated := make([]notify.GeneratedDigestCard, 0, len(payload.Included))
 	for _, card := range payload.Included {
-		candidate, ok := byEpisode[card.EpisodeID]
+		dispositionID := cardIdentity(card.ErrorGroupID, card.EpisodeID)
+		candidate, ok := byIdentity[dispositionID]
 		if !ok {
-			return fmt.Errorf("unknown episode %s", card.EpisodeID)
+			return fmt.Errorf("unknown digest candidate %s", dispositionID)
 		}
-		if previous := accounted[card.EpisodeID]; previous != "" {
-			return fmt.Errorf("duplicate action for episode %s", card.EpisodeID)
+		identity := candidateIdentity(candidate)
+		if previous := accounted[identity]; previous != "" {
+			return fmt.Errorf("duplicate action for candidate %s", identity)
 		}
-		accounted[card.EpisodeID] = "included"
+		accounted[identity] = "included"
+		if run.Mode != UnifiedCardsOff {
+			if unifiedDegraded {
+				renderModes[identity] = "receipt_fallback"
+				receiptReasons[identity] = "card_section_degraded"
+				continue
+			}
+			validated, mode, validationErr := validateUnifiedWrittenCard(ctx, tx, run, card, candidate)
+			if validationErr != nil {
+				var infrastructureError unifiedInfrastructureError
+				if errors.As(validationErr, &infrastructureError) {
+					if err := rollbackUnified(validationErr); err != nil {
+						return err
+					}
+				}
+				slog.Warn("unified digest card fell back to receipt", "run_id", runID,
+					"error_group_id", candidate.ErrorGroupID, "mode", run.Mode, "error", validationErr)
+				var changedError unifiedCandidateChangedError
+				if candidate.SpellStartedAt == nil && errors.As(validationErr, &changedError) {
+					accounted[identity] = "deferred"
+					excludedReasons[identity] = reasonNotPublishable
+					delete(renderModes, identity)
+					continue
+				}
+				renderModes[identity] = "receipt_fallback"
+				receiptReasons[identity] = "card_validation_failed"
+				continue
+			}
+			card = validated
+			renderModes[identity] = mode
+			replayURL := notify.BuildSessionURL(os.Getenv("DASHBOARD_URL"), candidate.ReplaySessionID, candidate.ReplayAnchorMs)
+			generated = append(generated, notify.GeneratedDigestCard{
+				EpisodeID: candidate.EpisodeID, IncidentID: candidate.ErrorGroupID, Kind: candidate.Kind,
+				Title: strings.TrimSpace(card.Title), Label: candidate.Label, Outcome: candidate.Outcome,
+				Copy: strings.TrimSpace(card.Copy), Action: strings.TrimSpace(card.Action),
+				AffectedUsers: candidate.AffectedUsers, OccurrenceCount: candidate.OccurrenceCount,
+				SignalCount: int64(candidate.OccurrenceCount), Accounts: candidate.Accounts,
+				PRURL: candidate.PRURL, ReplayURL: replayURL, PRNumber: prNumber(candidate.PRURL),
+				ActionableSince: candidate.SpellStartedAt,
+			})
+			continue
+		}
 		// Stripped BEFORE every check and carried through to the rendered card:
 		// zero-width and bidi characters pass TrimSpace and rune counts while
 		// defeating the vocabulary regex and blanking titles.
@@ -235,11 +675,14 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string) e
 		})
 	}
 	for _, item := range payload.Deferred {
-		if _, ok := byEpisode[item.EpisodeID]; !ok {
-			return fmt.Errorf("unknown episode %s", item.EpisodeID)
+		dispositionID := cardIdentity(item.ErrorGroupID, item.EpisodeID)
+		candidate, ok := byIdentity[dispositionID]
+		if !ok {
+			return fmt.Errorf("unknown digest candidate %s", dispositionID)
 		}
-		if accounted[item.EpisodeID] != "" {
-			return fmt.Errorf("duplicate disposition for episode %s", item.EpisodeID)
+		identity := candidateIdentity(candidate)
+		if accounted[identity] != "" {
+			return fmt.Errorf("duplicate disposition for candidate %s", identity)
 		}
 		if strings.TrimSpace(item.Reason) == "" {
 			return fmt.Errorf("deferred episode %s has no reason", item.EpisodeID)
@@ -247,11 +690,34 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string) e
 		if internalVocabulary.MatchString(item.Reason) {
 			return fmt.Errorf("internal vocabulary in deferred reason for episode %s", item.EpisodeID)
 		}
-		accounted[item.EpisodeID] = "deferred"
+		accounted[identity] = "deferred"
+		if run.Mode != UnifiedCardsOff {
+			renderModes[identity] = "receipt_fallback"
+		}
 	}
 	for _, candidate := range candidates {
-		if accounted[candidate.EpisodeID] == "" {
-			return fmt.Errorf("candidate %s was not accounted for", candidate.EpisodeID)
+		identity := candidateIdentity(candidate)
+		if accounted[identity] == "" {
+			if run.Mode != UnifiedCardsOff {
+				accounted[identity] = "deferred"
+				renderModes[identity] = "receipt_fallback"
+				continue
+			}
+			return fmt.Errorf("candidate %s was not accounted for", identity)
+		}
+	}
+	if unifiedDegraded {
+		kept := generated[:0]
+		for _, card := range generated {
+			if candidate, ok := byIdentity[card.IncidentID]; ok && candidate.SpellStartedAt == nil {
+				kept = append(kept, card)
+			}
+		}
+		generated = kept
+		for _, candidate := range candidates {
+			if candidate.SpellStartedAt != nil {
+				renderModes[candidateIdentity(candidate)] = "receipt_fallback"
+			}
 		}
 	}
 
@@ -261,7 +727,6 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string) e
 	// it silently disappears without ever reaching the reader. Overflow cards
 	// are deferred instead (decisions keep priority), which the freeze
 	// re-admits into the next digest.
-	overflowReasons := make(map[string]string)
 	sort.SliceStable(generated, func(i, j int) bool {
 		return generated[i].Outcome == "needs_human" && generated[j].Outcome != "needs_human"
 	})
@@ -275,21 +740,13 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string) e
 	for _, card := range generated {
 		frozenIncidentIDs[card.IncidentID] = true
 	}
-	if len(generated) > notify.DigestV4CardCap {
-		for _, dropped := range generated[notify.DigestV4CardCap:] {
-			accounted[dropped.EpisodeID] = "deferred"
-			overflowReasons[dropped.EpisodeID] = "digest overflow: held for the next digest"
-		}
-		overflowCount = len(generated) - notify.DigestV4CardCap
-		generated = generated[:notify.DigestV4CardCap]
-	}
-
 	// Actionable receipts and their candidate ledger are one publication unit:
 	// ledger "included" plus this run's delivered status is the durable receipt
 	// publication record. Episode-keyed issue_publications remains owned by the
 	// frozen lane above. A savepoint keeps failures in this additive lane from
 	// suppressing otherwise valid frozen cards.
 	receiptItems := []notify.ReceiptItem(nil)
+	actionableBaseReceipts := []notify.ReceiptItem(nil)
 	receiptOverflow := 0
 	deliveryAlert := ""
 	if _, err := tx.Exec(ctx, `SAVEPOINT actionable_delivery`); err != nil {
@@ -297,15 +754,49 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string) e
 	}
 	var actionableErr error
 	var actionableEvaluatedAt time.Time
+	actionableByGroup := make(map[string]actionableCandidate)
 	if err := tx.QueryRow(ctx, `SELECT transaction_timestamp()`).Scan(&actionableEvaluatedAt); err != nil {
 		actionableErr = fmt.Errorf("load actionable evaluation clock: %w", err)
 	}
 	var actionableEval evaluation
 	if actionableErr == nil {
-		actionableCandidates, err := loadActionableCandidates(ctx, tx, run.ProjectID)
+		statusSQL := m1ActionableStatusSQL
+		if run.Mode == UnifiedCardsOn {
+			statusSQL = onCardStatusSQL
+		}
+		actionableCandidates, err := loadActionableCandidates(ctx, tx, run.ProjectID, statusSQL)
 		if err != nil {
 			actionableErr = err
 		} else {
+			actionableByGroup = make(map[string]actionableCandidate, len(actionableCandidates))
+			for _, candidate := range actionableCandidates {
+				actionableByGroup[candidate.GroupID] = candidate
+			}
+		}
+		if actionableErr == nil && run.Mode == UnifiedCardsOn {
+			actionableEval = evaluation{Excluded: map[string]string{}}
+			for _, frozen := range candidates {
+				identity := candidateIdentity(frozen)
+				if renderModes[identity] != "receipt_fallback" {
+					continue
+				}
+				live, ok := actionableByGroup[frozen.ErrorGroupID]
+				if !ok || live.SnoozedUntil != nil && live.SnoozedUntil.After(actionableEvaluatedAt) ||
+					live.ActionableSince == nil || frozen.SpellStartedAt == nil ||
+					!live.ActionableSince.Equal(*frozen.SpellStartedAt) {
+					accounted[identity] = "deferred"
+					delete(renderModes, identity)
+					reason := reasonNotPublishable
+					if ok && live.SnoozedUntil != nil && live.SnoozedUntil.After(actionableEvaluatedAt) {
+						reason = reasonSnoozed
+					}
+					excludedReasons[identity] = reason
+					continue
+				}
+				actionableEval.Included = append(actionableEval.Included, live)
+				actionableEval.Candidates = append(actionableEval.Candidates, live)
+			}
+		} else if actionableErr == nil {
 			actionableEval = evaluateActionable(actionableCandidates, frozenIncidentIDs, actionableEvaluatedAt)
 		}
 	}
@@ -316,8 +807,14 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string) e
 			actionableErr = fmt.Errorf("map actionable receipts: %w", err)
 		}
 		receiptOverflow = actionableEval.Overflow
+		actionableBaseReceipts = append(actionableBaseReceipts, receiptItems...)
+		for _, item := range receiptItems {
+			if _, ok := byIdentity[item.IncidentID]; ok {
+				accounted[item.IncidentID] = "included"
+			}
+		}
 	}
-	if actionableErr == nil {
+	if actionableErr == nil && run.Mode == UnifiedCardsOff {
 		if err := writeActionableLedger(ctx, tx, runID, actionableEval, actionableEvaluatedAt); err != nil {
 			actionableErr = err
 		}
@@ -345,6 +842,142 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string) e
 	}
 	if _, err := tx.Exec(ctx, `RELEASE SAVEPOINT actionable_delivery`); err != nil {
 		return fmt.Errorf("release actionable delivery savepoint: %w", err)
+	}
+	if actionableErr != nil && run.Mode != UnifiedCardsOff {
+		if err := rollbackUnified(actionableErr); err != nil {
+			return err
+		}
+	}
+	rebuildUnifiedFallbacks := func() {
+		generated = generated[:0]
+		receiptItems = append(receiptItems[:0], actionableBaseReceipts...)
+		receipted := make(map[string]bool, len(receiptItems))
+		for _, item := range receiptItems {
+			receipted[item.IncidentID] = true
+		}
+		for _, candidate := range candidates {
+			identity := candidateIdentity(candidate)
+			if candidate.SpellStartedAt != nil {
+				live, ok := actionableByGroup[candidate.ErrorGroupID]
+				if !ok || live.SnoozedUntil != nil && live.SnoozedUntil.After(actionableEvaluatedAt) ||
+					live.ActionableSince == nil || !live.ActionableSince.Equal(*candidate.SpellStartedAt) {
+					accounted[identity] = "deferred"
+					delete(renderModes, identity)
+					reason := reasonNotPublishable
+					if ok && live.SnoozedUntil != nil && live.SnoozedUntil.After(actionableEvaluatedAt) {
+						reason = reasonSnoozed
+					}
+					excludedReasons[identity] = reason
+					continue
+				}
+			}
+			renderModes[identity] = "receipt_fallback"
+			if !receipted[candidate.ErrorGroupID] {
+				receiptItems = append(receiptItems, receiptForUnifiedFallback(candidate))
+				receipted[candidate.ErrorGroupID] = true
+			}
+			accounted[identity] = "included"
+		}
+	}
+	if unifiedDegraded {
+		rebuildUnifiedFallbacks()
+		receiptOverflow = actionableEval.Overflow
+		deliveryAlert = unifiedDeliveryAlert
+	}
+	// The ON lane caps its candidate set at freeze and ledgers the remainder as
+	// capped_overflow. Nothing carried that count into the payload, so the
+	// renderer computed an overflow of zero and the capped incidents were
+	// invisible: no card, no receipt, and no "And N more" line. Read the count
+	// the freeze already recorded (validation-time exclusions are written after
+	// this point, so this reads exactly the frozen cap).
+	frozenOverflow := 0
+	if run.Mode == UnifiedCardsOn {
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM digest_run_candidate_evaluations
+			WHERE digest_run_id=$1 AND outcome='excluded' AND primary_reason_code=$2`,
+			runID, reasonCappedOverflow).Scan(&frozenOverflow); err != nil {
+			return fmt.Errorf("count frozen digest overflow: %w", err)
+		}
+		overflowCount += frozenOverflow
+	}
+	baseOverflowCount, baseReceiptOverflow := overflowCount, receiptOverflow
+	capDropped := make(map[string]bool)
+	applyDeliveryCap := func() {
+		var dropped []string
+		generated, receiptItems, overflowCount, receiptOverflow, dropped = capDigestDelivery(
+			generated, receiptItems, baseOverflowCount, baseReceiptOverflow,
+		)
+		for _, identity := range dropped {
+			capDropped[identity] = true
+			if _, ok := byIdentity[identity]; ok {
+				accounted[identity] = "deferred"
+				delete(renderModes, identity)
+				overflowReasons[identity] = "digest overflow: held for the next digest"
+			}
+			excludedReasons[identity] = reasonCappedOverflow
+		}
+	}
+	applyDeliveryCap()
+	var unifiedLedgerErr error
+	if run.Mode != UnifiedCardsOff && !unifiedDegraded {
+		for _, candidate := range candidates {
+			identity := candidateIdentity(candidate)
+			renderMode := renderModes[identity]
+			if renderMode == "" {
+				continue
+			}
+			query := `UPDATE digest_run_candidate_evaluations SET phase='validation',render_mode=$3,
+				details=details || jsonb_strip_nulls(jsonb_build_object(
+				  'validated_at',$4::text,'unified_cards_mode',$5::text,
+				  'receipt_reason',NULLIF($6::text,'')))
+				WHERE digest_run_id=$1 AND error_group_id=$2 AND outcome='included'`
+			if _, err := tx.Exec(ctx, query, runID, candidate.ErrorGroupID, renderMode,
+				actionableEvaluatedAt.Format(time.RFC3339Nano), run.Mode, receiptReasons[identity]); err != nil {
+				unifiedLedgerErr = fmt.Errorf("finalize unified ledger for %s: %w", identity, err)
+				break
+			}
+		}
+	}
+	if unifiedLedgerErr != nil {
+		if err := rollbackUnified(unifiedLedgerErr); err != nil {
+			return err
+		}
+		for identity := range capDropped {
+			delete(excludedReasons, identity)
+			delete(overflowReasons, identity)
+			if _, ok := byIdentity[identity]; ok {
+				accounted[identity] = "included"
+			}
+		}
+		capDropped = make(map[string]bool)
+		rebuildUnifiedFallbacks()
+		// The frozen cap still holds after a unified rollback: those incidents
+		// are absent from this message either way, so their count stays.
+		baseOverflowCount, baseReceiptOverflow = frozenOverflow, actionableEval.Overflow
+		applyDeliveryCap()
+		deliveryAlert = unifiedDeliveryAlert
+	}
+	if unifiedSavepointOpen {
+		if _, err := tx.Exec(ctx, `RELEASE SAVEPOINT unified_card_section`); err != nil {
+			return fmt.Errorf("release unified card savepoint: %w", err)
+		}
+		unifiedSavepointOpen = false
+	}
+	for identity, reason := range excludedReasons {
+		if _, err := tx.Exec(ctx, `UPDATE digest_run_candidate_evaluations
+			SET outcome='excluded',primary_reason_code=$3,phase='validation',
+			    render_mode=NULL,
+			    details=details || jsonb_build_object('validation_exclusion',$3::text)
+			WHERE digest_run_id=$1 AND error_group_id=$2`, runID, identity, reason); err != nil {
+			return fmt.Errorf("store digest validation exclusion for %s: %w", identity, err)
+		}
+	}
+	deliveredGenerated := make(map[string]bool, len(generated))
+	for _, card := range generated {
+		deliveredGenerated[card.IncidentID] = true
+	}
+	deliveredReceipts := make(map[string]bool, len(receiptItems))
+	for _, item := range receiptItems {
+		deliveredReceipts[item.IncidentID] = true
 	}
 
 	eventPayload := notify.EventPayload{
@@ -374,25 +1007,35 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string) e
 		return fmt.Errorf("encode notification payload: %w", err)
 	}
 
-	for episodeID, outcome := range accounted {
+	for identity, outcome := range accounted {
 		reason := ""
 		if outcome == "deferred" {
-			reason = overflowReasons[episodeID]
+			reason = overflowReasons[identity]
 			for _, item := range payload.Deferred {
-				if item.EpisodeID == episodeID {
+				if cardIdentity(item.ErrorGroupID, item.EpisodeID) == identity {
 					reason = strings.TrimSpace(item.Reason)
 					break
 				}
 			}
 		}
 		if _, err := tx.Exec(ctx, `UPDATE digest_run_items SET outcome=$4,reason=NULLIF($5,'')
-			WHERE project_id=$1 AND run_id=$2 AND episode_id=$3`,
-			run.ProjectID, runID, episodeID, outcome, reason); err != nil {
+			WHERE project_id=$1 AND run_id=$2 AND COALESCE(error_group_id,episode_id)=$3`,
+			run.ProjectID, runID, identity, outcome, reason); err != nil {
 			return fmt.Errorf("store digest item outcome: %w", err)
 		}
-		if outcome == "included" {
+		if _, err := tx.Exec(ctx, `UPDATE digest_unified_run_items SET outcome=$4,reason=NULLIF($5,'')
+			WHERE project_id=$1 AND run_id=$2 AND error_group_id=$3`,
+			run.ProjectID, runID, identity, outcome, reason); err != nil {
+			return fmt.Errorf("store unified digest item outcome: %w", err)
+		}
+		candidate := byIdentity[identity]
+		publishedCard := deliveredGenerated[identity] || deliveredReceipts[identity]
+		// ON writes no issue_publications at all: status governs repetition and
+		// the run ledger handles dedup. The episode gate belongs to OFF, which
+		// still runs the one-shot lane.
+		if outcome == "included" && publishedCard && run.Mode != UnifiedCardsOn && candidate.EpisodeID != "" {
 			if _, err := tx.Exec(ctx, `INSERT INTO issue_publications (project_id,episode_id,channel)
-				VALUES ($1,$2,'digest') ON CONFLICT DO NOTHING`, run.ProjectID, episodeID); err != nil {
+				VALUES ($1,$2,'digest') ON CONFLICT DO NOTHING`, run.ProjectID, candidate.EpisodeID); err != nil {
 				return fmt.Errorf("write digest receipt: %w", err)
 			}
 		}
@@ -424,9 +1067,37 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string) e
 	return nil
 }
 
+func receiptForUnifiedFallback(candidate Candidate) notify.ReceiptItem {
+	state := "report_ready"
+	switch {
+	case candidate.SpellStartedAt != nil && candidate.Status != "":
+		// ON candidates carry their live status, so the receipt line is the same
+		// mechanical one prod renders today.
+		state = receiptState(candidate.Status, candidate.HasSavedDiff)
+	case candidate.Outcome == "verified_fix" && candidate.PRURL != "":
+		state = "pr_open"
+	}
+	item := notify.ReceiptItem{
+		Kind: candidate.Kind, IncidentID: candidate.ErrorGroupID, Title: candidate.Title,
+		OccurrenceCount: int64(candidate.OccurrenceCount), ReceiptState: state,
+		PRURL: candidate.PRURL, HasValidatedDiagnosis: candidate.HasValidatedDiagnosis,
+		ActionableSince: candidate.SpellStartedAt,
+	}
+	if candidate.HasValidatedDiagnosis {
+		item.RootCauseExcerpt = candidate.RootCause
+		item.MitigationExcerpt = candidate.Mitigation
+	}
+	return item
+}
+
 func loadValidationCandidates(ctx context.Context, tx pgx.Tx, projectID, runID string) ([]Candidate, error) {
 	return loadFrozenCandidates(ctx, tx, projectID, runID)
 }
+
+type candidateQueryError struct{ err error }
+
+func (e candidateQueryError) Error() string { return e.err.Error() }
+func (e candidateQueryError) Unwrap() error { return e.err }
 
 func candidateStillPublishable(ctx context.Context, tx pgx.Tx, projectID string, candidate Candidate) error {
 	var open bool
@@ -446,7 +1117,7 @@ func candidateStillPublishable(ctx context.Context, tx pgx.Tx, projectID string,
 		  AND ep.canonical_issue_id=$3`, projectID, candidate.EpisodeID, candidate.IssueID).Scan(
 		&open, &inquiryDecision, &diagnosisOutcome, &diagnosisDecidedAt,
 	); err != nil {
-		return fmt.Errorf("candidate %s is stale or unknown: %w", candidate.EpisodeID, err)
+		return candidateQueryError{fmt.Errorf("candidate %s is stale or unknown: %w", candidate.EpisodeID, err)}
 	}
 	if !open {
 		return fmt.Errorf("candidate %s is stale because its episode closed", candidate.EpisodeID)

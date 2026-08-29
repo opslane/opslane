@@ -93,6 +93,21 @@ func TestCheckDeliverySLAReportsEachFailureClass(t *testing.T) {
 			field: func(report SLAReport) []SLAFinding { return report.ReconciliationFailures },
 		},
 		{
+			name: "on run delivered with selected candidate still frozen",
+			seed: func(t *testing.T, pool *pgxpool.Pool, fixture digestFixture) {
+				runID := insertSLARun(t, pool, fixture.ProjectID, now, "delivered", `{"digest":{}}`, now)
+				if _, err := pool.Exec(context.Background(), `UPDATE digest_runs SET unified_cards_mode='on' WHERE id=$1`, runID); err != nil {
+					t.Fatal(err)
+				}
+				seedLedgerRow(t, pool, fixture, now, reasonIncluded)
+				if _, err := pool.Exec(context.Background(), `UPDATE digest_run_candidate_evaluations
+					SET phase='freeze' WHERE digest_run_id=$1`, runID); err != nil {
+					t.Fatal(err)
+				}
+			},
+			field: func(report SLAReport) []SLAFinding { return report.ReconciliationFailures },
+		},
+		{
 			name: "snooze beyond the product cap",
 			seed: func(t *testing.T, pool *pgxpool.Pool, fixture digestFixture) {
 				insertSLARun(t, pool, fixture.ProjectID, now, "delivered", `{"digest":{}}`, now)
@@ -145,7 +160,6 @@ func TestCheckDeliverySLAHappyPath(t *testing.T) {
 		t.Fatalf("unexpected SLA findings: %+v", report)
 	}
 }
-
 
 // seedLedgerRow attaches one candidate evaluation to the project's most recent
 // run, proving the ledger lane was live for that run.
@@ -237,5 +251,125 @@ func TestCheckDeliverySLASkipsInvalidTimezoneOnly(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("valid project's missing_runs finding was not reported")
+	}
+}
+
+// TestCheckDeliverySLAPRStatusesAreModeAware is the mode-branch contract: the
+// same PR incident is a finding against an ON run and invisible against an OFF
+// one, because OFF never had a lane that could deliver it.
+func TestCheckDeliverySLAPRStatusesAreModeAware(t *testing.T) {
+	now := time.Date(2026, 8, 26, 10, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name          string
+		mode          string
+		ledgerReason  string
+		ledgerPRGroup bool
+		snoozed       bool
+		wantOmitted   int
+	}{
+		{name: "on omits an unledgered PR incident", mode: "on", wantOmitted: 1},
+		{name: "on is quiet when the PR incident is capped", mode: "on",
+			ledgerPRGroup: true, ledgerReason: reasonCappedOverflow},
+		{name: "on is quiet when the PR incident is snoozed", mode: "on", snoozed: true},
+		{name: "on is quiet when the PR incident was selected", mode: "on",
+			ledgerPRGroup: true, ledgerReason: reasonIncluded},
+		{name: "off never sees a PR incident", mode: "off"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := testPool(t)
+			fixture := seedSLAProject(t, pool, now, true)
+			runID := insertSLARun(t, pool, fixture.ProjectID, now, "delivered", `{"digest":{}}`, now)
+			if _, err := pool.Exec(context.Background(), `UPDATE digest_runs
+				SET unified_cards_mode=$2 WHERE id=$1`, runID, tc.mode); err != nil {
+				t.Fatal(err)
+			}
+			// Anchors the ledger lane as live for this run, which the omitted
+			// diagnostic requires before it will report anything at all.
+			seedLedgerRow(t, pool, fixture, now, reasonIncluded)
+
+			var prGroupID string
+			if err := pool.QueryRow(context.Background(), `INSERT INTO error_groups
+				(project_id,environment_id,fingerprint,title,kind,status,first_seen,last_seen,pr_url)
+				VALUES ($1,$2,$3,'PR awaiting review','error','pr_created',$4,$4,
+				 'https://github.com/acme/shop/pull/5') RETURNING id::text`,
+				fixture.ProjectID, fixture.EnvID, "sla-pr-"+uuid.NewString(), now.Add(-48*time.Hour),
+			).Scan(&prGroupID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := pool.Exec(context.Background(), `UPDATE error_groups
+				SET actionable_since=$2 WHERE id=$1`, prGroupID, now.Add(-24*time.Hour)); err != nil {
+				t.Fatal(err)
+			}
+			if tc.snoozed {
+				if _, err := pool.Exec(context.Background(), `UPDATE error_groups
+					SET snoozed_until=$2 WHERE id=$1`, prGroupID, now.Add(48*time.Hour)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.ledgerPRGroup {
+				outcome := "excluded"
+				if tc.ledgerReason == reasonIncluded {
+					outcome = "included"
+				}
+				if _, err := pool.Exec(context.Background(), `INSERT INTO digest_run_candidate_evaluations
+					(digest_run_id,error_group_id,outcome,primary_reason_code,phase)
+					VALUES ($1,$2,$3,$4,'validation')`, runID, prGroupID, outcome, tc.ledgerReason); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			report, err := CheckDeliverySLA(context.Background(), pool, fixture.ProjectID, now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			omitted := 0
+			for _, finding := range report.OmittedActionable {
+				if finding.ErrorGroupID == prGroupID {
+					omitted++
+				}
+			}
+			if omitted != tc.wantOmitted {
+				t.Fatalf("omitted findings for the PR incident = %d, want %d (all: %+v)",
+					omitted, tc.wantOmitted, report.OmittedActionable)
+			}
+			if len(report.ReconciliationFailures) != 0 {
+				t.Fatalf("unexpected reconciliation findings: %+v", report.ReconciliationFailures)
+			}
+		})
+	}
+}
+
+// TestCheckDeliverySLALongSnoozeCoversPRStatuses: the snooze endpoint accepts
+// the PR statuses, so the over-cap tripwire has to watch them too — otherwise a
+// direct write could hide a PR incident from every digest with nothing to say so.
+func TestCheckDeliverySLALongSnoozeCoversPRStatuses(t *testing.T) {
+	now := time.Date(2026, 8, 26, 10, 0, 0, 0, time.UTC)
+	pool := testPool(t)
+	fixture := seedSLAProject(t, pool, now, true)
+	insertSLARun(t, pool, fixture.ProjectID, now, "delivered", `{"digest":{}}`, now)
+	var groupID string
+	if err := pool.QueryRow(context.Background(), `INSERT INTO error_groups
+		(project_id,environment_id,fingerprint,title,kind,status,first_seen,last_seen,pr_url)
+		VALUES ($1,$2,$3,'over-snoozed PR','error','pr_draft',$4,$4,
+		 'https://github.com/acme/shop/pull/6') RETURNING id::text`,
+		fixture.ProjectID, fixture.EnvID, "sla-"+uuid.NewString(), now.Add(-48*time.Hour)).Scan(&groupID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(context.Background(), `UPDATE error_groups
+		SET snoozed_until=$2 WHERE id=$1`, groupID, now.Add(60*24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	report, err := CheckDeliverySLA(context.Background(), pool, fixture.ProjectID, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, finding := range report.LongSnoozes {
+		if finding.ErrorGroupID == groupID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("over-cap snooze on a PR incident went unreported: %+v", report.LongSnoozes)
 	}
 }

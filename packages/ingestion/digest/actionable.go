@@ -21,6 +21,50 @@ const (
 	reasonIncluded            = "included"
 )
 
+// The ON lane's instruction lines. Exactly one is correct for any incident
+// state, so the model never owns them: validation stamps the value digestAction
+// returns onto the card before it is cached or rendered.
+const (
+	actionApproveFix          = "Approve the proposed fix."
+	actionReviewInvestigation = "Review the investigation."
+	actionReviewPR            = "Review the fix PR."
+	actionReviewIssue         = "Review the issue."
+)
+
+// digestAction is the single source of an ON card's instruction line. It reads
+// only incident state: stored prose (remediation, reason_message) and model
+// output never gate it, which is what keeps an incident with an empty
+// remediation field from vanishing from the digest. Migration 066's
+// error_groups_action_class is its SQL twin; change both together.
+func digestAction(status string, hasSavedDiff bool, prURL string) string {
+	switch status {
+	case "awaiting_approval":
+		if hasSavedDiff {
+			return actionApproveFix
+		}
+		return actionReviewInvestigation
+	case "pr_created", "pr_draft":
+		if prURL != "" {
+			return actionReviewPR
+		}
+		// Inconsistent state: the status says a PR is open and no URL exists.
+		// The incident still renders — it still awaits a human — but the
+		// caller logs a diagnostic so the inconsistency is visible.
+		return actionReviewIssue
+	default: // needs_human
+		return actionReviewInvestigation
+	}
+}
+
+// onCardOutcome maps an ON status onto the renderer's two card families, which
+// decide the card's button (replay vs review-PR) and its ordering.
+func onCardOutcome(status string) string {
+	if status == "pr_created" || status == "pr_draft" {
+		return "verified_fix"
+	}
+	return "needs_human"
+}
+
 // knownReasonCodes is the closed vocabulary a ledger row may carry. Both
 // reconcileActionable and the SLA unknown_reason_code diagnostic derive their
 // allowlists from this slice, so adding a reason constant without appending it
@@ -31,14 +75,20 @@ var knownReasonCodes = []string{
 	reasonNotPublishable, reasonFrozenLaneOwns, reasonCappedOverflow,
 }
 
-// actionableStatusSQL is the SQL membership list for statuses that require a
-// human. digest/sla.go and handler.SnoozeIncident embed the same pair, and the
-// migration 064 trigger hardcodes it; a status joining this set must update
-// all four sites together.
-const actionableStatusSQL = `('awaiting_approval','needs_human')`
+// m1ActionableStatusSQL is the OFF lane's status set: the pair migration 064's
+// trigger and the shipped receipts lane were built on. It is deliberately NOT
+// widened — OFF mode is the rollback path and must stay byte-identical.
+const m1ActionableStatusSQL = `('awaiting_approval','needs_human')`
 
-// actionableReceiptCap bounds the digest's actionable section: the top
-// (cap-1) candidates by impact plus the single oldest waiting item.
+// onCardStatusSQL is the ON lane's status set. PR review is a human action, so
+// it repeats until the PR is merged or closed (see docs/design/2026-08-28).
+const onCardStatusSQL = `('awaiting_approval','needs_human','pr_created','pr_draft')`
+
+// actionableReceiptCap bounds the OFF lane's receipts section: the top
+// (cap-1) candidates by impact plus the single oldest waiting item. It is a
+// product-era constant, so it stays where it is — OFF is the rollback path and
+// must remain byte-identical. The ON card lane passes notify.DigestV4CardCap
+// instead, which is the renderer's real Slack-block constraint.
 const actionableReceiptCap = 5
 
 type actionableCandidate struct {
@@ -56,6 +106,13 @@ type actionableCandidate struct {
 	ActionableSince       *time.Time
 	SnoozedUntil          *time.Time
 	ErrorLaneEligible     bool
+	SignalType            string
+	AffectedUsers         int
+	LastSeen              time.Time
+	RoutePurpose          string
+	DiffIdentity          string
+	DiagnosisDecidedAt    *time.Time
+	Accounts              []string
 }
 
 type evaluation struct {
@@ -65,7 +122,9 @@ type evaluation struct {
 	Candidates []actionableCandidate
 }
 
-func loadActionableCandidates(ctx context.Context, tx pgx.Tx, projectID string) ([]actionableCandidate, error) {
+// loadActionableCandidates reads the incidents awaiting a human. statusSQL is
+// the caller's status set: m1ActionableStatusSQL in OFF, onCardStatusSQL in ON.
+func loadActionableCandidates(ctx context.Context, tx pgx.Tx, projectID, statusSQL string) ([]actionableCandidate, error) {
 	query := `
 		SELECT g.id::text,g.kind,g.status::text,g.title,g.occurrence_count::bigint,
 		       g.impact_visits,COALESCE(g.pr_url,''),COALESCE(g.root_cause,''),
@@ -73,11 +132,23 @@ func loadActionableCandidates(ctx context.Context, tx pgx.Tx, projectID string) 
 		       NULLIF(btrim(g.candidate_diff),'') IS NOT NULL,
 		       COALESCE(d.has_validated_diagnosis,false),
 		       g.actionable_since,g.snoozed_until,
-		       COALESCE(g.kind='error' AND (` + pipelineEligibleSQL("g") + `),false)
+		       COALESCE(g.kind='error' AND (` + pipelineEligibleSQL("g") + `),false),
+		       COALESCE(g.signal_type,''),g.affected_users_count,g.last_seen,
+		       COALESCE((SELECT rm.purpose FROM route_map rm
+		         WHERE rm.project_id=g.project_id
+		           AND g.page_url_normalized LIKE '%' || rm.pattern || '%'
+		         ORDER BY length(rm.pattern) DESC LIMIT 1),''),
+		       md5(COALESCE(g.candidate_diff,'')),d.diagnosis_decided_at,
+		       COALESCE((SELECT array_agg(name) FROM (
+		         SELECT DISTINCT eu.account_name AS name
+		         FROM error_group_affected_users eau JOIN end_users eu ON eu.id=eau.end_user_id
+		         WHERE eau.error_group_id=g.id AND eu.project_id=g.project_id
+		           AND NULLIF(btrim(eu.account_name),'') IS NOT NULL
+		         ORDER BY eu.account_name LIMIT 8) names),'{}')
 		  FROM error_groups g
 		  LEFT JOIN LATERAL (` + diagnosisValidationLateralSQL + `) d ON true
 		 WHERE g.project_id=$1
-		   AND g.status IN ` + actionableStatusSQL + `
+		   AND g.status IN ` + statusSQL + `
 		 ORDER BY g.actionable_since NULLS LAST,g.id`
 	rows, err := tx.Query(ctx, query, projectID)
 	if err != nil {
@@ -94,6 +165,9 @@ func loadActionableCandidates(ctx context.Context, tx pgx.Tx, projectID string) 
 			&candidate.RootCause, &candidate.Mitigation, &candidate.HasSavedDiff,
 			&candidate.HasValidatedDiagnosis, &candidate.ActionableSince,
 			&candidate.SnoozedUntil, &candidate.ErrorLaneEligible,
+			&candidate.SignalType, &candidate.AffectedUsers, &candidate.LastSeen,
+			&candidate.RoutePurpose, &candidate.DiffIdentity, &candidate.DiagnosisDecidedAt,
+			&candidate.Accounts,
 		); err != nil {
 			return nil, fmt.Errorf("scan actionable digest candidate: %w", err)
 		}
@@ -126,7 +200,7 @@ func evaluateActionable(candidates []actionableCandidate, frozenIncidentIDs map[
 		}
 	}
 
-	result.Included, result.Overflow = selectActionable(eligible)
+	result.Included, result.Overflow = selectActionable(eligible, actionableReceiptCap)
 	included := make(map[string]bool, len(result.Included))
 	for _, candidate := range result.Included {
 		included[candidate.GroupID] = true
@@ -140,16 +214,29 @@ func evaluateActionable(candidates []actionableCandidate, frozenIncidentIDs map[
 }
 
 func actionablePublishable(candidate actionableCandidate) bool {
-	item := notify.ReceiptItem{
-		ReceiptState:     receiptState(candidate.Status, candidate.HasSavedDiff),
-		PRURL:            candidate.PRURL,
-		RootCauseExcerpt: narrative.SanitizeExcerpt(candidate.RootCause, excerptMax),
-		HasSavedDiff:     candidate.HasSavedDiff,
-	}
-	return publishable(item, candidate.HasValidatedDiagnosis)
+	return onCardEligible(candidate.Status, candidate.PRURL, candidate.RootCause,
+		candidate.HasSavedDiff, candidate.HasValidatedDiagnosis)
 }
 
-func selectActionable(eligible []actionableCandidate) (picked []actionableCandidate, overflow int) {
+// onCardEligible answers "does this incident deserve an authored card?", and
+// nothing else. A false answer routes it to its mechanical receipt; it can
+// never remove the incident from the digest.
+func onCardEligible(status, prURL, rootCause string, hasSavedDiff, hasValidatedDiagnosis bool) bool {
+	item := notify.ReceiptItem{
+		ReceiptState:     receiptState(status, hasSavedDiff),
+		PRURL:            prURL,
+		RootCauseExcerpt: narrative.SanitizeExcerpt(rootCause, excerptMax),
+		HasSavedDiff:     hasSavedDiff,
+	}
+	return publishable(item, hasValidatedDiagnosis)
+}
+
+// selectActionable keeps the top (limit-1) candidates by impact plus the single
+// oldest waiting item. The limit belongs to the caller, not to this function:
+// the OFF receipts lane keeps actionableReceiptCap while the ON card lane uses
+// the renderer's notify.DigestV4CardCap, and the two must not drift into one
+// another.
+func selectActionable(eligible []actionableCandidate, limit int) (picked []actionableCandidate, overflow int) {
 	byImpact := append([]actionableCandidate(nil), eligible...)
 	sort.SliceStable(byImpact, func(i, j int) bool {
 		left, right := byImpact[i], byImpact[j]
@@ -169,12 +256,12 @@ func selectActionable(eligible []actionableCandidate) (picked []actionableCandid
 		}
 		return left.GroupID < right.GroupID
 	})
-	if len(byImpact) <= actionableReceiptCap {
+	if len(byImpact) <= limit {
 		return byImpact, 0
 	}
 
-	picked = append(picked, byImpact[:actionableReceiptCap-1]...)
-	inPicked := make(map[string]bool, actionableReceiptCap-1)
+	picked = append(picked, byImpact[:limit-1]...)
+	inPicked := make(map[string]bool, limit-1)
 	for _, candidate := range picked {
 		inPicked[candidate.GroupID] = true
 	}
@@ -193,7 +280,7 @@ func selectActionable(eligible []actionableCandidate) (picked []actionableCandid
 	if oldest != nil {
 		picked = append(picked, *oldest)
 	} else {
-		picked = append(picked, byImpact[actionableReceiptCap-1])
+		picked = append(picked, byImpact[limit-1])
 	}
 	return picked, len(eligible) - len(picked)
 }
@@ -204,7 +291,9 @@ func toReceiptItems(candidates []actionableCandidate) ([]notify.ReceiptItem, err
 		if candidate.Kind != "error" && candidate.Kind != "friction" {
 			return nil, fmt.Errorf("unsupported actionable kind %q", candidate.Kind)
 		}
-		if candidate.Status != "awaiting_approval" && candidate.Status != "needs_human" {
+		switch candidate.Status {
+		case "awaiting_approval", "needs_human", "pr_created", "pr_draft":
+		default:
 			return nil, fmt.Errorf("unsupported actionable status %q", candidate.Status)
 		}
 		item := notify.ReceiptItem{

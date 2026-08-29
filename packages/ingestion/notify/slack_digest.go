@@ -58,20 +58,17 @@ func formatSlackDigestV4(payload EventPayload) ([]byte, string, error) {
 			slog.Warn("digest card outcome is not renderable", "incident_id", card.IncidentID, "outcome", card.Outcome)
 		}
 	}
-	allCards := append(append([]GeneratedDigestCard(nil), decisions...), fixes...)
-	rendered := allCards
-	if len(rendered) > DigestV4CardCap {
-		rendered = rendered[:DigestV4CardCap]
-	}
-	renderedDecisions := make([]GeneratedDigestCard, 0, len(rendered))
-	renderedFixes := make([]GeneratedDigestCard, 0, len(rendered))
-	for _, card := range rendered {
-		if card.Outcome == "needs_human" {
-			renderedDecisions = append(renderedDecisions, card)
-		} else {
-			renderedFixes = append(renderedFixes, card)
-		}
-	}
+	remaining := DigestV4CardCap
+	decisionCount := min(len(decisions), remaining)
+	renderedDecisions := decisions[:decisionCount]
+	remaining -= decisionCount
+	receiptCount := min(len(receipts), remaining)
+	renderedReceipts := receipts[:receiptCount]
+	remaining -= receiptCount
+	fixCount := min(len(fixes), remaining)
+	renderedFixes := fixes[:fixCount]
+	renderedCount := decisionCount + receiptCount + fixCount
+	totalCount := len(decisions) + len(receipts) + len(fixes)
 
 	blocks := []map[string]any{
 		{
@@ -83,11 +80,11 @@ func formatSlackDigestV4(payload EventPayload) ([]byte, string, error) {
 			"elements": []map[string]any{{"type": "mrkdwn", "text": digestV4Summary(digest.Date, len(decisions)+len(receipts), len(fixes))}},
 		},
 	}
-	if len(allCards) == 0 && len(receipts) == 0 {
+	if totalCount == 0 {
 		blocks = append(blocks, digestSectionBlock("Nothing needs your attention today."))
 	}
 	position := 0
-	if len(renderedDecisions) > 0 || len(receipts) > 0 {
+	if len(renderedDecisions) > 0 || len(renderedReceipts) > 0 {
 		blocks = append(blocks, digestSectionBlock("⚠️ *Needs a decision*"))
 		needDivider := false
 		for _, card := range renderedDecisions {
@@ -98,16 +95,13 @@ func formatSlackDigestV4(payload EventPayload) ([]byte, string, error) {
 			position++
 			needDivider = true
 		}
-		for _, receipt := range receipts {
+		for _, receipt := range renderedReceipts {
 			if needDivider {
 				blocks = append(blocks, map[string]any{"type": "divider"})
 			}
 			blocks = append(blocks, digestReceiptCardBlocks(payload, receipt.item, receipt.line)...)
 			needDivider = true
 		}
-	}
-	if digest.ReceiptOverflow > 0 {
-		blocks = append(blocks, digestContextBlock(narrative.OverflowLine(digest.ReceiptOverflow)))
 	}
 	if digest.DeliveryAlert != "" {
 		blocks = append(blocks, digestContextBlock("⚠️ "+cleanProse(digest.DeliveryAlert, digestDetailMax)))
@@ -122,12 +116,11 @@ func formatSlackDigestV4(payload EventPayload) ([]byte, string, error) {
 			}
 		}
 	}
-	// The validator defers overflow cards and reports the count; the local
-	// difference is the belt for payloads that somehow still exceed the cap.
-	overflow := digest.OverflowCount
-	if local := len(allCards) - len(rendered); local > overflow {
-		overflow = local
-	}
+	// Generated cards and receipt fallbacks share one cap. The two persisted
+	// overflow counts describe different upstream lanes, while local overflow
+	// covers an oversized payload from an older or buggy producer. Render one
+	// combined notice so an incident is never represented by two overflow lines.
+	overflow := max(digest.OverflowCount+digest.ReceiptOverflow, totalCount-renderedCount)
 	if overflow > 0 {
 		label := fmt.Sprintf("And %d more on the dashboard", overflow)
 		blocks = append(blocks, digestContextBlock(slackDigestLink(payload.DashboardURL, label)))
@@ -179,7 +172,7 @@ func digestV4CardBlocks(payload EventPayload, card GeneratedDigestCard, position
 	// No people fragment at zero: the prompt tells the writer to describe a
 	// zero-user problem without a count, and "👥 0 users" would contradict the
 	// card's own copy (v3 hid the count the same way).
-	contextParts := make([]string, 0, 2)
+	contextParts := make([]string, 0, 4)
 	if card.AffectedUsers > 0 {
 		noun := "users"
 		if card.AffectedUsers == 1 {
@@ -194,6 +187,17 @@ func digestV4CardBlocks(payload EventPayload, card GeneratedDigestCard, position
 		}
 		contextParts = append(contextParts, accounts)
 	}
+	if card.Kind == "friction" {
+		noun := "friction signals"
+		if card.SignalCount == 1 {
+			noun = "friction signal"
+		}
+		contextParts = append(contextParts, fmt.Sprintf("%d %s", card.SignalCount, noun))
+	}
+	if age := digestWaitingAgeLine(payload, card.IncidentID, card.ActionableSince,
+		"digest card aging line dropped: window is not RFC3339Nano"); age != "" {
+		contextParts = append(contextParts, age)
+	}
 	context := strings.Join(contextParts, " · ")
 	buttons := make([]map[string]any, 0, 2)
 	if card.Outcome == "needs_human" && card.ReplayURL != "" {
@@ -207,7 +211,11 @@ func digestV4CardBlocks(payload EventPayload, card GeneratedDigestCard, position
 		buttons = append(buttons, digestButton("digest_pr_"+strconv.Itoa(position), label, card.PRURL, "primary"))
 	}
 	if issueURL := BuildIncidentURL(payload.DashboardURL, card.IncidentID, payload.Project.ID); issueURL != "" {
-		buttons = append(buttons, digestButton("digest_issue_"+strconv.Itoa(position), "View issue", issueURL, ""))
+		label := "View issue"
+		if card.Kind == "friction" {
+			label = "Issue page"
+		}
+		buttons = append(buttons, digestButton("digest_issue_"+strconv.Itoa(position), label, issueURL, ""))
 	}
 	blocks := []map[string]any{digestSectionBlock(text)}
 	if context != "" {
@@ -413,32 +421,9 @@ func digestReceiptCardBlocks(payload EventPayload, item ReceiptItem, receiptLine
 	}
 
 	links := make([]string, 0, 4)
-	if item.ActionableSince != nil {
-		clock, err := time.Parse(time.RFC3339Nano, payload.Digest.Window.To)
-		switch {
-		case err != nil:
-			// Sibling non-renderable skips warn; dropping the aging line must be
-			// just as visible, or a window format drift silently removes it.
-			slog.Warn("digest receipt aging line dropped: window is not RFC3339Nano",
-				"incident_id", item.IncidentID, "window_to", payload.Digest.Window.To)
-		case !item.ActionableSince.After(clock):
-			location := time.UTC
-			if payload.Digest.Timezone != "" {
-				if loc, locErr := time.LoadLocation(payload.Digest.Timezone); locErr == nil {
-					location = loc
-				}
-			}
-			days := int(clock.Sub(*item.ActionableSince).Hours() / 24)
-			label := fmt.Sprintf("%d days", days)
-			if days == 1 {
-				label = "1 day"
-			}
-			if days == 0 {
-				label = "today"
-			}
-			links = append(links, fmt.Sprintf("waiting on you since %s (%s)",
-				item.ActionableSince.In(location).Format("Jan 2"), label))
-		}
+	if age := digestWaitingAgeLine(payload, item.IncidentID, item.ActionableSince,
+		"digest receipt aging line dropped: window is not RFC3339Nano"); age != "" {
+		links = append(links, age)
 	}
 	if (item.ReceiptState == "pr_open" || item.ReceiptState == "pr_draft") && item.PRURL != "" {
 		label := "Review fix PR"
@@ -457,6 +442,38 @@ func digestReceiptCardBlocks(payload EventPayload, item ReceiptItem, receiptLine
 		digestSectionBlock(text),
 		digestContextBlock(strings.Join(links, " · ")),
 	}
+}
+
+func digestWaitingAgeLine(payload EventPayload, incidentID string, actionableSince *time.Time, invalidWindowWarning string) string {
+	if actionableSince == nil {
+		return ""
+	}
+	clock, err := time.Parse(time.RFC3339Nano, payload.Digest.Window.To)
+	if err != nil {
+		// Sibling non-renderable skips warn; dropping the aging line must be
+		// just as visible, or a window format drift silently removes it.
+		slog.Warn(invalidWindowWarning,
+			"incident_id", incidentID, "window_to", payload.Digest.Window.To)
+		return ""
+	}
+	if actionableSince.After(clock) {
+		return ""
+	}
+	location := time.UTC
+	if payload.Digest.Timezone != "" {
+		if loc, locErr := time.LoadLocation(payload.Digest.Timezone); locErr == nil {
+			location = loc
+		}
+	}
+	days := int(clock.Sub(*actionableSince).Hours() / 24)
+	label := fmt.Sprintf("%d days", days)
+	if days == 1 {
+		label = "1 day"
+	}
+	if days == 0 {
+		label = "today"
+	}
+	return fmt.Sprintf("waiting on you since %s (%s)", actionableSince.In(location).Format("Jan 2"), label)
 }
 
 func digestContextBlock(text string) map[string]any {

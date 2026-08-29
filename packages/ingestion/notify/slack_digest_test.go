@@ -406,6 +406,97 @@ func TestFormatSlackDigestV4NativeLayout(t *testing.T) {
 	}
 }
 
+func TestFormatSlackDigestV4RendersAuthoredFrictionCard(t *testing.T) {
+	clock := time.Date(2026, 8, 27, 9, 0, 0, 0, time.UTC)
+	actionableSince := clock.Add(-3 * 24 * time.Hour)
+	payload := EventPayload{
+		Version: 1, EventType: "digest.daily", Project: ProjectRef{ID: "p1", Name: "Shop"},
+		DashboardURL: "https://app.example",
+		Digest: &DigestPayload{
+			SchemaVersion: 4, Date: "2026-08-27",
+			Window: DigestWindow{To: clock.Format(time.RFC3339)},
+			GeneratedCards: []GeneratedDigestCard{{
+				IncidentID: "friction-1", Kind: "friction", Title: "Checkout button does nothing",
+				Outcome: "needs_human", Copy: "People try to continue but the checkout remains unchanged.",
+				Action: "Watch the replay and review the investigation.", SignalCount: 17,
+				ActionableSince: &actionableSince, ReplayURL: "https://app.example/sessions/s1?t=4200",
+			}},
+		},
+	}
+	_, body := formatV4Blocks(t, payload)
+	for _, want := range []string{
+		"People try to continue but the checkout remains unchanged.",
+		"17 friction signals",
+		"waiting on you since Aug 24 (3 days)",
+		"Watch replay",
+		"Issue page",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("authored friction card missing %q: %s", want, body)
+		}
+	}
+	if strings.Contains(body, "👥") {
+		t.Fatalf("zero-user friction card rendered people context: %s", body)
+	}
+}
+
+func TestFormatSlackDigestV4ErrorCardSnapshotIsUnchanged(t *testing.T) {
+	payload := EventPayload{
+		Version: 1, EventType: "digest.daily", Project: ProjectRef{ID: "p1", Name: "Shop"},
+		DashboardURL: "https://app.example",
+		Digest: &DigestPayload{SchemaVersion: 4, Date: "2026-08-27", GeneratedCards: []GeneratedDigestCard{{
+			IncidentID: "error-1", Title: "Checkout fails", Outcome: "needs_human",
+			Copy: "Checkout stops before payment.", Action: "Review the investigation.",
+			AffectedUsers: 2, Accounts: []string{"Acme"}, ReplayURL: "https://app.example/sessions/s1",
+		}}},
+	}
+	payload.Digest.GeneratedCards[0].Kind = "error"
+	body, _, err := FormatSlack(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = `{"blocks":[{"text":{"emoji":true,"text":"Daily digest · Shop","type":"plain_text"},"type":"header"},{"elements":[{"text":"Aug 27 · 1 issue that matters · 1 needs a decision","type":"mrkdwn"}],"type":"context"},{"text":{"text":"⚠️ *Needs a decision*","type":"mrkdwn"},"type":"section"},{"text":{"text":"*Checkout fails*\nCheckout stops before payment.\n*Needs you:* Review the investigation.","type":"mrkdwn"},"type":"section"},{"elements":[{"text":"👥 2 users · Acme","type":"mrkdwn"}],"type":"context"},{"elements":[{"action_id":"digest_replay_0","style":"primary","text":{"emoji":true,"text":"Watch replay","type":"plain_text"},"type":"button","url":"https://app.example/sessions/s1"},{"action_id":"digest_issue_0","text":{"emoji":true,"text":"View issue","type":"plain_text"},"type":"button","url":"https://app.example/incidents/error-1?project_id=p1"}],"type":"actions"}]}
+`
+	if string(body) != want {
+		t.Fatalf("error card snapshot changed:\nwant: %s\n got: %s", want, body)
+	}
+}
+
+func TestFormatSlackDigestV4CapsMergedKindsOnceWithinSlackBlockLimit(t *testing.T) {
+	clock := time.Date(2026, 8, 27, 9, 0, 0, 0, time.UTC)
+	actionableSince := clock.Add(-24 * time.Hour)
+	cards := make([]GeneratedDigestCard, 0, 12)
+	for index := range 12 {
+		kind := "error"
+		if index%2 == 0 {
+			kind = "friction"
+		}
+		cards = append(cards, GeneratedDigestCard{
+			IncidentID: "issue-" + strconv.Itoa(index), Kind: kind, Title: "Problem " + strconv.Itoa(index),
+			Outcome: "needs_human", Copy: "People cannot complete the flow.", Action: "Review the investigation.",
+			AffectedUsers: 1, SignalCount: int64(index + 1), ActionableSince: &actionableSince,
+			ReplayURL: "https://app.example/sessions/s1",
+		})
+	}
+	payload := EventPayload{
+		Version: 1, EventType: "digest.daily", Project: ProjectRef{ID: "p", Name: "p"}, DashboardURL: "https://app.example",
+		Digest: &DigestPayload{SchemaVersion: 4, Date: "2026-08-27", Window: DigestWindow{To: clock.Format(time.RFC3339)}, GeneratedCards: cards, OverflowCount: 3},
+	}
+	blocks, body := formatV4Blocks(t, payload)
+	if got := strings.Count(body, "more on the dashboard"); got != 1 {
+		t.Fatalf("overflow rendered %d times: %s", got, body)
+	}
+	if !strings.Contains(body, "And 3 more on the dashboard") {
+		t.Fatalf("merged overflow count missing: %s", body)
+	}
+	if strings.Contains(body, "Problem 9") || strings.Contains(body, "Problem 10") || strings.Contains(body, "Problem 11") {
+		t.Fatalf("card past merged cap rendered: %s", body)
+	}
+	if len(blocks) >= 50 {
+		t.Fatalf("maximum-card digest has %d Slack blocks; want fewer than 50", len(blocks))
+	}
+}
+
 func TestFormatSlackDigestV4SummaryEmptyAndOverflow(t *testing.T) {
 	one := EventPayload{Version: 1, EventType: "digest.daily", Project: ProjectRef{ID: "p", Name: "p"}, DashboardURL: "https://app.example",
 		Digest: &DigestPayload{SchemaVersion: 4, Date: "2026-08-24", GeneratedCards: []GeneratedDigestCard{{IncidentID: "i", Outcome: "needs_human", Title: "Problem", Copy: "It broke.", Action: "Decide.", AffectedUsers: 1}}}}

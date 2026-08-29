@@ -124,6 +124,257 @@ func TestFreezeCapturesOccurrenceAndReplayFacts(t *testing.T) {
 	}
 }
 
+func TestFreezeDualWritesGroupIdentityAndChoosesCanonicalEpisode(t *testing.T) {
+	t.Setenv("DIGEST_UNIFIED_CARDS", "off")
+	pool := testPool(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	f := seedDigestFixture(t, pool, now)
+	first := seedFreezeEpisode(t, pool, f.ProjectID, f.EnvID, now.Add(-3*time.Hour), 1)
+	seedFreezeDiagnosis(t, pool, f.ProjectID, first, "needs_human", now.Add(-2*time.Hour))
+	var groupID, second string
+	if err := pool.QueryRow(ctx, `SELECT canonical_issue_id::text FROM issue_episodes WHERE id=$1`, first).Scan(&groupID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE issue_episodes SET closed_at=$2 WHERE id=$1`, first, now.Add(-90*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `INSERT INTO issue_episodes (project_id,canonical_issue_id,sequence)
+		VALUES ($1,$2,2) RETURNING id::text`, f.ProjectID, groupID).Scan(&second); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO issue_inquiry_decisions
+		(project_id,episode_id,decision,reason,evaluated_units,evidence_signature,model,prompt_version,decided_at)
+		VALUES ($1,$2,'investigate','newer episode',1,$3,'test',1,$4)`,
+		f.ProjectID, second, "freeze-"+uuid.NewString(), now.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	seedFreezeDiagnosis(t, pool, f.ProjectID, second, "needs_human", now.Add(-30*time.Minute))
+
+	runID, candidates, err := FreezeCandidates(ctx, pool, f.ProjectID, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates) != 1 || candidates[0].EpisodeID != second {
+		t.Fatalf("canonical candidates = %+v, want episode %s", candidates, second)
+	}
+	if candidates[0].ErrorGroupID != groupID || candidates[0].Kind != "error" {
+		t.Fatalf("incident identity not frozen: %+v", candidates[0])
+	}
+	var itemCount int
+	var storedGroupID, mode string
+	if err := pool.QueryRow(ctx, `SELECT count(*),min(error_group_id::text)
+		FROM digest_run_items WHERE run_id=$1`, runID).Scan(&itemCount, &storedGroupID); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT unified_cards_mode FROM digest_runs WHERE id=$1`, runID).Scan(&mode); err != nil {
+		t.Fatal(err)
+	}
+	if itemCount != 1 || storedGroupID != groupID || mode != "off" {
+		t.Fatalf("run identity count=%d group=%s mode=%s", itemCount, storedGroupID, mode)
+	}
+}
+
+func TestFreezeOnIncludesFrictionAndReusesValidatedCopy(t *testing.T) {
+	t.Setenv("DIGEST_UNIFIED_CARDS", "on")
+	pool := testPool(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	f := seedDigestFixture(t, pool, now)
+	cleanupActionableDiagnoses(t, pool, f.ProjectID)
+	groupID, _ := seedActionableGroup(t, pool, f.ProjectID, f.EnvID, "friction", "awaiting_approval", now.Add(-time.Hour))
+	if _, err := pool.Exec(ctx, `UPDATE error_groups SET signal_type='dead_click',candidate_diff='diff --git a/a b/a'
+		WHERE id=$1`, groupID); err != nil {
+		t.Fatal(err)
+	}
+
+	runID, candidates, err := FreezeCandidates(ctx, pool, f.ProjectID, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var candidate Candidate
+	for _, item := range candidates {
+		if item.ErrorGroupID == groupID {
+			candidate = item
+			break
+		}
+	}
+	if candidate.ErrorGroupID == "" || candidate.Kind != "friction" || candidate.EpisodeID != "" || candidate.Fingerprint == "" {
+		t.Fatalf("friction candidate = %+v", candidate)
+	}
+	if candidate.ValidAction != "Approve the proposed fix." {
+		t.Fatalf("valid action = %q", candidate.ValidAction)
+	}
+	var mode, phase string
+	if err := pool.QueryRow(ctx, `SELECT r.unified_cards_mode,e.phase
+		FROM digest_runs r JOIN digest_unified_run_items i ON i.run_id=r.id
+		JOIN digest_run_candidate_evaluations e ON e.digest_run_id=r.id AND e.error_group_id=i.error_group_id
+		WHERE r.id=$1 AND i.error_group_id=$2`, runID, groupID).Scan(&mode, &phase); err != nil {
+		t.Fatal(err)
+	}
+	if mode != "on" || phase != "freeze" {
+		t.Fatalf("stored mode=%s phase=%s", mode, phase)
+	}
+	if candidate.SpellStartedAt == nil {
+		t.Fatal("friction spell was not frozen")
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO digest_card_copy
+		(error_group_id,spell_started_at,input_fingerprint,title,copy,action,model,prompt_version)
+		VALUES ($1,$2,$3,'Saving is blocked','The save control never submits.','Review the proposed repair.','test',4)`,
+		groupID, *candidate.SpellStartedAt, candidate.Fingerprint); err != nil {
+		t.Fatal(err)
+	}
+	_, second, err := FreezeCandidates(ctx, pool, f.ProjectID, now.Add(24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range second {
+		if item.ErrorGroupID == groupID {
+			if item.CachedCard == nil || item.CachedCard.Copy != "The save control never submits." {
+				t.Fatalf("cache not frozen atomically: %+v", item.CachedCard)
+			}
+			return
+		}
+	}
+	t.Fatal("friction candidate missing from second run")
+}
+
+func TestFreezeOnRepeatsActionableErrorPastLegacyWindows(t *testing.T) {
+	t.Setenv("DIGEST_UNIFIED_CARDS", "on")
+	pool := testPool(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	f := seedDigestFixture(t, pool, now)
+	episodeID := seedFreezeEpisode(t, pool, f.ProjectID, f.EnvID, now.Add(-9*24*time.Hour), 1)
+	seedFreezeDiagnosis(t, pool, f.ProjectID, episodeID, "needs_human", now.Add(-9*24*time.Hour))
+	var groupID string
+	if err := pool.QueryRow(ctx, `UPDATE error_groups SET status='needs_human'
+		WHERE id=(SELECT canonical_issue_id FROM issue_episodes WHERE id=$1) RETURNING id::text`, episodeID).Scan(&groupID); err != nil {
+		t.Fatal(err)
+	}
+	quietBackgroundActionable(t, pool, f.ProjectID, groupID)
+	firstRun, first, err := FreezeCandidates(ctx, pool, f.ProjectID, now)
+	if err != nil || len(first) != 1 || first[0].ErrorGroupID != groupID {
+		t.Fatalf("first freeze candidates=%+v err=%v", first, err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE digest_run_items SET outcome='included' WHERE run_id=$1`, firstRun); err != nil {
+		t.Fatal(err)
+	}
+	// A publication row is the one-shot lane's gate. ON must not read it.
+	if _, err := pool.Exec(ctx, `INSERT INTO issue_publications (project_id,episode_id,channel)
+		VALUES ($1,$2,'digest')`, f.ProjectID, episodeID); err != nil {
+		t.Fatal(err)
+	}
+	_, second, err := FreezeCandidates(ctx, pool, f.ProjectID, now.Add(24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second) != 1 || second[0].ErrorGroupID != groupID {
+		t.Fatalf("repeat freeze candidates=%+v, want group %s", second, groupID)
+	}
+	if second[0].ValidAction != "Review the investigation." {
+		t.Fatalf("repeat action = %q", second[0].ValidAction)
+	}
+}
+
+// TestFreezeOnProducesNoCandidateForInvestigatedFYI is R7: "we investigated,
+// nothing to do" leaves the digest for good in ON, so it costs no model call.
+func TestFreezeOnProducesNoCandidateForInvestigatedFYI(t *testing.T) {
+	t.Setenv("DIGEST_UNIFIED_CARDS", "on")
+	pool := testPool(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	f := seedDigestFixture(t, pool, now)
+	episodeID := seedFreezeEpisode(t, pool, f.ProjectID, f.EnvID, now.Add(-2*time.Hour), 1)
+	seedFreezeDiagnosis(t, pool, f.ProjectID, episodeID, "verified_fix", now.Add(-time.Hour))
+	var groupID string
+	if err := pool.QueryRow(ctx, `SELECT canonical_issue_id::text FROM issue_episodes WHERE id=$1`,
+		episodeID).Scan(&groupID); err != nil {
+		t.Fatal(err)
+	}
+	quietBackgroundActionable(t, pool, f.ProjectID)
+	runID, candidates, err := FreezeCandidates(ctx, pool, f.ProjectID, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates) != 0 {
+		t.Fatalf("investigated FYI produced candidates: %+v", candidates)
+	}
+	var ledgerRows int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM digest_run_candidate_evaluations
+		WHERE digest_run_id=$1 AND error_group_id=$2`, runID, groupID).Scan(&ledgerRows); err != nil {
+		t.Fatal(err)
+	}
+	if ledgerRows != 0 {
+		t.Fatalf("investigated FYI reached the ledger: rows=%d", ledgerRows)
+	}
+}
+
+// TestFreezeOnDropsIncidentThatStopsWaiting is the other half of R1: status
+// alone decides presence, so leaving the ON status set removes the card.
+func TestFreezeOnDropsIncidentThatStopsWaiting(t *testing.T) {
+	t.Setenv("DIGEST_UNIFIED_CARDS", "on")
+	pool := testPool(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	f := seedDigestFixture(t, pool, now)
+	episodeID := seedFreezeEpisode(t, pool, f.ProjectID, f.EnvID, now.Add(-2*time.Hour), 1)
+	seedFreezeDiagnosis(t, pool, f.ProjectID, episodeID, "needs_human", now.Add(-time.Hour))
+	var groupID string
+	if err := pool.QueryRow(ctx, `UPDATE error_groups SET status='needs_human'
+		WHERE id=(SELECT canonical_issue_id FROM issue_episodes WHERE id=$1) RETURNING id::text`,
+		episodeID).Scan(&groupID); err != nil {
+		t.Fatal(err)
+	}
+	quietBackgroundActionable(t, pool, f.ProjectID, groupID)
+	if _, first, err := FreezeCandidates(ctx, pool, f.ProjectID, now); err != nil ||
+		len(first) != 1 || first[0].SpellStartedAt == nil {
+		t.Fatalf("actionable freeze candidates=%+v err=%v", first, err)
+	}
+	transitionAt := now.Add(23 * time.Hour)
+	if _, err := pool.Exec(ctx, `UPDATE error_groups SET status='investigated',last_seen=$2
+		WHERE id=$1`, groupID, transitionAt); err != nil {
+		t.Fatal(err)
+	}
+	_, second, err := FreezeCandidates(ctx, pool, f.ProjectID, now.Add(24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second) != 0 {
+		t.Fatalf("incident that stopped waiting still froze: %+v", second)
+	}
+}
+
+func TestFreezeOnAdmitsFYIToActionableTransitionDespitePublication(t *testing.T) {
+	t.Setenv("DIGEST_UNIFIED_CARDS", "on")
+	pool := testPool(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	f := seedDigestFixture(t, pool, now)
+	episodeID := seedFreezeEpisode(t, pool, f.ProjectID, f.EnvID, now.Add(-2*time.Hour), 1)
+	seedFreezeDiagnosis(t, pool, f.ProjectID, episodeID, "verified_fix", now.Add(-time.Hour))
+	if _, err := pool.Exec(ctx, `INSERT INTO issue_publications (project_id,episode_id,channel)
+		VALUES ($1,$2,'digest')`, f.ProjectID, episodeID); err != nil {
+		t.Fatal(err)
+	}
+	transitionAt := now.Add(23 * time.Hour)
+	var groupID string
+	if err := pool.QueryRow(ctx, `UPDATE error_groups SET status='needs_human',last_seen=$2
+		WHERE id=(SELECT canonical_issue_id FROM issue_episodes WHERE id=$1) RETURNING id::text`,
+		episodeID, transitionAt).Scan(&groupID); err != nil {
+		t.Fatal(err)
+	}
+	seedFreezeDiagnosis(t, pool, f.ProjectID, episodeID, "needs_human", transitionAt)
+	quietBackgroundActionable(t, pool, f.ProjectID, groupID)
+	_, candidates, err := FreezeCandidates(ctx, pool, f.ProjectID, now.Add(24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates) != 1 || candidates[0].ErrorGroupID != groupID || candidates[0].SpellStartedAt == nil {
+		t.Fatalf("FYI-to-actionable candidates=%+v", candidates)
+	}
+}
+
 func TestFreezeSucceedsWithoutWatchableReplay(t *testing.T) {
 	pool := testPool(t)
 	now := time.Now().UTC().Truncate(time.Second)

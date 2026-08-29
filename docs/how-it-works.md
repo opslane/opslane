@@ -30,4 +30,8 @@ Every issue ends one of three honest ways:
 - **A note** that the problem is real but the cause is outside your code, so there's nothing to patch.
 - **A stop with a plain reason** and a next step, when Opslane can't find a cause or is missing something it needs.
 
-A daily digest sums up what broke, what got fixed, and what needs you. On a quiet day it says nothing.
+A daily digest sums up what broke, what got fixed, and what needs you. Browser
+errors and blocked user actions share one clear card, with current impact counts
+and links to the replay or issue. Opslane reuses approved wording while the
+problem remains unchanged. If it cannot write or verify a card, it shows a plain
+factual summary instead. On a quiet day the digest says nothing.
