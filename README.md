@@ -25,11 +25,9 @@
 
 ---
 
-Your error tracker logs thousands of alerts, and you can't tell which ones hurt users. The worst bugs don't even throw an exception: confusing UX, a dead button, a form nobody can submit. You hear about those when a customer complains. Or worse, churns.
+Opslane finds user-facing bugs and investigates them. It only opens a PR if it can verify the fix.
 
-Opslane learns your product from your code and by watching user sessions, ranks issues by how many users hit them, and investigates the ones that matter. When it can verify a fix, it opens a pull request. When it can't, it hands your coding agent, the details of the investigation.
-
-You review a pull request, not a dashboard.
+It records every session. That means it sees the errors, and it also sees the bugs that never throw an exception: the button that does nothing, the form people give up on, the dropdown that closes before anyone can pick from it. Each one is ranked by how many users hit it. The ones that matter get investigated. Some of those fixes become PRs. Some need your attention, so you can drive the resolution.
 
 <a href="https://youtu.be/ccuOTYQMeYg"><img src="docs/assets/readme/demo-thumbnail.jpg" alt="Watch the Opslane demo: from a production error to a verified pull request" width="100%"></a>
 
@@ -41,21 +39,15 @@ You review a pull request, not a dashboard.
 
 <p align="center"><sub>Read the digest, make the product call, fix it, link the PR. All from the terminal.</sub></p>
 
-## What it does
-
 <img src="docs/assets/readme/slack-digest.png" alt="The daily Slack digest: which issues matter, which fixes are ready to merge, and which need a human decision, each written in plain product terms with user counts" width="100%">
 
 <p align="center"><sub>The daily Slack digest: what broke, what's ready to merge, what needs a decision. Images show demo data.</sub></p>
 
-- **Know which bugs hit users.** The same crash from 500 users is grouped into one issue. Issues are ranked by their impact. You get one Opslane digest a day.
-- **Catch bugs that never throw an error.** Understand sources of user frustration. Dead buttons and abandoned forms don't throw exceptions but they show up in the session recordings.
-- **The fix is a pull request.** Opslane investigates in your repo and opens a PR only after it checks its own work: your tests pass before and after, the build passes, and a second model reviews the diff. You review and merge.
-- **Work from your coding agent.** Use the Opslane MCP in your coding agent. Opslane tells you the bugs that need your attention and provide all the context to your agents.
-- **See what the user saw.** Each issue links to the recording behind it: the clicks, pages, and requests that led up to it.
+## Principles
 
-<img src="docs/assets/readme/sessions-list.png" alt="Recorded sessions showing errors, rage clicks, dead clicks, and form abandons per session" width="100%">
-
-<p align="center"><sub>Session recordings catch what never hits the console: rage clicks, dead clicks, abandoned forms.</sub></p>
+- **Agent-first.** I never want to open an error dashboard again. Opslane ships an MCP server, so your coding agent pulls the digest, reads the investigation, and fixes the bug from the terminal.
+- **It learns your product.** From your code, and from watching people use it. Better context, better investigations.
+- **One Docker Compose file.** Postgres and MinIO. That's the whole stack.
 
 ## How it works
 
@@ -71,11 +63,11 @@ Opslane has four parts:
 An error travels through those parts like this:
 
 1. **Capture.** The SDK sends errors and session recordings to the ingestion service. Two lines to install.
-2. **Group.** Opslane turns minified stack traces back into real file names using your source maps, and groups every occurrence of the same bug into one issue.
-3. **Qualify.** Before investigating, Opslane checks how many users hit the bug and how recently, then reads your repo to decide whether it's a real product problem. Only bugs that pass both checks get investigated.
-4. **Investigate.** The worker clones your repo and reads the code until it finds the cause. If it can't point to the exact files, it stops instead of guessing.
-5. **Verify.** The fix goes into a sandbox where your build and tests run. Everything that passed before has to pass again, and a second model reviews the change.
-6. **Deliver.** A fix that passes becomes a pull request. When there's no fix, you get the reason and the call to make. A daily Slack digest covers what broke, what got fixed, and what needs you.
+2. **Group.** Opslane maps minified stack traces back to real file names using your source maps, and groups every occurrence of the same bug into one issue.
+3. **Qualify.** Opslane checks how many users hit the bug and how recently, then reads your repo to decide whether it's a real product problem. Only bugs that pass both checks get investigated.
+4. **Investigate.** The worker clones your repo and reads the code until it finds the cause.
+5. **Verify.** The fix runs in a sandbox with your build and tests. Everything that passed before has to pass again, and a second model reviews the change.
+6. **Deliver.** A verified fix becomes a pull request. Anything else comes with the reason and the call you need to make. A daily Slack digest covers what broke, what got fixed, and what needs you.
 
 ```mermaid
 flowchart LR
@@ -88,11 +80,11 @@ flowchart LR
     V -->|no| HR[Written-up reason for you]
 ```
 
-Opslane calls three outside services: Anthropic to investigate, E2B to run the sandbox, and GitHub for clones and pull requests. Everything else runs on your own stack: Postgres for state and the job queue, and S3-compatible storage for session recordings (MinIO in the bundled setup). There's no Redis or separate queue to run. JavaScript apps are supported end to end today.
+Opslane calls three outside services: Anthropic to investigate, E2B to run the sandbox, and GitHub for clones and pull requests. Everything else runs on your own stack: Postgres for state and the job queue, and S3-compatible storage for session recordings (MinIO in the bundled setup). Today it supports JavaScript apps end to end.
 
 ## Run it locally
 
-Prerequisites: Docker with Compose v2 and free host ports 8082, 5434, and 9012. No accounts or API keys needed for this first run.
+Prerequisites: Docker with Compose v2. No accounts or API keys needed for this first run.
 
 ```bash
 git clone https://github.com/opslane/opslane.git

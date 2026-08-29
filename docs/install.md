@@ -42,7 +42,7 @@ import App from './App';
 init({
   apiKey: 'opslane_pk_...',
   environment: 'development',
-  endpoint: 'https://your-opslane-instance.example.com', // omit for hosted Opslane
+  endpoint: 'https://your-opslane-instance.example.com', // https://app.opslane.com for hosted Opslane
 });
 
 // After sign-in.
@@ -67,7 +67,7 @@ import App from './App.vue';
 init({
   apiKey: 'opslane_pk_...',
   environment: 'development',
-  endpoint: 'https://your-opslane-instance.example.com', // omit for hosted Opslane
+  endpoint: 'https://your-opslane-instance.example.com', // https://app.opslane.com for hosted Opslane
 });
 
 setUser({ id: currentUser.id, email: currentUser.email });
@@ -91,7 +91,7 @@ export function OpslaneProvider({ children }: { children: React.ReactNode }) {
     init({
       apiKey: 'opslane_pk_...',
       environment: 'development',
-      endpoint: 'https://your-opslane-instance.example.com', // omit for hosted Opslane
+      endpoint: 'https://your-opslane-instance.example.com', // https://app.opslane.com for hosted Opslane
     });
   }, []);
   return <>{children}</>;
@@ -109,7 +109,7 @@ import { init, setUser } from '@opslane/sdk';
 init({
   apiKey: 'opslane_pk_...',
   environment: 'development',
-  endpoint: 'https://your-opslane-instance.example.com', // omit for hosted Opslane
+  endpoint: 'https://your-opslane-instance.example.com', // https://app.opslane.com for hosted Opslane
 });
 
 setUser({ id: 'user-123' });

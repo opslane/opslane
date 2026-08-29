@@ -11,10 +11,10 @@
     "test:system": "tsc -p tsconfig.typecheck.json && vitest run --config vitest.system.config.ts"
   },
   "dependencies": {
-    "pg": "^8.22.0"
+    "pg": "^8.23.0"
   },
   "devDependencies": {
-    "@types/pg": "^8.20.0",
+    "@types/pg": "^8.23.1",
     "typescript": "^5.4.0",
     "vitest": "^3.2.0"
   }

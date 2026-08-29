@@ -19,7 +19,7 @@ import { init } from '@opslane/sdk';
 
 init({
   apiKey: import.meta.env.VITE_OPSLANE_API_KEY,
-  endpoint: 'https://your-opslane-instance.example.com', // omit for hosted Opslane
+  endpoint: 'https://your-opslane-instance.example.com', // https://app.opslane.com for hosted Opslane
   release: import.meta.env.VITE_OPSLANE_RELEASE,          // e.g. your git SHA
 });
 ```
@@ -99,7 +99,7 @@ All `init` options, from the SDK's `SdkInitOptions` type:
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
 | `apiKey` | `string` | *(required)* | Project ingest key. `init` is a no-op without it. |
-| `endpoint` | `string` | `https://api.opslane.com` | Your Opslane instance. Must be a valid http(s) URL. |
+| `endpoint` | `string` | `https://app.opslane.com` | Your Opslane instance. Must be a valid http(s) URL. |
 | `release` | `string` | `''` | Immutable build identifier; must match uploaded source maps. |
 | `maxBreadcrumbs` | `number` | `50` | Maximum breadcrumbs kept in the ring buffer. |
 | `breadcrumbMaxAge` | `number` | `30000` | Milliseconds a breadcrumb stays relevant before being dropped. |
