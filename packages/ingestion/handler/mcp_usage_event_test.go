@@ -44,3 +44,29 @@ func TestTrackToolEmitsOnlyForSuccessfulResults(t *testing.T) {
 		t.Fatalf("events = %+v", events)
 	}
 }
+
+func TestTrackToolQualityEmitsSingleEventWithAttribute(t *testing.T) {
+	var events []map[string]string
+	restore := usageevents.SetSinkForTest(func(event string, props map[string]string) {
+		if event != "mcp_tool_used" {
+			t.Fatalf("event = %q", event)
+		}
+		events = append(events, props)
+	})
+	t.Cleanup(restore)
+	if err := usageevents.Configure("https://hooks.example/T/B/x"); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.WithValue(context.Background(), ctxProjectID, "project-1")
+	ctx = context.WithValue(ctx, ctxOrgID, "org-1")
+
+	wrapped := trackToolQuality("opslane_session_timeline", func(context.Context, *mcpsdk.CallToolRequest, struct{}) (*mcpsdk.CallToolResult, string, error) {
+		return textToolResult("ok"), "no_network", nil
+	})
+	if _, _, err := wrapped(ctx, nil, struct{}{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0]["timeline_quality"] != "no_network" || events[0]["tool"] != "opslane_session_timeline" {
+		t.Fatalf("events = %+v", events)
+	}
+}

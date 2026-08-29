@@ -70,6 +70,7 @@ func (d *Dependencies) presentMCPIncident(
 				AnchorKind: "friction",
 				SessionID:  sessionID,
 				AnchorMS:   anchorMs,
+				Retained:   true,
 			})
 			formattedEvidence.Availability.Recording = "available"
 		}
@@ -136,6 +137,7 @@ func toMCPEvidence(evidence db.IssueEvidenceResult) (*mcpformat.IssueEvidence, e
 			AnchorKind: pointer.AnchorKind,
 			SessionID:  pointer.SessionID,
 			AnchorMS:   pointer.AnchorMs,
+			Retained:   pointer.Retained,
 		})
 	}
 	return result, nil

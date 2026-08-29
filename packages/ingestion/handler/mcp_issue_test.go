@@ -153,7 +153,7 @@ func TestPresentMCPIncidentFrictionAttachesReplayPointer(t *testing.T) {
 		t.Fatalf("friction issue result = %+v", result)
 	}
 	text := result.Content[0].(*mcpsdk.TextContent).Text
-	for _, want := range []string{"Recording: available", "Replay: watch session", sessionID, "t=" + strconv.FormatInt(anchorMs, 10)} {
+	for _, want := range []string{"Recording: available", "Replay: session", sessionID, "t=" + strconv.FormatInt(anchorMs, 10)} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("friction issue text missing %q:\n%s", want, text)
 		}
@@ -171,5 +171,79 @@ func TestPresentMCPIncidentFrictionAttachesReplayPointer(t *testing.T) {
 	bareText := bare.Content[0].(*mcpsdk.TextContent).Text
 	if strings.Contains(bareText, "Replay:") || strings.Contains(bareText, "Recording: available") {
 		t.Fatalf("bare friction issue got replay evidence:\n%s", bareText)
+	}
+}
+
+func TestMCPIssueErrorEvidenceRendering(t *testing.T) {
+	deps, pool := testDeps(t)
+	ctx := context.Background()
+	orgID, projectID, envID, _ := seedTenant(t, deps.Queries)
+	t.Cleanup(func() { cleanupTenantHandler(t, pool, orgID) })
+
+	groupID, _ := seedEpisodeWithAnchor(t, pool, projectID, envID,
+		`{"version":2,"frames":[{"original_file":"src/Auth.tsx","original_line":9}]}`)
+
+	sessionID := fmt.Sprintf("sess_m1_%d", time.Now().UnixNano())
+	seedReadableSession(t, deps.Queries, projectID, envID, sessionID, time.Now().UTC().Add(-time.Minute))
+	if _, err := pool.Exec(ctx, `UPDATE error_events SET session_id=$1 WHERE error_group_id=$2`, sessionID, groupID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO session_analysis
+		(session_id, project_id, session_started_at, coverage, activity_class, rule_version)
+		VALUES ($1, $2, now(), 'complete', 'active', 1)`, sessionID, projectID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO session_request_failures
+		(project_id, session_id, request_id_hash, page_route, method, endpoint_pattern, status, action_link, occurred_at, rule_version)
+		VALUES ($1, $2, 'h1', '/settings', 'POST', '/api/:tenant/refresh', 401, 'none', now(), 1)`,
+		projectID, sessionID); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM session_request_failures WHERE session_id=$1`, sessionID)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM session_analysis WHERE session_id=$1`, sessionID)
+		_, _ = pool.Exec(context.Background(), `UPDATE error_events SET session_id=NULL WHERE error_group_id=$1`, groupID)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM sessions WHERE id=$1`, sessionID)
+	})
+
+	key, err := deps.Queries.CreateProjectKey(ctx, projectID, db.ScopeAPI, "mcp-m1", nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(handler.NewRouterWithPool(deps, pool))
+	t.Cleanup(server.Close)
+	session := connectMCP(t, server.URL+"/mcp", key.Raw)
+
+	result, err := session.CallTool(ctx, &mcpsdk.CallToolParams{
+		Name: "opslane_issue", Arguments: map[string]any{"id": groupID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := result.Content[0].(*mcpsdk.TextContent).Text
+	for _, want := range []string{"/api/:tenant/refresh", sessionID, "opslane_session_timeline"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("issue text missing %q:\n%s", want, text)
+		}
+	}
+
+	for _, stmt := range []string{
+		`DELETE FROM session_request_failures WHERE session_id=$1`,
+		`DELETE FROM session_analysis WHERE session_id=$1`,
+		`DELETE FROM sessions WHERE id=$1`,
+	} {
+		if _, err := pool.Exec(ctx, stmt, sessionID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result, err = session.CallTool(ctx, &mcpsdk.CallToolParams{
+		Name: "opslane_issue", Arguments: map[string]any{"id": groupID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text = result.Content[0].(*mcpsdk.TextContent).Text
+	if strings.Contains(text, "Replay: session") {
+		t.Fatalf("rendered replay pointer for a deleted session:\n%s", text)
 	}
 }

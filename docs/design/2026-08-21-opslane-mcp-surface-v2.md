@@ -30,6 +30,8 @@ Claude Code skill that drives them:
 - `opslane_digest()` returns today's model-selected issues as facts, not prose.
 - `opslane_issue(id)` returns everything Opslane knows about one issue, rich enough to fix
   without a second system.
+- `opslane_session_timeline(id)` returns the stored browser activity around an issue's
+  error, as specified in [MCP session evidence](2026-08-28-mcp-session-evidence.md).
 - `opslane_link_pr(id, url)` records a pull request against an issue.
 
 And the server-side reads and one write they need, because none exist yet.
