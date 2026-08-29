@@ -119,6 +119,7 @@ type EvidenceReplayPointer struct {
 	EventID    string `json:"event_id"`
 	SessionID  string `json:"session_id"`
 	AnchorMs   int64  `json:"anchor_ms"`
+	Retained   bool   `json:"retained"`
 }
 
 type IssueEvidenceResult struct {
@@ -198,6 +199,7 @@ func (q *Queries) IssueEvidence(ctx context.Context, projectID, groupID string) 
 				EventID:    frame.SourceEventID,
 				SessionID:  *sessionID,
 				AnchorMs:   anchorMs,
+				Retained:   retainedID != nil && *retainedID == *sessionID,
 			})
 		}
 		if retainedID != nil && !seenRetained[*retainedID] {
@@ -266,6 +268,116 @@ func recordingAvailabilityFromRetained(retained []string, pointers []EvidenceRep
 		return "partial"
 	}
 	return "available"
+}
+
+type TimelineAnchor struct {
+	EventID         string
+	SessionID       string
+	SessionRetained bool
+	AnchorMs        int64
+	Breadcrumbs     json.RawMessage
+	NetworkTimings  json.RawMessage
+}
+
+// TimelineAnchorEvent picks the single event the session timeline reads: the
+// open episode's threshold anchor, falling back to first.
+func (q *Queries) TimelineAnchorEvent(ctx context.Context, projectID, groupID string) (TimelineAnchor, string, error) {
+	var episodeID string
+	err := q.pool.QueryRow(ctx,
+		`SELECT id FROM issue_episodes
+		  WHERE project_id = $1 AND canonical_issue_id = $2 AND closed_at IS NULL
+		  ORDER BY sequence DESC LIMIT 1`, projectID, groupID).Scan(&episodeID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		var everHadEpisode bool
+		if err := q.pool.QueryRow(ctx,
+			`SELECT EXISTS (SELECT 1 FROM issue_episodes WHERE project_id = $1 AND canonical_issue_id = $2)`,
+			projectID, groupID).Scan(&everHadEpisode); err != nil {
+			return TimelineAnchor{}, "", fmt.Errorf("timeline episode existence: %w", err)
+		}
+		if everHadEpisode {
+			return TimelineAnchor{}, "closed", nil
+		}
+		return TimelineAnchor{}, "no_episode", nil
+	}
+	if err != nil {
+		return TimelineAnchor{}, "", fmt.Errorf("timeline episode: %w", err)
+	}
+
+	var anchor TimelineAnchor
+	var sessionID, retainedID *string
+	err = q.pool.QueryRow(ctx,
+		`SELECT e.id, e.session_id,
+		        (extract(epoch FROM e."timestamp") * 1000)::bigint,
+		        e.breadcrumbs, e.network_timings,
+		        CASE WHEN s.status <> 'deleting' THEN s.id END
+		   FROM issue_evidence_anchors a
+		   JOIN error_events e ON e.id = a.event_id AND e.project_id = a.project_id
+		   LEFT JOIN sessions s ON s.id = e.session_id AND s.project_id = a.project_id
+		  WHERE a.project_id = $1 AND a.episode_id = $2
+		    AND a.anchor_kind IN ('threshold', 'first')
+		  ORDER BY CASE a.anchor_kind WHEN 'threshold' THEN 0 ELSE 1 END
+		  LIMIT 1`, projectID, episodeID,
+	).Scan(&anchor.EventID, &sessionID, &anchor.AnchorMs, &anchor.Breadcrumbs, &anchor.NetworkTimings, &retainedID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return TimelineAnchor{}, "no_anchors", nil
+	}
+	if err != nil {
+		return TimelineAnchor{}, "", fmt.Errorf("timeline anchor: %w", err)
+	}
+	if sessionID != nil {
+		anchor.SessionID = *sessionID
+		anchor.SessionRetained = retainedID != nil && *retainedID == *sessionID
+	}
+	return anchor, "ok", nil
+}
+
+type TimelineFailureRow struct {
+	Method, EndpointPattern, PageRoute string
+	Status                             int
+	ActionSelector                     *string
+	OccurredAtMs                       int64
+}
+
+// RequestFailuresNear returns analyzed failures within windowMs of anchorMs at
+// the session's current rule version, and whether analysis ran at all.
+func (q *Queries) RequestFailuresNear(ctx context.Context, projectID, sessionID string, anchorMs, windowMs int64) ([]TimelineFailureRow, bool, error) {
+	var analysisRan bool
+	if err := q.pool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM session_analysis WHERE project_id = $1 AND session_id = $2)`,
+		projectID, sessionID).Scan(&analysisRan); err != nil {
+		return nil, false, fmt.Errorf("analysis state: %w", err)
+	}
+	if !analysisRan {
+		return nil, false, nil
+	}
+	rows, err := q.pool.Query(ctx,
+		`SELECT f.method, f.endpoint_pattern, f.page_route, f.status, f.action_selector,
+		        (extract(epoch FROM f.occurred_at) * 1000)::bigint AS occurred_at_ms
+		   FROM session_request_failures f
+		  WHERE f.project_id = $1
+		    AND f.session_id = $2
+		    AND f.rule_version = (
+		      SELECT analysis.rule_version FROM session_analysis analysis
+		       WHERE analysis.project_id = f.project_id AND analysis.session_id = f.session_id)
+		    AND abs((extract(epoch FROM f.occurred_at) * 1000)::bigint - $3) <= $4
+		  ORDER BY abs((extract(epoch FROM f.occurred_at) * 1000)::bigint - $3) ASC, f.request_id_hash
+		  LIMIT 20`, projectID, sessionID, anchorMs, windowMs)
+	if err != nil {
+		return nil, false, fmt.Errorf("failures near anchor: %w", err)
+	}
+	defer rows.Close()
+	failures := make([]TimelineFailureRow, 0)
+	for rows.Next() {
+		var failure TimelineFailureRow
+		if err := rows.Scan(&failure.Method, &failure.EndpointPattern, &failure.PageRoute, &failure.Status, &failure.ActionSelector, &failure.OccurredAtMs); err != nil {
+			return nil, false, fmt.Errorf("scan failure: %w", err)
+		}
+		failures = append(failures, failure)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, fmt.Errorf("iterate failures: %w", err)
+	}
+	return failures, true, nil
 }
 
 // LinkPR records a developer's PR on error_groups so the existing merge webhook

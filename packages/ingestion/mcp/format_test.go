@@ -133,7 +133,7 @@ func TestFormatIssueFrictionReplayWithoutFailedRequests(t *testing.T) {
 		Incident: MCPIncident{ID: "i", Kind: "friction", Title: "Send does nothing", Status: "awaiting_approval",
 			PageURLNormalized: &route, ElementSelector: &selector},
 		Evidence: IssueEvidence{
-			ReplayPointers: []EvidenceReplayPointer{{AnchorKind: "friction", SessionID: "sess_abc", AnchorMS: 4200}},
+			ReplayPointers: []EvidenceReplayPointer{{AnchorKind: "friction", SessionID: "sess_abc", AnchorMS: 4200, Retained: true}},
 			Availability:   EvidenceAvailability{Recording: "available", SourceMap: "missing"},
 		},
 	})
@@ -177,6 +177,85 @@ func TestFormatIssueNonFrictionUnchanged(t *testing.T) {
 	}
 	if !strings.Contains(got, "Root cause:") {
 		t.Fatalf("error issue missing root cause:\n%s", got)
+	}
+}
+
+func TestFormatIssueErrorRendersFailedRequestsAndReplay(t *testing.T) {
+	rc := "token refresh 401s"
+	got := FormatIssue(IssueInput{
+		Incident: MCPIncident{ID: "i", Kind: "error", Title: "Boom", Status: "needs_human", RootCause: &rc},
+		Evidence: IssueEvidence{
+			FailedRequests: []EvidenceFailedRequest{
+				{PageRoute: "/settings", Method: "POST", EndpointPattern: "/api/:tenant/refresh", Status: 401},
+				{PageRoute: "/settings", Method: "GET", EndpointPattern: "/api/auth/session", Status: 401},
+				{PageRoute: "/settings", Method: "GET", EndpointPattern: "/api/user", Status: 401},
+				{PageRoute: "/settings", Method: "GET", EndpointPattern: "/api/fourth", Status: 500},
+			},
+			ReplayPointers: []EvidenceReplayPointer{{AnchorKind: "threshold", SessionID: "sess_err", AnchorMS: 1787911205000, Retained: true}},
+			Availability:   EvidenceAvailability{Recording: "available", SourceMap: "missing"},
+		},
+	})
+	for _, want := range []string{"/api/:tenant/refresh", "/api/auth/session", "/api/user", "sess_err", "t=1787911205000", "opslane_session_timeline"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "/api/fourth") {
+		t.Fatalf("rendered more than 3 failed requests:\n%s", got)
+	}
+}
+
+func TestFormatIssueSkipsUnretainedPointers(t *testing.T) {
+	got := FormatIssue(IssueInput{
+		Incident: MCPIncident{ID: "i", Kind: "error", Title: "Boom", Status: "investigating"},
+		Evidence: IssueEvidence{
+			ReplayPointers: []EvidenceReplayPointer{
+				{AnchorKind: "threshold", SessionID: "sess_gone", AnchorMS: 1, Retained: false},
+				{AnchorKind: "first", SessionID: "sess_kept", AnchorMS: 2, Retained: true},
+			},
+			Availability: EvidenceAvailability{Recording: "partial", SourceMap: "missing"},
+		},
+	})
+	if strings.Contains(got, "sess_gone") {
+		t.Fatalf("rendered a deleted session:\n%s", got)
+	}
+	if !strings.Contains(got, "sess_kept") {
+		t.Fatalf("skipped the surviving pointer:\n%s", got)
+	}
+}
+
+func TestFormatIssueNoRetainedPointerNoReplayLine(t *testing.T) {
+	got := FormatIssue(IssueInput{
+		Incident: MCPIncident{ID: "i", Kind: "error", Title: "Boom", Status: "investigating"},
+		Evidence: IssueEvidence{
+			ReplayPointers: []EvidenceReplayPointer{{AnchorKind: "threshold", SessionID: "sess_gone", AnchorMS: 1, Retained: false}},
+			Availability:   EvidenceAvailability{Recording: "expired", SourceMap: "missing"},
+		},
+	})
+	if strings.Contains(got, "Replay:") {
+		t.Fatalf("rendered replay line for expired session:\n%s", got)
+	}
+}
+
+func TestFormatIssueFooterSurvivesOversizedEvidence(t *testing.T) {
+	huge := strings.Repeat("字", 120)
+	sel := huge
+	got := FormatIssue(IssueInput{
+		Incident: MCPIncident{ID: "i", Kind: "error", Title: huge, Status: "investigating"},
+		Evidence: IssueEvidence{
+			FailedRequests: []EvidenceFailedRequest{
+				{PageRoute: huge, Method: huge, EndpointPattern: huge, Status: 500, ActionSelector: &sel},
+				{PageRoute: huge, Method: huge, EndpointPattern: huge, Status: 500, ActionSelector: &sel},
+				{PageRoute: huge, Method: huge, EndpointPattern: huge, Status: 500, ActionSelector: &sel},
+			},
+			Availability: EvidenceAvailability{Recording: "missing", SourceMap: "missing"},
+		},
+	})
+	if len([]byte(got)) > PayloadLimit {
+		t.Fatalf("payload %d bytes over limit", len(got))
+	}
+	if !strings.HasSuffix(got, "call opslane_link_pr with this issue id and the PR URL.") {
+		t.Fatalf("footer evicted:\n%s", got[len(got)-200:])
 	}
 }
 
