@@ -434,3 +434,253 @@ func TestMigrationReplayKeepsPRSnoozes(t *testing.T) {
 		t.Fatalf("replay cleared the snooze: %v want %v", snooze, beforeSnooze)
 	}
 }
+
+// guardTriggerOID identifies the guard trigger object itself. A migration that
+// recreates it takes an ACCESS EXCLUSIVE lock on the hot error_groups table on
+// every ingestion boot; a new OID is the proof that happened.
+func guardTriggerOID(t *testing.T, pool *pgxpool.Pool) uint32 {
+	t.Helper()
+	var oid uint32
+	if err := pool.QueryRow(context.Background(),
+		`SELECT oid::int8::oid::int4 FROM pg_trigger
+		  WHERE tgrelid='error_groups'::regclass
+		    AND tgname='error_groups_pending_action_guard_upd'`).Scan(&oid); err != nil {
+		t.Fatalf("read guard trigger: %v", err)
+	}
+	return oid
+}
+
+// TestMigration066ReplayLeavesTheGuardTriggerAlone: the runner replays every
+// file on every boot, so an unconditional DROP/CREATE of this trigger would
+// lock the table at each start while other tasks serve traffic.
+func TestMigration066ReplayLeavesTheGuardTriggerAlone(t *testing.T) {
+	pool, dsn, projectID := applyMigrationsThrough066(t)
+	psql := findPsql(t)
+	ctx := context.Background()
+	before := guardTriggerOID(t, pool)
+
+	for _, file := range migrationFiles(t) {
+		if err := applyMigration(t, psql, dsn, file); err != nil {
+			t.Fatalf("replay %s: %v", file, err)
+		}
+	}
+
+	if after := guardTriggerOID(t, pool); after != before {
+		t.Fatalf("guard trigger was recreated on replay: oid %d -> %d", before, after)
+	}
+
+	// The rule it enforces still holds after the replay.
+	id := seedLifecycleGroup(t, pool, projectID, "066-guard-replay", "pr_created")
+	if _, err := pool.Exec(ctx, `UPDATE error_groups
+		SET pr_url='https://github.com/o/r/pull/11' WHERE id=$1`, id); err != nil {
+		t.Fatal(err)
+	}
+	snoozeUntil := time.Now().Add(3 * 24 * time.Hour).UTC().Truncate(time.Microsecond)
+	if _, err := pool.Exec(ctx, `UPDATE error_groups SET snoozed_until=$2 WHERE id=$1`, id, snoozeUntil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, migration064RepairSweep); err != nil {
+		t.Fatal(err)
+	}
+	since, snooze := lifecycleState(t, pool, id)
+	if since == nil || snooze == nil || !snooze.Equal(snoozeUntil) {
+		t.Fatalf("guard stopped protecting after replay: since=%v snooze=%v", since, snooze)
+	}
+}
+
+// unstampedSnoozedPRRow plants the production shape the un-snooze bug needs: a
+// still-actionable PR row that carries a snooze but no waiting age (a status
+// transition during the boot window where 064's narrower body is live, or a
+// direct database write).
+func unstampedSnoozedPRRow(t *testing.T, pool *pgxpool.Pool, projectID, fingerprint string, snooze time.Time) string {
+	t.Helper()
+	ctx := context.Background()
+	id := seedLifecycleGroup(t, pool, projectID, fingerprint, "pr_created")
+	if _, err := pool.Exec(ctx, `ALTER TABLE error_groups DISABLE TRIGGER USER`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE error_groups
+		SET pr_url='https://github.com/o/r/pull/12',actionable_since=NULL,snoozed_until=$2
+		WHERE id=$1`, id, snooze); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `ALTER TABLE error_groups ENABLE TRIGGER USER`); err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+// TestMigration066ExplicitUnsnoozeIsNotReverted: the snooze endpoint's
+// un-snooze sends snoozed_until=NULL and touches nothing else. On a row with no
+// waiting age the guard used to read that as a stale bulk repair, restore the
+// old snooze and stamp now() — the API returned 204 while the incident stayed
+// hidden from every digest.
+func TestMigration066ExplicitUnsnoozeIsNotReverted(t *testing.T) {
+	pool, _, projectID := applyMigrationsThrough066(t)
+	ctx := context.Background()
+	snoozeUntil := time.Now().Add(20 * 24 * time.Hour).UTC().Truncate(time.Microsecond)
+	id := unstampedSnoozedPRRow(t, pool, projectID, "066-unsnooze", snoozeUntil)
+
+	// Exactly what handler.SnoozeIncident issues for {"until": null}.
+	if _, err := pool.Exec(ctx, `UPDATE error_groups
+		SET snoozed_until=NULL,updated_at=now() WHERE id=$1
+		  AND status IN ('awaiting_approval','needs_human','pr_created','pr_draft')`, id); err != nil {
+		t.Fatal(err)
+	}
+	since, snooze := lifecycleState(t, pool, id)
+	if snooze != nil {
+		t.Fatalf("un-snooze was reverted: snoozed_until=%v", snooze)
+	}
+	if since != nil {
+		t.Fatalf("un-snooze stamped a waiting age: actionable_since=%v", since)
+	}
+}
+
+// TestMigration066StaleSweepStillRestoresAStampedRow keeps the protection the
+// un-snooze fix must not weaken.
+func TestMigration066StaleSweepStillRestoresAStampedRow(t *testing.T) {
+	pool, _, projectID := applyMigrationsThrough066(t)
+	ctx := context.Background()
+	id := seedLifecycleGroup(t, pool, projectID, "066-sweep-restore", "pr_created")
+	if _, err := pool.Exec(ctx, `UPDATE error_groups
+		SET pr_url='https://github.com/o/r/pull/13' WHERE id=$1`, id); err != nil {
+		t.Fatal(err)
+	}
+	snoozeUntil := time.Now().Add(5 * 24 * time.Hour).UTC().Truncate(time.Microsecond)
+	if _, err := pool.Exec(ctx, `UPDATE error_groups SET snoozed_until=$2 WHERE id=$1`, id, snoozeUntil); err != nil {
+		t.Fatal(err)
+	}
+	before, beforeSnooze := lifecycleState(t, pool, id)
+	if before == nil || beforeSnooze == nil {
+		t.Fatalf("setup: since=%v snooze=%v", before, beforeSnooze)
+	}
+	if _, err := pool.Exec(ctx, migration064RepairSweep); err != nil {
+		t.Fatal(err)
+	}
+	since, snooze := lifecycleState(t, pool, id)
+	if since == nil || !since.Equal(*before) || snooze == nil || !snooze.Equal(*beforeSnooze) {
+		t.Fatalf("stale sweep stripped a waiting row: since=%v snooze=%v", since, snooze)
+	}
+}
+
+// TestMigration066NeutralizedSweepWritesNoRowVersion: the guard rewrites NEW
+// back to OLD on every boot, but Postgres still writes a row version unless the
+// trigger cancels the update, leaving one dead tuple per PR incident per boot.
+func TestMigration066NeutralizedSweepWritesNoRowVersion(t *testing.T) {
+	pool, _, projectID := applyMigrationsThrough066(t)
+	ctx := context.Background()
+	id := seedLifecycleGroup(t, pool, projectID, "066-dead-tuple", "pr_created")
+	if _, err := pool.Exec(ctx, `UPDATE error_groups
+		SET pr_url='https://github.com/o/r/pull/14' WHERE id=$1`, id); err != nil {
+		t.Fatal(err)
+	}
+	rowVersion := func() string {
+		t.Helper()
+		var xmin string
+		if err := pool.QueryRow(ctx, `SELECT xmin::text FROM error_groups WHERE id=$1`, id).Scan(&xmin); err != nil {
+			t.Fatal(err)
+		}
+		return xmin
+	}
+	before := rowVersion()
+
+	if _, err := pool.Exec(ctx, migration064RepairSweep); err != nil {
+		t.Fatal(err)
+	}
+	if after := rowVersion(); after != before {
+		t.Fatalf("neutralized sweep wrote a new row version: xmin %s -> %s", before, after)
+	}
+
+	// A statement that really changes something still applies.
+	if _, err := pool.Exec(ctx, `UPDATE error_groups
+		SET title='still writable',snoozed_until=snoozed_until WHERE id=$1`, id); err != nil {
+		t.Fatal(err)
+	}
+	var title string
+	if err := pool.QueryRow(ctx, `SELECT title FROM error_groups WHERE id=$1`, id).Scan(&title); err != nil {
+		t.Fatal(err)
+	}
+	if title != "still writable" || rowVersion() == before {
+		t.Fatalf("a real update was suppressed: title=%q xmin=%s", title, rowVersion())
+	}
+}
+
+// TestMigration066GuardStampsAClassChangeTheNarrowTriggerMissed covers the
+// replay window: between 064's COMMIT and 066's COMMIT on every boot, 064's
+// narrower UPDATE OF list is live, so a bare pr_url write never reaches the
+// lifecycle trigger and the reset for that transition would be lost.
+func TestMigration066GuardStampsAClassChangeTheNarrowTriggerMissed(t *testing.T) {
+	pool, _, projectID := applyMigrationsThrough066(t)
+	ctx := context.Background()
+	id := seedLifecycleGroup(t, pool, projectID, "066-boot-window", "pr_created")
+	pinned := time.Now().Add(-9 * 24 * time.Hour).UTC().Truncate(time.Microsecond)
+	snoozeUntil := time.Now().Add(4 * 24 * time.Hour).UTC().Truncate(time.Microsecond)
+	if _, err := pool.Exec(ctx, `UPDATE error_groups
+		SET actionable_since=$2,snoozed_until=$3 WHERE id=$1`, id, pinned, snoozeUntil); err != nil {
+		t.Fatal(err)
+	}
+
+	// 064's trigger does not watch pr_url, so during the window only the guard
+	// sees this statement.
+	if _, err := pool.Exec(ctx, `ALTER TABLE error_groups DISABLE TRIGGER error_groups_actionable_lifecycle_upd`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE error_groups
+		SET pr_url='https://github.com/o/r/pull/15' WHERE id=$1`, id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `ALTER TABLE error_groups ENABLE TRIGGER error_groups_actionable_lifecycle_upd`); err != nil {
+		t.Fatal(err)
+	}
+
+	since, snooze := lifecycleState(t, pool, id)
+	if since == nil || !since.After(pinned) {
+		t.Fatalf("class change in the replay window kept the stale age: since=%v", since)
+	}
+	if snooze != nil {
+		t.Fatalf("class change in the replay window kept the old snooze: %v", snooze)
+	}
+}
+
+// TestMigration066SnoozingAnUnstampedRowStampsIt closes the hole the un-snooze
+// fix would otherwise leave: the erasure rule protects a snooze only on a row
+// that HAS a waiting age, so a snooze arriving on a row without one has to
+// create it — otherwise the next boot's replayed 064 sweep clears that user's
+// snooze. An explicit clear still stands (see the un-snooze test above).
+func TestMigration066SnoozingAnUnstampedRowStampsIt(t *testing.T) {
+	pool, _, projectID := applyMigrationsThrough066(t)
+	ctx := context.Background()
+	id := unstampedSnoozedPRRow(t, pool, projectID, "066-snooze-unstamped", time.Now().Add(time.Hour))
+	// Start from no snooze and no waiting age at all.
+	if _, err := pool.Exec(ctx, `ALTER TABLE error_groups DISABLE TRIGGER USER`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE error_groups
+		SET actionable_since=NULL,snoozed_until=NULL WHERE id=$1`, id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `ALTER TABLE error_groups ENABLE TRIGGER USER`); err != nil {
+		t.Fatal(err)
+	}
+
+	snoozeUntil := time.Now().Add(6 * 24 * time.Hour).UTC().Truncate(time.Microsecond)
+	if _, err := pool.Exec(ctx, `UPDATE error_groups
+		SET snoozed_until=$2,updated_at=now() WHERE id=$1`, id, snoozeUntil); err != nil {
+		t.Fatal(err)
+	}
+	since, snooze := lifecycleState(t, pool, id)
+	if since == nil {
+		t.Fatal("snoozing an unstamped row left it unprotected: actionable_since is still NULL")
+	}
+	if snooze == nil || !snooze.Equal(snoozeUntil) {
+		t.Fatalf("snooze = %v, want %v", snooze, snoozeUntil)
+	}
+
+	if _, err := pool.Exec(ctx, migration064RepairSweep); err != nil {
+		t.Fatal(err)
+	}
+	afterSince, afterSnooze := lifecycleState(t, pool, id)
+	if afterSince == nil || !afterSince.Equal(*since) || afterSnooze == nil || !afterSnooze.Equal(snoozeUntil) {
+		t.Fatalf("the replayed sweep took the snooze: since=%v snooze=%v", afterSince, afterSnooze)
+	}
+}

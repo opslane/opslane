@@ -696,3 +696,86 @@ func TestFormatSlackUnknownEventTypeErrors(t *testing.T) {
 		t.Fatal("expected error for unknown event type")
 	}
 }
+
+// v4CapFixture builds a payload with the given number of decision cards and
+// receipts; both fixtures below differ only in the mode flag.
+func v4CapFixture(cards, receipts, receiptOverflow int, unified bool) EventPayload {
+	generated := make([]GeneratedDigestCard, 0, cards)
+	for index := range cards {
+		generated = append(generated, GeneratedDigestCard{
+			IncidentID: "card-" + strconv.Itoa(index), Kind: "error",
+			Title: "Card " + strconv.Itoa(index), Outcome: "needs_human",
+			Copy: "People cannot complete the flow.", Action: "Review the investigation.",
+		})
+	}
+	items := make([]ReceiptItem, 0, receipts)
+	for index := range receipts {
+		items = append(items, ReceiptItem{
+			Kind: "error", IncidentID: "receipt-" + strconv.Itoa(index),
+			Title: "Receipt " + strconv.Itoa(index), OccurrenceCount: 4,
+			ReceiptState: "report_ready", HasValidatedDiagnosis: true,
+		})
+	}
+	return EventPayload{
+		Version: 1, EventType: "digest.daily", Project: ProjectRef{ID: "p", Name: "p"},
+		DashboardURL: "https://app.example",
+		Digest: &DigestPayload{
+			SchemaVersion: 4, Date: "2026-08-27", GeneratedCards: generated,
+			ReceiptItems: items, ReceiptOverflow: receiptOverflow, UnifiedCards: unified,
+		},
+	}
+}
+
+// TestFormatSlackDigestV4OffCapsGeneratedCardsOnly pins OFF against
+// origin/main: the render budget covers generated cards, receipts render below
+// them without competing for it, and the receipt lane keeps its own overflow
+// line. OFF is the rollback path, so this output may not drift.
+func TestFormatSlackDigestV4OffCapsGeneratedCardsOnly(t *testing.T) {
+	blocks, body := formatV4Blocks(t, v4CapFixture(12, 5, 4, false))
+	for index := range DigestV4CardCap {
+		if !strings.Contains(body, "Card "+strconv.Itoa(index)+"*") {
+			t.Fatalf("card %d below the cap was dropped: %s", index, body)
+		}
+	}
+	for _, index := range []int{9, 10, 11} {
+		if strings.Contains(body, "Card "+strconv.Itoa(index)+"*") {
+			t.Fatalf("card %d past the cap rendered: %s", index, body)
+		}
+	}
+	for index := range 5 {
+		if !strings.Contains(body, "Receipt "+strconv.Itoa(index)+"*") {
+			t.Fatalf("receipt %d lost the render budget to cards: %s", index, body)
+		}
+	}
+	if !strings.Contains(body, "And 3 more on the dashboard") {
+		t.Fatalf("card overflow line missing: %s", body)
+	}
+	if !strings.Contains(body, "4 more receipts ranked below these") {
+		t.Fatalf("receipt overflow line missing: %s", body)
+	}
+	if len(blocks) >= 50 {
+		t.Fatalf("OFF digest has %d Slack blocks; want fewer than 50", len(blocks))
+	}
+}
+
+// TestFormatSlackDigestV4OnCapsCardsAndReceiptsTogether is the ON contract: one
+// list of incidents, one budget, one overflow line.
+func TestFormatSlackDigestV4OnCapsCardsAndReceiptsTogether(t *testing.T) {
+	blocks, body := formatV4Blocks(t, v4CapFixture(6, 5, 0, true))
+	rendered := strings.Count(body, "Card ") + strings.Count(body, "Receipt ")
+	if rendered != DigestV4CardCap {
+		t.Fatalf("ON rendered %d items, want the merged cap %d: %s", rendered, DigestV4CardCap, body)
+	}
+	if got := strings.Count(body, "more on the dashboard"); got != 1 {
+		t.Fatalf("overflow rendered %d times: %s", got, body)
+	}
+	if !strings.Contains(body, "And 2 more on the dashboard") {
+		t.Fatalf("merged overflow line missing: %s", body)
+	}
+	if strings.Contains(body, "ranked below these") {
+		t.Fatalf("ON rendered a second receipt overflow line: %s", body)
+	}
+	if len(blocks) >= 50 {
+		t.Fatalf("ON digest has %d Slack blocks; want fewer than 50", len(blocks))
+	}
+}

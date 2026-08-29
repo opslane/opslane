@@ -538,3 +538,118 @@ func TestFreezeOnCapsAtTheRendererLimitAndRendersOverflow(t *testing.T) {
 		t.Fatalf("seeded %d incidents", len(seeded))
 	}
 }
+
+// TestValidateOnKeepsAnIncidentWhoseAskChangedAfterFreeze: migration 066 resets
+// actionable_since whenever the action class changes, so a normal minutes-long
+// gap between freeze and validate (a PR opening, a diff arriving) moved the
+// spell. Treating that like "left the actionable set" dropped a still-waiting
+// incident with no card, no receipt and no overflow credit.
+func TestValidateOnKeepsAnIncidentWhoseAskChangedAfterFreeze(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	pool, fixture := onCardFixture(t, now)
+	ctx := context.Background()
+	groupID := seedOnCardGroup(t, pool, fixture.ProjectID, fixture.EnvID, "error", "awaiting_approval",
+		true, "", "The checkout control does not submit.", now.Add(-time.Hour))
+	seedValidatedDiagnosis(t, pool, fixture.ProjectID, groupID, now.Add(-time.Hour))
+
+	runID, candidates, err := FreezeCandidates(ctx, pool, fixture.ProjectID, now)
+	if err != nil || len(candidates) != 1 {
+		t.Fatalf("freeze candidates=%+v err=%v", candidates, err)
+	}
+	writeOnCardPayload(t, pool, runID, candidates)
+
+	// The ask changes between freeze and validate: a PR opens.
+	if _, err := pool.Exec(ctx, `UPDATE error_groups
+		SET status='pr_created',pr_url='https://github.com/acme/shop/pull/9' WHERE id=$1`, groupID); err != nil {
+		t.Fatal(err)
+	}
+	var spellMoved bool
+	if err := pool.QueryRow(ctx, `SELECT actionable_since <> $2 FROM error_groups WHERE id=$1`,
+		groupID, *candidates[0].SpellStartedAt).Scan(&spellMoved); err != nil {
+		t.Fatal(err)
+	}
+	if !spellMoved {
+		t.Fatal("the trigger did not reset the waiting age; the test proves nothing")
+	}
+
+	if err := ValidateAndPublish(ctx, pool, runID); err != nil {
+		t.Fatal(err)
+	}
+	payload := renderedEvent(t, pool, runID).Digest
+	delivered := false
+	for _, item := range payload.ReceiptItems {
+		if item.IncidentID == groupID {
+			delivered = true
+			if item.ReceiptState != "pr_open" {
+				t.Errorf("receipt state = %q, want the live pr_open state", item.ReceiptState)
+			}
+		}
+	}
+	for _, card := range payload.GeneratedCards {
+		if card.IncidentID == groupID {
+			delivered = true
+		}
+	}
+	if !delivered && payload.OverflowCount+payload.ReceiptOverflow == 0 {
+		t.Fatalf("an incident that only changed its ask vanished: %+v", payload)
+	}
+	if !delivered {
+		t.Fatalf("incident was only counted as overflow, not rendered: %+v", payload)
+	}
+}
+
+// TestFreezeOnSkipsAnActionableRowWithNoWaitingAge: an actionable row whose
+// actionable_since is NULL used to be frozen as a non-actionable candidate,
+// which sent validation down the episode path with an empty episode id. The
+// resulting uuid encode error is not pgx.ErrNoRows, so it degraded the entire
+// ON card section for one malformed row.
+func TestFreezeOnSkipsAnActionableRowWithNoWaitingAge(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	pool, fixture := onCardFixture(t, now)
+	ctx := context.Background()
+	malformed := seedOnCardGroup(t, pool, fixture.ProjectID, fixture.EnvID, "error", "needs_human",
+		true, "", "The checkout control does not submit.", now.Add(-2*time.Hour))
+	seedValidatedDiagnosis(t, pool, fixture.ProjectID, malformed, now.Add(-time.Hour))
+	healthy := seedOnCardGroup(t, pool, fixture.ProjectID, fixture.EnvID, "friction", "awaiting_approval",
+		true, "", "The save control does not submit.", now.Add(-time.Hour))
+	seedValidatedDiagnosis(t, pool, fixture.ProjectID, healthy, now.Add(-time.Hour))
+	// Only a direct write can produce this shape; the lifecycle trigger cannot.
+	if _, err := pool.Exec(ctx, `ALTER TABLE error_groups DISABLE TRIGGER USER`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE error_groups SET actionable_since=NULL WHERE id=$1`, malformed); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `ALTER TABLE error_groups ENABLE TRIGGER USER`); err != nil {
+		t.Fatal(err)
+	}
+
+	runID, candidates, err := FreezeCandidates(ctx, pool, fixture.ProjectID, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates) != 1 || candidates[0].ErrorGroupID != healthy {
+		t.Fatalf("frozen candidates = %+v, want only the healthy incident", candidates)
+	}
+	var outcome, reason string
+	if err := pool.QueryRow(ctx, `SELECT outcome,primary_reason_code
+		FROM digest_run_candidate_evaluations WHERE digest_run_id=$1 AND error_group_id=$2`,
+		runID, malformed).Scan(&outcome, &reason); err != nil {
+		t.Fatalf("the skipped row was not ledgered: %v", err)
+	}
+	if outcome != "excluded" || reason != reasonMissingWaitingAge {
+		t.Fatalf("ledger row = %s/%s, want excluded/%s", outcome, reason, reasonMissingWaitingAge)
+	}
+
+	writeOnCardPayload(t, pool, runID, candidates)
+	if err := ValidateAndPublish(ctx, pool, runID); err != nil {
+		t.Fatal(err)
+	}
+	payload := renderedEvent(t, pool, runID).Digest
+	if len(payload.GeneratedCards) != 1 || payload.GeneratedCards[0].IncidentID != healthy {
+		t.Fatalf("one malformed row degraded the whole card section: %+v", payload)
+	}
+	if payload.DeliveryAlert != "" {
+		t.Fatalf("section degraded with alert %q", payload.DeliveryAlert)
+	}
+}

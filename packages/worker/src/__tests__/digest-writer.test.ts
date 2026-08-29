@@ -548,6 +548,29 @@ describe('digest writer', () => {
     expect(JSON.stringify(warning?.fields)).toContain(broken.errorGroupId);
   });
 
+  // A card whose identity is missing or the wrong type cannot be attached to
+  // any frozen candidate, so its rejection used to leave that candidate
+  // unaccounted and fail the WHOLE run — the all-or-nothing failure scoped
+  // rejection exists to remove.
+  it('survives a card with no usable identity and defers the unmatched candidate', async () => {
+    logged.length = 0;
+    const orphan = candidate(1);
+    const healthy = candidate(2);
+    const payload = await writeDigest('run-1', 'project-1', dependencies([orphan, healthy], {
+      included: [
+        { errorGroupId: null, episodeId: 7, title: 'Checkout is blocked', copy: 'c', action: 'a' },
+        { errorGroupId: healthy.errorGroupId, title: healthy.title, copy: healthy.summary, action: 'Review it' },
+      ],
+      deferred: [],
+    }));
+
+    expect(payload.included.map((card) => card.errorGroupId)).toEqual([healthy.errorGroupId]);
+    expect(payload.deferred).toEqual([{
+      errorGroupId: orphan.errorGroupId, episodeId: orphan.episodeId, reason: REJECTED_CARD_REASON,
+    }]);
+    expect(logged.some((entry) => entry.level === 'warn' && /card rejected/.test(entry.message))).toBe(true);
+  });
+
   it('tolerates an unknown key inside a deferred item', async () => {
     const frozen = candidate(1);
     const payload = await writeDigest('run-1', 'project-1', dependencies([frozen], {

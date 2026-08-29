@@ -109,6 +109,10 @@ export interface ParsedDigestPayload {
    * wrong type). The caller accounts for them as deferred so the incident
    * falls back to its receipt; rejection never fails the run. */
   rejected: DeferredDigestItem[];
+  /** Rejections that carried no usable identity, so they could not be attached
+   * to a frozen candidate. The caller cannot name the incident they belong to,
+   * so it defers whatever stayed unaccounted rather than failing the run. */
+  unidentifiedRejections: number;
   warnings: DigestPayloadWarning[];
 }
 
@@ -184,6 +188,7 @@ const DEFERRED_KEYS: ReadonlySet<string> = new Set(['errorGroupId', 'episodeId',
 export function parseDigestPayload(raw: unknown): ParsedDigestPayload {
   const warnings: DigestPayloadWarning[] = [];
   const rejected: DeferredDigestItem[] = [];
+  let unidentifiedRejections = 0;
   const rawRoot = record(raw, 'digest payload');
   const root = withoutUnknownKeys(rawRoot, new Set(['included', 'deferred']), 'digest payload', warnings);
   if (!Array.isArray(root['included']) || !Array.isArray(root['deferred'])) {
@@ -251,6 +256,8 @@ export function parseDigestPayload(raw: unknown): ParsedDigestPayload {
       });
       if (cardIdentity.errorGroupId !== undefined || cardIdentity.episodeId !== undefined) {
         rejected.push({ ...cardIdentity, reason: REJECTED_CARD_REASON });
+      } else {
+        unidentifiedRejections += 1;
       }
     }
   });
@@ -275,10 +282,12 @@ export function parseDigestPayload(raw: unknown): ParsedDigestPayload {
       });
       if (itemIdentity.errorGroupId !== undefined || itemIdentity.episodeId !== undefined) {
         rejected.push({ ...itemIdentity, reason: REJECTED_CARD_REASON });
+      } else {
+        unidentifiedRejections += 1;
       }
     }
   });
-  return { included, deferred, rejected, warnings };
+  return { included, deferred, rejected, unidentifiedRejections, warnings };
 }
 
 export function digestPayloadTool(): Anthropic.Tool {

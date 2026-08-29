@@ -144,11 +144,21 @@ S3 carries one hard gate: R5's transition is verified in code (`queries.go:2204`
 - **CI (worker):** action-overwrite test, four-status authoring-and-cache test, budget tests at 0/unset/invalid.
 - **Live (fresh stack, real model):** the S6 scenario list: F4 regression both diff variants, PR card authored then cached then removed on merge, snooze cleared on class change with visible age reset, pre-existing publication gating nothing, FYI producing zero calls, `shadow` behaving as `off`, tampered cache re-authoring next day, OFF parity spot check. CI proves the rules; only the live run proves the pipeline wiring (scheduler, worker, webhook ordering) obeys them.
 
+## How to turn it on safely
+
+Two deploys, never one. Ship the binary with `DIGEST_UNIFIED_CARDS` unset, wait for the rollout to finish, then set it to `on` in a second deploy.
+
+The reason is that an ON freeze writes its candidate snapshots to `digest_unified_run_items`, a table the previous binary does not read. During a rolling deploy the two versions run at once, so a new task can freeze an ON run that an old task then validates. The old validator finds no items where it looks and delivers a digest missing every incident in that run. Nothing in the schema can prevent this, because the old binary is already shipped and cannot be taught about the new table. The stamped run mode does not help either, for the same reason.
+
+Rolling back is safe in one step: set the flag back to `off` (or unset it) and the next run uses the receipts lane that ships today.
+
 ## Risks and mitigations
 
 - **A status outside the four gains a pending action later** and silently misses the digest. Mitigation: the SLA `omitted_actionable` class fires for actionable incidents absent from a delivered run's ledger; the status set lives in one constant.
 - **The class-reset trigger fires on an unforeseen column churn** (for example a pipeline rewriting `candidate_diff` in place) and resets ages spuriously. Mitigation: reset only when the computed class value actually changes, not on any watched-column write; the trigger test matrix includes a same-class rewrite.
 - **First ON day model cost** with no shadow warm-up: every card authors cold once. Accepted; one writer call covers a whole candidate set, so this is single-digit calls per project.
+- **A model payload whose root shape is wrong still fails the run.** Per-card tolerance covers the realistic case (the model echoing an input field into one card), but if `included` or `deferred` comes back as something other than an array, the writer throws before anything persists and the job retries. The tool schema constrains that shape, so this needs the model to violate its own tool contract.
+- **A sub-second window during migration replay does not apply the action-class rule.** Each boot replays 064 before 066, so between those two commits the older lifecycle function is live. An incident whose ask changes in that window keeps its previous waiting age and snooze until the next change. The guard trigger still protects it from 064's stale sweep.
 - **Unsolved:** the cap plus repeat-forever means a project with more than nine standing actionable incidents will show the same top nine daily while the tail lives only in the overflow count and the ledger. Rotating which incidents fill the capped slots stays an open follow-up from the friction-delivery fix; this design does not address it.
 
 ## Alternatives considered

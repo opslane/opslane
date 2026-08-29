@@ -4,6 +4,7 @@ import { log } from '../logger.js';
 import {
   digestPayloadTool,
   parseDigestPayload,
+  REJECTED_CARD_REASON,
   type DigestPayload,
 } from './schema.js';
 
@@ -231,9 +232,18 @@ function groundPayload(raw: unknown, candidates: DigestCandidate[]): DigestPaylo
   }
   for (const candidate of candidates) {
     const identity = candidateIdentity(candidate);
-    if (!accounted.has(identity)) {
-      throw new Error(`candidate ${identity} was neither included nor deferred`);
+    if (accounted.has(identity)) continue;
+    if (parsed.unidentifiedRejections > 0) {
+      // A rejected card with no usable identity cannot be attached to the
+      // candidate it was about, so the gap it leaves here is the rejection, not
+      // an omission. Deferring routes that incident to its mechanical receipt;
+      // failing the run would drop every sibling card too.
+      log('warn', 'candidate deferred after an unidentifiable card rejection', { identity });
+      accounted.add(identity);
+      deferred.push({ ...frozenIdentities(candidate), reason: REJECTED_CARD_REASON });
+      continue;
     }
+    throw new Error(`candidate ${identity} was neither included nor deferred`);
   }
   return { included, deferred };
 }
@@ -408,7 +418,12 @@ export async function persistWrittenDigest(runId: string, projectId: string, pay
       await client.query('ROLLBACK');
       return false;
     }
+    // Both item tables are reset before the payload restamps them: a rewrite
+    // (failed -> written) whose new payload omits a row must not leave that row
+    // carrying the previous attempt's outcome.
     await client.query(`UPDATE digest_run_items SET outcome=NULL,reason=NULL
+      WHERE run_id=$1 AND project_id=$2`, [runId, projectId]);
+    await client.query(`UPDATE digest_unified_run_items SET outcome=NULL,reason=NULL
       WHERE run_id=$1 AND project_id=$2`, [runId, projectId]);
     for (const card of payload.included) {
       await client.query(`UPDATE digest_run_items SET outcome='included',reason=NULL

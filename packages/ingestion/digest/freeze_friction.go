@@ -28,6 +28,18 @@ func selectOnCardCandidates(all []actionableCandidate, at time.Time) ([]Candidat
 			excluded[source.GroupID] = reasonSnoozed
 			continue
 		}
+		if source.ActionableSince == nil {
+			// Freezing this would produce a candidate with no spell, which
+			// validation reads as an episode candidate and queries by an empty
+			// episode id — an infrastructure error that degrades the whole card
+			// section for one malformed row. Ledger it and move on; the SLA
+			// sweep reports it as an omitted actionable incident.
+			slog.Warn("actionable incident has no waiting age; excluded from the card lane",
+				"diagnostic", "missing_actionable_since",
+				"error_group_id", source.GroupID, "status", source.Status)
+			excluded[source.GroupID] = reasonMissingWaitingAge
+			continue
+		}
 		eligible = append(eligible, source)
 	}
 	// The ON lane's bound is the renderer's real Slack-block constraint, not the

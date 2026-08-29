@@ -3,6 +3,7 @@ package digest
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -200,5 +201,54 @@ func TestValidateKeepsCappedRowsInFreezePhase(t *testing.T) {
 	}
 	if len(report.ReconciliationFailures) != 0 {
 		t.Fatalf("SLA reported the capped run: %+v", report.ReconciliationFailures)
+	}
+}
+
+// TestValidateGroundsCachedCardTitleAgainstMovedCounts: the fingerprint
+// deliberately excludes counts, so nothing retires a cached card when the count
+// moves. A count baked into the cached TITLE therefore survived forever beside a
+// context line showing the live number. Grounding runs for cached cards too.
+func TestValidateGroundsCachedCardTitleAgainstMovedCounts(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	pool, fixture, groupID := authorOneOnCardRun(t, now)
+	ctx := context.Background()
+
+	if _, err := pool.Exec(ctx, `UPDATE digest_card_copy
+		SET title='Saving is blocked for 2 people'
+		WHERE error_group_id=$1 AND invalidated_at IS NULL`, groupID); err != nil {
+		t.Fatal(err)
+	}
+	// The day the count moves, the cached "2" stops being a fact.
+	if _, err := pool.Exec(ctx, `UPDATE error_groups SET affected_users_count=5 WHERE id=$1`, groupID); err != nil {
+		t.Fatal(err)
+	}
+
+	secondRun, second, err := FreezeCandidates(ctx, pool, fixture.ProjectID, now.Add(24*time.Hour))
+	if err != nil || len(second) != 1 || second[0].CachedCard == nil {
+		t.Fatalf("second freeze candidates=%+v err=%v", second, err)
+	}
+	if second[0].AffectedUsers != 5 {
+		t.Fatalf("frozen affected users = %d, want the moved count 5", second[0].AffectedUsers)
+	}
+	echoCachedPayload(t, pool, secondRun, second[0])
+	if err := ValidateAndPublish(ctx, pool, secondRun); err != nil {
+		t.Fatal(err)
+	}
+	payload := renderedEvent(t, pool, secondRun).Digest
+	for _, card := range payload.GeneratedCards {
+		if strings.Contains(card.Title, "2 people") {
+			t.Fatalf("stale count in a cached title was delivered: %+v", card)
+		}
+	}
+	if len(payload.GeneratedCards) != 0 || len(payload.ReceiptItems) != 1 {
+		t.Fatalf("stale cached card was not demoted to its receipt: %+v", payload.GeneratedCards)
+	}
+	var current int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM digest_card_copy
+		WHERE error_group_id=$1 AND invalidated_at IS NULL`, groupID).Scan(&current); err != nil {
+		t.Fatal(err)
+	}
+	if current != 0 {
+		t.Fatalf("stale cached row is still current (%d rows); the title repeats forever", current)
 	}
 }

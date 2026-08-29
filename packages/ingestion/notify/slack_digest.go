@@ -58,17 +58,52 @@ func formatSlackDigestV4(payload EventPayload) ([]byte, string, error) {
 			slog.Warn("digest card outcome is not renderable", "incident_id", card.IncidentID, "outcome", card.Outcome)
 		}
 	}
-	remaining := DigestV4CardCap
-	decisionCount := min(len(decisions), remaining)
-	renderedDecisions := decisions[:decisionCount]
-	remaining -= decisionCount
-	receiptCount := min(len(receipts), remaining)
-	renderedReceipts := receipts[:receiptCount]
-	remaining -= receiptCount
-	fixCount := min(len(fixes), remaining)
-	renderedFixes := fixes[:fixCount]
-	renderedCount := decisionCount + receiptCount + fixCount
 	totalCount := len(decisions) + len(receipts) + len(fixes)
+	var renderedDecisions, renderedFixes []GeneratedDigestCard
+	var renderedReceipts []renderableReceipt
+	// Overflow accounting differs with the mode, so each branch computes the
+	// single "And N more" count it owns.
+	overflow := 0
+	if digest.UnifiedCards {
+		// ON: cards and receipt fallbacks are one list of pending incidents and
+		// share one budget. The two persisted overflow counts describe
+		// different upstream lanes, while local overflow covers an oversized
+		// payload from an older or buggy producer. Render one combined notice
+		// so an incident is never represented by two overflow lines.
+		remaining := DigestV4CardCap
+		decisionCount := min(len(decisions), remaining)
+		renderedDecisions = decisions[:decisionCount]
+		remaining -= decisionCount
+		receiptCount := min(len(receipts), remaining)
+		renderedReceipts = receipts[:receiptCount]
+		remaining -= receiptCount
+		fixCount := min(len(fixes), remaining)
+		renderedFixes = fixes[:fixCount]
+		overflow = max(digest.OverflowCount+digest.ReceiptOverflow,
+			totalCount-(decisionCount+receiptCount+fixCount))
+	} else {
+		// OFF is the rollback path and must stay byte-identical to what ships
+		// on main: the cap covers generated cards only, every receipt renders,
+		// and the receipt lane keeps its own overflow line below the cards.
+		allCards := append(append([]GeneratedDigestCard(nil), decisions...), fixes...)
+		rendered := allCards
+		if len(rendered) > DigestV4CardCap {
+			rendered = rendered[:DigestV4CardCap]
+		}
+		renderedDecisions = make([]GeneratedDigestCard, 0, len(rendered))
+		renderedFixes = make([]GeneratedDigestCard, 0, len(rendered))
+		for _, card := range rendered {
+			if card.Outcome == "needs_human" {
+				renderedDecisions = append(renderedDecisions, card)
+			} else {
+				renderedFixes = append(renderedFixes, card)
+			}
+		}
+		renderedReceipts = receipts
+		// The validator defers overflow cards and reports the count; the local
+		// difference is the belt for payloads that somehow still exceed the cap.
+		overflow = max(digest.OverflowCount, len(allCards)-len(rendered))
+	}
 
 	blocks := []map[string]any{
 		{
@@ -103,6 +138,9 @@ func formatSlackDigestV4(payload EventPayload) ([]byte, string, error) {
 			needDivider = true
 		}
 	}
+	if !digest.UnifiedCards && digest.ReceiptOverflow > 0 {
+		blocks = append(blocks, digestContextBlock(narrative.OverflowLine(digest.ReceiptOverflow)))
+	}
 	if digest.DeliveryAlert != "" {
 		blocks = append(blocks, digestContextBlock("⚠️ "+cleanProse(digest.DeliveryAlert, digestDetailMax)))
 	}
@@ -116,11 +154,6 @@ func formatSlackDigestV4(payload EventPayload) ([]byte, string, error) {
 			}
 		}
 	}
-	// Generated cards and receipt fallbacks share one cap. The two persisted
-	// overflow counts describe different upstream lanes, while local overflow
-	// covers an oversized payload from an older or buggy producer. Render one
-	// combined notice so an incident is never represented by two overflow lines.
-	overflow := max(digest.OverflowCount+digest.ReceiptOverflow, totalCount-renderedCount)
 	if overflow > 0 {
 		label := fmt.Sprintf("And %d more on the dashboard", overflow)
 		blocks = append(blocks, digestContextBlock(slackDigestLink(payload.DashboardURL, label)))

@@ -18,6 +18,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/opslane/opslane/packages/ingestion/narrative"
 	"github.com/opslane/opslane/packages/ingestion/notify"
 )
 
@@ -76,7 +77,14 @@ func cardIdentity(errorGroupID, episodeID string) string {
 // capDigestDelivery mirrors the renderer's decision -> receipt -> fix order.
 // Publication accounting uses its returned slices, so no card hidden by the
 // renderer can acquire a durable publication receipt.
+//
+// The mode decides who pays for the budget, exactly as the renderer does: ON
+// spends one cap across decisions, receipts and fixes, because there a receipt
+// is a card that could not be authored and both are the same pending incident.
+// OFF is the rollback path — the cap covers generated cards only and every
+// receipt is delivered, which is what ships on main.
 func capDigestDelivery(
+	mode UnifiedCardsMode,
 	generated []notify.GeneratedDigestCard,
 	receipts []notify.ReceiptItem,
 	generatedOverflow int,
@@ -95,8 +103,11 @@ func capDigestDelivery(
 	remaining := notify.DigestV4CardCap
 	keptDecisions := min(len(decisions), remaining)
 	remaining -= keptDecisions
-	keptReceipts := min(len(receipts), remaining)
-	remaining -= keptReceipts
+	keptReceipts := len(receipts)
+	if mode == UnifiedCardsOn {
+		keptReceipts = min(len(receipts), remaining)
+		remaining -= keptReceipts
+	}
 	keptFixes := min(len(fixes), remaining)
 
 	dropped := make([]string, 0,
@@ -119,6 +130,11 @@ func capDigestDelivery(
 		receiptOverflow + len(receipts) - keptReceipts,
 		dropped
 }
+
+// loadActionableCandidatesForValidation is the validator's live reload of the
+// actionable set. It is a variable so a test can inject the infrastructure
+// failure this degrade path exists for; production always uses the real query.
+var loadActionableCandidatesForValidation = loadActionableCandidates
 
 // ValidateAndPublish rechecks model output against the immutable snapshots and
 // publishes the run, its receipts, outbox event and deliveries atomically.
@@ -281,6 +297,15 @@ func checkUnifiedWrittenCard(
 		return card, "", unifiedCandidateChangedError{identity: identity}
 	}
 
+	// Grounding runs for cached cards too, and it is the only check that covers
+	// the title. The fingerprint deliberately excludes counts, so nothing
+	// retires a cached row when a count moves: a title authored as "for 2
+	// people" would otherwise repeat verbatim beside a context line showing the
+	// live number, forever. A digit copied from a frozen fact still passes, so
+	// this does not ban titles that legitimately carry numbers.
+	if number, ok := firstUngroundedNumber(card, candidate); ok {
+		return card, "", fmt.Errorf("ungrounded number %s in card for %s", number, identity)
+	}
 	renderMode := "authored"
 	if candidate.CachedCard != nil {
 		cached := candidate.CachedCard
@@ -288,9 +313,6 @@ func checkUnifiedWrittenCard(
 			return card, "", fmt.Errorf("cached card for %s changed in transit", identity)
 		}
 		return card, "cached", nil
-	}
-	if number, ok := firstUngroundedNumber(card, candidate); ok {
-		return card, "", fmt.Errorf("ungrounded number %s in card for %s", number, identity)
 	}
 	card, cachedMode, err := cacheValidatedCard(ctx, tx, run, candidate, card)
 	if err != nil {
@@ -764,7 +786,7 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string) e
 		if run.Mode == UnifiedCardsOn {
 			statusSQL = onCardStatusSQL
 		}
-		actionableCandidates, err := loadActionableCandidates(ctx, tx, run.ProjectID, statusSQL)
+		actionableCandidates, err := loadActionableCandidatesForValidation(ctx, tx, run.ProjectID, statusSQL)
 		if err != nil {
 			actionableErr = err
 		} else {
@@ -780,18 +802,29 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string) e
 				if renderModes[identity] != "receipt_fallback" {
 					continue
 				}
+				// Only "stopped waiting" removes an incident here. A moved
+				// spell means the ASK changed since the freeze (migration 066
+				// resets the waiting age on every action-class change, so a
+				// minutes-long gap is enough) — the incident is still waiting,
+				// and its receipt is mechanical, built from the live row below.
 				live, ok := actionableByGroup[frozen.ErrorGroupID]
-				if !ok || live.SnoozedUntil != nil && live.SnoozedUntil.After(actionableEvaluatedAt) ||
-					live.ActionableSince == nil || frozen.SpellStartedAt == nil ||
-					!live.ActionableSince.Equal(*frozen.SpellStartedAt) {
+				snoozed := ok && live.SnoozedUntil != nil && live.SnoozedUntil.After(actionableEvaluatedAt)
+				if !ok || snoozed || live.ActionableSince == nil {
 					accounted[identity] = "deferred"
 					delete(renderModes, identity)
 					reason := reasonNotPublishable
-					if ok && live.SnoozedUntil != nil && live.SnoozedUntil.After(actionableEvaluatedAt) {
+					if snoozed {
 						reason = reasonSnoozed
+					} else if ok {
+						reason = reasonMissingWaitingAge
 					}
 					excludedReasons[identity] = reason
 					continue
+				}
+				if frozen.SpellStartedAt == nil || !live.ActionableSince.Equal(*frozen.SpellStartedAt) {
+					slog.Info("digest incident changed its ask between freeze and validation",
+						"diagnostic", "ask_changed_after_freeze",
+						"error_group_id", frozen.ErrorGroupID, "status", live.Status)
 				}
 				actionableEval.Included = append(actionableEval.Included, live)
 				actionableEval.Candidates = append(actionableEval.Candidates, live)
@@ -857,15 +890,25 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string) e
 		}
 		for _, candidate := range candidates {
 			identity := candidateIdentity(candidate)
-			if candidate.SpellStartedAt != nil {
+			// With no live state the liveness gate cannot be evaluated, and
+			// judging it against an empty map would drop every frozen incident:
+			// a delivery alert over an empty digest. The frozen snapshot carries
+			// title, counts, status and action, so it renders the receipt and
+			// the alert says the live check did not run.
+			if candidate.SpellStartedAt != nil && actionableErr == nil {
+				// Same rule as the gate above: a changed ask is still a
+				// waiting incident, so only leaving the set or a live snooze
+				// removes it.
 				live, ok := actionableByGroup[candidate.ErrorGroupID]
-				if !ok || live.SnoozedUntil != nil && live.SnoozedUntil.After(actionableEvaluatedAt) ||
-					live.ActionableSince == nil || !live.ActionableSince.Equal(*candidate.SpellStartedAt) {
+				snoozed := ok && live.SnoozedUntil != nil && live.SnoozedUntil.After(actionableEvaluatedAt)
+				if !ok || snoozed || live.ActionableSince == nil {
 					accounted[identity] = "deferred"
 					delete(renderModes, identity)
 					reason := reasonNotPublishable
-					if ok && live.SnoozedUntil != nil && live.SnoozedUntil.After(actionableEvaluatedAt) {
+					if snoozed {
 						reason = reasonSnoozed
+					} else if ok {
+						reason = reasonMissingWaitingAge
 					}
 					excludedReasons[identity] = reason
 					continue
@@ -904,7 +947,7 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string) e
 	applyDeliveryCap := func() {
 		var dropped []string
 		generated, receiptItems, overflowCount, receiptOverflow, dropped = capDigestDelivery(
-			generated, receiptItems, baseOverflowCount, baseReceiptOverflow,
+			run.Mode, generated, receiptItems, baseOverflowCount, baseReceiptOverflow,
 		)
 		for _, identity := range dropped {
 			capDropped[identity] = true
@@ -913,7 +956,12 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string) e
 				delete(renderModes, identity)
 				overflowReasons[identity] = "digest overflow: held for the next digest"
 			}
-			excludedReasons[identity] = reasonCappedOverflow
+			// OFF drops only generated cards, and its receipt ledger row was
+			// already written as included in this transaction: re-ledgering it
+			// as excluded here would overwrite a row that main never touches.
+			if run.Mode == UnifiedCardsOn {
+				excludedReasons[identity] = reasonCappedOverflow
+			}
 		}
 	}
 	applyDeliveryCap()
@@ -997,6 +1045,9 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string) e
 			ReceiptItems:    receiptItems,
 			ReceiptOverflow: receiptOverflow,
 			DeliveryAlert:   deliveryAlert,
+			// The renderer budgets its cap by mode, so it must be told which
+			// mode produced this payload rather than inferring it.
+			UnifiedCards: run.Mode == UnifiedCardsOn,
 		},
 	}
 	if err := eventPayload.Validate(); err != nil {
@@ -1077,15 +1128,23 @@ func receiptForUnifiedFallback(candidate Candidate) notify.ReceiptItem {
 	case candidate.Outcome == "verified_fix" && candidate.PRURL != "":
 		state = "pr_open"
 	}
+	// Sanitized exactly like toReceiptItems and build.go: this item is
+	// persisted in digest_runs.rendered_payload and shipped in the outbox
+	// event, so the renderer cleaning prose again on the way out would not
+	// un-persist a leaked secret. HasSavedDiff is carried for the same reason
+	// its state is: the two constructors must emit the same item for one
+	// incident.
 	item := notify.ReceiptItem{
-		Kind: candidate.Kind, IncidentID: candidate.ErrorGroupID, Title: candidate.Title,
+		Kind: candidate.Kind, IncidentID: candidate.ErrorGroupID,
+		Title:           narrative.SanitizeExcerpt(candidate.Title, excerptMax),
 		OccurrenceCount: int64(candidate.OccurrenceCount), ReceiptState: state,
-		PRURL: candidate.PRURL, HasValidatedDiagnosis: candidate.HasValidatedDiagnosis,
-		ActionableSince: candidate.SpellStartedAt,
+		PRURL: candidate.PRURL, HasSavedDiff: candidate.HasSavedDiff,
+		HasValidatedDiagnosis: candidate.HasValidatedDiagnosis,
+		ActionableSince:       candidate.SpellStartedAt,
 	}
 	if candidate.HasValidatedDiagnosis {
-		item.RootCauseExcerpt = candidate.RootCause
-		item.MitigationExcerpt = candidate.Mitigation
+		item.RootCauseExcerpt = narrative.SanitizeExcerpt(candidate.RootCause, excerptMax)
+		item.MitigationExcerpt = narrative.SanitizeExcerpt(candidate.Mitigation, excerptMax)
 	}
 	return item
 }

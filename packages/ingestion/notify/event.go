@@ -64,28 +64,37 @@ type TriageImpact struct {
 }
 
 type DigestPayload struct {
-	Date                string                `json:"date"`
-	Window              DigestWindow          `json:"window"`
-	Insights            []DigestInsight       `json:"insights"`
-	InsightsHasMore     bool                  `json:"insights_has_more"`
-	TopNewIssues        []DigestIssue         `json:"top_new_issues"`
-	TopNewIssuesHasMore bool                  `json:"top_new_issues_has_more"`
-	Outcomes            DigestOutcomes        `json:"outcomes"`
-	NeedsHumanBacklog   int                   `json:"needs_human_backlog"`
-	Watching            DigestWatching        `json:"watching"`
-	SchemaVersion       int                   `json:"schema_version,omitempty"`
+	Date                string          `json:"date"`
+	Window              DigestWindow    `json:"window"`
+	Insights            []DigestInsight `json:"insights"`
+	InsightsHasMore     bool            `json:"insights_has_more"`
+	TopNewIssues        []DigestIssue   `json:"top_new_issues"`
+	TopNewIssuesHasMore bool            `json:"top_new_issues_has_more"`
+	Outcomes            DigestOutcomes  `json:"outcomes"`
+	NeedsHumanBacklog   int             `json:"needs_human_backlog"`
+	Watching            DigestWatching  `json:"watching"`
+	SchemaVersion       int             `json:"schema_version,omitempty"`
 	// Timezone is the project's digest timezone; the renderer uses it to show
 	// calendar dates (the waiting-since line) in the reader's local day.
-	Timezone            string                `json:"timezone,omitempty"`
-	ReceiptItems        []ReceiptItem         `json:"receipt_items,omitempty"`
-	TriageCounts        *DigestTriageCounts   `json:"triage_counts,omitempty"`
-	HeldBackCount       int                   `json:"held_back_count,omitempty"`
-	ReceiptOverflow     int                   `json:"receipt_overflow,omitempty"`
-	GeneratedCards      []GeneratedDigestCard `json:"generated_cards,omitempty"`
+	Timezone        string                `json:"timezone,omitempty"`
+	ReceiptItems    []ReceiptItem         `json:"receipt_items,omitempty"`
+	TriageCounts    *DigestTriageCounts   `json:"triage_counts,omitempty"`
+	HeldBackCount   int                   `json:"held_back_count,omitempty"`
+	ReceiptOverflow int                   `json:"receipt_overflow,omitempty"`
+	GeneratedCards  []GeneratedDigestCard `json:"generated_cards,omitempty"`
 	// OverflowCount is how many validated cards were deferred past the render
 	// cap; the renderer's "And N more" line reports it.
 	OverflowCount int    `json:"overflow_count,omitempty"`
 	DeliveryAlert string `json:"delivery_alert,omitempty"`
+	// UnifiedCards is the run's DIGEST_UNIFIED_CARDS mode, stamped by the
+	// validator. It is the renderer's only mode signal, and it exists because
+	// the two modes budget the render cap differently: ON is one list of
+	// incidents where a receipt is a card that could not be authored, so cards
+	// and receipts share the cap; OFF is the rollback path, where the cap
+	// covers generated cards only and receipts render below them with their own
+	// overflow line. Absent (false) means OFF, so a payload written before this
+	// field existed renders exactly as it did then.
+	UnifiedCards bool `json:"unified_cards,omitempty"`
 }
 
 // GeneratedDigestCard is model-authored prose grounded in a frozen candidate.

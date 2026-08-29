@@ -538,3 +538,118 @@ func TestFreezeIsIdempotentPerWindowAndPreservesSnapshot(t *testing.T) {
 		t.Errorf("sequence two label = %q, want returned", second[0].Label)
 	}
 }
+
+// TestFreezeOffSelectsEveryEligibleEpisode pins OFF parity with main: the
+// episode lane returns one candidate per eligible EPISODE and never dedups by
+// error group. The schema makes a second open episode impossible today
+// (idx_one_open_episode), so the index is dropped inside a transaction that is
+// always rolled back — the rule under test belongs to the Go query path, which
+// is the rollback surface and must stay identical to origin/main.
+func TestFreezeOffSelectsEveryEligibleEpisode(t *testing.T) {
+	t.Setenv("DIGEST_UNIFIED_CARDS", "off")
+	pool := testPool(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	f := seedDigestFixture(t, pool, now)
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `DROP INDEX idx_one_open_episode`); err != nil {
+		t.Fatal(err)
+	}
+	var groupID string
+	if err := tx.QueryRow(ctx, `INSERT INTO error_groups
+		  (project_id,environment_id,fingerprint,title,kind,status,first_seen,last_seen,
+		   occurrence_count,affected_users_count,page_url_normalized,remediation)
+		VALUES ($1,$2,$3,'Checkout failed','error','investigated',$4,$4,3,0,'/checkout',
+		        'Decide whether to ship the documented follow-up.')
+		RETURNING id::text`, f.ProjectID, f.EnvID, "freeze-two-open-"+uuid.NewString(),
+		now.Add(-2*time.Hour)).Scan(&groupID); err != nil {
+		t.Fatal(err)
+	}
+	episodes := make([]string, 0, 2)
+	for sequence := 1; sequence <= 2; sequence++ {
+		var episodeID string
+		if err := tx.QueryRow(ctx, `INSERT INTO issue_episodes
+			(project_id,canonical_issue_id,sequence) VALUES ($1,$2,$3) RETURNING id::text`,
+			f.ProjectID, groupID, sequence).Scan(&episodeID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO issue_inquiry_decisions
+			(project_id,episode_id,decision,reason,evaluated_units,evidence_signature,
+			 model,prompt_version,decided_at)
+			VALUES ($1,$2,'investigate','customer checkout is blocked',1,$3,'test',1,$4)`,
+			f.ProjectID, episodeID, "freeze-two-open-"+uuid.NewString(), now.Add(-2*time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO diagnosis_decisions
+			(error_group_id,project_id,episode_id,outcome,decision_reason,diagnosis,
+			 model,prompt_version,decided_at)
+			VALUES ($1,$2,$3,'needs_human','verified terminal result',
+			        '{"summary":"The checkout request fails before payment."}'::jsonb,
+			        'test','1',$4)`,
+			groupID, f.ProjectID, episodeID, now.Add(-time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+		episodes = append(episodes, episodeID)
+	}
+
+	candidates, replayFloors, err := selectCandidates(ctx, tx, f.ProjectID, now, now.Add(-24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	frozen := make(map[string]bool, len(candidates))
+	for _, candidate := range candidates {
+		frozen[candidate.EpisodeID] = true
+	}
+	if len(candidates) != 2 || !frozen[episodes[0]] || !frozen[episodes[1]] {
+		t.Fatalf("OFF returned %d candidates %v, want both eligible episodes %v",
+			len(candidates), frozen, episodes)
+	}
+	if len(replayFloors) != len(candidates) {
+		t.Fatalf("replay floors = %d, want %d", len(replayFloors), len(candidates))
+	}
+}
+
+// TestFreezeOnKeepsOneCandidatePerGroup is the ON half of OFF's per-episode
+// rule: the card lane is keyed by incident, so extra episodes on one group add
+// no candidates.
+func TestFreezeOnKeepsOneCandidatePerGroup(t *testing.T) {
+	t.Setenv("DIGEST_UNIFIED_CARDS", "on")
+	pool := testPool(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	f := seedDigestFixture(t, pool, now)
+	cleanupActionableDiagnoses(t, pool, f.ProjectID)
+	groupID, firstEpisode := seedActionableGroup(t, pool, f.ProjectID, f.EnvID, "error", "needs_human", now.Add(-2*time.Hour))
+	if _, err := pool.Exec(ctx, `UPDATE issue_episodes SET closed_at=$2 WHERE id=$1`,
+		firstEpisode, now.Add(-90*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	var second string
+	if err := pool.QueryRow(ctx, `INSERT INTO issue_episodes
+		(project_id,canonical_issue_id,sequence) VALUES ($1,$2,2) RETURNING id::text`,
+		f.ProjectID, groupID).Scan(&second); err != nil {
+		t.Fatal(err)
+	}
+
+	_, candidates, err := FreezeCandidates(ctx, pool, f.ProjectID, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forGroup := 0
+	for _, candidate := range candidates {
+		if candidate.ErrorGroupID == groupID {
+			forGroup++
+			if candidate.EpisodeID != "" {
+				t.Fatalf("ON candidate is episode-keyed: %+v", candidate)
+			}
+		}
+	}
+	if forGroup != 1 {
+		t.Fatalf("ON froze %d candidates for one group, want 1", forGroup)
+	}
+}

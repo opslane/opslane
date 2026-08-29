@@ -274,14 +274,13 @@ func selectCandidates(ctx context.Context, q digestQuerier, projectID string, at
 		         SELECT 1 FROM issue_publications publication
 		          WHERE publication.project_id=ep.project_id
 		            AND publication.episode_id=ep.id AND publication.channel='digest')
-	 ORDER BY g.last_seen DESC,g.id,d.decided_at DESC,ep.sequence DESC,ep.id DESC`, projectID, at, windowFrom)
+	 ORDER BY g.last_seen DESC,ep.id`, projectID, at, windowFrom)
 	if err != nil {
 		return nil, nil, fmt.Errorf("select digest candidates: %w", err)
 	}
 	defer rows.Close()
 	candidates := make([]Candidate, 0)
 	replayFloors := make([]time.Time, 0)
-	seenGroups := make(map[string]bool)
 	for rows.Next() {
 		var candidate Candidate
 		var episodeSequence int
@@ -300,10 +299,10 @@ func selectCandidates(ctx context.Context, q digestQuerier, projectID string, at
 		candidate.ErrorGroupID = candidate.IssueID
 		candidate.Kind = "error"
 		candidate.EpisodeSequence = &episodeSequence
-		if seenGroups[candidate.ErrorGroupID] {
-			continue
-		}
-		seenGroups[candidate.ErrorGroupID] = true
+		// No per-group dedup here: OFF is the rollback path and returns one
+		// candidate per eligible EPISODE, exactly as origin/main does. The ON
+		// lane is keyed per incident by loadActionableCandidates and never
+		// reaches this query.
 		candidate.Label = "new"
 		if episodeSequence > 1 {
 			candidate.Label = "returned"

@@ -126,8 +126,8 @@ func CheckDeliverySLA(ctx context.Context, pool *pgxpool.Pool, projectID string,
 		 -- not deliverable in OFF, so flagging them against an OFF run would be
 		 -- a permanent false finding.
 		 WHERE (CASE WHEN latest.unified_cards_mode='on'
-		             THEN g.status IN `+onCardStatusSQL+`
-		             ELSE g.status IN `+m1ActionableStatusSQL+` END)
+		             THEN g.status IN `+string(onCardStatusSQL)+`
+		             ELSE g.status IN `+string(m1ActionableStatusSQL)+` END)
 		   AND g.actionable_since < latest.window_to
 		   AND (g.snoozed_until IS NULL OR g.snoozed_until <= $2)
 		   AND EXISTS (
@@ -191,7 +191,7 @@ func CheckDeliverySLA(ctx context.Context, pool *pgxpool.Pool, projectID string,
 	report.LongSnoozes, err = queryFindings(ctx, pool, "long_snoozes", `
 		SELECT project_id::text,'',id::text,'long_snoozes'
 		  FROM error_groups
-		 WHERE status IN `+onCardStatusSQL+`
+		 WHERE status IN `+string(onCardStatusSQL)+`
 		   AND snoozed_until > $2::timestamptz + interval '31 days'
 		   AND ($1='' OR project_id::text=$1)
 		 ORDER BY project_id,id`, projectID, now)

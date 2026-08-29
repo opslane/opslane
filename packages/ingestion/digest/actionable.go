@@ -19,6 +19,12 @@ const (
 	reasonFrozenLaneOwns      = "frozen_lane_owns"
 	reasonCappedOverflow      = "capped_overflow"
 	reasonIncluded            = "included"
+	// reasonMissingWaitingAge marks an incident in an actionable status whose
+	// actionable_since is NULL. The lifecycle trigger cannot produce that shape,
+	// so it means a direct database write: the incident is ledgered (and picked
+	// up by the SLA sweep) instead of being frozen without a spell, which sent
+	// validation down the episode path with an empty episode id.
+	reasonMissingWaitingAge = "missing_waiting_age"
 )
 
 // The ON lane's instruction lines. Exactly one is correct for any incident
@@ -73,16 +79,22 @@ func onCardOutcome(status string) string {
 var knownReasonCodes = []string{
 	reasonIncluded, reasonSnoozed, reasonErrorLaneIneligible,
 	reasonNotPublishable, reasonFrozenLaneOwns, reasonCappedOverflow,
+	reasonMissingWaitingAge,
 }
+
+// actionableStatusSet is a SQL fragment spliced into the candidate query. Its
+// own type keeps that splice to the two constants below: runtime data cannot
+// reach it without an explicit, reviewable conversion.
+type actionableStatusSet string
 
 // m1ActionableStatusSQL is the OFF lane's status set: the pair migration 064's
 // trigger and the shipped receipts lane were built on. It is deliberately NOT
 // widened — OFF mode is the rollback path and must stay byte-identical.
-const m1ActionableStatusSQL = `('awaiting_approval','needs_human')`
+const m1ActionableStatusSQL actionableStatusSet = `('awaiting_approval','needs_human')`
 
 // onCardStatusSQL is the ON lane's status set. PR review is a human action, so
 // it repeats until the PR is merged or closed (see docs/design/2026-08-28).
-const onCardStatusSQL = `('awaiting_approval','needs_human','pr_created','pr_draft')`
+const onCardStatusSQL actionableStatusSet = `('awaiting_approval','needs_human','pr_created','pr_draft')`
 
 // actionableReceiptCap bounds the OFF lane's receipts section: the top
 // (cap-1) candidates by impact plus the single oldest waiting item. It is a
@@ -124,7 +136,7 @@ type evaluation struct {
 
 // loadActionableCandidates reads the incidents awaiting a human. statusSQL is
 // the caller's status set: m1ActionableStatusSQL in OFF, onCardStatusSQL in ON.
-func loadActionableCandidates(ctx context.Context, tx pgx.Tx, projectID, statusSQL string) ([]actionableCandidate, error) {
+func loadActionableCandidates(ctx context.Context, tx pgx.Tx, projectID string, statusSQL actionableStatusSet) ([]actionableCandidate, error) {
 	query := `
 		SELECT g.id::text,g.kind,g.status::text,g.title,g.occurrence_count::bigint,
 		       g.impact_visits,COALESCE(g.pr_url,''),COALESCE(g.root_cause,''),
@@ -148,7 +160,7 @@ func loadActionableCandidates(ctx context.Context, tx pgx.Tx, projectID, statusS
 		  FROM error_groups g
 		  LEFT JOIN LATERAL (` + diagnosisValidationLateralSQL + `) d ON true
 		 WHERE g.project_id=$1
-		   AND g.status IN ` + statusSQL + `
+		   AND g.status IN ` + string(statusSQL) + `
 		 ORDER BY g.actionable_since NULLS LAST,g.id`
 	rows, err := tx.Query(ctx, query, projectID)
 	if err != nil {

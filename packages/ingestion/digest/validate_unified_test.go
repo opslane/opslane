@@ -3,12 +3,14 @@ package digest
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/opslane/opslane/packages/ingestion/notify"
 )
@@ -278,7 +280,7 @@ func TestCapDigestDeliverySharesOneDecisionReceiptFixBudget(t *testing.T) {
 	}
 
 	cards, keptReceipts, generatedOverflow, receiptOverflow, dropped := capDigestDelivery(
-		generated, receipts, 0, 0,
+		UnifiedCardsOn, generated, receipts, 0, 0,
 	)
 	if len(cards) != 4 || len(keptReceipts) != 5 {
 		t.Fatalf("capped delivery has %d fixes + %d receipts, want 4 + 5", len(cards), len(keptReceipts))
@@ -337,5 +339,125 @@ func TestValidateUnifiedLedgerFailureRollsBackCacheAndDeliversReceipts(t *testin
 	}
 	if phase != "freeze" {
 		t.Fatalf("ledger phase after degraded section = %q, want freeze", phase)
+	}
+}
+
+// TestCapDigestDeliveryOffSpendsTheBudgetOnCardsOnly pins OFF parity with
+// origin/main: receipts do not compete with generated cards for the render
+// budget, and none of them is dropped or counted as overflow.
+func TestCapDigestDeliveryOffSpendsTheBudgetOnCardsOnly(t *testing.T) {
+	generated := make([]notify.GeneratedDigestCard, 0, 12)
+	for index := range 12 {
+		generated = append(generated, notify.GeneratedDigestCard{
+			IncidentID: fmt.Sprintf("card-%d", index), Outcome: "needs_human",
+		})
+	}
+	receipts := make([]notify.ReceiptItem, 0, 5)
+	for index := range 5 {
+		receipts = append(receipts, notify.ReceiptItem{IncidentID: fmt.Sprintf("receipt-%d", index)})
+	}
+
+	cards, keptReceipts, generatedOverflow, receiptOverflow, dropped := capDigestDelivery(
+		UnifiedCardsOff, generated, receipts, 0, 4,
+	)
+	if len(cards) != notify.DigestV4CardCap || len(keptReceipts) != 5 {
+		t.Fatalf("OFF delivery has %d cards + %d receipts, want %d + 5",
+			len(cards), len(keptReceipts), notify.DigestV4CardCap)
+	}
+	if generatedOverflow != 3 || receiptOverflow != 4 {
+		t.Fatalf("OFF overflow = generated %d receipt %d, want 3/4", generatedOverflow, receiptOverflow)
+	}
+	if strings.Join(dropped, ",") != "card-9,card-10,card-11" {
+		t.Fatalf("OFF dropped identities = %v, want only cards past the cap", dropped)
+	}
+}
+
+// TestValidateOnDeliversFrozenReceiptsWhenTheLiveReloadFails: when the live
+// actionable reload fails in ON, the card section has already been demoted to
+// receipts, so building those receipts from the failed query delivered an alert
+// over an empty digest. The M1 contract for this degrade is full receipts plus
+// an alert, so the frozen snapshots — which carry title, counts, status and
+// action — are the fallback source.
+func TestValidateOnDeliversFrozenReceiptsWhenTheLiveReloadFails(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	pool, fixture := onCardFixture(t, now)
+	ctx := context.Background()
+	first := seedOnCardGroup(t, pool, fixture.ProjectID, fixture.EnvID, "friction", "needs_human",
+		true, "", "The checkout control does not submit.", now.Add(-time.Hour))
+	second := seedOnCardGroup(t, pool, fixture.ProjectID, fixture.EnvID, "error", "awaiting_approval",
+		true, "", "The save request never leaves the page.", now.Add(-2*time.Hour))
+	seedValidatedDiagnosis(t, pool, fixture.ProjectID, second, now.Add(-time.Hour))
+
+	runID, candidates, err := FreezeCandidates(ctx, pool, fixture.ProjectID, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates) != 2 {
+		t.Fatalf("frozen candidates = %d, want 2", len(candidates))
+	}
+	writeOnCardPayload(t, pool, runID, candidates)
+
+	restore := loadActionableCandidatesForValidation
+	loadActionableCandidatesForValidation = func(context.Context, pgx.Tx, string, actionableStatusSet) ([]actionableCandidate, error) {
+		return nil, errors.New("injected actionable reload failure")
+	}
+	t.Cleanup(func() { loadActionableCandidatesForValidation = restore })
+
+	if err := ValidateAndPublish(ctx, pool, runID); err != nil {
+		t.Fatal(err)
+	}
+	payload := renderedEvent(t, pool, runID).Digest
+	if payload.DeliveryAlert == "" {
+		t.Fatalf("degraded digest carries no delivery alert: %+v", payload)
+	}
+	delivered := make(map[string]bool, len(payload.ReceiptItems))
+	for _, item := range payload.ReceiptItems {
+		delivered[item.IncidentID] = true
+	}
+	if !delivered[first] || !delivered[second] {
+		t.Fatalf("frozen incidents missing from the degraded digest: receipts=%+v cards=%+v",
+			payload.ReceiptItems, payload.GeneratedCards)
+	}
+}
+
+// TestReceiptForUnifiedFallbackSanitizesLikeItsSibling: the fallback receipt is
+// persisted in digest_runs.rendered_payload and shipped in the outbox event, so
+// it owes the same sanitization contract as toReceiptItems — the renderer
+// cleaning prose again on the way out does not un-persist a leaked secret.
+func TestReceiptForUnifiedFallbackSanitizesLikeItsSibling(t *testing.T) {
+	since := time.Now().UTC().Truncate(time.Second)
+	const secret = "token `ghp_0123456789abcdefghijklmnopqrstuvwxyzAB` in src/checkout.ts"
+	candidate := Candidate{
+		ErrorGroupID: "group-1", Kind: "error", Status: "awaiting_approval",
+		Title: "Checkout *fails* for user@example.com", OccurrenceCount: 17,
+		RootCause: secret, Mitigation: "Rotate the `token` and retry.",
+		HasValidatedDiagnosis: true, HasSavedDiff: true, SpellStartedAt: &since,
+	}
+
+	item := receiptForUnifiedFallback(candidate)
+
+	sibling, err := toReceiptItems([]actionableCandidate{{
+		GroupID: "group-1", Kind: "error", Status: "awaiting_approval",
+		Title: candidate.Title, OccurrenceCount: 17, RootCause: candidate.RootCause,
+		Mitigation: candidate.Mitigation, HasValidatedDiagnosis: true,
+		HasSavedDiff: true, ActionableSince: &since,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item.Title != sibling[0].Title {
+		t.Fatalf("title = %q, want the sanitized %q", item.Title, sibling[0].Title)
+	}
+	if item.RootCauseExcerpt != sibling[0].RootCauseExcerpt {
+		t.Fatalf("root cause = %q, want the sanitized %q", item.RootCauseExcerpt, sibling[0].RootCauseExcerpt)
+	}
+	if item.MitigationExcerpt != sibling[0].MitigationExcerpt {
+		t.Fatalf("mitigation = %q, want the sanitized %q", item.MitigationExcerpt, sibling[0].MitigationExcerpt)
+	}
+	if !item.HasSavedDiff {
+		t.Fatal("has_saved_diff was dropped: the two constructors emit different items for one incident")
+	}
+	if strings.Contains(item.RootCauseExcerpt, "ghp_") || strings.Contains(item.Title, "@example.com") {
+		t.Fatalf("secret-shaped prose survived into the payload: %+v", item)
 	}
 }
