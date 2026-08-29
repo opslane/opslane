@@ -14,6 +14,7 @@ type EventPayload struct {
 	Project      ProjectRef     `json:"project"`
 	Environment  string         `json:"environment,omitempty"`
 	DashboardURL string         `json:"dashboard_url,omitempty"`
+	PreviewNote  string         `json:"preview_note,omitempty"`
 	Digest       *DigestPayload `json:"digest,omitempty"`
 	Outcome      *TriagePayload `json:"outcome,omitempty"`
 }
@@ -64,24 +65,24 @@ type TriageImpact struct {
 }
 
 type DigestPayload struct {
-	Date                string                `json:"date"`
-	Window              DigestWindow          `json:"window"`
-	Insights            []DigestInsight       `json:"insights"`
-	InsightsHasMore     bool                  `json:"insights_has_more"`
-	TopNewIssues        []DigestIssue         `json:"top_new_issues"`
-	TopNewIssuesHasMore bool                  `json:"top_new_issues_has_more"`
-	Outcomes            DigestOutcomes        `json:"outcomes"`
-	NeedsHumanBacklog   int                   `json:"needs_human_backlog"`
-	Watching            DigestWatching        `json:"watching"`
-	SchemaVersion       int                   `json:"schema_version,omitempty"`
+	Date                string          `json:"date"`
+	Window              DigestWindow    `json:"window"`
+	Insights            []DigestInsight `json:"insights"`
+	InsightsHasMore     bool            `json:"insights_has_more"`
+	TopNewIssues        []DigestIssue   `json:"top_new_issues"`
+	TopNewIssuesHasMore bool            `json:"top_new_issues_has_more"`
+	Outcomes            DigestOutcomes  `json:"outcomes"`
+	NeedsHumanBacklog   int             `json:"needs_human_backlog"`
+	Watching            DigestWatching  `json:"watching"`
+	SchemaVersion       int             `json:"schema_version,omitempty"`
 	// Timezone is the project's digest timezone; the renderer uses it to show
 	// calendar dates (the waiting-since line) in the reader's local day.
-	Timezone            string                `json:"timezone,omitempty"`
-	ReceiptItems        []ReceiptItem         `json:"receipt_items,omitempty"`
-	TriageCounts        *DigestTriageCounts   `json:"triage_counts,omitempty"`
-	HeldBackCount       int                   `json:"held_back_count,omitempty"`
-	ReceiptOverflow     int                   `json:"receipt_overflow,omitempty"`
-	GeneratedCards      []GeneratedDigestCard `json:"generated_cards,omitempty"`
+	Timezone        string                `json:"timezone,omitempty"`
+	ReceiptItems    []ReceiptItem         `json:"receipt_items,omitempty"`
+	TriageCounts    *DigestTriageCounts   `json:"triage_counts,omitempty"`
+	HeldBackCount   int                   `json:"held_back_count,omitempty"`
+	ReceiptOverflow int                   `json:"receipt_overflow,omitempty"`
+	GeneratedCards  []GeneratedDigestCard `json:"generated_cards,omitempty"`
 	// OverflowCount is how many validated cards were deferred past the render
 	// cap; the renderer's "And N more" line reports it.
 	OverflowCount int    `json:"overflow_count,omitempty"`

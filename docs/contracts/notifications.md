@@ -6,6 +6,8 @@ description: Which issue events notification destinations receive and when Opsla
 
 Notification destinations can subscribe to issue notifications and daily digests. Issue destinations choose between immediate and post-triage delivery, but the current settled-identity error path does not publish an immediate issue-created event. Capturing an observation never sends an alert.
 
+Notification configuration encryption binds each ciphertext to its destination ID, project ID, and stored destination type. The current endpoints and database constraint admit only `slack`. Adding another type requires a new migration that widens the constraint and type-specific configuration validation; applied migrations must not be edited.
+
 Choose post-triage delivery when you want a message after an error investigation opens a pull request or stops for a person. Insights and decisions not to pursue appear in the daily digest instead. Daily digests summarize activity over a window rather than posting once per captured occurrence.
 
 ## Post-triage payload

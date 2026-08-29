@@ -24,16 +24,39 @@ func formatSlackDigest(payload EventPayload) ([]byte, string, error) {
 	if payload.Digest == nil {
 		return nil, "application/json", fmt.Errorf("digest.daily payload missing digest body")
 	}
+	var body []byte
+	var contentType string
+	var err error
 	if payload.Digest.SchemaVersion >= 4 {
-		return formatSlackDigestV4(payload)
+		body, contentType, err = formatSlackDigestV4(payload)
+	} else if payload.Digest.SchemaVersion >= 3 {
+		body, contentType, err = formatSlackDigestV3(payload)
+	} else if payload.Digest.SchemaVersion >= 2 {
+		body, contentType, err = formatSlackDigestV2(payload)
+	} else {
+		body, contentType, err = formatSlackDigestV1(payload)
 	}
-	if payload.Digest.SchemaVersion >= 3 {
-		return formatSlackDigestV3(payload)
+	if err != nil || payload.PreviewNote == "" {
+		return body, contentType, err
 	}
-	if payload.Digest.SchemaVersion >= 2 {
-		return formatSlackDigestV2(payload)
+	var envelope struct {
+		Blocks []map[string]any `json:"blocks"`
 	}
-	return formatSlackDigestV1(payload)
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return nil, contentType, fmt.Errorf("add digest preview note: %w", err)
+	}
+	note := cleanProse(payload.PreviewNote, digestDetailMax)
+	if note == "" {
+		return body, contentType, nil
+	}
+	envelope.Blocks = append([]map[string]any{digestContextBlock(note)}, envelope.Blocks...)
+	var output bytes.Buffer
+	encoder := json.NewEncoder(&output)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(envelope); err != nil {
+		return nil, contentType, fmt.Errorf("encode digest preview note: %w", err)
+	}
+	return output.Bytes(), contentType, nil
 }
 
 // DigestV4CardCap is the most cards one v4 digest renders. Exported because

@@ -5,28 +5,13 @@ import (
 	"regexp"
 	"strings"
 	"unicode/utf8"
-)
 
-type DigestCard struct {
-	EpisodeID     string   `json:"episode_id"`
-	IncidentID    string   `json:"incident_id"`
-	Title         string   `json:"title"`
-	Label         string   `json:"label"`
-	Copy          string   `json:"copy"`
-	Action        string   `json:"action"`
-	AffectedUsers int      `json:"affected_users"`
-	Accounts      []string `json:"accounts"`
-	PRURL         string   `json:"pr_url,omitempty"`
-	// Schema v4 additions; zero-valued on cards stored before v4.
-	Outcome         string `json:"outcome,omitempty"`
-	OccurrenceCount int    `json:"occurrence_count,omitempty"`
-	ReplayURL       string `json:"replay_url,omitempty"`
-	PRNumber        int    `json:"pr_number,omitempty"`
-}
+	"github.com/opslane/opslane/packages/ingestion/notify"
+)
 
 type DigestInput struct {
 	RunDate      *string
-	Cards        []DigestCard
+	View         notify.DigestView
 	ProjectLabel string
 }
 
@@ -121,15 +106,17 @@ func IsFillerRootCause(value *string) bool {
 }
 
 func FormatDigest(input DigestInput) string {
-	if len(input.Cards) == 0 {
+	if input.RunDate == nil {
 		return fmt.Sprintf("No digest has been delivered for %s yet. The daily run produces it.", input.ProjectLabel)
 	}
-	runDate := ""
-	if input.RunDate != nil {
-		runDate = *input.RunDate
+	if input.View.Legacy {
+		return fmt.Sprintf("The digest for %s, %s was delivered in an older format this tool cannot itemize. The next daily run will be readable here.", input.ProjectLabel, *input.RunDate)
 	}
-	lines := []string{fmt.Sprintf("Opslane digest for %s, %s.", input.ProjectLabel, runDate), ""}
-	for _, card := range input.Cards {
+	if input.View.Empty() {
+		return fmt.Sprintf("Opslane digest for %s, %s: nothing new and no decisions waiting.", input.ProjectLabel, *input.RunDate)
+	}
+	lines := []string{fmt.Sprintf("Opslane digest for %s, %s.", input.ProjectLabel, *input.RunDate), ""}
+	for _, card := range input.View.Cards {
 		affected := fmt.Sprintf("%d users", card.AffectedUsers)
 		if len(card.Accounts) > 0 {
 			affected += " (" + Fence(Truncate(strings.Join(card.Accounts, ", "), TitleLimit)) + ")"
@@ -149,6 +136,26 @@ func FormatDigest(input DigestInput) string {
 		if card.Action != "" {
 			lines = append(lines, "  next: "+Fence(Truncate(card.Action, TitleLimit)))
 		}
+	}
+	if len(input.View.Receipts) > 0 {
+		lines = append(lines, "", fmt.Sprintf("Waiting on a decision (%d):", len(input.View.Receipts)+input.View.ReceiptOverflow))
+		for _, item := range input.View.Receipts {
+			lines = append(lines, fmt.Sprintf("- %s  %s  state: %s", item.IncidentID, Fence(Truncate(item.Title, TitleLimit)), item.ReceiptState))
+			detail := fmt.Sprintf("  %d occurrences", item.OccurrenceCount)
+			if item.PRURL != "" {
+				detail += "  PR: " + item.PRURL
+			}
+			if item.SessionURL != "" {
+				detail += "  replay: " + item.SessionURL
+			}
+			lines = append(lines, detail)
+		}
+		if input.View.ReceiptOverflow > 0 {
+			lines = append(lines, fmt.Sprintf("  …and %d more on the dashboard.", input.View.ReceiptOverflow))
+		}
+	}
+	if input.View.DeliveryAlert != "" {
+		lines = append(lines, "", "Delivery alert: "+Fence(Truncate(input.View.DeliveryAlert, TitleLimit)))
 	}
 	lines = append(lines, "", "Call opslane_issue with an id for the full context on one of these.")
 	return ClampPayload(strings.Join(lines, "\n"))

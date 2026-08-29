@@ -29,9 +29,9 @@ func TestLatestDigestReturnsMostRecentDeliveredCards(t *testing.T) {
 	t.Cleanup(func() { cleanupTenantHandler(t, pool, orgID) })
 
 	insertDeliveredDigest(t, pool, projectID, "2026-08-19",
-		`{"digest":{"generated_cards":[{"episode_id":"e-old","incident_id":"i-old","title":"old","label":"new","copy":"c","action":"a","affected_users":3,"accounts":[]}]}}`)
+		`{"event_type":"digest.daily","digest":{"schema_version":4,"date":"2026-08-19","generated_cards":[{"episode_id":"e-old","incident_id":"i-old","title":"old","label":"new","outcome":"needs_human","copy":"c","action":"a","affected_users":3,"accounts":[]}]}}`)
 	insertDeliveredDigest(t, pool, projectID, "2026-08-21",
-		`{"digest":{"generated_cards":[{"episode_id":"e-new","incident_id":"i-new","title":"new","label":"new","copy":"c","action":"a","affected_users":9,"accounts":["acme"],"pr_url":"https://github.com/acme/app/pull/1"}]}}`)
+		`{"event_type":"digest.daily","digest":{"schema_version":4,"date":"2026-08-21","generated_cards":[{"episode_id":"e-new","incident_id":"i-new","title":"new","label":"new","outcome":"verified_fix","copy":"c","action":"a","affected_users":9,"accounts":["acme"],"pr_url":"https://github.com/acme/app/pull/1"}]}}`)
 
 	router := handler.NewRouterWithPool(deps, pool)
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/projects/"+projectID+"/digest/latest", nil)
@@ -50,6 +50,8 @@ func TestLatestDigestReturnsMostRecentDeliveredCards(t *testing.T) {
 			AffectedUsers int    `json:"affected_users"`
 			PRURL         string `json:"pr_url"`
 		} `json:"cards"`
+		Receipts []json.RawMessage `json:"receipts"`
+		Empty    bool              `json:"empty"`
 	}
 	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
 		t.Fatalf("decode: %v", err)
@@ -62,6 +64,40 @@ func TestLatestDigestReturnsMostRecentDeliveredCards(t *testing.T) {
 	}
 	if body.Cards[0].PRURL == "" {
 		t.Fatal("pr_url is empty; a verified_fix card must carry its PR")
+	}
+	if len(body.Receipts) != 0 || body.Empty {
+		t.Fatalf("cards-only additions = receipts:%d empty:%v", len(body.Receipts), body.Empty)
+	}
+}
+
+func TestLatestDigestReturnsReceipts(t *testing.T) {
+	deps, pool := testDeps(t)
+	orgID, projectID, _, _ := seedTenant(t, deps.Queries)
+	t.Cleanup(func() { cleanupTenantHandler(t, pool, orgID) })
+	insertDeliveredDigest(t, pool, projectID, "2026-08-27", `{"event_type":"digest.daily","digest":{"schema_version":4,"date":"2026-08-27","receipt_items":[{"kind":"error","incident_id":"i-wait","title":"Dead clicks","receipt_state":"awaiting_approval"}],"receipt_overflow":2}}`)
+
+	router := handler.NewRouterWithPool(deps, pool)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/projects/"+projectID+"/digest/latest", nil)
+	req.Header.Set("Authorization", "Bearer "+dashboardToken(t, orgID))
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	var body struct {
+		RunDate  *string `json:"run_date"`
+		Cards    []any   `json:"cards"`
+		Receipts []struct {
+			IncidentID string `json:"incident_id"`
+		} `json:"receipts"`
+		ReceiptOverflow int  `json:"receipt_overflow"`
+		Empty           bool `json:"empty"`
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body.RunDate == nil || *body.RunDate != "2026-08-27" || len(body.Cards) != 0 || len(body.Receipts) != 1 || body.Receipts[0].IncidentID != "i-wait" || body.ReceiptOverflow != 2 || body.Empty {
+		t.Fatalf("receipts response = %+v", body)
 	}
 }
 
@@ -82,14 +118,16 @@ func TestLatestDigestReturnsEmptyWhenNoDeliveredRun(t *testing.T) {
 		t.Fatalf("status = %d, want 200 with empty set", rec.Code)
 	}
 	var body struct {
-		RunDate *string           `json:"run_date"`
-		Cards   []json.RawMessage `json:"cards"`
+		RunDate  *string           `json:"run_date"`
+		Cards    []json.RawMessage `json:"cards"`
+		Receipts []json.RawMessage `json:"receipts"`
+		Empty    bool              `json:"empty"`
 	}
 	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if body.RunDate != nil || len(body.Cards) != 0 {
-		t.Fatalf("want empty set, got run_date=%v cards=%d", body.RunDate, len(body.Cards))
+	if body.RunDate != nil || len(body.Cards) != 0 || len(body.Receipts) != 0 || !body.Empty {
+		t.Fatalf("want empty set, got run_date=%v cards=%d receipts=%d empty=%v", body.RunDate, len(body.Cards), len(body.Receipts), body.Empty)
 	}
 }
 

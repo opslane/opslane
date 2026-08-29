@@ -417,6 +417,11 @@ describe('GitHub client configuration', () => {
 });
 
 describe('buildPRBody', () => {
+  it('renders unavailable replay signals honestly', () => {
+    const body = buildPRBody(makeInput({ replay: makeReplay({ signals: null }) }));
+    expect(body).toContain('Signals not available.');
+    expect(body).not.toContain('0 console errors');
+  });
   it('discloses customer and sandbox runtimes with explicit unknowns', () => {
     const known = buildPRBody(makeInput({
       customerRuntime: { name: 'CPython', version: '3.11.8' },

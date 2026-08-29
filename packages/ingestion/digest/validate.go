@@ -18,6 +18,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	ingestiondb "github.com/opslane/opslane/packages/ingestion/db"
 	"github.com/opslane/opslane/packages/ingestion/notify"
 )
 
@@ -307,6 +308,29 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string) e
 			actionableErr = err
 		} else {
 			actionableEval = evaluateActionable(actionableCandidates, frozenIncidentIDs, actionableEvaluatedAt)
+		}
+	}
+	if actionableErr == nil {
+		for i := range actionableEval.Included {
+			candidate := &actionableEval.Included[i]
+			if _, err := tx.Exec(ctx, `SAVEPOINT actionable_replay_lookup`); err != nil {
+				actionableErr = fmt.Errorf("open actionable replay lookup savepoint: %w", err)
+				break
+			}
+			sessionID, anchorMs, ok, lookupErr := ingestiondb.WatchableSessionForGroupOn(ctx, tx, candidate.GroupID, run.ProjectID, time.Time{})
+			if lookupErr != nil {
+				slog.Warn("actionable digest replay lookup failed; omitting the link", "group_id", candidate.GroupID, "project_id", run.ProjectID, "error", lookupErr)
+				if _, err := tx.Exec(ctx, `ROLLBACK TO SAVEPOINT actionable_replay_lookup`); err != nil {
+					actionableErr = fmt.Errorf("roll back actionable replay lookup savepoint: %w", err)
+					break
+				}
+			} else if ok {
+				candidate.SessionURL = notify.BuildSessionURL(os.Getenv("DASHBOARD_URL"), sessionID, anchorMs)
+			}
+			if _, err := tx.Exec(ctx, `RELEASE SAVEPOINT actionable_replay_lookup`); err != nil {
+				actionableErr = fmt.Errorf("release actionable replay lookup savepoint: %w", err)
+				break
+			}
 		}
 	}
 	if actionableErr == nil {

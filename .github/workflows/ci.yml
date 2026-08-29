@@ -349,7 +349,7 @@ jobs:
           # on the runner; the container reaches them via the extra_hosts
           # host-gateway mapping. Separate ports because vitest runs the two
           # files in parallel and they cannot share a listener.
-          NOTIFY_UNSAFE_EXTRA_WEBHOOK_HOSTS: host.docker.internal:9999,host.docker.internal:9998
+          NOTIFY_UNSAFE_EXTRA_WEBHOOK_HOSTS: host.docker.internal:9999,host.docker.internal:9998,host.docker.internal:9997
           # The friction suites wait on the chunk scrubber 13 times. A 1s tick
           # removes up to 15s from each wait. The 30s eligibility grace is
           # deliberately left at its production value; the tests fast-forward

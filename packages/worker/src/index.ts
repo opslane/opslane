@@ -100,9 +100,18 @@ if (adjudicationDailyCap !== configuredDailyCap) {
  * SDK format:  { event_type_counts, console: { error_count, ... }, network: { ... }, last_user_actions }
  * Worker format: { eventTypeCounts, consoleErrorCount, ..., lastUserActions }
  */
-function mapDbSignals(raw: unknown): ReplaySignals | null {
+export function mapDbSignals(raw: unknown): ReplaySignals | null {
   if (!raw || typeof raw !== 'object') return null;
   const s = raw as Record<string, unknown>;
+
+  const hasOwn = (key: string): boolean => Object.prototype.hasOwnProperty.call(s, key);
+  const hasKnownSignal = [
+    'event_type_counts', 'console', 'network', 'last_user_actions',
+    'eventTypeCounts', 'consoleErrorCount', 'consoleWarningCount',
+    'consoleErrorMessages', 'consoleWarningMessages', 'networkAnomalyCount',
+    'networkAnomalies', 'lastUserActions',
+  ].some(hasOwn);
+  if (!hasKnownSignal) return null;
 
   const console_ = (s['console'] ?? {}) as Record<string, unknown>;
   const network_ = (s['network'] ?? {}) as Record<string, unknown>;

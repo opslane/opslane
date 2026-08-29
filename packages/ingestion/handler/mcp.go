@@ -15,6 +15,7 @@ import (
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/opslane/opslane/packages/ingestion/db"
 	mcpformat "github.com/opslane/opslane/packages/ingestion/mcp"
+	"github.com/opslane/opslane/packages/ingestion/notify"
 	"github.com/opslane/opslane/packages/ingestion/usageevents"
 )
 
@@ -104,23 +105,24 @@ func (d *Dependencies) registerMCPTools(server *mcpsdk.Server) {
 			"Start here when working the daily digest.",
 	}, trackTool("opslane_digest", func(ctx context.Context, _ *mcpsdk.CallToolRequest, _ noArguments) (*mcpsdk.CallToolResult, any, error) {
 		projectID := ProjectIDFromCtx(ctx)
-		runDate, rawCards, err := d.Queries.LatestDeliveredDigest(ctx, projectID)
+		runDate, payload, err := d.Queries.LatestDeliveredDigestPayload(ctx, projectID)
 		if err != nil {
 			return nil, nil, err
 		}
-		cards := make([]mcpformat.DigestCard, 0)
-		if len(rawCards) > 0 && string(rawCards) != "null" {
-			if err := json.Unmarshal(rawCards, &cards); err != nil {
-				return nil, nil, fmt.Errorf("decode delivered digest: %w", err)
-			}
+		if runDate == "" {
+			body := mcpformat.FormatDigest(mcpformat.DigestInput{ProjectLabel: projectID})
+			return textToolResult(body), nil, nil
 		}
-		var runDatePointer *string
-		if runDate != "" {
-			runDatePointer = &runDate
+		var event notify.EventPayload
+		if err := json.Unmarshal(payload, &event); err != nil {
+			return nil, nil, fmt.Errorf("decode delivered digest: %w", err)
+		}
+		if event.Digest == nil {
+			return nil, nil, fmt.Errorf("stored digest payload is malformed")
 		}
 		body := mcpformat.FormatDigest(mcpformat.DigestInput{
-			RunDate:      runDatePointer,
-			Cards:        cards,
+			RunDate:      &runDate,
+			View:         notify.BuildDigestView(event.Digest),
 			ProjectLabel: projectID,
 		})
 		return textToolResult(body), nil, nil
