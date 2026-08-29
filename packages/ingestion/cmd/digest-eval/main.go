@@ -55,8 +55,11 @@ func main() {
 			log.Fatal(err)
 		}
 		var event notify.EventPayload
-		if err := json.Unmarshal(raw, &event); err != nil || event.Digest == nil {
-			log.Fatalf("%s contains an invalid delivered payload: %v", date, err)
+		if err := json.Unmarshal(raw, &event); err != nil {
+			log.Fatalf("%s contains an unreadable delivered payload: %v", date, err)
+		}
+		if event.Digest == nil {
+			log.Fatalf("%s contains a delivered payload with no digest body", date)
 		}
 		fmt.Printf("# %s\n\n", date)
 		view := notify.BuildDigestView(event.Digest)

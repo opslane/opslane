@@ -251,17 +251,27 @@ func (d *Dependencies) GetLatestDigest(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "stored digest payload is malformed")
 		return
 	}
-	var raw struct {
-		Digest struct {
-			GeneratedCards json.RawMessage `json:"generated_cards"`
-		} `json:"digest"`
-	}
-	_ = json.Unmarshal(payload, &raw)
-	cards := raw.Digest.GeneratedCards
-	if len(cards) == 0 || string(cards) == "null" {
-		cards = json.RawMessage("[]")
-	}
 	view := notify.BuildDigestView(event.Digest)
+	// cards stays raw so a card field this build does not know about still
+	// reaches the dashboard byte-for-byte, but it is gated on the view: a
+	// stored version whose cards the view does not serve must not appear
+	// here, or the response contradicts itself (legacy/empty alongside a
+	// populated cards array) and disagrees with the MCP tool.
+	cards := json.RawMessage("[]")
+	if len(view.Cards) > 0 {
+		var raw struct {
+			Digest struct {
+				GeneratedCards json.RawMessage `json:"generated_cards"`
+			} `json:"digest"`
+		}
+		if err := json.Unmarshal(payload, &raw); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "stored digest payload is malformed")
+			return
+		}
+		if len(raw.Digest.GeneratedCards) > 0 && string(raw.Digest.GeneratedCards) != "null" {
+			cards = raw.Digest.GeneratedCards
+		}
+	}
 	receipts := view.Receipts
 	if receipts == nil {
 		receipts = []notify.ReceiptItem{}

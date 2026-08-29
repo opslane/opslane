@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -163,5 +164,75 @@ func insertDigestRunFrozen(t *testing.T, pool *pgxpool.Pool, projectID string) {
 		 VALUES ($1, '2026-08-20'::date, '2026-08-21'::date, '2026-08-21'::date, 'frozen')`, projectID)
 	if err != nil {
 		t.Fatalf("insert frozen run: %v", err)
+	}
+}
+
+// A stored payload the view cannot interpret must be refused, never rendered
+// as an empty digest: an empty-looking success is the failure mode the shared
+// view exists to remove.
+func TestLatestDigestRefusesMalformedStoredPayload(t *testing.T) {
+	deps, pool := testDeps(t)
+	orgID, projectID, _, _ := seedTenant(t, deps.Queries)
+	t.Cleanup(func() { cleanupTenantHandler(t, pool, orgID) })
+
+	for _, tc := range []struct {
+		name    string
+		payload string
+	}{
+		{name: "no digest body", payload: `{"event_type":"digest.daily"}`},
+		{name: "digest is not an object", payload: `{"event_type":"digest.daily","digest":"nope"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := pool.Exec(context.Background(), `DELETE FROM digest_runs WHERE project_id=$1`, projectID); err != nil {
+				t.Fatal(err)
+			}
+			insertDeliveredDigest(t, pool, projectID, "2026-08-20", tc.payload)
+			router := handler.NewRouterWithPool(deps, pool)
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/projects/"+projectID+"/digest/latest", nil)
+			req.Header.Set("Authorization", "Bearer "+dashboardToken(t, orgID))
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, req)
+			if rec.Code != http.StatusInternalServerError {
+				t.Fatalf("status=%d want 500, body=%s", rec.Code, rec.Body.String())
+			}
+			if !strings.Contains(rec.Body.String(), "malformed") {
+				t.Fatalf("body should name the malformed payload, got %s", rec.Body.String())
+			}
+		})
+	}
+}
+
+// A stored version whose cards the view does not serve must not leak those
+// cards through the raw passthrough: the response would then report legacy
+// while carrying a populated cards array, and disagree with the MCP tool.
+func TestLatestDigestDoesNotLeakCardsFromAnUnservedVersion(t *testing.T) {
+	deps, pool := testDeps(t)
+	orgID, projectID, _, _ := seedTenant(t, deps.Queries)
+	t.Cleanup(func() { cleanupTenantHandler(t, pool, orgID) })
+	// No schema_version: a v1 payload the view reports as legacy, carrying a
+	// cards array a later format introduced.
+	insertDeliveredDigest(t, pool, projectID, "2026-08-19",
+		`{"event_type":"digest.daily","digest":{"date":"2026-08-19","generated_cards":[{"incident_id":"i-stale","title":"Stale","label":"new","copy":"c","action":"a","affected_users":1,"accounts":[]}]}}`)
+
+	router := handler.NewRouterWithPool(deps, pool)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/projects/"+projectID+"/digest/latest", nil)
+	req.Header.Set("Authorization", "Bearer "+dashboardToken(t, orgID))
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Cards  []any `json:"cards"`
+		Legacy bool  `json:"legacy"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if !body.Legacy {
+		t.Fatal("a payload with no schema_version must report legacy")
+	}
+	if len(body.Cards) != 0 {
+		t.Fatalf("legacy response must not carry cards the view does not serve, got %d", len(body.Cards))
 	}
 }
