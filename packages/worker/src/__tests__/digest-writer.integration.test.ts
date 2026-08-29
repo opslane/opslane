@@ -40,7 +40,7 @@ describeDb('digest writer database handoff', () => {
        VALUES ($1,$2,2) RETURNING id`, [projectId, issueId],
     )).rows[0]!.id;
     frozen = {
-      episodeId, episodeSequence: 2, label: 'returned', issueId,
+      errorGroupId: issueId, episodeId, episodeSequence: 2, label: 'returned', issueId, kind: 'error',
       title: 'Checkout failed', outcome: 'verified_fix', summary: 'A null cart blocked payment.',
       prUrl: 'https://github.com/acme/shop/pull/42', affectedUsers: 9,
       occurrenceCount: 34,
@@ -51,8 +51,8 @@ describeDb('digest writer database handoff', () => {
        VALUES ($1,now()-interval '1 day',now(),current_date,'frozen') RETURNING id`, [projectId],
     )).rows[0]!.id;
     await pool.query(
-      `INSERT INTO digest_run_items (project_id,run_id,episode_id,candidate_snapshot)
-       VALUES ($1,$2,$3,$4::jsonb)`, [projectId, runId, episodeId, JSON.stringify(frozen)],
+      `INSERT INTO digest_run_items (project_id,run_id,error_group_id,episode_id,candidate_snapshot)
+       VALUES ($1,$2,$3,$4,$5::jsonb)`, [projectId, runId, issueId, episodeId, JSON.stringify(frozen)],
     );
   });
 
@@ -72,7 +72,7 @@ describeDb('digest writer database handoff', () => {
       loadRun: loadFrozenDigestRun,
       askModel: async () => ({
         included: [{
-          episodeId, title: 'Checkout is blocked', copy: 'Nine users at Acme cannot check out.', action: 'Review the verified fix.',
+          errorGroupId: issueId, title: 'Checkout is blocked', copy: 'People at Acme cannot check out.', action: 'Review the verified fix.',
           claimedUsers: 9, accounts: ['Acme'], prUrl: frozen.prUrl,
         }],
         deferred: [],
@@ -85,10 +85,36 @@ describeDb('digest writer database handoff', () => {
       `SELECT status,payload FROM digest_runs WHERE id=$1`, [runId],
     )).rows[0]!;
     const item = (await pool.query<{ outcome: string | null; reason: string | null }>(
-      `SELECT outcome,reason FROM digest_run_items WHERE run_id=$1 AND episode_id=$2`, [runId, episodeId],
+      `SELECT outcome,reason FROM digest_run_items WHERE run_id=$1 AND error_group_id=$2`, [runId, issueId],
     )).rows[0]!;
     expect(run.status).toBe('written');
     expect(run.payload).toEqual(payload);
     expect(item).toEqual({ outcome: 'included', reason: null });
+  });
+
+  // Rewriting a failed run resets the legacy table before restamping outcomes.
+  // Without the same reset on the unified table, a row absent from the new
+  // payload keeps the outcome the previous attempt gave it.
+  it('clears stale unified item outcomes when a failed run is rewritten', async () => {
+    const rewriteRunId = (await pool.query<{ id: string }>(
+      `INSERT INTO digest_runs (project_id,window_from,window_to,run_date,status)
+       VALUES ($1,now()-interval '1 day',now(),current_date - 1,'failed') RETURNING id`, [projectId],
+    )).rows[0]!.id;
+    await pool.query(
+      `INSERT INTO digest_unified_run_items
+         (project_id,run_id,error_group_id,candidate_snapshot,outcome,reason)
+       VALUES ($1,$2,$3,$4::jsonb,'included','from the previous attempt')`,
+      [projectId, rewriteRunId, issueId, JSON.stringify(frozen)],
+    );
+
+    const persisted = await persistWrittenDigest(rewriteRunId, projectId, { included: [], deferred: [] });
+    expect(persisted).toBe(true);
+
+    const row = (await pool.query<{ outcome: string | null; reason: string | null }>(
+      `SELECT outcome,reason FROM digest_unified_run_items WHERE run_id=$1 AND error_group_id=$2`,
+      [rewriteRunId, issueId],
+    )).rows[0]!;
+    expect(row).toEqual({ outcome: null, reason: null });
+    await pool.query(`DELETE FROM digest_runs WHERE id=$1`, [rewriteRunId]);
   });
 });

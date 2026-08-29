@@ -99,7 +99,7 @@ func TestSelectActionableFallsBackToFifthByImpactWithoutAgeStamps(t *testing.T) 
 		impact := int64(6 - i)
 		candidates[i] = actionableCandidate{GroupID: string(rune('a' + i)), ImpactVisits: &impact}
 	}
-	picked, overflow := selectActionable(candidates)
+	picked, overflow := selectActionable(candidates, actionableReceiptCap)
 	if len(picked) != 5 || picked[4].GroupID != "e" || overflow != 1 {
 		t.Fatalf("picked=%+v overflow=%d", picked, overflow)
 	}
@@ -136,5 +136,31 @@ func TestToReceiptItemsRejectsUnsupportedCandidates(t *testing.T) {
 	}
 	if _, err := toReceiptItems([]actionableCandidate{{GroupID: "g", Kind: "friction", Status: "resolved"}}); err == nil {
 		t.Fatal("unsupported status accepted")
+	}
+}
+
+// TestEvaluateActionableKeepsTheReceiptsCapAtFive pins the OFF/M1 receipts
+// lane. The ON card lane raised its bound to the renderer's cap; OFF is the
+// rollback path and must stay byte-identical at five.
+func TestEvaluateActionableKeepsTheReceiptsCapAtFive(t *testing.T) {
+	now := time.Date(2026, 8, 26, 8, 0, 0, 0, time.UTC)
+	candidates := make([]actionableCandidate, 0, 8)
+	for i := 0; i < 8; i++ {
+		impact := int64(100 - i)
+		stamp := now.Add(-time.Duration(i+1) * 24 * time.Hour)
+		candidates = append(candidates, actionableCandidate{
+			GroupID: string(rune('a' + i)), Kind: "friction", Status: "needs_human",
+			Title: "candidate", OccurrenceCount: int64(50 - i), ImpactVisits: &impact,
+			HasValidatedDiagnosis: true, ActionableSince: &stamp,
+		})
+	}
+
+	eval := evaluateActionable(candidates, nil, now)
+
+	if len(eval.Included) != 5 || eval.Overflow != 3 {
+		t.Fatalf("OFF receipts selected %d with overflow %d, want 5 and 3", len(eval.Included), eval.Overflow)
+	}
+	if actionableReceiptCap != 5 {
+		t.Fatalf("actionableReceiptCap = %d, want 5", actionableReceiptCap)
 	}
 }

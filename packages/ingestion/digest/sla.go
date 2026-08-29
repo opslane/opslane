@@ -112,7 +112,7 @@ func CheckDeliverySLA(ctx context.Context, pool *pgxpool.Pool, projectID string,
 	// would bury the real omissions this diagnostic exists to catch.
 	report.OmittedActionable, err = queryFindings(ctx, pool, "omitted_actionable", `
 		WITH latest AS (
-			SELECT DISTINCT ON (project_id) id,project_id,window_to
+			SELECT DISTINCT ON (project_id) id,project_id,window_to,unified_cards_mode
 			  FROM digest_runs r
 			 WHERE status='delivered' AND ($1='' OR project_id::text=$1)
 			   AND created_at >= $2::timestamptz-interval '`+slaLookback+`'
@@ -122,7 +122,12 @@ func CheckDeliverySLA(ctx context.Context, pool *pgxpool.Pool, projectID string,
 		SELECT latest.project_id::text,latest.id::text,g.id::text,'omitted_actionable'
 		  FROM latest
 		  JOIN error_groups g ON g.project_id=latest.project_id
-		 WHERE g.status IN `+actionableStatusSQL+`
+		 -- Judged by the mode the run actually executed under: PR statuses were
+		 -- not deliverable in OFF, so flagging them against an OFF run would be
+		 -- a permanent false finding.
+		 WHERE (CASE WHEN latest.unified_cards_mode='on'
+		             THEN g.status IN `+string(onCardStatusSQL)+`
+		             ELSE g.status IN `+string(m1ActionableStatusSQL)+` END)
 		   AND g.actionable_since < latest.window_to
 		   AND (g.snoozed_until IS NULL OR g.snoozed_until <= $2)
 		   AND EXISTS (
@@ -143,7 +148,7 @@ func CheckDeliverySLA(ctx context.Context, pool *pgxpool.Pool, projectID string,
 	reasonList := "'" + strings.Join(knownReasonCodes, "','") + "'"
 	report.ReconciliationFailures, err = queryFindings(ctx, pool, "reconciliation_failures", `
 		WITH latest AS (
-			SELECT DISTINCT ON (project_id) id,project_id,rendered_payload
+			SELECT DISTINCT ON (project_id) id,project_id,rendered_payload,unified_cards_mode
 			  FROM digest_runs r
 			 WHERE status='delivered' AND ($1='' OR project_id::text=$1)
 			   AND created_at >= $2::timestamptz-interval '`+slaLookback+`'
@@ -161,6 +166,12 @@ func CheckDeliverySLA(ctx context.Context, pool *pgxpool.Pool, projectID string,
 			  FROM latest
 			  JOIN digest_run_candidate_evaluations evaluation ON evaluation.digest_run_id=latest.id
 			 WHERE evaluation.primary_reason_code NOT IN (`+reasonList+`)
+			UNION ALL
+			SELECT latest.project_id,latest.id,evaluation.error_group_id,'unified_selected_still_frozen'
+			  FROM latest
+			  JOIN digest_run_candidate_evaluations evaluation ON evaluation.digest_run_id=latest.id
+			 WHERE latest.unified_cards_mode='on' AND evaluation.outcome='included'
+			   AND evaluation.phase='freeze'
 		)
 		SELECT project_id::text,id::text,COALESCE(error_group_id::text,''),diagnostic
 		  FROM failures ORDER BY project_id,id,error_group_id NULLS FIRST`, projectID, now)
@@ -172,10 +183,15 @@ func CheckDeliverySLA(ctx context.Context, pool *pgxpool.Pool, projectID string,
 	// the snooze endpoint; a direct database write can exceed it and silently
 	// suppress an incident from every digest AND from the omitted_actionable
 	// diagnostic above. This is the tripwire for that channel.
+	//
+	// Not mode-branched, unlike the run-scoped diagnostics above: this one has
+	// no run to judge by, and the snooze endpoint now accepts the PR statuses,
+	// so an over-cap snooze on one has to be visible. In OFF it can only fire
+	// on a snooze that endpoint newly made possible.
 	report.LongSnoozes, err = queryFindings(ctx, pool, "long_snoozes", `
 		SELECT project_id::text,'',id::text,'long_snoozes'
 		  FROM error_groups
-		 WHERE status IN `+actionableStatusSQL+`
+		 WHERE status IN `+string(onCardStatusSQL)+`
 		   AND snoozed_until > $2::timestamptz + interval '31 days'
 		   AND ($1='' OR project_id::text=$1)
 		 ORDER BY project_id,id`, projectID, now)

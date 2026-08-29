@@ -52,6 +52,23 @@ func seedActionableGroup(t *testing.T, pool *pgxpool.Pool, projectID, environmen
 	return groupID, episodeID
 }
 
+// quietBackgroundActionable takes the shared fixture's standing needs_human and
+// pr_created groups out of the ON lane, so a test sees only the incident it
+// seeded. In ON every incident awaiting a human IS a candidate — that is the
+// design — which is why these long-standing fixtures now surface everywhere.
+func quietBackgroundActionable(t *testing.T, pool *pgxpool.Pool, projectID string, keep ...string) {
+	t.Helper()
+	if keep == nil {
+		keep = []string{}
+	}
+	if _, err := pool.Exec(context.Background(), `UPDATE error_groups SET status='resolved'
+		WHERE project_id=$1
+		  AND status IN ('awaiting_approval','needs_human','pr_created','pr_draft')
+		  AND NOT (id::text = ANY($2::text[]))`, projectID, keep); err != nil {
+		t.Fatalf("quiet background actionable groups: %v", err)
+	}
+}
+
 func cleanupActionableDiagnoses(t *testing.T, pool *pgxpool.Pool, projectID string) {
 	t.Helper()
 	t.Cleanup(func() {
@@ -273,7 +290,7 @@ func TestLoadActionableCandidatesKeepsEveryLedgerCandidateOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer tx.Rollback(ctx)
-	candidates, err := loadActionableCandidates(ctx, tx, fixture.ProjectID)
+	candidates, err := loadActionableCandidates(ctx, tx, fixture.ProjectID, m1ActionableStatusSQL)
 	if err != nil {
 		t.Fatal(err)
 	}

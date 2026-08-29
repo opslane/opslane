@@ -1475,10 +1475,13 @@ func (d *Dependencies) SnoozeIncident(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// The extended set matches the ON digest lane: PR review is an action a
+	// reader can defer. In OFF a snoozed PR incident is accepted and simply has
+	// no digest effect, because OFF's receipts lane never showed it.
 	result, err := d.Queries.Pool().Exec(r.Context(), `UPDATE error_groups
 		SET snoozed_until=$1,updated_at=now()
 		WHERE id=$2 AND project_id=$3
-		  AND status IN ('awaiting_approval','needs_human')`, until, incidentID, projectID)
+		  AND status IN ('awaiting_approval','needs_human','pr_created','pr_draft')`, until, incidentID, projectID)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "failed to snooze incident")
 		return

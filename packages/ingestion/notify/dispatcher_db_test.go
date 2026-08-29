@@ -190,14 +190,20 @@ func TestDispatcherRecoversPerDeliveryPanic(t *testing.T) {
 	seed := seedDelivery(t, pool, cipher, "http://sink.test:9999/hook")
 	d := New(pool, cipher, Options{ExtraHosts: []string{"sink.test:9999"}})
 	claims, err := d.claim(context.Background())
-	if err != nil || len(claims) != 1 {
-		t.Fatalf("claim=%+v err=%v", claims, err)
+	if err != nil {
+		t.Fatalf("claim err=%v", err)
+	}
+	// Scoped to the seeded row: packages run concurrently under `go test ./...`
+	// and any of them may have a claimable delivery in flight (see #397).
+	claim, ok := claimFor(claims, seed.DeliveryID)
+	if !ok {
+		t.Fatalf("seeded delivery not claimed; batch = %+v", claims)
 	}
 	original := Formatters["slack"]
 	Formatters["slack"] = panicFormatter{}
 	t.Cleanup(func() { Formatters["slack"] = original })
 
-	d.deliverClaim(context.Background(), claims[0])
+	d.deliverClaim(context.Background(), claim)
 	var status string
 	var reason *string
 	if err := pool.QueryRow(context.Background(), `SELECT status, last_error FROM outbound_deliveries WHERE id = $1`, seed.DeliveryID).Scan(&status, &reason); err != nil {
@@ -218,10 +224,14 @@ func TestDispatcherNetworkFailureDoesNotPersistWebhook(t *testing.T) {
 		return nil, &url.Error{Op: "Post", URL: request.URL.String(), Err: errors.New("dial " + request.URL.String())}
 	})}
 	claims, err := d.claim(context.Background())
-	if err != nil || len(claims) != 1 {
-		t.Fatalf("claim=%+v err=%v", claims, err)
+	if err != nil {
+		t.Fatalf("claim err=%v", err)
 	}
-	d.deliverClaim(context.Background(), claims[0])
+	claim, ok := claimFor(claims, seed.DeliveryID)
+	if !ok {
+		t.Fatalf("seeded delivery not claimed; batch = %+v", claims)
+	}
+	d.deliverClaim(context.Background(), claim)
 	var reason *string
 	if err := pool.QueryRow(context.Background(), `SELECT last_error FROM outbound_deliveries WHERE id = $1`, seed.DeliveryID).Scan(&reason); err != nil {
 		t.Fatal(err)

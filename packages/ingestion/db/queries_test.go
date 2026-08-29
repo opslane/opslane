@@ -1432,3 +1432,108 @@ func TestDiagnosisDecisionsAreImmutable(t *testing.T) {
 		}
 	})
 }
+
+// TestProcessPRWebhook_ResolvesTheDigestCardLane is the hard gate the unified
+// card lane depends on: an ON digest repeats a pr_created / pr_draft incident
+// every day until something moves it, so if the PR webhook did not move it,
+// merged PRs would nag forever. Merging leaves the lane outright; closing a
+// draft keeps the incident but changes the ask, which the lifecycle trigger
+// answers by resetting the waiting age.
+func TestProcessPRWebhook_ResolvesTheDigestCardLane(t *testing.T) {
+	const onCardStatuses = "('awaiting_approval','needs_human','pr_created','pr_draft')"
+	inLane := func(t *testing.T, pool *pgxpool.Pool, groupID string) bool {
+		t.Helper()
+		var present bool
+		if err := pool.QueryRow(context.Background(),
+			`SELECT status IN `+onCardStatuses+` FROM error_groups WHERE id=$1`, groupID).Scan(&present); err != nil {
+			t.Fatalf("read lane membership: %v", err)
+		}
+		return present
+	}
+
+	t.Run("merge removes the incident from the lane", func(t *testing.T) {
+		pool := testPool(t)
+		ctx := context.Background()
+		q := db.New(pool)
+		_, projID, _, groupID := seedGroup(t, pool, q, "pr-lane-merge")
+		if _, err := pool.Exec(ctx, `UPDATE error_groups
+			SET status='pr_created',pr_number=91,pr_url='https://github.com/org/pr-lane-merge/pull/91'
+			WHERE id=$1 AND project_id=$2`, groupID, projID); err != nil {
+			t.Fatal(err)
+		}
+		if !inLane(t, pool, groupID) {
+			t.Fatal("seeded PR incident is not in the card lane")
+		}
+		if _, err := q.ProcessPRWebhook(ctx, "org/pr-lane-merge", 91, true, "delivery-lane-merge", time.Now()); err != nil {
+			t.Fatalf("ProcessPRWebhook: %v", err)
+		}
+		var status string
+		if err := pool.QueryRow(ctx, `SELECT status FROM error_groups WHERE id=$1`, groupID).Scan(&status); err != nil {
+			t.Fatal(err)
+		}
+		if status != "merged" || inLane(t, pool, groupID) {
+			t.Fatalf("merged PR left status %q in the card lane", status)
+		}
+	})
+
+	t.Run("closing a draft keeps the incident and resets the ask", func(t *testing.T) {
+		pool := testPool(t)
+		ctx := context.Background()
+		q := db.New(pool)
+		_, projID, _, groupID := seedGroup(t, pool, q, "pr-lane-draft")
+		if _, err := pool.Exec(ctx, `UPDATE error_groups
+			SET status='pr_draft',pr_number=92,pr_url='https://github.com/org/pr-lane-draft/pull/92',
+			    reason_code='low_confidence_fix',reason_message='verification incomplete',
+			    remediation='Review the draft PR.'
+			WHERE id=$1 AND project_id=$2`, groupID, projID); err != nil {
+			t.Fatal(err)
+		}
+		var beforeSince *time.Time
+		if err := pool.QueryRow(ctx, `SELECT actionable_since FROM error_groups WHERE id=$1`,
+			groupID).Scan(&beforeSince); err != nil {
+			t.Fatal(err)
+		}
+		if beforeSince == nil {
+			t.Fatal("pr_draft did not enter the actionable lifecycle")
+		}
+		if _, err := q.ProcessPRWebhook(ctx, "org/pr-lane-draft", 92, false, "delivery-lane-draft", time.Now()); err != nil {
+			t.Fatalf("ProcessPRWebhook: %v", err)
+		}
+		var status string
+		var afterSince *time.Time
+		if err := pool.QueryRow(ctx, `SELECT status,actionable_since FROM error_groups WHERE id=$1`,
+			groupID).Scan(&status, &afterSince); err != nil {
+			t.Fatal(err)
+		}
+		if status != "needs_human" || !inLane(t, pool, groupID) {
+			t.Fatalf("closed draft left status %q outside the card lane", status)
+		}
+		// "Review the fix PR." became "Review the investigation.": a different
+		// ask, so the waiting age restarts.
+		if afterSince == nil || !afterSince.After(*beforeSince) {
+			t.Fatalf("closed draft did not reset the waiting age: %v -> %v", beforeSince, afterSince)
+		}
+	})
+
+	t.Run("closing an open error PR removes the incident from the lane", func(t *testing.T) {
+		pool := testPool(t)
+		ctx := context.Background()
+		q := db.New(pool)
+		_, projID, _, groupID := seedGroup(t, pool, q, "pr-lane-close")
+		if _, err := pool.Exec(ctx, `UPDATE error_groups
+			SET status='pr_created',pr_number=93,pr_url='https://github.com/org/pr-lane-close/pull/93'
+			WHERE id=$1 AND project_id=$2`, groupID, projID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := q.ProcessPRWebhook(ctx, "org/pr-lane-close", 93, false, "delivery-lane-close", time.Now()); err != nil {
+			t.Fatalf("ProcessPRWebhook: %v", err)
+		}
+		var status string
+		if err := pool.QueryRow(ctx, `SELECT status FROM error_groups WHERE id=$1`, groupID).Scan(&status); err != nil {
+			t.Fatal(err)
+		}
+		if status != "investigated" || inLane(t, pool, groupID) {
+			t.Fatalf("closed error PR left status %q in the card lane", status)
+		}
+	})
+}

@@ -87,24 +87,36 @@ type DigestPayload struct {
 	// cap; the renderer's "And N more" line reports it.
 	OverflowCount int    `json:"overflow_count,omitempty"`
 	DeliveryAlert string `json:"delivery_alert,omitempty"`
+	// UnifiedCards is the run's DIGEST_UNIFIED_CARDS mode, stamped by the
+	// validator. It is the renderer's only mode signal, and it exists because
+	// the two modes budget the render cap differently: ON is one list of
+	// incidents where a receipt is a card that could not be authored, so cards
+	// and receipts share the cap; OFF is the rollback path, where the cap
+	// covers generated cards only and receipts render below them with their own
+	// overflow line. Absent (false) means OFF, so a payload written before this
+	// field existed renders exactly as it did then.
+	UnifiedCards bool `json:"unified_cards,omitempty"`
 }
 
 // GeneratedDigestCard is model-authored prose grounded in a frozen candidate.
 // Its IDs, counts, accounts and links have all been mechanically validated.
 type GeneratedDigestCard struct {
-	EpisodeID       string   `json:"episode_id"`
-	IncidentID      string   `json:"incident_id"`
-	Title           string   `json:"title"`
-	Label           string   `json:"label"`
-	Outcome         string   `json:"outcome,omitempty"`
-	Copy            string   `json:"copy"`
-	Action          string   `json:"action"`
-	AffectedUsers   int      `json:"affected_users"`
-	OccurrenceCount int      `json:"occurrence_count,omitempty"`
-	Accounts        []string `json:"accounts"`
-	PRURL           string   `json:"pr_url,omitempty"`
-	ReplayURL       string   `json:"replay_url,omitempty"`
-	PRNumber        int      `json:"pr_number,omitempty"`
+	EpisodeID       string     `json:"episode_id"`
+	IncidentID      string     `json:"incident_id"`
+	Kind            string     `json:"kind,omitempty"`
+	Title           string     `json:"title"`
+	Label           string     `json:"label"`
+	Outcome         string     `json:"outcome,omitempty"`
+	Copy            string     `json:"copy"`
+	Action          string     `json:"action"`
+	AffectedUsers   int        `json:"affected_users"`
+	OccurrenceCount int        `json:"occurrence_count,omitempty"`
+	SignalCount     int64      `json:"signal_count,omitempty"`
+	Accounts        []string   `json:"accounts"`
+	PRURL           string     `json:"pr_url,omitempty"`
+	ReplayURL       string     `json:"replay_url,omitempty"`
+	PRNumber        int        `json:"pr_number,omitempty"`
+	ActionableSince *time.Time `json:"actionable_since,omitempty"`
 }
 
 // DigestTriageCounts are point-in-time counts rendered in the digest header.

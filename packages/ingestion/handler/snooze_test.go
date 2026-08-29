@@ -131,3 +131,63 @@ func TestSnoozeIncidentContractAndAuthorization(t *testing.T) {
 		t.Fatalf("null until did not clear snooze: %v", stored)
 	}
 }
+
+// TestSnoozeIncidentAcceptsPRReviewStatuses: PR review is a human action in the
+// ON digest lane, so a reader must be able to defer it. In OFF the snooze is
+// still accepted; it simply has no digest effect, because OFF's receipts lane
+// never showed a PR-status incident in the first place.
+func TestSnoozeIncidentAcceptsPRReviewStatuses(t *testing.T) {
+	router, queries, pool := authTestRouter(t)
+	ctx := context.Background()
+	orgID, projectID, _, _ := seedTenant(t, queries)
+	t.Cleanup(func() { cleanupTenantHandler(t, pool, orgID) })
+	token, err := auth.SignAccessToken([]byte(authTestJWTSecret), uuid.NewString(), orgID, "snooze-pr@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	until := time.Now().UTC().Add(3 * 24 * time.Hour).Truncate(time.Second)
+
+	for _, tc := range []struct {
+		status string
+		want   int
+	}{
+		{status: "awaiting_approval", want: http.StatusNoContent},
+		{status: "needs_human", want: http.StatusNoContent},
+		{status: "pr_created", want: http.StatusNoContent},
+		{status: "pr_draft", want: http.StatusNoContent},
+		{status: "investigated", want: http.StatusConflict},
+		{status: "merged", want: http.StatusConflict},
+	} {
+		t.Run(tc.status, func(t *testing.T) {
+			var incidentID string
+			if err := pool.QueryRow(ctx, `INSERT INTO error_groups
+				(project_id,fingerprint,title,kind,status,first_seen,last_seen,pr_url)
+				VALUES ($1,$2,'snooze pr candidate','error',$3::error_group_status,now(),now(),
+				 'https://github.com/acme/shop/pull/3') RETURNING id::text`,
+				projectID, "snooze-pr-"+uuid.NewString(), tc.status).Scan(&incidentID); err != nil {
+				t.Fatal(err)
+			}
+			request := httptest.NewRequest(http.MethodPost,
+				"/api/v1/projects/"+projectID+"/incidents/"+incidentID+"/snooze",
+				strings.NewReader(`{"until":"`+until.Format(time.RFC3339)+`"}`))
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("Authorization", "Bearer "+token)
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, request)
+			if response.Code != tc.want {
+				t.Fatalf("snooze %s status=%d want=%d body=%s", tc.status, response.Code, tc.want, response.Body.String())
+			}
+			if tc.want != http.StatusNoContent {
+				return
+			}
+			var stored *time.Time
+			if err := pool.QueryRow(ctx, `SELECT snoozed_until FROM error_groups WHERE id=$1`,
+				incidentID).Scan(&stored); err != nil {
+				t.Fatal(err)
+			}
+			if stored == nil || !stored.Equal(until) {
+				t.Fatalf("stored snooze for %s = %v, want %s", tc.status, stored, until)
+			}
+		})
+	}
+}
