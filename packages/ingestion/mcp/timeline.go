@@ -32,6 +32,10 @@ type TimelineInput struct {
 	NetworkTimings json.RawMessage
 	Failures       []TimelineFailure
 	AnalysisRan    bool
+	// Preamble is a caller-owned line printed above the timeline. It counts
+	// against the payload budget here rather than being prepended by the
+	// caller, which would push the result past PayloadLimit.
+	Preamble string
 }
 
 type timelineEntry struct {
@@ -76,13 +80,25 @@ func relativeSeconds(atMs, anchorMs int64) string {
 	return fmt.Sprintf("%+.1f", float64(atMs-anchorMs)/1000)
 }
 
-func decodeEvidenceArray[T any](raw json.RawMessage, label string) ([]T, error) {
+// decodeEvidenceArray reads one stored evidence column. strict says whether a
+// non-array is corruption or merely a shape the ingest API tolerates.
+//
+// network_timings is strict: migration 033 puts a jsonb_typeof = 'array' CHECK
+// on it, so anything else is a schema regression worth surfacing. breadcrumbs
+// carries no such constraint and POST /api/v1/events stores client JSON
+// verbatim (handler/error_event.go), so `null` and objects are already on disk
+// and are absence, not corruption. Erroring on those would make the tool
+// permanently unusable for every issue anchored on such an event.
+func decodeEvidenceArray[T any](raw json.RawMessage, label string, strict bool) ([]T, error) {
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 {
 		return nil, nil
 	}
 	if string(trimmed) == "null" || trimmed[0] != '[' {
-		return nil, fmt.Errorf("%s is not the expected array", label)
+		if strict {
+			return nil, fmt.Errorf("%s is not the expected array", label)
+		}
+		return nil, nil
 	}
 	var out []T
 	if err := json.Unmarshal(trimmed, &out); err != nil {
@@ -97,11 +113,11 @@ func decodeEvidenceArray[T any](raw json.RawMessage, label string) ([]T, error) 
 // FormatTimeline renders one anchor event's browser activity and analyzed
 // request failures without exposing raw recording data.
 func FormatTimeline(in TimelineInput) (string, string, error) {
-	crumbs, err := decodeEvidenceArray[rawBreadcrumb](in.Breadcrumbs, "breadcrumbs")
+	crumbs, err := decodeEvidenceArray[rawBreadcrumb](in.Breadcrumbs, "breadcrumbs", false)
 	if err != nil {
 		return "", "", err
 	}
-	timings, err := decodeEvidenceArray[rawTiming](in.NetworkTimings, "network_timings")
+	timings, err := decodeEvidenceArray[rawTiming](in.NetworkTimings, "network_timings", true)
 	if err != nil {
 		return "", "", err
 	}
@@ -156,10 +172,13 @@ func FormatTimeline(in TimelineInput) (string, string, error) {
 	})
 
 	var fixed []string
+	if in.Preamble != "" {
+		fixed = append(fixed, in.Preamble, "")
+	}
 	if in.SessionID == "" {
-		fixed = []string{"Timeline for this event (t=0 is the error; times in seconds):"}
+		fixed = append(fixed, "Timeline for this event (t=0 is the error; times in seconds):")
 	} else {
-		fixed = []string{fmt.Sprintf("Timeline for session %s (t=0 is the error; times in seconds):", Fence(Truncate(in.SessionID, SelectorLimit)))}
+		fixed = append(fixed, fmt.Sprintf("Timeline for session %s (t=0 is the error; times in seconds):", Fence(Truncate(in.SessionID, SelectorLimit))))
 	}
 	tail := make([]string, 0, 12)
 	if len(timings) == 0 {

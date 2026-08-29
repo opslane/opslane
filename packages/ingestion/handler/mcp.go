@@ -188,8 +188,9 @@ func (d *Dependencies) registerMCPTools(server *mcpsdk.Server) {
 	mcpsdk.AddTool(server, &mcpsdk.Tool{
 		Name: "opslane_session_timeline",
 		Description: "A time-ordered view of what the user's browser did around one issue's " +
-			"error: network calls with status and duration, console errors, clicks, and " +
-			"the analyzed failing requests. Reads stored evidence; never the raw recording.",
+			"error: network calls with status and duration, console errors, and the " +
+			"analyzed failing requests with the action that triggered each. Reads stored " +
+			"evidence; never the raw recording.",
 	}, trackToolQuality("opslane_session_timeline", func(ctx context.Context, _ *mcpsdk.CallToolRequest, input timelineArguments) (*mcpsdk.CallToolResult, string, error) {
 		incidentID, ok := parseIncidentID(input.ID)
 		if !ok {
@@ -297,26 +298,24 @@ func (d *Dependencies) frictionTimeline(ctx context.Context, projectID, incident
 	if err != nil {
 		return nil, "", err
 	}
-	lines := []string{"Friction issues carry no error events, so browser-log evidence only exists for thrown errors."}
-	quality := "empty"
-	if ok {
-		failures, analysisRan, err := d.Queries.RequestFailuresNear(ctx, projectID, sessionID, anchorMs, 60_000)
-		if err != nil {
-			return nil, "", err
-		}
-		body, timelineQuality, err := mcpformat.FormatTimeline(mcpformat.TimelineInput{
-			SessionID: sessionID, AnchorMs: anchorMs,
-			Failures: toTimelineFailures(failures), AnalysisRan: analysisRan,
-		})
-		if err != nil {
-			return nil, "", err
-		}
-		lines = append(lines, "", body)
-		quality = timelineQuality
-	} else {
-		lines = append(lines, "No watchable session is linked to this issue."+timelineFooter)
+	preamble := "Friction issues carry no error events, so browser-log evidence only exists for thrown errors."
+	if !ok {
+		return textToolResult(preamble + "\nNo watchable session is linked to this issue." + timelineFooter), "empty", nil
 	}
-	return textToolResult(strings.Join(lines, "\n")), quality, nil
+	failures, analysisRan, err := d.Queries.RequestFailuresNear(ctx, projectID, sessionID, anchorMs, 60_000)
+	if err != nil {
+		return nil, "", err
+	}
+	// FormatTimeline clamps to exactly PayloadLimit, so the preamble has to be
+	// part of its budget rather than prepended after the fact.
+	body, quality, err := mcpformat.FormatTimeline(mcpformat.TimelineInput{
+		SessionID: sessionID, AnchorMs: anchorMs, Preamble: preamble,
+		Failures: toTimelineFailures(failures), AnalysisRan: analysisRan,
+	})
+	if err != nil {
+		return nil, "", err
+	}
+	return textToolResult(body), quality, nil
 }
 
 func textToolResult(body string) *mcpsdk.CallToolResult {

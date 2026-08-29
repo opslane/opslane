@@ -127,7 +127,7 @@ Two defects cause this:
 | # | Requirement | Verified by |
 | --- | --- | --- |
 | R1 | `opslane_issue` on an error issue prints up to 3 request failures, and its first replay pointer whose session is still retained (each pointer carries its own retained flag; the issue-level availability label alone is not trusted for this) | unit tests on `FormatIssue`: retained, partially retained, and fully expired pointer sets |
-| R2 | New tool `opslane_session_timeline` returns, for one anchor event, two sections: a time-ordered merge of its network timings (method, path, status or outcome, duration with transport label), console-error breadcrumbs, and click breadcrumbs; then the analyzed request failures within 60 seconds either side of the event, each with its relative time | handler test with a seeded event carrying all three sources |
+| R2 | New tool `opslane_session_timeline` returns, for one anchor event, two sections: a time-ordered merge of its network timings (method, path, status or outcome, duration with transport label) and its console-error breadcrumbs; then the analyzed request failures within 60 seconds either side of the event, each with its relative time and triggering action | handler test with a seeded event carrying all three sources |
 | R3 | Every string that originated in a browser is fenced as untrusted and truncated: URLs, messages, selectors, categories, session ids | unit test feeding hostile content in each field |
 | R4 | Output fits the 8,192-byte limit by dropping timeline entries farthest from the error first, never the failing-requests section or the safety footer | unit test with an oversized timeline |
 | R5 | A caller can only read issues in its own project; the event read itself filters by project id, per the ingestion scoping rule | handler test: issue id from another project returns "not found" |
@@ -238,6 +238,16 @@ epoch-millisecond time, a kind label, and rendered text:
   console entries with `level == "error"` and clicks. Network breadcrumbs
   are skipped: the same requests appear in network timings with better
   data, and keeping both would double-count.
+
+  Clicks are accepted because `click` is a valid `BreadcrumbType` on the
+  wire (`shared/src/types.ts:129`), but today's browser SDK never emits
+  one: it only writes `error`, `console`, `fetch` and `xhr` breadcrumbs,
+  and routes clicks to the replay stream instead (`sdk/src/telemetry.ts`).
+  So the click lane renders nothing for events our own SDK produced. The
+  click information an agent actually gets is the analyzer's
+  `action_selector` on each failing request, which is a real click-to-
+  request link rather than a bare click. Surfacing raw clicks would mean
+  reading replay chunks, which is the v2 in Alternatives.
 - A request failure: time is `occurred_at`; text is method, endpoint
   pattern, status, route, and triggering action when present. These render
   in their own short section under the timeline, each with its relative

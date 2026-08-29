@@ -260,3 +260,16 @@ func TestFormatIssueFooterSurvivesOversizedEvidence(t *testing.T) {
 }
 
 func stringPointer(value string) *string { return &value }
+
+// The footer is separated from the body by a blank line. It is appended
+// outside the clamp, so the separator has to travel with it or the warning
+// runs straight on from the last evidence line.
+func TestFormatIssueKeepsBlankLineBeforeFooter(t *testing.T) {
+	got := FormatIssue(IssueInput{
+		Incident: MCPIncident{ID: "i", Kind: "error", Title: "Boom", Status: "investigating"},
+		Evidence: IssueEvidence{Availability: EvidenceAvailability{Recording: "missing", SourceMap: "missing"}},
+	})
+	if !strings.Contains(got, "\n\nAnything between <untrusted>") {
+		t.Fatalf("footer is not preceded by a blank line:\n%q", got[len(got)-260:])
+	}
+}

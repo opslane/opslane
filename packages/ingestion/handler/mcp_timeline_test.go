@@ -258,3 +258,46 @@ func TestMCPSessionTimelineFriction(t *testing.T) {
 		t.Fatalf("friction statement missing:\n%s", text)
 	}
 }
+
+// A retained session outranks anchor kind. FormatIssue points the agent at the
+// first pointer whose session survived; if the timeline still insisted on the
+// threshold anchor, the two tools would disagree about the same issue and the
+// retained session's analyzed failures would never be read.
+func TestTimelineAnchorPrefersRetainedSessionOverAnchorKind(t *testing.T) {
+	deps, pool := testDeps(t)
+	ctx := context.Background()
+	orgID, projectID, envID, _ := seedTenant(t, deps.Queries)
+	t.Cleanup(func() { cleanupTenantHandler(t, pool, orgID) })
+
+	groupID, episodeID := seedEpisodeWithAnchor(t, pool, projectID, envID, `{"version":2,"frames":[]}`)
+	live := fmt.Sprintf("sess_retained_%d", time.Now().UnixNano())
+	seedReadableSession(t, deps.Queries, projectID, envID, live, time.Now().UTC().Add(-time.Minute))
+	t.Cleanup(func() { _, _ = pool.Exec(context.Background(), `DELETE FROM sessions WHERE id=$1`, live) })
+
+	// The seeded threshold anchor's event points at a session that retention
+	// already took; a 'first' anchor points at one that survived.
+	if _, err := pool.Exec(ctx, `UPDATE error_events SET session_id='sess_swept_away' WHERE error_group_id=$1`, groupID); err != nil {
+		t.Fatal(err)
+	}
+	var firstEventID string
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO error_events (project_id, environment_id, error_group_id, "timestamp", platform,
+		   error_type, error_message, stack_trace_raw, session_id)
+		 VALUES ($1,$2,$3,now(),'javascript','TypeError','boom','at a (b.min.js:1:2)',$4)
+		 RETURNING id`, projectID, envID, groupID, live).Scan(&firstEventID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO issue_evidence_anchors (project_id, episode_id, anchor_kind, event_id)
+		 VALUES ($1,$2,'first',$3)`, projectID, episodeID, firstEventID); err != nil {
+		t.Fatal(err)
+	}
+
+	anchor, state, err := deps.Queries.TimelineAnchorEvent(ctx, projectID, groupID)
+	if err != nil || state != "ok" {
+		t.Fatalf("state=%q err=%v", state, err)
+	}
+	if anchor.SessionID != live || !anchor.SessionRetained {
+		t.Fatalf("timeline chose %+v, want the retained session %s", anchor, live)
+	}
+}

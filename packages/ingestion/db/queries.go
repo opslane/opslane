@@ -315,7 +315,13 @@ func (q *Queries) TimelineAnchorEvent(ctx context.Context, projectID, groupID st
 		   LEFT JOIN sessions s ON s.id = e.session_id AND s.project_id = a.project_id
 		  WHERE a.project_id = $1 AND a.episode_id = $2
 		    AND a.anchor_kind IN ('threshold', 'first')
-		  ORDER BY CASE a.anchor_kind WHEN 'threshold' THEN 0 ELSE 1 END
+		  -- A retained session outranks anchor kind. FormatIssue points the agent
+		  -- at the first pointer whose session survived, so preferring the
+		  -- threshold anchor unconditionally here would answer "session deleted"
+		  -- for the very issue opslane_issue just said to look at.
+		  ORDER BY CASE WHEN s.id IS NOT NULL AND s.status <> 'deleting' THEN 0 ELSE 1 END,
+		           CASE a.anchor_kind WHEN 'threshold' THEN 0 ELSE 1 END,
+		           e."timestamp" DESC, e.id
 		  LIMIT 1`, projectID, episodeID,
 	).Scan(&anchor.EventID, &sessionID, &anchor.AnchorMs, &anchor.Breadcrumbs, &anchor.NetworkTimings, &retainedID)
 	if errors.Is(err, pgx.ErrNoRows) {
