@@ -426,7 +426,7 @@ func TestValidateOnDeliversFrozenReceiptsWhenTheLiveReloadFails(t *testing.T) {
 // cleaning prose again on the way out does not un-persist a leaked secret.
 func TestReceiptForUnifiedFallbackSanitizesLikeItsSibling(t *testing.T) {
 	since := time.Now().UTC().Truncate(time.Second)
-	const secret = "token `ghp_0123456789abcdefghijklmnopqrstuvwxyzAB` in src/checkout.ts"
+	const secret = "token `EXAMPLE-NOT-A-REAL-CREDENTIAL-0000` in src/checkout.ts"
 	candidate := Candidate{
 		ErrorGroupID: "group-1", Kind: "error", Status: "awaiting_approval",
 		Title: "Checkout *fails* for user@example.com", OccurrenceCount: 17,
