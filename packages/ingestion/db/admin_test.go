@@ -43,17 +43,13 @@ func TestAdminOverviewHourlyBucketsAreZeroFilledAndBoundarySafe(t *testing.T) {
 	if len(before.Events.Hourly) != 48 {
 		t.Fatalf("got %d hourly buckets, want 48", len(before.Events.Hourly))
 	}
-	if _, ok := before.Jobs.ByType["ci_watch"]; !ok {
-		t.Fatal("admin job overview omitted ci_watch")
+	for _, jobType := range []string{"investigate", "fix", "error_fix", "session_analysis", "ci_watch", "route_map", "product_context", "issue_inquiry", "digest_write", "score_sync", "stack_resolve"} {
+		if _, ok := before.Jobs.ByType[jobType]; !ok {
+			t.Fatalf("admin job overview omitted %s", jobType)
+		}
 	}
-	if _, ok := before.Jobs.ByType["route_map"]; !ok {
-		t.Fatal("admin job overview omitted route_map")
-	}
-	if _, ok := before.Jobs.ByType["product_context"]; !ok {
-		t.Fatal("admin job overview omitted product_context")
-	}
-	if _, ok := before.Jobs.ByType["score_sync"]; !ok {
-		t.Fatal("admin job overview omitted score_sync")
+	if len(before.Jobs.ByType) != 11 {
+		t.Fatalf("admin job overview has %d job types, want 11", len(before.Jobs.ByType))
 	}
 	for i := 1; i < len(before.Events.Hourly); i++ {
 		if before.Events.Hourly[i].Hour.Sub(before.Events.Hourly[i-1].Hour) != time.Hour {

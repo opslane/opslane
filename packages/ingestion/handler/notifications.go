@@ -169,13 +169,17 @@ func (d *Dependencies) CreateNotificationDestinationEndpoint(w http.ResponseWrit
 		return
 	}
 
+	// Notification endpoints are Slack-only today. The stored destination type
+	// is also the encryption AAD; adding a type requires type-specific config
+	// validation and a migration widening the database CHECK.
+	destinationType := "slack"
 	destinationID := uuid.NewString()
 	configJSON, err := json.Marshal(notificationConfig{WebhookURL: request.WebhookURL})
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "failed to encode notification configuration")
 		return
 	}
-	sealed, err := d.ConfigCipher.Seal(configJSON, notify.ConfigAAD(destinationID, projectID, "slack"))
+	sealed, err := d.ConfigCipher.Seal(configJSON, notify.ConfigAAD(destinationID, projectID, destinationType))
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "failed to encrypt notification configuration")
 		return
@@ -183,7 +187,7 @@ func (d *Dependencies) CreateNotificationDestinationEndpoint(w http.ResponseWrit
 	created, err := d.Queries.CreateNotificationDestination(r.Context(), OrgIDFromCtx(r.Context()), projectID, db.NotificationDestination{
 		ID:                destinationID,
 		ProjectID:         projectID,
-		Type:              "slack",
+		Type:              destinationType,
 		Name:              request.Name,
 		ConfigEncrypted:   sealed,
 		ConfigFingerprint: notify.FingerprintURL(request.WebhookURL),
@@ -246,12 +250,21 @@ func (d *Dependencies) UpdateNotificationDestinationEndpoint(w http.ResponseWrit
 			writeJSONError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		destination, err := d.Queries.GetNotificationDestination(r.Context(), OrgIDFromCtx(r.Context()), projectID, chi.URLParam(r, "destID"))
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				writeJSONError(w, http.StatusNotFound, "notification destination not found")
+				return
+			}
+			writeJSONError(w, http.StatusInternalServerError, "failed to load notification destination")
+			return
+		}
 		configJSON, err := json.Marshal(notificationConfig{WebhookURL: *request.WebhookURL})
 		if err != nil {
 			writeJSONError(w, http.StatusInternalServerError, "failed to encode notification configuration")
 			return
 		}
-		sealed, err = d.ConfigCipher.Seal(configJSON, notify.ConfigAAD(chi.URLParam(r, "destID"), projectID, "slack"))
+		sealed, err = d.ConfigCipher.Seal(configJSON, notify.ConfigAAD(destination.ID, projectID, destination.Type))
 		if err != nil {
 			writeJSONError(w, http.StatusInternalServerError, "failed to encrypt notification configuration")
 			return
@@ -367,6 +380,7 @@ func (d *Dependencies) TestNotificationDestinationEndpoint(w http.ResponseWriter
 			writeJSONError(w, http.StatusInternalServerError, "failed to build digest")
 			return
 		}
+		payload.PreviewNote = "Sample digest (legacy format — the scheduled daily digest uses the current format)"
 	default:
 		writeJSONError(w, http.StatusBadRequest, "unsupported event_type")
 		return

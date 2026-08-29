@@ -8,6 +8,7 @@ import {
 } from './contracts/c0-diagnosis.fixture.js';
 import {
   digestReceiptFields,
+  digestReceiptFieldsV4,
   receiptItem,
 } from './contracts/c0-receipts.fixture.js';
 import {
@@ -27,6 +28,13 @@ describe('C0 frozen contracts', () => {
   it('carries versioned receipt items', () => {
     expect(digestReceiptFields.schema_version).toBe(2);
     expect(digestReceiptFields.receipt_items).toEqual([receiptItem]);
+  });
+
+  it('carries schema v4 cards, receipts, overflow, and delivery facts', () => {
+    expect(digestReceiptFieldsV4.schema_version).toBe(4);
+    expect(digestReceiptFieldsV4.generated_cards?.[0]?.outcome).toBe('needs_human');
+    expect(digestReceiptFieldsV4.receipt_items?.[0]?.actionable_since).toBeTruthy();
+    expect(digestReceiptFieldsV4.delivery_alert).toContain('degraded');
   });
 
   it('carries verification ledger entries and every tier', () => {

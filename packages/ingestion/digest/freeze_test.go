@@ -119,6 +119,9 @@ func TestFreezeCapturesOccurrenceAndReplayFacts(t *testing.T) {
 	if candidates[0].OccurrenceCount != 34 {
 		t.Fatalf("occurrence: got %d", candidates[0].OccurrenceCount)
 	}
+	if candidates[0].Summary != "verified terminal result" {
+		t.Fatalf("summary = %q, want authoritative decision_reason", candidates[0].Summary)
+	}
 	if candidates[0].ReplaySessionID == "" || candidates[0].ReplayAnchorMs == 0 {
 		t.Fatalf("replay facts not frozen: %+v", candidates[0])
 	}

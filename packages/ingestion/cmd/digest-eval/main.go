@@ -55,19 +55,32 @@ func main() {
 			log.Fatal(err)
 		}
 		var event notify.EventPayload
-		if err := json.Unmarshal(raw, &event); err != nil || event.Digest == nil {
-			log.Fatalf("%s contains an invalid delivered payload: %v", date, err)
+		if err := json.Unmarshal(raw, &event); err != nil {
+			log.Fatalf("%s contains an unreadable delivered payload: %v", date, err)
+		}
+		if event.Digest == nil {
+			log.Fatalf("%s contains a delivered payload with no digest body", date)
 		}
 		fmt.Printf("# %s\n\n", date)
-		if len(event.Digest.GeneratedCards) == 0 {
+		view := notify.BuildDigestView(event.Digest)
+		if view.Legacy {
+			fmt.Println("legacy format run")
+			fmt.Println()
+			count++
+			continue
+		}
+		if view.Empty() {
 			fmt.Println("Nothing needs your attention today.")
 			fmt.Println()
 		}
-		for _, card := range event.Digest.GeneratedCards {
+		for _, card := range view.Cards {
 			fmt.Printf("## %s (%s)\n\n%s\n\nAction: %s\n\n", card.Title, card.Label, card.Copy, card.Action)
 			if card.PRURL != "" {
 				fmt.Printf("PR: %s\n\n", card.PRURL)
 			}
+		}
+		for _, receipt := range view.Receipts {
+			fmt.Printf("## %s\n\nIncident: %s\n\nState: %s\n\n", receipt.Title, receipt.IncidentID, receipt.ReceiptState)
 		}
 		count++
 	}

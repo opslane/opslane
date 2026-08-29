@@ -42,12 +42,28 @@ function close(server: http.Server | undefined): Promise<void> {
   });
 }
 
-async function waitForEvent(page: Page): Promise<Record<string, unknown>> {
+// Match the event to the interaction that produced it. Clearing the buffer is
+// not enough on its own: an event the previous case triggered can still be in
+// flight, land in the freshly cleared buffer, and be read as this case's
+// result. That misread is silent, because a stale event is a perfectly valid
+// event — it just answers the wrong question, and the frames it carries belong
+// to the wrong error.
+async function waitForEvent(
+  page: Page,
+  message: string,
+): Promise<Record<string, unknown>> {
   for (let attempt = 0; attempt < 100; attempt++) {
-    if (receivedEvents.length > 0) return receivedEvents[0];
+    const match = receivedEvents.find(
+      (event) =>
+        (event.error as { message?: string } | undefined)?.message === message,
+    );
+    if (match) return match;
     await page.waitForTimeout(100);
   }
-  throw new Error('timed out waiting for an ingested browser event');
+  throw new Error(
+    `timed out waiting for an ingested browser event with message ${JSON.stringify(message)}; ` +
+      `saw ${JSON.stringify(receivedEvents.map((event) => (event.error as { message?: string } | undefined)?.message))}`,
+  );
 }
 
 function images(event: Record<string, unknown>): Array<Record<string, string>> {
@@ -61,11 +77,12 @@ async function exercise(
   page: Page,
   origin: string,
   selector: string,
+  message: string,
 ): Promise<{ event: Record<string, unknown>; originalStack: string }> {
   receivedEvents = [];
   await page.goto(origin);
   await page.click(selector);
-  const event = await waitForEvent(page);
+  const event = await waitForEvent(page, message);
   const originalStack = await page.evaluate(
     () =>
       (
@@ -201,6 +218,7 @@ describe('production debug-ID browser matrix', () => {
             page,
             assetOrigin,
             '[data-testid="debug-id-eager"]',
+            'debug-id eager chunk',
           );
           expect(images(eager.event)).toHaveLength(1);
           expect(
@@ -214,6 +232,7 @@ describe('production debug-ID browser matrix', () => {
             page,
             assetOrigin,
             '[data-testid="debug-id-lazy"]',
+            'debug-id lazy module init',
           );
           expect(images(lazy.event)).toHaveLength(1);
           expect(
@@ -224,6 +243,7 @@ describe('production debug-ID browser matrix', () => {
             page,
             assetOrigin,
             '[data-testid="debug-id-worker-capture"]',
+            'debug-id worker capture',
           );
           expect(images(worker.event)).toHaveLength(1);
           expect(
@@ -234,6 +254,7 @@ describe('production debug-ID browser matrix', () => {
             page,
             assetOrigin,
             '[data-testid="debug-id-worker-forward"]',
+            'debug-id worker forwarded',
           );
           expect(images(forwarded.event)).toEqual([]);
 
@@ -241,6 +262,7 @@ describe('production debug-ID browser matrix', () => {
             page,
             pageOrigin,
             '[data-testid="debug-id-eager"]',
+            'debug-id eager chunk',
           );
           expect(images(cdn.event)).toHaveLength(1);
           expect(images(cdn.event)[0].code_file).toContain(assetOrigin);
@@ -249,6 +271,7 @@ describe('production debug-ID browser matrix', () => {
             page,
             assetOrigin,
             '[data-testid="debug-id-third-party"]',
+            'debug-id third party',
           );
           expect(images(thirdParty.event)).toEqual([]);
 
@@ -256,6 +279,7 @@ describe('production debug-ID browser matrix', () => {
             page,
             assetOrigin,
             '[data-testid="debug-id-unparseable"]',
+            'debug-id unparseable',
           );
           expect(images(unparseable.event)).toEqual([]);
           completed.add(name);

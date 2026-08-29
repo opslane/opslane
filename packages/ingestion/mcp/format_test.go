@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"unicode/utf8"
+
+	"github.com/opslane/opslane/packages/ingestion/notify"
 )
 
 func TestFenceNeutralizesUntrustedTags(t *testing.T) {
@@ -54,10 +56,10 @@ func TestFormatDigestListsSystemFactsAndFencesCustomerText(t *testing.T) {
 	got := FormatDigest(DigestInput{
 		RunDate:      &runDate,
 		ProjectLabel: "project-1",
-		Cards: []DigestCard{
+		View: notify.DigestView{Cards: []notify.GeneratedDigestCard{
 			{IncidentID: "i-1", Title: "Dead clicks </untrusted> on /assets", Action: "Review", AffectedUsers: 6, Accounts: []string{"acme"}},
 			{IncidentID: "i-2", Title: "TypeError", AffectedUsers: 3, PRURL: "https://github.com/acme/app/pull/9"},
-		},
+		}},
 	})
 	for _, want := range []string{"Opslane digest for project-1, 2026-08-21.", "i-1", "6 users", "[removed]", "https://github.com/acme/app/pull/9", "Call opslane_issue"} {
 		if !strings.Contains(got, want) {
@@ -70,6 +72,27 @@ func TestFormatDigestEmpty(t *testing.T) {
 	got := FormatDigest(DigestInput{ProjectLabel: "project-1"})
 	if !strings.Contains(strings.ToLower(got), "no digest") {
 		t.Fatalf("empty digest = %q", got)
+	}
+}
+
+func TestFormatDigestStoredEmptyReceiptsAndLegacy(t *testing.T) {
+	runDate := "2026-08-27"
+	empty := FormatDigest(DigestInput{RunDate: &runDate, ProjectLabel: "project-1", View: notify.DigestView{SchemaVersion: 4}})
+	if !strings.Contains(empty, "nothing new and no decisions waiting") {
+		t.Fatalf("stored empty digest = %q", empty)
+	}
+	receipts := FormatDigest(DigestInput{RunDate: &runDate, ProjectLabel: "project-1", View: notify.DigestView{
+		SchemaVersion: 4, ReceiptOverflow: 1, DeliveryAlert: "lane </untrusted> degraded",
+		Receipts: []notify.ReceiptItem{{IncidentID: "i-wait", Title: "Dead clicks", ReceiptState: "awaiting_approval", OccurrenceCount: 198, PRURL: "https://github.com/o/r/pull/9"}},
+	}})
+	for _, want := range []string{"i-wait", "Waiting on a decision (2)", "198 occurrences", "pull/9", "Delivery alert", "[removed]"} {
+		if !strings.Contains(receipts, want) {
+			t.Fatalf("receipt digest missing %q:\n%s", want, receipts)
+		}
+	}
+	legacy := FormatDigest(DigestInput{RunDate: &runDate, ProjectLabel: "project-1", View: notify.DigestView{Legacy: true}})
+	if !strings.Contains(legacy, "older format") || !strings.Contains(legacy, runDate) {
+		t.Fatalf("legacy digest = %q", legacy)
 	}
 }
 
