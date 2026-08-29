@@ -73,24 +73,24 @@ func nilIfEmpty(s string) *string {
 	return &s
 }
 
-// LatestDeliveredDigest returns the run date and generated cards from the most
-// recent delivered digest, or ("", nil, nil) when none exists. Validation stamps
-// generated_cards with system facts before delivery, so they are returned as-is.
-func (q *Queries) LatestDeliveredDigest(ctx context.Context, projectID string) (runDate string, cards []byte, err error) {
+// LatestDeliveredDigestPayload returns the run date and the full stored
+// notification payload of the most recent delivered digest, or ("", nil, nil)
+// when none exists. Callers interpret the payload through
+// notify.BuildDigestView rather than plucking JSON paths.
+func (q *Queries) LatestDeliveredDigestPayload(ctx context.Context, projectID string) (runDate string, payload []byte, err error) {
 	err = q.pool.QueryRow(ctx,
-		`SELECT run_date::text,
-		        coalesce(rendered_payload->'digest'->'generated_cards', '[]'::jsonb)
+		`SELECT run_date::text, rendered_payload
 		   FROM digest_runs
 		  WHERE project_id = $1
 		    AND status = 'delivered'
 		    AND rendered_payload IS NOT NULL
 		  ORDER BY run_date DESC
 		  LIMIT 1`, projectID,
-	).Scan(&runDate, &cards)
+	).Scan(&runDate, &payload)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", nil, nil
 	}
-	return runDate, cards, err
+	return runDate, payload, err
 }
 
 type EvidenceFrame struct {

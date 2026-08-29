@@ -18,6 +18,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	ingestiondb "github.com/opslane/opslane/packages/ingestion/db"
 	"github.com/opslane/opslane/packages/ingestion/narrative"
 	"github.com/opslane/opslane/packages/ingestion/notify"
 )
@@ -831,6 +832,48 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string) e
 			}
 		} else if actionableErr == nil {
 			actionableEval = evaluateActionable(actionableCandidates, frozenIncidentIDs, actionableEvaluatedAt)
+		}
+	}
+	if actionableErr == nil {
+		// The replay link is decoration on a receipt. Nothing here may fail
+		// the digest: a lookup error, or a failure of the savepoint
+		// bookkeeping that isolates it, abandons link enrichment for the rest
+		// of the run and leaves every receipt intact and publishable.
+		dashboardURL := os.Getenv("DASHBOARD_URL")
+		for i := range actionableEval.Included {
+			candidate := &actionableEval.Included[i]
+			if _, err := tx.Exec(ctx, `SAVEPOINT actionable_replay_lookup`); err != nil {
+				slog.Warn("actionable digest replay enrichment abandoned; receipts publish without links",
+					"project_id", run.ProjectID, "error", err)
+				break
+			}
+			// Bound the lookup by the moment the item became actionable. An
+			// unbounded floor makes the watchable query sort the group's
+			// whole event history inside the transaction that must commit
+			// for the digest to be delivered, and a recording from before
+			// the item was actionable is stale anyway.
+			replayFloor := time.Time{}
+			if candidate.ActionableSince != nil {
+				replayFloor = *candidate.ActionableSince
+			}
+			sessionID, anchorMs, ok, lookupErr := ingestiondb.WatchableSessionForGroupOn(ctx, tx, candidate.GroupID, run.ProjectID, replayFloor)
+			if lookupErr != nil {
+				slog.Warn("actionable digest replay lookup failed; omitting the link", "group_id", candidate.GroupID, "project_id", run.ProjectID, "error", lookupErr)
+				if _, err := tx.Exec(ctx, `ROLLBACK TO SAVEPOINT actionable_replay_lookup`); err != nil {
+					// The transaction is no longer usable for enrichment;
+					// stop touching it and let the receipts lane proceed.
+					slog.Warn("actionable digest replay enrichment abandoned after rollback failure",
+						"project_id", run.ProjectID, "error", err)
+					break
+				}
+			} else if ok {
+				candidate.SessionURL = notify.BuildSessionURL(dashboardURL, sessionID, anchorMs)
+			}
+			if _, err := tx.Exec(ctx, `RELEASE SAVEPOINT actionable_replay_lookup`); err != nil {
+				slog.Warn("actionable digest replay enrichment abandoned after release failure",
+					"project_id", run.ProjectID, "error", err)
+				break
+			}
 		}
 	}
 	if actionableErr == nil {

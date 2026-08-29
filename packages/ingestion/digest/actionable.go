@@ -109,7 +109,10 @@ type actionableCandidate struct {
 	Status                string
 	Title                 string
 	OccurrenceCount       int64
+	ImpactClass           string
 	ImpactVisits          *int64
+	ImpactRecovered       *int64
+	SessionURL            string
 	PRURL                 string
 	RootCause             string
 	Mitigation            string
@@ -139,7 +142,8 @@ type evaluation struct {
 func loadActionableCandidates(ctx context.Context, tx pgx.Tx, projectID string, statusSQL actionableStatusSet) ([]actionableCandidate, error) {
 	query := `
 		SELECT g.id::text,g.kind,g.status::text,g.title,g.occurrence_count::bigint,
-		       g.impact_visits,COALESCE(g.pr_url,''),COALESCE(g.root_cause,''),
+		       COALESCE(g.impact_class,''),g.impact_visits,g.impact_visits_recovered,
+		       COALESCE(g.pr_url,''),COALESCE(g.root_cause,''),
 		       COALESCE(g.suggested_mitigation,''),
 		       NULLIF(btrim(g.candidate_diff),'') IS NOT NULL,
 		       COALESCE(d.has_validated_diagnosis,false),
@@ -173,7 +177,8 @@ func loadActionableCandidates(ctx context.Context, tx pgx.Tx, projectID string, 
 		var candidate actionableCandidate
 		if err := rows.Scan(
 			&candidate.GroupID, &candidate.Kind, &candidate.Status, &candidate.Title,
-			&candidate.OccurrenceCount, &candidate.ImpactVisits, &candidate.PRURL,
+			&candidate.OccurrenceCount, &candidate.ImpactClass, &candidate.ImpactVisits,
+			&candidate.ImpactRecovered, &candidate.PRURL,
 			&candidate.RootCause, &candidate.Mitigation, &candidate.HasSavedDiff,
 			&candidate.HasValidatedDiagnosis, &candidate.ActionableSince,
 			&candidate.SnoozedUntil, &candidate.ErrorLaneEligible,
@@ -311,9 +316,10 @@ func toReceiptItems(candidates []actionableCandidate) ([]notify.ReceiptItem, err
 		item := notify.ReceiptItem{
 			Kind: candidate.Kind, IncidentID: candidate.GroupID,
 			Title:           narrative.SanitizeExcerpt(candidate.Title, excerptMax),
-			OccurrenceCount: candidate.OccurrenceCount, ImpactVisits: candidate.ImpactVisits,
+			OccurrenceCount: candidate.OccurrenceCount, ImpactClass: candidate.ImpactClass,
+			ImpactVisits: candidate.ImpactVisits, ImpactRecovered: candidate.ImpactRecovered,
 			ReceiptState: receiptState(candidate.Status, candidate.HasSavedDiff),
-			PRURL:        candidate.PRURL, HasSavedDiff: candidate.HasSavedDiff,
+			PRURL:        candidate.PRURL, SessionURL: candidate.SessionURL, HasSavedDiff: candidate.HasSavedDiff,
 			HasValidatedDiagnosis: candidate.HasValidatedDiagnosis,
 			ActionableSince:       candidate.ActionableSince,
 		}

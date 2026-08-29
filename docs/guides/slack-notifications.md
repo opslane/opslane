@@ -45,7 +45,7 @@ Omitting `delivery_policy` defaults to `immediate`. `post_triage` still uses the
 `issue.created` subscription; it is a timing policy, not another event checkbox.
 It sends when Opslane hands the issue to a person or opens a fix pull request. Findings with no application-code cause and decisions not to pursue remain in the daily digest and do not page the channel.
 
-The full endpoint set (list, update, delete, test) is in [HTTP routes](../reference/http-routes.md). To test a specific message type, pass `{"event_type":"digest.daily"}` in the test request body; omitting it sends a test issue alert. On cloud multi-org deployments, creating, updating, deleting, and testing destinations requires the **admin** organization role; self-hosted OSS deployments allow any signed-in org member.
+The full endpoint set (list, update, delete, test) is in [HTTP routes](../reference/http-routes.md). To test a specific message type, pass `{"event_type":"digest.daily"}` in the test request body; omitting it sends a test issue alert. Test digests include a legacy format note; scheduled digests use the current format. On cloud multi-org deployments, creating, updating, deleting, and testing destinations requires the **admin** organization role; self-hosted OSS deployments allow any signed-in org member.
 
 ## Delivery semantics
 

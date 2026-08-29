@@ -41,6 +41,17 @@ func TestOpenRejectsTransplantedAAD(t *testing.T) {
 	if _, err := cipher.Open(blob, ConfigAAD("dest-1", "proj-other", "slack")); err == nil {
 		t.Fatal("expected project AAD mismatch to fail")
 	}
+	webhookAAD := ConfigAAD("dest-1", "proj-1", "webhook")
+	webhookBlob, err := cipher.Seal([]byte(`{"webhook_url":"u"}`), webhookAAD)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cipher.Open(webhookBlob, ConfigAAD("dest-1", "proj-1", "slack")); err == nil {
+		t.Fatal("expected destination type AAD mismatch to fail")
+	}
+	if _, err := cipher.Open(webhookBlob, webhookAAD); err != nil {
+		t.Fatalf("matching destination type AAD failed: %v", err)
+	}
 }
 
 func TestNewConfigCipherRejectsShortSecret(t *testing.T) {

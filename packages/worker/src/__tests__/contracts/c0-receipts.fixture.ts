@@ -29,3 +29,17 @@ export const digestReceiptFieldsV2: DigestReceiptFields = {
   held_back_count: 2,
   receipt_overflow: 4,
 };
+
+export const digestReceiptFieldsV4: DigestReceiptFields = {
+  schema_version: 4,
+  timezone: 'America/Los_Angeles',
+  generated_cards: [{
+    episode_id: 'episode-1', incident_id: 'incident-1', title: 'Sign-in crashes',
+    label: 'new', outcome: 'needs_human', copy: 'Sign-in fails.', action: 'Choose the fallback.',
+    affected_users: 3, occurrence_count: 7, accounts: ['Acme'], pr_number: 9,
+  }],
+  receipt_items: [{ ...receiptItem, has_validated_diagnosis: true, actionable_since: '2026-08-27T10:00:00Z' }],
+  receipt_overflow: 1,
+  overflow_count: 2,
+  delivery_alert: 'Actionable lane degraded.',
+};

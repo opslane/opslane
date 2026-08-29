@@ -123,7 +123,7 @@ func TestNotificationDestinationCRUDAndTestEndpointOSS(t *testing.T) {
 
 	patch := notificationHTTP(t, router, http.MethodPatch,
 		"/api/v1/projects/"+projectID+"/notification-destinations/"+created.ID, token,
-		map[string]any{"name": "Renamed", "enabled": false},
+		map[string]any{"name": "Renamed", "webhook_url": sink.URL + "/updated-secret-5678", "enabled": false},
 	)
 	if patch.Code != http.StatusOK || !strings.Contains(patch.Body.String(), `"name":"Renamed"`) || !strings.Contains(patch.Body.String(), `"enabled":false`) {
 		t.Fatalf("patch status=%d body=%s", patch.Code, patch.Body.String())
@@ -165,8 +165,11 @@ func TestCreateDisabledNotificationDestination(t *testing.T) {
 
 func TestNotificationDestinationTestEventType(t *testing.T) {
 	var sinkCalls atomic.Int64
-	sink := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	var sinkBody atomic.Value
+	sink := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sinkCalls.Add(1)
+		body, _ := io.ReadAll(r.Body)
+		sinkBody.Store(string(body))
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer sink.Close()
@@ -206,6 +209,9 @@ func TestNotificationDestinationTestEventType(t *testing.T) {
 	}
 	if builder.calls.Load() != 1 || sinkCalls.Load() != 1 {
 		t.Fatalf("builder calls=%d sink calls=%d", builder.calls.Load(), sinkCalls.Load())
+	}
+	if body, _ := sinkBody.Load().(string); !strings.Contains(body, "Sample digest (legacy format") {
+		t.Fatalf("digest preview did not label its legacy format: %s", body)
 	}
 
 	bogus := notificationHTTP(t, router, http.MethodPost, path, token, map[string]any{"event_type": "bogus"})

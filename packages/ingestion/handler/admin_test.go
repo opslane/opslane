@@ -36,7 +36,7 @@ func TestAdminJobsRejectsInvalidFiltersBeforeQuerying(t *testing.T) {
 	}
 }
 
-func TestAdminJobsAllowsCIWatchFilter(t *testing.T) {
+func TestAdminJobsAllowsCurrentJobTypeFilters(t *testing.T) {
 	if _, ok := adminJobTypes["setup_pr"]; ok {
 		t.Fatal("retired setup_pr job type remains in the admin filter allowlist")
 	}
@@ -54,6 +54,11 @@ func TestAdminJobsAllowsCIWatchFilter(t *testing.T) {
 	}
 	if _, ok := adminJobTypes["score_sync"]; !ok {
 		t.Fatal("score_sync is missing from the admin job-type allowlist")
+	}
+	for _, jobType := range []string{"digest_write", "stack_resolve"} {
+		if _, ok := adminJobTypes[jobType]; !ok {
+			t.Fatalf("%s is missing from the admin job-type allowlist", jobType)
+		}
 	}
 }
 

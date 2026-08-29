@@ -32,8 +32,14 @@ func seedActionableGroup(t *testing.T, pool *pgxpool.Pool, projectID, environmen
 	}
 	if _, err := pool.Exec(ctx, `INSERT INTO issue_decisions
 		(project_id,episode_id,decision,reason,users_7d,anon_7d,rule_version,decided_at)
-		VALUES ($1,$2,'watch','friction is not evaluated in the error lane',2,0,1,$3)`,
+		VALUES ($1,$2,'open_inquiry','actionable fixture is eligible',2,0,1,$3)`,
 		projectID, episodeID, decidedAt); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO issue_inquiry_decisions
+		(project_id,episode_id,decision,reason,evaluated_units,evidence_signature,model,prompt_version,decided_at)
+		VALUES ($1,$2,'investigate','actionable fixture is eligible',2,$3,'test',1,$4)`,
+		projectID, episodeID, "actionable-"+uuid.NewString(), decidedAt); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := pool.Exec(ctx, `INSERT INTO diagnosis_decisions
@@ -122,17 +128,20 @@ func renderedEvent(t *testing.T, pool *pgxpool.Pool, runID string) notify.EventP
 	return payload
 }
 
-func TestValidateRepeatsActionableFrictionUntilHumanActs(t *testing.T) {
+func TestValidateRepeatsActionableItemUntilHumanActs(t *testing.T) {
 	pool := testPool(t)
 	ctx := context.Background()
 	now := time.Now().UTC().Truncate(time.Second)
 	fixture := seedDigestFixture(t, pool, now)
 	cleanupActionableDiagnoses(t, pool, fixture.ProjectID)
 	seedDestination(t, pool, fixture.ProjectID, []string{"digest.daily"})
-	groupID, _ := seedActionableGroup(t, pool, fixture.ProjectID, fixture.EnvID, "friction", "awaiting_approval", now.Add(-13*24*time.Hour))
-	if _, err := pool.Exec(ctx, `UPDATE error_groups SET actionable_since=$2 WHERE id=$1`, groupID, now.Add(-12*24*time.Hour)); err != nil {
+	groupID, episodeID := seedActionableGroup(t, pool, fixture.ProjectID, fixture.EnvID, "error", "awaiting_approval", now.Add(-13*24*time.Hour))
+	if _, err := pool.Exec(ctx, `UPDATE error_groups SET actionable_since=$2,
+		impact_class='blocked',impact_visits=23,impact_visits_recovered=4 WHERE id=$1`, groupID, now.Add(-12*24*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
+	seedFreezeReplay(t, pool, fixture.ProjectID, fixture.EnvID, episodeID, "actionable-replay-"+uuid.NewString(), now.Add(-time.Hour))
+	t.Setenv("DASHBOARD_URL", "https://app.example.com")
 
 	firstRun := publishEmptyWrittenRun(t, pool, fixture.ProjectID, now)
 	secondRun := publishEmptyWrittenRun(t, pool, fixture.ProjectID, now.Add(24*time.Hour))
@@ -152,11 +161,14 @@ func TestValidateRepeatsActionableFrictionUntilHumanActs(t *testing.T) {
 		}
 	}
 	firstPayload := renderedEvent(t, pool, firstRun)
+	if item := firstPayload.Digest.ReceiptItems[0]; item.ImpactClass != "blocked" || item.ImpactRecovered == nil || *item.ImpactRecovered != 4 || !strings.Contains(item.SessionURL, "https://app.example.com/sessions/actionable-replay-") {
+		t.Fatalf("actionable receipt omitted impact or replay: %+v", item)
+	}
 	slackBody, _, err := notify.FormatSlack(firstPayload)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(slackBody), "waiting on you since") ||
+	if !strings.Contains(string(slackBody), "waiting on you since") || !strings.Contains(string(slackBody), "Watch recording") ||
 		!strings.Contains(string(slackBody), "(12 days)") {
 		t.Fatalf("first Slack digest omitted actionable age: %s", slackBody)
 	}

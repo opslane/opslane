@@ -113,7 +113,7 @@ func TestMigration044Contracts(t *testing.T) {
 			   (error_group_id, project_id, outcome, decision_reason, model,
 			    prompt_version, policy_eligible, policy_basis)
 			 VALUES ($1, $2, 'code_fix', 'local code cause', 'contract-model',
-			         'c0', true, '{"v":1,"basis":"eligible"}'::jsonb)
+			         'c0', true, '{"v":1,"identified_users":3,"recent_anon_sessions":0}'::jsonb)
 			 RETURNING id`, fixture.groupID, fixture.projectID,
 		).Scan(&decisionID); err != nil {
 			t.Fatal(err)
@@ -130,7 +130,10 @@ func TestMigration044Contracts(t *testing.T) {
 		if err := json.Unmarshal(basisBytes, &basis); err != nil {
 			t.Fatal(err)
 		}
-		if eligible == nil || !*eligible || basis["v"] != float64(1) || basis["basis"] != "eligible" {
+		// Shape mirrors worker/src/db.ts buildPolicyBasis; the cross-language
+		// fixture that pins it mechanically is planned in the audit's Next phase.
+		if eligible == nil || !*eligible || basis["v"] != float64(1) ||
+			basis["identified_users"] != float64(3) || basis["recent_anon_sessions"] != float64(0) {
 			t.Fatalf("policy fields did not round trip: eligible=%v basis=%v", eligible, basis)
 		}
 

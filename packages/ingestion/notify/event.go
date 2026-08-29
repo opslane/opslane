@@ -14,6 +14,7 @@ type EventPayload struct {
 	Project      ProjectRef     `json:"project"`
 	Environment  string         `json:"environment,omitempty"`
 	DashboardURL string         `json:"dashboard_url,omitempty"`
+	PreviewNote  string         `json:"preview_note,omitempty"`
 	Digest       *DigestPayload `json:"digest,omitempty"`
 	Outcome      *TriagePayload `json:"outcome,omitempty"`
 }

@@ -152,7 +152,7 @@ const db = await import('../db.js');
 const { cloneRepo } = await import('../repo-clone.js');
 const { runPipeline } = await import('../pipeline.js');
 const { investigateError } = await import('../investigate.js');
-const { processJobInner, processInvestigateJob, processFixJob, processSessionAnalysisJob } = await import('../index.js');
+const { mapDbSignals, processJobInner, processInvestigateJob, processFixJob, processSessionAnalysisJob } = await import('../index.js');
 const { gatherFrictionEvidence } = await import('../friction/friction-evidence.js');
 const { investigateFriction } = await import('../friction/investigate-friction.js');
 const { readChunksBounded } = await import('../friction/chunk-reader.js');
@@ -218,6 +218,15 @@ function makeEvidence(sourceEventId = 'evt-1'): EvidenceBundle {
     relatedCandidates: [],
   };
 }
+
+describe('mapDbSignals', () => {
+  it('distinguishes an unknown blob from measured zeroes', () => {
+    expect(mapDbSignals({})).toBeNull();
+    expect(mapDbSignals({ unrelated: 1 })).toBeNull();
+    expect(mapDbSignals({ console: { error_count: 0 } })).toMatchObject({ consoleErrorCount: 0 });
+    expect(mapDbSignals({ consoleErrorCount: 0 })).toMatchObject({ consoleErrorCount: 0 });
+  });
+});
 
 beforeEach(() => {
   mockLoadEvidence.mockResolvedValue(makeEvidence());

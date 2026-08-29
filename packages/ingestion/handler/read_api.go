@@ -21,6 +21,7 @@ import (
 	"github.com/opslane/opslane/packages/ingestion/db"
 	"github.com/opslane/opslane/packages/ingestion/masking"
 	"github.com/opslane/opslane/packages/ingestion/narrative"
+	"github.com/opslane/opslane/packages/ingestion/notify"
 )
 
 var githubPRPath = regexp.MustCompile(`^https://github\.com/([^/\s]+/[^/\s]+)/pull/(\d+)/?$`)
@@ -215,18 +216,24 @@ func toIncidentJSON(g db.ErrorGroup) incidentJSON {
 }
 
 type latestDigestJSON struct {
-	RunDate *string         `json:"run_date"`
-	Cards   json.RawMessage `json:"cards"`
+	RunDate         *string              `json:"run_date"`
+	Cards           json.RawMessage      `json:"cards"`
+	Receipts        []notify.ReceiptItem `json:"receipts"`
+	ReceiptOverflow int                  `json:"receipt_overflow,omitempty"`
+	DeliveryAlert   string               `json:"delivery_alert,omitempty"`
+	SchemaVersion   int                  `json:"schema_version,omitempty"`
+	Empty           bool                 `json:"empty"`
+	Legacy          bool                 `json:"legacy,omitempty"`
 }
 
-// GetLatestDigest returns the cards from the latest delivered daily digest.
+// GetLatestDigest returns the latest delivered daily digest.
 // GET /api/v1/projects/{projectID}/digest/latest
 func (d *Dependencies) GetLatestDigest(w http.ResponseWriter, r *http.Request) {
 	projectID := chi.URLParam(r, "projectID")
 	if !d.verifyProjectAccess(w, r, projectID) {
 		return
 	}
-	runDate, cards, err := d.Queries.LatestDeliveredDigest(r.Context(), projectID)
+	runDate, payload, err := d.Queries.LatestDeliveredDigestPayload(r.Context(), projectID)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "failed to read digest")
 		return
@@ -234,10 +241,46 @@ func (d *Dependencies) GetLatestDigest(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	if runDate == "" {
-		_ = json.NewEncoder(w).Encode(map[string]any{"run_date": nil, "cards": []any{}})
+		_ = json.NewEncoder(w).Encode(latestDigestJSON{
+			Cards: json.RawMessage("[]"), Receipts: []notify.ReceiptItem{}, Empty: true,
+		})
 		return
 	}
-	_ = json.NewEncoder(w).Encode(latestDigestJSON{RunDate: &runDate, Cards: json.RawMessage(cards)})
+	var event notify.EventPayload
+	if err := json.Unmarshal(payload, &event); err != nil || event.Digest == nil {
+		writeJSONError(w, http.StatusInternalServerError, "stored digest payload is malformed")
+		return
+	}
+	view := notify.BuildDigestView(event.Digest)
+	// cards stays raw so a card field this build does not know about still
+	// reaches the dashboard byte-for-byte, but it is gated on the view: a
+	// stored version whose cards the view does not serve must not appear
+	// here, or the response contradicts itself (legacy/empty alongside a
+	// populated cards array) and disagrees with the MCP tool.
+	cards := json.RawMessage("[]")
+	if len(view.Cards) > 0 {
+		var raw struct {
+			Digest struct {
+				GeneratedCards json.RawMessage `json:"generated_cards"`
+			} `json:"digest"`
+		}
+		if err := json.Unmarshal(payload, &raw); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "stored digest payload is malformed")
+			return
+		}
+		if len(raw.Digest.GeneratedCards) > 0 && string(raw.Digest.GeneratedCards) != "null" {
+			cards = raw.Digest.GeneratedCards
+		}
+	}
+	receipts := view.Receipts
+	if receipts == nil {
+		receipts = []notify.ReceiptItem{}
+	}
+	_ = json.NewEncoder(w).Encode(latestDigestJSON{
+		RunDate: &runDate, Cards: cards, Receipts: receipts,
+		ReceiptOverflow: view.ReceiptOverflow, DeliveryAlert: view.DeliveryAlert,
+		SchemaVersion: view.SchemaVersion, Empty: view.Empty(), Legacy: view.Legacy,
+	})
 }
 
 // GetIncidentEvidence returns the fix-shaped evidence for a group's open episode.

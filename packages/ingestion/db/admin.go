@@ -95,7 +95,8 @@ func (q *Queries) AdminOverviewData(ctx context.Context) (*AdminOverview, error)
 		Events: AdminEventOverview{Hourly: make([]AdminHourlyEventBucket, 0, 48), TopProjects: make([]AdminTopProject, 0, 10)},
 		Jobs: AdminJobOverview{
 			ByStatus: map[string]int64{"pending": 0, "claimed": 0, "completed": 0, "failed": 0, "dead_letter": 0},
-			ByType:   map[string]int64{"investigate": 0, "fix": 0, "error_fix": 0, "session_analysis": 0, "ci_watch": 0, "route_map": 0, "product_context": 0, "score_sync": 0},
+			// Keep this list aligned with shared/src/types.ts JobType.
+			ByType: map[string]int64{"investigate": 0, "fix": 0, "error_fix": 0, "session_analysis": 0, "ci_watch": 0, "route_map": 0, "product_context": 0, "issue_inquiry": 0, "digest_write": 0, "score_sync": 0, "stack_resolve": 0},
 		},
 		Outcomes:   AdminOutcomeOverview{ByStatus: make(map[string]int64)},
 		Onboarding: AdminOnboardingOverview{ByFailureReason: make(map[string]int64)},

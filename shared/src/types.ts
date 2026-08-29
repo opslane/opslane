@@ -37,8 +37,28 @@ export interface ReceiptItem {
    *  directly rather than inferring a cause from root_cause_excerpt. */
   has_validated_diagnosis?: boolean;
   cluster_incident_ids?: string[];
+  /** Go source: notify.ReceiptItem.ActionableSince. */
+  actionable_since?: string;
 }
 
+/** Go source: notify.GeneratedDigestCard. */
+export interface GeneratedDigestCard {
+  episode_id: string;
+  incident_id: string;
+  title: string;
+  label: string;
+  outcome?: string;
+  copy: string;
+  action: string;
+  affected_users: number;
+  occurrence_count?: number;
+  accounts: string[];
+  pr_url?: string;
+  replay_url?: string;
+  pr_number?: number;
+}
+
+/** Versioned fields from Go's notify.DigestPayload. */
 export interface DigestReceiptFields {
   schema_version?: number;
   receipt_items?: ReceiptItem[];
@@ -48,6 +68,10 @@ export interface DigestReceiptFields {
   };
   held_back_count?: number;
   receipt_overflow?: number;
+  generated_cards?: GeneratedDigestCard[];
+  overflow_count?: number;
+  delivery_alert?: string;
+  timezone?: string;
 }
 
 export interface Environment {

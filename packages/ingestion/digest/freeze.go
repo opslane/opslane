@@ -205,7 +205,7 @@ type digestQuerier interface {
 func selectCandidates(ctx context.Context, q digestQuerier, projectID string, at, windowFrom time.Time) ([]Candidate, []time.Time, error) {
 	rows, err := q.Query(ctx, `
 		SELECT ep.id::text, ep.sequence, g.id::text, g.title,
-		       d.outcome, COALESCE(NULLIF(btrim(d.diagnosis->>'summary'),''), d.decision_reason),
+		       d.outcome, d.decision_reason,
 		       COALESCE(g.pr_url,''), g.occurrence_count,
 		       (SELECT count(DISTINCT eau.end_user_id)::int
 		          FROM error_group_affected_users eau
