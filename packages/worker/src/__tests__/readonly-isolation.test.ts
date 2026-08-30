@@ -1,6 +1,8 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import * as tools from '../investigate-tools.js';
+import { MachineUnavailableError, VerificationInfraError } from '../harness/errors.js';
+import { toInfraError } from '../harness/readonly-sandbox.js';
 
 const src = (p: string): string => readFileSync(new URL(`../${p}`, import.meta.url), 'utf8');
 
@@ -41,5 +43,19 @@ describe('read-only jobs no longer read the host', () => {
     // DESCOPED_JOB_SOURCES and into ISOLATED_JOB_SOURCES, rather than leaving a
     // stale exemption behind.
     expect(src(file)).toMatch(/from 'node:fs/);
+  });
+});
+
+describe('toInfraError', () => {
+  const machine = { sandboxId: 'sbx-1', createdAt: Date.now() - 5000 };
+
+  it('converts a machine failure into the existing infra retry lane', () => {
+    const out = toInfraError(new MachineUnavailableError('gone', 'gone'), machine, {} as never);
+    expect(out).toBeInstanceOf(VerificationInfraError);
+  });
+
+  it('leaves an unrelated error alone so real bugs are not laundered as infra', () => {
+    const bug = new TypeError('cannot read property of undefined');
+    expect(toInfraError(bug, machine, {} as never)).toBe(bug);
   });
 });

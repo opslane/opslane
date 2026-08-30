@@ -45,6 +45,8 @@ describe('issue inquiry', () => {
       loadEvidence: async () => evidence,
       prepareRepository: async () => ({
         reader: { readFile: async () => '', grep: async () => '', list: async () => '', exists: async () => [] },
+        sandboxId: 'sbx-test',
+        createdAt: Date.now(),
         cleanup: async () => undefined,
       }),
       askModel: async () => ({
@@ -77,6 +79,8 @@ describe('issue inquiry', () => {
       loadEvidence: async () => evidence,
       prepareRepository: async () => ({
         reader: { readFile: async () => '', grep: async () => '', list: async () => '', exists: async () => [] },
+        sandboxId: 'sbx-test',
+        createdAt: Date.now(),
         cleanup: async () => undefined,
       }),
       askModel: async () => ({
@@ -102,6 +106,8 @@ describe('issue inquiry', () => {
       loadEvidence: async () => evidence,
       prepareRepository: async () => ({
         reader: { readFile: async () => '', grep: async () => '', list: async () => '', exists: async () => [] },
+        sandboxId: 'sbx-test',
+        createdAt: Date.now(),
         cleanup: async () => undefined,
       }),
       askModel: async () => ({

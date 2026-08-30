@@ -85,7 +85,12 @@ vi.mock('../repo-clone.js', async (importOriginal) => {
 });
 // Investigation and friction read inside a sandbox now; only the fix job still
 // clones onto this host, which is why both mocks coexist.
-vi.mock('../harness/readonly-sandbox.js', () => ({ createReadOnlyCheckout: vi.fn() }));
+vi.mock('../harness/readonly-sandbox.js', async (importOriginal) => {
+  // Only the checkout is stubbed. toInfraError runs REAL, so the tests assert
+  // the actual routing decision rather than a stub's.
+  const real = await importOriginal<typeof import('../harness/readonly-sandbox.js')>();
+  return { ...real, createReadOnlyCheckout: vi.fn() };
+});
 vi.mock('../minio-client.js', () => ({ fetchObject: vi.fn(), getMinIOConfig: vi.fn(() => null) }));
 vi.mock('../investigate.js', () => ({
   investigateError: vi.fn(),

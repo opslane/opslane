@@ -105,6 +105,8 @@ describeDb('inquiry job write path integration', () => {
       loadEvidence: async () => evidence,
       prepareRepository: async () => ({
         reader: { readFile: async () => '', grep: async () => '', list: async () => '', exists: async () => [] },
+        sandboxId: 'sbx-test',
+        createdAt: Date.now(),
         cleanup: async () => undefined,
       }),
       askModel: async () => ({
@@ -172,6 +174,8 @@ describeDb('inquiry job write path integration', () => {
       loadEvidence: async () => evidence,
       prepareRepository: async () => ({
         reader: { readFile: async () => '', grep: async () => '', list: async () => '', exists: async () => [] },
+        sandboxId: 'sbx-test',
+        createdAt: Date.now(),
         cleanup: async () => undefined,
       }),
       askModel: async () => ({
