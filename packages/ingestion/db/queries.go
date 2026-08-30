@@ -61,6 +61,241 @@ func New(pool *pgxpool.Pool) *Queries {
 	return &Queries{pool: pool}
 }
 
+// SessionSDKVersion returns the browser SDK version a session registered, or
+// "" when the session is gone or never sent one. Tenant-scoped.
+func (q *Queries) SessionSDKVersion(ctx context.Context, projectID, sessionID string) (string, error) {
+	var version *string
+	err := q.pool.QueryRow(ctx,
+		`SELECT sdk_version FROM sessions WHERE project_id = $1 AND id = $2`,
+		projectID, sessionID).Scan(&version)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("session sdk version: %w", err)
+	}
+	if version == nil {
+		return "", nil
+	}
+	return *version, nil
+}
+
+type ChosenCause struct {
+	CauseKind     string
+	Paths         []string
+	DecidedAt     time.Time
+	Commit        string
+	FromPastRound bool
+}
+
+type PipelineResult struct {
+	Outcome   string
+	Reason    string
+	DecidedAt time.Time
+}
+
+// LatestPipelineResult returns the newest decision of any kind in the current round.
+func (q *Queries) LatestPipelineResult(ctx context.Context, projectID, groupID string) (*PipelineResult, error) {
+	var out PipelineResult
+	var reason *string
+	err := q.pool.QueryRow(ctx,
+		`SELECT d.outcome, d.decision_reason, d.decided_at
+		   FROM diagnosis_decisions d
+		   JOIN issue_episodes ep ON ep.id = d.episode_id AND ep.project_id = d.project_id
+		  WHERE d.project_id = $1 AND d.error_group_id = $2 AND ep.closed_at IS NULL
+		  ORDER BY d.decided_at DESC, d.id DESC LIMIT 1`, projectID, groupID,
+	).Scan(&out.Outcome, &reason, &out.DecidedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("latest pipeline result: %w", err)
+	}
+	if reason != nil {
+		out.Reason = *reason
+	}
+	return &out, nil
+}
+
+// ChosenDiagnosis returns the newest accepted diagnosis in the issue's current round.
+func (q *Queries) ChosenDiagnosis(ctx context.Context, projectID, groupID string) (*ChosenCause, error) {
+	var episodeID *string
+	err := q.pool.QueryRow(ctx,
+		`SELECT id::text FROM issue_episodes
+		  WHERE project_id = $1 AND canonical_issue_id = $2 AND closed_at IS NULL
+		  ORDER BY sequence DESC LIMIT 1`, projectID, groupID).Scan(&episodeID)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("chosen diagnosis round: %w", err)
+	}
+	var hasAnyRound bool
+	if err := q.pool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM issue_episodes WHERE project_id = $1 AND canonical_issue_id = $2)`,
+		projectID, groupID).Scan(&hasAnyRound); err != nil {
+		return nil, fmt.Errorf("chosen diagnosis round existence: %w", err)
+	}
+	if episodeID == nil && hasAnyRound {
+		return nil, nil
+	}
+	scope := `d.episode_id = $3::uuid`
+	if episodeID == nil {
+		scope = `d.episode_id IS NULL AND $3::uuid IS NULL`
+	}
+	var causeKind, commit, causeLocation *string
+	var pathsJSON []byte
+	var decidedAt time.Time
+	err = q.pool.QueryRow(ctx,
+		`SELECT d.cause_kind,
+		        COALESCE(d.diagnosis->'cause_locations', 'null'::jsonb),
+		        d.cause_location,
+		        d.diagnosis->>'investigatedCommit',
+		        d.decided_at
+		   FROM diagnosis_decisions d
+		  WHERE d.project_id = $1 AND d.error_group_id = $2 AND `+scope+`
+		    AND d.outcome IN ('code_fix', 'not_actionable', 'needs_human')
+		    AND d.model <> 'deterministic-fix-verification'
+		    AND d.diagnosis IS NOT NULL
+		    AND d.basis IS DISTINCT FROM 'invalid_verdict'
+		  ORDER BY d.decided_at DESC, d.id DESC
+		  LIMIT 1`, projectID, groupID, episodeID,
+	).Scan(&causeKind, &pathsJSON, &causeLocation, &commit, &decidedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("chosen diagnosis: %w", err)
+	}
+	out := &ChosenCause{DecidedAt: decidedAt, FromPastRound: !hasAnyRound}
+	if causeKind != nil {
+		out.CauseKind = *causeKind
+	}
+	if commit != nil {
+		out.Commit = *commit
+	}
+	if len(pathsJSON) > 0 && string(pathsJSON) != "null" {
+		if err := json.Unmarshal(pathsJSON, &out.Paths); err != nil {
+			return nil, fmt.Errorf("chosen diagnosis paths: %w", err)
+		}
+	}
+	if len(out.Paths) == 0 && causeLocation != nil {
+		for _, part := range strings.Split(*causeLocation, ",") {
+			if trimmed := strings.TrimSpace(part); trimmed != "" {
+				out.Paths = append(out.Paths, trimmed)
+			}
+		}
+	}
+	return out, nil
+}
+
+type RelatedIssue struct {
+	ID                  string
+	Occurrences, People int
+	FirstSeen, LastSeen time.Time
+	Status              string
+	Recurred            bool
+}
+
+type RelatedAnchor struct {
+	Message       string
+	Platform      string
+	EnvironmentID string
+}
+
+// RelatedAnchor selects the same fixed event used by the timeline tool.
+func (q *Queries) RelatedAnchor(ctx context.Context, projectID, groupID string) (*RelatedAnchor, error) {
+	var out RelatedAnchor
+	err := q.pool.QueryRow(ctx,
+		`SELECT e.error_message, e.platform, e.environment_id::text
+		   FROM issue_evidence_anchors a
+		   JOIN issue_episodes ep
+		     ON ep.id = a.episode_id AND ep.project_id = a.project_id
+		   JOIN error_events e ON e.id = a.event_id AND e.project_id = a.project_id
+		   LEFT JOIN sessions s ON s.id = e.session_id AND s.project_id = a.project_id
+		  WHERE a.project_id = $1 AND ep.canonical_issue_id = $2 AND ep.closed_at IS NULL
+		    AND a.anchor_kind IN ('threshold', 'first')
+		  ORDER BY CASE WHEN s.id IS NOT NULL AND s.status <> 'deleting' THEN 0 ELSE 1 END,
+		           CASE a.anchor_kind WHEN 'threshold' THEN 0 ELSE 1 END,
+		           e."timestamp" DESC, e.id
+		  LIMIT 1`, projectID, groupID,
+	).Scan(&out.Message, &out.Platform, &out.EnvironmentID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("related anchor: %w", err)
+	}
+	return &out, nil
+}
+
+type RelatedTotals struct {
+	Occurrences, People int
+	FirstSeen, LastSeen time.Time
+	IssueCount          int
+	Issues              []RelatedIssue
+	Truncated           int
+}
+
+// RelatedEventTotals counts exact-message events within one platform and environment.
+func (q *Queries) RelatedEventTotals(ctx context.Context, projectID, environmentID, platform, message string, limit int) (*RelatedTotals, error) {
+	const matching = `
+	  SELECT e.error_group_id, e.end_user_id, e."timestamp"
+	    FROM error_events e
+	    JOIN error_groups g ON g.id = e.error_group_id AND g.project_id = e.project_id
+	   WHERE e.project_id = $1 AND e.environment_id = $2 AND e.platform = $3
+	     AND digest(e.error_message, 'sha256') = digest($4, 'sha256')
+	     AND e.error_message = $4
+	     AND g.archived_at IS NULL AND g.merged_at IS NULL`
+	out := &RelatedTotals{}
+	if err := q.pool.QueryRow(ctx,
+		`WITH m AS (`+matching+`)
+		 SELECT count(*)::int, count(DISTINCT end_user_id)::int,
+		        count(DISTINCT error_group_id)::int,
+		        COALESCE(min("timestamp"), now()), COALESCE(max("timestamp"), now())
+		   FROM m`,
+		projectID, environmentID, platform, message,
+	).Scan(&out.Occurrences, &out.People, &out.IssueCount, &out.FirstSeen, &out.LastSeen); err != nil {
+		return nil, fmt.Errorf("related event totals: %w", err)
+	}
+	if out.Occurrences == 0 {
+		return out, nil
+	}
+	listLimit := limit
+	if listLimit <= 0 || listLimit > out.IssueCount {
+		listLimit = out.IssueCount
+	}
+	rows, err := q.pool.Query(ctx,
+		`WITH m AS (`+matching+`),
+		 per AS (
+		   SELECT m.error_group_id AS id, count(*)::int AS occ,
+		          count(DISTINCT m.end_user_id)::int AS people,
+		          min(m."timestamp") AS first_seen, max(m."timestamp") AS last_seen
+		     FROM m GROUP BY m.error_group_id)
+		 SELECT per.id::text, per.occ, per.people, per.first_seen, per.last_seen, g.status::text,
+		        (g.resolved_at IS NOT NULL AND EXISTS (
+		          SELECT 1 FROM m other
+		           WHERE other.error_group_id <> per.id AND other."timestamp" > g.resolved_at)) AS recurred
+		   FROM per JOIN error_groups g ON g.id = per.id
+		  ORDER BY per.first_seen ASC, per.id ASC
+		  LIMIT $5`,
+		projectID, environmentID, platform, message, listLimit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("related issues: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var issue RelatedIssue
+		if err := rows.Scan(&issue.ID, &issue.Occurrences, &issue.People, &issue.FirstSeen, &issue.LastSeen, &issue.Status, &issue.Recurred); err != nil {
+			return nil, fmt.Errorf("scan related issue: %w", err)
+		}
+		out.Issues = append(out.Issues, issue)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate related issues: %w", err)
+	}
+	out.Truncated = out.IssueCount - len(out.Issues)
+	return out, nil
+}
+
 // Pool exposes the underlying pool for health checks and migration runner only.
 func (q *Queries) Pool() *pgxpool.Pool {
 	return q.pool
