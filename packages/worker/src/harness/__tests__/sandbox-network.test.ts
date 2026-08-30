@@ -45,4 +45,13 @@ describe('buildReadOnlyNetwork', () => {
   it('rejects a clone URL it cannot read a host from, rather than allowing nothing', () => {
     expect(() => buildReadOnlyNetwork('sk-ant-test', 'not-a-url')).toThrow('clone URL is required');
   });
+
+  it('allows no extra host for a file:// remote, which needs no egress', () => {
+    // The local verify rigs clone a twin repository off the filesystem. A
+    // file:// URL has an empty hostname, and treating that as unreadable failed
+    // every rig with "a clone URL is required" before the machine even started.
+    const net = buildReadOnlyNetwork('sk-ant-test', 'file:///tmp/remotes/acme/app.git');
+    expect(net.allowOut).toEqual(['registry.npmjs.org', 'api.anthropic.com']);
+    expect(net.denyOut).toEqual([ALL_TRAFFIC]);
+  });
 });
