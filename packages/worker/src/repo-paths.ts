@@ -38,7 +38,7 @@ export function resolveInsideRepo(repoPath: string, cited: string): string | nul
 }
 
 /** As resolveInsideRepo, but for a directory. Returns '' for the repo root. */
-function resolveDirInsideRepo(repoPath: string, cited: string): string | null {
+export function resolveDirInsideRepo(repoPath: string, cited: string): string | null {
   return resolveInsideRepoIf(repoPath, cited, (stats) => stats.isDirectory());
 }
 
