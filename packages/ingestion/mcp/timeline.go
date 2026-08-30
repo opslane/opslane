@@ -32,6 +32,11 @@ type TimelineInput struct {
 	NetworkTimings json.RawMessage
 	Failures       []TimelineFailure
 	AnalysisRan    bool
+	// SDKVersion is what the anchor event's session registered, or "" when the
+	// session recorded none. Network timings arrived in 4.1.0.
+	SDKVersion string
+	// SessionAttached separates no session from a session with no version.
+	SessionAttached bool
 	// Preamble is a caller-owned line printed above the timeline. It counts
 	// against the payload budget here rather than being prepended by the
 	// caller, which would push the result past PayloadLimit.
@@ -49,6 +54,9 @@ type rawBreadcrumb struct {
 	Timestamp string `json:"timestamp"`
 	Message   string `json:"message"`
 	Level     string `json:"level"`
+	Data      struct {
+		StatusCode *int `json:"status_code"`
+	} `json:"data"`
 }
 
 type rawTiming struct {
@@ -124,9 +132,20 @@ func FormatTimeline(in TimelineInput) (string, string, error) {
 
 	entries := make([]timelineEntry, 0, len(crumbs)+len(timings))
 	unreadable := 0
+	// Network breadcrumbs are the fallback for events whose SDK sent no
+	// timings. When timings exist they describe the same requests with more
+	// detail, and rendering both would double count every one of them.
+	useCrumbNetwork := len(timings) == 0
 	for _, crumb := range crumbs {
-		keep := crumb.Type == "click" || (crumb.Type == "console" && crumb.Level == "error")
-		if !keep {
+		var kind string
+		switch {
+		case crumb.Type == "click":
+			kind = "click"
+		case crumb.Type == "console" && crumb.Level == "error":
+			kind = "console"
+		case (crumb.Type == "fetch" || crumb.Type == "xhr") && useCrumbNetwork:
+			kind = "net"
+		default:
 			continue
 		}
 		at, err := time.Parse(time.RFC3339, crumb.Timestamp)
@@ -134,14 +153,23 @@ func FormatTimeline(in TimelineInput) (string, string, error) {
 			unreadable++
 			continue
 		}
-		kind := "click"
-		if crumb.Type == "console" {
-			kind = "console"
+		text := fmt.Sprintf("%s  %s", kind, Fence(Truncate(crumb.Message, SelectorLimit)))
+		if kind == "net" {
+			status := "no status recorded"
+			if crumb.Data.StatusCode != nil {
+				status = fmt.Sprintf("%d", *crumb.Data.StatusCode)
+			}
+			// The SDK writes "METHOD https://host/path?query" into the message,
+			// so strip query parameters here as the timing renderer does.
+			method, rawURL, _ := strings.Cut(crumb.Message, " ")
+			text = fmt.Sprintf("net %s %s -> %s (breadcrumb)",
+				Fence(Truncate(method, methodLimit)),
+				Fence(Truncate(urlPath(rawURL), SelectorLimit)), status)
 		}
 		entries = append(entries, timelineEntry{
 			atMs: at.UnixMilli(),
 			kind: kind,
-			text: fmt.Sprintf("%s  %s", kind, Fence(Truncate(crumb.Message, SelectorLimit))),
+			text: text,
 		})
 	}
 	for _, timing := range timings {
@@ -182,7 +210,22 @@ func FormatTimeline(in TimelineInput) (string, string, error) {
 	}
 	tail := make([]string, 0, 12)
 	if len(timings) == 0 {
-		tail = append(tail, "", "No network activity was recorded on this event.")
+		switch {
+		case len(crumbs) == 0:
+			tail = append(tail, "", "No network activity was recorded on this event.")
+		case !in.SessionAttached:
+			tail = append(tail, "", "No network timings were recorded. No session is attached to this event, so the SDK version cannot be looked up. The entries above come from breadcrumbs.")
+		case in.SDKVersion == "":
+			tail = append(tail, "", "No network timings were recorded. This event's session recorded no SDK version, so the reason is not established. The entries above come from breadcrumbs.")
+		case !sendsNetworkTimings(in.SDKVersion):
+			tail = append(tail, "", fmt.Sprintf(
+				"No network timings were recorded. This session ran SDK %s, which predates network timings. The entries above come from breadcrumbs.",
+				Fence(Truncate(in.SDKVersion, methodLimit))))
+		default:
+			tail = append(tail, "", fmt.Sprintf(
+				"No network timings were recorded. This session ran SDK %s, which does record timings, so their absence is unexplained. The entries above come from breadcrumbs.",
+				Fence(Truncate(in.SDKVersion, methodLimit))))
+		}
 	}
 	if len(crumbs) == 0 {
 		tail = append(tail, "No breadcrumbs were recorded on this event.")
@@ -289,4 +332,17 @@ func abs64(value int64) int64 {
 		return -value
 	}
 	return value
+}
+
+// sendsNetworkTimings reports whether a version string is 4.1.0 or newer.
+// Anything unparseable is treated as newer to avoid a confident wrong claim.
+func sendsNetworkTimings(version string) bool {
+	major, minor := 0, 0
+	if _, err := fmt.Sscanf(version, "%d.%d", &major, &minor); err != nil {
+		return true
+	}
+	if major != 4 {
+		return major > 4
+	}
+	return minor >= 1
 }
