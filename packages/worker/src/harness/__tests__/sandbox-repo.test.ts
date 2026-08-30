@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
+import { CommandExitError } from 'e2b';
 import { SandboxUnavailableError, type SandboxRuntime } from '../sandbox-runtime.js';
-import { parseAffectedFiles, runBuildGate, selectBuildCommand } from '../sandbox-repo.js';
+import { classifyInstallFailure, parseAffectedFiles, runBuildGate, selectBuildCommand } from '../sandbox-repo.js';
 
 function buildSandbox(opts: {
   files?: Record<string, string>;
@@ -142,5 +143,28 @@ describe('runBuildGate against an unavailable sandbox', () => {
   it('reports infra_error for the python syntax gate too', async () => {
     const result = await runBuildGate(deadSandbox, 'python');
     expect(result.outcome).toBe('infra_error');
+  });
+});
+
+describe('classifyInstallFailure', () => {
+  const exit = (exitCode: number, stderr = '') =>
+    new CommandExitError({ exitCode, stdout: '', stderr, error: undefined } as never);
+
+  it('calls a clean package-manager exit a dependency problem', () => {
+    expect(classifyInstallFailure(exit(1))).toBe('dependencies');
+  });
+
+  it('calls a kill signal infrastructure', () => {
+    expect(classifyInstallFailure(exit(137))).toBe('infrastructure');
+    expect(classifyInstallFailure(exit(143))).toBe('infrastructure');
+  });
+
+  it('calls a dropped connection infrastructure', () => {
+    expect(classifyInstallFailure(new Error('2: [unknown] terminated'))).toBe('infrastructure');
+  });
+
+  it("calls a blocked host infrastructure, not the customer's fault", () => {
+    const err = exit(1, 'request to https://cdn.example.com failed, reason: getaddrinfo ENOTFOUND');
+    expect(classifyInstallFailure(err)).toBe('infrastructure');
   });
 });
