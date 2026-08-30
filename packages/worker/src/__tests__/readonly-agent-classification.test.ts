@@ -16,6 +16,7 @@ vi.mock('@anthropic-ai/sdk', () => ({
   default: vi.fn().mockImplementation(() => ({ messages: { create: mockCreate } })),
 }));
 
+import { createHostReader } from '../investigate-tools.js';
 import { runReadOnlyAgent, type ReadOnlyRunInput } from '../readonly-agent.js';
 
 const USAGE = {
@@ -50,7 +51,7 @@ function input(overrides: Partial<ReadOnlyRunInput> = {}): ReadOnlyRunInput {
     systemPrompt: 'Stable system prompt',
     firstMessage: 'Investigate.',
     terminalTool,
-    repoPath,
+    reader: createHostReader(repoPath),
     ...overrides,
   };
 }

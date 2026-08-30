@@ -6,6 +6,7 @@ import * as db from '../db.js';
 import { canonicalPattern } from '../friction/urlnorm.js';
 import { getInstallationToken } from '../github-app.js';
 import { logger, safeErrorMessage } from '../logger.js';
+import { createHostReader } from '../investigate-tools.js';
 import { runReadOnlyAgent } from '../readonly-agent.js';
 import { cloneRepo } from '../repo-clone.js';
 import { traceSpan } from '../tracing.js';
@@ -379,7 +380,7 @@ async function askModelForClaims(input: {
   }, () => runReadOnlyAgent({
     apiKey,
     model: PRODUCT_CONTEXT_MODEL,
-    repoPath: input.repoPath,
+    reader: createHostReader(input.repoPath),
     maxTurns: 20,
     budgetUsd: 0.5,
     pricing: MODEL_PRICING[PRODUCT_CONTEXT_MODEL] ?? DEFAULT_PRICING,

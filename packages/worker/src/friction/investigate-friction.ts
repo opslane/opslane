@@ -8,6 +8,7 @@ import { DEFAULT_PRICING, MODEL_PRICING } from '../investigate.js';
 import { logger } from '../logger.js';
 import { fenced } from '../prompt-fence.js';
 import { resolveInsideRepo } from '../repo-paths.js';
+import { createHostReader } from '../investigate-tools.js';
 import { runReadOnlyAgent, type ReadOnlyRunResult } from '../readonly-agent.js';
 import { scrubbedEnv } from '../repo-clone.js';
 import { validateVerdict } from '../verdict-validation.js';
@@ -188,7 +189,7 @@ export async function investigateFriction(
     systemPrompt: await systemPrompt(input),
     firstMessage: 'Inspect the repository, then call classify_friction with your evidence-backed conclusion.',
     terminalTool: CLASSIFY_TOOL,
-    repoPath: input.repoPath,
+    reader: createHostReader(input.repoPath),
     classification: { minFilesRead: 1 },
   });
 
