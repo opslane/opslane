@@ -25,7 +25,7 @@ import { scrubSecrets } from './harness/redact.js';
 import { escapeUntrustedLabel, fenced } from './prompt-fence.js';
 import { cloneFailureReason, CloneResolutionError } from './repo-clone.js';
 import { createEvidenceRecorder, type EvidenceRecorder } from './harness/evidence.js';
-import { VerificationInfraError } from './harness/errors.js';
+import { DependencyInstallError, VerificationInfraError } from './harness/errors.js';
 import { createRepoSandbox, extractDiff, runBuildGate, type RepoSandbox } from './harness/sandbox-repo.js';
 import {
   compareSuiteRuns,
@@ -1486,6 +1486,21 @@ async function runAgentFixCore(input: AgentFixInput): Promise<AgentFixResult> {
     };
   } catch (err: unknown) {
     if (err instanceof VerificationInfraError) throw err;
+    // A dependency list that will not install is the customer's to fix and
+    // nothing a retry can change, so it terminalizes with its own reason
+    // instead of being reported as an unexpected harness error.
+    if (err instanceof DependencyInstallError) {
+      evidence.addCheck('install', 'failed', { command: '', output: err.output });
+      return {
+        status: 'needs_human',
+        reason: {
+          reason_code: 'dependency_install_failed',
+          reason_message: `Dependency installation failed: ${err.output.slice(-500) || err.message}`,
+          remediation: 'Check that your dependencies install cleanly on a fresh checkout.',
+        },
+        evidence: evidence.record(),
+      };
+    }
     // Paths that throw rather than latch: the uncaught `git checkout` resets,
     // clone/branch resolution, install, baseline cleanup, tracked-file
     // discovery, tier reset, and extractDiff. Without this they all terminate

@@ -1,5 +1,7 @@
 import type { CheckOutcome } from '@opslane/shared';
 import { logger } from '../logger.js';
+import { DependencyInstallError, VerificationInfraError } from './errors.js';
+import { isCommandFailure } from './machine-state.js';
 import {
   buildGitNetrc,
   CloneResolutionError,
@@ -13,6 +15,37 @@ import { sanitizeRuntimeValue, type RuntimeInfo } from '../runtime-info.js';
 import { TRAVERSAL_EXCLUSIONS } from './traversal-exclusions.js';
 
 const SANDBOX_REPO = '/home/user/repo';
+
+/** Codes that mean something killed the process rather than it choosing to fail. */
+const KILL_EXIT_CODES = new Set([137, 143]);
+
+/**
+ * Signatures that mean the network failed, not the dependency list.
+ *
+ * This matters because our own egress allowlist can cause them: a package that
+ * fetches a binary from a host we do not allow produces an ordinary non-zero
+ * npm exit. Blaming the customer's dependencies for our network policy would be
+ * both wrong and unfixable by them.
+ */
+const NETWORK_FAILURE_SIGNATURES = [
+  'ENOTFOUND', 'ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'EAI_AGAIN',
+  'network timeout', 'socket hang up', 'getaddrinfo',
+];
+
+/**
+ * Whether a failed install is the customer's dependency list or our machine.
+ *
+ * Only a command that ran and chose a non-zero exit can be the customer's
+ * fault. Anything that did not run — a transport failure, a kill signal — is
+ * ours, and so is a clean exit whose output names a network fault.
+ */
+export function classifyInstallFailure(err: unknown): 'dependencies' | 'infrastructure' {
+  if (!isCommandFailure(err)) return 'infrastructure';
+  if (KILL_EXIT_CODES.has(err.exitCode)) return 'infrastructure';
+  const output = `${err.stdout ?? ''}\n${err.stderr ?? ''}`;
+  if (NETWORK_FAILURE_SIGNATURES.some((signature) => output.includes(signature))) return 'infrastructure';
+  return 'dependencies';
+}
 
 interface PackageJsonLike {
   scripts?: Record<string, string>;
@@ -226,8 +259,23 @@ export async function createRepoSandbox(opts: {
         await sandbox.commands.run(`cd ${SANDBOX_REPO} && ${command}`, { timeoutMs: 300_000 });
       } catch (err: unknown) {
         installOutcome = 'failed';
-        logger.warn('setup install failed; continuing', { error: err instanceof Error ? err.message : String(err) });
-        break;
+        // Continuing here spent the whole model budget building and testing
+        // against a tree with no dependencies, then reported the resulting
+        // import errors as ordinary test failures. Stop, and say which kind of
+        // failure it was: the customer can act on their own dependency list and
+        // can do nothing about ours.
+        const kind = classifyInstallFailure(err);
+        const detail = isCommandFailure(err)
+          ? scrubSecrets(`${err.stdout ?? ''}\n${err.stderr ?? ''}`).slice(0, 2000)
+          : scrubSecrets(err instanceof Error ? err.message : String(err)).slice(0, 2000);
+        logger.error('setup install failed; stopping the run', { install_failure_kind: kind, output: detail });
+        if (kind === 'infrastructure') {
+          throw new VerificationInfraError(
+            'Dependency installation failed for an infrastructure reason.',
+            { version: 1, tier: null, checks: [] },
+          );
+        }
+        throw new DependencyInstallError('Dependency installation failed.', detail);
       }
     }
 
