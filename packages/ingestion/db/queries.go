@@ -790,6 +790,9 @@ var nonRetriableReasonCodes = map[string]struct{}{
 	"unfixable_test_error":  {},
 	// unfixable_no_sourcemap is intentionally absent: uploading source maps can
 	// make a later investigation actionable.
+	// dependency_install_failed is intentionally absent for the same reason: the
+	// customer fixes it by pushing a working dependency list, and a recurrence
+	// after that push is exactly the case that should be retried.
 }
 
 const (

@@ -16,6 +16,24 @@ describe('DEFAULT_REMEDIATION registry', () => {
   });
 });
 
+describe('dependency_install_failed', () => {
+  it('has its own remediation rather than reusing another code\'s copy', () => {
+    const remediation = DEFAULT_REMEDIATION.dependency_install_failed;
+    expect(remediation).toMatch(/install/i);
+    const others = Object.entries(DEFAULT_REMEDIATION)
+      .filter(([code]) => code !== 'dependency_install_failed')
+      .map(([, copy]) => copy);
+    expect(others).not.toContain(remediation);
+  });
+
+  it('builds a complete customer-facing reason contract', () => {
+    const r = buildReason('dependency_install_failed');
+    expect(r.reason_code).toBe('dependency_install_failed');
+    expect(r.reason_message.length).toBeGreaterThanOrEqual(20);
+    expect(r.remediation).toBe(DEFAULT_REMEDIATION.dependency_install_failed);
+  });
+});
+
 describe('buildReason', () => {
   it('fills remediation from the registry when omitted', () => {
     const r = buildReason('budget_exhausted', 'Agent ran out of budget');

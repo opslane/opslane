@@ -235,7 +235,8 @@ export type ReasonCode =
   | 'unfixable_test_error'
   | 'unfixable_third_party'
   | 'unfixable_infra'
-  | 'unfixable_no_sourcemap';
+  | 'unfixable_no_sourcemap'
+  | 'dependency_install_failed';
 
 // === Verification evidence (evidence-tiered fix verification) ===
 
