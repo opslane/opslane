@@ -9,6 +9,7 @@ import {
   runInquiry,
 } from '../src/inquiry/job.js';
 import type { InquiryDecisionKind } from '../src/inquiry/schema.js';
+import { createHostReader } from '../src/harness/host-reader.js';
 
 interface EvaluationCase {
   name: string;
@@ -148,7 +149,15 @@ async function main(): Promise<void> {
     const startedAt = Date.now();
     const decision = await runInquiry(syntheticJob(index), new AbortController().signal, {
       loadEvidence: async () => entry.evidence,
-      prepareRepository: async () => ({ repoPath, cleanup: async () => undefined }),
+      // The eval runs against a trusted local checkout, so it reads on this
+      // host rather than renting a machine per case. The seam now hands back a
+      // reader, because production reads inside a sandbox.
+      prepareRepository: async () => ({
+        reader: createHostReader(repoPath),
+        sandboxId: 'local-eval',
+        createdAt: Date.now(),
+        cleanup: async () => undefined,
+      }),
       askModel: async (input) => {
         const result = await askInquiryModel(input);
         usage = result.usage;

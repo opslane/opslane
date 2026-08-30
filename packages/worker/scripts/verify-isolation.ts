@@ -54,7 +54,7 @@ async function main(): Promise<void> {
 
   const sbx = await Sandbox.create({
     timeoutMs: SANDBOX_LIFETIME_MS,
-    network: buildReadOnlyNetwork(anthropicApiKey),
+    network: buildReadOnlyNetwork(anthropicApiKey, CLONE_URL),
   });
   console.log(`sandbox ${sbx.sandboxId}\n`);
 
@@ -80,15 +80,28 @@ async function main(): Promise<void> {
     );
 
     // 3. Everything outside the allowlist is denied.
+    //
+    // Asserted on curl's own exit code, not on "the command threw". `attempt`
+    // returns ok:false for any error — curl missing from the image, a dead
+    // machine, a timeout — so treating that as proof reported PASS for the one
+    // check that actually demonstrates deny-all egress, in exactly the cases
+    // where nothing was demonstrated.
+    const curlPresent = await attempt(sbx, 'command -v curl >/dev/null && echo yes');
+    report('curl is available, so the egress check can run at all', curlPresent.stdout.trim() === 'yes',
+      curlPresent.stdout.trim() || 'curl not found in the image');
+
     const blocked = await attempt(
       sbx,
-      "curl -s -m 10 -o /dev/null -w '%{http_code}' https://example.com",
+      "curl -s -m 10 -o /dev/null -w '%{http_code}' https://example.com; echo \"exit=$?\"",
     );
-    const blockedCode = blocked.stdout.trim();
+    // 6 could not resolve host, 7 could not connect, 28 timed out: all are the
+    // policy refusing the connection rather than the server answering.
+    const exitCode = /exit=(\d+)/.exec(blocked.stdout)?.[1] ?? '';
+    const blockedCode = blocked.stdout.replace(/exit=\d+/, '').trim();
     report(
       'a host outside the allowlist is blocked',
-      !blocked.ok || blockedCode === '' || blockedCode === '000',
-      blocked.ok ? `HTTP ${blockedCode || 'none'}` : 'request failed',
+      ['6', '7', '28'].includes(exitCode) && (blockedCode === '' || blockedCode === '000'),
+      `curl exit ${exitCode || 'unknown'}, HTTP ${blockedCode || 'none'}`,
     );
 
     // 4. Containment is enforced in the machine, against a real symlink.
