@@ -193,6 +193,25 @@ func TestMigrations_AreIdempotent(t *testing.T) {
 	}
 }
 
+func TestMessageDigestIndexIsBuiltAndValid(t *testing.T) {
+	admin := testPool(t)
+	psql := findPsql(t)
+	pool, dsn := disposableDB(t, admin)
+	for _, file := range migrationFiles(t) {
+		if err := applyMigration(t, psql, dsn, file); err != nil {
+			t.Fatalf("migration %s failed: %v", file, err)
+		}
+	}
+	var valid bool
+	if err := pool.QueryRow(context.Background(),
+		`SELECT i.indisvalid FROM pg_class c JOIN pg_index i ON i.indexrelid = c.oid WHERE c.relname = 'idx_error_events_message_digest'`).Scan(&valid); err != nil {
+		t.Fatalf("index missing after applying every migration: %v", err)
+	}
+	if !valid {
+		t.Fatal("index exists but is invalid")
+	}
+}
+
 // TestMigrations_RollForwardFromPreviousSchema proves the latest migration
 // applies on top of a database that stopped at the previous one — the state
 // every existing deployment is in when it upgrades.
