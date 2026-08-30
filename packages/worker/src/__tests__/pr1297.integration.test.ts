@@ -7,6 +7,7 @@ vi.mock('@anthropic-ai/sdk', () => ({
   default: vi.fn().mockImplementation(() => ({ messages: { create: mockMessagesCreate } })),
 }));
 
+import { createHostReader } from '../harness/host-reader.js';
 import { investigateError } from '../investigate.js';
 
 // These two cases are the regression controls for PR #1297: a request timeout
@@ -105,7 +106,7 @@ describe('PR #1297: a slow backend never becomes a frontend code change', () => 
         agent_task_brief: '',
       }));
 
-    const result = await investigateError('key', inputFrom(fixture('hard-h1-timeout')), REPO_ROOT);
+    const result = await investigateError('key', inputFrom(fixture('hard-h1-timeout')), createHostReader(REPO_ROOT));
 
     expect(result.outcome).toBe('not_actionable');
     expect(result.fixable).toBe(false);
@@ -142,7 +143,7 @@ describe('PR #1297: a slow backend never becomes a frontend code change', () => 
         ].join('\n'),
       }));
 
-    const result = await investigateError('key', inputFrom(fixture('hard-h1-timeout')), REPO_ROOT);
+    const result = await investigateError('key', inputFrom(fixture('hard-h1-timeout')), createHostReader(REPO_ROOT));
 
     expect(result.outcome).toBe('code_fix');
     expect(result.confidence).toBe('medium');

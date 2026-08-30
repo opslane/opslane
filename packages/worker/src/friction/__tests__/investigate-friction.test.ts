@@ -16,6 +16,7 @@ vi.mock('../../logger.js', () => ({
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
 }));
 
+import { createHostReader } from '../../harness/host-reader.js';
 import { investigateFriction, type FrictionInvestigateInput } from '../investigate-friction.js';
 
 const execFile = promisify(execFileCb);
@@ -32,7 +33,14 @@ function group(): ErrorGroupData {
 }
 
 function input(): FrictionInvestigateInput {
-  return { group: group(), evidence: null, repoPath, sessionContext: null, investigatedCommit: 'commit-123' };
+  return {
+    group: group(),
+    evidence: null,
+    reader: createHostReader(repoPath),
+    tree: 'src/App.vue\n',
+    sessionContext: null,
+    investigatedCommit: 'commit-123',
+  };
 }
 
 function response(content: Array<Record<string, unknown>>, usage = USAGE) {

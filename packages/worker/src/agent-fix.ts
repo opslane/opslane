@@ -7,6 +7,7 @@ import { createDefaultMiddleware } from './harness/tool-middleware.js';
 import { extractStackTraceFiles, resolveTrackedFiles } from './harness/stack-trace-utils.js';
 import { parsePythonFrames, resolveFrames } from './harness/python-frames.js';
 import { judgeDiff } from './harness/diff-judge.js';
+import { createHostReader } from './harness/host-reader.js';
 import { investigateError } from './investigate.js';
 import { logger } from './logger.js';
 import { traceSpan } from './tracing.js';
@@ -535,7 +536,7 @@ async function runAgentFixCore(input: AgentFixInput): Promise<AgentFixResult> {
       };
 
       const investigation = await traceSpan('investigate', {}, () =>
-      investigateError(apiKey, triageInput, input.repoPath!),
+      investigateError(apiKey, triageInput, createHostReader(input.repoPath!)),
       );
 
       logger.info('Investigation result', {

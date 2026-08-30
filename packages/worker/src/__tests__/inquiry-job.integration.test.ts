@@ -103,7 +103,10 @@ describeDb('inquiry job write path integration', () => {
   it('stores one decision and one investigation job across retries', async () => {
     const dependencies = {
       loadEvidence: async () => evidence,
-      prepareRepository: async () => ({ repoPath: '/tmp/repo', cleanup: async () => undefined }),
+      prepareRepository: async () => ({
+        reader: { readFile: async () => '', grep: async () => '', list: async () => '', exists: async () => [] },
+        cleanup: async () => undefined,
+      }),
       askModel: async () => ({
         raw: { decision: 'investigate', reason: 'real failed write', brief: 'check delete path' },
         usage: { input: 10, output: 4, cacheRead: 0, cacheWrite: 0 }, costUsd: 0.001,
@@ -167,7 +170,10 @@ describeDb('inquiry job write path integration', () => {
     };
     await runInquiry(waitJob, new AbortController().signal, {
       loadEvidence: async () => evidence,
-      prepareRepository: async () => ({ repoPath: '/tmp/repo', cleanup: async () => undefined }),
+      prepareRepository: async () => ({
+        reader: { readFile: async () => '', grep: async () => '', list: async () => '', exists: async () => [] },
+        cleanup: async () => undefined,
+      }),
       askModel: async () => ({
         raw: { decision: 'wait_for_more_evidence', reason: 'single unit, no replay' },
         usage: { input: 8, output: 3, cacheRead: 0, cacheWrite: 0 }, costUsd: 0.001,

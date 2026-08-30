@@ -43,7 +43,10 @@ describe('issue inquiry', () => {
 
     const decision = await runInquiry(job, new AbortController().signal, {
       loadEvidence: async () => evidence,
-      prepareRepository: async () => ({ repoPath: '/tmp/repo', cleanup: async () => undefined }),
+      prepareRepository: async () => ({
+        reader: { readFile: async () => '', grep: async () => '', list: async () => '', exists: async () => [] },
+        cleanup: async () => undefined,
+      }),
       askModel: async () => ({
         raw: { decision: 'investigate', reason: 'real failed write', brief: 'check delete path' },
         usage: { input: 10, output: 4, cacheRead: 0, cacheWrite: 0 },
@@ -72,7 +75,10 @@ describe('issue inquiry', () => {
     const persisted: unknown[] = [];
     const decision = await runInquiry(job, new AbortController().signal, {
       loadEvidence: async () => evidence,
-      prepareRepository: async () => ({ repoPath: '/tmp/repo', cleanup: async () => undefined }),
+      prepareRepository: async () => ({
+        reader: { readFile: async () => '', grep: async () => '', list: async () => '', exists: async () => [] },
+        cleanup: async () => undefined,
+      }),
       askModel: async () => ({
         raw: { decision: 'do_not_pursue', reason: 'browser extension noise' },
         usage: { input: 8, output: 3, cacheRead: 0, cacheWrite: 0 },
@@ -94,7 +100,10 @@ describe('issue inquiry', () => {
     const persist = vi.fn(async () => true);
     await expect(runInquiry(job, new AbortController().signal, {
       loadEvidence: async () => evidence,
-      prepareRepository: async () => ({ repoPath: '/tmp/repo', cleanup: async () => undefined }),
+      prepareRepository: async () => ({
+        reader: { readFile: async () => '', grep: async () => '', list: async () => '', exists: async () => [] },
+        cleanup: async () => undefined,
+      }),
       askModel: async () => ({
         raw: { reason: 'no decision field' },
         usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
