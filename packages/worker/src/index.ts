@@ -55,7 +55,12 @@ import {
 } from './friction/adjudicator.js';
 import { buildEvidenceWindows, EVIDENCE_WINDOW_MS } from './friction/evidence-window.js';
 import { MachineUnavailableError, VerificationInfraError } from './harness/errors.js';
-import { createReadOnlyCheckout, type ReadOnlyCheckout } from './harness/readonly-sandbox.js';
+import {
+  createReadOnlyCheckout,
+  NO_VERIFICATION_EVIDENCE,
+  toInfraError,
+  type ReadOnlyCheckout,
+} from './harness/readonly-sandbox.js';
 import { processCIWatchJob } from './ci-watch.js';
 import { processRouteMapJob } from './route-map.js';
 import { runProductContext } from './product-context/job.js';
@@ -904,6 +909,10 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
         });
       }
     }
+  } catch (err: unknown) {
+    // Converted here, not inside investigateError: this is the only scope that
+    // holds the machine identity the incident reports needed and never had.
+    throw toInfraError(err, checkout, NO_VERIFICATION_EVIDENCE);
   } finally {
     await checkout.close();
   }
@@ -1108,6 +1117,8 @@ export async function processFrictionInvestigateJob(
     }
     jobsProcessed++;
     lastJobAt = new Date().toISOString();
+  } catch (err: unknown) {
+    throw toInfraError(err, checkout, NO_VERIFICATION_EVIDENCE);
   } finally {
     await checkout.close();
   }

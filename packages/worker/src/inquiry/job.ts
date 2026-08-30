@@ -5,7 +5,11 @@ import { loadEvidence, type EvidenceBundle } from '../evidence/bundle.js';
 import { getInstallationToken } from '../github-app.js';
 import { logger, safeErrorMessage } from '../logger.js';
 import type { RepoReader } from '../investigate-tools.js';
-import { createReadOnlyCheckout } from '../harness/readonly-sandbox.js';
+import {
+  createReadOnlyCheckout,
+  NO_VERIFICATION_EVIDENCE,
+  toInfraError,
+} from '../harness/readonly-sandbox.js';
 import { runReadOnlyAgent } from '../readonly-agent.js';
 import { buildRepoUrl } from '../repo-clone.js';
 import { traceSpan } from '../tracing.js';
@@ -68,7 +72,7 @@ export interface InquiryDependencies {
   prepareRepository: (
     job: ClaimedJob,
     signal: AbortSignal,
-  ) => Promise<{ reader: RepoReader; cleanup: () => Promise<void> }>;
+  ) => Promise<{ reader: RepoReader; sandboxId: string; createdAt: number; cleanup: () => Promise<void> }>;
   askModel: (input: {
     evidence: EvidenceBundle;
     reader: RepoReader;
@@ -116,7 +120,7 @@ export function buildInquiryPrompt(evidence: EvidenceBundle): string {
 async function prepareInquiryRepository(
   job: ClaimedJob,
   signal: AbortSignal,
-): Promise<{ reader: RepoReader; cleanup: () => Promise<void> }> {
+): Promise<{ reader: RepoReader; sandboxId: string; createdAt: number; cleanup: () => Promise<void> }> {
   checkAbort(signal);
   const project = await db.getProject(job.projectId);
   if (!project) throw new Error(`Project ${job.projectId} not found`);
@@ -149,7 +153,13 @@ async function prepareInquiryRepository(
     anthropicApiKey: apiKey,
   });
   await db.cacheProjectDefaultBranch(job.projectId, checkout.defaultBranch);
-  return { reader: checkout.reader, cleanup: checkout.close };
+  return {
+    reader: checkout.reader,
+    // Carried so a dead machine is logged with the identity that names it.
+    sandboxId: checkout.sandboxId,
+    createdAt: checkout.createdAt,
+    cleanup: checkout.close,
+  };
 }
 
 function inquiryStopMessage(stop: string): string {
@@ -226,7 +236,13 @@ export async function runInquiry(
   const startedAt = Date.now();
   try {
     checkAbort(signal);
-    const modelResult = await dependencies.askModel({ evidence, reader: prepared.reader, signal });
+    let modelResult;
+    try {
+      modelResult = await dependencies.askModel({ evidence, reader: prepared.reader, signal });
+    } catch (err: unknown) {
+      // The only scope holding both the machine identity and the failure.
+      throw toInfraError(err, prepared, NO_VERIFICATION_EVIDENCE);
+    }
     checkAbort(signal);
     const decision = parseInquiryDecision(modelResult.raw, suppliedIssueIds);
     const wrote = await dependencies.persist({

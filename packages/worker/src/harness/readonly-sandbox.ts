@@ -1,8 +1,9 @@
 import { CommandExitError, Sandbox } from 'e2b';
 import { classifyFailure, isCommandFailure } from './machine-state.js';
-import { MachineUnavailableError } from './errors.js';
+import { MachineUnavailableError, VerificationInfraError } from './errors.js';
 import { logger } from '../logger.js';
 import { buildReadOnlyNetwork } from './sandbox-network.js';
+import type { EvidenceRecord } from '@opslane/shared';
 import { buildGitNetrc } from '../repo-clone.js';
 import { redactCloneDetail } from './redact.js';
 import { MAX_LIST_ENTRIES, type RepoReader } from '../investigate-tools.js';
@@ -309,4 +310,33 @@ export async function createReadOnlyCheckout(opts: ReadOnlyCheckoutOpts): Promis
     await sbx.kill().catch(() => undefined);
     throw err;
   }
+}
+
+/**
+ * The evidence field `VerificationInfraError` requires when the failing job
+ * type has none. A read-only job never runs verification checks, so there is
+ * nothing truthful to put here, and the retry lane does not read it. Stated
+ * once rather than invented per call site.
+ */
+export const NO_VERIFICATION_EVIDENCE: EvidenceRecord = { version: 1, tier: null, checks: [] };
+
+/**
+ * Route a dead-machine failure into the retry lane that already exists, and
+ * record the machine identity that both August incidents lacked.
+ *
+ * Anything else is returned untouched: laundering a programming defect into an
+ * infrastructure error would retry it three times and then blame the provider.
+ */
+export function toInfraError(
+  err: unknown,
+  checkout: { sandboxId: string; createdAt: number },
+  evidence: EvidenceRecord,
+): unknown {
+  if (!(err instanceof MachineUnavailableError)) return err;
+  logger.error('read-only machine unavailable', {
+    'sandbox.id': checkout.sandboxId,
+    'sandbox.age_at_error_ms': Date.now() - checkout.createdAt,
+    'machine.state': err.state,
+  });
+  return new VerificationInfraError(err.message, evidence);
 }
