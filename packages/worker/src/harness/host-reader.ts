@@ -1,8 +1,9 @@
 import { execFile } from 'node:child_process';
 import { open, readdir, stat } from 'node:fs/promises';
-import { normalize, resolve } from 'node:path';
+import { resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { MAX_LIST_ENTRIES, type RepoReader } from '../investigate-tools.js';
+import { resolveDirInsideRepo, resolveInsideRepo } from '../repo-paths.js';
 import { isExcludedTraversalDirectory } from './traversal-exclusions.js';
 
 const execFileAsync = promisify(execFile);
@@ -28,16 +29,67 @@ const MAX_FILE_SIZE = 50_000;
  * the isolated jobs do import stays free of filesystem access.
  */
 export function createHostReader(repoPath: string): RepoReader {
-  const contained = (requested: string): string => {
-    const resolved = resolve(repoPath, requested);
-    // `resolve` removes a trailing separator. Keeping it here made the prefix
-    // check compare against `repo//`, rejecting every valid child path when a
-    // caller supplied a repository URL-derived path ending in `/`.
-    const normalizedRepo = resolve(normalize(repoPath));
-    if (!resolved.startsWith(normalizedRepo + '/') && resolved !== normalizedRepo) {
-      throw new Error('path traversal blocked — path must be within the repository');
+  /**
+   * Where a requested path really is, or null if it is not in the repository.
+   *
+   * The check this replaced was lexical — `resolve` then `startsWith` — and a
+   * lexical check cannot see a symlink. A checkout is untrusted input, so a
+   * repository can ship `escape.ts -> /etc/passwd`: the requested path is
+   * literally under the repository root, passes the prefix test, and the read
+   * then follows the link off the checkout. Demonstrated against this reader,
+   * which returned the linked-to host file's bytes.
+   *
+   * `resolveInsideRepo` resolves through `realpath` instead, so containment is
+   * decided on where the path lands rather than on how it is spelled. A symlink
+   * that stays inside the checkout still resolves, because that is inside.
+   *
+   * It returns a repository-relative path whose every component is already
+   * resolved, so re-joining it reaches the target without following a link
+   * again. As in `assertWritable`, this narrows the swap window between the
+   * check and the open rather than closing it; containment for the remaining
+   * window is the sandbox the isolated jobs now run in.
+   */
+  const containedFile = (requested: string): string | null => {
+    const relativePath = resolveInsideRepo(repoPath, requested);
+    return relativePath === null ? null : resolve(repoPath, relativePath);
+  };
+
+  /**
+   * Why a path did not resolve, in terms the agent can act on.
+   *
+   * A null resolution has two very different causes and the caller has to tell
+   * them apart: nothing is there — by far the common one, because the model
+   * guesses paths — or something is there that does not resolve to a `kind`
+   * inside the checkout. `executeReadFile` keys "file not found" off ENOENT, so
+   * reporting every miss as a security refusal would send an investigation
+   * chasing a traversal error over a mistyped filename.
+   *
+   * This picks a message; it does not re-decide containment. That decision was
+   * already made, by realpath, in `repo-paths.ts`.
+   */
+  const refusal = async (requested: string, kind: 'file' | 'directory'): Promise<Error> => {
+    try {
+      // `stat` follows the link, so an escaping symlink to something real still
+      // lands here and is reported as the refusal it is.
+      await stat(resolve(repoPath, requested));
+    } catch {
+      return new Error(`ENOENT: no such file or directory: ${requested}`);
     }
-    return resolved;
+    return new Error(
+      `path traversal blocked — ${requested} does not resolve to a ${kind} within the repository`,
+    );
+  };
+
+  const containedFileOrThrow = async (requested: string): Promise<string> => {
+    const resolved = containedFile(requested);
+    if (resolved !== null) return resolved;
+    throw await refusal(requested, 'file');
+  };
+
+  const containedDirOrThrow = async (requested: string): Promise<string> => {
+    const relativePath = resolveDirInsideRepo(repoPath, requested);
+    if (relativePath === null) throw await refusal(requested, 'directory');
+    return resolve(repoPath, relativePath);
   };
 
   return {
@@ -45,7 +97,7 @@ export function createHostReader(repoPath: string): RepoReader {
       // Read a bounded window rather than the whole file, because the model
       // picks the path: slicing to 50KB after the fact decoded minified vendor
       // bundles in full to produce the same 50KB of output.
-      const handle = await open(contained(filePath), 'r');
+      const handle = await open(await containedFileOrThrow(filePath), 'r');
       try {
         const buffer = Buffer.alloc(MAX_FILE_SIZE + 1);
         const { bytesRead } = await handle.read(buffer, 0, MAX_FILE_SIZE + 1, 0);
@@ -73,15 +125,16 @@ export function createHostReader(repoPath: string): RepoReader {
     exists: async (paths: string[]): Promise<string[]> => {
       const found: string[] = [];
       for (const path of paths) {
-        try {
-          if ((await stat(contained(path))).isFile()) found.push(path);
-        } catch { /* missing, unreadable, or outside the repository */ }
+        // `containedFile` already answers "is this an existing regular file
+        // inside the repository", and returns null rather than throwing for
+        // missing, unreadable, or escaping paths.
+        if (containedFile(path) !== null) found.push(path);
       }
       return found;
     },
 
     list: async (dirPath: string, recursive: boolean): Promise<string> => {
-      const resolved = contained(dirPath);
+      const resolved = await containedDirOrThrow(dirPath);
       const entries = await readdir(resolved, { withFileTypes: true });
       const results: string[] = [];
 
