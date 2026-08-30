@@ -42,14 +42,19 @@ export function buildReadOnlyNetwork(anthropicApiKey: string, repoUrl: string): 
   try {
     gitHost = new URL(repoUrl).hostname;
   } catch {
+    // A URL we cannot parse is one whose host we cannot allow. Refuse rather
+    // than build a policy that silently blocks the clone.
     throw new Error('A clone URL is required to build the egress policy');
   }
-  if (!gitHost) throw new Error('A clone URL is required to build the egress policy');
   return {
     denyOut: [ALL_TRAFFIC],
-    // Deduplicated: a repoUrl already naming an always-allowed host would
-    // otherwise appear twice in the policy.
-    allowOut: [...new Set([gitHost, ...ALWAYS_ALLOWED_HOSTS])],
+    // A `file://` remote has no host and needs no egress at all: the local
+    // verify rigs clone a twin repository off the filesystem. Allowing nothing
+    // extra is the correct policy there, not an error.
+    //
+    // Deduplicated, because a repoUrl already naming an always-allowed host
+    // would otherwise appear twice in the policy.
+    allowOut: [...new Set([...(gitHost ? [gitHost] : []), ...ALWAYS_ALLOWED_HOSTS])],
     rules: {
       'api.anthropic.com': [
         { transform: { headers: { 'x-api-key': anthropicApiKey, 'anthropic-version': '2023-06-01' } } },
