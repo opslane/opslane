@@ -448,16 +448,7 @@ export async function investigateError(
     }
   }
 
-  const diagnosis: Diagnosis | null = adjudication
-    ? {
-      one_line_description: adjudication.best_supported,
-      why_chain: adjudication.why_chain,
-      reproduction_steps: adjudication.reproduction_steps,
-      cause_location: adjudication.cause_locations.map((l) => l.path).join(', '),
-      evidence: adjudication.evidence,
-      agentTaskBrief: adjudication.agent_task_brief,
-    }
-    : null;
+  const diagnosis: Diagnosis | null = buildDiagnosis(adjudication);
 
   await traceSpan('investigation.decision', {
     'investigation.outcome': decision.outcome,
@@ -499,5 +490,29 @@ export async function investigateError(
     evidence: adjudication?.evidence ?? [],
     agentTaskBrief: adjudication?.agent_task_brief ?? null,
     investigatedCommit,
+  };
+}
+
+/** Exported for tests: the one place a diagnosis is assembled from an adjudication. */
+export function buildDiagnosis(
+  adjudication: {
+    best_supported: string;
+    why_chain: string[];
+    reproduction_steps: string[];
+    cause_locations: { path: string }[];
+    evidence?: EvidenceCitation[];
+    agent_task_brief?: string;
+  } | null,
+): Diagnosis | null {
+  if (!adjudication) return null;
+  const paths = adjudication.cause_locations.map((location) => location.path);
+  return {
+    one_line_description: adjudication.best_supported,
+    why_chain: adjudication.why_chain,
+    reproduction_steps: adjudication.reproduction_steps,
+    cause_location: paths.join(', '),
+    cause_locations: paths,
+    evidence: adjudication.evidence,
+    agentTaskBrief: adjudication.agent_task_brief,
   };
 }
