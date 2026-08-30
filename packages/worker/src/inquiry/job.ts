@@ -4,6 +4,7 @@ import * as db from '../db.js';
 import { loadEvidence, type EvidenceBundle } from '../evidence/bundle.js';
 import { getInstallationToken } from '../github-app.js';
 import { logger, safeErrorMessage } from '../logger.js';
+import { createHostReader } from '../investigate-tools.js';
 import { runReadOnlyAgent } from '../readonly-agent.js';
 import { cloneRepo } from '../repo-clone.js';
 import { traceSpan } from '../tracing.js';
@@ -166,7 +167,7 @@ export async function askInquiryModel(input: {
   }, () => runReadOnlyAgent({
     apiKey,
     model: INQUIRY_MODEL,
-    repoPath: input.repoPath,
+    reader: createHostReader(input.repoPath),
     maxTurns: 12,
     budgetUsd: 0.35,
     pricing: MODEL_PRICING[INQUIRY_MODEL] ?? DEFAULT_PRICING,

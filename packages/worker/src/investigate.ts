@@ -5,6 +5,7 @@ import { deriveOutcome, type DerivedDecision } from './classify.js';
 import { parseAdjudication, submitDiagnosisTool } from './diagnose-schema.js';
 import { resolveInsideRepo } from './repo-paths.js';
 import { extractStackTraceFiles } from './harness/stack-trace-utils.js';
+import { createHostReader } from './investigate-tools.js';
 import { logger } from './logger.js';
 import { fenced } from './prompt-fence.js';
 import type { Platform } from './platform.js';
@@ -385,7 +386,7 @@ export async function investigateError(
         `calls. Spend them on the files that decide between your candidates, and submit what ` +
         `the evidence supports rather than running out.${hints}`,
       terminalTool: submitDiagnosisTool(),
-      repoPath,
+      reader: createHostReader(repoPath),
       classification: { minFilesRead: 1 },
       validateTerminal: validateSubmission,
     }));

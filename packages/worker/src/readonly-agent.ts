@@ -1,6 +1,6 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import { createAnthropicClient } from './anthropic-client.js';
-import { executeListFiles, executeReadFile, executeSearch } from './investigate-tools.js';
+import { executeListFiles, executeReadFile, executeSearch, type RepoReader } from './investigate-tools.js';
 import { logger } from './logger.js';
 import { traceSpan } from './tracing.js';
 
@@ -58,7 +58,8 @@ export interface ReadOnlyRunInput {
   firstMessage: string;
   /** The tool that ends the run. Its raw input is returned. */
   terminalTool: Anthropic.Tool;
-  repoPath: string;
+  /** Where the agent's read-only tools get their raw data. */
+  reader: RepoReader;
   /** Optional evidence gate followed by one dedicated verdict-only turn. */
   classification?: { minFilesRead: number };
   /**
@@ -365,14 +366,14 @@ export async function runReadOnlyAgent(input: ReadOnlyRunInput): Promise<ReadOnl
           switch (call.name) {
             case 'read_file': {
               const path = call.input['path'] as string | undefined;
-              const content = await executeReadFile(input.repoPath, call.input);
+              const content = await executeReadFile(input.reader, call.input);
               const read = path && !content.startsWith('Error:') ? path : null;
               return { id: call.id, output: content, read };
             }
             case 'search':
-              return { id: call.id, output: await executeSearch(input.repoPath, call.input), read: null };
+              return { id: call.id, output: await executeSearch(input.reader, call.input), read: null };
             case 'list_files':
-              return { id: call.id, output: await executeListFiles(input.repoPath, call.input), read: null };
+              return { id: call.id, output: await executeListFiles(input.reader, call.input), read: null };
             default:
               return { id: call.id, output: `Error: Unknown tool "${call.name}"`, read: null };
           }
