@@ -19,6 +19,14 @@ vi.mock('../repo-clone.js', () => ({
   validateDiffPaths: vi.fn(),
 }));
 
+// Investigation reads inside a sandbox now, so this file reached the real E2B
+// client and failed on a missing API key. Only the checkout is stubbed:
+// toInfraError runs real, so the routing decision under test is the real one.
+// The cloneRepo mock above stays because the fix job still clones onto the host.
+vi.mock('../harness/readonly-sandbox.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../harness/readonly-sandbox.js')>();
+  return { ...real, createReadOnlyCheckout: vi.fn() };
+});
 vi.mock('../investigate.js', () => ({
   investigateError: vi.fn(),
   INVESTIGATION_MODEL: 'claude-sonnet-5',
@@ -63,6 +71,7 @@ const { processJobInner } = await import('../index.js');
 const { investigateError } = await import('../investigate.js');
 const { runAgentFix } = await import('../agent-fix.js');
 const { cloneRepo } = await import('../repo-clone.js');
+const { createReadOnlyCheckout } = await import('../harness/readonly-sandbox.js');
 
 const DATABASE_URL = process.env['DATABASE_URL'];
 const describeDb = DATABASE_URL ? describe : describe.skip;
@@ -248,6 +257,15 @@ describeDb('Python two-stage production path', () => {
       defaultBranch: 'main',
       headSha: 'abc123',
       cleanup: vi.fn(),
+    });
+    vi.mocked(createReadOnlyCheckout).mockResolvedValue({
+      reader: { readFile: vi.fn(), grep: vi.fn(), exists: vi.fn(), list: vi.fn() },
+      sandboxId: 'sbx-python-production-path',
+      createdAt: Date.now(),
+      headSha: 'abc123',
+      defaultBranch: 'main',
+      tree: '',
+      close: vi.fn(),
     });
     vi.mocked(investigateError).mockResolvedValue({
       fixable: true,
