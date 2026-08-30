@@ -39,21 +39,21 @@ func (d *Dependencies) presentIncident(
 func (d *Dependencies) presentMCPIncident(
 	ctx context.Context,
 	projectID, incidentID string,
-) (*mcpformat.MCPIncident, *mcpformat.IssueEvidence, error) {
+) (*mcpformat.IssueInput, error) {
 	incident, _, err := d.presentIncident(ctx, projectID, incidentID)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	if incident == nil {
-		return nil, nil, nil
+		return nil, nil
 	}
 	evidence, err := d.Queries.IssueEvidence(ctx, projectID, incidentID)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	formattedEvidence, err := toMCPEvidence(evidence)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	// Friction incidents have no episode, so the episode-based evidence above
 	// carries no recording. The watchable session is the friction replay; surface
@@ -79,7 +79,38 @@ func (d *Dependencies) presentMCPIncident(
 	if incident.State != "" {
 		state = &incident.State
 	}
-	return &mcpformat.MCPIncident{
+	var cause *mcpformat.IssueCause
+	chosen, cerr := d.Queries.ChosenDiagnosis(ctx, projectID, incidentID)
+	if cerr != nil {
+		slog.WarnContext(ctx, "chosen diagnosis lookup failed", "incident_id", incidentID, "error", cerr)
+	} else if chosen != nil {
+		cause = &mcpformat.IssueCause{
+			Kind: chosen.CauseKind, Paths: chosen.Paths,
+			DecidedAt: chosen.DecidedAt.Format("2006-01-02"),
+			Commit:    chosen.Commit, FromPastRound: chosen.FromPastRound,
+		}
+	}
+	var latest *mcpformat.IssueResult
+	if result, rerr := d.Queries.LatestPipelineResult(ctx, projectID, incidentID); rerr != nil {
+		slog.WarnContext(ctx, "latest pipeline result lookup failed", "incident_id", incidentID, "error", rerr)
+	} else if result != nil && (chosen == nil || !result.DecidedAt.Equal(chosen.DecidedAt)) {
+		latest = &mcpformat.IssueResult{
+			Outcome: result.Outcome, Reason: result.Reason,
+			DecidedAt: result.DecidedAt.Format("2006-01-02"),
+		}
+	}
+	earliestMatching, matchingIssues := "", 0
+	if anchor, aerr := d.Queries.RelatedAnchor(ctx, projectID, incidentID); aerr != nil {
+		slog.WarnContext(ctx, "related anchor lookup failed", "incident_id", incidentID, "error", aerr)
+	} else if anchor != nil {
+		if totals, terr := d.Queries.RelatedEventTotals(ctx, projectID, anchor.EnvironmentID, anchor.Platform, anchor.Message, -1); terr != nil {
+			slog.WarnContext(ctx, "related totals lookup failed", "incident_id", incidentID, "error", terr)
+		} else {
+			earliestMatching = totals.FirstSeen.Format("2006-01-02")
+			matchingIssues = totals.IssueCount
+		}
+	}
+	incidentView := mcpformat.MCPIncident{
 		ID:                     incident.ID,
 		Kind:                   incident.Kind,
 		Title:                  incident.Title,
@@ -96,7 +127,12 @@ func (d *Dependencies) presentMCPIncident(
 		ElementSelector:        incident.ElementSelector,
 		PageURLNormalized:      incident.PageURLNormalized,
 		InvestigationReadiness: incident.InvestigationReadiness,
-	}, formattedEvidence, nil
+	}
+	return &mcpformat.IssueInput{
+		Incident: incidentView, Evidence: *formattedEvidence,
+		Cause: cause, LatestResult: latest,
+		EarliestMatching: earliestMatching, MatchingIssues: matchingIssues,
+	}, nil
 }
 
 func toMCPEvidence(evidence db.IssueEvidenceResult) (*mcpformat.IssueEvidence, error) {

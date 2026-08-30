@@ -20,6 +20,9 @@ import (
 )
 
 var mcpLimiter = newRateLimiter(120)
+
+const relatedIssueListCap = 12
+
 var incidentUUID = regexp.MustCompile(`(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`)
 
 func (d *Dependencies) MCPHandler() http.Handler {
@@ -141,17 +144,14 @@ func (d *Dependencies) registerMCPTools(server *mcpsdk.Server) {
 		if !ok {
 			return errorToolResult("Could not read an incident id. Pass the full UUID or the dashboard URL from the digest."), nil, nil
 		}
-		incident, evidence, err := d.presentMCPIncident(ctx, ProjectIDFromCtx(ctx), incidentID)
+		issue, err := d.presentMCPIncident(ctx, ProjectIDFromCtx(ctx), incidentID)
 		if err != nil {
 			return nil, nil, err
 		}
-		if incident == nil {
+		if issue == nil {
 			return errorToolResult("Issue not found for this project."), nil, nil
 		}
-		return textToolResult(mcpformat.FormatIssue(mcpformat.IssueInput{
-			Incident: *incident,
-			Evidence: *evidence,
-		})), nil, nil
+		return textToolResult(mcpformat.FormatIssue(*issue)), nil, nil
 	}))
 
 	type linkPRArguments struct {
@@ -182,6 +182,58 @@ func (d *Dependencies) registerMCPTools(server *mcpsdk.Server) {
 			}
 		}
 		return textToolResult(fmt.Sprintf("Linked %s to %s. The issue will resolve through the merge workflow.", input.URL, incidentID)), nil, nil
+	}))
+
+	type relatedArguments struct {
+		ID      string `json:"id" jsonschema:"Full incident UUID, or a dashboard URL containing it"`
+		Message string `json:"message,omitempty" jsonschema:"Optional: count a different exact message instead of this issue's own"`
+	}
+	mcpsdk.AddTool(server, &mcpsdk.Tool{
+		Name: "opslane_related_events",
+		Description: "How far does this error reach? Counts events across the whole project " +
+			"carrying the same exact message as this issue, and lists the separate issues " +
+			"they fall in.",
+	}, trackTool("opslane_related_events", func(
+		ctx context.Context, _ *mcpsdk.CallToolRequest, input relatedArguments,
+	) (*mcpsdk.CallToolResult, any, error) {
+		incidentID, ok := parseIncidentID(input.ID)
+		if !ok {
+			return errorToolResult("Could not read an incident id. Pass the full UUID or the dashboard URL from the digest."), nil, nil
+		}
+		projectID := ProjectIDFromCtx(ctx)
+		anchor, err := d.Queries.RelatedAnchor(ctx, projectID, incidentID)
+		if err != nil {
+			return nil, nil, err
+		}
+		if anchor == nil {
+			return textToolResult(mcpformat.FormatRelated(mcpformat.RelatedInput{IssueID: incidentID})), nil, nil
+		}
+		message := anchor.Message
+		if trimmed := strings.TrimSpace(input.Message); trimmed != "" {
+			message = trimmed
+		}
+		totals, err := d.Queries.RelatedEventTotals(ctx, projectID, anchor.EnvironmentID, anchor.Platform, message, relatedIssueListCap)
+		if err != nil {
+			return nil, nil, err
+		}
+		view := mcpformat.RelatedTotalsView{
+			Occurrences: totals.Occurrences, People: totals.People,
+			IssueCount: totals.IssueCount,
+			FirstSeen:  totals.FirstSeen.Format("2006-01-02"),
+			LastSeen:   totals.LastSeen.Format("2006-01-02"),
+			Truncated:  totals.Truncated,
+		}
+		for _, issue := range totals.Issues {
+			view.Issues = append(view.Issues, mcpformat.RelatedIssueView{
+				ID: issue.ID, Occurrences: issue.Occurrences, People: issue.People,
+				FirstSeen: issue.FirstSeen.Format("2006-01-02"),
+				LastSeen:  issue.LastSeen.Format("2006-01-02"),
+				Status:    issue.Status, Recurred: issue.Recurred,
+			})
+		}
+		return textToolResult(mcpformat.FormatRelated(mcpformat.RelatedInput{
+			Message: message, IssueID: incidentID, Totals: view, AnchorFound: true,
+		})), nil, nil
 	}))
 
 	type timelineArguments struct {
@@ -232,14 +284,25 @@ func (d *Dependencies) registerMCPTools(server *mcpsdk.Server) {
 				return nil, "", err
 			}
 		}
+		sdkVersion := ""
+		sessionAttached := anchor.SessionID != ""
+		if sessionAttached {
+			if v, verr := d.Queries.SessionSDKVersion(ctx, projectID, anchor.SessionID); verr == nil {
+				sdkVersion = v
+			} else {
+				slog.WarnContext(ctx, "sdk version lookup failed", "session_id", anchor.SessionID, "error", verr)
+			}
+		}
 		body, quality, err := mcpformat.FormatTimeline(mcpformat.TimelineInput{
-			SessionID:      anchor.SessionID,
-			SessionGone:    sessionGone,
-			AnchorMs:       anchor.AnchorMs,
-			Breadcrumbs:    anchor.Breadcrumbs,
-			NetworkTimings: anchor.NetworkTimings,
-			Failures:       toTimelineFailures(failures),
-			AnalysisRan:    analysisRan,
+			SessionID:       anchor.SessionID,
+			SessionGone:     sessionGone,
+			AnchorMs:        anchor.AnchorMs,
+			Breadcrumbs:     anchor.Breadcrumbs,
+			NetworkTimings:  anchor.NetworkTimings,
+			Failures:        toTimelineFailures(failures),
+			AnalysisRan:     analysisRan,
+			SDKVersion:      sdkVersion,
+			SessionAttached: sessionAttached,
 		})
 		if err != nil {
 			return nil, "", fmt.Errorf("format timeline: %w", err)

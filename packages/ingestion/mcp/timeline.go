@@ -32,6 +32,11 @@ type TimelineInput struct {
 	NetworkTimings json.RawMessage
 	Failures       []TimelineFailure
 	AnalysisRan    bool
+	// SDKVersion is what the anchor event's session registered, or "" when the
+	// session recorded none. Network timings arrived in 4.1.0.
+	SDKVersion string
+	// SessionAttached separates no session from a session with no version.
+	SessionAttached bool
 	// Preamble is a caller-owned line printed above the timeline. It counts
 	// against the payload budget here rather than being prepended by the
 	// caller, which would push the result past PayloadLimit.
@@ -49,6 +54,38 @@ type rawBreadcrumb struct {
 	Timestamp string `json:"timestamp"`
 	Message   string `json:"message"`
 	Level     string `json:"level"`
+	// Deliberately json.RawMessage rather than a struct. POST /api/v1/events
+	// stores client JSON verbatim (handler/error_event.go), so `data` on disk
+	// may be an object, an array, a string, or absent, and status_code inside
+	// it may be a string or a float. Decoding into a typed struct makes one odd
+	// breadcrumb fail the whole array and error the tool for that issue
+	// permanently. Everything below is read leniently instead.
+	Data json.RawMessage `json:"data"`
+}
+
+// crumbField reads one string-ish value out of a breadcrumb's data object,
+// returning "" for every shape that is not a plain object holding it.
+func crumbField(data json.RawMessage, key string) string {
+	if len(data) == 0 {
+		return ""
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return ""
+	}
+	raw, ok := fields[key]
+	if !ok {
+		return ""
+	}
+	var text string
+	if err := json.Unmarshal(raw, &text); err == nil {
+		return text
+	}
+	var number json.Number
+	if err := json.Unmarshal(raw, &number); err == nil {
+		return number.String()
+	}
+	return ""
 }
 
 type rawTiming struct {
@@ -124,9 +161,21 @@ func FormatTimeline(in TimelineInput) (string, string, error) {
 
 	entries := make([]timelineEntry, 0, len(crumbs)+len(timings))
 	unreadable := 0
+	netCrumbs := 0
+	// Network breadcrumbs are the fallback for events whose SDK sent no
+	// timings. When timings exist they describe the same requests with more
+	// detail, and rendering both would double count every one of them.
+	useCrumbNetwork := len(timings) == 0
 	for _, crumb := range crumbs {
-		keep := crumb.Type == "click" || (crumb.Type == "console" && crumb.Level == "error")
-		if !keep {
+		var kind string
+		switch {
+		case crumb.Type == "click":
+			kind = "click"
+		case crumb.Type == "console" && crumb.Level == "error":
+			kind = "console"
+		case (crumb.Type == "fetch" || crumb.Type == "xhr") && useCrumbNetwork:
+			kind = "net"
+		default:
 			continue
 		}
 		at, err := time.Parse(time.RFC3339, crumb.Timestamp)
@@ -134,14 +183,29 @@ func FormatTimeline(in TimelineInput) (string, string, error) {
 			unreadable++
 			continue
 		}
-		kind := "click"
-		if crumb.Type == "console" {
-			kind = "console"
+		text := fmt.Sprintf("%s  %s", kind, Fence(Truncate(crumb.Message, SelectorLimit)))
+		if kind == "net" {
+			netCrumbs++
+			status := crumbField(crumb.Data, "status_code")
+			if status == "" {
+				status = "no status recorded"
+			}
+			// The SDK writes method and url as their own fields (sdk/src/
+			// network.ts). Prefer those; a producer that only filled in the
+			// message still renders through the "METHOD url" fallback. Either
+			// way the query string is stripped, as the timing renderer does.
+			method, rawURL := crumbField(crumb.Data, "method"), crumbField(crumb.Data, "url")
+			if method == "" && rawURL == "" {
+				method, rawURL, _ = strings.Cut(crumb.Message, " ")
+			}
+			text = fmt.Sprintf("net %s %s -> %s (breadcrumb)",
+				Fence(Truncate(method, methodLimit)),
+				Fence(Truncate(urlPath(rawURL), SelectorLimit)), status)
 		}
 		entries = append(entries, timelineEntry{
 			atMs: at.UnixMilli(),
 			kind: kind,
-			text: fmt.Sprintf("%s  %s", kind, Fence(Truncate(crumb.Message, SelectorLimit))),
+			text: text,
 		})
 	}
 	for _, timing := range timings {
@@ -182,7 +246,25 @@ func FormatTimeline(in TimelineInput) (string, string, error) {
 	}
 	tail := make([]string, 0, 12)
 	if len(timings) == 0 {
-		tail = append(tail, "", "No network activity was recorded on this event.")
+		switch {
+		// netCrumbs, not len(crumbs): the SDK only attaches network_timings once
+		// it has observed a request, so an event with clicks and no network
+		// calls has nothing missing to explain.
+		case netCrumbs == 0:
+			tail = append(tail, "", "No network activity was recorded on this event.")
+		case !in.SessionAttached:
+			tail = append(tail, "", "No network timings were recorded. No session is attached to this event, so the SDK version cannot be looked up. The entries above come from breadcrumbs.")
+		case in.SDKVersion == "":
+			tail = append(tail, "", "No network timings were recorded. This event's session recorded no SDK version, so the reason is not established. The entries above come from breadcrumbs.")
+		case !sendsNetworkTimings(in.SDKVersion):
+			tail = append(tail, "", fmt.Sprintf(
+				"No network timings were recorded. This session ran SDK %s, which predates network timings. The entries above come from breadcrumbs.",
+				Fence(Truncate(in.SDKVersion, methodLimit))))
+		default:
+			tail = append(tail, "", fmt.Sprintf(
+				"No network timings were recorded. This session ran SDK %s, which does record timings, so their absence is unexplained. The entries above come from breadcrumbs.",
+				Fence(Truncate(in.SDKVersion, methodLimit))))
+		}
 	}
 	if len(crumbs) == 0 {
 		tail = append(tail, "No breadcrumbs were recorded on this event.")
@@ -289,4 +371,17 @@ func abs64(value int64) int64 {
 		return -value
 	}
 	return value
+}
+
+// sendsNetworkTimings reports whether a version string is 4.1.0 or newer.
+// Anything unparseable is treated as newer to avoid a confident wrong claim.
+func sendsNetworkTimings(version string) bool {
+	major, minor := 0, 0
+	if _, err := fmt.Sscanf(version, "%d.%d", &major, &minor); err != nil {
+		return true
+	}
+	if major != 4 {
+		return major > 4
+	}
+	return minor >= 1
 }

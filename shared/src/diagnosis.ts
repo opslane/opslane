@@ -131,6 +131,12 @@ export interface Diagnosis {
   reproduction_steps: string[];
   /** A repository file and line, or a description of the external system. */
   cause_location: string;
+  /**
+   * The same locations unjoined, most confident first. `cause_location` is a
+   * comma join and cannot be split back when a path contains a comma, so
+   * readers should prefer this. Absent on older rows.
+   */
+  cause_locations?: string[];
   evidence?: EvidenceCitation[];
   agentTaskBrief?: string;
   /** Commit whose repository contents were inspected for this diagnosis. */
