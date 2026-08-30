@@ -1,20 +1,14 @@
-import { execFile as execFileCb } from 'node:child_process';
-import { promisify } from 'node:util';
 import type Anthropic from '@anthropic-ai/sdk';
 import type { EvidenceCitation } from '@opslane/shared';
 import type { ErrorGroupData } from '../db.js';
 import { EVIDENCE_ARRAY_SCHEMA, parseEvidence, seal } from '../diagnose-schema.js';
 import { DEFAULT_PRICING, MODEL_PRICING } from '../investigate.js';
-import { logger } from '../logger.js';
 import { fenced } from '../prompt-fence.js';
-import { resolveInsideRepo } from '../repo-paths.js';
-import { createHostReader } from '../investigate-tools.js';
+import type { RepoReader } from '../investigate-tools.js';
 import { runReadOnlyAgent, type ReadOnlyRunResult } from '../readonly-agent.js';
-import { scrubbedEnv } from '../repo-clone.js';
 import { validateVerdict } from '../verdict-validation.js';
 import type { FrictionEvidence } from './friction-evidence.js';
 
-const execFile = promisify(execFileCb);
 
 export const FRICTION_INVESTIGATION_MODEL =
   process.env['FRICTION_INVESTIGATION_MODEL'] ?? 'claude-sonnet-4-6';
@@ -24,7 +18,13 @@ const BUDGET_USD = Number(process.env['FRICTION_INVESTIGATION_BUDGET_USD'] ?? 2.
 export interface FrictionInvestigateInput {
   group: ErrorGroupData;
   evidence: FrictionEvidence | null;
-  repoPath: string;
+  reader: RepoReader;
+  /**
+   * `git ls-files` output for the prompt's repository tree, produced inside the
+   * sandbox. Passed in rather than read here: this module no longer touches the
+   * host filesystem or spawns processes.
+   */
+  tree: string;
   sessionContext: string | null;
   investigatedCommit: string;
 }
@@ -106,20 +106,8 @@ export function parseFrictionVerdict(input: unknown): FrictionVerdict | null {
   };
 }
 
-async function repositoryTree(repoPath: string): Promise<string> {
-  let tree = '';
-  try {
-    const result = await execFile('git', ['ls-files'], {
-      cwd: repoPath,
-      timeout: 15_000,
-      env: scrubbedEnv(),
-    });
-    tree = String(result.stdout);
-  } catch (error: unknown) {
-    logger.warn('Friction investigation could not list repository files', {
-      error: error instanceof Error ? error.message : String(error),
-    });
-  }
+/** Bound the supplied repository tree for the prompt. */
+function repositoryTree(tree: string): string {
   return tree.length > 8192 ? `${tree.slice(0, 8192)}\n…truncated` : tree;
 }
 
@@ -132,7 +120,7 @@ async function systemPrompt(input: FrictionInvestigateInput): Promise<string> {
       sessionContext: input.sessionContext,
     }
     : { signals: [], timeline: '', truncated: false, sessionContext: input.sessionContext };
-  const tree = await repositoryTree(input.repoPath);
+  const tree = repositoryTree(input.tree);
   return `You investigate user-friction incidents using read-only repository tools.
 
 Decide whether the friction has a concrete CODE cause this repository could fix, such as a broken handler, missing event wiring, missing preventDefault, or dead route. Otherwise classify it as a UX/design insight. When in doubt, codeCause=false: an insight is honest, a speculative fix is not. Only classify after reading files. Your verdict is machine-checked: it must cite at least one file you actually read, with what you found there and how it links to the symptom; a verdict with no citations is discarded as incomplete. Only files opened with read_file count as read — a file seen only in search results must be read before you cite it. If you cannot verify a cause, say so plainly — an unverified guess is worse than no answer.
@@ -180,6 +168,40 @@ export async function investigateFriction(
   apiKey: string,
   input: FrictionInvestigateInput,
 ): Promise<FrictionInvestigationResult> {
+  // Citations are grounded against what the model actually read, filled as it
+  // reads. The host version resolved paths with realpath against the checkout;
+  // there is no checkout on this host any more, and a file the model never
+  // opened could not ground a citation under the old rule either.
+  const filesRead = new Set<string>();
+  /** Paths proven absent, so a hallucinated citation reads differently from an unread one. */
+  const knownMissing = new Set<string>();
+  /** One repository-relative POSIX form, so './src/a.ts' and 'src/a.ts' agree. */
+  const norm = (path: string): string =>
+    path.replace(/\\/g, '/').replace(/^\.\//, '').replace(/^\/+/, '');
+  const recordingReader: RepoReader = {
+    readFile: async (path: string): Promise<string> => {
+      let content: string;
+      try {
+        content = await input.reader.readFile(path);
+      } catch (err: unknown) {
+        if (/ENOENT|No such file|not found/i.test(err instanceof Error ? err.message : String(err))) {
+          knownMissing.add(norm(path));
+        }
+        throw err;
+      }
+      knownMissing.delete(norm(path));
+      filesRead.add(norm(path));
+      return content;
+    },
+    grep: (args: string[]) => input.reader.grep(args),
+    list: (path: string, recursive: boolean) => input.reader.list(path, recursive),
+    exists: (paths: string[]) => input.reader.exists(paths),
+  };
+  const resolveCited = (cited: string): string | null => {
+    const key = norm(cited);
+    return knownMissing.has(key) ? null : key;
+  };
+
   const run = await runReadOnlyAgent({
     apiKey,
     model: FRICTION_INVESTIGATION_MODEL,
@@ -189,7 +211,7 @@ export async function investigateFriction(
     systemPrompt: await systemPrompt(input),
     firstMessage: 'Inspect the repository, then call classify_friction with your evidence-backed conclusion.',
     terminalTool: CLASSIFY_TOOL,
-    reader: createHostReader(input.repoPath),
+    reader: recordingReader,
     classification: { minFilesRead: 1 },
   });
 
@@ -210,13 +232,22 @@ export async function investigateFriction(
       if (!verdict) {
         return incomplete('malformed_verdict: terminal tool input failed to parse', input, run);
       }
+      // One round trip proves which citations are really in the checkout, so a
+      // hallucinated path is reported as unresolvable rather than merely unread.
+      const cited = verdict.evidence.map((entry) => entry.path).filter((path) => !filesRead.has(norm(path)));
+      if (cited.length > 0) {
+        const present = new Set((await input.reader.exists(cited)).map(norm));
+        for (const path of cited) {
+          if (!present.has(norm(path))) knownMissing.add(norm(path));
+        }
+      }
       const validation = validateVerdict({
         causeText: verdict.reason,
         claimsCodeCause: verdict.codeCause,
         evidence: verdict.evidence,
         agentTaskBrief: verdict.agentTaskBrief,
         filesRead: run.filesRead,
-      }, (path) => resolveInsideRepo(input.repoPath, path));
+      }, resolveCited);
       if (validation.status === 'incomplete') {
         return incomplete(validation.reason, input, run, {
           evidence: verdict.evidence,

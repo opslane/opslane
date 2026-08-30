@@ -54,7 +54,8 @@ import {
   type EvidenceWindowMode,
 } from './friction/adjudicator.js';
 import { buildEvidenceWindows, EVIDENCE_WINDOW_MS } from './friction/evidence-window.js';
-import { VerificationInfraError } from './harness/errors.js';
+import { MachineUnavailableError, VerificationInfraError } from './harness/errors.js';
+import { createReadOnlyCheckout, type ReadOnlyCheckout } from './harness/readonly-sandbox.js';
 import { processCIWatchJob } from './ci-watch.js';
 import { processRouteMapJob } from './route-map.js';
 import { runProductContext } from './product-context/job.js';
@@ -636,21 +637,20 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
 
   checkAbort(signal);
 
-  // Clone repo for investigation
-  let repoDir: string;
+  // Rent an isolated machine and clone into it. The customer's code is never
+  // written to this shared host, and the Anthropic key is attached by the
+  // egress proxy rather than placed inside the machine.
+  let checkout: ReadOnlyCheckout;
   let investigatedCommit: string;
-  let cleanup: () => Promise<void>;
   try {
-    const cloneResult = await cloneRepo({
-      githubRepo: project.github_repo,
-      jobId: job.id,
+    checkout = await createReadOnlyCheckout({
+      repoUrl: buildRepoUrl(project.github_repo),
+      commitSha: evidence.frames.commitSha ?? undefined,
       githubToken,
-      commitSha: evidence.frames.commitSha,
+      anthropicApiKey: apiKey,
     });
-    repoDir = cloneResult.repoDir;
-    investigatedCommit = cloneResult.headSha;
-    cleanup = cloneResult.cleanup;
-    await db.cacheProjectDefaultBranch(job.projectId, cloneResult.defaultBranch);
+    investigatedCommit = checkout.headSha;
+    await db.cacheProjectDefaultBranch(job.projectId, checkout.defaultBranch);
     // Stamp the checkout on the job row now, not inside the diagnosis: the
     // diagnosis is null exactly when the run fails, and those are the runs
     // whose checkout needs auditing.
@@ -665,7 +665,10 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
       fell_back_to_default_head: fellBack,
     });
   } catch (err: unknown) {
-    if (isRetriableCloneFailure(err)) {
+    // A machine that died or went unreachable during setup is infrastructure,
+    // not a repository problem. Retry the durable job rather than telling the
+    // customer their repository is inaccessible.
+    if (err instanceof MachineUnavailableError || isRetriableCloneFailure(err)) {
       // A network blip is not a diagnosis. Fail the durable job so it retries
       // and, when exhausted, dead-letters into the operator's view instead of
       // becoming a customer-facing terminal.
@@ -696,7 +699,7 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
       breadcrumbs: event?.breadcrumbs ?? '[]',
       sessionContext: investigationEvidenceContext(evidence),
       investigationBrief: job.guidance,
-    }, repoDir, investigatedCommit);
+    }, checkout.reader, investigatedCommit);
     await recordJobUsage({
       jobId: job.id,
       execution: job.attempts,
@@ -902,7 +905,7 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
       }
     }
   } finally {
-    await cleanup();
+    await checkout.close();
   }
 
   lastJobAt = new Date().toISOString();
@@ -946,16 +949,16 @@ export async function processFrictionInvestigateJob(
   githubToken ??= process.env['GITHUB_TOKEN'];
   checkAbort(signal);
 
-  let clone: Awaited<ReturnType<typeof cloneRepo>>;
+  let checkout: ReadOnlyCheckout;
   try {
-    clone = await cloneRepo({
-      githubRepo: project.github_repo,
-      jobId: job.id,
+    checkout = await createReadOnlyCheckout({
+      repoUrl: buildRepoUrl(project.github_repo),
       githubToken,
+      anthropicApiKey: apiKey,
     });
-    await db.cacheProjectDefaultBranch(job.projectId, clone.defaultBranch);
+    await db.cacheProjectDefaultBranch(job.projectId, checkout.defaultBranch);
   } catch (error: unknown) {
-    if (isRetriableCloneFailure(error)) {
+    if (error instanceof MachineUnavailableError || isRetriableCloneFailure(error)) {
       // Same classification as the error pipeline: transient clone faults
       // retry the durable job instead of terminalizing the incident.
       throw error;
@@ -979,9 +982,10 @@ export async function processFrictionInvestigateJob(
     const result = await investigateFriction(apiKey, {
       group,
       evidence,
-      repoPath: clone.repoDir,
+      reader: checkout.reader,
+      tree: checkout.tree,
       sessionContext,
-      investigatedCommit: clone.headSha,
+      investigatedCommit: checkout.headSha,
     });
     await recordJobUsage({
       jobId: job.id,
@@ -1105,7 +1109,7 @@ export async function processFrictionInvestigateJob(
     jobsProcessed++;
     lastJobAt = new Date().toISOString();
   } finally {
-    await clone.cleanup();
+    await checkout.close();
   }
 }
 

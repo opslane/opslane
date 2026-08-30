@@ -83,6 +83,9 @@ vi.mock('../repo-clone.js', async (importOriginal) => {
     })),
   };
 });
+// Investigation and friction read inside a sandbox now; only the fix job still
+// clones onto this host, which is why both mocks coexist.
+vi.mock('../harness/readonly-sandbox.js', () => ({ createReadOnlyCheckout: vi.fn() }));
 vi.mock('../minio-client.js', () => ({ fetchObject: vi.fn(), getMinIOConfig: vi.fn(() => null) }));
 vi.mock('../investigate.js', () => ({
   investigateError: vi.fn(),
@@ -150,6 +153,7 @@ vi.mock('../friction/evidence-window.js', () => ({
 
 const db = await import('../db.js');
 const { cloneRepo } = await import('../repo-clone.js');
+const { createReadOnlyCheckout } = await import('../harness/readonly-sandbox.js');
 const { runPipeline } = await import('../pipeline.js');
 const { investigateError } = await import('../investigate.js');
 const { mapDbSignals, processJobInner, processInvestigateJob, processFixJob, processSessionAnalysisJob } = await import('../index.js');
@@ -176,6 +180,18 @@ const mockGetErrorEvent = vi.mocked(db.getErrorEvent);
 const mockGetProject = vi.mocked(db.getProject);
 const mockUpdateGroupStatus = vi.mocked(db.updateGroupStatus);
 const mockCloneRepo = vi.mocked(cloneRepo);
+const mockCreateReadOnlyCheckout = vi.mocked(createReadOnlyCheckout);
+const stubReader = { readFile: async () => '', grep: async () => '', list: async () => '', exists: async () => [] };
+const stubCheckout = (over: Record<string, unknown> = {}) => ({
+  reader: stubReader,
+  sandboxId: 'sbx-1',
+  createdAt: Date.now(),
+  headSha: 'abc123',
+  defaultBranch: 'main',
+  tree: '',
+  close: vi.fn(async () => undefined),
+  ...over,
+});
 const mockRunPipeline = vi.mocked(runPipeline);
 const mockInvestigateError = vi.mocked(investigateError);
 const mockGetSessionPointerForGroup = vi.mocked(db.getSessionPointerForGroup);
@@ -307,7 +323,7 @@ describe('processInvestigateJob — pre-clone guard for stackless errors', () =>
     await processInvestigateJob(makeJob(), new AbortController().signal);
 
     // The expensive path (repo clone → LLM/sandbox) must never run.
-    expect(mockCloneRepo).not.toHaveBeenCalled();
+    expect(mockCreateReadOnlyCheckout).not.toHaveBeenCalled();
 
     // The group must be parked as a non-retriable needs_human with the full
     // reason contract (reason_code + reason_message + remediation).
@@ -351,7 +367,7 @@ describe('processInvestigateJob — pre-clone guard for stackless errors', () =>
     await processInvestigateJob(makeJob(), new AbortController().signal);
 
     expect(mockGetErrorEvent).toHaveBeenCalledWith('evt-1', 'proj-1');
-    expect(mockCloneRepo).not.toHaveBeenCalled();
+    expect(mockCreateReadOnlyCheckout).not.toHaveBeenCalled();
     expect(unfixableCall()).toBeDefined();
   });
 
@@ -362,7 +378,7 @@ describe('processInvestigateJob — pre-clone guard for stackless errors', () =>
 
     expect(mockUpdateGroupStatus).not.toHaveBeenCalled();
     expect(mockGetErrorEvent).not.toHaveBeenCalled();
-    expect(mockCloneRepo).not.toHaveBeenCalled();
+    expect(mockCreateReadOnlyCheckout).not.toHaveBeenCalled();
   });
 });
 
@@ -386,12 +402,7 @@ describe('processInvestigateJob diagnosis routing', () => {
       friction_autonomy: 'ask_first',
     });
     vi.mocked(db.getProjectGitHubInstallation).mockResolvedValue(null);
-      mockCloneRepo.mockResolvedValue({
-      repoDir: '/tmp/repo',
-      defaultBranch: 'main',
-      headSha: 'abc123',
-      cleanup: vi.fn(),
-    });
+      mockCreateReadOnlyCheckout.mockResolvedValue(stubCheckout() as never);
   });
 
   afterEach(() => {
@@ -545,7 +556,7 @@ describe('processInvestigateJob diagnosis routing', () => {
   });
 
   it('fails the job on a transient clone failure instead of writing a terminal', async () => {
-    mockCloneRepo.mockRejectedValueOnce(new Error('fatal: unable to access repo: Connection timed out'));
+    mockCreateReadOnlyCheckout.mockRejectedValueOnce(new Error('fatal: unable to access repo: Connection timed out'));
 
     await expect(processInvestigateJob(makeJob(), new AbortController().signal))
       .rejects.toThrow('Connection timed out');
@@ -1105,7 +1116,7 @@ describe('friction worker path', () => {
       id: 'proj-1', name: 'app', github_repo: 'org/app', default_branch: 'main', friction_autonomy: 'ask_first',
     });
     vi.mocked(db.getProjectGitHubInstallation).mockResolvedValue(null);
-    mockCloneRepo.mockResolvedValue({ repoDir: '/tmp/repo', defaultBranch: 'main', headSha: 'abc123', cleanup: vi.fn() });
+    mockCreateReadOnlyCheckout.mockResolvedValue(stubCheckout() as never);
     vi.mocked(gatherFrictionEvidence).mockResolvedValue({ signals: [], timeline: '', truncated: false });
     mockRunPipeline.mockResolvedValue({
       status: 'pr_created', confidence: 'high', pr_url: 'https://github.com/org/app/pull/9', pr_number: 9,

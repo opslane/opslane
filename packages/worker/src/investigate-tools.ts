@@ -1,28 +1,9 @@
-import { execFile } from 'node:child_process';
-import { open, readdir } from 'node:fs/promises';
-import { normalize, resolve } from 'node:path';
-import { promisify } from 'node:util';
 import { MachineUnavailableError } from './harness/errors.js';
-import { grepExclusionArgs, isExcludedTraversalDirectory } from './harness/traversal-exclusions.js';
-
-const execFileAsync = promisify(execFile);
+import { grepExclusionArgs } from './harness/traversal-exclusions.js';
 
 const MAX_FILE_SIZE = 50_000;
 const MAX_SEARCH_RESULTS = 50;
 export const MAX_LIST_ENTRIES = 200;
-
-/** Validate and resolve a path, blocking traversal outside repoPath. */
-export function safePath(repoPath: string, requested: string): string | null {
-  const resolved = resolve(repoPath, requested);
-  // `resolve` removes a trailing separator. Keeping it here made the prefix
-  // check compare against `repo//`, rejecting every valid child path when a
-  // caller supplied a repository URL-derived path ending in `/`.
-  const normalizedRepo = resolve(normalize(repoPath));
-  if (!resolved.startsWith(normalizedRepo + '/') && resolved !== normalizedRepo) {
-    return null;
-  }
-  return resolved;
-}
 
 function addLineNumbers(content: string): string {
   return content
@@ -63,79 +44,17 @@ export interface RepoReader {
    * drift this seam exists to prevent.
    */
   list(path: string, recursive: boolean): Promise<string>;
-}
-
-/** A `RepoReader` over a checkout on this host's filesystem. */
-export function createHostReader(repoPath: string): RepoReader {
-  const contained = (requested: string): string => {
-    const resolved = safePath(repoPath, requested);
-    if (!resolved) throw new Error('path traversal blocked — path must be within the repository');
-    return resolved;
-  };
-
-  return {
-    readFile: async (filePath: string): Promise<string> => {
-      // Read a bounded window rather than the whole file, because the model picks
-      // the path: reading first and slicing to 50KB afterwards decoded a minified
-      // vendor bundle or a lockfile into a JS string in full — potentially
-      // hundreds of megabytes — inside the process that also runs sandbox and PR
-      // work, to produce the same 50KB of output.
-      const handle = await open(contained(filePath), 'r');
-      try {
-        const buffer = Buffer.alloc(MAX_FILE_SIZE + 1);
-        const { bytesRead } = await handle.read(buffer, 0, MAX_FILE_SIZE + 1, 0);
-        return buffer.subarray(0, bytesRead).toString('utf-8');
-      } finally {
-        await handle.close();
-      }
-    },
-
-    grep: async (args: string[]): Promise<string> => {
-      try {
-        return (
-          await execFileAsync('grep', args, { cwd: repoPath, maxBuffer: 512 * 1024, timeout: 10_000 })
-        ).stdout;
-      } catch (err: unknown) {
-        // grep exits 1 when there are no matches, and execFileAsync rejects on
-        // any non-zero code. That is an empty result, not a failure.
-        if (err && typeof err === 'object' && 'code' in err && (err as { code: number }).code === 1) {
-          return String((err as { stdout?: string }).stdout ?? '');
-        }
-        throw err;
-      }
-    },
-
-    list: async (dirPath: string, recursive: boolean): Promise<string> => {
-      const resolved = contained(dirPath);
-      const entries = await readdir(resolved, { withFileTypes: true });
-      const results: string[] = [];
-
-      for (const entry of entries) {
-        if (isExcludedTraversalDirectory(entry.name)) continue;
-        if (results.length >= MAX_LIST_ENTRIES) {
-          results.push(`... [truncated at ${MAX_LIST_ENTRIES} entries]`);
-          break;
-        }
-        const suffix = entry.isDirectory() ? '/' : '';
-        results.push(`${dirPath === '.' ? '' : dirPath + '/'}${entry.name}${suffix}`);
-
-        if (recursive && entry.isDirectory() && results.length < MAX_LIST_ENTRIES) {
-          try {
-            const subEntries = await readdir(resolve(resolved, entry.name), { withFileTypes: true });
-            for (const sub of subEntries) {
-              if (isExcludedTraversalDirectory(sub.name)) continue;
-              if (results.length >= MAX_LIST_ENTRIES) break;
-              const subSuffix = sub.isDirectory() ? '/' : '';
-              results.push(`${dirPath === '.' ? '' : dirPath + '/'}${entry.name}/${sub.name}${subSuffix}`);
-            }
-          } catch { /* skip unreadable subdirs */ }
-        }
-      }
-
-      if (results.length === 0) return 'Empty directory.';
-      return results.join('\n');
-    },
-  };
+  /**
+   * Of `paths`, the subset that resolves to a regular file inside the checkout,
+   * returned in the caller's own spelling.
+   *
+   * Batched and narrow on purpose. Citation grounding has to tell "this file is
+   * not in the repository" from "this file is here but you never opened it",
+   * and those are different messages to send back to the model. A general
+   * command escape would answer it too, and would reopen the hole this seam
+   * closes, so this asks exactly one question.
+   */
+  exists(paths: string[]): Promise<string[]>;
 }
 
 /** read_file tool: read a source file from the repo with line numbers. */

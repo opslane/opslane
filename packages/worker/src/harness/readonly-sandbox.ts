@@ -4,6 +4,7 @@ import { MachineUnavailableError } from './errors.js';
 import { logger } from '../logger.js';
 import { buildReadOnlyNetwork } from './sandbox-network.js';
 import { buildGitNetrc } from '../repo-clone.js';
+import { redactCloneDetail } from './redact.js';
 import { MAX_LIST_ENTRIES, type RepoReader } from '../investigate-tools.js';
 import { TRAVERSAL_EXCLUSIONS } from './traversal-exclusions.js';
 
@@ -88,6 +89,22 @@ export function createSandboxReader(sbx: MinimalSandbox, root: string): RepoRead
     // grep exits 1 for "no matches", which is not a failure.
     grep: (args) => run(`cd ${q(root)} && grep ${args.map(q).join(' ')}`, [1]),
 
+    // One command for the whole batch: grounding a submission can ask about a
+    // dozen citations, and a round trip each would cost more than the read that
+    // produced them.
+    exists: async (paths) => {
+      if (paths.length === 0) return [];
+      const loop = paths.map(q).join(' ');
+      const stdout = await run(
+        `cd ${q(root)} && for p in ${loop}; do ` +
+        `r=$(realpath -e -- "$p" 2>/dev/null) || continue; ` +
+        `case "$r" in ${q(root)}/*|${q(root)}) ;; *) continue;; esac; ` +
+        `[ -f "$r" ] || continue; printf '%s\\n' "$p"; done`,
+      );
+      const found = new Set(stdout.split('\n').filter(Boolean));
+      return paths.filter((path) => found.has(path));
+    },
+
     // Must present the same shape the host reader produced: one entry per line,
     // directories marked with a trailing slash, prefixed by the requested path,
     // vendored directories skipped, bounded at MAX_LIST_ENTRIES.
@@ -122,8 +139,25 @@ export interface ReadOnlyCheckout {
   reader: RepoReader;
   sandboxId: string;
   createdAt: number;
+  /** Commit actually checked out, for `recordInvestigatedCommit`. */
+  headSha: string;
+  /** Repository default branch, for `cacheProjectDefaultBranch`. */
+  defaultBranch: string;
+  /**
+   * `git ls-files` output, bounded. Friction puts a repository tree in its
+   * system prompt and used to shell out to git on the host to get it.
+   *
+   * A named field rather than a general "run this command" escape: an escape
+   * hatch would let any future caller reach back into the machine with an
+   * arbitrary string and recreate exactly the hole this module closes. If a
+   * fourth thing needs raw output, add a fourth named field.
+   */
+  tree: string;
   close(): Promise<void>;
 }
+
+/** Bounds `git ls-files` output; friction truncates further for its prompt. */
+const MAX_TREE_BYTES = 65_536;
 
 export interface ReadOnlyCheckoutOpts {
   /**
@@ -136,6 +170,45 @@ export interface ReadOnlyCheckoutOpts {
   commitSha?: string | undefined;
   githubToken?: string | undefined;
   anthropicApiKey: string;
+}
+
+/** Run one git query inside the machine and return its trimmed stdout. */
+async function readGitFact(
+  sbx: { commands: { run(cmd: string, opts?: { timeoutMs?: number }): Promise<{ stdout: string }> } },
+  command: string,
+  fallback = '',
+): Promise<string> {
+  try {
+    const { stdout } = await sbx.commands.run(`cd ${q(SANDBOX_REPO)} && ${command}`, { timeoutMs: 30_000 });
+    return stdout.trim();
+  } catch {
+    return fallback;
+  }
+}
+
+/**
+ * Translate a setup failure into the shape the caller can already classify.
+ *
+ * `cloneFailureReason` and `isRetriableCloneFailure` read `err.message`, but a
+ * `CommandExitError` puts git's diagnosis in `stderr` and leaves the message as
+ * a bare exit status. Without this every sandbox clone failure would look
+ * identical: never retriable, always `repo_access_denied`.
+ *
+ * A transport failure is not a clone failure at all, so it becomes a
+ * `MachineUnavailableError` and reaches the durable retry lane instead of a
+ * customer-facing terminal.
+ */
+async function asSetupFailure(sbx: MinimalSandbox, err: unknown): Promise<unknown> {
+  if (err instanceof CommandExitError) {
+    const detail = [err.message, err.stderr, err.stdout].filter(Boolean).join('\n');
+    return new Error(redactCloneDetail(detail));
+  }
+  const classified = await classifyFailure(err, () => sbx.isRunning({ requestTimeoutMs: PROBE_TIMEOUT_MS }));
+  if (classified === 'alive') return err;
+  return new MachineUnavailableError(
+    classified === 'gone' ? 'The work machine is no longer running.' : 'The work machine state could not be determined.',
+    classified,
+  );
 }
 
 /**
@@ -158,10 +231,14 @@ export async function createReadOnlyCheckout(opts: ReadOnlyCheckoutOpts): Promis
         await sbx.files.write('/home/user/.netrc', netrc);
         await sbx.commands.run('chmod 600 /home/user/.netrc', { timeoutMs: 10_000 });
       }
-      await sbx.commands.run(
-        `git clone --depth 1 -- ${q(opts.repoUrl)} ${q(SANDBOX_REPO)}`,
-        { timeoutMs: CLONE_TIMEOUT_MS },
-      );
+      try {
+        await sbx.commands.run(
+          `git clone --depth 1 -- ${q(opts.repoUrl)} ${q(SANDBOX_REPO)}`,
+          { timeoutMs: CLONE_TIMEOUT_MS },
+        );
+      } catch (err: unknown) {
+        throw await asSetupFailure(sbx, err);
+      }
       if (opts.commitSha) {
         // Best effort: an error group can name a commit that has since been
         // force-pushed away. Falling back to the cloned head matches the host
@@ -177,7 +254,7 @@ export async function createReadOnlyCheckout(opts: ReadOnlyCheckoutOpts): Promis
           // investigating the wrong commit is worse than failing.
           const detail = `${err instanceof CommandExitError ? err.stderr : ''}`;
           const missingRef = /couldn't find remote ref|not a valid object name|no such remote ref/i.test(detail);
-          if (!isCommandFailure(err) || !missingRef) throw err;
+          if (!isCommandFailure(err) || !missingRef) throw await asSetupFailure(sbx, err);
           logger.warn('requested commit unavailable; using cloned head', {
             requested_commit: opts.commitSha, sandbox_id: sbx.sandboxId,
           });
@@ -196,10 +273,26 @@ export async function createReadOnlyCheckout(opts: ReadOnlyCheckoutOpts): Promis
         }
       }
     }
+
+    // Read after the credential is gone: none of these need it, and the host
+    // clone produced the same three facts that callers still depend on.
+    const [headSha, defaultBranch, tree] = await Promise.all([
+      readGitFact(sbx, 'git rev-parse HEAD'),
+      // A plain clone checks out remote HEAD, so the checked-out branch IS the
+      // repository default. `symbolic-ref refs/remotes/origin/HEAD` is not set
+      // by every shallow clone, which is why the local branch name is used.
+      readGitFact(sbx, 'git rev-parse --abbrev-ref HEAD'),
+      readGitFact(sbx, `git ls-files | head -c ${MAX_TREE_BYTES}`, ''),
+    ]);
+    if (!headSha) throw new Error('Could not resolve the checked-out commit inside the sandbox');
+
     return {
       reader: createSandboxReader(sbx, SANDBOX_REPO),
       sandboxId: sbx.sandboxId,
       createdAt,
+      headSha,
+      defaultBranch,
+      tree,
       // close must never throw: it runs in a finally and would otherwise
       // replace the job's real result with a teardown error.
       close: async () => { await sbx.kill().catch(() => undefined); },

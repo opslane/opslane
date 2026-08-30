@@ -6,7 +6,7 @@ import * as db from '../db.js';
 import { canonicalPattern } from '../friction/urlnorm.js';
 import { getInstallationToken } from '../github-app.js';
 import { logger, safeErrorMessage } from '../logger.js';
-import { createHostReader } from '../investigate-tools.js';
+import { createHostReader } from '../harness/host-reader.js';
 import { runReadOnlyAgent } from '../readonly-agent.js';
 import { cloneRepo } from '../repo-clone.js';
 import { traceSpan } from '../tracing.js';
@@ -154,7 +154,19 @@ function declaredRequests(source: string): string[] {
   return [...requests].sort();
 }
 
-/** Bounded, framework-agnostic discovery of registered and file-system routes. */
+/**
+ * Bounded, framework-agnostic discovery of registered and file-system routes.
+ *
+ * KNOWN GAP, tracked separately: this walk reads the customer's checkout on the
+ * shared worker host. Every other read-only job type now reads inside a per-run
+ * E2B sandbox (`harness/readonly-sandbox.ts`), but this one cannot yet — it
+ * visits up to MAX_DISCOVERY_FILES (10,000) files and runs multi-line regexes
+ * over each, which is not expressible through the three-method `RepoReader`
+ * seam at a workable cost. Isolating it needs its own design: either a way to
+ * run this analysis inside the machine, or the walk ported into the sandbox as
+ * a script. It was descoped deliberately, not overlooked. See
+ * `src/__tests__/readonly-isolation.test.ts`, which asserts the gap.
+ */
 export async function discoverRepositoryRoutes(repoPath: string): Promise<DiscoveredRoute[]> {
   const files: string[] = [];
   const visit = async (directory: string): Promise<void> => {

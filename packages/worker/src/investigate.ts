@@ -1,11 +1,9 @@
 import type { Adjudication, Diagnosis, DiagnosisOutcome, EvidenceCitation } from '@opslane/shared';
-import { readFileSync, statSync } from 'node:fs';
-import { join } from 'node:path';
 import { deriveOutcome, type DerivedDecision } from './classify.js';
 import { parseAdjudication, submitDiagnosisTool } from './diagnose-schema.js';
-import { resolveInsideRepo } from './repo-paths.js';
+import { MachineUnavailableError } from './harness/errors.js';
 import { extractStackTraceFiles } from './harness/stack-trace-utils.js';
-import { createHostReader } from './investigate-tools.js';
+import type { RepoReader } from './investigate-tools.js';
 import { logger } from './logger.js';
 import { fenced } from './prompt-fence.js';
 import type { Platform } from './platform.js';
@@ -33,6 +31,8 @@ export const INVESTIGATION_MODEL = process.env['INVESTIGATION_MODEL'] ?? 'claude
  * vendor bundle can be hundreds of megabytes.
  */
 const QUOTE_CHECK_MAX_FILE_BYTES = 5 * 1024 * 1024;
+/** Ceiling on paths probed for existence in one submission. */
+const MAX_PROBED_CITATIONS = 100;
 const MAX_TURNS = Number(process.env['INVESTIGATION_MAX_TURNS'] ?? 10);
 /**
  * Turns are the budget the agent works against, and the number is stated to it
@@ -275,7 +275,7 @@ function failed(
 export async function investigateError(
   apiKey: string,
   input: InvestigateInput,
-  repoPath: string,
+  reader: RepoReader,
   investigatedCommit = 'unknown',
 ): Promise<InvestigationResult> {
   const pricing = MODEL_PRICING[INVESTIGATION_MODEL] ?? DEFAULT_PRICING;
@@ -285,29 +285,89 @@ export async function investigateError(
     ? `\n\nFiles named by the stack trace, as a starting point only: ${stackFiles.slice(0, 5).join(', ')}`
     : '';
 
-  // One read per cited file per adjudication: a submission citing the same
-  // file across several candidates and rejections must not re-read it each
-  // time in the process that also owns lease heartbeats.
-  const quoteFileCache = new Map<string, string | null>();
-  const resolveCited = (cited: string): string | null => resolveInsideRepo(repoPath, cited);
-  const quoteAt = (resolved: string, line: number, quote: string): boolean => {
-    if (!quoteFileCache.has(resolved)) {
+  // The verbatim-quote check stays synchronous. Making it async would cascade
+  // into deriveOutcome, whose resolvePath and quoteAt parameters are
+  // synchronous, and deriveOutcome is also called from agent-fix.ts in the fix
+  // pipeline, which this change does not touch.
+  //
+  // So the cache is filled by the agent's own reads rather than by a separate
+  // fetch: every successful read_file lands here on its way to the model. That
+  // also keeps the check honest across the pre-acceptance validator, which runs
+  // mid-run and could not await a fetch of its own.
+  const quoteFileCache = new Map<string, string>();
+  /**
+   * Paths proven absent from the checkout.
+   *
+   * Grounding must separate "not in the repository" (citation_unresolvable)
+   * from "here, but you never opened it" (citation_not_read), and those send
+   * different corrections back to the model. Absence is only ever recorded from
+   * evidence — a failed read, or the probe below — never assumed.
+   */
+  const knownMissing = new Set<string>();
+  /** One repository-relative POSIX form, so './src/a.ts' and 'src/a.ts' agree. */
+  const norm = (path: string): string =>
+    path.replace(/\\/g, '/').replace(/^\.\//, '').replace(/^\/+/, '');
+  const recordingReader: RepoReader = {
+    readFile: async (path: string): Promise<string> => {
+      let content: string;
       try {
-        // The model picks the path, so bound the read the same way
-        // executeReadFile does: a citation into a multi-megabyte vendored or
-        // minified file is not groundable evidence, and slurping it whole
-        // per candidate check would buy nothing but memory pressure.
-        const target = join(repoPath, resolved);
-        quoteFileCache.set(
-          resolved,
-          statSync(target).size > QUOTE_CHECK_MAX_FILE_BYTES ? null : readFileSync(target, 'utf8'),
-        );
-      } catch {
-        quoteFileCache.set(resolved, null);
+        content = await reader.readFile(path);
+      } catch (err: unknown) {
+        if (/ENOENT|No such file|not found/i.test(err instanceof Error ? err.message : String(err))) {
+          knownMissing.add(norm(path));
+        }
+        throw err;
       }
+      knownMissing.delete(norm(path));
+      // Already bounded by the reader, so this cannot hold a whole minified
+      // bundle; the ceiling is belt-and-braces against a future looser reader.
+      if (content.length <= QUOTE_CHECK_MAX_FILE_BYTES) quoteFileCache.set(norm(path), content);
+      return content;
+    },
+    grep: (args: string[]) => reader.grep(args),
+    list: (path: string, recursive: boolean) => reader.list(path, recursive),
+    exists: (paths: string[]) => reader.exists(paths),
+  };
+  const resolveCited = (cited: string): string | null => {
+    const key = norm(cited);
+    return knownMissing.has(key) ? null : key;
+  };
+  /**
+   * Prove which cited paths are actually in the checkout, in one round trip,
+   * before the authoritative validation runs. Without this every citation would
+   * resolve and a hallucinated path would be reported as merely unread.
+   */
+  const probeCitedPaths = async (submitted: unknown): Promise<void> => {
+    const cited = new Set<string>();
+    const walk = (node: unknown, depth: number): void => {
+      if (depth > 6 || cited.size >= MAX_PROBED_CITATIONS) return;
+      if (Array.isArray(node)) {
+        for (const item of node) walk(item, depth + 1);
+        return;
+      }
+      if (node === null || typeof node !== 'object') return;
+      for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
+        if (key === 'path' && typeof value === 'string' && value.length > 0) cited.add(value);
+        else walk(value, depth + 1);
+      }
+    };
+    walk(submitted, 0);
+    const unknownPaths = [...cited].filter((path) => !quoteFileCache.has(norm(path)));
+    if (unknownPaths.length === 0) return;
+    try {
+      const present = new Set((await reader.exists(unknownPaths)).map(norm));
+      for (const path of unknownPaths) {
+        if (!present.has(norm(path))) knownMissing.add(norm(path));
+      }
+    } catch (err: unknown) {
+      // A dead machine is not a hallucinated citation. Leave the paths
+      // unclassified and let the failure reach the job.
+      if (err instanceof MachineUnavailableError) throw err;
     }
-    const text = quoteFileCache.get(resolved);
-    return text !== null && text !== undefined && quoteWithinWindow(text, line, quote);
+  };
+  const quoteAt = (resolved: string, line: number, quote: string): boolean => {
+    const text = quoteFileCache.get(norm(resolved));
+    return text !== undefined && quoteWithinWindow(text, line, quote);
   };
 
   // Pre-acceptance mirror of the post-run checks below. A defect the model can
@@ -386,7 +446,7 @@ export async function investigateError(
         `calls. Spend them on the files that decide between your candidates, and submit what ` +
         `the evidence supports rather than running out.${hints}`,
       terminalTool: submitDiagnosisTool(),
-      reader: createHostReader(repoPath),
+      reader: recordingReader,
       classification: { minFilesRead: 1 },
       validateTerminal: validateSubmission,
     }));
@@ -415,6 +475,8 @@ export async function investigateError(
       filesRead: filesRead.length,
     });
   }
+
+  await probeCitedPaths(run.terminalInput ?? {});
 
   // The authoritative acceptance pipeline. validateSubmission above is its
   // pre-acceptance mirror — a rule added here without a matching (or

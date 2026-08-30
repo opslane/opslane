@@ -16,7 +16,7 @@ vi.mock('@anthropic-ai/sdk', () => ({
   default: vi.fn().mockImplementation(() => ({ messages: { create: mockCreate } })),
 }));
 
-import { createHostReader } from '../investigate-tools.js';
+import { createHostReader } from '../harness/host-reader.js';
 import { runReadOnlyAgent, type ReadOnlyRunInput } from '../readonly-agent.js';
 
 const USAGE = {

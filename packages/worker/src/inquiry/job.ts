@@ -4,9 +4,10 @@ import * as db from '../db.js';
 import { loadEvidence, type EvidenceBundle } from '../evidence/bundle.js';
 import { getInstallationToken } from '../github-app.js';
 import { logger, safeErrorMessage } from '../logger.js';
-import { createHostReader } from '../investigate-tools.js';
+import type { RepoReader } from '../investigate-tools.js';
+import { createReadOnlyCheckout } from '../harness/readonly-sandbox.js';
 import { runReadOnlyAgent } from '../readonly-agent.js';
-import { cloneRepo } from '../repo-clone.js';
+import { buildRepoUrl } from '../repo-clone.js';
 import { traceSpan } from '../tracing.js';
 import {
   inquiryDecisionTerminalTool,
@@ -67,10 +68,10 @@ export interface InquiryDependencies {
   prepareRepository: (
     job: ClaimedJob,
     signal: AbortSignal,
-  ) => Promise<{ repoPath: string; cleanup: () => Promise<void> }>;
+  ) => Promise<{ reader: RepoReader; cleanup: () => Promise<void> }>;
   askModel: (input: {
     evidence: EvidenceBundle;
-    repoPath: string;
+    reader: RepoReader;
     signal: AbortSignal;
   }) => Promise<InquiryModelResult>;
   persist: (input: InquiryPersistInput) => Promise<boolean>;
@@ -115,7 +116,7 @@ export function buildInquiryPrompt(evidence: EvidenceBundle): string {
 async function prepareInquiryRepository(
   job: ClaimedJob,
   signal: AbortSignal,
-): Promise<{ repoPath: string; cleanup: () => Promise<void> }> {
+): Promise<{ reader: RepoReader; cleanup: () => Promise<void> }> {
   checkAbort(signal);
   const project = await db.getProject(job.projectId);
   if (!project) throw new Error(`Project ${job.projectId} not found`);
@@ -134,10 +135,21 @@ async function prepareInquiryRepository(
     }
   }
   githubToken ??= process.env['GITHUB_TOKEN'];
+  const apiKey = process.env['ANTHROPIC_API_KEY'];
+  if (!apiKey) throw new Error('ANTHROPIC_API_KEY environment variable is not set');
   checkAbort(signal);
-  const clone = await cloneRepo({ githubRepo: project.github_repo, jobId: job.id, githubToken });
-  await db.cacheProjectDefaultBranch(job.projectId, clone.defaultBranch);
-  return { repoPath: clone.repoDir, cleanup: clone.cleanup };
+  // The checkout lives in a per-run sandbox: the customer's code is never
+  // written to this host, and the key reaches the model through the egress
+  // proxy rather than the machine's environment.
+  const checkout = await createReadOnlyCheckout({
+    // Credential-free by design; the token goes in through githubToken, is used
+    // for the clone, and is deleted before the model gets a turn.
+    repoUrl: buildRepoUrl(project.github_repo),
+    githubToken,
+    anthropicApiKey: apiKey,
+  });
+  await db.cacheProjectDefaultBranch(job.projectId, checkout.defaultBranch);
+  return { reader: checkout.reader, cleanup: checkout.close };
 }
 
 function inquiryStopMessage(stop: string): string {
@@ -154,7 +166,7 @@ function inquiryStopMessage(stop: string): string {
 /** Run the production read-only model pass. Exported for the fixed-set evaluation harness. */
 export async function askInquiryModel(input: {
   evidence: EvidenceBundle;
-  repoPath: string;
+  reader: RepoReader;
   signal: AbortSignal;
 }): Promise<InquiryModelResult> {
   checkAbort(input.signal);
@@ -167,7 +179,7 @@ export async function askInquiryModel(input: {
   }, () => runReadOnlyAgent({
     apiKey,
     model: INQUIRY_MODEL,
-    reader: createHostReader(input.repoPath),
+    reader: input.reader,
     maxTurns: 12,
     budgetUsd: 0.35,
     pricing: MODEL_PRICING[INQUIRY_MODEL] ?? DEFAULT_PRICING,
@@ -214,7 +226,7 @@ export async function runInquiry(
   const startedAt = Date.now();
   try {
     checkAbort(signal);
-    const modelResult = await dependencies.askModel({ evidence, repoPath: prepared.repoPath, signal });
+    const modelResult = await dependencies.askModel({ evidence, reader: prepared.reader, signal });
     checkAbort(signal);
     const decision = parseInquiryDecision(modelResult.raw, suppliedIssueIds);
     const wrote = await dependencies.persist({
