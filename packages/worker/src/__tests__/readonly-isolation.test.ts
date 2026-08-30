@@ -1,10 +1,73 @@
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { dirname, join, relative, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import * as tools from '../investigate-tools.js';
 import { MachineUnavailableError, VerificationInfraError } from '../harness/errors.js';
 import { toInfraError } from '../harness/readonly-sandbox.js';
 
-const src = (p: string): string => readFileSync(new URL(`../${p}`, import.meta.url), 'utf8');
+const SRC_ROOT = fileURLToPath(new URL('../', import.meta.url));
+const src = (p: string): string => readFileSync(join(SRC_ROOT, p), 'utf8');
+
+/** Every module under `src`, excluding tests, as paths relative to `src`. */
+function allSourceFiles(dir = SRC_ROOT): string[] {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) return entry.name === '__tests__' ? [] : allSourceFiles(full);
+    return entry.isFile() && entry.name.endsWith('.ts') ? [relative(SRC_ROOT, full)] : [];
+  });
+}
+
+/**
+ * The modules a file pulls in at runtime.
+ *
+ * `import type` is excluded because it is erased and imports nothing; a value
+ * import of a type (`import { type Foo } from`) still loads the module and is
+ * therefore included.
+ */
+function importsOf(file: string): string[] {
+  const text = src(file);
+  const specifiers: string[] = [];
+  const pattern = /(?:^|\n)\s*import\s+(type\s+)?[^;]*?from\s*['"]([^'"]+)['"]|import\(\s*['"]([^'"]+)['"]\s*\)/g;
+  for (const match of text.matchAll(pattern)) {
+    if (match[1]) continue; // `import type` — erased at compile time
+    const specifier = match[2] ?? match[3];
+    if (specifier) specifiers.push(specifier);
+  }
+  return specifiers;
+}
+
+/** Resolve a relative `./x.js` specifier back to the `.ts` source it came from. */
+function resolveLocal(fromFile: string, specifier: string): string | null {
+  if (!specifier.startsWith('.')) return null;
+  const base = resolve(dirname(join(SRC_ROOT, fromFile)), specifier).replace(/\.js$/, '');
+  for (const candidate of [`${base}.ts`, join(base, 'index.ts')]) {
+    try {
+      if (statSync(candidate).isFile()) return relative(SRC_ROOT, candidate);
+    } catch { /* not this shape */ }
+  }
+  return null;
+}
+
+/** Every in-package module reachable from `entry`, including `entry` itself. */
+function reachableFrom(entry: string): string[] {
+  const seen = new Set<string>([entry]);
+  const queue = [entry];
+  while (queue.length > 0) {
+    const file = queue.shift()!;
+    for (const specifier of importsOf(file)) {
+      const local = resolveLocal(file, specifier);
+      if (local && !seen.has(local)) {
+        seen.add(local);
+        queue.push(local);
+      }
+    }
+  }
+  return [...seen];
+}
+
+/** Node builtins that would put the host's filesystem or a subprocess in reach. */
+const HOST_ACCESS = /from '(?:node:)?(?:fs|fs\/promises|child_process)'/;
 
 /**
  * The job sources whose repository access must now happen inside a sandbox.
@@ -34,20 +97,26 @@ describe('read-only jobs no longer read the host', () => {
 
   it.each(ISOLATED_JOB_SOURCES)('%s touches neither the host filesystem nor a subprocess', (file) => {
     const text = src(file);
-    expect(text).not.toMatch(/from 'node:(fs|child_process)/);
+    expect(text).not.toMatch(HOST_ACCESS);
     expect(text).not.toMatch(/execFile/);
   });
 
-  it.each(ISOLATED_JOB_SOURCES)('%s does not reach the host through the host reader', (file) => {
-    // Without this, the filesystem checks above pass while a job imports
-    // createHostReader — whose node:fs imports live in host-reader.ts, not here.
-    expect(src(file)).not.toMatch(/host-reader/);
+  it.each(ISOLATED_JOB_SOURCES)('%s reaches no host access through anything it imports', (file) => {
+    // The check above reads one file, and host access does not have to live in
+    // it. Re-adding `import { resolveInsideRepo } from './repo-paths.js'` to
+    // investigate.ts — a module that imports node:fs — restored full host
+    // filesystem access with every isolation test still green. This walks the
+    // real import graph instead, so the boundary is asserted where it exists.
+    const offenders = reachableFrom(file).filter((reached) => HOST_ACCESS.test(src(reached)));
+    expect(offenders, `${file} reaches the host through: ${offenders.join(', ')}`).toEqual([]);
   });
 
   it('the host reader is imported only by the fix pipeline and the descoped job', () => {
-    const importers = ['agent-fix.ts', ...DESCOPED_JOB_SOURCES, ...ISOLATED_JOB_SOURCES, 'index.ts']
-      .filter((file) => /host-reader/.test(src(file)));
-    expect(importers.sort()).toEqual(['agent-fix.ts', 'product-context/job.ts']);
+    // Enumerated from disk, not from a fixed list: a NEW module importing the
+    // host reader — a new read-only job type, exactly the regression this file
+    // exists to prevent — is the case a hardcoded list cannot see.
+    const importers = allSourceFiles().filter((file) => /host-reader/.test(src(file)));
+    expect(importers.sort()).toEqual(['agent-fix.ts', join('product-context', 'job.ts')]);
   });
 
   it('no isolated job still clones onto this host', () => {
@@ -60,7 +129,7 @@ describe('read-only jobs no longer read the host', () => {
     // Asserted so that isolating it fails this test and forces the file out of
     // DESCOPED_JOB_SOURCES and into ISOLATED_JOB_SOURCES, rather than leaving a
     // stale exemption behind.
-    expect(src(file)).toMatch(/from 'node:fs/);
+    expect(src(file)).toMatch(HOST_ACCESS);
   });
 });
 

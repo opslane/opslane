@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { buildGitNetrc, buildRepoUrl } from '../repo-clone.js';
+import { buildGitNetrc, buildRepoUrl } from '../repo-url.js';
 
 describe('buildRepoUrl', () => {
   const originalBaseUrl = process.env['OPSLANE_GITHUB_URL'];

@@ -1,7 +1,16 @@
 import { ALL_TRAFFIC } from 'e2b';
 import type { SandboxNetworkOpts, SandboxNetworkRule } from 'e2b';
 
-const ALLOWED_HOSTS = ['registry.npmjs.org', 'github.com', 'api.anthropic.com'] as const;
+/**
+ * Hosts allowed regardless of which git host the project uses.
+ *
+ * The git host is NOT in this list: it is derived from the clone URL, because
+ * `OPSLANE_GITHUB_URL` makes it configurable (self-hosted git, and the local
+ * verify rigs). Hard-coding `github.com` here meant every isolated job on a
+ * self-hosted install cloned into a machine whose deny-all policy blocked the
+ * only host it needed.
+ */
+const ALWAYS_ALLOWED_HOSTS = ['registry.npmjs.org', 'api.anthropic.com'] as const;
 
 /**
  * The network policy this module produces.
@@ -27,11 +36,20 @@ export interface ReadOnlyNetwork extends SandboxNetworkOpts {
  *
  * E2B returns 400 unless denyOut names ALL_TRAFFIC, so the deny is not redundant.
  */
-export function buildReadOnlyNetwork(anthropicApiKey: string): ReadOnlyNetwork {
+export function buildReadOnlyNetwork(anthropicApiKey: string, repoUrl: string): ReadOnlyNetwork {
   if (!anthropicApiKey) throw new Error('Anthropic API key is required to build the egress rule');
+  let gitHost: string;
+  try {
+    gitHost = new URL(repoUrl).hostname;
+  } catch {
+    throw new Error('A clone URL is required to build the egress policy');
+  }
+  if (!gitHost) throw new Error('A clone URL is required to build the egress policy');
   return {
     denyOut: [ALL_TRAFFIC],
-    allowOut: [...ALLOWED_HOSTS],
+    // Deduplicated: a repoUrl already naming an always-allowed host would
+    // otherwise appear twice in the policy.
+    allowOut: [...new Set([gitHost, ...ALWAYS_ALLOWED_HOSTS])],
     rules: {
       'api.anthropic.com': [
         { transform: { headers: { 'x-api-key': anthropicApiKey, 'anthropic-version': '2023-06-01' } } },

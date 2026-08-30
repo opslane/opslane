@@ -24,7 +24,8 @@ import { INVESTIGATION_MODEL, investigateError } from './investigate.js';
 import { runPipeline } from './pipeline.js';
 import { buildSessionUrl } from './narrative.js';
 import { createPoller } from './poller.js';
-import { buildRepoUrl, cloneFailureReason, cloneRepo, isRetriableCloneFailure, sweepAbandonedClones } from './repo-clone.js';
+import { cloneFailureReason, cloneRepo, isRetriableCloneFailure, sweepAbandonedClones } from './repo-clone.js';
+import { buildRepoUrl } from './repo-url.js';
 import { getInstallationToken } from './github-app.js';
 import { type ReplaySignals } from './pr.js';
 
@@ -646,28 +647,12 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
   // written to this shared host, and the Anthropic key is attached by the
   // egress proxy rather than placed inside the machine.
   let checkout: ReadOnlyCheckout;
-  let investigatedCommit: string;
   try {
     checkout = await createReadOnlyCheckout({
       repoUrl: buildRepoUrl(project.github_repo),
       commitSha: evidence.frames.commitSha ?? undefined,
       githubToken,
       anthropicApiKey: apiKey,
-    });
-    investigatedCommit = checkout.headSha;
-    await db.cacheProjectDefaultBranch(job.projectId, checkout.defaultBranch);
-    // Stamp the checkout on the job row now, not inside the diagnosis: the
-    // diagnosis is null exactly when the run fails, and those are the runs
-    // whose checkout needs auditing.
-    const requestedCommit = evidence.frames.commitSha ?? null;
-    const fellBack = requestedCommit !== null
-      && requestedCommit.toLowerCase() !== investigatedCommit.toLowerCase();
-    await db.recordInvestigatedCommit(job, investigatedCommit);
-    logger.info('Investigation checkout', {
-      job_id: job.id,
-      requested_commit: requestedCommit,
-      investigated_commit: investigatedCommit,
-      fell_back_to_default_head: fellBack,
     });
   } catch (err: unknown) {
     // A machine that died or went unreachable during setup is infrastructure,
@@ -687,6 +672,37 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
     jobsFailed++;
     lastJobAt = new Date().toISOString();
     return;
+  }
+
+  // Separate from the block above, because everything here runs with a machine
+  // already rented. Leaving through the clone-failure catch would both bill the
+  // machine until its 15-minute lifetime expired and report a database failure
+  // to the customer as `repo_access_denied`.
+  let investigatedCommit: string;
+  try {
+    investigatedCommit = checkout.headSha;
+    // Empty when the branch could not be read, or when HEAD was already
+    // detached. Caching it then would overwrite the project's real default
+    // branch with a value we cannot stand behind.
+    if (checkout.defaultBranch) {
+      await db.cacheProjectDefaultBranch(job.projectId, checkout.defaultBranch);
+    }
+    // Stamp the checkout on the job row now, not inside the diagnosis: the
+    // diagnosis is null exactly when the run fails, and those are the runs
+    // whose checkout needs auditing.
+    const requestedCommit = evidence.frames.commitSha ?? null;
+    const fellBack = requestedCommit !== null
+      && requestedCommit.toLowerCase() !== investigatedCommit.toLowerCase();
+    await db.recordInvestigatedCommit(job, investigatedCommit);
+    logger.info('Investigation checkout', {
+      job_id: job.id,
+      requested_commit: requestedCommit,
+      investigated_commit: investigatedCommit,
+      fell_back_to_default_head: fellBack,
+    });
+  } catch (err: unknown) {
+    await checkout.close();
+    throw err;
   }
 
   try {
@@ -965,7 +981,9 @@ export async function processFrictionInvestigateJob(
       githubToken,
       anthropicApiKey: apiKey,
     });
-    await db.cacheProjectDefaultBranch(job.projectId, checkout.defaultBranch);
+    if (checkout.defaultBranch) {
+      await db.cacheProjectDefaultBranch(job.projectId, checkout.defaultBranch);
+    }
   } catch (error: unknown) {
     if (error instanceof MachineUnavailableError || isRetriableCloneFailure(error)) {
       // Same classification as the error pipeline: transient clone faults

@@ -1039,6 +1039,7 @@ const TRIAGE_LABELS: Record<string, string> = {
   'needs_human:worker_runtime_error': 'Needs review — investigation crashed',
   'needs_human:verification_failed': 'Needs review — fix failed verification',
   'needs_human:budget_exhausted': 'Needs review — investigation budget exhausted',
+  'needs_human:dependency_install_failed': 'Needs review — dependencies could not be installed',
   'needs_human:*': 'Needs review',
 };
 

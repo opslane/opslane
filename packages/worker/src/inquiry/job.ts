@@ -11,7 +11,7 @@ import {
   toInfraError,
 } from '../harness/readonly-sandbox.js';
 import { runReadOnlyAgent } from '../readonly-agent.js';
-import { buildRepoUrl } from '../repo-clone.js';
+import { buildRepoUrl } from '../repo-url.js';
 import { traceSpan } from '../tracing.js';
 import {
   inquiryDecisionTerminalTool,
