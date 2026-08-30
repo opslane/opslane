@@ -57,6 +57,7 @@ const REASON_CODES = [
   'unfixable_third_party',
   'unfixable_infra',
   'unfixable_no_sourcemap',
+  'dependency_install_failed',
 ] as const;
 
 // ---------------------------------------------------------------------------
