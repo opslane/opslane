@@ -69,15 +69,37 @@ type IssueEvidence struct {
 }
 
 type IssueInput struct {
-	Incident MCPIncident
-	Evidence IssueEvidence
+	Incident         MCPIncident
+	Evidence         IssueEvidence
+	Cause            *IssueCause
+	LatestResult     *IssueResult
+	EarliestMatching string
+	MatchingIssues   int
+}
+
+type IssueResult struct {
+	Outcome   string
+	Reason    string
+	DecidedAt string
+}
+
+type IssueCause struct {
+	Kind          string
+	Paths         []string
+	DecidedAt     string
+	Commit        string
+	FromPastRound bool
 }
 
 const (
 	TitleLimit    = 200
 	SelectorLimit = 300
-	PayloadLimit  = 8192
-	marker        = "... [truncated]"
+	// A diagnosis is the one field an agent reads in full. SelectorLimit
+	// exists for CSS selectors and is far too small for prose.
+	RootCauseLimit  = 4000
+	PayloadLimit    = 8192
+	causePathBudget = 2000
+	marker          = "... [truncated]"
 )
 
 var (
@@ -227,6 +249,41 @@ func renderFailedRequests(lines []string, failures []EvidenceFailedRequest) []st
 	return lines
 }
 
+func renderCause(lines []string, cause *IssueCause) []string {
+	if cause == nil || len(cause.Paths) == 0 {
+		return lines
+	}
+	header := "Cause: " + Fence(Truncate(cause.Kind, methodLimit))
+	if cause.DecidedAt != "" {
+		header += ", diagnosed " + Fence(Truncate(cause.DecidedAt, TitleLimit))
+	}
+	if cause.Commit != "" {
+		header += " against commit " + Fence(Truncate(cause.Commit, methodLimit))
+	}
+	lines = append(lines, "", header)
+	used, omitted := 0, 0
+	for i, path := range cause.Paths {
+		line := "  " + Fence(Truncate(path, SelectorLimit))
+		if i == 0 && cause.Kind == "local_code" {
+			line += "  (checked against the repository)"
+		}
+		if used+len(line)+1 > causePathBudget {
+			omitted = len(cause.Paths) - i
+			break
+		}
+		used += len(line) + 1
+		lines = append(lines, line)
+	}
+	if omitted > 0 {
+		lines = append(lines, fmt.Sprintf("  (%d more cause paths omitted for size)", omitted))
+	}
+	lines = append(lines, "The order is the investigation's own ranking.")
+	if cause.FromPastRound {
+		lines = append(lines, "This issue has no open round; the cause above is history, not a current diagnosis.")
+	}
+	return lines
+}
+
 func FormatIssue(input IssueInput) string {
 	incident := input.Incident
 	evidence := input.Evidence
@@ -236,7 +293,7 @@ func FormatIssue(input IssueInput) string {
 	} else if IsFillerRootCause(incident.RootCause) {
 		lines = append(lines, "Root cause: the investigation did not complete with a usable diagnosis.")
 	} else {
-		lines = append(lines, "Root cause: "+Fence(Truncate(*incident.RootCause, SelectorLimit)))
+		lines = append(lines, "Root cause: "+Fence(Truncate(*incident.RootCause, RootCauseLimit)))
 	}
 	lines = append(lines,
 		"",
@@ -244,6 +301,23 @@ func FormatIssue(input IssueInput) string {
 		"Id: "+incident.ID,
 		fmt.Sprintf("Impact: %d users, %d occurrences", incident.AffectedUsersCount, incident.OccurrenceCount),
 	)
+	if incident.FirstSeen != "" {
+		line := "First seen: " + Fence(Truncate(incident.FirstSeen, TitleLimit)) + " (this issue)"
+		if input.EarliestMatching != "" && input.MatchingIssues > 1 {
+			line += fmt.Sprintf(". Earliest matching message across %d issues: %s", input.MatchingIssues, Fence(Truncate(input.EarliestMatching, TitleLimit)))
+		}
+		lines = append(lines, line)
+	}
+	if incident.LastSeen != "" {
+		lines = append(lines, "Last seen: "+Fence(Truncate(incident.LastSeen, TitleLimit)))
+	}
+	lines = renderCause(lines, input.Cause)
+	if input.LatestResult != nil {
+		lines = append(lines, "", "Most recent result: "+Fence(Truncate(input.LatestResult.DecidedAt, TitleLimit))+", "+Fence(Truncate(input.LatestResult.Outcome, methodLimit)))
+		if input.LatestResult.Reason != "" {
+			lines = append(lines, "  "+Fence(Truncate(input.LatestResult.Reason, RootCauseLimit)))
+		}
+	}
 	if incident.Kind == "friction" {
 		lines = append(lines,
 			"Route: "+Fence(Truncate(pointerValue(incident.PageURLNormalized, "(none recorded)"), SelectorLimit)),
