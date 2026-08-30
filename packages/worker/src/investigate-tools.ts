@@ -9,7 +9,7 @@ const execFileAsync = promisify(execFile);
 
 const MAX_FILE_SIZE = 50_000;
 const MAX_SEARCH_RESULTS = 50;
-const MAX_LIST_ENTRIES = 200;
+export const MAX_LIST_ENTRIES = 200;
 
 /** Validate and resolve a path, blocking traversal outside repoPath. */
 export function safePath(repoPath: string, requested: string): string | null {
