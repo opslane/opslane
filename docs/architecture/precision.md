@@ -14,6 +14,7 @@ Opslane opens a pull request only after it checks that its fix actually works. H
 
 Before you ever see a pull request, Opslane has:
 
+- Installed your dependencies.
 - Run your test suite before and after its change, and confirmed nothing that passed before now fails.
 - Built your project, if you have a build step.
 - Where it could, written a new test that fails on the broken code and passes with the fix.
