@@ -103,7 +103,7 @@ func (d *Dependencies) presentMCPIncident(
 	if anchor, aerr := d.Queries.RelatedAnchor(ctx, projectID, incidentID); aerr != nil {
 		slog.WarnContext(ctx, "related anchor lookup failed", "incident_id", incidentID, "error", aerr)
 	} else if anchor != nil {
-		if totals, terr := d.Queries.RelatedEventTotals(ctx, projectID, anchor.EnvironmentID, anchor.Platform, anchor.Message, 1); terr != nil {
+		if totals, terr := d.Queries.RelatedEventTotals(ctx, projectID, anchor.EnvironmentID, anchor.Platform, anchor.Message, -1); terr != nil {
 			slog.WarnContext(ctx, "related totals lookup failed", "incident_id", incidentID, "error", terr)
 		} else {
 			earliestMatching = totals.FirstSeen.Format("2006-01-02")

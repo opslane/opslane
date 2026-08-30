@@ -58,17 +58,56 @@ func TestRelatedEventTotalsCountsEventsNotRollups(t *testing.T) {
 	}
 }
 
-func TestRelatedEventTotalsExcludesArchivedAndMergedIssues(t *testing.T) {
+func TestRelatedEventTotalsExcludesArchivedIssuesAndRealMergeLosers(t *testing.T) {
 	pool, p, e := relatedFixture(t)
 	base := time.Date(2026, 7, 27, 10, 0, 0, 0, time.UTC)
 	keep := seedMatchingGroup(t, pool, p, e, "browser", "Request failed", []string{"u1"}, base)
 	archived := seedMatchingGroup(t, pool, p, e, "browser", "Request failed", []string{"u2"}, base)
-	merged := seedMatchingGroup(t, pool, p, e, "browser", "Request failed", []string{"u3"}, base)
+	loser := seedMatchingGroup(t, pool, p, e, "browser", "Request failed", []string{"u3"}, base)
 	pool.Exec(context.Background(), `UPDATE error_groups SET archived_at=now() WHERE id=$1`, archived)
-	pool.Exec(context.Background(), `UPDATE error_groups SET merged_at=now() WHERE id=$1`, merged)
+	// A real merge loser is identified by its receipt, not by merged_at. Its
+	// events were repointed to the winner, so counting it would double count.
+	pool.Exec(context.Background(), `UPDATE error_groups SET merged_at=now() WHERE id=$1`, loser)
+	if _, err := pool.Exec(context.Background(),
+		`INSERT INTO issue_merges (project_id,winner_id,loser_id,confirmed_by,aliases_moved,events_moved)
+		 VALUES ($1,$2,$3,'human',0,0)`, p, keep, loser); err != nil {
+		t.Fatalf("seed merge receipt: %v", err)
+	}
 	got, err := db.New(pool).RelatedEventTotals(context.Background(), p, e, "browser", "Request failed", 50)
 	if err != nil || got.IssueCount != 1 || got.Issues[0].ID != keep {
 		t.Fatalf("got=%+v err=%v", got, err)
+	}
+}
+
+// error_groups.merged_at has two writers. identity/merge.go sets it on a merge
+// loser, whose events moved away. The pull-request merge webhook sets it on an
+// issue whose verified fix shipped, and that one keeps every event. Excluding
+// both would hide an already-fixed sibling carrying the identical message,
+// which is precisely the "we shipped a fix and it came back" history this tool
+// exists to surface.
+func TestRelatedEventTotalsStillCountsAnIssueWhoseFixShipped(t *testing.T) {
+	pool, p, e := relatedFixture(t)
+	base := time.Date(2026, 7, 27, 10, 0, 0, 0, time.UTC)
+	live := seedMatchingGroup(t, pool, p, e, "browser", "Request failed", []string{"u1"}, base)
+	shipped := seedMatchingGroup(t, pool, p, e, "browser", "Request failed", []string{"u2"}, base)
+	pool.Exec(context.Background(),
+		`UPDATE error_groups SET merged_at=now(), status='merged' WHERE id=$1`, shipped)
+
+	got, err := db.New(pool).RelatedEventTotals(context.Background(), p, e, "browser", "Request failed", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.IssueCount != 2 || got.Occurrences != 2 {
+		t.Fatalf("an issue whose PR merged was dropped from the family: %+v", got)
+	}
+	var seen bool
+	for _, issue := range got.Issues {
+		if issue.ID == shipped {
+			seen = true
+		}
+	}
+	if !seen || len(got.Issues) != 2 {
+		t.Fatalf("expected both %s and %s, got %+v", live, shipped, got.Issues)
 	}
 }
 

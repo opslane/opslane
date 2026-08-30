@@ -54,9 +54,38 @@ type rawBreadcrumb struct {
 	Timestamp string `json:"timestamp"`
 	Message   string `json:"message"`
 	Level     string `json:"level"`
-	Data      struct {
-		StatusCode *int `json:"status_code"`
-	} `json:"data"`
+	// Deliberately json.RawMessage rather than a struct. POST /api/v1/events
+	// stores client JSON verbatim (handler/error_event.go), so `data` on disk
+	// may be an object, an array, a string, or absent, and status_code inside
+	// it may be a string or a float. Decoding into a typed struct makes one odd
+	// breadcrumb fail the whole array and error the tool for that issue
+	// permanently. Everything below is read leniently instead.
+	Data json.RawMessage `json:"data"`
+}
+
+// crumbField reads one string-ish value out of a breadcrumb's data object,
+// returning "" for every shape that is not a plain object holding it.
+func crumbField(data json.RawMessage, key string) string {
+	if len(data) == 0 {
+		return ""
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return ""
+	}
+	raw, ok := fields[key]
+	if !ok {
+		return ""
+	}
+	var text string
+	if err := json.Unmarshal(raw, &text); err == nil {
+		return text
+	}
+	var number json.Number
+	if err := json.Unmarshal(raw, &number); err == nil {
+		return number.String()
+	}
+	return ""
 }
 
 type rawTiming struct {
@@ -132,6 +161,7 @@ func FormatTimeline(in TimelineInput) (string, string, error) {
 
 	entries := make([]timelineEntry, 0, len(crumbs)+len(timings))
 	unreadable := 0
+	netCrumbs := 0
 	// Network breadcrumbs are the fallback for events whose SDK sent no
 	// timings. When timings exist they describe the same requests with more
 	// detail, and rendering both would double count every one of them.
@@ -155,13 +185,19 @@ func FormatTimeline(in TimelineInput) (string, string, error) {
 		}
 		text := fmt.Sprintf("%s  %s", kind, Fence(Truncate(crumb.Message, SelectorLimit)))
 		if kind == "net" {
-			status := "no status recorded"
-			if crumb.Data.StatusCode != nil {
-				status = fmt.Sprintf("%d", *crumb.Data.StatusCode)
+			netCrumbs++
+			status := crumbField(crumb.Data, "status_code")
+			if status == "" {
+				status = "no status recorded"
 			}
-			// The SDK writes "METHOD https://host/path?query" into the message,
-			// so strip query parameters here as the timing renderer does.
-			method, rawURL, _ := strings.Cut(crumb.Message, " ")
+			// The SDK writes method and url as their own fields (sdk/src/
+			// network.ts). Prefer those; a producer that only filled in the
+			// message still renders through the "METHOD url" fallback. Either
+			// way the query string is stripped, as the timing renderer does.
+			method, rawURL := crumbField(crumb.Data, "method"), crumbField(crumb.Data, "url")
+			if method == "" && rawURL == "" {
+				method, rawURL, _ = strings.Cut(crumb.Message, " ")
+			}
 			text = fmt.Sprintf("net %s %s -> %s (breadcrumb)",
 				Fence(Truncate(method, methodLimit)),
 				Fence(Truncate(urlPath(rawURL), SelectorLimit)), status)
@@ -211,7 +247,10 @@ func FormatTimeline(in TimelineInput) (string, string, error) {
 	tail := make([]string, 0, 12)
 	if len(timings) == 0 {
 		switch {
-		case len(crumbs) == 0:
+		// netCrumbs, not len(crumbs): the SDK only attaches network_timings once
+		// it has observed a request, so an event with clicks and no network
+		// calls has nothing missing to explain.
+		case netCrumbs == 0:
 			tail = append(tail, "", "No network activity was recorded on this event.")
 		case !in.SessionAttached:
 			tail = append(tail, "", "No network timings were recorded. No session is attached to this event, so the SDK version cannot be looked up. The entries above come from breadcrumbs.")

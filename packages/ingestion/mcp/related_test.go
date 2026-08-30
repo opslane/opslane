@@ -29,3 +29,16 @@ func TestFormatRelatedStaysInsideThePayloadBudget(t *testing.T) {
 		t.Fatalf("invalid payload size/fences")
 	}
 }
+
+// An empty result has no observed date range. Printing today's date as one
+// would present a fabricated fact as data.
+func TestFormatRelatedOmitsTheRangeWhenNothingMatched(t *testing.T) {
+	got := FormatRelated(RelatedInput{Message: "nothing matches this", AnchorFound: true,
+		Totals: RelatedTotalsView{Occurrences: 0, People: 0, IssueCount: 0}})
+	if strings.Contains(got, " to ") {
+		t.Fatalf("printed a date range for an empty result:\n%s", got)
+	}
+	if !strings.Contains(got, "No events match that message") {
+		t.Fatalf("did not say the result was empty:\n%s", got)
+	}
+}

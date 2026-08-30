@@ -250,7 +250,7 @@ func renderFailedRequests(lines []string, failures []EvidenceFailedRequest) []st
 }
 
 func renderCause(lines []string, cause *IssueCause) []string {
-	if cause == nil || len(cause.Paths) == 0 {
+	if cause == nil {
 		return lines
 	}
 	header := "Cause: " + Fence(Truncate(cause.Kind, methodLimit))
@@ -261,6 +261,17 @@ func renderCause(lines []string, cause *IssueCause) []string {
 		header += " against commit " + Fence(Truncate(cause.Commit, methodLimit))
 	}
 	lines = append(lines, "", header)
+	if len(cause.Paths) == 0 {
+		// A verdict concluding the cause is external can be accepted with no
+		// location at all. Rendering nothing here, combined with the
+		// latest-result suppression in the presenter, made the whole decision
+		// disappear from the issue.
+		lines = append(lines, "  (the investigation cited no file)")
+		if cause.FromPastRound {
+			lines = append(lines, "This issue has no open round; the cause above is history, not a current diagnosis.")
+		}
+		return lines
+	}
 	used, omitted := 0, 0
 	for i, path := range cause.Paths {
 		line := "  " + Fence(Truncate(path, SelectorLimit))

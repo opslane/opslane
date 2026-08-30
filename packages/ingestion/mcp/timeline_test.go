@@ -281,3 +281,65 @@ func TestFormatTimelineFencesHostileContent(t *testing.T) {
 		t.Fatalf("hostile close tag survived:\n%s", body)
 	}
 }
+
+// POST /api/v1/events stores client JSON verbatim, so `data` on disk may be any
+// shape and status_code inside it may be a string or a float. Decoding into a
+// typed struct made one odd breadcrumb fail the whole array, which errored the
+// tool for that issue permanently rather than degrading.
+func TestFormatTimelineToleratesAnyBreadcrumbDataShape(t *testing.T) {
+	for _, raw := range []string{
+		`[{"type":"click","timestamp":"2026-08-28T10:00:02Z","message":"button.try-again","data":[]}]`,
+		`[{"type":"click","timestamp":"2026-08-28T10:00:02Z","message":"button.try-again","data":"text"}]`,
+		`[{"type":"click","timestamp":"2026-08-28T10:00:02Z","message":"button.try-again","data":null}]`,
+		`[{"type":"fetch","timestamp":"2026-08-28T10:00:03Z","message":"GET https://a.example/x","data":{"status_code":"404"}}]`,
+		`[{"type":"fetch","timestamp":"2026-08-28T10:00:03Z","message":"GET https://a.example/x","data":{"status_code":404.0}}]`,
+	} {
+		in := timelineInput()
+		in.Breadcrumbs = json.RawMessage(raw)
+		in.NetworkTimings = json.RawMessage(`[]`)
+		body, _, err := FormatTimeline(in)
+		if err != nil {
+			t.Fatalf("breadcrumbs %s errored the whole timeline: %v", raw, err)
+		}
+		if strings.TrimSpace(body) == "" {
+			t.Fatalf("breadcrumbs %s produced no timeline", raw)
+		}
+	}
+}
+
+func TestFormatTimelineReadsAStringStatusCode(t *testing.T) {
+	in := timelineInput()
+	in.Breadcrumbs = json.RawMessage(`[{"type":"fetch","timestamp":"2026-08-28T10:00:03Z","message":"POST https://a.example/api/x","data":{"method":"POST","url":"https://a.example/api/x?tok=SECRET","status_code":"404"}}]`)
+	in.NetworkTimings = json.RawMessage(`[]`)
+	body, _, err := FormatTimeline(in)
+	if err != nil {
+		t.Fatalf("FormatTimeline: %v", err)
+	}
+	if !strings.Contains(body, "-> 404") {
+		t.Fatalf("string status_code was dropped:\n%s", body)
+	}
+	if strings.Contains(body, "tok=SECRET") {
+		t.Fatalf("the structured url leaked its query string:\n%s", body)
+	}
+}
+
+// The SDK only attaches network_timings once it has observed a request, so an
+// event with clicks and no network calls has nothing missing to explain. Saying
+// the absence is "unexplained" there states two false things at once.
+func TestFormatTimelineDoesNotExplainTimingsForAnEventWithNoRequests(t *testing.T) {
+	in := timelineInput()
+	in.Breadcrumbs = json.RawMessage(`[{"type":"click","timestamp":"2026-08-28T10:00:02Z","message":"button.try-again"}]`)
+	in.NetworkTimings = json.RawMessage(`[]`)
+	in.SessionAttached = true
+	in.SDKVersion = "4.1.1"
+	body, _, err := FormatTimeline(in)
+	if err != nil {
+		t.Fatalf("FormatTimeline: %v", err)
+	}
+	if strings.Contains(body, "unexplained") || strings.Contains(body, "No network timings were recorded") {
+		t.Fatalf("explained missing timings for an event that made no requests:\n%s", body)
+	}
+	if !strings.Contains(body, "No network activity was recorded on this event.") {
+		t.Fatalf("lost the accurate empty-network sentence:\n%s", body)
+	}
+}

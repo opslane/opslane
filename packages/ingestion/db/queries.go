@@ -243,19 +243,36 @@ func (q *Queries) RelatedEventTotals(ctx context.Context, projectID, environment
 	   WHERE e.project_id = $1 AND e.environment_id = $2 AND e.platform = $3
 	     AND digest(e.error_message, 'sha256') = digest($4, 'sha256')
 	     AND e.error_message = $4
-	     AND g.archived_at IS NULL AND g.merged_at IS NULL`
+	     AND g.archived_at IS NULL
+	     AND NOT EXISTS (
+	       SELECT 1 FROM issue_merges im
+	        WHERE im.project_id = g.project_id AND im.loser_id = g.id)`
 	out := &RelatedTotals{}
+	var first, last *time.Time
 	if err := q.pool.QueryRow(ctx,
 		`WITH m AS (`+matching+`)
 		 SELECT count(*)::int, count(DISTINCT end_user_id)::int,
 		        count(DISTINCT error_group_id)::int,
-		        COALESCE(min("timestamp"), now()), COALESCE(max("timestamp"), now())
+		        min("timestamp"), max("timestamp")
 		   FROM m`,
 		projectID, environmentID, platform, message,
-	).Scan(&out.Occurrences, &out.People, &out.IssueCount, &out.FirstSeen, &out.LastSeen); err != nil {
+	).Scan(&out.Occurrences, &out.People, &out.IssueCount, &first, &last); err != nil {
 		return nil, fmt.Errorf("related event totals: %w", err)
 	}
+	// Zero matches leaves the bounds NULL rather than today. Reporting "today to
+	// today" as an observed range on an empty result would be a fabricated fact.
+	if first != nil {
+		out.FirstSeen = *first
+	}
+	if last != nil {
+		out.LastSeen = *last
+	}
 	if out.Occurrences == 0 {
+		return out, nil
+	}
+	// A caller that only needs the totals (the issue tool's cross-issue date)
+	// passes a negative limit and skips the per-issue scan entirely.
+	if limit < 0 {
 		return out, nil
 	}
 	listLimit := limit

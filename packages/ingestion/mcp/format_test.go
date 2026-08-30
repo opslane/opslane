@@ -393,3 +393,20 @@ func TestFormatIssueKeepsBlankLineBeforeFooter(t *testing.T) {
 		t.Fatalf("footer is not preceded by a blank line:\n%q", got[len(got)-260:])
 	}
 }
+
+// A verdict concluding the cause is external can be accepted with no location.
+// Rendering nothing there, combined with the latest-result suppression, made the
+// whole decision disappear from the issue.
+func TestFormatIssueShowsACauseThatCitedNoFile(t *testing.T) {
+	cause := "a third-party outage"
+	got := FormatIssue(IssueInput{
+		Incident: MCPIncident{ID: "i8", Kind: "error", Title: "t", Status: "needs_human", RootCause: &cause},
+		Cause:    &IssueCause{Kind: "external_system", DecidedAt: "2026-08-28"},
+	})
+	if !strings.Contains(got, "external_system") {
+		t.Fatalf("the cause kind vanished with its empty path list:\n%s", got)
+	}
+	if !strings.Contains(got, "the investigation cited no file") {
+		t.Fatalf("did not say why there are no paths:\n%s", got)
+	}
+}
