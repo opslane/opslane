@@ -30,6 +30,11 @@ describe('issue.triaged helpers', () => {
     expect(triageLabel('needs_human', 'future_reason')).toBe('Needs review');
   });
 
+  it('gives a new reason code its own copy rather than the generic fallback', () => {
+    expect(triageLabel('needs_human', 'dependency_install_failed'))
+      .toBe('Needs review — dependencies could not be installed');
+  });
+
   it('includes the terminal job in the dedup key', () => {
     expect(triagedDedupKey('group', 'job')).toBe('issue.triaged:group:job');
   });

@@ -2,8 +2,8 @@ import type { CheckOutcome } from '@opslane/shared';
 import { logger } from '../logger.js';
 import { DependencyInstallError, VerificationInfraError } from './errors.js';
 import { isCommandFailure } from './machine-state.js';
+import { buildGitNetrc } from '../repo-url.js';
 import {
-  buildGitNetrc,
   CloneResolutionError,
   resolveClonedBranch,
   type GitRunner,
@@ -16,8 +16,16 @@ import { TRAVERSAL_EXCLUSIONS } from './traversal-exclusions.js';
 
 const SANDBOX_REPO = '/home/user/repo';
 
-/** Codes that mean something killed the process rather than it choosing to fail. */
-const KILL_EXIT_CODES = new Set([137, 143]);
+/**
+ * Codes that are ours, not the customer's dependency list.
+ *
+ * 137/143 mean something killed the process. 126/127 mean the shell could not
+ * run what we asked: the install line invokes `pnpm`/`yarn`/`npm`, so a package
+ * manager missing from our image exits 127 and used to be reported to the
+ * customer as their dependencies failing to install — an instruction to fix a
+ * fresh checkout that is clean.
+ */
+const KILL_EXIT_CODES = new Set([126, 127, 137, 143]);
 
 /**
  * Signatures that mean the network failed, not the dependency list.
@@ -30,6 +38,8 @@ const KILL_EXIT_CODES = new Set([137, 143]);
 const NETWORK_FAILURE_SIGNATURES = [
   'ENOTFOUND', 'ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'EAI_AGAIN',
   'network timeout', 'socket hang up', 'getaddrinfo',
+  // Our disk, not their dependency list.
+  'ENOSPC', 'no space left on device',
 ];
 
 /**
@@ -245,7 +255,7 @@ export async function createRepoSandbox(opts: {
     // no-op: pytest would run against an uninstalled tree and the resulting
     // import errors would be reported as ordinary test failures, hiding the
     // real cause from the incident.
-    let installOutcome: RepoSandbox['installOutcome'] =
+    const installOutcome: RepoSandbox['installOutcome'] =
       platform === 'python' && !pythonManifestFound ? 'failed'
         : installCommands.length > 0 ? 'installed'
           : 'not_applicable';
@@ -258,7 +268,6 @@ export async function createRepoSandbox(opts: {
       try {
         await sandbox.commands.run(`cd ${SANDBOX_REPO} && ${command}`, { timeoutMs: 300_000 });
       } catch (err: unknown) {
-        installOutcome = 'failed';
         // Continuing here spent the whole model budget building and testing
         // against a tree with no dependencies, then reported the resulting
         // import errors as ordinary test failures. Stop, and say which kind of

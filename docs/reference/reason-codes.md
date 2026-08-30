@@ -54,6 +54,7 @@ When Opslane stops and hands an issue to a person, it records a `reason_code`, a
 | `unfixable_third_party` | Review manually; the error originates entirely in third-party code, so the fix is not in your application source. |
 | `unfixable_infra` | Investigate infrastructure or network behavior such as CORS, DNS, timeouts, and server errors; this is not an application code bug. |
 | `unfixable_no_sourcemap` | Upload source maps for this release so the minified stack trace shows original source locations, then retry. |
+| `dependency_install_failed` | Check that your dependencies install cleanly on a fresh checkout — Opslane could not install them, so it could not build or test a fix. |
 
 ## Runtime
 

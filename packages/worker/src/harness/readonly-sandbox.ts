@@ -1,10 +1,10 @@
-import { CommandExitError, Sandbox } from 'e2b';
+import { CommandExitError, Sandbox, TimeoutError } from 'e2b';
 import { classifyFailure, isCommandFailure } from './machine-state.js';
 import { MachineUnavailableError, VerificationInfraError } from './errors.js';
 import { logger } from '../logger.js';
 import { buildReadOnlyNetwork } from './sandbox-network.js';
 import type { EvidenceRecord } from '@opslane/shared';
-import { buildGitNetrc } from '../repo-clone.js';
+import { buildGitNetrc } from '../repo-url.js';
 import { redactCloneDetail } from './redact.js';
 import { MAX_LIST_ENTRIES, type RepoReader } from '../investigate-tools.js';
 import { TRAVERSAL_EXCLUSIONS } from './traversal-exclusions.js';
@@ -22,6 +22,37 @@ const SANDBOX_LIFETIME_MS = 900_000;
 const PATH_OUTSIDE_EXIT = 3;
 /** Exit code the in-machine guard uses for a path that does not resolve at all. */
 const PATH_MISSING_EXIT = 4;
+/**
+ * Cap on one read's stdout, matching the 512KB `maxBuffer` the host reader gave
+ * `execFile`. Without it a `grep -r` over a large checkout, or a directory with a
+ * wide fanout, materialises its whole result set in the worker process that also
+ * runs sandbox and PR work — the truncation in `investigate-tools.ts` only
+ * applies after the bytes have already crossed the wire.
+ */
+const MAX_COMMAND_OUTPUT_BYTES = 512 * 1024;
+/**
+ * Paths probed per `exists` command, and in total.
+ *
+ * The citation list is chosen by the model and the tool schema cannot bound it
+ * (the Anthropic API rejects array bounds in custom tool schemas), so one
+ * submission could interpolate thousands of paths into a single shell command.
+ * That overruns the command-length limit and fails as a *transport* error, which
+ * `run` reads as machine death and the caller retries as infrastructure — a
+ * model-chosen input laundered into the durable retry lane.
+ */
+const EXISTS_BATCH = 100;
+const MAX_EXISTS_PATHS = 1_000;
+/**
+ * The shape ingestion already enforces, re-checked here.
+ *
+ * `q()` stops shell injection but not *git argument* injection: git parses
+ * options interspersed with positionals, so a value starting with `-` is
+ * consumed as a flag by `git fetch`, and this runs while the clone credential is
+ * still in the machine. The host path this replaced validated the same way
+ * before using the value; containment should not depend on a regex in another
+ * package and another language.
+ */
+const COMMIT_SHA_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
 
 /**
  * The slice of the E2B `Sandbox` surface the reader uses.
@@ -58,6 +89,22 @@ function pruneExpression(): string {
   return `\\( ${names} \\) -prune -o`;
 }
 
+/**
+ * Run a command with its stdout capped, without losing its exit status.
+ *
+ * `cmd | head -c N` would report head's status, hiding both grep's "no matches"
+ * 1 and any genuine error behind a 0. Spooling to a temp file, saving `$?`, and
+ * re-raising it keeps the status exact and is portable to plain `sh`.
+ *
+ * `cd` is applied here rather than by the caller so the redirect happens after
+ * it, keeping the whole thing one statement.
+ */
+function bounded(cmd: string, cdTo: string | null): string {
+  const prefix = cdTo === null ? '' : `cd ${q(cdTo)} && `;
+  return `${prefix}o=$(mktemp); { ${cmd}; } > "$o"; s=$?; ` +
+    `head -c ${MAX_COMMAND_OUTPUT_BYTES} "$o"; rm -f "$o"; exit $s`;
+}
+
 export function createSandboxReader(sbx: MinimalSandbox, root: string): RepoReader {
   const run = async (cmd: string, okExitCodes: number[] = []): Promise<string> => {
     try {
@@ -69,10 +116,21 @@ export function createSandboxReader(sbx: MinimalSandbox, root: string): RepoRead
         if (err.exitCode === PATH_MISSING_EXIT) throw new Error('No such file or directory');
         throw err;
       }
-      // `alive` is unreachable here: classifyFailure only returns it for a
-      // CommandExitError, which the branch above already consumed. Collapsing it
-      // into `unknown` keeps the claim honest rather than asserting the
-      // impossible case away.
+      // A read that outran its own deadline is a bad tool call, not a dead
+      // machine. `classifyFailure` calls it `unknown` — correct for a
+      // verification suite, which should retry the whole job — but here it made
+      // one slow model-chosen `grep` on a large checkout raise
+      // MachineUnavailableError, kill the investigation, and send it round the
+      // infra-retry lane, where the model would plausibly issue the same search
+      // again. The host reader capped grep at 10s and handed the message back to
+      // the model, which could then narrow the search. Keep that.
+      if (err instanceof TimeoutError) {
+        throw new Error(
+          `The read did not finish within ${READ_TIMEOUT_MS / 1000}s. Narrow the search or the directory.`,
+        );
+      }
+      // `alive` is unreachable below: classifyFailure only returns it for a
+      // CommandExitError, which the branch above already consumed.
       const classified = await classifyFailure(err, () => sbx.isRunning({ requestTimeoutMs: PROBE_TIMEOUT_MS }));
       const state = classified === 'gone' ? 'gone' : 'unknown';
       throw new MachineUnavailableError(
@@ -87,22 +145,34 @@ export function createSandboxReader(sbx: MinimalSandbox, root: string): RepoRead
     // exhaust the command output or the deadline.
     readFile: (path) => run(`cd ${q(root)} && ${guardedPath(root, path)} head -c ${MAX_READ_BYTES} -- "$p"`),
 
-    // grep exits 1 for "no matches", which is not a failure.
-    grep: (args) => run(`cd ${q(root)} && grep ${args.map(q).join(' ')}`, [1]),
+    // grep exits 1 for "no matches", which is not a failure — so the output cap
+    // cannot be a `| head -c`: a pipeline reports the LAST command's status, which
+    // would mask both that 1 and a genuine grep error as success. Spooling to a
+    // file and re-raising the saved status keeps the exit code exact.
+    grep: (args) => run(bounded(`grep ${args.map(q).join(' ')}`, root), [1]),
 
     // One command for the whole batch: grounding a submission can ask about a
     // dozen citations, and a round trip each would cost more than the read that
     // produced them.
     exists: async (paths) => {
       if (paths.length === 0) return [];
-      const loop = paths.map(q).join(' ');
-      const stdout = await run(
-        `cd ${q(root)} && for p in ${loop}; do ` +
-        `r=$(realpath -e -- "$p" 2>/dev/null) || continue; ` +
-        `case "$r" in ${q(root)}/*|${q(root)}) ;; *) continue;; esac; ` +
-        `[ -f "$r" ] || continue; printf '%s\\n' "$p"; done`,
-      );
-      const found = new Set(stdout.split('\n').filter(Boolean));
+      if (paths.length > MAX_EXISTS_PATHS) {
+        logger.warn('citation list exceeded the probe ceiling; the tail is reported as missing', {
+          requested: paths.length, probed: MAX_EXISTS_PATHS,
+        });
+      }
+      const probed = paths.slice(0, MAX_EXISTS_PATHS);
+      const found = new Set<string>();
+      for (let i = 0; i < probed.length; i += EXISTS_BATCH) {
+        const loop = probed.slice(i, i + EXISTS_BATCH).map(q).join(' ');
+        const stdout = await run(
+          `cd ${q(root)} && for p in ${loop}; do ` +
+          `r=$(realpath -e -- "$p" 2>/dev/null) || continue; ` +
+          `case "$r" in ${q(root)}/*|${q(root)}) ;; *) continue;; esac; ` +
+          `[ -f "$r" ] || continue; printf '%s\\n' "$p"; done`,
+        );
+        for (const line of stdout.split('\n')) if (line) found.add(line);
+      }
       return paths.filter((path) => found.has(path));
     },
 
@@ -115,9 +185,12 @@ export function createSandboxReader(sbx: MinimalSandbox, root: string): RepoRead
     // would mean interpolating a model-chosen path into a `sed` script.
     list: async (path, recursive) => {
       const stdout = await run(
-        `cd ${q(root)} && ${guardedPath(root, path)} cd "$p" && ` +
-        `find . -mindepth 1 -maxdepth ${recursive ? 2 : 1} ${pruneExpression()} ` +
-        `-printf '%y\\t%P\\n' | LC_ALL=C sort -k2`,
+        `cd ${q(root)} && ${guardedPath(root, path)} ` +
+        bounded(
+          `cd "$p" && find . -mindepth 1 -maxdepth ${recursive ? 2 : 1} ${pruneExpression()} ` +
+          `-printf '%y\\t%P\\n' | LC_ALL=C sort -k2`,
+          null,
+        ),
       );
       const prefix = path === '.' ? '' : `${path.replace(/\/+$/, '')}/`;
       const results: string[] = [];
@@ -213,6 +286,24 @@ async function asSetupFailure(sbx: MinimalSandbox, err: unknown): Promise<unknow
 }
 
 /**
+ * As `readGitFact`, but a failure is the machine's, not an empty answer.
+ *
+ * The tolerant version turns a dead machine into a fallback string. For a fact
+ * the caller cannot proceed without, that laundered a machine death into a
+ * plain `Error`, which `processInvestigateJob` then read through
+ * `cloneFailureReason` and reported to the customer as `repo_access_denied` —
+ * their repository blamed for our infrastructure, terminally.
+ */
+async function readGitFactStrict(sbx: MinimalSandbox, command: string): Promise<string> {
+  try {
+    const { stdout } = await sbx.commands.run(`cd ${q(SANDBOX_REPO)} && ${command}`, { timeoutMs: 30_000 });
+    return stdout.trim();
+  } catch (err: unknown) {
+    throw await asSetupFailure(sbx, err);
+  }
+}
+
+/**
  * Rent a machine, clone into it, and hand back a reader.
  *
  * The credential is written for the clone and removed in a finally, so it is
@@ -221,10 +312,32 @@ async function asSetupFailure(sbx: MinimalSandbox, err: unknown): Promise<unknow
  */
 export async function createReadOnlyCheckout(opts: ReadOnlyCheckoutOpts): Promise<ReadOnlyCheckout> {
   const createdAt = Date.now();
-  const sbx = await Sandbox.create({
-    timeoutMs: SANDBOX_LIFETIME_MS,
-    network: buildReadOnlyNetwork(opts.anthropicApiKey),
-  });
+  const requestedCommit = opts.commitSha && COMMIT_SHA_PATTERN.test(opts.commitSha) ? opts.commitSha : null;
+  if (opts.commitSha && !requestedCommit) {
+    logger.warn('ignoring a commit that is not a plain SHA; investigating the cloned head', {
+      requested_commit: opts.commitSha.slice(0, 64),
+    });
+  }
+
+  let sbx: Sandbox;
+  try {
+    sbx = await Sandbox.create({
+      timeoutMs: SANDBOX_LIFETIME_MS,
+      network: buildReadOnlyNetwork(opts.anthropicApiKey, opts.repoUrl),
+    });
+  } catch (err: unknown) {
+    // No machine exists yet, so there is nothing to probe or kill. It still has
+    // to be typed as infrastructure: a provider rate limit, quota or auth
+    // failure otherwise reaches `cloneFailureReason`, which has only git
+    // vocabulary and terminalizes the incident as `repo_access_denied`. Hitting
+    // the concurrent-sandbox cap would tell every customer their repository is
+    // inaccessible.
+    throw new MachineUnavailableError(
+      `Could not start a work machine: ${redactCloneDetail(err instanceof Error ? err.message : String(err))}`,
+      'unknown',
+    );
+  }
+  let clonedBranch = '';
   try {
     const netrc = opts.githubToken ? buildGitNetrc(opts.repoUrl, opts.githubToken) : null;
     try {
@@ -240,13 +353,20 @@ export async function createReadOnlyCheckout(opts: ReadOnlyCheckoutOpts): Promis
       } catch (err: unknown) {
         throw await asSetupFailure(sbx, err);
       }
-      if (opts.commitSha) {
+      // Read the branch HERE, before any checkout. `git checkout <sha>` detaches
+      // HEAD, and `git rev-parse --abbrev-ref HEAD` then prints the literal
+      // string "HEAD" — which this handed to `cacheProjectDefaultBranch`, so
+      // every investigation carrying a commit SHA overwrote the project's real
+      // default branch with "HEAD". A plain clone has not detached yet, so the
+      // checked-out branch here genuinely is the repository default.
+      clonedBranch = await readGitFact(sbx, 'git rev-parse --abbrev-ref HEAD');
+      if (requestedCommit) {
         // Best effort: an error group can name a commit that has since been
         // force-pushed away. Falling back to the cloned head matches the host
         // clone's existing behaviour rather than failing the job.
         try {
           await sbx.commands.run(
-            `cd ${q(SANDBOX_REPO)} && git fetch --depth 1 origin ${q(opts.commitSha)} && git checkout ${q(opts.commitSha)}`,
+            `cd ${q(SANDBOX_REPO)} && git fetch --depth 1 origin ${q(requestedCommit)} && git checkout ${q(requestedCommit)}`,
             { timeoutMs: CLONE_TIMEOUT_MS },
           );
         } catch (err: unknown) {
@@ -257,7 +377,7 @@ export async function createReadOnlyCheckout(opts: ReadOnlyCheckoutOpts): Promis
           const missingRef = /couldn't find remote ref|not a valid object name|no such remote ref/i.test(detail);
           if (!isCommandFailure(err) || !missingRef) throw await asSetupFailure(sbx, err);
           logger.warn('requested commit unavailable; using cloned head', {
-            requested_commit: opts.commitSha, sandbox_id: sbx.sandboxId,
+            requested_commit: requestedCommit, sandbox_id: sbx.sandboxId,
           });
         }
       }
@@ -277,12 +397,10 @@ export async function createReadOnlyCheckout(opts: ReadOnlyCheckoutOpts): Promis
 
     // Read after the credential is gone: none of these need it, and the host
     // clone produced the same three facts that callers still depend on.
-    const [headSha, defaultBranch, tree] = await Promise.all([
-      readGitFact(sbx, 'git rev-parse HEAD'),
-      // A plain clone checks out remote HEAD, so the checked-out branch IS the
-      // repository default. `symbolic-ref refs/remotes/origin/HEAD` is not set
-      // by every shallow clone, which is why the local branch name is used.
-      readGitFact(sbx, 'git rev-parse --abbrev-ref HEAD'),
+    const [headSha, tree] = await Promise.all([
+      // Strict: the run cannot proceed without it, so a failed read is the
+      // machine's fault and must stay typed as such.
+      readGitFactStrict(sbx, 'git rev-parse HEAD'),
       readGitFact(sbx, `git ls-files | head -c ${MAX_TREE_BYTES}`, ''),
     ]);
     if (!headSha) throw new Error('Could not resolve the checked-out commit inside the sandbox');
@@ -292,7 +410,9 @@ export async function createReadOnlyCheckout(opts: ReadOnlyCheckoutOpts): Promis
       sandboxId: sbx.sandboxId,
       createdAt,
       headSha,
-      defaultBranch,
+      // Empty rather than a guess when the read failed or HEAD was already
+      // detached. The caller must not cache a branch we cannot name.
+      defaultBranch: clonedBranch === 'HEAD' ? '' : clonedBranch,
       tree,
       // close must never throw: it runs in a finally and would otherwise
       // replace the job's real result with a teardown error.
