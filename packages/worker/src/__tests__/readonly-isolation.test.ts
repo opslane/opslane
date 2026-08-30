@@ -38,6 +38,24 @@ describe('read-only jobs no longer read the host', () => {
     expect(text).not.toMatch(/execFile/);
   });
 
+  it.each(ISOLATED_JOB_SOURCES)('%s does not reach the host through the host reader', (file) => {
+    // Without this, the filesystem checks above pass while a job imports
+    // createHostReader — whose node:fs imports live in host-reader.ts, not here.
+    expect(src(file)).not.toMatch(/host-reader/);
+  });
+
+  it('the host reader is imported only by the fix pipeline and the descoped job', () => {
+    const importers = ['agent-fix.ts', ...DESCOPED_JOB_SOURCES, ...ISOLATED_JOB_SOURCES, 'index.ts']
+      .filter((file) => /host-reader/.test(src(file)));
+    expect(importers.sort()).toEqual(['agent-fix.ts', 'product-context/job.ts']);
+  });
+
+  it('no isolated job still clones onto this host', () => {
+    for (const file of ISOLATED_JOB_SOURCES) {
+      expect(src(file), `${file} must not call cloneRepo`).not.toMatch(/cloneRepo\(/);
+    }
+  });
+
   it.each(DESCOPED_JOB_SOURCES)('%s is a known, tracked gap that still reads the host', (file) => {
     // Asserted so that isolating it fails this test and forces the file out of
     // DESCOPED_JOB_SOURCES and into ISOLATED_JOB_SOURCES, rather than leaving a
