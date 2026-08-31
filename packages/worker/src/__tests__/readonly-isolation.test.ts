@@ -70,6 +70,20 @@ function reachableFrom(entry: string): string[] {
 const HOST_ACCESS = /from '(?:node:)?(?:fs|fs\/promises|child_process)'/;
 
 /**
+ * The one module with host access a read-only job may have in its import graph.
+ *
+ * `harness/local-sandbox.ts` is the deterministic reliability harness's sandbox
+ * transport double. It is not a repository reader: it never resolves a path in a
+ * customer checkout, and it runs scripted fixture commands in a temp directory
+ * it created. It earns the exemption by being unreachable in production rather
+ * than by assertion — `createSandboxRuntime` loads it with a dynamic import that
+ * it reaches only after `OPSLANE_RELIABILITY_HARNESS=1`, so a production process
+ * never evaluates the module. The test below pins that ordering; if the gate
+ * moves or disappears, this exemption stops being true and that test fails.
+ */
+const HARNESS_ONLY_HOST_ACCESS = [join('harness', 'local-sandbox.ts')];
+
+/**
  * The job sources whose repository access must now happen inside a sandbox.
  *
  * `product-context/job.ts` is deliberately absent: its `discoverRepositoryRoutes`
@@ -107,8 +121,32 @@ describe('read-only jobs no longer read the host', () => {
     // investigate.ts — a module that imports node:fs — restored full host
     // filesystem access with every isolation test still green. This walks the
     // real import graph instead, so the boundary is asserted where it exists.
-    const offenders = reachableFrom(file).filter((reached) => HOST_ACCESS.test(src(reached)));
+    const offenders = reachableFrom(file)
+      .filter((reached) => HOST_ACCESS.test(src(reached)))
+      .filter((reached) => !HARNESS_ONLY_HOST_ACCESS.includes(reached));
     expect(offenders, `${file} reaches the host through: ${offenders.join(', ')}`).toEqual([]);
+  });
+
+  it('the harness sandbox double stays unreachable without the harness gate', () => {
+    // The exemption above is only true while the gate comes FIRST: a static
+    // import, or a dynamic one hoisted above the check, would load a module that
+    // can run arbitrary commands on this host into every production worker.
+    const runtime = src(join('harness', 'sandbox-runtime.ts'));
+    expect(runtime, 'the double must not be statically imported').not.toMatch(
+      /^\s*import\s[^;]*from\s*'\.\/local-sandbox\.js'/m,
+    );
+    const gate = runtime.indexOf("process.env['OPSLANE_RELIABILITY_HARNESS'] !== '1'");
+    const load = runtime.indexOf("await import('./local-sandbox.js')");
+    expect(gate, 'the harness gate must still exist').toBeGreaterThan(-1);
+    expect(load, 'the double must still be loaded dynamically').toBeGreaterThan(gate);
+  });
+
+  it('the harness double reads no customer checkout', () => {
+    // It is exempt because it is a transport double, not a repository reader.
+    // The read-only reader that DOES resolve model-chosen paths is
+    // createSandboxReader, and it must stay on the far side of the machine.
+    const double = src(join('harness', 'local-sandbox.ts'));
+    expect(double).not.toMatch(/host-reader|repo-paths|createSandboxReader/);
   });
 
   it('the host reader is imported only by the fix pipeline and the descoped job', () => {

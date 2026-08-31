@@ -133,6 +133,7 @@ function fakeSandbox(opts: {
     createdAt: 0,
     lifetimeMs: 1_800_000,
     unavailable: false,
+    isRunning: async () => true,
     commands: {
       run: async (command: string) => {
         const behavior = opts.onRun?.(command);
@@ -388,6 +389,7 @@ describe('planTests against an unavailable sandbox', () => {
     // same silent misclassification as the build gate's path D.
     const dead: SandboxRuntime = {
       id: 'dead', createdAt: 0, lifetimeMs: 1_800_000, unavailable: true,
+      isRunning: async () => false,
       commands: { run: async () => ({ exitCode: 0, stdout: '', stderr: '' }) },
       files: {
         read: async () => { throw new SandboxUnavailableError('Sandbox is probably not running anymore'); },
@@ -406,6 +408,7 @@ describe('planTests against an unavailable sandbox', () => {
     let reads = 0;
     const diesLater: SandboxRuntime = {
       id: 'dies-later', createdAt: 0, lifetimeMs: 1_800_000, unavailable: true,
+      isRunning: async () => false,
       commands: { run: async () => ({ exitCode: 0, stdout: '', stderr: '' }) },
       files: {
         read: async (path: string) => {

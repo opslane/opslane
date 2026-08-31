@@ -2,6 +2,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { CommandExitError, TimeoutError } from 'e2b';
 
 const { createE2BSandbox } = vi.hoisted(() => ({
   createE2BSandbox: vi.fn(),
@@ -178,6 +179,53 @@ describe('createSandboxRuntime', () => {
     );
   });
 
+  it('hands the egress policy to the provider, and omits it entirely when there is none', async () => {
+    // The read-only path built this policy and passed it to `Sandbox.create`
+    // itself. It now travels through the factory instead, so the factory has to
+    // carry it — and a machine with no policy must still be created exactly as
+    // it was before the parameter existed, not with `network: undefined`.
+    delete process.env['OPSLANE_SANDBOX_BACKEND'];
+    createE2BSandbox.mockResolvedValue({
+      sandboxId: 'sbx-net', isRunning: async () => true, commands: { run: vi.fn() },
+      files: { read: vi.fn(), write: vi.fn() }, kill: vi.fn(),
+    });
+
+    const network = { denyOut: ['*'], allowOut: ['github.com'], rules: {} };
+    await createSandboxRuntime('javascript', network as never);
+    expect(createE2BSandbox).toHaveBeenLastCalledWith(expect.objectContaining({ network }));
+
+    await createSandboxRuntime();
+    expect(Object.keys(createE2BSandbox.mock.lastCall?.[0] as object)).not.toContain('network');
+  });
+
+  it('reports local liveness from its own state, and kills idempotently', async () => {
+    // `classifyFailure` probes `isRunning` to tell a dead machine from a command
+    // that merely failed. A backend that could not answer sent every read-only
+    // failure in the harness down the machine-death path.
+    process.env['OPSLANE_SANDBOX_BACKEND'] = 'local';
+    process.env['OPSLANE_RELIABILITY_HARNESS'] = '1';
+    const sandbox = await createSandboxRuntime();
+
+    expect(await sandbox.isRunning()).toBe(true);
+    await sandbox.kill();
+    expect(await sandbox.isRunning()).toBe(false);
+    // Teardown runs from a finally that a caller can reach twice.
+    await expect(sandbox.kill()).resolves.toBeUndefined();
+    expect(await sandbox.isRunning()).toBe(false);
+    expect(sandbox.unavailable).toBe(true);
+  });
+
+  it('ignores the egress policy on the local backend rather than pretending to enforce it', async () => {
+    // The double runs commands on this host and has no network to police.
+    // `scripts/verify-isolation.ts` is what proves the policy is real.
+    process.env['OPSLANE_SANDBOX_BACKEND'] = 'local';
+    process.env['OPSLANE_RELIABILITY_HARNESS'] = '1';
+    const sandbox = await createSandboxRuntime('javascript', { denyOut: ['*'] } as never);
+    expect(await sandbox.isRunning()).toBe(true);
+    expect(createE2BSandbox).not.toHaveBeenCalled();
+    await sandbox.kill();
+  });
+
   it('raises SandboxUnavailableError from the local backend after kill', async () => {
     process.env['OPSLANE_SANDBOX_BACKEND'] = 'local';
     process.env['OPSLANE_RELIABILITY_HARNESS'] = '1';
@@ -249,11 +297,18 @@ describe('createSandboxRuntime', () => {
     process.env['OPSLANE_RELIABILITY_HARNESS'] = '1';
     const sandbox = await createSandboxRuntime();
 
-    await expect(sandbox.commands.run('echo failed >&2; exit 7')).rejects.toMatchObject({
-      exitCode: 7,
-      stderr: 'failed\n',
-    });
-    await expect(sandbox.commands.run('sleep 1', { timeoutMs: 10 })).rejects.toThrow(/timed out/i);
+    // The classes matter, not just the fields: the read-only reader reads
+    // grep's "no matches" 1 and the containment guard's 3 and 4 off a
+    // CommandExitError, machine-state treats that class as proof the machine is
+    // alive, and a TimeoutError is a bad tool call the model can narrow. A
+    // double with its own error class sent all three down the machine-death path.
+    const exited = await sandbox.commands.run('echo failed >&2; exit 7').catch((err: unknown) => err);
+    expect(exited).toBeInstanceOf(CommandExitError);
+    expect(exited).toMatchObject({ exitCode: 7, stderr: 'failed\n' });
+
+    const timedOut = await sandbox.commands.run('sleep 1', { timeoutMs: 10 }).catch((err: unknown) => err);
+    expect(timedOut).toBeInstanceOf(TimeoutError);
+    expect((timedOut as Error).message).toMatch(/timed out/i);
 
     await sandbox.kill();
   });

@@ -20,6 +20,7 @@ vi.mock('../sandbox-runtime.js', async (importOriginal) => ({
     createdAt: 0,
     lifetimeMs: 1_800_000,
     unavailable: false,
+    isRunning: async () => true,
     commands: {
       run: async (command: string) => {
         state.commands.push(command);

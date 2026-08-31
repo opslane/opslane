@@ -1,4 +1,5 @@
-import { CommandExitError, Sandbox, TimeoutError } from 'e2b';
+import { CommandExitError, TimeoutError } from 'e2b';
+import { createSandboxRuntime, type SandboxRuntime } from './sandbox-runtime.js';
 import { classifyFailure, isCommandFailure } from './machine-state.js';
 import { MachineUnavailableError, VerificationInfraError } from './errors.js';
 import { logger } from '../logger.js';
@@ -17,7 +18,6 @@ const MAX_READ_BYTES = 51_201;
 const READ_TIMEOUT_MS = 30_000;
 const CLONE_TIMEOUT_MS = 120_000;
 const PROBE_TIMEOUT_MS = 5_000;
-const SANDBOX_LIFETIME_MS = 900_000;
 /** Exit code the in-machine guard uses for a path that escapes the checkout. */
 const PATH_OUTSIDE_EXIT = 3;
 /** Exit code the in-machine guard uses for a path that does not resolve at all. */
@@ -55,17 +55,17 @@ const MAX_EXISTS_PATHS = 1_000;
 const COMMIT_SHA_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
 
 /**
- * The slice of the E2B `Sandbox` surface the reader uses.
+ * The slice of the machine surface the reader uses.
  *
  * Narrow on purpose: the reader must be constructible from a stub in tests
  * without standing up a machine, and a narrow surface documents exactly what
- * a read costs.
+ * a read costs. Both a raw E2B `Sandbox` (which `scripts/verify-isolation.ts`
+ * hands it) and a `SandboxRuntime` satisfy it, which is why it names neither
+ * `sandboxId` nor `id`: the reader needs neither.
  */
 export interface MinimalSandbox {
-  sandboxId: string;
   isRunning(opts?: { requestTimeoutMs?: number }): Promise<boolean>;
   commands: { run(cmd: string, opts?: { timeoutMs?: number }): Promise<{ stdout: string }> };
-  kill(): Promise<unknown>;
 }
 
 /** Single-quote one argument. Every string here is chosen by the model. */
@@ -319,12 +319,24 @@ export async function createReadOnlyCheckout(opts: ReadOnlyCheckoutOpts): Promis
     });
   }
 
-  let sbx: Sandbox;
+  let sbx: SandboxRuntime;
   try {
-    sbx = await Sandbox.create({
-      timeoutMs: SANDBOX_LIFETIME_MS,
-      network: buildReadOnlyNetwork(opts.anthropicApiKey, opts.repoUrl),
-    });
+    // Through the shared factory, not `Sandbox.create`. The factory is what
+    // reads `OPSLANE_SANDBOX_BACKEND`, so calling the provider directly meant
+    // the fix path honoured the deterministic reliability harness's local
+    // backend and this path did not — every read-only job in that harness died
+    // demanding an E2B key. The egress policy still travels with the request;
+    // only the E2B backend can apply it.
+    //
+    // The machine lifetime now comes from the factory (`SANDBOX_LIFETIME_MS`,
+    // default 1_800_000) rather than a 900_000 constant here. It is a ceiling,
+    // not a reservation: `close` kills the machine and E2B bills actual uptime,
+    // so the only cost is that a crashed worker leaks an orphan for longer.
+    // Both machine-renting paths now answer to one setting.
+    sbx = await createSandboxRuntime(
+      'javascript',
+      buildReadOnlyNetwork(opts.anthropicApiKey, opts.repoUrl),
+    );
   } catch (err: unknown) {
     // No machine exists yet, so there is nothing to probe or kill. It still has
     // to be typed as infrastructure: a provider rate limit, quota or auth
@@ -377,7 +389,7 @@ export async function createReadOnlyCheckout(opts: ReadOnlyCheckoutOpts): Promis
           const missingRef = /couldn't find remote ref|not a valid object name|no such remote ref/i.test(detail);
           if (!isCommandFailure(err) || !missingRef) throw await asSetupFailure(sbx, err);
           logger.warn('requested commit unavailable; using cloned head', {
-            requested_commit: requestedCommit, sandbox_id: sbx.sandboxId,
+            requested_commit: requestedCommit, sandbox_id: sbx.id,
           });
         }
       }
@@ -407,7 +419,7 @@ export async function createReadOnlyCheckout(opts: ReadOnlyCheckoutOpts): Promis
 
     return {
       reader: createSandboxReader(sbx, SANDBOX_REPO),
-      sandboxId: sbx.sandboxId,
+      sandboxId: sbx.id,
       createdAt,
       headSha,
       // Empty rather than a guess when the read failed or HEAD was already
@@ -423,7 +435,7 @@ export async function createReadOnlyCheckout(opts: ReadOnlyCheckoutOpts): Promis
     // lost, because the old code discarded the machine before anything could
     // record it.
     logger.error('read-only checkout setup failed', {
-      'sandbox.id': sbx.sandboxId,
+      'sandbox.id': sbx.id,
       'sandbox.age_at_error_ms': Date.now() - createdAt,
       'error.message': err instanceof Error ? err.message : String(err),
     });
