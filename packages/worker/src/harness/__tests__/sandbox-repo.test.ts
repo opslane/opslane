@@ -12,6 +12,7 @@ function buildSandbox(opts: {
     createdAt: 0,
     lifetimeMs: 1_800_000,
     unavailable: false,
+    isRunning: async () => true,
     files: {
       read: async (path) => {
         const content = opts.files?.[path];
@@ -101,6 +102,7 @@ describe('runBuildGate taxonomy', () => {
 describe('runBuildGate against an unavailable sandbox', () => {
   const deadSandbox: SandboxRuntime = {
     id: 'dead', createdAt: 0, lifetimeMs: 1_800_000, unavailable: true,
+    isRunning: async () => false,
     commands: {
       run: async () => { throw new SandboxUnavailableError('Sandbox is probably not running anymore'); },
     },

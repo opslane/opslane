@@ -78,6 +78,28 @@ describe('createReadOnlyCheckout default branch', () => {
     await checkout.close();
   });
 
+  it('rents the machine through the configured backend, not straight from the provider', async () => {
+    // This path called `Sandbox.create` directly while the fix path went through
+    // `createSandboxRuntime`, so `OPSLANE_SANDBOX_BACKEND` applied to one and
+    // not the other: every read-only job in the deterministic reliability
+    // harness died demanding an E2B key that CI deliberately does not have.
+    // Asserted through an unsupported backend because it proves the factory was
+    // consulted without standing up a local machine.
+    const saved = process.env['OPSLANE_SANDBOX_BACKEND'];
+    process.env['OPSLANE_SANDBOX_BACKEND'] = 'elsewhere';
+    created.calls.length = 0;
+    created.opts = null;
+    try {
+      await expect(createReadOnlyCheckout(BASE)).rejects.toThrow(
+        /Unsupported OPSLANE_SANDBOX_BACKEND: elsewhere/,
+      );
+      expect(created.opts, 'the provider must not have been called').toBeNull();
+    } finally {
+      if (saved === undefined) delete process.env['OPSLANE_SANDBOX_BACKEND'];
+      else process.env['OPSLANE_SANDBOX_BACKEND'] = saved;
+    }
+  });
+
   it('removes the clone credential before handing back a reader', async () => {
     created.calls.length = 0;
     const checkout = await createReadOnlyCheckout(BASE);
