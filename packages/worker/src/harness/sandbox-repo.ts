@@ -200,7 +200,37 @@ export async function createRepoSandbox(opts: {
       throw new Error(`clone failed: ${redactCloneDetail(message)}`);
     } finally {
       if (gitNetrc) {
-        await sandbox.commands.run('rm -f /home/user/.netrc').catch(() => {});
+        // Prove removal rather than attempt it. Everything after this point runs
+        // customer-controlled code — install lifecycle scripts, setup commands,
+        // the agent's own shell — and a token still on disk is readable by all
+        // of it. The read-only path holds the same bar; this is the machine that
+        // actually executes untrusted code, so it cannot hold a lower one.
+        try {
+          await sandbox.commands.run('rm -f /home/user/.netrc && test ! -e /home/user/.netrc',
+            { timeoutMs: 10_000 });
+        } catch (removalError: unknown) {
+          // A machine that is already gone took the credential with it, so there
+          // is nothing to protect and nothing to report. Swallow it exactly as
+          // before and let the latched death surface through the pre-cascade
+          // check, which is what stops the agent budget being spent on a machine
+          // already known to be dead. Throwing from this `finally` would instead
+          // replace that death with a setup error and skip the check.
+          //
+          // A machine still RUNNING is the real case: the token is on a disk that
+          // customer-controlled install scripts are about to read.
+          const dead = sandbox.unavailable
+            || removalError instanceof SandboxUnavailableError
+            || !(await sandbox.isRunning({ requestTimeoutMs: 10_000 }).catch(() => true));
+          if (!dead) {
+            const killed = await sandbox.kill().then(() => true).catch(() => false);
+            throw new Error(
+              'Could not remove the clone credential from the sandbox; '
+              + (killed
+                ? 'machine destroyed.'
+                : `machine ${sandbox.id} could not be destroyed either and may still hold it until its lease expires.`),
+            );
+          }
+        }
       }
     }
 

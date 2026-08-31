@@ -88,7 +88,17 @@ export function routeClaimsTerminalTool(): Anthropic.Tool {
   };
 }
 
-/** Validate model output against the exact set of mechanically discovered routes. */
+/**
+ * Validate model output before any of it is persisted.
+ *
+ * `discoveredRoutes` narrows claims to a known set when a caller has one. In
+ * production nobody does any more — the agent finds routes itself — so the
+ * shape rules below are the whole floor, and they have to hold on their own
+ * against a model steered by repository content it does not control.
+ */
+/** A leading slash, then only characters a URL path may legally carry. */
+const ROUTE_PATTERN = /^\/[A-Za-z0-9\-._~!$&'()*+,;=:@%/]*$/;
+
 export function parseRouteClaims(raw: unknown, discoveredRoutes?: string[]): RouteClaim[] {
   if (!isRecord(raw) || !Array.isArray(raw['claims'])) {
     throw new Error('Product-context submission must be an object with a claims array');
@@ -106,7 +116,10 @@ export function parseRouteClaims(raw: unknown, discoveredRoutes?: string[]): Rou
       throw new Error(`Product-context claim ${index} contains unknown field ${unknownKey}`);
     }
     const route = value['route'];
-    if (typeof route !== 'string' || !route.startsWith('/') || route.length > 512
+    // A route is a URL path and nothing else. Without this, whitespace, control
+    // characters and markup reach the digest and the dashboard by way of a
+    // model that untrusted repository content can steer.
+    if (typeof route !== 'string' || !ROUTE_PATTERN.test(route) || route.length > 512
       || (allowed !== null && !allowed.has(route))) {
       throw new Error(`Product-context claim ${index} contains an undiscovered route`);
     }

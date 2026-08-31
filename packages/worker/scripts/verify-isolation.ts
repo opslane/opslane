@@ -13,7 +13,7 @@
  *   E2B_API_KEY=... OPSLANE_E2B_JAVASCRIPT_TEMPLATE=... \
  *     pnpm --filter @opslane/worker exec tsx scripts/verify-isolation.ts
  *
- * Exits 0 only when all five checks print PASS.
+ * Exits 0 only when every check prints PASS.
  */
 import { Sandbox } from 'e2b';
 import { MachineUnavailableError } from '../src/harness/errors.js';
@@ -109,7 +109,7 @@ async function main(): Promise<void> {
     // not blamed on the repository's dependency list.
     const fix = await Sandbox.create(template, {
       timeoutMs: SANDBOX_LIFETIME_MS,
-      network: buildFixNetwork('javascript'),
+      network: buildFixNetwork('javascript', CLONE_URL),
     });
     try {
       let installError: unknown = null;

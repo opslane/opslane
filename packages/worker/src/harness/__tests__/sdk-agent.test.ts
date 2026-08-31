@@ -6,7 +6,8 @@ interface FakeTool { name: string; handler: Handler }
 type Action =
   | { kind: 'call'; name: string; input: Record<string, unknown> }
   | { kind: 'assistant'; id?: string; text?: string; usage?: Partial<typeof DEFAULT_USAGE> }
-  | { kind: 'result'; subtype?: string; isError?: boolean };
+  | { kind: 'result'; subtype?: string; isError?: boolean }
+  | { kind: 'throw'; error: unknown };
 
 const DEFAULT_USAGE = {
   input_tokens: 100,
@@ -29,7 +30,9 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
     const iterator = (async function* () {
       const server = (options['mcpServers'] as { repo: { tools: FakeTool[] } }).repo;
       for (const action of sdk.actions) {
-        if (action.kind === 'call') {
+        if (action.kind === 'throw') {
+          throw action.error;
+        } else if (action.kind === 'call') {
           const selected = server.tools.find((candidate) => candidate.name === action.name);
           if (!selected) throw new Error(`missing fake tool ${action.name}`);
           await selected.handler(action.input);
@@ -218,5 +221,83 @@ describe('SDK read-only agent', () => {
     expect(validate).toHaveBeenCalledTimes(1);
     expect(out.terminalInput).toEqual({ answer: 'grounded' });
     expect(out.filesRead).toEqual(['src/router.ts']);
+  });
+});
+
+describe('how a run ends', () => {
+  it('spends nothing when zero turns cannot meet the evidence gate', async () => {
+    const out = await runReadOnlyAgentSdk(fakeInput({
+      maxTurns: 0, classification: { minFilesRead: 1 },
+    }));
+    expect(out).toMatchObject({ stop: 'no_evidence', filesRead: [], costUsd: 0, terminalInput: null });
+    expect(sdk.queryOptions).toBeNull();
+  });
+
+  it('calls the same zero-turn run turns_exhausted when no evidence gate applies', async () => {
+    expect((await runReadOnlyAgentSdk(fakeInput({ maxTurns: 0 }))).stop).toBe('turns_exhausted');
+  });
+
+  it('reports exhausted turns rather than a silent no_tool_call', async () => {
+    sdk.actions.push({ kind: 'result', subtype: 'error_max_turns' });
+    expect((await runReadOnlyAgentSdk(fakeInput())).stop).toBe('turns_exhausted');
+  });
+
+  it('reports the budget stop the SDK reports', async () => {
+    sdk.actions.push({ kind: 'result', subtype: 'error_max_budget_usd' });
+    expect((await runReadOnlyAgentSdk(fakeInput())).stop).toBe('budget');
+  });
+
+  it('carries the detail of a failure during execution', async () => {
+    sdk.actions.push({ kind: 'result', subtype: 'error_during_execution' });
+    const out = await runReadOnlyAgentSdk(fakeInput());
+    expect(out).toMatchObject({ stop: 'api_error', apiErrorDetail: 'query failed' });
+  });
+
+  it('surfaces the HTTP status of a rejected request, which decides retry from hard fail', async () => {
+    sdk.actions.push({ kind: 'result', subtype: 'success', isError: true });
+    const out = await runReadOnlyAgentSdk(fakeInput());
+    expect(out).toMatchObject({ stop: 'api_error', apiErrorStatus: 503, apiErrorDetail: 'failed' });
+  });
+
+  it('reports a thrown query as an api_error carrying its status', async () => {
+    sdk.actions.push({ kind: 'throw', error: Object.assign(new Error('overloaded'), { status: 529 }) });
+    const out = await runReadOnlyAgentSdk(fakeInput());
+    expect(out).toMatchObject({ stop: 'api_error', apiErrorStatus: 529 });
+    expect(sdk.returned).toHaveBeenCalled();
+  });
+
+  it('lets a dead machine win over a failing query, because the job must retry', async () => {
+    const reader = fakeReader();
+    reader.readFile.mockRejectedValue(new MachineUnavailableError('gone', 'gone'));
+    sdk.actions.push(
+      { kind: 'call', name: 'read_file', input: { path: 'src/a.ts' } },
+      { kind: 'throw', error: new Error('stream died') },
+    );
+    await expect(runReadOnlyAgentSdk(fakeInput({ reader })))
+      .rejects.toBeInstanceOf(MachineUnavailableError);
+    expect(sdk.returned).toHaveBeenCalled();
+  });
+});
+
+describe('the subprocess environment', () => {
+  it('hands over no worker secret it was not asked for', () => {
+    process.env['GITHUB_TOKEN'] = 'ghp_worker_secret';
+    process.env['DATABASE_URL'] = 'postgres://u:p@h/db';
+    try {
+      const env = buildQueryOptions(fakeInput()).env ?? {};
+      expect(env['ANTHROPIC_API_KEY']).toBe('test-key');
+      expect(env['GITHUB_TOKEN']).toBeUndefined();
+      expect(env['DATABASE_URL']).toBeUndefined();
+    } finally {
+      delete process.env['GITHUB_TOKEN'];
+      delete process.env['DATABASE_URL'];
+    }
+  });
+
+  it('denies the built-in shell and filesystem tools by name, not only by omission', () => {
+    const denied = buildQueryOptions(fakeInput()).disallowedTools ?? [];
+    for (const builtin of ['Bash', 'Read', 'Write', 'Edit', 'WebFetch', 'ToolSearch']) {
+      expect(denied).toContain(builtin);
+    }
   });
 });
