@@ -260,6 +260,7 @@ describeDb('Python two-stage production path', () => {
     });
     vi.mocked(createReadOnlyCheckout).mockResolvedValue({
       reader: { readFile: vi.fn(), grep: vi.fn(), exists: vi.fn(), list: vi.fn() },
+      commandRunner: { run: vi.fn() },
       sandboxId: 'sbx-python-production-path',
       createdAt: Date.now(),
       headSha: 'abc123',

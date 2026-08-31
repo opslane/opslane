@@ -260,6 +260,8 @@ function authorisedDecision() {
 beforeEach(() => {
   vi.clearAllMocks();
   process.env['ANTHROPIC_API_KEY'] = 'test-key';
+  process.env['OPSLANE_E2B_JAVASCRIPT_TEMPLATE'] = 'opslane-javascript-test';
+  delete process.env['FIX_SANDBOX_EGRESS_DISABLED'];
   vi.mocked(Sandbox.create).mockResolvedValue(mockSandbox as unknown as import('e2b').Sandbox);
   mockSandbox.commands.run.mockImplementation(defaultCommandsRun);
   mockSandbox.kill.mockResolvedValue(undefined);
@@ -289,6 +291,28 @@ beforeEach(() => {
  * investigation had already routed and persisted a decision.
  */
 describe('fix jobs read the persisted decision instead of re-triaging', () => {
+  it('restricts JavaScript by default', async () => {
+    vi.mocked(runAgentLoop).mockResolvedValue(makeAgentResult({ success: false }));
+    await runAgentFix(makeInput({ platform: 'javascript' }));
+    const options = createE2BSandbox.mock.calls.at(-1)?.[1] as { network?: { denyOut?: unknown[] } };
+    expect(options.network?.denyOut).toHaveLength(1);
+  });
+
+  it('never restricts Python because its install path was not probed', async () => {
+    vi.mocked(runAgentLoop).mockResolvedValue(makeAgentResult({ success: false }));
+    await runAgentFix(makeInput({ platform: 'python' }));
+    const options = createE2BSandbox.mock.calls.at(-1)?.[1] as { network?: unknown };
+    expect(options.network).toBeUndefined();
+  });
+
+  it('honours the JavaScript egress escape hatch', async () => {
+    process.env['FIX_SANDBOX_EGRESS_DISABLED'] = '1';
+    vi.mocked(runAgentLoop).mockResolvedValue(makeAgentResult({ success: false }));
+    await runAgentFix(makeInput({ platform: 'javascript' }));
+    const options = createE2BSandbox.mock.calls.at(-1)?.[1] as { network?: unknown };
+    expect(options.network).toBeUndefined();
+  });
+
   it('short-circuits when the persisted decision was not code_fix', async () => {
     mockLoadDiagnosisDecision.mockResolvedValue({
       id: 'decision-2', outcome: 'not_actionable', basis: 'cause_outside_codebase', confidence: 'high',

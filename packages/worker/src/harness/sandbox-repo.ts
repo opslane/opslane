@@ -1,6 +1,7 @@
 import type { CheckOutcome } from '@opslane/shared';
 import { logger } from '../logger.js';
 import { DependencyInstallError, VerificationInfraError } from './errors.js';
+import { assertModernNode } from './image-check.js';
 import { isCommandFailure } from './machine-state.js';
 import { buildGitNetrc } from '../repo-url.js';
 import {
@@ -11,6 +12,7 @@ import {
 import { redactCloneDetail, scrubSecrets } from './redact.js';
 import { createSandboxRuntime, SandboxUnavailableError, type SandboxRuntime } from './sandbox-runtime.js';
 import type { Platform } from '../platform.js';
+import type { SandboxNetworkOpts } from 'e2b';
 import { sanitizeRuntimeValue, type RuntimeInfo } from '../runtime-info.js';
 import { TRAVERSAL_EXCLUSIONS } from './traversal-exclusions.js';
 
@@ -123,33 +125,6 @@ export interface RepoSandbox {
   sandboxRuntime: RuntimeInfo | null;
 }
 
-const SANDBOX_NODE_VERSION = '22.17.0';
-
-/**
- * The default E2B image ships Node 20.9, which predates crypto.hash() and
- * breaks modern Vite plugins (they require >= 20.12). Install a user-space
- * Node when the sandbox's Node is too old; later command shells pick it up
- * through ~/.profile and ~/.bashrc.
- */
-async function ensureModernNode(sandbox: SandboxRuntime): Promise<void> {
-  try {
-    await sandbox.commands.run(
-      `node -e "if (typeof require('crypto').hash !== 'function') process.exit(1)"`,
-    );
-    return;
-  } catch {
-    // Node is missing or too old — install below.
-  }
-  const url = `https://nodejs.org/dist/v${SANDBOX_NODE_VERSION}/node-v${SANDBOX_NODE_VERSION}-linux-x64.tar.xz`;
-  await sandbox.commands.run(
-    `curl -fsSL ${url} -o /tmp/node.tar.xz` +
-      ' && mkdir -p ~/.opslane-node && tar -xJf /tmp/node.tar.xz -C ~/.opslane-node --strip-components=1' +
-      ` && echo 'export PATH="$HOME/.opslane-node/bin:$PATH"' >> ~/.profile` +
-      ` && echo 'export PATH="$HOME/.opslane-node/bin:$PATH"' >> ~/.bashrc`,
-    { timeoutMs: 180_000 },
-  );
-}
-
 /**
  * Create an E2B sandbox, clone the repo via .netrc auth, install deps, and
  * commit a baseline so a later diff captures only the agent's work.
@@ -162,8 +137,9 @@ export async function createRepoSandbox(opts: {
   setupCommands?: string[];
   platform?: Platform;
   customerRuntime?: RuntimeInfo | null;
+  network?: SandboxNetworkOpts;
 }): Promise<RepoSandbox> {
-  const sandbox = await createSandboxRuntime(opts.platform);
+  const sandbox = await createSandboxRuntime(opts.platform, opts.network);
   try {
     await sandbox.commands.run('git config --global user.email "opslane-agent@opslane.com" && git config --global user.name "Opslane Agent"');
 
@@ -230,7 +206,7 @@ export async function createRepoSandbox(opts: {
 
     const platform = opts.platform ?? 'javascript';
     const hasPackageJson = await fileExists(sandbox, `${SANDBOX_REPO}/package.json`);
-    if (hasPackageJson) await ensureModernNode(sandbox);
+    if (hasPackageJson) await assertModernNode(sandbox);
 
     await sandbox.commands.run(
       platform === 'python'

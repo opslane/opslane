@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { CommandExitError } from 'e2b';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SandboxRuntime } from '../sandbox-runtime.js';
 
@@ -72,6 +74,44 @@ beforeEach(() => {
 });
 
 describe('createRepoSandbox setupCommands', () => {
+  it('no JavaScript setup path downloads a Node tarball', () => {
+    const src = readFileSync(new URL('../sandbox-repo.ts', import.meta.url), 'utf8');
+    expect(src).not.toMatch(/nodejs\.org/);
+    expect(src).not.toMatch(/node-v\d+/);
+  });
+
+  it('aborts setup before install when the image has an old Node', async () => {
+    state.files = { 'package.json': '{}' };
+    state.failWhenIncludes = 'process.versions.node';
+    const originalFailure = state.failWhenIncludes;
+    state.failWhenIncludes = undefined;
+    state.stdoutFor = { ...state.stdoutFor };
+    const commandState = state;
+    const { createSandboxRuntime } = await import('../sandbox-runtime.js');
+    vi.mocked(createSandboxRuntime).mockResolvedValueOnce({
+      id: 'old-node', createdAt: 0, lifetimeMs: 1_800_000, unavailable: false,
+      isRunning: async () => true,
+      commands: { run: async (command: string) => {
+        commandState.commands.push(command);
+        if (command.includes(originalFailure)) {
+          throw new CommandExitError({ exitCode: 1, stdout: '', stderr: '', error: undefined } as never);
+        }
+        const stdout = Object.entries(commandState.stdoutFor)
+          .find(([needle]) => command.includes(needle))?.[1] ?? '';
+        return { exitCode: 0, stdout, stderr: '' };
+      } },
+      files: {
+        read: async (path: string) => path.endsWith('package.json') ? '{}' : Promise.reject(new Error('not found')),
+        write: async () => undefined,
+      },
+      kill: state.kill,
+    });
+
+    await expect(createRepoSandbox({ repoUrl: 'https://github.com/o/r.git' }))
+      .rejects.toThrow(/does not provide Node 22/);
+    expect(state.commands.some((command) => command.includes('npm install'))).toBe(false);
+  });
+
   it('runs setup commands after the baseline commit and commits them separately', async () => {
     await createRepoSandbox({
       repoUrl: 'https://github.com/o/r.git',

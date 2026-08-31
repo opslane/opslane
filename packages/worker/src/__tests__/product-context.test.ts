@@ -4,8 +4,8 @@ import { join } from 'node:path';
 import pg from 'pg';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { closePool, type ClaimedJob, upsertProductContextClaims } from '../db.js';
+import { createHostReader } from '../harness/host-reader.js';
 import {
-  discoverRepositoryRoutes,
   buildProductContextPrompt,
   groundRouteClaims,
   runProductContext,
@@ -13,6 +13,7 @@ import {
 import { parseRouteClaims, routeClaimsTerminalTool } from '../product-context/schema.js';
 
 const cleanupPaths: string[] = [];
+const commandRunner = { run: vi.fn(async () => ({ stdout: '', exitCode: 0 })) };
 
 afterEach(async () => {
   await Promise.all(cleanupPaths.splice(0).map((path) => rm(path, { recursive: true, force: true })));
@@ -62,24 +63,25 @@ describe('product context schema', () => {
     const repoPath = await mkdtemp(join(tmpdir(), 'opslane-product-context-'));
     cleanupPaths.push(repoPath);
 
-    await expect(groundRouteClaims(repoPath, [{
+    await expect(groundRouteClaims(createHostReader(repoPath), [{
       route: '/assets/:id/edit', purpose: 'Edit an asset', actions: [],
       clientRefs: ['src/pages/Missing.vue'], serverRefs: [], audience: 'standard', confidence: 0.8,
       evidenceConflicts: [],
     }])).rejects.toThrow(/does not exist/);
   });
 
-  it('rejects a citation the repository agent did not read', async () => {
-    const repoPath = await mkdtemp(join(tmpdir(), 'opslane-product-context-'));
-    cleanupPaths.push(repoPath);
-    await mkdir(join(repoPath, 'src'), { recursive: true });
-    await writeFile(join(repoPath, 'src/assets.ts'), 'export const save = () => undefined;');
-
-    await expect(groundRouteClaims(repoPath, [{
+  it('reads every submitted citation while grounding it', async () => {
+    const reader = {
+      readFile: vi.fn(async () => 'export const save = () => undefined;'),
+      exists: vi.fn(async (paths: string[]) => paths),
+      grep: vi.fn(), list: vi.fn(),
+    };
+    await groundRouteClaims(reader, [{
       route: '/assets/:id/edit', purpose: 'Edit an asset', actions: [],
       clientRefs: ['src/assets.ts'], serverRefs: [], audience: 'standard', confidence: 0.8,
       evidenceConflicts: [],
-    }], [])).rejects.toThrow(/was not read/);
+    }]);
+    expect(reader.readFile).toHaveBeenCalledWith('src/assets.ts');
   });
 
   it('keeps grounded claims and marks missing understanding as unknown', async () => {
@@ -88,7 +90,7 @@ describe('product context schema', () => {
     await mkdir(join(repoPath, 'src'), { recursive: true });
     await writeFile(join(repoPath, 'src/assets.ts'), 'export const save = () => undefined;');
 
-    await expect(groundRouteClaims(repoPath, [{
+    await expect(groundRouteClaims(createHostReader(repoPath), [{
       route: '/assets/:id/edit', purpose: 'Edit an asset', actions: ['save'],
       clientRefs: ['src/assets.ts'], serverRefs: [], audience: 'standard', confidence: 0.9,
       evidenceConflicts: [],
@@ -107,7 +109,7 @@ describe('product context schema', () => {
     }]);
   });
 
-  it('persists grounded claims with the inspected commit and keeps omitted routes unknown', async () => {
+  it('persists a model-discovered route and keeps omitted observed routes unknown', async () => {
     const repoPath = await mkdtemp(join(tmpdir(), 'opslane-product-context-'));
     cleanupPaths.push(repoPath);
     await mkdir(join(repoPath, 'src'), { recursive: true });
@@ -122,9 +124,8 @@ describe('product context schema', () => {
 
     await runProductContext(job, new AbortController().signal, {
       prepare: async () => ({
-        repoPath, commitSha: 'commit-123', cleanup,
-        routes: [{ route: '/assets/:id/edit', clientRefs: ['src/assets.ts'], serverRefs: [], declaredRequests: [] },
-          { route: '/internal/debug', clientRefs: [], serverRefs: [], declaredRequests: [] }],
+        reader: createHostReader(repoPath), commandRunner, commitSha: 'commit-123', cleanup,
+        routes: [{ route: '/internal/debug', clientRefs: [], serverRefs: [], declaredRequests: [] }],
       }),
       askModel: async () => ({
         raw: { claims: [{
@@ -164,7 +165,8 @@ describe('product context schema', () => {
 
     await runProductContext(job, new AbortController().signal, {
       prepare: async () => ({
-        repoPath, commitSha: 'commit-conflicts', cleanup: async () => undefined,
+        reader: createHostReader(repoPath), commandRunner,
+        commitSha: 'commit-conflicts', cleanup: async () => undefined,
         routes: [
           { route: '/a', clientRefs: ['src/a.ts'], serverRefs: [], declaredRequests: ['PUT /api/a'] },
         ],
@@ -195,34 +197,14 @@ describe('product context schema', () => {
     expect(write.declaredRequests['/a']).toEqual(['PUT /api/a']);
   });
 
-  it('mechanically discovers registered and file-system routes with their source files', async () => {
-    const repoPath = await mkdtemp(join(tmpdir(), 'opslane-product-context-'));
-    cleanupPaths.push(repoPath);
-    await mkdir(join(repoPath, 'src'), { recursive: true });
-    await mkdir(join(repoPath, 'app/assets/[id]/edit'), { recursive: true });
-    await writeFile(join(repoPath, 'src/router.ts'), `
-      export const routes = [{ path: '/settings', component: Settings }];
-    `);
-    await writeFile(join(repoPath, 'app/assets/[id]/edit/page.tsx'), `
-      export async function save() { await fetch('/api/assets/:id', { method: 'PUT' }); }
-      export default function Page() {}
-    `);
-
-    await expect(discoverRepositoryRoutes(repoPath)).resolves.toEqual([
-      { route: '/assets/:id/edit', clientRefs: ['app/assets/[id]/edit/page.tsx'], serverRefs: [], declaredRequests: ['PUT /api/assets/:id'] },
-      { route: '/settings', clientRefs: ['src/router.ts'], serverRefs: [], declaredRequests: [] },
-    ]);
-  });
-
-  it('fences mechanical discovery as data in the model prompt', () => {
+  it('asks the model to find routes without a mechanical discovery block', () => {
     const prompt = buildProductContextPrompt([{
       route: '/assets/:id/edit', clientRefs: ['src/router.ts'],
       serverRefs: [], declaredRequests: ['PUT /api/assets/:id'],
     }]);
-    expect(prompt).toContain('DISCOVERY_START');
-    expect(prompt).toContain('DISCOVERY_END');
-    expect(prompt).toContain('"route": "/assets/:id/edit"');
-    expect(prompt).toContain('"PUT /api/assets/:id"');
+    expect(prompt).not.toContain('DISCOVERY_START');
+    expect(prompt).toMatch(/find every user-facing route/i);
+    expect(prompt).toContain('/assets/:id/edit');
   });
 });
 
@@ -259,12 +241,12 @@ describe('evidence_conflicts', () => {
 });
 
 describe('declared requests naming', () => {
-  it('discovery output and the model prompt say declaredRequests, not observedRequests', () => {
+  it('does not mistake observed requests for repository-declared requests', () => {
     const prompt = buildProductContextPrompt([
       { route: '/a', clientRefs: ['src/a.ts'], serverRefs: [], declaredRequests: ['PUT /api/a'] },
     ]);
-    expect(prompt).toContain('declaredRequests');
     expect(prompt).not.toContain('observedRequests');
+    expect(prompt).not.toContain('PUT /api/a');
   });
 });
 

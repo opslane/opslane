@@ -5,5 +5,5 @@
     "rootDir": ".",
     "declaration": false
   },
-  "include": ["scripts/**/*.ts"]
+  "include": ["scripts/**/*.ts", "e2b-javascript/**/*.ts"]
 }

@@ -86,14 +86,12 @@ const HARNESS_ONLY_HOST_ACCESS = [join('harness', 'local-sandbox.ts')];
 /**
  * The job sources whose repository access must now happen inside a sandbox.
  *
- * `product-context/job.ts` is deliberately absent: its `discoverRepositoryRoutes`
- * walk reads up to 10,000 files on the host and needs a seam `RepoReader` does
- * not provide, so it was descoped from this change and is tracked separately.
- * The descoped assertion below states that out loud rather than letting the
- * silence read as coverage.
+ * Product context has a product-context-only command capability, but that
+ * command executes in the same isolated checkout rather than on this host.
  */
-const ISOLATED_JOB_SOURCES = ['investigate.ts', 'inquiry/job.ts', 'friction/investigate-friction.ts'];
-const DESCOPED_JOB_SOURCES = ['product-context/job.ts'];
+const ISOLATED_JOB_SOURCES = [
+  'investigate.ts', 'inquiry/job.ts', 'friction/investigate-friction.ts', 'product-context/job.ts',
+];
 
 describe('read-only jobs no longer read the host', () => {
   it('exports no host reader and no lexical path guard', () => {
@@ -149,12 +147,12 @@ describe('read-only jobs no longer read the host', () => {
     expect(double).not.toMatch(/host-reader|repo-paths|createSandboxReader/);
   });
 
-  it('the host reader is imported only by the fix pipeline and the descoped job', () => {
+  it('the host reader is imported only by the fix pipeline', () => {
     // Enumerated from disk, not from a fixed list: a NEW module importing the
     // host reader — a new read-only job type, exactly the regression this file
     // exists to prevent — is the case a hardcoded list cannot see.
     const importers = allSourceFiles().filter((file) => /host-reader/.test(src(file)));
-    expect(importers.sort()).toEqual(['agent-fix.ts', join('product-context', 'job.ts')]);
+    expect(importers.sort()).toEqual(['agent-fix.ts']);
   });
 
   it('no isolated job still clones onto this host', () => {
@@ -163,12 +161,6 @@ describe('read-only jobs no longer read the host', () => {
     }
   });
 
-  it.each(DESCOPED_JOB_SOURCES)('%s is a known, tracked gap that still reads the host', (file) => {
-    // Asserted so that isolating it fails this test and forces the file out of
-    // DESCOPED_JOB_SOURCES and into ISOLATED_JOB_SOURCES, rather than leaving a
-    // stale exemption behind.
-    expect(src(file)).toMatch(HOST_ACCESS);
-  });
 });
 
 describe('toInfraError', () => {

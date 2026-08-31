@@ -644,15 +644,14 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
   checkAbort(signal);
 
   // Rent an isolated machine and clone into it. The customer's code is never
-  // written to this shared host, and the Anthropic key is attached by the
-  // egress proxy rather than placed inside the machine.
+  // written to this shared host, and the worker-side model loop keeps the
+  // Anthropic credential out of the machine entirely.
   let checkout: ReadOnlyCheckout;
   try {
     checkout = await createReadOnlyCheckout({
       repoUrl: buildRepoUrl(project.github_repo),
       commitSha: evidence.frames.commitSha ?? undefined,
       githubToken,
-      anthropicApiKey: apiKey,
     });
   } catch (err: unknown) {
     // A machine that died or went unreachable during setup is infrastructure,
@@ -979,7 +978,6 @@ export async function processFrictionInvestigateJob(
     checkout = await createReadOnlyCheckout({
       repoUrl: buildRepoUrl(project.github_repo),
       githubToken,
-      anthropicApiKey: apiKey,
     });
     if (checkout.defaultBranch) {
       await db.cacheProjectDefaultBranch(job.projectId, checkout.defaultBranch);
@@ -1673,7 +1671,9 @@ async function main(): Promise<void> {
   }
 
   // Warn about optional env vars that will cause job failures if missing
-  const warnEnv = ['ANTHROPIC_API_KEY', 'E2B_API_KEY', 'GITHUB_TOKEN'];
+  const warnEnv = [
+    'ANTHROPIC_API_KEY', 'E2B_API_KEY', 'OPSLANE_E2B_JAVASCRIPT_TEMPLATE', 'GITHUB_TOKEN',
+  ];
   for (const key of warnEnv) {
     if (!process.env[key]) {
       logger.warn('Optional environment variable not set — jobs requiring it will fail', { key });

@@ -9,6 +9,7 @@ import { buildGitNetrc } from '../repo-url.js';
 import { redactCloneDetail } from './redact.js';
 import { MAX_LIST_ENTRIES, type RepoReader } from '../investigate-tools.js';
 import { TRAVERSAL_EXCLUSIONS } from './traversal-exclusions.js';
+import type { CommandRunner } from './sdk-agent.js';
 
 export { MachineUnavailableError } from './errors.js';
 
@@ -211,6 +212,8 @@ export function createSandboxReader(sbx: MinimalSandbox, root: string): RepoRead
 
 export interface ReadOnlyCheckout {
   reader: RepoReader;
+  /** Bounded shell execution inside the checkout. Product context is its only consumer. */
+  commandRunner: CommandRunner;
   sandboxId: string;
   createdAt: number;
   /** Commit actually checked out, for `recordInvestigatedCommit`. */
@@ -243,7 +246,6 @@ export interface ReadOnlyCheckoutOpts {
   repoUrl: string;
   commitSha?: string | undefined;
   githubToken?: string | undefined;
-  anthropicApiKey: string;
 }
 
 /** Run one git query inside the machine and return its trimmed stdout. */
@@ -335,7 +337,7 @@ export async function createReadOnlyCheckout(opts: ReadOnlyCheckoutOpts): Promis
     // Both machine-renting paths now answer to one setting.
     sbx = await createSandboxRuntime(
       'javascript',
-      buildReadOnlyNetwork(opts.anthropicApiKey, opts.repoUrl),
+      buildReadOnlyNetwork(opts.repoUrl),
     );
   } catch (err: unknown) {
     // No machine exists yet, so there is nothing to probe or kill. It still has
@@ -419,6 +421,31 @@ export async function createReadOnlyCheckout(opts: ReadOnlyCheckoutOpts): Promis
 
     return {
       reader: createSandboxReader(sbx, SANDBOX_REPO),
+      commandRunner: {
+        run: async (command) => {
+          try {
+            const result = await sbx.commands.run(bounded(command, SANDBOX_REPO), { timeoutMs: 30_000 });
+            return { stdout: result.stdout, exitCode: result.exitCode };
+          } catch (err: unknown) {
+            if (err instanceof CommandExitError) {
+              return { stdout: err.stdout, exitCode: err.exitCode };
+            }
+            if (err instanceof TimeoutError) {
+              return { stdout: 'Command timed out after 30 seconds.', exitCode: 124 };
+            }
+            const classified = await classifyFailure(
+              err,
+              () => sbx.isRunning({ requestTimeoutMs: PROBE_TIMEOUT_MS }),
+            );
+            throw new MachineUnavailableError(
+              classified === 'gone'
+                ? 'The work machine is no longer running.'
+                : 'The work machine state could not be determined.',
+              classified === 'gone' ? 'gone' : 'unknown',
+            );
+          }
+        },
+      },
       sandboxId: sbx.id,
       createdAt,
       headSha,

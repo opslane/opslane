@@ -14,6 +14,14 @@ export class VerificationInfraError extends Error {
   }
 }
 
+/** The configured sandbox template cannot provide the runtime a job requires. */
+export class SandboxImageError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SandboxImageError';
+  }
+}
+
 /** The machine could not serve the request. `state` never claims death it cannot prove. */
 export class MachineUnavailableError extends Error {
   constructor(

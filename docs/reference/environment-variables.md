@@ -109,6 +109,8 @@ The Opslane server reads **only** the `REPLAY_STORE_*` names; `MINIO_*` names ap
 | `ANTHROPIC_BASE_URL` | no (Anthropic default) | Alternate Claude API endpoint; automated tests use it for a fake model server |
 | `OPSLANE_SANDBOX_BACKEND` | no (`e2b`) | Fix-verification sandbox backend; `local` is only for trusted automated reliability tests and also requires `OPSLANE_RELIABILITY_HARNESS=1` |
 | `SANDBOX_LIFETIME_MS` | no (`1800000`) | Wall-clock ceiling for a verification sandbox. Values below `900000` fall back to the default; values above `1800000` are clamped to it (E2B enforces account-tier maximums). The ceiling is not billed unless consumed; raising it increases orphan exposure if the worker crashes. |
+| `OPSLANE_E2B_JAVASCRIPT_TEMPLATE` | for JavaScript jobs | Immutable E2B template name built by `packages/worker/e2b-javascript/build.ts`. JavaScript fix and read-only jobs refuse to start a machine when it is unset. |
+| `FIX_SANDBOX_EGRESS_DISABLED` | no | Emergency escape hatch. Set to `1` to leave JavaScript fix sandboxes on unrestricted egress; Python fix sandboxes remain unrestricted until their dependency hosts are measured. |
 | `OPSLANE_PYTHON_PIPELINE` | no (off) | Routes Python errors through the Python-specific fix workflow for `1` or `true`; Opslane saves the chosen platform with the repair task. |
 | `OPSLANE_E2B_PYTHON_TEMPLATE` | no (`opslane-python`) | Overrides the E2B template name used by Python repair tasks. |
 | `OPSLANE_RELIABILITY_HARNESS` | no | Explicit guard required before tests can use the local process runner, which does not isolate commands |

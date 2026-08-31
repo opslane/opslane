@@ -10,15 +10,16 @@
  * destroy the machine mid-run. It creates its own `Sandbox` with the same
  * network policy and wraps it with the same `createSandboxReader`.
  *
- *   E2B_API_KEY=... ANTHROPIC_API_KEY=... \
+ *   E2B_API_KEY=... OPSLANE_E2B_JAVASCRIPT_TEMPLATE=... \
  *     pnpm --filter @opslane/worker exec tsx scripts/verify-isolation.ts
  *
  * Exits 0 only when all five checks print PASS.
  */
 import { Sandbox } from 'e2b';
 import { MachineUnavailableError } from '../src/harness/errors.js';
-import { buildReadOnlyNetwork } from '../src/harness/sandbox-network.js';
+import { buildFixNetwork, buildReadOnlyNetwork } from '../src/harness/sandbox-network.js';
 import { createSandboxReader } from '../src/harness/readonly-sandbox.js';
+import { classifyInstallFailure } from '../src/harness/sandbox-repo.js';
 
 const SANDBOX_REPO = '/home/user/repo';
 /** Any small public repository; only its existence matters. */
@@ -48,26 +49,26 @@ async function attempt(
 }
 
 async function main(): Promise<void> {
-  const anthropicApiKey = process.env['ANTHROPIC_API_KEY'];
-  if (!anthropicApiKey) throw new Error('ANTHROPIC_API_KEY is required');
   if (!process.env['E2B_API_KEY']) throw new Error('E2B_API_KEY is required');
+  const template = process.env['OPSLANE_E2B_JAVASCRIPT_TEMPLATE']?.trim();
+  if (!template) throw new Error('OPSLANE_E2B_JAVASCRIPT_TEMPLATE is required');
 
-  const sbx = await Sandbox.create({
+  const sbx = await Sandbox.create(template, {
     timeoutMs: SANDBOX_LIFETIME_MS,
-    network: buildReadOnlyNetwork(anthropicApiKey, CLONE_URL),
+    network: buildReadOnlyNetwork(CLONE_URL),
   });
   console.log(`sandbox ${sbx.sandboxId}\n`);
 
   let killed = false;
   try {
-    // 1. The egress proxy attaches the key. Nothing inside supplies one.
+    // 1. The model runs on the worker, so the machine cannot reach Anthropic.
     const models = await attempt(
       sbx,
       "curl -s -o /dev/null -w '%{http_code}' https://api.anthropic.com/v1/models",
     );
     report(
-      'anthropic reachable with no key inside the machine',
-      models.stdout.trim() === '200',
+      'anthropic is blocked inside the machine',
+      models.stdout.trim() !== '200',
       `HTTP ${models.stdout.trim() || 'none'}${models.stderr ? ` ${models.stderr}` : ''}`,
     );
 
@@ -103,6 +104,28 @@ async function main(): Promise<void> {
       ['6', '7', '28'].includes(exitCode) && (blockedCode === '' || blockedCode === '000'),
       `curl exit ${exitCode || 'unknown'}, HTTP ${blockedCode || 'none'}`,
     );
+
+    // A dependency fetched from a blocked host is recognised as our policy,
+    // not blamed on the repository's dependency list.
+    const fix = await Sandbox.create(template, {
+      timeoutMs: SANDBOX_LIFETIME_MS,
+      network: buildFixNetwork('javascript'),
+    });
+    try {
+      let installError: unknown = null;
+      try {
+        await fix.commands.run('npm install https://example.com/opslane-blocked.tgz', { timeoutMs: 60_000 });
+      } catch (error: unknown) {
+        installError = error;
+      }
+      report(
+        'a blocked dependency download is classified as infrastructure',
+        installError !== null && classifyInstallFailure(installError) === 'infrastructure',
+        installError instanceof Error ? installError.message : String(installError),
+      );
+    } finally {
+      await fix.kill().catch(() => undefined);
+    }
 
     // 4. Containment is enforced in the machine, against a real symlink.
     await sbx.commands.run(`git clone --depth 1 -- ${CLONE_URL} ${SANDBOX_REPO}`, { timeoutMs: 180_000 });

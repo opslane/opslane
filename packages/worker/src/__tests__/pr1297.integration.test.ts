@@ -2,10 +2,14 @@ import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
-const mockMessagesCreate = vi.fn();
+const { mockMessagesCreate } = vi.hoisted(() => ({ mockMessagesCreate: vi.fn() }));
 vi.mock('@anthropic-ai/sdk', () => ({
   default: vi.fn().mockImplementation(() => ({ messages: { create: mockMessagesCreate } })),
 }));
+vi.mock('@anthropic-ai/claude-agent-sdk', async () => {
+  const { fakeClaudeAgentSdk } = await import('./sdk-query-mock.js');
+  return fakeClaudeAgentSdk(mockMessagesCreate);
+});
 
 import { createHostReader } from '../harness/host-reader.js';
 import { investigateError } from '../investigate.js';
