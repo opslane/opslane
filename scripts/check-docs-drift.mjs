@@ -158,12 +158,17 @@ function sdkBuildEnvVars() {
 const INDIRECT_VARS = new Map([
   ['E2B_API_KEY', 'read internally by the e2b SDK when the worker creates sandboxes'],
 ]);
-const codeVars = new Set([
+// Vars the code forwards rather than consumes: the OS supplies them, nobody
+// sets them to configure Opslane, and documenting them as knobs would tell a
+// reader to set something that is not a setting. The worker names them where it
+// builds a minimal environment for the Agent SDK subprocess.
+const PASSTHROUGH_VARS = new Set(['PATH', 'HOME']);
+const codeVars = new Set([...[
   ...goEnvVars(),
   ...workerEnvVars(),
   ...sdkBuildEnvVars(),
   ...INDIRECT_VARS.keys(),
-]);
+].filter((name) => !PASSTHROUGH_VARS.has(name))]);
 const envDoc = read('docs/reference/environment-variables.md');
 for (const v of codeVars) {
   if (!envDoc.includes(v)) problems.push(`env var ${v} is read by code but missing from docs/reference/environment-variables.md`);

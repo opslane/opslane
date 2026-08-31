@@ -28,7 +28,7 @@ import { createEvidenceRecorder, type EvidenceRecorder } from './harness/evidenc
 import { DependencyInstallError, SandboxImageError, VerificationInfraError } from './harness/errors.js';
 import { createRepoSandbox, extractDiff, runBuildGate, type RepoSandbox } from './harness/sandbox-repo.js';
 import { buildFixNetwork } from './harness/sandbox-network.js';
-import { alertRestrictedMachineFailure } from './restricted-machine-alert.js';
+import { alertRestrictedMachineFailure, type FixPhase } from './restricted-machine-alert.js';
 import {
   compareSuiteRuns,
   planTests,
@@ -601,8 +601,21 @@ async function runAgentFixCore(input: AgentFixInput): Promise<AgentFixResult> {
   // only because assignment happened after createRepoSandbox returned.
   const evidence: EvidenceRecorder = createEvidenceRecorder();
   const network = platform === 'javascript' && process.env['FIX_SANDBOX_EGRESS_DISABLED'] !== '1'
-    ? buildFixNetwork(platform)
+    ? buildFixNetwork(platform, input.repoUrl)
     : undefined;
+  /**
+   * Report a phase that failed on a machine whose egress we restricted.
+   *
+   * Deliberately wired to infrastructure-shaped outcomes only. A build or suite
+   * that merely `failed` is the agent's patch being wrong, which is the normal
+   * case in a fix loop; alerting on those would bury the one signal this exists
+   * to surface.
+   */
+  const alertRestricted = (phase: FixPhase, detail: string): void =>
+    alertRestrictedMachineFailure({
+      network, phase,
+      jobId: input.usageContext?.jobId ?? '', projectId: input.projectId, detail,
+    });
 
   try {
     let repoSandbox: RepoSandbox;
@@ -624,10 +637,13 @@ async function runAgentFixCore(input: AgentFixInput): Promise<AgentFixResult> {
       const message = scrubSecrets(setupError instanceof Error ? setupError.message : String(setupError));
       // A blocked host during clone looks like an ordinary clone failure. If we
       // restricted this machine, say so, or the allowlist never gets corrected.
-      alertRestrictedMachineFailure({
-        network, phase: message.includes('clone failed') ? 'clone' : 'setup',
-        jobId: input.usageContext?.jobId ?? '', projectId: input.projectId, detail: message,
-      });
+      //
+      // Not for a bad image or an unresolvable repository: those fail before any
+      // packet leaves, so the allowlist cannot be the cause and an alert naming
+      // it would be the noise this module refuses to make.
+      if (!(setupError instanceof SandboxImageError) && !(setupError instanceof CloneResolutionError)) {
+        alertRestricted(message.includes('clone failed') ? 'clone' : 'setup', message);
+      }
       if (message.includes('clone failed')) {
         return {
           status: 'needs_human',
@@ -728,7 +744,10 @@ async function runAgentFixCore(input: AgentFixInput): Promise<AgentFixResult> {
           exitCode: baselineRun.exitCode,
           output: baselineRun.output,
         });
-        if (baselineRun.outcome === 'infra_error') verificationInfraError = true;
+        if (baselineRun.outcome === 'infra_error') {
+          verificationInfraError = true;
+          alertRestricted('test', baselineRun.output);
+        }
         // Baseline execution may write snapshots, coverage, or fixtures. Restore
         // HEAD before the agent so those artifacts can never enter its patch.
         await sandbox.commands.run(
@@ -1072,6 +1091,7 @@ async function runAgentFixCore(input: AgentFixInput): Promise<AgentFixResult> {
           finalSuiteDiscovered = post.total;
           if (post.outcome === 'infra_error') {
             verificationInfraError = true;
+            alertRestricted('test', post.output);
             testResult = { passed: true, skipped: true, output: post.output };
             evidence.addCheck('suite_post_patch', 'infra_error', {
               command: post.command,
@@ -1134,7 +1154,10 @@ async function runAgentFixCore(input: AgentFixInput): Promise<AgentFixResult> {
           attempt++;
           continue;
         }
-        if (buildResult.outcome === 'infra_error') verificationInfraError = true;
+        if (buildResult.outcome === 'infra_error') {
+          verificationInfraError = true;
+          alertRestricted('build', buildResult.output);
+        }
         buildGatePassed = buildResult.outcome === 'passed';
 
         testGatePassed = true;
@@ -1506,10 +1529,7 @@ async function runAgentFixCore(input: AgentFixInput): Promise<AgentFixResult> {
     // nothing a retry can change, so it terminalizes with its own reason
     // instead of being reported as an unexpected harness error.
     if (err instanceof DependencyInstallError) {
-      alertRestrictedMachineFailure({
-        network, phase: 'install',
-        jobId: input.usageContext?.jobId ?? '', projectId: input.projectId, detail: err.output,
-      });
+      alertRestricted('install', err.output);
       evidence.addCheck('install', 'failed', { command: '', output: err.output });
       return {
         status: 'needs_human',

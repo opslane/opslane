@@ -117,7 +117,7 @@ The Opslane server reads **only** the `REPLAY_STORE_*` names; `MINIO_*` names ap
 | `OPSLANE_GITHUB_URL` | no (`https://github.com`) | Alternate git host for clones; used by tests and self-hosted git |
 | `OPSLANE_GITHUB_API_URL` | no (GitHub default) | Alternate GitHub REST API base URL for PR creation |
 
-The worker starts with only `DATABASE_URL` and logs a warning for missing `ANTHROPIC_API_KEY`, `E2B_API_KEY`, and `GITHUB_TOKEN`. Work that needs a missing credential stops with a reason instead of crashing the worker.
+The worker starts with only `DATABASE_URL` and logs a warning for missing `ANTHROPIC_API_KEY`, `E2B_API_KEY`, `OPSLANE_E2B_JAVASCRIPT_TEMPLATE`, and `GITHUB_TOKEN`. Work that needs a missing credential stops with a reason instead of crashing the worker.
 
 ## Set in Compose but consumed by no code (known dead config)
 

@@ -40,11 +40,32 @@ describe('buildReadOnlyNetwork', () => {
 
 describe('buildFixNetwork', () => {
   it('denies everything by default', () => {
-    expect(buildFixNetwork('javascript').denyOut).toEqual([ALL_TRAFFIC]);
+    expect(buildFixNetwork('javascript', REPO).denyOut).toEqual([ALL_TRAFFIC]);
+  });
+
+  it('allows the configured git host, not a hardcoded github.com', () => {
+    const allow = buildFixNetwork('javascript', 'https://git.internal.acme.dev/acme/app.git').allowOut;
+    expect(allow).toContain('git.internal.acme.dev');
+  });
+
+  it('needs no extra host for a file:// remote, which the local rigs clone', () => {
+    const net = buildFixNetwork('javascript', 'file:///tmp/twin/acme/app.git');
+    expect(net.allowOut).toEqual(['registry.npmjs.org', 'nodejs.org',
+      'github.com', 'codeload.github.com', 'raw.githubusercontent.com',
+      'objects.githubusercontent.com', 'release-assets.githubusercontent.com']);
+  });
+
+  it('refuses a clone URL it cannot parse rather than silently blocking the clone', () => {
+    expect(() => buildFixNetwork('javascript', 'not a url')).toThrow(/clone URL/);
+  });
+
+  it('names an enterprise host once, not twice', () => {
+    const allow = buildFixNetwork('javascript', 'https://github.com/acme/app.git').allowOut;
+    expect(allow.filter((host) => host === 'github.com')).toHaveLength(1);
   });
 
   it('allows the GitHub hosts a clone and release asset use', () => {
-    const allow = buildFixNetwork('javascript').allowOut;
+    const allow = buildFixNetwork('javascript', REPO).allowOut;
     for (const host of [
       'github.com', 'codeload.github.com', 'objects.githubusercontent.com',
       'raw.githubusercontent.com', 'release-assets.githubusercontent.com',
@@ -52,13 +73,13 @@ describe('buildFixNetwork', () => {
   });
 
   it('allows the registry and Node header host node-gyp needs', () => {
-    const allow = buildFixNetwork('javascript').allowOut;
+    const allow = buildFixNetwork('javascript', REPO).allowOut;
     expect(allow).toContain('registry.npmjs.org');
     expect(allow).toContain('nodejs.org');
   });
 
   it('injects no credential and cannot reach Anthropic', () => {
-    const net = buildFixNetwork('javascript');
+    const net = buildFixNetwork('javascript', REPO);
     expect(net.rules).toEqual({});
     expect(net.allowOut).not.toContain('api.anthropic.com');
   });

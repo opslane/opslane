@@ -59,6 +59,28 @@ describe('product context schema', () => {
       .toThrow(/unknown field/);
   });
 
+  describe('with no discovery allowlist, which is what production runs', () => {
+    const claim = (route: string) => ({
+      route, purpose: 'p', actions: [], client_refs: ['src/a.ts'],
+      server_refs: [], audience: 'standard', confidence: 0.5, evidence_conflicts: [],
+    });
+
+    it('accepts a route the agent found for itself', () => {
+      expect(parseRouteClaims({ claims: [claim('/assets/:id/edit')] })[0]!.route).toBe('/assets/:id/edit');
+    });
+
+    it('refuses anything that is not a URL path', () => {
+      for (const bad of ['assets/edit', '/a b', '/a\nb', '/<script>x</script>', `/${'x'.repeat(600)}`]) {
+        expect(() => parseRouteClaims({ claims: [claim(bad)] })).toThrow(/undiscovered route/);
+      }
+    });
+
+    it('refuses the same route submitted twice', () => {
+      expect(() => parseRouteClaims({ claims: [claim('/assets/:id'), claim('/assets/:id')] }))
+        .toThrow(/repeats route/);
+    });
+  });
+
   it('rejects claims whose code references do not exist', async () => {
     const repoPath = await mkdtemp(join(tmpdir(), 'opslane-product-context-'));
     cleanupPaths.push(repoPath);
@@ -70,18 +92,37 @@ describe('product context schema', () => {
     }])).rejects.toThrow(/does not exist/);
   });
 
+  const stubReader = () => ({
+    readFile: vi.fn(async () => 'export const save = () => undefined;'),
+    exists: vi.fn(async (paths: string[]) => paths),
+    grep: vi.fn(), list: vi.fn(),
+  });
+
+  const claimCiting = (...refs: string[]) => [{
+    route: '/assets/:id/edit', purpose: 'Edit an asset', actions: [],
+    clientRefs: refs, serverRefs: [], audience: 'standard' as const, confidence: 0.8,
+    evidenceConflicts: [],
+  }];
+
   it('reads every submitted citation while grounding it', async () => {
-    const reader = {
-      readFile: vi.fn(async () => 'export const save = () => undefined;'),
-      exists: vi.fn(async (paths: string[]) => paths),
-      grep: vi.fn(), list: vi.fn(),
-    };
-    await groundRouteClaims(reader, [{
-      route: '/assets/:id/edit', purpose: 'Edit an asset', actions: [],
-      clientRefs: ['src/assets.ts'], serverRefs: [], audience: 'standard', confidence: 0.8,
-      evidenceConflicts: [],
-    }]);
+    const reader = stubReader();
+    await groundRouteClaims(reader, claimCiting('src/assets.ts'));
     expect(reader.readFile).toHaveBeenCalledWith('src/assets.ts');
+  });
+
+  it('rejects a citation the repository agent never opened', async () => {
+    await expect(groundRouteClaims(stubReader(), claimCiting('src/assets.ts'), ['src/other.ts']))
+      .rejects.toThrow(/was not read/);
+  });
+
+  it('accepts a citation the agent read under a different spelling', async () => {
+    await expect(groundRouteClaims(stubReader(), claimCiting('./src/assets.ts'), ['src/assets.ts']))
+      .resolves.toHaveLength(1);
+  });
+
+  it('grounds on existence alone when no read set is supplied', async () => {
+    await expect(groundRouteClaims(stubReader(), claimCiting('src/assets.ts')))
+      .resolves.toHaveLength(1);
   });
 
   it('keeps grounded claims and marks missing understanding as unknown', async () => {
