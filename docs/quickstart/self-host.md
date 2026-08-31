@@ -87,11 +87,12 @@ Requires all of the following set in your environment **before** `docker compose
 | `ANTHROPIC_API_KEY` | AI investigation and fix generation | [console.anthropic.com](https://console.anthropic.com) |
 | `E2B_API_KEY` | Sandbox where fixes are built and verification evidence is collected before delivery | [e2b.dev](https://e2b.dev) |
 | `GITHUB_TOKEN` | Cloning the repo, opening the PR, and reading its CI result | GitHub Settings > Developer settings > fine-grained PAT with repository contents and pull requests write access, plus checks and commit statuses read access |
+| `OPSLANE_E2B_JAVASCRIPT_TEMPLATE` | The sandbox image every JavaScript job boots from. Without it, every job fails at startup. | Build it once with `packages/worker/e2b-javascript/build.ts`; see that directory's README |
 
 You also need a **target repository the worker may open PRs against**. Use a fork of a small fixture app (e.g. this repo's `test-fixtures/vue-app` pushed to a scratch repo), never a production repo you aren't ready to receive AI PRs on. Point your project's `github_repo` at it (via the dashboard, or by editing the seeded project row).
 
 ```bash
-# export the three variables above in your shell, then:
+# export the four variables above in your shell, then:
 docker compose up -d --wait
 ```
 

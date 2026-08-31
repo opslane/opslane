@@ -128,6 +128,16 @@ export async function callTool(
   }
 }
 
+/**
+ * Built-in tools this loop must never expose. The read-only jobs reach the
+ * repository through the MCP server alone, whose handlers run inside the
+ * machine; a built-in here would read and write the worker host instead.
+ */
+const DENIED_BUILTIN_TOOLS = [
+  'Bash', 'BashOutput', 'KillShell', 'Read', 'Write', 'Edit', 'NotebookEdit',
+  'Glob', 'Grep', 'WebFetch', 'WebSearch', 'Task', 'TodoWrite', 'ToolSearch',
+] as const;
+
 interface RunState {
   captured: Record<string, unknown> | null;
   fatal: unknown;
@@ -236,12 +246,28 @@ export function buildQueryOptions(input: ReadOnlyRunInput, state?: RunState): Op
     model: input.model,
     systemPrompt: input.systemPrompt,
     maxTurns: input.maxTurns,
+    // `tools: []` is what actually disables the built-ins; `disallowedTools`
+    // names them anyway so the deny survives an SDK release that changes what
+    // an empty `tools` means. Repository content steers this model, so the
+    // built-in shell and filesystem must be denied twice, not once.
     tools: [],
+    disallowedTools: [...DENIED_BUILTIN_TOOLS],
     allowedTools: names.map((name) => `mcp__repo__${name}`),
     permissionMode: 'dontAsk',
     settingSources: [],
     mcpServers: { repo: buildServer(input, runState) },
-    env: { ...process.env, ANTHROPIC_API_KEY: input.apiKey },
+    // Only what the subprocess needs. Spreading process.env handed a
+    // prompt-injectable agent the worker's GITHUB_TOKEN, E2B_API_KEY,
+    // ENCRYPTION_KEY, DATABASE_URL and Slack webhook, with the built-in tool
+    // deny as the only thing between them.
+    env: {
+      ...(process.env['PATH'] === undefined ? {} : { PATH: process.env['PATH'] }),
+      ...(process.env['HOME'] === undefined ? {} : { HOME: process.env['HOME'] }),
+      ANTHROPIC_API_KEY: input.apiKey,
+      ...(process.env['ANTHROPIC_BASE_URL'] === undefined
+        ? {}
+        : { ANTHROPIC_BASE_URL: process.env['ANTHROPIC_BASE_URL'] }),
+    },
   };
 }
 

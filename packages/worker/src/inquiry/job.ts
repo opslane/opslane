@@ -151,7 +151,12 @@ async function prepareInquiryRepository(
     repoUrl: buildRepoUrl(project.github_repo),
     githubToken,
   });
-  await db.cacheProjectDefaultBranch(job.projectId, checkout.defaultBranch);
+  // Empty when the branch could not be read. Caching it then would overwrite
+  // the project's real default branch with a value we cannot stand behind —
+  // the same guard the investigate and friction paths carry.
+  if (checkout.defaultBranch) {
+    await db.cacheProjectDefaultBranch(job.projectId, checkout.defaultBranch);
+  }
   return {
     reader: checkout.reader,
     // Carried so a dead machine is logged with the identity that names it.

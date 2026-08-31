@@ -71,11 +71,28 @@ export function buildReadOnlyNetwork(repoUrl: string): ReadOnlyNetwork {
   };
 }
 
-/** Egress needed to clone and install dependencies in a credential-free fix machine. */
-export function buildFixNetwork(platform: Platform): ReadOnlyNetwork {
+/**
+ * Egress needed to clone and install dependencies in a credential-free fix machine.
+ *
+ * The repository host is derived from the clone URL for the same reason
+ * `buildReadOnlyNetwork` derives it: `OPSLANE_GITHUB_URL` points a self-hosted
+ * install at its own GitHub, and a policy that hardcoded github.com would deny
+ * that install the one host its clone needs. The platform's package hosts stay
+ * in the list regardless, because dependencies fetch from github.com even when
+ * the repository does not live there.
+ */
+export function buildFixNetwork(platform: Platform, repoUrl: string): ReadOnlyNetwork {
+  let gitHost: string;
+  try {
+    gitHost = new URL(repoUrl).hostname;
+  } catch {
+    throw new Error('A clone URL is required to build the egress policy');
+  }
   return {
     denyOut: [ALL_TRAFFIC],
-    allowOut: [...FIX_HOSTS[platform]],
+    // A `file://` remote has no host and needs no egress, exactly as on the
+    // read-only path. Deduplicated so a github.com repository is named once.
+    allowOut: [...new Set([...FIX_HOSTS[platform], ...(gitHost ? [gitHost] : [])])],
     rules: {},
   };
 }

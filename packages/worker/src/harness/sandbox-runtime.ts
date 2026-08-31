@@ -1,6 +1,7 @@
 import { Sandbox, SandboxNotFoundError } from 'e2b';
 import type { SandboxNetworkOpts } from 'e2b';
 import type { Platform } from '../platform.js';
+import { SandboxImageError } from './errors.js';
 
 /** Must match the template name in packages/worker/e2b-python/e2b.toml. */
 const DEFAULT_PYTHON_TEMPLATE = 'opslane-python';
@@ -164,7 +165,10 @@ export async function createSandboxRuntime(
     const createOpts = { timeoutMs: lifetimeMs, ...(network ? { network } : {}) };
     if (platform !== 'python') {
       const template = process.env['OPSLANE_E2B_JAVASCRIPT_TEMPLATE']?.trim();
-      if (!template) throw new Error('OPSLANE_E2B_JAVASCRIPT_TEMPLATE is not set');
+      // SandboxImageError, not a bare Error: an unset variable and a stale image
+      // are the same operator remedy, and the bare Error terminalized as
+      // worker_runtime_error — the useless card this class exists to prevent.
+      if (!template) throw new SandboxImageError('OPSLANE_E2B_JAVASCRIPT_TEMPLATE is not set');
       return adaptE2BSandbox(await Sandbox.create(template, createOpts), lifetimeMs, createdAt);
     }
     const template = process.env['OPSLANE_E2B_PYTHON_TEMPLATE']?.trim() || DEFAULT_PYTHON_TEMPLATE;

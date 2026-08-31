@@ -403,8 +403,13 @@ export async function createReadOnlyCheckout(opts: ReadOnlyCheckoutOpts): Promis
         try {
           await sbx.commands.run('rm -f /home/user/.netrc && test ! -e /home/user/.netrc', { timeoutMs: 10_000 });
         } catch {
-          await sbx.kill().catch(() => undefined);
-          throw new Error('Could not remove the clone credential from the sandbox; machine destroyed.');
+          const killed = await sbx.kill().then(() => true).catch(() => false);
+          throw new Error(
+            'Could not remove the clone credential from the sandbox; '
+            + (killed
+              ? 'machine destroyed.'
+              : `machine ${sbx.id} could not be destroyed either and may still hold it until its lease expires.`),
+          );
         }
       }
     }
@@ -424,7 +429,12 @@ export async function createReadOnlyCheckout(opts: ReadOnlyCheckoutOpts): Promis
       commandRunner: {
         run: async (command) => {
           try {
-            const result = await sbx.commands.run(bounded(command, SANDBOX_REPO), { timeoutMs: 30_000 });
+            // `2>&1` here and not inside `bounded`: the reader's grep parses its
+            // own stdout, but this is a general shell the discovery agent drives,
+            // where `grep: invalid option` is otherwise indistinguishable from
+            // "no matches" and the model cannot correct what it cannot see.
+            const result = await sbx.commands.run(
+              bounded(`{ ${command}; } 2>&1`, SANDBOX_REPO), { timeoutMs: 30_000 });
             return { stdout: result.stdout, exitCode: result.exitCode };
           } catch (err: unknown) {
             if (err instanceof CommandExitError) {

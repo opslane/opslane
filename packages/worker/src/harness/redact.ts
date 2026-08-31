@@ -10,7 +10,17 @@ export function scrubSecrets(raw: string): string {
     .replace(/sk-ant-[A-Za-z0-9_-]+/g, '[REDACTED]')
     // Opslane project keys. The greedy tail must span the endpoint payload an
     // sk carries after its secret, so the whole credential goes, not its head.
-    .replace(/opslane_(?:pk|sk)_[A-Za-z0-9_-]+/g, '[REDACTED]');
+    .replace(/opslane_(?:pk|sk)_[A-Za-z0-9_-]+/g, '[REDACTED]')
+    // Non-GitHub forge tokens. OPSLANE_GITHUB_URL points self-hosted installs at
+    // their own forge, and that token is written verbatim into the sandbox
+    // .netrc, so it can appear in any command output this scrubs.
+    .replace(/glpat-[A-Za-z0-9_-]+/g, '[REDACTED]')
+    // The clone credential as git spells it in a URL or a netrc line.
+    .replace(/x-access-token:[^@\s]+@/g, 'x-access-token:***@')
+    .replace(/(password\s+)\S+/gi, '$1[REDACTED]')
+    // Registry auth an install script can echo on failure.
+    .replace(/(_authToken\s*=\s*)\S+/gi, '$1[REDACTED]')
+    .replace(/(authorization:\s*(?:bearer|basic)\s+)\S+/gi, '$1[REDACTED]');
 }
 
 const CLONE_DETAIL_LIMIT = 2_000;

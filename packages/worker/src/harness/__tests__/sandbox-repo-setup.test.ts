@@ -112,6 +112,18 @@ describe('createRepoSandbox setupCommands', () => {
     expect(state.commands.some((command) => command.includes('npm install'))).toBe(false);
   });
 
+  it('destroys a live machine whose clone credential it cannot prove gone', async () => {
+    // Everything after this point runs customer-controlled code. Continuing with
+    // a token possibly still on disk is the one outcome this must never have.
+    state.failWhenIncludes = 'test ! -e /home/user/.netrc';
+
+    await expect(createRepoSandbox({
+      repoUrl: 'https://github.com/o/r.git', githubToken: 'ghp_test',
+    })).rejects.toThrow(/Could not remove the clone credential/);
+    expect(state.kill).toHaveBeenCalled();
+    expect(state.commands.some((command) => command.includes('npm install'))).toBe(false);
+  });
+
   it('runs setup commands after the baseline commit and commits them separately', async () => {
     await createRepoSandbox({
       repoUrl: 'https://github.com/o/r.git',

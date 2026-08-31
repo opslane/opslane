@@ -122,7 +122,7 @@ Opslane captured the event, mapped the stack trace back to your source files, an
 
 - **Dashboard sign-in:** a GitHub App, or WorkOS for cloud deployments.
 - **Investigation:** `ANTHROPIC_API_KEY`.
-- **Sandbox verification:** `E2B_API_KEY`.
+- **Sandbox verification:** `E2B_API_KEY`, plus `OPSLANE_E2B_JAVASCRIPT_TEMPLATE` naming the image built by `packages/worker/e2b-javascript/build.ts`.
 - **Pull requests:** GitHub credentials with access to the target repository.
 
 Exact permissions and environment variables are in the [self-host quickstart](docs/quickstart/self-host.md). SDK setup is in the [install guide](docs/install.md); replay privacy defaults in [replay privacy and masking](docs/guides/replay-privacy.md).
