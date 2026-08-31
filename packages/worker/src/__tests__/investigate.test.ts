@@ -3,12 +3,16 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-const mockMessagesCreate = vi.fn();
+const { mockMessagesCreate } = vi.hoisted(() => ({ mockMessagesCreate: vi.fn() }));
 vi.mock('@anthropic-ai/sdk', () => ({
   default: vi.fn().mockImplementation(() => ({
     messages: { create: mockMessagesCreate },
   })),
 }));
+vi.mock('@anthropic-ai/claude-agent-sdk', async () => {
+  const { fakeClaudeAgentSdk } = await import('./sdk-query-mock.js');
+  return fakeClaudeAgentSdk(mockMessagesCreate);
+});
 
 import { investigateError } from '../investigate.js';
 import type { InvestigateInput } from '../investigate.js';

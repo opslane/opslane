@@ -1,4 +1,5 @@
 import type Anthropic from '@anthropic-ai/sdk';
+import { canonicalPattern } from '../friction/urlnorm.js';
 
 export const PRODUCT_CONTEXT_AUDIENCES = [
   'customer',
@@ -88,7 +89,7 @@ export function routeClaimsTerminalTool(): Anthropic.Tool {
 }
 
 /** Validate model output against the exact set of mechanically discovered routes. */
-export function parseRouteClaims(raw: unknown, discoveredRoutes: string[]): RouteClaim[] {
+export function parseRouteClaims(raw: unknown, discoveredRoutes?: string[]): RouteClaim[] {
   if (!isRecord(raw) || !Array.isArray(raw['claims'])) {
     throw new Error('Product-context submission must be an object with a claims array');
   }
@@ -96,7 +97,7 @@ export function parseRouteClaims(raw: unknown, discoveredRoutes: string[]): Rout
     throw new Error('Product-context submission contains an unknown field');
   }
 
-  const allowed = new Set(discoveredRoutes);
+  const allowed = discoveredRoutes === undefined ? null : new Set(discoveredRoutes);
   const seen = new Set<string>();
   return raw['claims'].map((value, index) => {
     if (!isRecord(value)) throw new Error(`Product-context claim ${index} must be an object`);
@@ -105,11 +106,13 @@ export function parseRouteClaims(raw: unknown, discoveredRoutes: string[]): Rout
       throw new Error(`Product-context claim ${index} contains unknown field ${unknownKey}`);
     }
     const route = value['route'];
-    if (typeof route !== 'string' || !allowed.has(route)) {
+    if (typeof route !== 'string' || !route.startsWith('/') || route.length > 512
+      || (allowed !== null && !allowed.has(route))) {
       throw new Error(`Product-context claim ${index} contains an undiscovered route`);
     }
-    if (seen.has(route)) throw new Error(`Product-context submission repeats route ${route}`);
-    seen.add(route);
+    const canonicalRoute = canonicalPattern(route);
+    if (seen.has(canonicalRoute)) throw new Error(`Product-context submission repeats route ${canonicalRoute}`);
+    seen.add(canonicalRoute);
 
     const purpose = value['purpose'];
     if (typeof purpose !== 'string' || purpose.trim() === '') {
@@ -125,7 +128,7 @@ export function parseRouteClaims(raw: unknown, discoveredRoutes: string[]): Rout
       throw new Error(`Product-context claim ${index} confidence must be between 0 and 1`);
     }
     return {
-      route,
+      route: canonicalRoute,
       purpose: purpose.trim(),
       actions: stringArray(value['actions'], 'actions', index),
       clientRefs: stringArray(value['client_refs'], 'client_refs', index),

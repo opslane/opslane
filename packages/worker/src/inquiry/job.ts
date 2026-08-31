@@ -10,7 +10,7 @@ import {
   NO_VERIFICATION_EVIDENCE,
   toInfraError,
 } from '../harness/readonly-sandbox.js';
-import { runReadOnlyAgent } from '../readonly-agent.js';
+import { runReadOnlyAgentSdk } from '../harness/sdk-agent.js';
 import { buildRepoUrl } from '../repo-url.js';
 import { traceSpan } from '../tracing.js';
 import {
@@ -143,14 +143,13 @@ async function prepareInquiryRepository(
   if (!apiKey) throw new Error('ANTHROPIC_API_KEY environment variable is not set');
   checkAbort(signal);
   // The checkout lives in a per-run sandbox: the customer's code is never
-  // written to this host, and the key reaches the model through the egress
-  // proxy rather than the machine's environment.
+  // written to this host, and the worker-side SDK loop keeps the model key out
+  // of the machine entirely.
   const checkout = await createReadOnlyCheckout({
     // Credential-free by design; the token goes in through githubToken, is used
     // for the clone, and is deleted before the model gets a turn.
     repoUrl: buildRepoUrl(project.github_repo),
     githubToken,
-    anthropicApiKey: apiKey,
   });
   await db.cacheProjectDefaultBranch(job.projectId, checkout.defaultBranch);
   return {
@@ -186,7 +185,7 @@ export async function askInquiryModel(input: {
     'inquiry.prompt_version': INQUIRY_PROMPT_VERSION,
     'inquiry.model': INQUIRY_MODEL,
     'inquiry.affected_units': input.evidence.affectedUnits,
-  }, () => runReadOnlyAgent({
+  }, () => runReadOnlyAgentSdk({
     apiKey,
     model: INQUIRY_MODEL,
     reader: input.reader,

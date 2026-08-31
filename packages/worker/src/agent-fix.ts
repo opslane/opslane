@@ -25,8 +25,10 @@ import { scrubSecrets } from './harness/redact.js';
 import { escapeUntrustedLabel, fenced } from './prompt-fence.js';
 import { cloneFailureReason, CloneResolutionError } from './repo-clone.js';
 import { createEvidenceRecorder, type EvidenceRecorder } from './harness/evidence.js';
-import { DependencyInstallError, VerificationInfraError } from './harness/errors.js';
+import { DependencyInstallError, SandboxImageError, VerificationInfraError } from './harness/errors.js';
 import { createRepoSandbox, extractDiff, runBuildGate, type RepoSandbox } from './harness/sandbox-repo.js';
+import { buildFixNetwork } from './harness/sandbox-network.js';
+import { alertRestrictedMachineFailure } from './restricted-machine-alert.js';
 import {
   compareSuiteRuns,
   planTests,
@@ -598,6 +600,9 @@ async function runAgentFixCore(input: AgentFixInput): Promise<AgentFixResult> {
   // Note the type is no longer nullable — it was `EvidenceRecorder | null`
   // only because assignment happened after createRepoSandbox returned.
   const evidence: EvidenceRecorder = createEvidenceRecorder();
+  const network = platform === 'javascript' && process.env['FIX_SANDBOX_EGRESS_DISABLED'] !== '1'
+    ? buildFixNetwork(platform)
+    : undefined;
 
   try {
     let repoSandbox: RepoSandbox;
@@ -612,10 +617,17 @@ async function runAgentFixCore(input: AgentFixInput): Promise<AgentFixResult> {
           setupCommands: input.setupCommands,
           platform: input.platform,
           customerRuntime: input.customerRuntime,
+          network,
         }),
       );
     } catch (setupError: unknown) {
       const message = scrubSecrets(setupError instanceof Error ? setupError.message : String(setupError));
+      // A blocked host during clone looks like an ordinary clone failure. If we
+      // restricted this machine, say so, or the allowlist never gets corrected.
+      alertRestrictedMachineFailure({
+        network, phase: message.includes('clone failed') ? 'clone' : 'setup',
+        jobId: input.usageContext?.jobId ?? '', projectId: input.projectId, detail: message,
+      });
       if (message.includes('clone failed')) {
         return {
           status: 'needs_human',
@@ -1486,10 +1498,18 @@ async function runAgentFixCore(input: AgentFixInput): Promise<AgentFixResult> {
     };
   } catch (err: unknown) {
     if (err instanceof VerificationInfraError) throw err;
+    if (err instanceof SandboxImageError) {
+      evidence.addCheck('sandbox', 'infra_error', { command: '', output: err.message });
+      throw new VerificationInfraError(err.message, evidence.record());
+    }
     // A dependency list that will not install is the customer's to fix and
     // nothing a retry can change, so it terminalizes with its own reason
     // instead of being reported as an unexpected harness error.
     if (err instanceof DependencyInstallError) {
+      alertRestrictedMachineFailure({
+        network, phase: 'install',
+        jobId: input.usageContext?.jobId ?? '', projectId: input.projectId, detail: err.output,
+      });
       evidence.addCheck('install', 'failed', { command: '', output: err.output });
       return {
         status: 'needs_human',

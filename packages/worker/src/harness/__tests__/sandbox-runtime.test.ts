@@ -18,6 +18,7 @@ import { createSandboxRuntime, SandboxUnavailableError } from '../sandbox-runtim
 const ENV_KEYS = [
   'OPSLANE_SANDBOX_BACKEND',
   'OPSLANE_RELIABILITY_HARNESS',
+  'OPSLANE_E2B_JAVASCRIPT_TEMPLATE',
   'SANDBOX_LIFETIME_MS',
   'ANTHROPIC_API_KEY',
   'GITHUB_TOKEN',
@@ -44,6 +45,7 @@ const savedEnv = new Map<string, string | undefined>();
 beforeEach(() => {
   vi.clearAllMocks();
   for (const key of ENV_KEYS) savedEnv.set(key, process.env[key]);
+  process.env['OPSLANE_E2B_JAVASCRIPT_TEMPLATE'] = 'opslane-javascript-test';
 });
 
 afterEach(() => {
@@ -118,7 +120,10 @@ describe('createSandboxRuntime', () => {
 
     const runtime = await createSandboxRuntime('javascript');
     expect(runtime.lifetimeMs).toBe(1_800_000);
-    expect(createE2BSandbox).toHaveBeenCalledWith(expect.objectContaining({ timeoutMs: 1_800_000 }));
+    expect(createE2BSandbox).toHaveBeenCalledWith(
+      'opslane-javascript-test',
+      expect.objectContaining({ timeoutMs: 1_800_000 }),
+    );
   });
 
   it('clamps a lifetime below the floor back to the default', async () => {
@@ -145,7 +150,10 @@ describe('createSandboxRuntime', () => {
     expect(runtime.lifetimeMs).toBe(900_000);
     // Assert the provisioning argument, not just the metadata: the two could
     // disagree and the sandbox would still be created with the wrong ceiling.
-    expect(createE2BSandbox).toHaveBeenCalledWith(expect.objectContaining({ timeoutMs: 900_000 }));
+    expect(createE2BSandbox).toHaveBeenCalledWith(
+      'opslane-javascript-test',
+      expect.objectContaining({ timeoutMs: 900_000 }),
+    );
   });
 
   it('clamps a lifetime above the account ceiling', async () => {
@@ -192,10 +200,31 @@ describe('createSandboxRuntime', () => {
 
     const network = { denyOut: ['*'], allowOut: ['github.com'], rules: {} };
     await createSandboxRuntime('javascript', network as never);
-    expect(createE2BSandbox).toHaveBeenLastCalledWith(expect.objectContaining({ network }));
+    expect(createE2BSandbox).toHaveBeenLastCalledWith(
+      'opslane-javascript-test',
+      expect.objectContaining({ network }),
+    );
 
     await createSandboxRuntime();
-    expect(Object.keys(createE2BSandbox.mock.lastCall?.[0] as object)).not.toContain('network');
+    expect(Object.keys(createE2BSandbox.mock.lastCall?.[1] as object)).not.toContain('network');
+  });
+
+  it('boots the configured JavaScript template by name', async () => {
+    process.env['OPSLANE_E2B_JAVASCRIPT_TEMPLATE'] = 'opslane-javascript-20260831000303';
+    createE2BSandbox.mockResolvedValue({
+      sandboxId: 'sbx-template', commands: { run: vi.fn() },
+      files: { read: vi.fn(), write: vi.fn() }, kill: vi.fn(),
+    });
+
+    await createSandboxRuntime('javascript');
+
+    expect(createE2BSandbox.mock.calls.at(-1)?.[0]).toBe('opslane-javascript-20260831000303');
+  });
+
+  it('refuses to start JavaScript with no template configured', async () => {
+    delete process.env['OPSLANE_E2B_JAVASCRIPT_TEMPLATE'];
+    await expect(createSandboxRuntime('javascript')).rejects.toThrow(/OPSLANE_E2B_JAVASCRIPT_TEMPLATE/);
+    expect(createE2BSandbox).not.toHaveBeenCalled();
   });
 
   it('reports local liveness from its own state, and kills idempotently', async () => {

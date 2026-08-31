@@ -5,7 +5,7 @@ import { EVIDENCE_ARRAY_SCHEMA, parseEvidence, seal } from '../diagnose-schema.j
 import { DEFAULT_PRICING, MODEL_PRICING } from '../investigate.js';
 import { fenced } from '../prompt-fence.js';
 import type { RepoReader } from '../investigate-tools.js';
-import { runReadOnlyAgent, type ReadOnlyRunResult } from '../readonly-agent.js';
+import { runReadOnlyAgentSdk, type ReadOnlyRunResult } from '../harness/sdk-agent.js';
 import { validateVerdict } from '../verdict-validation.js';
 import type { FrictionEvidence } from './friction-evidence.js';
 
@@ -202,7 +202,7 @@ export async function investigateFriction(
     return knownMissing.has(key) ? null : key;
   };
 
-  const run = await runReadOnlyAgent({
+  const run = await runReadOnlyAgentSdk({
     apiKey,
     model: FRICTION_INVESTIGATION_MODEL,
     maxTurns: MAX_TURNS,

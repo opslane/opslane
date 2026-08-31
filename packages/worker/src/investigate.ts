@@ -7,7 +7,7 @@ import type { RepoReader } from './investigate-tools.js';
 import { logger } from './logger.js';
 import { fenced } from './prompt-fence.js';
 import type { Platform } from './platform.js';
-import { runReadOnlyAgent, type ReadOnlyStop, type TokenUsage } from './readonly-agent.js';
+import { runReadOnlyAgentSdk, type ReadOnlyStop, type TokenUsage } from './harness/sdk-agent.js';
 import type { RuntimeInfo } from './runtime-info.js';
 import { traceSpan } from './tracing.js';
 import type { TriageResult } from './agent-fix.js';
@@ -434,7 +434,7 @@ export async function investigateError(
   };
 
   const run = await traceSpan('investigation.diagnose', { 'investigation.stage': 'diagnose' }, () =>
-    runReadOnlyAgent({
+    runReadOnlyAgentSdk({
       apiKey,
       model: INVESTIGATION_MODEL,
       maxTurns: MAX_TURNS,
