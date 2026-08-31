@@ -6,12 +6,16 @@ import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ErrorGroupData } from '../../db.js';
 
-const mockMessagesCreate = vi.fn();
+const { mockMessagesCreate } = vi.hoisted(() => ({ mockMessagesCreate: vi.fn() }));
 vi.mock('@anthropic-ai/sdk', () => ({
   default: vi.fn().mockImplementation(() => ({
     messages: { create: mockMessagesCreate },
   })),
 }));
+vi.mock('@anthropic-ai/claude-agent-sdk', async () => {
+  const { fakeClaudeAgentSdk } = await import('../../__tests__/sdk-query-mock.js');
+  return fakeClaudeAgentSdk(mockMessagesCreate);
+});
 vi.mock('../../logger.js', () => ({
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
 }));

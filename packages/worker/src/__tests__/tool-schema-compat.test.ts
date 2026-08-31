@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { submitDiagnosisTool, EVIDENCE_ARRAY_SCHEMA } from '../diagnose-schema.js';
-import { readOnlyTools } from '../readonly-agent.js';
+import { readOnlyTools } from '../harness/sdk-agent.js';
 import { inquiryDecisionTerminalTool } from '../inquiry/schema.js';
 import { routeMapTerminalTool } from '../route-map.js';
 import { routeClaimsTerminalTool } from '../product-context/schema.js';

@@ -12,16 +12,10 @@ const MAX_FILE_SIZE = 50_000;
 /**
  * A `RepoReader` over a checkout on this host's filesystem.
  *
- * Exactly two callers may use it, and neither is a read-only job that was
- * isolated by this change:
+ * Only the fix pipeline (`agent-fix.ts`) may use it. That pipeline needs a host
+ * checkout because it applies a diff and pushes a branch.
  *
- * - the fix pipeline (`agent-fix.ts`), which needs a host checkout anyway
- *   because it applies a diff and pushes a branch;
- * - `product-context/job.ts`, which is a KNOWN GAP tracked separately:
- *   `discoverRepositoryRoutes` walks the whole checkout and reads up to 10,000
- *   files, which this three-method seam cannot express at a workable cost.
- *
- * Investigation, inquiry and friction read inside a per-run sandbox
+ * Investigation, inquiry, friction and product context read inside a per-run sandbox
  * (`readonly-sandbox.ts`) and must never import this.
  * `src/__tests__/readonly-isolation.test.ts` enforces that.
  *

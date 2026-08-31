@@ -1,5 +1,6 @@
 import { ALL_TRAFFIC } from 'e2b';
 import type { SandboxNetworkOpts, SandboxNetworkRule } from 'e2b';
+import type { Platform } from '../platform.js';
 
 /**
  * Hosts allowed regardless of which git host the project uses.
@@ -10,7 +11,21 @@ import type { SandboxNetworkOpts, SandboxNetworkRule } from 'e2b';
  * self-hosted install cloned into a machine whose deny-all policy blocked the
  * only host it needed.
  */
-const ALWAYS_ALLOWED_HOSTS = ['registry.npmjs.org', 'api.anthropic.com'] as const;
+const ALWAYS_ALLOWED_HOSTS = ['registry.npmjs.org'] as const;
+
+/** GitHub serves clones, raw files and release binaries from different hosts. */
+const GITHUB_HOSTS = [
+  'github.com',
+  'codeload.github.com',
+  'raw.githubusercontent.com',
+  'objects.githubusercontent.com',
+  'release-assets.githubusercontent.com',
+] as const;
+
+const FIX_HOSTS: Record<Platform, readonly string[]> = {
+  javascript: ['registry.npmjs.org', 'nodejs.org', ...GITHUB_HOSTS],
+  python: ['pypi.org', 'files.pythonhosted.org', ...GITHUB_HOSTS],
+};
 
 /**
  * The network policy this module produces.
@@ -28,16 +43,13 @@ export interface ReadOnlyNetwork extends SandboxNetworkOpts {
 /**
  * Network policy for a read-only sandbox.
  *
- * The key is attached by E2B's egress proxy, not placed in the sandbox
- * environment. A sandbox holds one customer's repository and untrusted file
- * content steers the model, so a key inside the machine is reachable by the very
- * thing being isolated. Measured: a request from inside with no key returns 200,
- * and `env` inside the machine contains no Anthropic variable.
+ * The model loop and its credential remain on the worker. The machine needs
+ * only its repository host and the package registry; Anthropic is deliberately
+ * absent from both the allowlist and the proxy rules.
  *
  * E2B returns 400 unless denyOut names ALL_TRAFFIC, so the deny is not redundant.
  */
-export function buildReadOnlyNetwork(anthropicApiKey: string, repoUrl: string): ReadOnlyNetwork {
-  if (!anthropicApiKey) throw new Error('Anthropic API key is required to build the egress rule');
+export function buildReadOnlyNetwork(repoUrl: string): ReadOnlyNetwork {
   let gitHost: string;
   try {
     gitHost = new URL(repoUrl).hostname;
@@ -55,10 +67,15 @@ export function buildReadOnlyNetwork(anthropicApiKey: string, repoUrl: string): 
     // Deduplicated, because a repoUrl already naming an always-allowed host
     // would otherwise appear twice in the policy.
     allowOut: [...new Set([...(gitHost ? [gitHost] : []), ...ALWAYS_ALLOWED_HOSTS])],
-    rules: {
-      'api.anthropic.com': [
-        { transform: { headers: { 'x-api-key': anthropicApiKey, 'anthropic-version': '2023-06-01' } } },
-      ],
-    },
+    rules: {},
+  };
+}
+
+/** Egress needed to clone and install dependencies in a credential-free fix machine. */
+export function buildFixNetwork(platform: Platform): ReadOnlyNetwork {
+  return {
+    denyOut: [ALL_TRAFFIC],
+    allowOut: [...FIX_HOSTS[platform]],
+    rules: {},
   };
 }

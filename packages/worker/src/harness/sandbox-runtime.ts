@@ -163,7 +163,9 @@ export async function createSandboxRuntime(
     // created exactly as it was before this parameter existed.
     const createOpts = { timeoutMs: lifetimeMs, ...(network ? { network } : {}) };
     if (platform !== 'python') {
-      return adaptE2BSandbox(await Sandbox.create(createOpts), lifetimeMs, createdAt);
+      const template = process.env['OPSLANE_E2B_JAVASCRIPT_TEMPLATE']?.trim();
+      if (!template) throw new Error('OPSLANE_E2B_JAVASCRIPT_TEMPLATE is not set');
+      return adaptE2BSandbox(await Sandbox.create(template, createOpts), lifetimeMs, createdAt);
     }
     const template = process.env['OPSLANE_E2B_PYTHON_TEMPLATE']?.trim() || DEFAULT_PYTHON_TEMPLATE;
     return adaptE2BSandbox(await Sandbox.create(template, createOpts), lifetimeMs, createdAt);

@@ -29,7 +29,7 @@ const sandbox = vi.hoisted(() => ({
 vi.mock('e2b', async (importOriginal) => ({
   ...(await importOriginal<typeof import('e2b')>()),
   Sandbox: {
-    create: async (opts: unknown): Promise<typeof sandbox> => {
+    create: async (_template: string, opts: unknown): Promise<typeof sandbox> => {
       created.opts = opts;
       return sandbox;
     },
@@ -41,8 +41,9 @@ const { createReadOnlyCheckout } = await import('../readonly-sandbox.js');
 const BASE = {
   repoUrl: 'https://github.com/acme/app.git',
   githubToken: 'ghs-test',
-  anthropicApiKey: 'sk-ant-test',
 };
+
+process.env['OPSLANE_E2B_JAVASCRIPT_TEMPLATE'] = 'opslane-javascript-test';
 
 describe('createReadOnlyCheckout default branch', () => {
   it('reports the branch the clone was on, not the detached "HEAD" after a commit checkout', async () => {
