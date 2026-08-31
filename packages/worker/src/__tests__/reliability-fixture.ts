@@ -97,13 +97,31 @@ function anthropicMessage(
   };
 }
 
+/**
+ * The Claude Agent SDK registers our tools through an MCP server, so the same
+ * `read_file` the hand-written loop declared arrives here as
+ * `mcp__repo__read_file`. The twin dispatches on the bare name and replies with
+ * whatever the request actually declared, so it speaks to both callers without
+ * either of them knowing.
+ */
+const bareToolName = (name: string): string => name.replace(/^mcp__[^_]+(?:_[^_]+)*?__/, '');
+
 export function toolNames(body: Record<string, unknown>): string[] {
+  return declaredTools(body).map(bareToolName);
+}
+
+function declaredTools(body: Record<string, unknown>): string[] {
   const tools = Array.isArray(body['tools']) ? body['tools'] : [];
   return tools.flatMap((tool) => {
     if (!tool || typeof tool !== 'object') return [];
     const name = (tool as Record<string, unknown>)['name'];
     return typeof name === 'string' ? [name] : [];
   });
+}
+
+/** The name to call a tool by, as this request spells it. */
+function callName(body: Record<string, unknown>, bare: string): string {
+  return declaredTools(body).find((name) => bareToolName(name) === bare) ?? bare;
 }
 
 function toolResultCount(body: Record<string, unknown>): number {
@@ -222,14 +240,14 @@ export async function startProviderRecorders(options: ProviderTwinOptions = {}):
         message = anthropicMessage(body, [{
           type: 'tool_use',
           id: 'tool_read_for_classify',
-          name: 'read_file',
+          name: callName(body, 'read_file'),
           input: { path: 'src/value.js' },
         }], 'tool_use');
       } else {
         message = anthropicMessage(body, [{
           type: 'tool_use',
           id: 'tool_classify_friction',
-          name: 'classify_friction',
+          name: callName(body, 'classify_friction'),
           input: {
             codeCause: true,
             confidence: 'high',
@@ -263,14 +281,14 @@ export async function startProviderRecorders(options: ProviderTwinOptions = {}):
         message = anthropicMessage(body, [{
           type: 'tool_use',
           id: 'tool_read_for_diagnosis',
-          name: 'read_file',
+          name: callName(body, 'read_file'),
           input: { path: 'src/value.js' },
         }], 'tool_use');
       } else {
         message = anthropicMessage(body, [{
         type: 'tool_use',
         id: 'tool_diagnose',
-        name: 'submit_diagnosis',
+        name: callName(body, 'submit_diagnosis'),
         input: {
           best_supported: 'A nullable production value is dereferenced without a guard.',
           evidence_check: 'Read src/value.js and the failing test.',
@@ -306,7 +324,7 @@ export async function startProviderRecorders(options: ProviderTwinOptions = {}):
       message = anthropicMessage(body, [{
         type: 'tool_use',
         id: 'tool_judge',
-        name: 'score_diff',
+        name: callName(body, 'score_diff'),
         input: {
           scope: 2,
           correctness: 2,
@@ -318,7 +336,7 @@ export async function startProviderRecorders(options: ProviderTwinOptions = {}):
       message = anthropicMessage(body, [{
         type: 'tool_use',
         id: 'tool_verification_judge',
-        name: 'submit_judge_verdict',
+        name: callName(body, 'submit_judge_verdict'),
         input: {
           approved: true,
           assessment: 'The declared test fails on the base null dereference, passes with the guard, and the diff is narrow.',
@@ -328,7 +346,7 @@ export async function startProviderRecorders(options: ProviderTwinOptions = {}):
       message = anthropicMessage(body, [{
         type: 'tool_use',
         id: 'tool_fix_narrative',
-        name: 'submit_fix_narrative',
+        name: callName(body, 'submit_fix_narrative'),
         input: {
           subject: 'Guard missing values in value',
           whatHappened: 'Rendering a record with missing data crashed the page.',
@@ -342,7 +360,7 @@ export async function startProviderRecorders(options: ProviderTwinOptions = {}):
         message = anthropicMessage(body, [{
           type: 'tool_use',
           id: 'tool_edit',
-          name: 'edit',
+          name: callName(body, 'edit'),
           input: {
             path: '/home/user/repo/src/value.js',
             old_string: 'input.value.toUpperCase()',
@@ -353,7 +371,7 @@ export async function startProviderRecorders(options: ProviderTwinOptions = {}):
         message = anthropicMessage(body, [{
           type: 'tool_use',
           id: 'tool_test',
-          name: 'bash',
+          name: callName(body, 'bash'),
           input: { command: 'cd /home/user/repo && npm test' },
         }], 'tool_use');
       } else if (results === 2) {
@@ -366,7 +384,7 @@ export async function startProviderRecorders(options: ProviderTwinOptions = {}):
         message = anthropicMessage(body, [{
           type: 'tool_use',
           id: 'tool_declare_test',
-          name: 'declare_failing_test',
+          name: callName(body, 'declare_failing_test'),
           input: {
             test_files: ['test/value.test.js'],
             identifier: 'handles missing production data',
