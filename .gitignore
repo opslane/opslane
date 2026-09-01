@@ -20,6 +20,7 @@ eval/results/
 .claude/skills/docs-sync/scripts/*
 !.claude/skills/docs-sync/scripts/run.mjs
 !.claude/skills/docs-sync/scripts/run.test.mjs
+!.claude/skills/writing-commit-messages/
 .omx/
 .gstack/
 .context/
