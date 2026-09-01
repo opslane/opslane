@@ -91,7 +91,8 @@ type DigestPayload struct {
 	// validator. It is the renderer's only mode signal, and it exists because
 	// the two modes budget the render cap differently: ON is one list of
 	// incidents where a receipt is a card that could not be authored, so cards
-	// and receipts share the cap; OFF is the rollback path, where the cap
+	// and receipts share the cap; OFF is the pre-removal format, kept so
+	// payloads frozen under the retired switch render unchanged: the cap
 	// covers generated cards only and receipts render below them with their own
 	// overflow line. Absent (false) means OFF, so a payload written before this
 	// field existed renders exactly as it did then.

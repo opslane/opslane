@@ -85,7 +85,7 @@ func TestConfirmMergeRefusesAutomaticMergeAfterInvestigationOrPublication(t *tes
 	pool := testPool(t)
 	ctx := context.Background()
 	f := seedProject(t, pool)
-	for _, blocker := range []string{"investigation", "publication"} {
+	for _, blocker := range []string{"investigation", "publication", "unified digest item"} {
 		t.Run(blocker, func(t *testing.T) {
 			winner := seedIssueWithEvents(t, pool, f, 2)
 			loser := seedIssueWithEvents(t, pool, f, 2)

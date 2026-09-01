@@ -459,3 +459,44 @@ func TestReceiptForUnifiedFallbackSanitizesLikeItsSibling(t *testing.T) {
 		t.Fatalf("secret-shaped prose survived into the payload: %+v", item)
 	}
 }
+
+// TestValidateStampsActionSoWriterDigitsNeverShip pins the action trust
+// boundary for unified candidates: the instruction line has exactly one correct
+// value, so whatever the model wrote — digits included — is replaced by the
+// state function's output before any check runs, and nothing the writer put in
+// the action field can reach a reader.
+func TestValidateStampsActionSoWriterDigitsNeverShip(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	pool, fixture, runID, candidate := freezeUnifiedFriction(t, now)
+	seedDestination(t, pool, fixture.ProjectID, []string{"digest.daily"})
+	payload := writtenDigestPayload{Included: []writtenDigestCard{{
+		ErrorGroupID: candidate.ErrorGroupID, Title: "Saving is blocked",
+		Copy: "People cannot save their work.", Action: "Retry the save 99 times.",
+		Label: candidate.Label,
+	}}}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(context.Background(), `UPDATE digest_runs
+		SET status='written',writer_payload=$2::jsonb WHERE id=$1`, runID, encoded); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateAndPublish(context.Background(), pool, runID); err != nil {
+		t.Fatal(err)
+	}
+	cards := renderedEvent(t, pool, runID).Digest.GeneratedCards
+	if len(cards) != 1 || cards[0].IncidentID != candidate.ErrorGroupID {
+		t.Fatalf("stamped card did not ship: %+v", cards)
+	}
+	if cards[0].Action != candidate.ValidAction {
+		t.Fatalf("action = %q, want the stamped %q", cards[0].Action, candidate.ValidAction)
+	}
+	rendered, err := json.Marshal(renderedEvent(t, pool, runID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(rendered), "99") {
+		t.Fatalf("a writer digit reached the reader: %s", rendered)
+	}
+}
