@@ -200,6 +200,13 @@ func TestValidatePublishesSchemaV4GroundedCard(t *testing.T) {
 	if _, err := pool.Exec(ctx, `UPDATE error_groups SET occurrence_count=34 WHERE id=$1`, groupID); err != nil {
 		t.Fatal(err)
 	}
+	// The replay anchor is deliberately ancient: ?t= is absolute epoch ms, and
+	// this pin would catch a relative-offset regression. Backdate the spell
+	// past it so the freeze's spell-bounded replay lookup still admits it.
+	if _, err := pool.Exec(ctx, `UPDATE error_groups SET actionable_since=$2 WHERE id=$1`,
+		groupID, time.UnixMilli(1).UTC()); err != nil {
+		t.Fatal(err)
+	}
 	seedFreezeReplay(t, pool, f.ProjectID, f.EnvID, episodeID, "sess-123", time.UnixMilli(4200).UTC())
 	runID, candidates, err := FreezeCandidates(ctx, pool, f.ProjectID, now)
 	if err != nil || len(candidates) != 1 {
@@ -313,5 +320,90 @@ func TestValidateExtractsPRNumber(t *testing.T) {
 	}
 	if cards[0].PRNumber != 42 || cards[0].PRURL != candidate.PRURL {
 		t.Fatalf("PR facts = #%d %q, want #42 %q", cards[0].PRNumber, cards[0].PRURL, candidate.PRURL)
+	}
+}
+
+// TestValidateRehydratesOffModeRunThroughLegacyLane pins the migration window
+// this branch depends on: a run frozen under the retired DIGEST_UNIFIED_CARDS
+// switch carries unified_cards_mode='off' and episode-keyed snapshots, and the
+// new binary must still validate and deliver it through the legacy lane —
+// episode card rendered, publication receipt written, and the >80-rune frozen
+// title truncated at render. No code path can create such a run any more, so
+// the fixture writes the stored rows directly, as a pre-deploy freeze left them.
+func TestValidateRehydratesOffModeRunThroughLegacyLane(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	f := seedDigestFixture(t, pool, now)
+	cleanupActionableDiagnoses(t, pool, f.ProjectID)
+	quietBackgroundActionable(t, pool, f.ProjectID)
+	episodeID := seedFreezeEpisode(t, pool, f.ProjectID, f.EnvID, now.Add(-2*time.Hour), 1)
+	seedFreezeDiagnosis(t, pool, f.ProjectID, episodeID, "needs_human", now.Add(-time.Hour))
+	var groupID string
+	var decidedAt time.Time
+	if err := pool.QueryRow(ctx, `SELECT ep.canonical_issue_id::text,d.decided_at
+		FROM issue_episodes ep
+		JOIN diagnosis_decisions d ON d.project_id=ep.project_id AND d.episode_id=ep.id
+		WHERE ep.project_id=$1 AND ep.id=$2
+		ORDER BY d.decided_at DESC LIMIT 1`, f.ProjectID, episodeID).Scan(&groupID, &decidedAt); err != nil {
+		t.Fatal(err)
+	}
+
+	sequence := 1
+	frozen := Candidate{
+		EpisodeID: episodeID, EpisodeSequence: &sequence, IssueID: groupID, ErrorGroupID: groupID,
+		Kind: "error", Title: strings.Repeat("界", 100), Outcome: "needs_human",
+		Summary: "verified terminal result", ValidAction: "Review the investigation.",
+		DecidedAt: decidedAt, LastSeen: now.Add(-2 * time.Hour),
+		Accounts: []string{}, OccurrenceCount: 3, Label: "new",
+	}
+	snapshot, err := json.Marshal(frozen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyPayload := fmt.Sprintf(`{"included":[{"episodeId":%q,"copy":"Checkout is blocked before payment.","action":"Review the investigation.","label":"new"}],"deferred":[]}`, episodeID)
+	var runID string
+	if err := pool.QueryRow(ctx, `INSERT INTO digest_runs
+		(project_id,window_from,window_to,run_date,status,unified_cards_mode,payload)
+		VALUES ($1,$2,$3,$4,'written','off',$5::jsonb) RETURNING id::text`,
+		f.ProjectID, now.Add(-24*time.Hour), now, now.Format("2006-01-02"), legacyPayload).Scan(&runID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO digest_run_items
+		(project_id,run_id,episode_id,error_group_id,candidate_snapshot)
+		VALUES ($1,$2,$3,$4,$5::jsonb)`, f.ProjectID, runID, episodeID, groupID, snapshot); err != nil {
+		t.Fatal(err)
+	}
+	seedDestination(t, pool, f.ProjectID, []string{"digest.daily"})
+
+	if err := ValidateAndPublish(ctx, pool, runID); err != nil {
+		t.Fatalf("legacy off run failed to rehydrate: %v", err)
+	}
+	var status string
+	if err := pool.QueryRow(ctx, `SELECT status FROM digest_runs WHERE id=$1`, runID).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "delivered" {
+		t.Fatalf("status = %q, want delivered", status)
+	}
+	published := renderedEvent(t, pool, runID).Digest
+	if published == nil || published.UnifiedCards {
+		t.Fatalf("legacy run rendered as unified: %+v", published)
+	}
+	if len(published.GeneratedCards) != 1 || published.GeneratedCards[0].EpisodeID != episodeID {
+		t.Fatalf("legacy episode card = %+v", published.GeneratedCards)
+	}
+	if got := published.GeneratedCards[0].Title; got != strings.Repeat("界", 80) {
+		t.Fatalf("legacy title has %d runes, want the 80-rune truncation", len([]rune(got)))
+	}
+	// The OFF lane's one-shot semantics survive on the new binary: delivery
+	// writes the publication receipt that keeps the episode from repeating.
+	var receipts int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM issue_publications
+		WHERE project_id=$1 AND episode_id=$2 AND channel='digest'`, f.ProjectID, episodeID).Scan(&receipts); err != nil {
+		t.Fatal(err)
+	}
+	if receipts != 1 {
+		t.Fatalf("publication receipts = %d, want 1", receipts)
 	}
 }

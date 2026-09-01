@@ -44,9 +44,10 @@ type Candidate struct {
 	DecidedAt       time.Time `json:"decidedAt"`
 	ReplaySessionID string    `json:"replaySessionId,omitempty"`
 	ReplayAnchorMs  int64     `json:"replayAnchorMs,omitempty"`
-	// ValidAction is the reader-facing follow-up the card must offer. In ON it
-	// is digestAction's output and nothing else; validation stamps it back onto
-	// whatever the model wrote. In OFF it remains the remediation-derived text.
+	// ValidAction is the reader-facing follow-up the card must offer. It is
+	// digestAction's output and nothing else; validation stamps it back onto
+	// whatever the model wrote. Snapshots frozen under the retired OFF switch
+	// instead carry the remediation-derived text they were frozen with.
 	ValidAction string `json:"validAction"`
 	// HasSavedDiff is the exact fact digestAction reads, carried explicitly so
 	// the action never has to be reconstructed from a diff hash.
@@ -138,9 +139,6 @@ func FreezeCandidates(ctx context.Context, pool *pgxpool.Pool, projectID string,
 		candidates, replayFloors, unifiedExcluded = selectOnCardCandidates(actionableCandidates, at)
 		for i, candidate := range candidates {
 			replayFloor := replayFloors[i]
-			if replayFloor.Equal(time.Unix(0, 0).UTC()) {
-				replayFloor = time.Time{}
-			}
 			// The lookup runs under a savepoint: a server-side SQL error would
 			// otherwise abort the whole freeze transaction, and the very next
 			// snapshot INSERT would fail with "current transaction is aborted" —
@@ -167,7 +165,7 @@ func FreezeCandidates(ctx context.Context, pool *pgxpool.Pool, projectID string,
 			candidates[i] = candidate
 			snapshot, err := json.Marshal(candidate)
 			if err != nil {
-				return "", nil, fmt.Errorf("marshal candidate %s: %w", candidate.EpisodeID, err)
+				return "", nil, fmt.Errorf("marshal candidate %s: %w", candidate.ErrorGroupID, err)
 			}
 			var insertSQL string
 			var insertArgs []any
@@ -181,7 +179,7 @@ func FreezeCandidates(ctx context.Context, pool *pgxpool.Pool, projectID string,
 				insertArgs = []any{projectID, runID, candidate.EpisodeID, candidate.ErrorGroupID, snapshot}
 			}
 			if _, err := tx.Exec(ctx, insertSQL, insertArgs...); err != nil {
-				return "", nil, fmt.Errorf("freeze candidate %s: %w", candidate.EpisodeID, err)
+				return "", nil, fmt.Errorf("freeze candidate %s: %w", candidate.ErrorGroupID, err)
 			}
 		}
 		if err := writeUnifiedFreezeLedger(ctx, tx, runID, configuredMode,
@@ -203,7 +201,6 @@ func FreezeCandidates(ctx context.Context, pool *pgxpool.Pool, projectID string,
 type digestQuerier interface {
 	Query(context.Context, string, ...any) (pgx.Rows, error)
 }
-
 
 func loadFrozenCandidates(ctx context.Context, q digestQuerier, projectID, runID string) ([]Candidate, error) {
 	rows, err := q.Query(ctx, `
