@@ -111,8 +111,10 @@ export function selectMoments(
       || left.index - right.index);
   const moments: number[] = [];
   for (const { observation } of ordered) {
-    const lineIndex = Number(observation.evidenceLines[0]?.slice(1)) - 1;
-    const absoluteMs = timeline.lines[lineIndex]?.a;
+    const line = observation.evidenceLines
+      .map((evidenceLine) => timeline.lines[Number(evidenceLine.slice(1)) - 1])
+      .find((candidate) => candidate !== undefined && candidate.k !== 'idle');
+    const absoluteMs = line?.a;
     if (absoluteMs === null || absoluteMs === undefined) continue;
     const offset = Math.max(0, absoluteMs - timeline.startTs);
     if (!moments.includes(offset)) moments.push(offset);

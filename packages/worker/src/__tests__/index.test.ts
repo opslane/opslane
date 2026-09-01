@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import type { ClaimedJob, ErrorGroupData, ErrorEventData, ProjectData } from '../db.js';
 import type { EvidenceBundle } from '../evidence/bundle.js';
 import { VerificationInfraError } from '../harness/errors.js';
+import { NARRATIVE_PROMPT_VERSION } from '../narrative/prompt.js';
 
 const analysisDbClient = vi.hoisted(() => ({
   query: vi.fn(async () => ({ rows: [], rowCount: 1 })),
@@ -160,7 +161,6 @@ vi.mock('../friction/facts.js', () => ({
 vi.mock('../facts/persist.js', () => ({ replaceSessionFacts: vi.fn() }));
 vi.mock('../narrative/client.js', () => ({ narrativeClientFromEnv: vi.fn(() => null) }));
 vi.mock('../narrative/job.js', () => ({ processNarration: vi.fn() }));
-vi.mock('../narrative/prompt.js', () => ({ NARRATIVE_PROMPT_VERSION: 1 }));
 vi.mock('../narrative/frames/capture.js', () => ({ captureFrames: vi.fn() }));
 vi.mock('../narrative/verify.js', () => ({ processFrameVerification: vi.fn() }));
 
@@ -1466,7 +1466,7 @@ describe('session_analysis handler', () => {
     await processSessionAnalysisJob(job, new AbortController().signal);
 
     expect(db.reserveNarrative).toHaveBeenCalledWith(analysisDbClient, {
-      sessionId: 'session-1', projectId: 'proj-1', environmentId: 'env-1', promptVersion: 1,
+      sessionId: 'session-1', projectId: 'proj-1', environmentId: 'env-1', promptVersion: NARRATIVE_PROMPT_VERSION,
     });
     expect(db.enqueueJob).toHaveBeenCalledWith('session_narrate', 'proj-1', 'session-1');
   });
