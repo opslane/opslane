@@ -88,6 +88,9 @@ const signals = computed<StatusRecipe[]>(() => {
   if (props.session.form_abandon_count > 0) {
     result.push(frictionSignalRecipe('form_abandon', props.session.form_abandon_count));
   }
+  if (props.session.observation_count > 0) {
+    result.push({ label: `${props.session.observation_count} friction`, tone: 'warning', class: '' });
+  }
   if (props.session.activity_class) {
     result.push({ label: props.session.activity_class.replace('_', ' '), tone: 'neutral', class: '' });
   }

@@ -851,6 +851,7 @@ export async function failJob(
       status: string;
       job_type: JobType;
       project_id: string;
+      error_group_id: string | null;
     }>(
       `UPDATE error_group_jobs
        SET attempts = attempts + 1,
@@ -883,7 +884,7 @@ export async function failJob(
          AND lease_generation = $3::bigint
          AND status = 'claimed'
          AND lease_expires_at > now()
-       RETURNING status, job_type, project_id`,
+       RETURNING status, job_type, project_id, error_group_id`,
       [
         jobId,
         workerId,
@@ -904,12 +905,47 @@ export async function failJob(
       await releaseUnfinishedGeneration(client, jobId, row.project_id);
     }
     await client.query('COMMIT');
+    if (row && row.status === 'dead_letter' && row.job_type === 'investigate' && row.error_group_id) {
+      await reconcileDeadLetteredInvestigation(row.error_group_id, row.project_id, jobId);
+    }
     return row !== undefined;
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
     throw err;
   } finally {
     client.release();
+  }
+}
+
+/** A dead-lettered investigation leaves its group in 'analyzing' with no
+ * further job to move it, so nothing downstream (digest lanes, the
+ * awaiting_approval flow) ever sees the incident again. Terminate it as
+ * needs_human so an operator gets the signal. Best-effort and guarded on the
+ * group still being in 'analyzing': a group an earlier attempt already moved
+ * must not be clobbered. */
+async function reconcileDeadLetteredInvestigation(
+  errorGroupId: string,
+  projectId: string,
+  jobId: string,
+): Promise<void> {
+  try {
+    const group = await getPool().query<{ status: string }>(
+      `SELECT status FROM error_groups WHERE id = $1 AND project_id = $2`,
+      [errorGroupId, projectId],
+    );
+    if (group.rows[0]?.status !== 'analyzing') return;
+    await updateGroupStatus(errorGroupId, projectId, 'needs_human', {
+      reason: {
+        reason_code: 'worker_runtime_error',
+        reason_message: 'The investigation job exceeded its retry limit and was abandoned.',
+        remediation:
+          'Re-run the investigation from the incident, or review manually — repeated attempts failed before a verdict was reached.',
+      },
+      terminalFixJobId: jobId,
+    });
+  } catch {
+    // Best-effort: the job flip already committed; a failure here leaves the
+    // group for the next dead-letter sweep or manual triage.
   }
 }
 
@@ -1018,6 +1054,12 @@ export async function requeueStaleJobs(): Promise<number> {
         },
         terminalFixJobId: row.id,
       }).catch(() => {});
+    } else if (
+      row.status === 'dead_letter' &&
+      row.job_type === 'investigate' &&
+      row.error_group_id
+    ) {
+      await reconcileDeadLetteredInvestigation(row.error_group_id, row.project_id, row.id);
     }
   }
 
@@ -3535,6 +3577,10 @@ export async function finalizeVerification(job: ClaimedJob, args: {
   projectId: string;
   state: 'ok' | 'failed' | 'unsupported' | 'skipped_budget';
   claimedPromptVersion: number;
+  /** Version of the verify prompt that produced `verification`. The MCP frame
+   * server rebuilds object keys from this column, so it must match the
+   * uploader's VERIFY_PROMPT_VERSION, not a constant. */
+  verifyPromptVersion: number;
   verification?: unknown;
   /** Why a non-ok state was reached. Sanitized and bounded before storage;
    * an 'ok' finalize clears whatever a previous attempt left behind. */
@@ -3549,7 +3595,7 @@ export async function finalizeVerification(job: ClaimedJob, args: {
     const updated = await client.query(
       `UPDATE session_narratives
        SET verification_state = $3, verification = $4::jsonb,
-           verification_prompt_version = CASE WHEN $4::jsonb IS NULL THEN verification_prompt_version ELSE 1 END,
+           verification_prompt_version = CASE WHEN $4::jsonb IS NULL THEN verification_prompt_version ELSE $12::int END,
            verification_reason = CASE WHEN $3 = 'ok' THEN NULL ELSE $11 END,
            input_tokens = COALESCE(input_tokens, 0) + $5,
            output_tokens = COALESCE(output_tokens, 0) + $6,
@@ -3576,6 +3622,7 @@ export async function finalizeVerification(job: ClaimedJob, args: {
         job.workerId,
         job.leaseGeneration,
         sanitizeVerificationReason(args.reason),
+        args.verifyPromptVersion,
       ],
     );
     if ((updated.rowCount ?? 0) === 0) throw new LeaseLostError(job.id);
@@ -3612,8 +3659,8 @@ export async function sweepNarratives(): Promise<{ reEnqueued: number; failed: n
     `SELECT session_id, project_id::text, prompt_version, narrative, timeline
      FROM session_narratives
      WHERE status = 'ok' AND verification_state IN ('pending','verifying')
-       AND updated_at < now() - interval '24 hours'
-     ORDER BY updated_at ASC`,
+       AND created_at < now() - interval '24 hours'
+     ORDER BY created_at ASC`,
   );
   let failed = 0;
   for (const row of stale.rows) {
@@ -3640,6 +3687,17 @@ export async function sweepNarratives(): Promise<{ reEnqueued: number; failed: n
   let reEnqueued = 0;
   try {
     await client.query('BEGIN');
+    // A narrate that has not reached a terminal state within 24 hours of the
+    // row's creation is poisoned (its job keeps dead-lettering, or the model
+    // rejects the session every time). Without a cutoff the resets below
+    // re-enqueue it forever, and each round is an ungoverned model call.
+    const expired = await client.query(
+      `UPDATE session_narratives
+       SET status = 'failed', updated_at = now()
+       WHERE status IN ('pending','narrating')
+         AND created_at < now() - interval '24 hours'`,
+    );
+    failed += expired.rowCount ?? 0;
     const reset = await client.query<{ session_id: string; project_id: string }>(
       `UPDATE session_narratives
        SET status = 'pending', updated_at = now()
@@ -3662,7 +3720,7 @@ export async function sweepNarratives(): Promise<{ reEnqueued: number; failed: n
        FROM session_narratives
        WHERE status = 'ok' AND verification_state = 'pending'
          AND updated_at < now() - interval '1 hour'
-         AND updated_at >= now() - interval '24 hours'`,
+         AND created_at >= now() - interval '24 hours'`,
     );
     for (const row of [...reset.rows, ...narratePending.rows]) {
       const inserted = await client.query(
@@ -3707,11 +3765,13 @@ async function finalizeExpiredVerification(args: {
     await client.query('BEGIN');
     const updated = await client.query(
       `UPDATE session_narratives
-       SET verification_state = 'failed', verification = NULL, updated_at = now()
+       SET verification_state = 'failed', verification = NULL,
+           verification_reason = 'verification expired after 24 hours without a terminal attempt',
+           updated_at = now()
        WHERE session_id = $1 AND project_id = $2 AND status = 'ok'
          AND verification_state IN ('pending','verifying')
          AND prompt_version = $3
-         AND updated_at < now() - interval '24 hours'
+         AND created_at < now() - interval '24 hours'
        RETURNING session_id`,
       [args.sessionId, args.projectId, args.claimedPromptVersion],
     );

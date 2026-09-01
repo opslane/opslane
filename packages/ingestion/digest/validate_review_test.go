@@ -45,6 +45,22 @@ func TestFirstUngroundedNumberReviewHardening(t *testing.T) {
 	}
 }
 
+// The session counts are COALESCE-0 on error-kind candidates; whitelisting
+// them there would silently ground the digit '0' on every card.
+func TestSessionCountsGroundOnlyNarrativeCards(t *testing.T) {
+	errorKind := groundingCandidate()
+	if _, bad := firstUngroundedNumber(groundingCard("t", "0 customers have hit this since the fix.", "a"), errorKind); !bad {
+		t.Fatal("error-kind candidate grounded the digit 0 via zero session counts")
+	}
+	sessionKind := groundingCandidate()
+	sessionKind.ObservationQuote = "clicked the disabled export button repeatedly"
+	sessionKind.SessionCount = 3
+	sessionKind.IdentifiedCount = 0
+	if number, bad := firstUngroundedNumber(groundingCard("t", "3 sessions hit this, 0 identified.", "a"), sessionKind); bad {
+		t.Fatalf("narrative card counts should be grounded, rejected %q", number)
+	}
+}
+
 func TestNormalizeProseNumbersCollapsesGroups(t *testing.T) {
 	if got := normalizeProseNumbers("1,234,567 users"); got != "1234567 users" {
 		t.Fatalf("got %q", got)

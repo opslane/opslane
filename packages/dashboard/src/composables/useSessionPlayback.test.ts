@@ -51,6 +51,7 @@ const detail = (chunks: SessionChunkMeta[]): SessionDetail => ({
   failed_request_count: 0,
   successful_write_count: 0,
   unverified_signal_count: 0,
+  observation_count: 0,
   chunks,
 });
 

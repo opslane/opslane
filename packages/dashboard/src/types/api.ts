@@ -313,6 +313,7 @@ export interface SessionSummary {
   failed_request_count: number;
   successful_write_count: number;
   unverified_signal_count: number;
+  observation_count: number;
   sdk_release?: string | null;
 }
 
