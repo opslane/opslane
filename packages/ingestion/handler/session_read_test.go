@@ -251,6 +251,108 @@ func TestSessionRead_ListAndDetailRoutes(t *testing.T) {
 	}
 }
 
+func TestSessionRead_NarrativeRouteIsProjectScopedAndMergesGrades(t *testing.T) {
+	deps, pool := testDeps(t)
+	orgID, projectID, envID, _ := seedTenant(t, deps.Queries)
+	_, siblingProjectID, siblingEnvID, _ := seedTenant(t, deps.Queries)
+	deps.JWTSecret = sessionReadSecret
+	router := handler.NewRouterWithPool(deps, pool)
+	token := dashboardToken(t, orgID)
+	sessionID := fmt.Sprintf("sess_narrative_%d", time.Now().UnixNano())
+	seedReadableSession(t, deps.Queries, projectID, envID, sessionID, time.Now())
+
+	path := fmt.Sprintf("/api/v1/projects/%s/sessions/%s/narrative", projectID, sessionID)
+	missing := dashboardRequest(t, router, token, path)
+	if missing.Code != http.StatusNotFound {
+		t.Fatalf("missing narrative returned %d: %s", missing.Code, missing.Body.String())
+	}
+	if _, err := pool.Exec(context.Background(), `
+		INSERT INTO session_narratives (
+			session_id, project_id, environment_id, status, narrative, timeline,
+			prompt_version, verification_state, verification, verification_prompt_version
+		) VALUES ($1,$2,$3,'ok',$4::jsonb,$5::jsonb,1,'ok',$6::jsonb,1)`,
+		sessionID, projectID, envID,
+		`{"userGoal":"Save an asset","narrative":"Saving was confusing.","observations":[{"id":"0-abcd","category":"validation_confusion","what":"The message contradicted the result.","severity":"high","evidenceLines":["L2"]}],"notable":true}`,
+		`{"startTs":1700000000000,"lines":[{"t":"open","s":null,"r":"/assets","a":1700000000000},{"t":"message","s":null,"r":"/assets","a":1700000001234}]}`,
+		`{"grades":[{"observationId":"0-abcd","grade":"corrected","reason":"The frame is clearer.","replacementWhat":"The success message appeared beside an error."}],"frames":[]}`,
+	); err != nil {
+		t.Fatalf("seed narrative: %v", err)
+	}
+
+	response := dashboardRequest(t, router, token, path)
+	if response.Code != http.StatusOK {
+		t.Fatalf("narrative returned %d: %s", response.Code, response.Body.String())
+	}
+	for _, want := range []string{`"userGoal":"Save an asset"`, `"grade":"corrected"`, `"replacementWhat":"The success message appeared beside an error."`, `"atMs":1700000001234`} {
+		if !strings.Contains(response.Body.String(), want) {
+			t.Fatalf("narrative response missing %s: %s", want, response.Body.String())
+		}
+	}
+
+	// A valid session id in another project must still look absent.
+	foreignSessionID := fmt.Sprintf("sess_narrative_foreign_%d", time.Now().UnixNano())
+	seedReadableSession(t, deps.Queries, siblingProjectID, siblingEnvID, foreignSessionID, time.Now())
+	foreign := dashboardRequest(t, router, token,
+		fmt.Sprintf("/api/v1/projects/%s/sessions/%s/narrative", projectID, foreignSessionID))
+	if foreign.Code != http.StatusNotFound {
+		t.Fatalf("cross-project narrative returned %d: %s", foreign.Code, foreign.Body.String())
+	}
+}
+
+// TestSessionRead_NarrativeSurfacesVerificationReason: an ungraded narrative is
+// indistinguishable from an unverified one unless the failure says why, so a
+// non-ok verification state carries its reason to the reader. A verified
+// narrative must not carry the field at all.
+func TestSessionRead_NarrativeSurfacesVerificationReason(t *testing.T) {
+	deps, pool := testDeps(t)
+	orgID, projectID, envID, _ := seedTenant(t, deps.Queries)
+	deps.JWTSecret = sessionReadSecret
+	router := handler.NewRouterWithPool(deps, pool)
+	token := dashboardToken(t, orgID)
+
+	narrative := `{"userGoal":"Save an asset","narrative":"Saving was confusing.","observations":[{"id":"0-abcd","category":"validation_confusion","what":"The message contradicted the result.","severity":"high","evidenceLines":["L2"]}],"notable":true}`
+	timeline := `{"startTs":1700000000000,"lines":[{"t":"open","s":null,"r":"/assets","a":1700000000000},{"t":"message","s":null,"r":"/assets","a":1700000001234}]}`
+
+	failedID := fmt.Sprintf("sess_verif_reason_%d", time.Now().UnixNano())
+	seedReadableSession(t, deps.Queries, projectID, envID, failedID, time.Now())
+	if _, err := pool.Exec(context.Background(), `
+		INSERT INTO session_narratives (
+			session_id, project_id, environment_id, status, narrative, timeline,
+			prompt_version, verification_state, verification_reason
+		) VALUES ($1,$2,$3,'ok',$4::jsonb,$5::jsonb,1,'failed',$6)`,
+		failedID, projectID, envID, narrative, timeline,
+		"frame capture failed: chromium crashed: SIGTRAP"); err != nil {
+		t.Fatalf("seed failed narrative: %v", err)
+	}
+	failed := dashboardRequest(t, router, token,
+		fmt.Sprintf("/api/v1/projects/%s/sessions/%s/narrative", projectID, failedID))
+	if failed.Code != http.StatusOK {
+		t.Fatalf("narrative returned %d: %s", failed.Code, failed.Body.String())
+	}
+	if !strings.Contains(failed.Body.String(), `"verificationReason":"frame capture failed: chromium crashed: SIGTRAP"`) {
+		t.Fatalf("verification reason missing: %s", failed.Body.String())
+	}
+
+	verifiedID := fmt.Sprintf("sess_verif_ok_%d", time.Now().UnixNano())
+	seedReadableSession(t, deps.Queries, projectID, envID, verifiedID, time.Now())
+	if _, err := pool.Exec(context.Background(), `
+		INSERT INTO session_narratives (
+			session_id, project_id, environment_id, status, narrative, timeline,
+			prompt_version, verification_state, verification, verification_prompt_version
+		) VALUES ($1,$2,$3,'ok',$4::jsonb,$5::jsonb,1,'ok',$6::jsonb,1)`,
+		verifiedID, projectID, envID, narrative, timeline, `{"grades":[],"frames":[]}`); err != nil {
+		t.Fatalf("seed verified narrative: %v", err)
+	}
+	verified := dashboardRequest(t, router, token,
+		fmt.Sprintf("/api/v1/projects/%s/sessions/%s/narrative", projectID, verifiedID))
+	if verified.Code != http.StatusOK {
+		t.Fatalf("verified narrative returned %d: %s", verified.Code, verified.Body.String())
+	}
+	if strings.Contains(verified.Body.String(), "verificationReason") {
+		t.Fatalf("verified narrative carried a reason: %s", verified.Body.String())
+	}
+}
+
 func TestSessionRead_ListValidatesAndScopesEnvironmentFilter(t *testing.T) {
 	deps, pool := testDeps(t)
 	orgID, projectID, productionID, _ := seedTenant(t, deps.Queries)

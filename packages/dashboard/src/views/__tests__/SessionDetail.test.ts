@@ -3,13 +3,16 @@
 import { mount } from '@vue/test-utils';
 import { ref } from 'vue';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { flushPromises } from '@vue/test-utils';
 import type { SessionDetail as SessionDetailData } from '../../types/api';
 
 const playback = vi.hoisted(() => ({
   useSessionPlayback: vi.fn(),
 }));
+const api = vi.hoisted(() => ({ getSessionNarrative: vi.fn() }));
 
 vi.mock('../../composables/useSessionPlayback', () => playback);
+vi.mock('../../api', () => api);
 
 vi.mock('vue-router', () => ({
   useRoute: () => ({ params: { sessionId: 'session-1' }, query: {} }),
@@ -61,7 +64,7 @@ function mountView(durationSeconds: number) {
     global: {
       stubs: {
         ReplayPlayer: true,
-        RouterLink: { template: '<a><slot /></a>' },
+        RouterLink: { props: ['to'], template: '<a :href="(to.query && to.query.t) || \'\'"><slot /></a>' },
       },
     },
   });
@@ -79,10 +82,36 @@ describe('SessionDetail duration', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     localStorage.clear();
+	api.getSessionNarrative.mockRejectedValue(new Error('not found'));
   });
 
   it('uses the canonical duration formatting for long and sub-second sessions', () => {
     expect(renderedDuration(7_230)).toBe('2h 0m');
     expect(renderedDuration(0.4)).toBe('<1s');
   });
+
+	it('renders a corrected narrative observation as text with a cited-moment link', async () => {
+		api.getSessionNarrative.mockResolvedValue({
+			userGoal: 'Save an asset', narrative: 'The user could not tell whether saving worked.', notable: true,
+			observations: [{ id: '0-abcd', category: 'no_feedback_after_action', what: 'No feedback appeared.', severity: 'high', evidenceLines: ['L2'], grade: 'corrected', replacementWhat: 'Feedback appeared late.', atMs: 1700000001234 }],
+		});
+		const wrapper = mountView(12);
+		await flushPromises();
+		expect(wrapper.get('[aria-label="Session narrative"]').text()).toContain('Feedback appeared late.');
+		expect(wrapper.get('[aria-label="Session narrative"] a').attributes('href')).toBe('1700000001234');
+		wrapper.unmount();
+	});
+
+	it('explains why observations are ungraded when frame verification failed', async () => {
+		api.getSessionNarrative.mockResolvedValue({
+			userGoal: 'Save an asset', narrative: 'The user could not tell whether saving worked.', notable: true,
+			verificationReason: 'frame capture failed: chromium crashed: SIGTRAP',
+			observations: [{ id: '0-abcd', category: 'no_feedback_after_action', what: 'No feedback appeared.', severity: 'high', evidenceLines: ['L2'] }],
+		});
+		const wrapper = mountView(12);
+		await flushPromises();
+		expect(wrapper.get('[aria-label="Frame verification unavailable"]').text())
+			.toContain('chromium crashed: SIGTRAP');
+		wrapper.unmount();
+	});
 });

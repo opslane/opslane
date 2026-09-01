@@ -3,7 +3,9 @@ package handler
 import (
 	"bytes"
 	"crypto/subtle"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -68,6 +70,56 @@ type sessionListJSON struct {
 type sessionDetailJSON struct {
 	sessionJSON
 	Chunks []sessionChunkJSON `json:"chunks"`
+}
+
+type sessionNarrativeObservationJSON struct {
+	ID              string   `json:"id"`
+	Category        string   `json:"category"`
+	What            string   `json:"what"`
+	Severity        string   `json:"severity"`
+	EvidenceLines   []string `json:"evidenceLines"`
+	Grade           string   `json:"grade,omitempty"`
+	ReplacementWhat string   `json:"replacementWhat,omitempty"`
+	AtMs            *int64   `json:"atMs,omitempty"`
+}
+
+type sessionNarrativeJSON struct {
+	UserGoal     string                            `json:"userGoal"`
+	Narrative    string                            `json:"narrative"`
+	Observations []sessionNarrativeObservationJSON `json:"observations"`
+	Notable      bool                              `json:"notable"`
+	// VerificationReason is present only when frame verification did not reach
+	// 'ok', so a reader can tell an ungraded narrative from a verified one.
+	VerificationReason string `json:"verificationReason,omitempty"`
+}
+
+type storedNarrative struct {
+	UserGoal     string                            `json:"userGoal"`
+	Narrative    string                            `json:"narrative"`
+	Observations []sessionNarrativeObservationJSON `json:"observations"`
+	Notable      bool                              `json:"notable"`
+}
+
+type storedNarrativeVerification struct {
+	Grades []struct {
+		ObservationID   string `json:"observationId"`
+		Grade           string `json:"grade"`
+		Reason          string `json:"reason"`
+		ReplacementWhat string `json:"replacementWhat"`
+	} `json:"grades"`
+	Frames []struct {
+		OffsetMs  int64  `json:"offsetMs"`
+		Pair      string `json:"pair"`
+		ObjectKey string `json:"objectKey"`
+		Caption   string `json:"caption"`
+	} `json:"frames"`
+}
+
+type storedNarrativeTimeline struct {
+	Lines []struct {
+		Text string `json:"t"`
+		AtMs *int64 `json:"a"`
+	} `json:"lines"`
 }
 
 func toSessionJSON(session db.SessionSummary) sessionJSON {
@@ -261,6 +313,63 @@ func (d *Dependencies) GetSessionEndpoint(w http.ResponseWriter, r *http.Request
 		manifest = append(manifest, toSessionChunkJSON(chunk))
 	}
 	writeJSON(w, http.StatusOK, sessionDetailJSON{sessionJSON: toSessionJSON(*session), Chunks: manifest})
+}
+
+// GetSessionNarrativeEndpoint returns a completed narrative with verification
+// grades and evidence timestamps merged into its observations.
+func (d *Dependencies) GetSessionNarrativeEndpoint(w http.ResponseWriter, r *http.Request) {
+	projectID := chi.URLParam(r, "projectID")
+	if !d.verifyProjectAccess(w, r, projectID) {
+		return
+	}
+	record, err := d.Queries.GetSessionNarrative(r.Context(), projectID, chi.URLParam(r, "sessionID"))
+	if err != nil {
+		slog.Error("get session narrative failed", "error", err, "project_id", projectID)
+		writeJSONError(w, http.StatusInternalServerError, "failed to get session narrative")
+		return
+	}
+	if record == nil {
+		writeJSONError(w, http.StatusNotFound, "session narrative not found")
+		return
+	}
+	var narrative storedNarrative
+	var timeline storedNarrativeTimeline
+	var verification storedNarrativeVerification
+	if err := json.Unmarshal(record.Narrative, &narrative); err != nil || json.Unmarshal(record.Timeline, &timeline) != nil {
+		slog.Error("stored session narrative is malformed", "project_id", projectID, "session_id", record.SessionID)
+		writeJSONError(w, http.StatusInternalServerError, "failed to get session narrative")
+		return
+	}
+	if len(record.Verification) > 0 {
+		_ = json.Unmarshal(record.Verification, &verification)
+	}
+	grades := make(map[string]struct{ grade, replacement string }, len(verification.Grades))
+	for _, grade := range verification.Grades {
+		grades[grade.ObservationID] = struct{ grade, replacement string }{grade.Grade, grade.ReplacementWhat}
+	}
+	observations := make([]sessionNarrativeObservationJSON, 0, len(narrative.Observations))
+	for _, observation := range narrative.Observations {
+		if grade, ok := grades[observation.ID]; ok {
+			observation.Grade = grade.grade
+			observation.ReplacementWhat = grade.replacement
+		}
+		if len(observation.EvidenceLines) > 0 {
+			var line int
+			if _, err := fmt.Sscanf(observation.EvidenceLines[0], "L%d", &line); err == nil && line > 0 && line <= len(timeline.Lines) {
+				observation.AtMs = timeline.Lines[line-1].AtMs
+			}
+		}
+		observations = append(observations, observation)
+	}
+	verificationReason := ""
+	if record.VerificationReason != nil {
+		verificationReason = *record.VerificationReason
+	}
+	writeJSON(w, http.StatusOK, sessionNarrativeJSON{
+		UserGoal: narrative.UserGoal, Narrative: narrative.Narrative,
+		Observations: observations, Notable: narrative.Notable,
+		VerificationReason: verificationReason,
+	})
 }
 
 // GetSessionChunk is the dashboard-authenticated wrapper around the shared

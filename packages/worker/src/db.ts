@@ -7,6 +7,7 @@ import type {
   ErrorGroupStatus,
   EvidenceRecord,
   HypothesisKind,
+  FrictionCategory,
   JobType,
   NeedsHumanReason,
   PRPosture,
@@ -550,6 +551,12 @@ function sessionAnalysisCapFromEnv(): number {
   return Number.isInteger(parsed) && parsed >= 0 ? parsed : DEFAULT_SESSION_ANALYSIS_CAP;
 }
 
+function concurrentCapFromEnv(raw: string | undefined, fallback: number): number {
+  if (raw === undefined || raw === '') return fallback;
+  const parsed = Number(raw);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
 /** Claims one pending job using FOR UPDATE SKIP LOCKED (issue #28 scheduling).
  *
  * Policy, in order:
@@ -579,7 +586,9 @@ function sessionAnalysisCapFromEnv(): number {
 export async function claimJob(
   workerId: string,
   leaseDurationMs: number,
-  sessionAnalysisCap: number = sessionAnalysisCapFromEnv()
+  sessionAnalysisCap: number = sessionAnalysisCapFromEnv(),
+  narrativeCap: number = concurrentCapFromEnv(process.env['NARRATIVE_MAX_CONCURRENT'], 2),
+  framesCap: number = concurrentCapFromEnv(process.env['FRAMES_MAX_CONCURRENT'], 1),
 ): Promise<ClaimedJob | null> {
   const client = await getPool().connect();
   let result: pg.QueryResult<{
@@ -622,13 +631,23 @@ export async function claimJob(
          AND available_at <= now()
          -- Claim only job types this worker can dispatch. New types stay
          -- pending until a handler ships and joins this list.
-		 AND job_type IN ('session_analysis','ci_watch','route_map','product_context','issue_inquiry','digest_write',
+		 AND job_type IN ('session_analysis','session_narrate','session_verify_frames','ci_watch','route_map','product_context','issue_inquiry','digest_write',
                           'score_sync','stack_resolve','fix','investigate','error_fix')
          AND (job_type <> 'session_analysis'
               OR (SELECT COUNT(*) FROM error_group_jobs
                    WHERE status = 'claimed'
                      AND job_type = 'session_analysis'
                      AND lease_expires_at > now()) < $3)
+         AND (job_type <> 'session_narrate'
+              OR (SELECT COUNT(*) FROM error_group_jobs
+                   WHERE status = 'claimed'
+                     AND job_type = 'session_narrate'
+                     AND lease_expires_at > now()) < $4)
+         AND (job_type <> 'session_verify_frames'
+              OR (SELECT COUNT(*) FROM error_group_jobs
+                   WHERE status = 'claimed'
+                     AND job_type = 'session_verify_frames'
+                     AND lease_expires_at > now()) < $5)
        ORDER BY CASE
          WHEN job_type = 'error_fix' THEN 0
          WHEN job_type = 'session_analysis'
@@ -650,7 +669,7 @@ export async function claimJob(
                source_id, source_job_id, project_id, job_type, attempts, max_attempts, guidance,
                worker_id, lease_generation::text AS lease_generation,
                triggered_by, session_id, platform, payload`,
-      [workerId, leaseDurationMs / 1000, sessionAnalysisCap]
+      [workerId, leaseDurationMs / 1000, sessionAnalysisCap, narrativeCap, framesCap]
     );
     await client.query('COMMIT');
   } catch (err) {
@@ -3068,13 +3087,15 @@ export async function updateGroupAndCreateFixJob(
 export interface FrictionSignalRow {
   id: string;
   session_id: string;
-  signal_type: 'rage_click' | 'dead_click' | 'form_abandon';
+  signal_type: 'rage_click' | 'dead_click' | 'form_abandon' | FrictionCategory;
   fingerprint: string;
   element_selector: string | null;
   page_url_normalized: string;
   occurred_at: string;
   occurrence_count: number;
   rule_version: number;
+  observation_text: string | null;
+  severity: 'low' | 'medium' | 'high' | null;
 }
 
 export async function getFrictionSignalsForGroup(
@@ -3084,7 +3105,8 @@ export async function getFrictionSignalsForGroup(
   const db = getPool();
   const { rows } = await db.query<FrictionSignalRow>(
     `SELECT id, session_id, signal_type, fingerprint, element_selector,
-            page_url_normalized, occurred_at, occurrence_count, rule_version
+            page_url_normalized, occurred_at, occurrence_count, rule_version,
+            observation_text, severity
      FROM friction_signals
      WHERE incident_id = $1 AND project_id = $2
        AND superseded_by IS NULL AND retracted_at IS NULL
@@ -3092,6 +3114,36 @@ export async function getFrictionSignalsForGroup(
     [errorGroupId, projectId],
   );
   return rows;
+}
+
+export async function getLatestNarrativeSignalForGroup(
+  errorGroupId: string,
+  projectId: string,
+): Promise<{
+  signalType: FrictionCategory;
+  observationText: string;
+  severity: 'low' | 'medium' | 'high';
+} | null> {
+  const { rows } = await getPool().query<{
+    signal_type: FrictionCategory;
+    observation_text: string;
+    severity: 'low' | 'medium' | 'high';
+  }>(
+    `SELECT signal_type, observation_text, severity
+     FROM friction_signals
+     WHERE incident_id = $1 AND project_id = $2
+       AND observation_text IS NOT NULL AND severity IS NOT NULL
+       AND retracted_at IS NULL AND superseded_by IS NULL
+     ORDER BY occurred_at DESC, id DESC
+     LIMIT 1`,
+    [errorGroupId, projectId],
+  );
+  const row = rows[0];
+  return row ? {
+    signalType: row.signal_type,
+    observationText: row.observation_text,
+    severity: row.severity,
+  } : null;
 }
 
 export interface SessionChunkRow {
@@ -3180,8 +3232,11 @@ export interface SessionAnalysisUpsert {
   ruleVersion: number;
 }
 
-export async function upsertSessionAnalysis(row: SessionAnalysisUpsert): Promise<void> {
-  await getPool().query(
+export async function upsertSessionAnalysis(
+  row: SessionAnalysisUpsert,
+  client?: pg.PoolClient,
+): Promise<void> {
+  await (client ?? getPool()).query(
     `INSERT INTO session_analysis
        (session_id, project_id, environment_id, session_started_at, coverage,
         activity_class, entry_path, click_count, input_event_count, page_event_count,
@@ -3262,6 +3317,428 @@ export async function enqueueSessionAnalysisForBudgetRetry(
          AND status = 'pending')`,
     [sessionId, projectId],
   );
+}
+
+export async function enqueueJob(
+  jobType: Extract<JobType, 'session_narrate' | 'session_verify_frames'>,
+  projectId: string,
+  sessionId: string,
+): Promise<void> {
+  await getPool().query(
+    `INSERT INTO error_group_jobs (project_id, job_type, session_id)
+     SELECT $2, $1, $3
+     WHERE NOT EXISTS (
+       SELECT 1 FROM error_group_jobs
+       WHERE project_id = $2 AND session_id = $3 AND job_type = $1
+         AND status IN ('pending', 'claimed'))`,
+    [jobType, projectId, sessionId],
+  );
+}
+
+export async function reserveNarrative(
+  client: pg.PoolClient,
+  args: { sessionId: string; projectId: string; environmentId: string; promptVersion: number },
+): Promise<boolean> {
+  const result = await client.query(
+    `INSERT INTO session_narratives
+       (session_id, project_id, environment_id, status, prompt_version)
+     VALUES ($1, $2, $3, 'pending', $4)
+     ON CONFLICT (session_id) DO NOTHING`,
+    [args.sessionId, args.projectId, args.environmentId, args.promptVersion],
+  );
+  return (result.rowCount ?? 0) > 0;
+}
+
+export async function claimPendingNarrative(
+  sessionId: string,
+  projectId: string,
+): Promise<{ promptVersion: number } | null> {
+  const result = await getPool().query<{ prompt_version: number }>(
+    `UPDATE session_narratives
+     SET status = 'narrating', updated_at = now()
+     WHERE session_id = $1 AND project_id = $2 AND status = 'pending'
+     RETURNING prompt_version`,
+    [sessionId, projectId],
+  );
+  const row = result.rows[0];
+  return row ? { promptVersion: row.prompt_version } : null;
+}
+
+export async function reserveNarrativeBudget(args: {
+  sessionId: string;
+  projectId: string;
+  stage: 'narrate' | 'verify';
+  cap: number;
+}): Promise<boolean> {
+  const client = await getPool().connect();
+  try {
+    await client.query('BEGIN');
+    const stampColumn = args.stage === 'narrate'
+      ? 'budget_reserved_on'
+      : 'verify_budget_reserved_on';
+    const existing = await client.query<{ stamped: string | null }>(
+      `SELECT ${stampColumn}::text AS stamped
+       FROM session_narratives
+       WHERE session_id = $1 AND project_id = $2
+       FOR UPDATE`,
+      [args.sessionId, args.projectId],
+    );
+    if (!existing.rows[0]) {
+      await client.query('ROLLBACK');
+      return false;
+    }
+    if (existing.rows[0].stamped !== null) {
+      await client.query('COMMIT');
+      return true;
+    }
+    await client.query(
+      `INSERT INTO narrative_call_budget (project_id, day, stage, used)
+       VALUES ($1, current_date, $2, 0)
+       ON CONFLICT DO NOTHING`,
+      [args.projectId, args.stage],
+    );
+    const reserved = await client.query(
+      `UPDATE narrative_call_budget
+       SET used = used + 1
+       WHERE project_id = $1 AND day = current_date AND stage = $2 AND used < $3
+       RETURNING used`,
+      [args.projectId, args.stage, args.cap],
+    );
+    if ((reserved.rowCount ?? 0) === 0) {
+      await client.query('ROLLBACK');
+      return false;
+    }
+    await client.query(
+      `UPDATE session_narratives
+       SET ${stampColumn} = current_date, updated_at = now()
+       WHERE session_id = $1 AND project_id = $2`,
+      [args.sessionId, args.projectId],
+    );
+    await client.query('COMMIT');
+    return true;
+  } catch (error: unknown) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+const RAW_RESPONSE_MAX_BYTES = 65_536;
+const VERIFICATION_REASON_MAX_CHARS = 500;
+const CONTROL_CHARACTERS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u200b-\u200f\u2028\u2029\ufeff]/g;
+
+/** Provider and Chromium failures carry paths and multi-kilobyte messages, so
+ * the stored reason is stripped of control characters — the same strip
+ * `raw_response` uses — and bounded before it reaches a UI. */
+function sanitizeVerificationReason(reason: string | undefined): string | null {
+  if (reason === undefined) return null;
+  const cleaned = reason.replace(CONTROL_CHARACTERS, '').trim();
+  return cleaned === '' ? null : cleaned.slice(0, VERIFICATION_REASON_MAX_CHARS);
+}
+
+export async function finishNarrative(job: ClaimedJob, args: {
+  sessionId: string;
+  projectId: string;
+  status: 'ok' | 'skipped_cap' | 'skipped_budget' | 'parse_failed' | 'render_aborted' | 'failed';
+  narrative?: unknown;
+  timeline?: unknown;
+  rawResponse?: string;
+  model?: string;
+  inputTokens?: number;
+  outputTokens?: number;
+  verificationState?: 'none' | 'pending';
+}): Promise<{ written: boolean }> {
+  const raw = args.rawResponse === undefined
+    ? null
+    : Buffer.from(args.rawResponse.replace(CONTROL_CHARACTERS, ''), 'utf8')
+      .subarray(0, RAW_RESPONSE_MAX_BYTES).toString('utf8');
+  const result = await getPool().query(
+    `UPDATE session_narratives
+     SET status = $3, narrative = $4::jsonb, timeline = $5::jsonb,
+         raw_response = $6, model = $7, input_tokens = $8, output_tokens = $9,
+         verification_state = COALESCE($10, verification_state), updated_at = now()
+     WHERE session_id = $1 AND project_id = $2 AND status = 'narrating'
+       AND EXISTS (
+         SELECT 1 FROM error_group_jobs j
+         WHERE j.id = $11 AND j.worker_id = $12
+           AND j.lease_generation = $13::bigint
+           AND j.project_id = $2
+           AND j.session_id IS NOT DISTINCT FROM $1
+           AND j.status = 'claimed' AND j.lease_expires_at > now())`,
+    [
+      args.sessionId,
+      args.projectId,
+      args.status,
+      args.narrative === undefined ? null : JSON.stringify(args.narrative),
+      args.timeline === undefined ? null : JSON.stringify(args.timeline),
+      raw,
+      args.model ?? null,
+      args.inputTokens ?? null,
+      args.outputTokens ?? null,
+      args.verificationState ?? null,
+      job.id,
+      job.workerId,
+      job.leaseGeneration,
+    ],
+  );
+  return { written: (result.rowCount ?? 0) > 0 };
+}
+
+export async function narrativeMonthlySpendExceeded(projectId: string): Promise<boolean> {
+  const budget = Number(process.env['NARRATIVE_MONTHLY_BUDGET_USD']);
+  const inputRate = Number(process.env['NARRATIVE_COST_PER_MTOK_INPUT']);
+  const outputRate = Number(process.env['NARRATIVE_COST_PER_MTOK_OUTPUT']);
+  if (!Number.isFinite(budget) || !Number.isFinite(inputRate) || !Number.isFinite(outputRate)) {
+    return false;
+  }
+  const result = await getPool().query<{ usd: string }>(
+    `SELECT COALESCE(SUM(input_tokens), 0) * $2 / 1e6
+          + COALESCE(SUM(output_tokens), 0) * $3 / 1e6 AS usd
+     FROM session_narratives
+     WHERE project_id = $1 AND created_at >= date_trunc('month', now())`,
+    [projectId, inputRate, outputRate],
+  );
+  return Number(result.rows[0]?.usd ?? 0) > budget;
+}
+
+export interface ClaimedNarrativeVerification {
+  promptVersion: number;
+  narrative: unknown;
+  timeline: unknown;
+}
+
+export async function claimVerifyingNarrative(
+  sessionId: string,
+  projectId: string,
+): Promise<ClaimedNarrativeVerification | null> {
+  const result = await getPool().query<{
+    prompt_version: number;
+    narrative: unknown;
+    timeline: unknown;
+  }>(
+    `UPDATE session_narratives
+     SET verification_state = 'verifying', verification_reason = NULL, updated_at = now()
+     WHERE session_id = $1 AND project_id = $2 AND status = 'ok'
+       AND verification_state = 'pending'
+     RETURNING prompt_version, narrative, timeline`,
+    [sessionId, projectId],
+  );
+  const row = result.rows[0];
+  return row
+    ? { promptVersion: row.prompt_version, narrative: row.narrative, timeline: row.timeline }
+    : null;
+}
+
+export async function finalizeVerification(job: ClaimedJob, args: {
+  sessionId: string;
+  projectId: string;
+  state: 'ok' | 'failed' | 'unsupported' | 'skipped_budget';
+  claimedPromptVersion: number;
+  verification?: unknown;
+  /** Why a non-ok state was reached. Sanitized and bounded before storage;
+   * an 'ok' finalize clears whatever a previous attempt left behind. */
+  reason?: string;
+  inputTokens?: number;
+  outputTokens?: number;
+  signalRows: import('./friction/persist.js').ObservationSignalRow[];
+}): Promise<void> {
+  const client = await getPool().connect();
+  try {
+    await client.query('BEGIN');
+    const updated = await client.query(
+      `UPDATE session_narratives
+       SET verification_state = $3, verification = $4::jsonb,
+           verification_prompt_version = CASE WHEN $4::jsonb IS NULL THEN verification_prompt_version ELSE 1 END,
+           verification_reason = CASE WHEN $3 = 'ok' THEN NULL ELSE $11 END,
+           input_tokens = COALESCE(input_tokens, 0) + $5,
+           output_tokens = COALESCE(output_tokens, 0) + $6,
+           updated_at = now()
+       WHERE session_id = $1 AND project_id = $2
+         AND verification_state IN ('verifying', 'pending')
+         AND prompt_version = $7
+         AND EXISTS (
+           SELECT 1 FROM error_group_jobs j
+           WHERE j.id = $8 AND j.worker_id = $9
+             AND j.lease_generation = $10::bigint
+             AND j.project_id = $2 AND j.session_id IS NOT DISTINCT FROM $1
+             AND j.status = 'claimed' AND j.lease_expires_at > now())
+       RETURNING session_id`,
+      [
+        args.sessionId,
+        args.projectId,
+        args.state,
+        args.verification === undefined ? null : JSON.stringify(args.verification),
+        args.inputTokens ?? 0,
+        args.outputTokens ?? 0,
+        args.claimedPromptVersion,
+        job.id,
+        job.workerId,
+        job.leaseGeneration,
+        sanitizeVerificationReason(args.reason),
+      ],
+    );
+    if ((updated.rowCount ?? 0) === 0) throw new LeaseLostError(job.id);
+    const sessionResult = await client.query<SessionRow>(
+      `SELECT id, project_id, environment_id, end_user_id, status,
+              started_at::text AS started_at, chunk_count
+       FROM sessions WHERE id = $1 AND project_id = $2`,
+      [args.sessionId, args.projectId],
+    );
+    const session = sessionResult.rows[0];
+    if (!session) throw new Error(`Session ${args.sessionId} not found`);
+    const { writeObservationSignals } = await import('./friction/persist.js');
+    const fingerprints = await writeObservationSignals(client, session, args.signalRows);
+    const { runPromotionCheck } = await import('./friction/promotion.js');
+    await runPromotionCheck(client, args.projectId, session.environment_id, fingerprints);
+    await client.query('COMMIT');
+  } catch (error: unknown) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+export async function sweepNarratives(): Promise<{ reEnqueued: number; failed: number }> {
+  const modelConfigured = Boolean(process.env['NARRATIVE_API_KEY'] ?? process.env['ANTHROPIC_API_KEY']);
+  const stale = await getPool().query<{
+    session_id: string;
+    project_id: string;
+    prompt_version: number;
+    narrative: unknown;
+    timeline: unknown;
+  }>(
+    `SELECT session_id, project_id::text, prompt_version, narrative, timeline
+     FROM session_narratives
+     WHERE status = 'ok' AND verification_state IN ('pending','verifying')
+       AND updated_at < now() - interval '24 hours'
+     ORDER BY updated_at ASC`,
+  );
+  let failed = 0;
+  for (const row of stale.rows) {
+    const narrative = row.narrative as import('@opslane/shared').SessionNarrative;
+    const timeline = row.timeline as import('./narrative/emit.js').CompactTimeline;
+    if (!narrative || !Array.isArray(narrative.observations)
+      || !timeline || !Array.isArray(timeline.lines) || typeof timeline.startTs !== 'number') {
+      logger.error('Stale narrative verification contains malformed stored JSON', {
+        project_id: row.project_id, session_id: row.session_id,
+      });
+      continue;
+    }
+    const finalized = await finalizeExpiredVerification({
+      sessionId: row.session_id,
+      projectId: row.project_id,
+      claimedPromptVersion: row.prompt_version,
+      signalRows: (await import('./narrative/emit.js')).buildSignalRows(timeline, narrative.observations),
+    });
+    if (finalized) failed += 1;
+  }
+
+  if (!modelConfigured) return { reEnqueued: 0, failed };
+  const client = await getPool().connect();
+  let reEnqueued = 0;
+  try {
+    await client.query('BEGIN');
+    const reset = await client.query<{ session_id: string; project_id: string }>(
+      `UPDATE session_narratives
+       SET status = 'pending', updated_at = now()
+       WHERE status = 'narrating' AND updated_at < now() - interval '1 hour'
+       RETURNING session_id, project_id::text`,
+    );
+    const narratePending = await client.query<{ session_id: string; project_id: string }>(
+      `SELECT session_id, project_id::text
+       FROM session_narratives
+       WHERE status = 'pending' AND updated_at < now() - interval '15 minutes'`,
+    );
+		await client.query(
+			`UPDATE session_narratives
+			 SET verification_state = 'pending'
+			 WHERE status = 'ok' AND verification_state = 'verifying'
+			   AND updated_at < now() - interval '1 hour'`,
+		);
+    const verifyPending = await client.query<{ session_id: string; project_id: string }>(
+      `SELECT session_id, project_id::text
+       FROM session_narratives
+       WHERE status = 'ok' AND verification_state = 'pending'
+         AND updated_at < now() - interval '1 hour'
+         AND updated_at >= now() - interval '24 hours'`,
+    );
+    for (const row of [...reset.rows, ...narratePending.rows]) {
+      const inserted = await client.query(
+        `INSERT INTO error_group_jobs (project_id, job_type, session_id)
+         SELECT $1, 'session_narrate', $2
+         WHERE NOT EXISTS (
+           SELECT 1 FROM error_group_jobs WHERE project_id = $1 AND session_id = $2
+             AND job_type = 'session_narrate' AND status IN ('pending','claimed'))`,
+        [row.project_id, row.session_id],
+      );
+      reEnqueued += inserted.rowCount ?? 0;
+    }
+    for (const row of verifyPending.rows) {
+      const inserted = await client.query(
+        `INSERT INTO error_group_jobs (project_id, job_type, session_id)
+         SELECT $1, 'session_verify_frames', $2
+         WHERE NOT EXISTS (
+           SELECT 1 FROM error_group_jobs WHERE project_id = $1 AND session_id = $2
+             AND job_type = 'session_verify_frames' AND status IN ('pending','claimed'))`,
+        [row.project_id, row.session_id],
+      );
+      reEnqueued += inserted.rowCount ?? 0;
+    }
+    await client.query('COMMIT');
+    return { reEnqueued, failed };
+  } catch (error: unknown) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function finalizeExpiredVerification(args: {
+  sessionId: string;
+  projectId: string;
+  claimedPromptVersion: number;
+  signalRows: import('./friction/persist.js').ObservationSignalRow[];
+}): Promise<boolean> {
+  const client = await getPool().connect();
+  try {
+    await client.query('BEGIN');
+    const updated = await client.query(
+      `UPDATE session_narratives
+       SET verification_state = 'failed', verification = NULL, updated_at = now()
+       WHERE session_id = $1 AND project_id = $2 AND status = 'ok'
+         AND verification_state IN ('pending','verifying')
+         AND prompt_version = $3
+         AND updated_at < now() - interval '24 hours'
+       RETURNING session_id`,
+      [args.sessionId, args.projectId, args.claimedPromptVersion],
+    );
+    if ((updated.rowCount ?? 0) === 0) {
+      await client.query('ROLLBACK');
+      return false;
+    }
+    const sessionResult = await client.query<SessionRow>(
+      `SELECT id, project_id, environment_id, end_user_id, status,
+              started_at::text AS started_at, chunk_count
+       FROM sessions WHERE id = $1 AND project_id = $2`,
+      [args.sessionId, args.projectId],
+    );
+    const session = sessionResult.rows[0];
+    if (!session) throw new Error(`Session ${args.sessionId} not found`);
+    const { writeObservationSignals } = await import('./friction/persist.js');
+    const fingerprints = await writeObservationSignals(client, session, args.signalRows);
+    const { runPromotionCheck } = await import('./friction/promotion.js');
+    await runPromotionCheck(client, args.projectId, session.environment_id, fingerprints);
+    await client.query('COMMIT');
+    return true;
+  } catch (error: unknown) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 export async function setSessionAnalysisStatus(
