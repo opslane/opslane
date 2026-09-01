@@ -66,6 +66,9 @@ The automated-setup callback requires `code`, `installation_id`, and UUID `state
 | POST | `/api/v1/invitations` | Cloud org admin: create an active-org invitation |
 | DELETE | `/api/v1/invitations/{invitationID}` | Cloud org admin: revoke an outstanding invitation |
 | POST | `/api/v1/invitations/accept` | Cloud: accept a single-use, verified-email-bound invitation |
+| GET | `/api/v1/billing/summary` | Billing-enabled deployments: read the active org's plan and feature balances (admin on cloud) |
+| POST | `/api/v1/billing/checkout` | Billing-enabled deployments: start Pro checkout for the active org (admin on cloud) |
+| POST | `/api/v1/billing/portal` | Billing-enabled deployments: open the active org's billing portal (admin on cloud) |
 | GET | `/api/v1/admin/overview` | Operator-only cross-tenant monitoring overview, including best-effort progress through automated repository setup (404 unless allowlisted) |
 | GET | `/api/v1/admin/jobs` | Operator-only recent jobs (404 unless allowlisted) |
 | POST | `/api/v1/onboard/provision` | Create an organization and project for a repository, then store the one-time API key for the setup client to retrieve |

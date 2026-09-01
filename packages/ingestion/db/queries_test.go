@@ -825,13 +825,13 @@ func TestProcessPRWebhook_ReceiptBeforeTransition_Idempotent(t *testing.T) {
 		t.Fatalf("group status = %q, want merged", got)
 	}
 
-	var outcome string
+	var outcome, githubRepo string
 	if err := pool.QueryRow(ctx,
-		`SELECT outcome FROM pr_outcomes
+		`SELECT outcome, github_repo FROM pr_outcomes
 		 WHERE error_group_id = $1 AND github_delivery_id = 'delivery-merge'`,
 		groupID,
-	).Scan(&outcome); err != nil || outcome != "merged" {
-		t.Fatalf("receipt = (%q, %v), want merged", outcome, err)
+	).Scan(&outcome, &githubRepo); err != nil || outcome != "merged" || githubRepo != "org/pr-lifecycle" {
+		t.Fatalf("receipt = (%q, %q, %v), want merged with repo org/pr-lifecycle", outcome, githubRepo, err)
 	}
 
 	result, err = q.ProcessPRWebhook(ctx, "org/pr-lifecycle", 7, true, "delivery-merge", time.Now())
@@ -1150,13 +1150,17 @@ func TestProcessPRWebhook_ReopenedMergeRecoversViaReceipt(t *testing.T) {
 	// The recovered receipt keeps the fix-job attribution and the PR's actual
 	// merge time (not webhook-processing time) lands in merged_at.
 	var receiptJobID *string
+	var receiptRepo string
 	if err := q.Pool().QueryRow(ctx,
-		`SELECT fix_job_id FROM pr_outcomes WHERE github_delivery_id = 'delivery-reopen-merge'`,
-	).Scan(&receiptJobID); err != nil {
+		`SELECT fix_job_id, github_repo FROM pr_outcomes WHERE github_delivery_id = 'delivery-reopen-merge'`,
+	).Scan(&receiptJobID, &receiptRepo); err != nil {
 		t.Fatalf("query recovered receipt: %v", err)
 	}
 	if receiptJobID == nil || *receiptJobID != fixJobID {
 		t.Fatalf("recovered receipt fix_job_id = %v, want %s", receiptJobID, fixJobID)
+	}
+	if receiptRepo != "org/repo" {
+		t.Fatalf("recovered receipt github_repo = %q, want org/repo", receiptRepo)
 	}
 	assertScoreSyncJob(t, q.Pool(), "delivery-reopen-merge", fixJobID, "merged")
 	var mergedAtDB time.Time

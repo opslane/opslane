@@ -120,6 +120,14 @@ func NewRouterWithPool(deps *Dependencies, pool *pgxpool.Pool) *chi.Mux {
 		r.With(deps.AuthenticateUserSession, deps.RequireRole("admin")).Delete("/invitations/{invitationID}", deps.RevokeInvitation)
 		r.With(deps.AuthenticateUserSession).Post("/invitations/accept", deps.AcceptInvitation)
 
+		// Billing is provider-neutral: cloud deployments enforce org admin, while
+		// self-hosted deployments treat every authenticated user as the operator,
+		// matching the project and API-key settings routes below. Keep the enabled
+		// check first so a disabled deployment exposes no billing route at all.
+		r.With(deps.requireBillingEnabled, deps.AuthenticateUserSession, deps.RequireRoleIfCloud("admin")).Get("/billing/summary", deps.GetBillingSummary)
+		r.With(deps.requireBillingEnabled, deps.AuthenticateUserSession, deps.RequireRoleIfCloud("admin")).Post("/billing/checkout", deps.CreateBillingCheckout)
+		r.With(deps.requireBillingEnabled, deps.AuthenticateUserSession, deps.RequireRoleIfCloud("admin")).Post("/billing/portal", deps.CreateBillingPortal)
+
 		// Cross-tenant operator observability. RequireAdmin deliberately returns 404.
 		r.With(deps.AuthenticateUserSession, deps.RequireAdmin).Get("/admin/overview", deps.AdminOverview)
 		r.With(deps.AuthenticateUserSession, deps.RequireAdmin).Get("/admin/jobs", deps.AdminJobs)

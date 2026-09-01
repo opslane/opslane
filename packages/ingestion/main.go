@@ -12,6 +12,7 @@ import (
 	_ "time/tzdata"
 
 	"github.com/opslane/opslane/packages/ingestion/auth"
+	"github.com/opslane/opslane/packages/ingestion/billing"
 	"github.com/opslane/opslane/packages/ingestion/db"
 	"github.com/opslane/opslane/packages/ingestion/digest"
 	"github.com/opslane/opslane/packages/ingestion/filter"
@@ -308,6 +309,31 @@ func main() {
 		}
 		go sweeper.Start(context.Background(), sweepInterval)
 		slog.Info("retention sweeper started", "interval", sweepInterval.String())
+	}
+
+	if billingClient := billing.FromEnv(); billingClient != nil {
+		sweepInterval := 5 * time.Minute
+		if raw := os.Getenv("BILLING_SWEEP_INTERVAL_SECONDS"); raw != "" {
+			if seconds, err := strconv.Atoi(raw); err == nil && seconds > 0 {
+				sweepInterval = time.Duration(seconds) * time.Second
+			}
+		}
+		sessionAlertThreshold := 5000
+		if raw := os.Getenv("BILLING_SESSION_ALERT_THRESHOLD"); raw != "" {
+			if threshold, err := strconv.Atoi(raw); err == nil && threshold > 0 {
+				sessionAlertThreshold = threshold
+			}
+		}
+		deps.Billing = billingClient
+		sweeper := &billing.Sweeper{
+			Q:                     queries,
+			Client:                billingClient,
+			SessionAlertThreshold: sessionAlertThreshold,
+		}
+		go sweeper.Start(context.Background(), sweepInterval)
+		slog.Info("billing enabled", "sweep_interval", sweepInterval.String())
+	} else {
+		slog.Info("billing disabled: AUTUMN_SECRET_KEY not set")
 	}
 
 	slog.Info("Opslane ingestion starting", "port", port)
