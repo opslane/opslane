@@ -42,6 +42,13 @@ func seedOnCardGroup(
 		rootCause, diff, prURL).Scan(&groupID); err != nil {
 		t.Fatalf("seed on-card group: %v", err)
 	}
+	// The insert trigger stamps actionable_since=now(); backdate it to the
+	// seeded time so the fixture has genuinely been waiting since lastSeen —
+	// the freeze bounds its replay lookup by this spell start.
+	if _, err := pool.Exec(context.Background(), `UPDATE error_groups SET actionable_since=$2 WHERE id=$1`,
+		groupID, lastSeen); err != nil {
+		t.Fatalf("backdate on-card spell: %v", err)
+	}
 	return groupID
 }
 

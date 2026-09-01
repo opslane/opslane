@@ -87,7 +87,17 @@ func ConfirmMerge(ctx context.Context, pool *pgxpool.Pool, projectID, winnerID, 
 		   SELECT 1 FROM issue_publications p
 		   JOIN issue_episodes ep
 		     ON ep.project_id=p.project_id AND ep.id=p.episode_id
-		   WHERE p.project_id=$1 AND ep.canonical_issue_id IN ($2,$3))`,
+		   WHERE p.project_id=$1 AND ep.canonical_issue_id IN ($2,$3))
+		 OR EXISTS (
+		   -- Unified digest runs write no issue_publications rows: presence in a
+		   -- delivered run's frozen item set is the record that a reader saw the
+		   -- incident, so it blocks automatic merges the same way a publication
+		   -- receipt does.
+		   SELECT 1 FROM digest_unified_run_items ui
+		   JOIN digest_runs r
+		     ON r.id=ui.run_id AND r.project_id=ui.project_id
+		   WHERE ui.project_id=$1 AND ui.error_group_id IN ($2,$3)
+		     AND r.status='delivered')`,
 		projectID, winnerID, loserID).Scan(&blocked); err != nil {
 		return fmt.Errorf("check merge blockers: %w", err)
 	}

@@ -25,6 +25,13 @@ func seedActionableGroup(t *testing.T, pool *pgxpool.Pool, projectID, environmen
 		RETURNING id::text`, projectID, environmentID, "actionable-"+uuid.NewString(), kind, status, decidedAt).Scan(&groupID); err != nil {
 		t.Fatal(err)
 	}
+	// The insert trigger stamps actionable_since=now(); backdate it to the
+	// seeded time so the fixture has genuinely been waiting since decidedAt —
+	// the freeze bounds its replay lookup by this spell start.
+	if _, err := pool.Exec(ctx, `UPDATE error_groups SET actionable_since=$2 WHERE id=$1`,
+		groupID, decidedAt); err != nil {
+		t.Fatal(err)
+	}
 	if err := pool.QueryRow(ctx, `INSERT INTO issue_episodes
 		(project_id,canonical_issue_id,sequence) VALUES ($1,$2,1) RETURNING id::text`,
 		projectID, groupID).Scan(&episodeID); err != nil {

@@ -232,6 +232,24 @@ func seedMergeBlocker(t *testing.T, pool *pgxpool.Pool, f identityFixture, issue
 			 VALUES ($1,$2,'digest')`, f.ProjectID, episodeID); err != nil {
 			t.Fatalf("seed publication blocker: %v", err)
 		}
+	case "unified digest item":
+		// The unified digest lane writes no issue_publications rows; a delivered
+		// run's frozen item set is what proves a reader saw the incident.
+		var runID string
+		if err := pool.QueryRow(ctx,
+			`INSERT INTO digest_runs
+			   (project_id,window_from,window_to,run_date,status,unified_cards_mode)
+			 VALUES ($1,now()-interval '24 hours',now(),current_date,
+			         'delivered','on')
+			 RETURNING id::text`, f.ProjectID).Scan(&runID); err != nil {
+			t.Fatalf("seed unified digest run: %v", err)
+		}
+		if _, err := pool.Exec(ctx,
+			`INSERT INTO digest_unified_run_items
+			   (project_id,run_id,error_group_id,candidate_snapshot)
+			 VALUES ($1,$2,$3,'{}'::jsonb)`, f.ProjectID, runID, issueID); err != nil {
+			t.Fatalf("seed unified digest item blocker: %v", err)
+		}
 	default:
 		t.Fatalf("unknown blocker %q", blocker)
 	}
