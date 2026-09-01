@@ -329,6 +329,27 @@ export interface SessionDetail extends SessionSummary {
   chunks: SessionChunkMeta[];
 }
 
+export interface SessionNarrativeObservation {
+  id: string;
+  category: string;
+  what: string;
+  severity: 'low' | 'medium' | 'high';
+  evidenceLines: string[];
+  grade?: 'confirmed' | 'corrected' | 'refuted' | 'inconclusive';
+  replacementWhat?: string;
+  atMs?: number;
+}
+
+export interface SessionNarrative {
+  userGoal: string;
+  narrative: string;
+  observations: SessionNarrativeObservation[];
+  notable: boolean;
+  /** Present only when frame verification did not reach 'ok'; explains why the
+   * observations below are ungraded. */
+  verificationReason?: string;
+}
+
 export interface SessionListResponse {
   sessions: SessionSummary[];
   next_cursor?: string | null;
