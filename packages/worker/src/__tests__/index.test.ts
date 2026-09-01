@@ -20,6 +20,7 @@ vi.mock('../db.js', async () => ({
   getErrorGroup: vi.fn(),
   getErrorEvent: vi.fn(),
   getProject: vi.fn(),
+  getProjectOrg: vi.fn(),
   getProjectGitHubInstallation: vi.fn(),
   cacheProjectDefaultBranch: vi.fn(),
   updateGroupStatus: vi.fn(),
@@ -78,6 +79,11 @@ vi.mock('../logger.js', () => ({
   setWorkerId: vi.fn(),
   safeErrorMessage: (err: unknown) => (err instanceof Error ? err.message : String(err)),
 }));
+vi.mock('../billing.js', () => ({
+  billingEnabled: vi.fn(() => false),
+  checkQuota: vi.fn(async () => ({ allowed: true, failedOpen: false })),
+}));
+vi.mock('../usage-events.js', () => ({ emitUsageEvent: vi.fn() }));
 vi.mock('../repo-clone.js', async (importOriginal) => {
   // The retriable-clone classifier runs REAL: the tests assert the actual
   // routing decision, not a stub's.
@@ -185,6 +191,8 @@ const { runStackResolve } = await import('../resolve/job.js');
 const { pushScore } = await import('../scores.js');
 const { getActiveTraceId } = await import('../tracing.js');
 const { logger } = await import('../logger.js');
+const billing = await import('../billing.js');
+const { emitUsageEvent } = await import('../usage-events.js');
 
 const mockGetErrorGroup = vi.mocked(db.getErrorGroup);
 const mockGetErrorEvent = vi.mocked(db.getErrorEvent);
@@ -390,6 +398,45 @@ describe('processInvestigateJob — pre-clone guard for stackless errors', () =>
     expect(mockUpdateGroupStatus).not.toHaveBeenCalled();
     expect(mockGetErrorEvent).not.toHaveBeenCalled();
     expect(mockCreateReadOnlyCheckout).not.toHaveBeenCalled();
+  });
+
+  it('completes without starting analysis when the investigation quota is denied', async () => {
+    mockGetErrorGroup.mockResolvedValue(makeGroup());
+    vi.mocked(billing.billingEnabled).mockReturnValueOnce(true);
+    vi.mocked(db.getProjectOrg).mockResolvedValueOnce({ orgId: 'org-1', orgName: 'Acme' });
+    vi.mocked(billing.checkQuota).mockResolvedValueOnce({ allowed: false, failedOpen: false });
+
+    await processInvestigateJob(makeJob(), new AbortController().signal);
+
+    expect(billing.checkQuota).toHaveBeenCalledWith(
+      'org-1', 'Acme', 'investigations', { sendEvent: true },
+    );
+    expect(mockUpdateGroupStatus).not.toHaveBeenCalledWith(
+      'grp-1', 'proj-1', 'analyzing', expect.anything(), expect.anything(),
+    );
+    expect(emitUsageEvent).toHaveBeenCalledWith('investigation_quota_skipped', {
+      org_id: 'org-1', project_id: 'proj-1', error_group_id: 'grp-1',
+    });
+    expect(mockLoadEvidence).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['an allowed verdict', { orgId: 'org-1', orgName: 'Acme' }],
+    ['a missing project organization', null],
+  ])('continues to analysis after %s', async (_case, org) => {
+    mockGetErrorGroup.mockResolvedValue(makeGroup());
+    mockGetErrorEvent.mockResolvedValue(makeEvent(''));
+    vi.mocked(billing.billingEnabled).mockReturnValueOnce(true);
+    vi.mocked(db.getProjectOrg).mockResolvedValueOnce(org);
+    if (org) {
+      vi.mocked(billing.checkQuota).mockResolvedValueOnce({ allowed: true, failedOpen: false });
+    }
+
+    await processInvestigateJob(makeJob(), new AbortController().signal);
+
+    expect(mockUpdateGroupStatus).toHaveBeenCalledWith(
+      'grp-1', 'proj-1', 'analyzing', undefined, makeJob(),
+    );
   });
 });
 
@@ -928,6 +975,27 @@ describe('processFixJob — preserves writeup on failure (no revert/null)', () =
     )).rejects.toThrow('Error fix job j1 missing episode_id');
 
     expect(mockLoadEvidence).not.toHaveBeenCalled();
+    expect(mockRunPipeline).not.toHaveBeenCalled();
+  });
+
+  it('parks the fix as needs_human when the merged-PR quota is denied', async () => {
+    vi.mocked(billing.billingEnabled).mockReturnValueOnce(true);
+    vi.mocked(db.getProjectOrg).mockResolvedValueOnce({ orgId: 'org-1', orgName: 'Acme' });
+    vi.mocked(billing.checkQuota).mockResolvedValueOnce({ allowed: false, failedOpen: false });
+
+    await processFixJob(fixJob(), new AbortController().signal);
+
+    expect(billing.checkQuota).toHaveBeenCalledWith('org-1', 'Acme', 'merged_prs');
+    expect(mockUpdateGroupStatus).toHaveBeenCalledWith(
+      'g1', 'p1', 'needs_human', expect.objectContaining({
+        reason: expect.objectContaining({ reason_code: 'billing_limit_reached' }),
+        terminalFixJobId: 'j1',
+      }), fixJob(),
+    );
+    expect(emitUsageEvent).toHaveBeenCalledWith('billing_limit_reached', {
+      org_id: 'org-1', project_id: 'p1', error_group_id: 'g1',
+    });
+    expect(mockCloneRepo).not.toHaveBeenCalled();
     expect(mockRunPipeline).not.toHaveBeenCalled();
   });
 

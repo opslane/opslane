@@ -236,6 +236,7 @@ export type ReasonCode =
   | 'unfixable_third_party'
   | 'unfixable_infra'
   | 'unfixable_no_sourcemap'
+  | 'billing_limit_reached'
   | 'dependency_install_failed';
 
 // === Verification evidence (evidence-tiered fix verification) ===

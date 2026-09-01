@@ -91,6 +91,8 @@ export const DEFAULT_REMEDIATION: Record<ReasonCode, string> = {
     'Investigate infrastructure/network (CORS, DNS, timeouts, 5xx) — this is not an application code bug.',
   unfixable_no_sourcemap:
     'Upload source maps for this release so the minified stack trace resolves to original source, then retry.',
+  billing_limit_reached:
+    'This organization has used its included fix PRs for the month. Upgrade in Settings → Billing to resume automated fix PRs.',
   dependency_install_failed:
     'Check that your dependencies install cleanly on a fresh checkout — Opslane could not install them, so it could not build or test a fix.',
 };
