@@ -169,14 +169,14 @@ func loadActionableCandidates(ctx context.Context, tx pgx.Tx, projectID string, 
 		       COALESCE((SELECT COUNT(DISTINCT fs.session_id)::int
 		         FROM friction_signals fs
 		         WHERE fs.incident_id=g.id AND fs.project_id=g.project_id
-		           AND fs.rule_version=6 AND fs.signal_type<>'other'
+		           AND fs.observation_text IS NOT NULL AND fs.signal_type<>'other'
 		           AND fs.adjudication_status='accepted'
 		           AND fs.retracted_at IS NULL AND fs.superseded_by IS NULL
 		           AND fs.occurred_at > now() - interval '7 days'),0),
 		       COALESCE((SELECT COUNT(DISTINCT fs.end_user_id)::int
 		         FROM friction_signals fs
 		         WHERE fs.incident_id=g.id AND fs.project_id=g.project_id
-		           AND fs.rule_version=6 AND fs.signal_type<>'other'
+		           AND fs.observation_text IS NOT NULL AND fs.signal_type<>'other'
 		           AND fs.adjudication_status='accepted'
 		           AND fs.end_user_id IS NOT NULL
 		           AND fs.retracted_at IS NULL AND fs.superseded_by IS NULL
@@ -184,8 +184,10 @@ func loadActionableCandidates(ctx context.Context, tx pgx.Tx, projectID string, 
 		       COALESCE((SELECT fs.observation_text
 		         FROM friction_signals fs
 		         WHERE fs.incident_id=g.id AND fs.project_id=g.project_id
-		           AND fs.observation_text IS NOT NULL
+		           AND fs.observation_text IS NOT NULL AND fs.signal_type<>'other'
+		           AND fs.adjudication_status='accepted'
 		           AND fs.retracted_at IS NULL AND fs.superseded_by IS NULL
+		           AND fs.occurred_at > now() - interval '7 days'
 		         ORDER BY fs.occurred_at DESC,fs.id DESC LIMIT 1),'')
 		  FROM error_groups g
 		  LEFT JOIN LATERAL (` + diagnosisValidationLateralSQL + `) d ON true

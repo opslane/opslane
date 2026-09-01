@@ -1281,8 +1281,13 @@ func firstUngroundedNumber(card writtenDigestCard, candidate Candidate) (string,
 	allowed := map[string]struct{}{
 		strconv.Itoa(candidate.AffectedUsers):   {},
 		strconv.Itoa(candidate.OccurrenceCount): {},
-		strconv.Itoa(candidate.SessionCount):    {},
-		strconv.Itoa(candidate.IdentifiedCount): {},
+	}
+	// Session counts are real facts only for narrative-backed cards. Error-kind
+	// candidates carry them as COALESCE-0, and whitelisting those would ground
+	// the digit '0' on every card, letting invented zero-claims publish.
+	if candidate.ObservationQuote != "" {
+		allowed[strconv.Itoa(candidate.SessionCount)] = struct{}{}
+		allowed[strconv.Itoa(candidate.IdentifiedCount)] = struct{}{}
 	}
 	// The prompt orders the writer to copy account names and links exactly, so
 	// digits inside them ("42Floors", PR #42) must be grounded facts — without

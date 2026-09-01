@@ -94,6 +94,7 @@ describeDb('finalizeVerification stores a bounded verification reason', () => {
       projectId,
       state: 'failed',
       claimedPromptVersion: 1,
+      verifyPromptVersion: 1,
       reason: noisy,
       signalRows: [],
     });
@@ -110,6 +111,7 @@ describeDb('finalizeVerification stores a bounded verification reason', () => {
       projectId,
       state: 'ok',
       claimedPromptVersion: 1,
+      verifyPromptVersion: 1,
       verification: { grades: [], frames: [] },
       signalRows: [],
     });

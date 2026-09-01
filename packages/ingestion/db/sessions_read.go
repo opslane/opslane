@@ -35,6 +35,7 @@ type SessionSummary struct {
 	FailedRequestCount    int
 	SuccessfulWriteCount  int
 	UnverifiedSignalCount int
+	ObservationCount      int
 }
 
 type SessionFilters struct {
@@ -67,6 +68,7 @@ func scanSessionSummary(row sessionScanner) (SessionSummary, error) {
 		&session.FormAbandonCount,
 		&session.Coverage, &session.ActivityClass, &session.FailedRequestCount,
 		&session.SuccessfulWriteCount, &session.UnverifiedSignalCount,
+		&session.ObservationCount,
 	)
 	return session, err
 }
@@ -79,7 +81,7 @@ const sessionSummarySelect = `SELECT s.id, s.started_at, s.last_chunk_at, s.stat
        e.errors, f.rage, f.dead, f.abandon,
        sa.coverage, sa.activity_class,
        COALESCE(sa.failed_request_4xx_count + sa.failed_request_5xx_count, 0),
-       COALESCE(sa.successful_write_count, 0), f.pending
+       COALESCE(sa.successful_write_count, 0), f.pending, f.observations
   FROM sessions s
   LEFT JOIN end_users eu ON eu.id = s.end_user_id AND eu.project_id = $1
   LEFT JOIN session_analysis sa ON sa.session_id = s.id AND sa.project_id = $1
@@ -87,7 +89,8 @@ const sessionSummarySelect = `SELECT s.id, s.started_at, s.last_chunk_at, s.stat
     SELECT COALESCE(sum(fs.occurrence_count) FILTER (WHERE fs.adjudication_status = 'accepted' AND fs.signal_type = 'rage_click'), 0) AS rage,
            COALESCE(sum(fs.occurrence_count) FILTER (WHERE fs.adjudication_status = 'accepted' AND fs.signal_type = 'dead_click'), 0) AS dead,
            COALESCE(sum(fs.occurrence_count) FILTER (WHERE fs.adjudication_status = 'accepted' AND fs.signal_type = 'form_abandon'), 0) AS abandon,
-           COALESCE(sum(fs.occurrence_count) FILTER (WHERE fs.adjudication_status = 'pending'), 0) AS pending
+           COALESCE(sum(fs.occurrence_count) FILTER (WHERE fs.adjudication_status = 'pending'), 0) AS pending,
+           COALESCE(sum(fs.occurrence_count) FILTER (WHERE fs.adjudication_status = 'accepted' AND fs.observation_text IS NOT NULL AND fs.signal_type <> 'other'), 0) AS observations
       FROM friction_signals fs
      WHERE fs.session_id = s.id
        AND fs.project_id = $1
@@ -133,7 +136,7 @@ func (q *Queries) ListSessions(ctx context.Context, projectID string, filters Se
                  OR eu.account_name ILIKE '%' || $9 || '%'
                  OR eu.external_account_id ILIKE '%' || $9 || '%'
                  OR s.id = $9)
-   AND ($10 = false OR (f.rage + f.dead + f.abandon + f.pending + e.errors) > 0)
+   AND ($10 = false OR (f.rage + f.dead + f.abandon + f.pending + f.observations + e.errors) > 0)
  ORDER BY s.started_at DESC, s.id DESC
  LIMIT $11`, projectID, filters.EndUserID, filters.AccountID, filters.From, filters.To,
 		filters.EnvironmentID, cursorStartedAt, cursorID, filters.Search, filters.HasSignals, limit+1)

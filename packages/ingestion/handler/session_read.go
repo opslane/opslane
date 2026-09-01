@@ -49,6 +49,7 @@ type sessionJSON struct {
 	FailedRequestCount    int                 `json:"failed_request_count"`
 	SuccessfulWriteCount  int                 `json:"successful_write_count"`
 	UnverifiedSignalCount int                 `json:"unverified_signal_count"`
+	ObservationCount      int                 `json:"observation_count"`
 	EndUser               *sessionEndUserJSON `json:"end_user,omitempty"`
 }
 
@@ -141,6 +142,7 @@ func toSessionJSON(session db.SessionSummary) sessionJSON {
 		FailedRequestCount:    session.FailedRequestCount,
 		SuccessfulWriteCount:  session.SuccessfulWriteCount,
 		UnverifiedSignalCount: session.UnverifiedSignalCount,
+		ObservationCount:      session.ObservationCount,
 	}
 	if session.LastChunkAt != nil {
 		formatted := session.LastChunkAt.Format(time.RFC3339Nano)
