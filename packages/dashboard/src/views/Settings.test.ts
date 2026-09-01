@@ -6,21 +6,28 @@ import { createMemoryHistory, createRouter } from 'vue-router';
 
 import Settings from './Settings.vue';
 import {
+  createBillingCheckout,
   createAPIKey,
+  fetchAuthConfig,
+  getBillingSummary,
   getMe,
   listAPIKeys,
   listEnvironments,
   listProjects,
+  openBillingPortal,
   revokeAPIKey,
   updateProject,
   type Project,
 } from '../api';
 
 vi.mock('../api', () => ({
+  createBillingCheckout: vi.fn(),
   createInvitation: vi.fn(),
   createAPIKey: vi.fn(),
   createProject: vi.fn(),
   deleteGitHubConfig: vi.fn(),
+  fetchAuthConfig: vi.fn(),
+  getBillingSummary: vi.fn(),
   getFixStats: vi.fn().mockResolvedValue({
     error: {},
     friction: {},
@@ -32,6 +39,7 @@ vi.mock('../api', () => ({
   listInvitations: vi.fn().mockResolvedValue([]),
   listAPIKeys: vi.fn().mockResolvedValue([]),
   listProjects: vi.fn(),
+  openBillingPortal: vi.fn(),
   revokeInvitation: vi.fn(),
   revokeAPIKey: vi.fn(),
   setGitHubConfig: vi.fn(),
@@ -54,6 +62,11 @@ const project: Project = {
 async function mountSettings(
   role?: 'owner' | 'admin' | 'member',
   selectedProject = project,
+  options: {
+    billingEnabled?: boolean;
+    query?: Record<string, string>;
+    navigate?: (target: string) => void;
+  } = {},
 ) {
   vi.mocked(getMe).mockResolvedValue({
     id: 'user-1',
@@ -62,6 +75,14 @@ async function mountSettings(
     name: 'Person',
     is_admin: role === 'owner' || role === 'admin',
     active_role: role,
+  });
+  vi.mocked(fetchAuthConfig).mockResolvedValue({
+    provider: 'embedded',
+    supports_password: false,
+    supports_signup: false,
+    supports_reset: false,
+    social_providers: [],
+    billing_enabled: options.billingEnabled ?? false,
   });
   vi.mocked(listProjects).mockResolvedValue([selectedProject]);
   vi.mocked(listEnvironments).mockResolvedValue({
@@ -77,12 +98,128 @@ async function mountSettings(
     history: createMemoryHistory(),
     routes: [{ path: '/settings', component: Settings }],
   });
-  await router.push('/settings');
+  await router.push({ path: '/settings', query: options.query });
   await router.isReady();
-  const wrapper = mount(Settings, { global: { plugins: [router] } });
+  const wrapper = mount(Settings, {
+    props: { navigate: options.navigate },
+    global: { plugins: [router] },
+  });
   await flushPromises();
   return wrapper;
 }
+
+describe('billing settings', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    localStorage.setItem('opslane_project_id', project.id);
+    localStorage.setItem('opslane_project_name', project.name);
+    vi.mocked(getBillingSummary).mockResolvedValue({ plan_id: 'free', features: [] });
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+    localStorage.clear();
+  });
+
+  it('shows billing only when enabled and the user can administer the organization', async () => {
+    const disabled = await mountSettings('owner');
+    expect(disabled.find('#settings-billing-tab').exists()).toBe(false);
+    disabled.unmount();
+
+    const member = await mountSettings('member', project, { billingEnabled: true });
+    expect(member.find('#settings-billing-tab').exists()).toBe(false);
+    member.unmount();
+
+    for (const role of ['admin', 'owner', undefined] as const) {
+      const wrapper = await mountSettings(role, project, { billingEnabled: true });
+      expect(wrapper.find('#settings-billing-tab').exists()).toBe(true);
+      wrapper.unmount();
+    }
+  });
+
+  it('opens an authorized billing deep link after auth finishes loading', async () => {
+    const wrapper = await mountSettings('admin', project, {
+      billingEnabled: true,
+      query: { tab: 'billing' },
+    });
+
+    expect(wrapper.get('#settings-billing-tab').attributes('aria-selected')).toBe('true');
+    expect(wrapper.find('#settings-project-panel').exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it('renders the plan and merged fix PR usage from the billing summary', async () => {
+    vi.mocked(getBillingSummary).mockResolvedValue({
+      plan_id: 'free',
+      features: [
+        { feature_id: 'merged_prs', allowed: true, granted: 2, usage: 1, remaining: 1 },
+        { feature_id: 'investigations', allowed: true, unlimited: true },
+      ],
+    });
+    const wrapper = await mountSettings('admin', project, { billingEnabled: true });
+
+    await wrapper.get('#settings-billing-tab').trigger('click');
+    await flushPromises();
+
+    expect(getBillingSummary).toHaveBeenCalledOnce();
+    expect(wrapper.get('#settings-billing-panel').text()).toContain('Free');
+    expect(wrapper.text()).toContain('Merged fix PRs');
+    expect(wrapper.text()).toContain('1 of 2 used');
+    expect(wrapper.get('[data-billing-usage="merged_prs"]').attributes('style')).toContain('width: 50%');
+    expect(wrapper.text()).toContain('Investigations (fair use)');
+    expect(wrapper.text()).toContain('Unlimited');
+    wrapper.unmount();
+  });
+
+  it('shows an inline unavailable state when the provider summary fails', async () => {
+    vi.mocked(getBillingSummary).mockRejectedValue(new Error('API 502'));
+    const wrapper = await mountSettings('owner', project, { billingEnabled: true });
+
+    await wrapper.get('#settings-billing-tab').trigger('click');
+    await flushPromises();
+
+    expect(wrapper.get('#settings-billing-panel').text()).toContain('Billing is temporarily unavailable');
+    wrapper.unmount();
+  });
+
+  it('starts an upgrade checkout and navigates to its URL', async () => {
+    vi.mocked(createBillingCheckout).mockResolvedValue({ url: 'https://pay.example.test/checkout' });
+    const assign = vi.fn();
+    const wrapper = await mountSettings('admin', project, {
+      billingEnabled: true,
+      navigate: assign,
+    });
+
+    await wrapper.get('#settings-billing-tab').trigger('click');
+    await flushPromises();
+    await wrapper.get('[data-billing-upgrade]').trigger('click');
+    await flushPromises();
+
+    expect(createBillingCheckout).toHaveBeenCalledOnce();
+    expect(assign).toHaveBeenCalledWith('https://pay.example.test/checkout');
+    wrapper.unmount();
+  });
+
+  it('hides upgrade on Pro and opens the customer billing portal', async () => {
+    vi.mocked(getBillingSummary).mockResolvedValue({ plan_id: 'pro', features: [] });
+    vi.mocked(openBillingPortal).mockResolvedValue({ url: 'https://portal.example.test/customer' });
+    const navigate = vi.fn();
+    const wrapper = await mountSettings('owner', project, {
+      billingEnabled: true,
+      navigate,
+    });
+
+    await wrapper.get('#settings-billing-tab').trigger('click');
+    await flushPromises();
+    expect(wrapper.find('[data-billing-upgrade]').exists()).toBe(false);
+    await wrapper.get('[data-billing-portal]').trigger('click');
+    await flushPromises();
+
+    expect(openBillingPortal).toHaveBeenCalledOnce();
+    expect(navigate).toHaveBeenCalledWith('https://portal.example.test/customer');
+    wrapper.unmount();
+  });
+});
 
 describe('project default environment setting', () => {
   beforeEach(() => {

@@ -44,6 +44,12 @@ systems use it for a branch name.
 | `DASHBOARD_ORIGIN` | no | Allowed dashboard origin for CORS **and** the OAuth redirect target. For the bundled Compose setup, set `http://localhost:8082`. This is separate from the worker's `DASHBOARD_URL`, which supplies links in pull requests and notifications. |
 | `DASHBOARD_URL` | no | Public or private HTTP(S) dashboard base URL used for notification links shown to users. Configure it explicitly; loopback URLs are rejected, and `DASHBOARD_ORIGIN` is not used as a fallback. This mirrors the worker variable of the same name. |
 | `USAGE_EVENTS_SLACK_WEBHOOK` | no | Slack incoming webhook for best-effort operator usage notifications. Unset disables them. Configure the same private-channel webhook on both server-side services. |
+| `AUTUMN_SECRET_KEY` | no | Autumn secret key. Billing is completely disabled when this is unset, empty, or whitespace-only. |
+| `AUTUMN_BASE_URL` | no (`https://api.useautumn.com`) | Autumn API base URL. Override only for testing or an Autumn-compatible deployment. |
+| `AUTUMN_PRO_PLAN_ID` | no (`pro`) | Autumn plan ID attached by the Pro checkout flow. |
+| `AUTUMN_FREE_PLAN_ID` | no (`free`) | Autumn plan ID automatically enabled when a customer is first created. |
+| `BILLING_SWEEP_INTERVAL_SECONDS` | no (300) | How often the server reports durable merged-PR outcomes to Autumn and checks operator-only session ceilings. Invalid values use the default. |
+| `BILLING_SESSION_ALERT_THRESHOLD` | no (5000) | Monthly session count above which the server emits one operator alert per organization. This alert is plan-unaware and does not enforce a limit. |
 | `GROUPING_DEBUG_ID_FRAMES` | no (`false`) | Uses valid SDK build identifiers to normalize temporary JavaScript stack-frame locations whose bundle URL changes between page loads. A build identifier is embedded in a built file and its source map so Opslane can match them. Only the literal `true` enables this setting, and the server reads it once at startup. Keep it consistent across server replicas. After source-map processing, Opslane groups each error into its final issue. |
 | `NOTIFY_UNSAFE_EXTRA_WEBHOOK_HOSTS` | no | **Development/test only.** Comma-separated exact `host[:port]` additions to the Slack webhook allowlist; added hosts may use HTTP. Never set this in production. |
 | `GITHUB_APP_ID` | for GitHub App | App ID |
@@ -93,6 +99,9 @@ The Opslane server reads **only** the `REPLAY_STORE_*` names; `MINIO_*` names ap
 | `GITHUB_APP_ID` / `GITHUB_APP_PRIVATE_KEY` | the other mode | GitHub App installation tokens |
 | `DASHBOARD_URL` | no | Public or private HTTP(S) dashboard base URL used for incident links in PR bodies and notifications. Configure it explicitly; loopback URLs are rejected, and the Opslane server's `DASHBOARD_ORIGIN` is not used as a fallback. |
 | `USAGE_EVENTS_SLACK_WEBHOOK` | no | Slack incoming webhook for best-effort operator usage notifications. Unset disables them. Messages can contain customer email addresses and error titles, so use a private channel. |
+| `AUTUMN_SECRET_KEY` | no | Autumn secret key. Worker quota checks are a complete no-op when this is unset, empty, or whitespace-only. |
+| `AUTUMN_BASE_URL` | no (`https://api.useautumn.com`) | Autumn API base URL used by worker quota checks. |
+| `AUTUMN_FREE_PLAN_ID` | no (`free`) | Autumn plan ID automatically enabled when the worker first touches an organization. |
 | `WORKER_ID` | no (generated) | Stable worker identity used when one worker takes temporary ownership of a job |
 | `POLL_INTERVAL_MS` | no (5000) | How long the worker waits when the queue is empty (it drains continuously while work exists). Accepted range 50-300000; out-of-range or non-integer values log a warning and fall back to the default |
 | `SHUTDOWN_GRACE_MS` | no (25000) | Maximum time to wait for the poll loop during shutdown. Must stay below the platform's container termination grace period, or the container is killed before the graceful path runs. Compose sets `stop_grace_period: 30s` on the worker for this reason; Docker's 10s default is *below* the 25s grace. Accepted range 1000-120000; out-of-range values log a warning and fall back to the default |

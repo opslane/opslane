@@ -12,6 +12,10 @@ import {
   deleteGitHubConfig,
   getGitHubAppStatus,
   getMe,
+  fetchAuthConfig,
+  getBillingSummary,
+  createBillingCheckout,
+  openBillingPortal,
   listAPIKeys,
   createAPIKey,
   revokeAPIKey,
@@ -21,6 +25,8 @@ import {
   type ProjectProvisioningResponse,
   type ManagedAPIKey,
   type CreatedAPIKey,
+  type BillingFeature,
+  type BillingSummary,
 } from '../api';
 import type { AuthMembership, GitHubConfig, GitHubAppStatus } from '../types/api';
 import { formatDate, safeUrl } from '../utils';
@@ -41,21 +47,33 @@ import {
   projectSwitchQuery,
 } from '../components/project-switcher';
 
-type SettingsTab = 'project' | 'environments' | 'api-keys' | 'integrations' | 'organization';
+const props = defineProps<{
+  /** Test seam for the browser navigation boundary. */
+  navigate?: (target: string) => void;
+}>();
+
+type SettingsTab = 'project' | 'environments' | 'api-keys' | 'integrations' | 'organization' | 'billing';
 const route = useRoute();
 const router = useRouter();
 const activeTab = ref<SettingsTab>('project');
 const activeRole = ref<AuthMembership['role']>();
+const authLoaded = ref(false);
+const billingEnabled = ref(false);
 const settingsTabs = computed(() => [
   { id: 'project', label: 'Project' },
   { id: 'environments', label: 'Environments' },
   ...(activeRole.value !== 'member' ? [{ id: 'api-keys', label: 'API Keys' }] : []),
   { id: 'integrations', label: 'Integrations' },
   ...(activeRole.value ? [{ id: 'organization', label: 'Organization' }] : []),
+  ...(authLoaded.value
+    && billingEnabled.value
+    && (!activeRole.value || activeRole.value === 'admin' || activeRole.value === 'owner')
+    ? [{ id: 'billing', label: 'Billing' }]
+    : []),
 ]);
 
 function selectSettingsTab(value: string): void {
-  if (['project', 'environments', 'api-keys', 'integrations', 'organization'].includes(value)) {
+  if (['project', 'environments', 'api-keys', 'integrations', 'organization', 'billing'].includes(value)) {
     switchTab(value as SettingsTab);
   }
 }
@@ -166,10 +184,90 @@ const connectingGithub = ref(false);
 const disconnectingGithub = ref(false);
 const githubError = ref('');
 
+// Organization billing
+const billingSummary = ref<BillingSummary | null>(null);
+const billingLoading = ref(false);
+const billingUnavailable = ref(false);
+const billingActionBusy = ref(false);
+const billingActionError = ref('');
+
+function billingFeatureLabel(featureID: string): string {
+  if (featureID === 'merged_prs') return 'Merged fix PRs';
+  if (featureID === 'investigations') return 'Investigations (fair use)';
+  return featureID;
+}
+
+function billingUsageWidth(feature: BillingFeature): number {
+  if (!feature.granted || feature.granted <= 0) return 0;
+  return Math.min(100, ((feature.usage ?? 0) / feature.granted) * 100);
+}
+
+async function loadBillingSummary(): Promise<void> {
+  billingLoading.value = true;
+  billingUnavailable.value = false;
+  billingSummary.value = null;
+  try {
+    billingSummary.value = await getBillingSummary();
+  } catch {
+    billingUnavailable.value = true;
+  } finally {
+    billingLoading.value = false;
+  }
+}
+
+function navigateToBillingURL(url: string): void {
+  const destination = safeUrl(url, { httpsOnly: true });
+  if (!destination) throw new Error('Billing provider returned an invalid URL');
+  if (props.navigate) {
+    props.navigate(destination);
+    return;
+  }
+  window.location.assign(destination);
+}
+
+async function handleBillingUpgrade(): Promise<void> {
+  billingActionBusy.value = true;
+  billingActionError.value = '';
+  try {
+    const result = await createBillingCheckout();
+    navigateToBillingURL(result.url);
+  } catch {
+    billingActionError.value = 'Unable to open billing checkout. Please try again.';
+  } finally {
+    billingActionBusy.value = false;
+  }
+}
+
+async function handleBillingPortal(): Promise<void> {
+  billingActionBusy.value = true;
+  billingActionError.value = '';
+  try {
+    const result = await openBillingPortal();
+    navigateToBillingURL(result.url);
+  } catch {
+    billingActionError.value = 'Unable to open the billing portal. Please try again.';
+  } finally {
+    billingActionBusy.value = false;
+  }
+}
+
 onMounted(async () => {
-  getMe().then((user) => {
-    activeRole.value = user.active_role;
-  }).catch(() => {});
+  await Promise.all([
+    getMe().then((user) => {
+      activeRole.value = user.active_role;
+    }).catch(() => {}),
+    fetchAuthConfig().then((config) => {
+      billingEnabled.value = config.billing_enabled === true;
+    }).catch(() => {}),
+  ]);
+  authLoaded.value = true;
+  const requestedTab = route.query.tab;
+  if (
+    typeof requestedTab === 'string'
+    && settingsTabs.value.some((tab) => tab.id === requestedTab)
+  ) {
+    selectSettingsTab(requestedTab);
+  }
   try {
     projects.value = await listProjects();
     // Load GitHub App status + per-project config
@@ -417,6 +515,9 @@ function switchTab(tab: SettingsTab): void {
   }
   if (tab === 'api-keys' && pid && canProvision.value) {
     void loadManagedAPIKeys();
+  }
+  if (tab === 'billing') {
+    void loadBillingSummary();
   }
 }
 
@@ -1008,6 +1109,61 @@ async function handleDisconnectGithub(): Promise<void> {
 
     <div v-if="activeTab === 'organization'" id="settings-organization-panel" role="tabpanel" aria-labelledby="settings-organization-tab" tabindex="0">
       <InvitationsPanel :active-role="activeRole" />
+    </div>
+
+    <div v-if="activeTab === 'billing'" id="settings-billing-panel" role="tabpanel" aria-labelledby="settings-billing-tab" tabindex="0" class="space-y-6">
+      <p v-if="billingLoading" class="text-sm text-muted">Loading billing...</p>
+      <p v-else-if="billingUnavailable" role="alert" class="rounded-lg border border-warning/30 bg-warning/10 p-4 text-sm text-warning">
+        Billing is temporarily unavailable. Please try again later.
+      </p>
+      <template v-if="billingSummary">
+        <div>
+          <div class="text-xs font-medium uppercase tracking-wide text-muted">Current plan</div>
+          <h3 class="mt-1 text-xl font-semibold text-text">
+            {{ billingSummary.plan_id === 'pro' ? 'Pro' : 'Free' }}
+          </h3>
+        </div>
+
+        <ul class="space-y-4">
+          <li v-for="feature in billingSummary.features" :key="feature.feature_id" class="rounded-lg border border-border bg-surface p-4">
+            <div class="flex items-center justify-between gap-4 text-sm">
+              <span class="font-medium text-text">{{ billingFeatureLabel(feature.feature_id) }}</span>
+              <span class="text-muted">
+                {{ feature.unlimited ? 'Unlimited' : `${feature.usage ?? 0} of ${feature.granted ?? 0} used` }}
+              </span>
+            </div>
+            <div v-if="!feature.unlimited" class="mt-3 h-2 overflow-hidden rounded-full bg-surface-subtle" role="progressbar" :aria-valuenow="feature.usage ?? 0" aria-valuemin="0" :aria-valuemax="feature.granted ?? 0">
+              <div
+                :data-billing-usage="feature.feature_id"
+                class="h-full rounded-full bg-accent"
+                :style="{ width: `${billingUsageWidth(feature)}%` }"
+              ></div>
+            </div>
+          </li>
+        </ul>
+
+        <div class="flex flex-wrap items-center gap-3">
+          <Button
+            v-if="billingSummary.plan_id !== 'pro'"
+            data-billing-upgrade
+            variant="primary"
+            :busy="billingActionBusy"
+            @click="handleBillingUpgrade"
+          >
+            Upgrade to Pro
+          </Button>
+          <button
+            type="button"
+            data-billing-portal
+            class="min-h-10 text-sm font-medium text-accent underline underline-offset-4 hover:text-accent-hover disabled:opacity-50"
+            :disabled="billingActionBusy"
+            @click="handleBillingPortal"
+          >
+            Manage billing
+          </button>
+        </div>
+        <p v-if="billingActionError" role="alert" class="text-sm text-danger" v-text="billingActionError"></p>
+      </template>
     </div>
 
     <div v-if="activeTab === 'integrations'" id="settings-integrations-panel" role="tabpanel" aria-labelledby="settings-integrations-tab" tabindex="0">

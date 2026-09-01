@@ -25,6 +25,7 @@ export interface AuthConfig {
   supports_signup: boolean;
   supports_reset: boolean;
   social_providers: SocialProviderId[];
+  billing_enabled?: boolean;
 }
 
 export type PasswordAuthResult =

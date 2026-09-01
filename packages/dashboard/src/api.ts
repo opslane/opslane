@@ -169,6 +169,22 @@ export interface FixStats {
   prs_closed_auto: number;
 }
 
+export interface BillingFeature {
+  feature_id: string;
+  allowed: boolean;
+  granted?: number;
+  usage?: number;
+  remaining?: number;
+  unlimited?: boolean;
+  overage_allowed?: boolean;
+  next_reset_at?: number;
+}
+
+export interface BillingSummary {
+  plan_id?: string;
+  features: BillingFeature[];
+}
+
 export interface Environment {
   id: string;
   project_id: string;
@@ -220,6 +236,18 @@ export interface ReplayRecording {
 
 export function getMe(): Promise<AuthUser> {
   return fetchJSON<AuthUser>('/auth/me');
+}
+
+export function getBillingSummary(): Promise<BillingSummary> {
+  return fetchJSON<BillingSummary>('/billing/summary');
+}
+
+export function createBillingCheckout(): Promise<{ url: string }> {
+  return postJSON<{ url: string }>('/billing/checkout', {});
+}
+
+export function openBillingPortal(): Promise<{ url: string }> {
+  return postJSON<{ url: string }>('/billing/portal', {});
 }
 
 const AUTH_NETWORK_ERROR = 'Unable to reach the server. Please try again.';
