@@ -56,7 +56,12 @@ type Candidate struct {
 	// frozen before this field existed keep their meaning. The writer defers
 	// these mechanically, so a never-eligible incident costs no model call and
 	// still renders its receipt.
-	NotCardEligible bool `json:"notCardEligible,omitempty"`
+	NotCardEligible  bool   `json:"notCardEligible,omitempty"`
+	FrictionCategory string `json:"frictionCategory,omitempty"`
+	Route            string `json:"route,omitempty"`
+	SessionCount     int    `json:"sessionCount,omitempty"`
+	IdentifiedCount  int    `json:"identifiedCount,omitempty"`
+	ObservationQuote string `json:"observationQuote,omitempty"`
 }
 
 // FreezeCandidates selects publishable work and stores the exact facts before

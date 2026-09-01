@@ -101,22 +101,27 @@ type DigestPayload struct {
 // GeneratedDigestCard is model-authored prose grounded in a frozen candidate.
 // Its IDs, counts, accounts and links have all been mechanically validated.
 type GeneratedDigestCard struct {
-	EpisodeID       string     `json:"episode_id"`
-	IncidentID      string     `json:"incident_id"`
-	Kind            string     `json:"kind,omitempty"`
-	Title           string     `json:"title"`
-	Label           string     `json:"label"`
-	Outcome         string     `json:"outcome,omitempty"`
-	Copy            string     `json:"copy"`
-	Action          string     `json:"action"`
-	AffectedUsers   int        `json:"affected_users"`
-	OccurrenceCount int        `json:"occurrence_count,omitempty"`
-	SignalCount     int64      `json:"signal_count,omitempty"`
-	Accounts        []string   `json:"accounts"`
-	PRURL           string     `json:"pr_url,omitempty"`
-	ReplayURL       string     `json:"replay_url,omitempty"`
-	PRNumber        int        `json:"pr_number,omitempty"`
-	ActionableSince *time.Time `json:"actionable_since,omitempty"`
+	EpisodeID        string     `json:"episode_id"`
+	IncidentID       string     `json:"incident_id"`
+	Kind             string     `json:"kind,omitempty"`
+	Title            string     `json:"title"`
+	Label            string     `json:"label"`
+	Outcome          string     `json:"outcome,omitempty"`
+	Copy             string     `json:"copy"`
+	Action           string     `json:"action"`
+	AffectedUsers    int        `json:"affected_users"`
+	OccurrenceCount  int        `json:"occurrence_count,omitempty"`
+	SignalCount      int64      `json:"signal_count,omitempty"`
+	Accounts         []string   `json:"accounts"`
+	PRURL            string     `json:"pr_url,omitempty"`
+	ReplayURL        string     `json:"replay_url,omitempty"`
+	PRNumber         int        `json:"pr_number,omitempty"`
+	ActionableSince  *time.Time `json:"actionable_since,omitempty"`
+	FrictionCategory string     `json:"friction_category,omitempty"`
+	Route            string     `json:"route,omitempty"`
+	SessionCount     int        `json:"session_count,omitempty"`
+	IdentifiedCount  int        `json:"identified_count,omitempty"`
+	ObservationQuote string     `json:"observation_quote,omitempty"`
 }
 
 // DigestTriageCounts are point-in-time counts rendered in the digest header.

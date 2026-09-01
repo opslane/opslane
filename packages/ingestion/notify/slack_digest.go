@@ -142,10 +142,19 @@ func formatSlackDigestV4(payload EventPayload) ([]byte, string, error) {
 		blocks = append(blocks, digestSectionBlock("Nothing needs your attention today."))
 	}
 	position := 0
-	if len(renderedDecisions) > 0 || len(renderedReceipts) > 0 {
+	regularDecisions := make([]GeneratedDigestCard, 0, len(renderedDecisions))
+	intelligence := make([]GeneratedDigestCard, 0, len(renderedDecisions))
+	for _, card := range renderedDecisions {
+		if card.ObservationQuote != "" {
+			intelligence = append(intelligence, card)
+		} else {
+			regularDecisions = append(regularDecisions, card)
+		}
+	}
+	if len(regularDecisions) > 0 || len(renderedReceipts) > 0 {
 		blocks = append(blocks, digestSectionBlock("⚠️ *Needs a decision*"))
 		needDivider := false
-		for _, card := range renderedDecisions {
+		for _, card := range regularDecisions {
 			if needDivider {
 				blocks = append(blocks, map[string]any{"type": "divider"})
 			}
@@ -159,6 +168,16 @@ func formatSlackDigestV4(payload EventPayload) ([]byte, string, error) {
 			}
 			blocks = append(blocks, digestReceiptCardBlocks(payload, receipt.item, receipt.line)...)
 			needDivider = true
+		}
+	}
+	if len(intelligence) > 0 {
+		blocks = append(blocks, digestSectionBlock("🧭 *Session intelligence*"))
+		for index, card := range intelligence {
+			blocks = append(blocks, digestV4CardBlocks(payload, card, position, "Needs you")...)
+			position++
+			if index < len(intelligence)-1 {
+				blocks = append(blocks, map[string]any{"type": "divider"})
+			}
 		}
 	}
 	if !digest.UnifiedCards && digest.ReceiptOverflow > 0 {
@@ -229,7 +248,16 @@ func digestV4CardBlocks(payload EventPayload, card GeneratedDigestCard, position
 	// zero-user problem without a count, and "👥 0 users" would contradict the
 	// card's own copy (v3 hid the count the same way).
 	contextParts := make([]string, 0, 4)
-	if card.AffectedUsers > 0 {
+	if card.ObservationQuote != "" {
+		if card.Route != "" {
+			contextParts = append(contextParts, cleanProse(card.Route, digestPageMax))
+		}
+		sessionNoun := "sessions"
+		if card.SessionCount == 1 {
+			sessionNoun = "session"
+		}
+		contextParts = append(contextParts, fmt.Sprintf("%d %s (%d identified)", card.SessionCount, sessionNoun, card.IdentifiedCount))
+	} else if card.AffectedUsers > 0 {
 		noun := "users"
 		if card.AffectedUsers == 1 {
 			noun = "user"
@@ -243,7 +271,7 @@ func digestV4CardBlocks(payload EventPayload, card GeneratedDigestCard, position
 		}
 		contextParts = append(contextParts, accounts)
 	}
-	if card.Kind == "friction" {
+	if card.Kind == "friction" && card.ObservationQuote == "" {
 		noun := "friction signals"
 		if card.SignalCount == 1 {
 			noun = "friction signal"

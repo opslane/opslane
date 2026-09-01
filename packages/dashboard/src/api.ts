@@ -2,7 +2,7 @@ import type {
   Incident, AffectedUser, Account, IncidentFilters,
   SampleEvent,
   GitHubConfig, GitHubAppStatus, GitHubRepo,
-  SessionDetail, SessionFilters, SessionListResponse,
+  SessionDetail, SessionFilters, SessionListResponse, SessionNarrative,
   AdminOverview, AdminJobsResponse, HealthResponse,
   AuthConfig, AuthUser, ForgotPasswordResult, OrgInvitation,
 	NotificationDestination, NotificationDestinationList, NotificationEventType, NotificationTestResult,
@@ -653,6 +653,10 @@ export function listSessions(
 
 export function getSession(projectId: string, sessionId: string): Promise<SessionDetail> {
   return fetchJSON<SessionDetail>(`/projects/${projectId}/sessions/${sessionId}`);
+}
+
+export function getSessionNarrative(projectId: string, sessionId: string): Promise<SessionNarrative> {
+  return fetchJSON<SessionNarrative>(`/projects/${projectId}/sessions/${sessionId}/narrative`);
 }
 
 export function getSessionChunk(
