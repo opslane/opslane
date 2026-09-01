@@ -340,6 +340,13 @@
     },
     {
       "method": "GET",
+      "path": "/api/v1/projects/{projectId}/sessions/{sessionId}/narrative",
+      "source": "api.ts:getSessionNarrative",
+      "pollIntervalMs": null,
+      "redirect": "/login on failed refresh"
+    },
+    {
+      "method": "GET",
       "path": "/api/v1/projects/{projectId}/sessions/{sessionId}/chunks/{seq}",
       "source": "api.ts:getSessionChunk",
       "pollIntervalMs": 5000,
