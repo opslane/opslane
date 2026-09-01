@@ -33,10 +33,23 @@ describe('anchorIdentity', () => {
       .not.toBe(anchorIdentity('div.toolbar > button._a1'));
   });
 
-  it('uses no leaf suffix when the semantic segment is the leaf', () => {
-    expect(anchorIdentity('#main > div._nd5l1gzg._1reo1wug > div.ac-content')).toBe('cls:.ac-content');
+  it('always carries the leaf tag so sibling controls stay apart', () => {
+    expect(anchorIdentity('#main > div._nd5l1gzg._1reo1wug > div.ac-content')).toBe('cls:.ac-content>div');
     expect(anchorIdentity('div.avatar-item-container.no-hover-styles > span'))
       .toBe('cls:.avatar-item-container.no-hover-styles>span');
+    // review finding: an id on an ancestor must not swallow distinct children
+    expect(anchorIdentity('div#content > button.save')).toBe('id:#content>button');
+    expect(anchorIdentity('div#content > button.save'))
+      .not.toBe(anchorIdentity('div#content > a.cancel'));
+    // and a bare leaf class must not merge across tags
+    expect(anchorIdentity('button.save')).not.toBe(anchorIdentity('a.save'));
+  });
+
+  it('treats CSS-modules and hashed-suffix classes as compiled', () => {
+    expect(anchorIdentity('div.field-container > input._button_x7f2b_1'))
+      .toBe('cls:.field-container>input');
+    expect(anchorIdentity('div.field-container > input.styles_button__2Xq9k'))
+      .toBe('cls:.field-container>input');
   });
 
   it('prefers a semantic id over classes and accepts short digit runs', () => {
