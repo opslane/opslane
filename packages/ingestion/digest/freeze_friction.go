@@ -94,7 +94,12 @@ func selectOnCardCandidates(all []actionableCandidate, at time.Time) ([]Candidat
 		}
 		candidate.Fingerprint = candidateFingerprint(candidate, digestPromptVersion, digestValidatorVersion)
 		candidates = append(candidates, candidate)
-		floors = append(floors, time.Time{})
+		// Bound the replay lookup by the current actionable spell, exactly as
+		// validation's receipt enrichment does: an unbounded floor sorts the
+		// group's whole event history inside the freeze transaction, and a
+		// recording from an earlier spell is stale anyway. ActionableSince is
+		// non-nil for every selected candidate — the nil case was excluded above.
+		floors = append(floors, *source.ActionableSince)
 	}
 	return candidates, floors, excluded
 }
@@ -143,6 +148,22 @@ func writeUnifiedFreezeLedger(
 	}
 	sorted := append([]actionableCandidate(nil), all...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].GroupID < sorted[j].GroupID })
+	if len(sorted) == 0 {
+		return nil
+	}
+	// One batched statement, mirroring writeActionableLedger: the freeze ledger
+	// covers every considered incident, not just the capped selection, so a
+	// per-row Exec loop would cost one serial round trip per standing actionable
+	// incident inside the transaction that must commit for the freeze to exist.
+	count := len(sorted)
+	groupIDs := make([]string, 0, count)
+	outcomes := make([]string, 0, count)
+	reasons := make([]string, 0, count)
+	detailsList := make([]string, 0, count)
+	fingerprints := make([]string, 0, count)
+	spells := make([]*time.Time, 0, count)
+	cacheHits := make([]*bool, 0, count)
+	renderModes := make([]*string, 0, count)
 	for _, source := range sorted {
 		candidate, included := selectedByID[source.GroupID]
 		outcome, reason := "excluded", excluded[source.GroupID]
@@ -176,18 +197,30 @@ func writeUnifiedFreezeLedger(
 			hit := candidate.CachedCard != nil
 			cacheHit = &hit
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO digest_run_candidate_evaluations
-			(digest_run_id,error_group_id,outcome,primary_reason_code,details,
-			 input_fingerprint,spell_started_at,cache_hit,phase,render_mode)
-			VALUES ($1,$2,$3,$4,$5::jsonb,NULLIF($6,''),$7,$8,'freeze',$9)
-			ON CONFLICT (digest_run_id,error_group_id) DO UPDATE SET
-			 outcome=EXCLUDED.outcome,primary_reason_code=EXCLUDED.primary_reason_code,
-			 details=EXCLUDED.details,input_fingerprint=EXCLUDED.input_fingerprint,
-			 spell_started_at=EXCLUDED.spell_started_at,cache_hit=EXCLUDED.cache_hit,
-			 phase='freeze',render_mode=EXCLUDED.render_mode`,
-			runID, source.GroupID, outcome, reason, details, fingerprint, spell, cacheHit, renderMode); err != nil {
-			return fmt.Errorf("write unified freeze ledger for %s: %w", source.GroupID, err)
-		}
+		groupIDs = append(groupIDs, source.GroupID)
+		outcomes = append(outcomes, outcome)
+		reasons = append(reasons, reason)
+		detailsList = append(detailsList, string(details))
+		fingerprints = append(fingerprints, fingerprint)
+		spells = append(spells, spell)
+		cacheHits = append(cacheHits, cacheHit)
+		renderModes = append(renderModes, renderMode)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO digest_run_candidate_evaluations
+		(digest_run_id,error_group_id,outcome,primary_reason_code,details,
+		 input_fingerprint,spell_started_at,cache_hit,phase,render_mode)
+		SELECT $1,ids.value::uuid,($3::text[])[ids.ordinality],
+		       ($4::text[])[ids.ordinality],(($5::text[])[ids.ordinality])::jsonb,
+		       NULLIF(($6::text[])[ids.ordinality],''),($7::timestamptz[])[ids.ordinality],
+		       ($8::boolean[])[ids.ordinality],'freeze',($9::text[])[ids.ordinality]
+		  FROM unnest($2::text[]) WITH ORDINALITY AS ids(value,ordinality)
+		ON CONFLICT (digest_run_id,error_group_id) DO UPDATE SET
+		 outcome=EXCLUDED.outcome,primary_reason_code=EXCLUDED.primary_reason_code,
+		 details=EXCLUDED.details,input_fingerprint=EXCLUDED.input_fingerprint,
+		 spell_started_at=EXCLUDED.spell_started_at,cache_hit=EXCLUDED.cache_hit,
+		 phase='freeze',render_mode=EXCLUDED.render_mode`,
+		runID, groupIDs, outcomes, reasons, detailsList, fingerprints, spells, cacheHits, renderModes); err != nil {
+		return fmt.Errorf("write unified freeze ledger: %w", err)
 	}
 	return nil
 }

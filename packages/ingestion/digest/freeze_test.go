@@ -127,7 +127,6 @@ func TestFreezeCapturesOccurrenceAndReplayFacts(t *testing.T) {
 	}
 }
 
-
 func TestFreezeOnIncludesFrictionAndReusesValidatedCopy(t *testing.T) {
 	pool := testPool(t)
 	ctx := context.Background()
@@ -368,10 +367,8 @@ func TestFreezeIsIdempotentPerWindowAndPreservesSnapshot(t *testing.T) {
 	}
 }
 
-
-// TestFreezeOnKeepsOneCandidatePerGroup is the ON half of OFF's per-episode
-// rule: the card lane is keyed by incident, so extra episodes on one group add
-// no candidates.
+// TestFreezeOnKeepsOneCandidatePerGroup: the card lane is keyed per incident,
+// so extra episodes on one group add no candidates.
 func TestFreezeOnKeepsOneCandidatePerGroup(t *testing.T) {
 	pool := testPool(t)
 	ctx := context.Background()
@@ -462,5 +459,60 @@ func TestFreezeAdmitsDiagnosedFrictionIncident(t *testing.T) {
 	}
 	if candidate.RootCause == "" {
 		t.Fatalf("the diagnosis did not reach the card: %+v", candidate)
+	}
+}
+
+// TestFreezeHardFailsWhenLedgerUnavailable pins the blast radius this branch
+// accepted on purpose: the unified freeze ledger is the run's accounting
+// record, so a ledger failure aborts the whole freeze atomically — no run row,
+// no partial snapshots — and the next tick retries from scratch. The failure is
+// induced by renaming the ledger table for the duration of the call.
+func TestFreezeHardFailsWhenLedgerUnavailable(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	f := seedDigestFixture(t, pool, now)
+	cleanupActionableDiagnoses(t, pool, f.ProjectID)
+	groupID, _ := seedActionableGroup(t, pool, f.ProjectID, f.EnvID, "error", "needs_human", now.Add(-2*time.Hour))
+	quietBackgroundActionable(t, pool, f.ProjectID, groupID)
+
+	if _, err := pool.Exec(ctx, `ALTER TABLE digest_run_candidate_evaluations RENAME TO drce_freeze_hard_fail`); err != nil {
+		t.Fatal(err)
+	}
+	restored := false
+	restore := func() {
+		if restored {
+			return
+		}
+		restored = true
+		if _, err := pool.Exec(ctx, `ALTER TABLE drce_freeze_hard_fail RENAME TO digest_run_candidate_evaluations`); err != nil {
+			t.Fatalf("restore ledger table: %v", err)
+		}
+	}
+	defer restore()
+
+	if _, _, err := FreezeCandidates(ctx, pool, f.ProjectID, now); err == nil {
+		t.Fatal("a freeze without its ledger must fail, not degrade")
+	}
+	var runs int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM digest_runs WHERE project_id=$1`, f.ProjectID).Scan(&runs); err != nil {
+		t.Fatal(err)
+	}
+	if runs != 0 {
+		t.Fatalf("failed freeze left %d run rows; the abort must be atomic", runs)
+	}
+	restore()
+
+	runID, candidates, err := FreezeCandidates(ctx, pool, f.ProjectID, now)
+	if err != nil || len(candidates) != 1 {
+		t.Fatalf("retry after restore: candidates=%d err=%v", len(candidates), err)
+	}
+	var ledgerRows int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM digest_run_candidate_evaluations
+		WHERE digest_run_id=$1`, runID).Scan(&ledgerRows); err != nil {
+		t.Fatal(err)
+	}
+	if ledgerRows == 0 {
+		t.Fatal("the retried freeze wrote no ledger rows")
 	}
 }
