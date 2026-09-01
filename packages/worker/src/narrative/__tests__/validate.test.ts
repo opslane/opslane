@@ -27,6 +27,21 @@ const output = (overrides: Record<string, unknown> = {}): string => JSON.stringi
 });
 
 describe('validateNarrative', () => {
+  it('strips idle-marker citations and drops idle-only observations', () => {
+    const withIdle: RenderedTimeline = {
+      ...timeline,
+      lines: timeline.lines.map((line, index) => index === 5 ? { ...line, kind: 'idle' as const } : line),
+    };
+    const stripped = validateNarrative(output(), withIdle);
+    if (!stripped.ok) throw new Error(stripped.reason);
+    expect(stripped.narrative.observations[0]!.evidenceLines).toEqual(['L5']);
+    const idleOnly = validateNarrative(output({ observations: [{
+      category: 'dead_end_state', what: 'User gave up.', evidence_lines: ['L6'], severity: 'medium',
+    }] }), withIdle);
+    if (!idleOnly.ok) throw new Error(idleOnly.reason);
+    expect(idleOnly.narrative.observations).toHaveLength(0);
+  });
+
   it('accepts valid output and assigns stable ids', () => {
     const result = validateNarrative(output(), timeline);
     if (!result.ok) throw new Error(result.reason);
