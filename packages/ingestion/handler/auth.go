@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/opslane/opslane/packages/ingestion/auth"
+	"github.com/opslane/opslane/packages/ingestion/billing"
 	"github.com/opslane/opslane/packages/ingestion/db"
 	minioPkg "github.com/opslane/opslane/packages/ingestion/minio"
 	"github.com/opslane/opslane/packages/ingestion/notify"
@@ -69,6 +70,7 @@ func AllowedOriginsFromCtx(ctx context.Context) []string {
 // Dependencies holds shared service dependencies (DB, etc.) for handlers.
 type Dependencies struct {
 	Queries *db.Queries
+	Billing *billing.Client
 	// resetSessionStore is a narrow test seam for password-reset session
 	// revocation. Production falls back to Queries.
 	resetSessionStore passwordResetSessionStore

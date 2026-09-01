@@ -106,7 +106,7 @@ func TestEmbeddedAuthConfigNegotiatesCapabilities(t *testing.T) {
 		if recorder.Header().Get("Cache-Control") != "no-store" {
 			t.Fatalf("Cache-Control=%q", recorder.Header().Get("Cache-Control"))
 		}
-		for _, fragment := range []string{`"provider":"workos"`, `"supports_password":true`, `"supports_signup":true`, `"supports_reset":true`} {
+		for _, fragment := range []string{`"provider":"workos"`, `"supports_password":true`, `"supports_signup":true`, `"supports_reset":true`, `"billing_enabled":false`} {
 			if !strings.Contains(recorder.Body.String(), fragment) {
 				t.Fatalf("body missing %s: %s", fragment, recorder.Body.String())
 			}
@@ -116,7 +116,7 @@ func TestEmbeddedAuthConfigNegotiatesCapabilities(t *testing.T) {
 	t.Run("default github", func(t *testing.T) {
 		recorder := httptest.NewRecorder()
 		(&Dependencies{}).AuthConfig(recorder, embeddedRequest(http.MethodGet, "/auth/config", ""))
-		for _, fragment := range []string{`"provider":"github"`, `"supports_password":false`, `"supports_signup":false`, `"supports_reset":false`} {
+		for _, fragment := range []string{`"provider":"github"`, `"supports_password":false`, `"supports_signup":false`, `"supports_reset":false`, `"billing_enabled":false`} {
 			if !strings.Contains(recorder.Body.String(), fragment) {
 				t.Fatalf("body missing %s: %s", fragment, recorder.Body.String())
 			}

@@ -2539,10 +2539,10 @@ func (q *Queries) ProcessPRWebhook(ctx context.Context, githubRepo string, prNum
 	}
 	ct, err := tx.Exec(ctx,
 		`INSERT INTO pr_outcomes
-		   (error_group_id, project_id, pr_number, outcome, github_delivery_id, fix_job_id, occurred_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7)
+		   (error_group_id, project_id, pr_number, outcome, github_delivery_id, fix_job_id, occurred_at, github_repo)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		 ON CONFLICT (github_delivery_id) DO NOTHING`,
-		groupID, projectID, prNumber, outcome, deliveryID, fixJobID, occurredAt,
+		groupID, projectID, prNumber, outcome, deliveryID, fixJobID, occurredAt, githubRepo,
 	)
 	if err != nil {
 		return PRWebhookResult{}, fmt.Errorf("insert PR outcome: %w", err)
@@ -2679,10 +2679,10 @@ func recoverReopenedMerge(ctx context.Context, tx pgx.Tx, githubRepo string, prN
 
 	ct, err := tx.Exec(ctx,
 		`INSERT INTO pr_outcomes
-		   (error_group_id, project_id, pr_number, outcome, github_delivery_id, fix_job_id, occurred_at)
-		 VALUES ($1, $2, $3, 'merged', $4, $5, $6)
+		   (error_group_id, project_id, pr_number, outcome, github_delivery_id, fix_job_id, occurred_at, github_repo)
+		 VALUES ($1, $2, $3, 'merged', $4, $5, $6, $7)
 		 ON CONFLICT (github_delivery_id) DO NOTHING`,
-		groupID, projectID, prNumber, deliveryID, fixJobID, occurredAt,
+		groupID, projectID, prNumber, deliveryID, fixJobID, occurredAt, githubRepo,
 	)
 	if err != nil {
 		return PRWebhookResult{}, fmt.Errorf("insert recovered PR outcome: %w", err)
