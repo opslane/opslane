@@ -38,8 +38,19 @@ export function canonicalizeSelector(selector: string | null): string {
 /** App-shell mount points appear in almost every SDK selector; anchoring on
  * them merges unrelated controls. */
 const APP_SHELL_IDS = new Set(['#root', '#main', '#app', '#__next']);
-/** Compiled atomic CSS changes per build and carries no element identity. */
-const COMPILED_CLASS = /^\._[a-z0-9]+$/i;
+/** Build-generated class shapes carry no stable element identity: compiled
+ * atomic CSS (`_1e0c1txw`), CSS-modules default idents (`_button_x7f2b_1`),
+ * and webpack-style hashed suffixes (`styles_button__2Xq9k`). The SDK's own
+ * isDynamicClass filter (sdk selector.ts) strips a different, overlapping set
+ * at capture time; these patterns cover what still reaches the worker. */
+const COMPILED_CLASS_PATTERNS = [
+  /^\._[a-z0-9]+$/i,
+  /^\._?[\w-]*_[a-z0-9]{4,}_\d+$/i,
+  /__[A-Za-z0-9]{5,}$/,
+];
+function isCompiledClass(token: string): boolean {
+  return COMPILED_CLASS_PATTERNS.some((pattern) => pattern.test(token));
+}
 /** Ids minted per mount or per row are unstable. Short digit runs stay so
  * authored ids such as #step-12 remain useful. */
 const GENERATED_ID = /^#react-select|\d{4,}/;
@@ -57,7 +68,7 @@ function segmentTokens(segment: string): string[] {
 function semanticClasses(segment: string): string[] {
   return segmentTokens(segment).filter(
     (token) => token.startsWith('.')
-      && !COMPILED_CLASS.test(token)
+      && !isCompiledClass(token)
       && !STATE_CLASSES.has(token.toLowerCase())
       && !/\d{4,}/.test(token),
   );
@@ -81,19 +92,22 @@ export function anchorIdentity(selector: string | null): string {
     .map((part) => part.trim())
     .filter(Boolean);
   if (segments.length === 0) return '';
-  for (let i = segments.length - 1; i >= 0; i--) {
+  const leafIndex = segments.length - 1;
+  const leafTag = tagOf(segments[leafIndex]!);
+  // The leaf tag rides along whenever the identity token sits on an ancestor
+  // (or is a bare class), so sibling controls under one container id or one
+  // wrapper class do not collapse into a single fingerprint.
+  for (let i = leafIndex; i >= 0; i--) {
     for (const token of segmentTokens(segments[i]!)) {
       if (!token.startsWith('#')) continue;
       if (APP_SHELL_IDS.has(token.toLowerCase()) || GENERATED_ID.test(token)) continue;
-      return `id:${token}`;
+      return i === leafIndex ? `id:${token}` : `id:${token}>${leafTag}`;
     }
   }
-  const leafIndex = segments.length - 1;
   for (let i = leafIndex; i >= 0; i--) {
     const classes = semanticClasses(segments[i]!);
     if (classes.length > 0) {
-      const base = `cls:${[...classes].sort().join('')}`;
-      return i === leafIndex ? base : `${base}>${tagOf(segments[leafIndex]!)}`;
+      return `cls:${[...classes].sort().join('')}>${leafTag}`;
     }
   }
   return `skel:${segments.slice(-3).map(tagOf).join('>')}`;

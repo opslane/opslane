@@ -117,6 +117,11 @@ export function renderTimeline(
   const openRequests = new Map<string, { method: string; url: string; at: number }>();
   const inputCounts = new Map<number, { count: number; first: number }>();
   const userActivityMs: number[] = [];
+  // A malformed or foreign chunk can carry a non-numeric timestamp; NaN would
+  // slip past the gap-size comparison and fabricate an idle marker.
+  const recordActivity = (ts: number): void => {
+    if (Number.isFinite(ts)) userActivityMs.push(ts);
+  };
   let scrollCount = 0;
   let lastScrollFlush = 0;
   const flushInputs = (): void => {
@@ -159,7 +164,7 @@ export function renderTimeline(
       const kind = item['kind'];
       const at = Number(item['at']);
       if (kind === 'click') {
-        userActivityMs.push(at);
+        recordActivity(at);
         flushInputs();
         const selector = typeof item['selector'] === 'string' ? item['selector'] : '';
         push(`${relative(at)} CLICK ${selector}${item['cursor'] ? ` [cursor:${String(item['cursor'])}]` : ''}`, selector, at);
@@ -181,7 +186,7 @@ export function renderTimeline(
           }
         }
       } else if (kind === 'form_submit') {
-        userActivityMs.push(at);
+        recordActivity(at);
         flushInputs();
         const selector = typeof item['selector'] === 'string' ? item['selector'] : '';
         push(`${relative(at)} FORM SUBMIT ${selector}`, selector, at);
@@ -240,15 +245,15 @@ export function renderTimeline(
         push(`${relative(timestamp)} UI TEXT APPEARED: "${sanitize(significant).slice(0, 160)}"`, null, timestamp);
       }
     } else if (source === 2 && data['type'] === 2 && typeof data['id'] === 'number') {
-      userActivityMs.push(timestamp);
+      recordActivity(timestamp);
       push(`${relative(timestamp)}   -> target: ${label(data['id'])}`, null, timestamp);
     } else if (source === 5 && typeof data['id'] === 'number') {
-      userActivityMs.push(timestamp);
+      recordActivity(timestamp);
       const aggregate = inputCounts.get(data['id']) ?? { count: 0, first: timestamp };
       aggregate.count += 1;
       inputCounts.set(data['id'], aggregate);
     } else if (source === 3) {
-      userActivityMs.push(timestamp);
+      recordActivity(timestamp);
       scrollCount += 1;
       if (timestamp - lastScrollFlush > 5_000 && scrollCount > 3) {
         push(`${relative(timestamp)} (scrolling, ${scrollCount} scroll events)`, null, timestamp);
@@ -268,6 +273,11 @@ export function renderTimeline(
       if (gapEnd - gapStart <= IDLE_THRESHOLD_MS) continue;
       const successor = out.findIndex((line) => line.atMs !== null && line.atMs >= gapEnd);
       if (successor === -1) continue;
+      // Only assert absence when the line after the marker is the activity
+      // that ended the gap. Attaching the marker to an arbitrarily later line
+      // would tell the model the user was away across a span in which they
+      // were active but rendered nothing (a lone keystroke, a small scroll).
+      if (out[successor]!.atMs! - gapEnd > 1_000) continue;
       const gapSeconds = Math.round((gapEnd - gapStart) / 1_000);
       const minutes = Math.floor(gapSeconds / 60);
       const seconds = gapSeconds % 60;
@@ -282,11 +292,15 @@ export function renderTimeline(
     return out;
   };
 
-  let output = withIdleMarkers(lines);
+  // Markers are inserted after the line-count cut so they never displace real
+  // trailing evidence; long gap-riddled sessions are exactly where late-session
+  // abandonment lines live. A marker whose successor was cut simply drops.
+  let output = lines;
   if (output.length > options.maxLines) {
     output = output.slice(0, options.maxLines);
     truncated = true;
   }
+  output = withIdleMarkers(output);
   while (output.length > 0 && output[output.length - 1]!.kind === 'idle') {
     output = output.slice(0, -1);
   }

@@ -141,3 +141,42 @@ describe('idle markers', () => {
     expect(rendered.lines[rendered.lines.length - 1]?.kind).not.toBe('idle');
   });
 });
+
+describe('idle marker hardening', () => {
+  it('does not fabricate a marker from a non-numeric click timestamp', () => {
+    const badClick = { type: 5, timestamp: t0 + 2_000, data: { tag: 'opslane.telemetry',
+      payload: { kind: 'click', clickId: 'cx', selector: 'button.save-btn', cursor: 'pointer' } } };
+    const rendered = renderTimeline([envelope([
+      meta('https://app.example.com/assets', t0), snapshot(t0),
+      click('button.save-btn', t0 + 1_000), badClick, click('button.save-btn', t0 + 3_000),
+    ])]);
+    // the bad click still renders (pre-existing t+NaNs behavior); the new
+    // guarantee is that no idle marker is fabricated from it
+    expect(rendered.text).not.toContain('[user idle');
+  });
+
+  it('skips the marker when the gap-ending activity rendered no line', () => {
+    // a lone keystroke ends the gap but stays below the aggregation display
+    // threshold; asserting absence up to the later feedback line would lie
+    const rendered = renderTimeline([envelope([
+      meta('https://app.example.com/assets', t0), snapshot(t0),
+      click('button.save-btn', t0 + 1_000),
+      rawInput(2, t0 + 122_000),
+      { type: 3, timestamp: t0 + 400_000, data: { source: 0, adds: [
+        { parentId: 1, node: { id: 9, type: 3, textContent: 'Save failed' } }], removes: [], texts: [], attributes: [] } },
+    ])]);
+    expect(rendered.text).not.toContain('[user idle');
+  });
+
+  it('markers do not displace trailing real lines at the maxLines budget', () => {
+    const rendered = renderTimeline([envelope([
+      meta('https://app.example.com/assets', t0), snapshot(t0),
+      click('button.save-btn', t0 + 1_000),
+      click('button.save-btn', t0 + 122_000),
+      click('button.save-btn', t0 + 123_000),
+    ])], { maxLines: 4 });
+    // all four real lines survive; the marker rides on top of the budget
+    expect(rendered.lines.filter((line) => line.kind !== 'idle')).toHaveLength(4);
+    expect(rendered.lines.some((line) => line.kind === 'idle')).toBe(true);
+  });
+});
