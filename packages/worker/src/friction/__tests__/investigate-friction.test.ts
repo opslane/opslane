@@ -166,4 +166,22 @@ describe('investigateFriction', () => {
     expect(JSON.stringify(first.system)).toContain('src/App.vue');
     expect(first.system).toEqual(second.system);
   });
+
+  it('threads narrative category, observation text, and shared definitions into the prompt', async () => {
+		mockMessagesCreate.mockResolvedValueOnce(response([tool('read_file', { path: 'src/App.vue' })]));
+		mockMessagesCreate.mockResolvedValueOnce(response([verdict()]));
+		const narrativeInput = input();
+		narrativeInput.group.signal_type = 'validation_confusion';
+		narrativeInput.narrativeObservation = {
+			signalType: 'validation_confusion',
+			observationText: 'A success message appeared beside a required-field error.',
+			severity: 'high',
+		};
+
+		await investigateFriction('key', narrativeInput);
+
+		const system = JSON.stringify(mockMessagesCreate.mock.calls[0]![0].system);
+		expect(system).toContain('A success message appeared beside a required-field error.');
+		expect(system).toContain('validation_confusion: form/validation messaging is wrong');
+	});
 });

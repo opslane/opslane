@@ -1,337 +1,142 @@
-import { getPool, type SessionRow } from '../db.js';
-import { logger } from '../logger.js';
-import * as db from '../db.js';
-import type { Adjudicator, AdjudicationInput, AdjudicationVerdict, EvidenceWindowMode } from './adjudicator.js';
-import type { WindowEvent } from './evidence-window.js';
-import { RULE_VERSION } from './analyzer.js';
+import type pg from 'pg';
+import { NARRATIVE_RULE_VERSION } from '../narrative/emit.js';
 import {
-  findFoldTarget,
-  claimSignalsForAdjudication,
-  applyFoldOutcome,
-  countEligibleUsers,
-  listEligibleSignals,
+  countEligibleSupport,
   ensureCandidate,
-  claimGeneration,
-  releaseGeneration,
-  findValidAcceptedGeneration,
-  attachInheritedSignal,
-  applyBucketOutcome,
-  tryReserveAdjudicationCall,
-  readBucketState,
-  recordGenerationEvidence,
-  type FoldSignal,
+  recomputeIncidentImpact,
+  tupleLockKey,
   type BucketTuple,
 } from './promotion-db.js';
 
-export const PROMOTION_THRESHOLD_USERS = 5;
-/** Re-judge only when evidence has grown by half again since the last verdict.
- * Without this, a bucket over threshold is re-judged on every session. */
-export const RE_ADJUDICATION_GROWTH = 1.5;
+export const PROMOTION_THRESHOLD_SESSIONS = 3;
+export const PROMOTION_THRESHOLD_IDENTIFIED_USERS = 2;
 export const EVIDENCE_WINDOW_DAYS = 7;
-const WINDOW_DAYS = EVIDENCE_WINDOW_DAYS;
 
-interface PendingSignalRow extends FoldSignal {
-  signal_type: 'rage_click' | 'dead_click' | 'form_abandon';
-  page_url_normalized: string;
-  element_selector: string | null;
-  occurrence_count: number;
-  rule_version: number;
-  occurred_ats: number[] | null;
-}
-
-export interface AdjudicationRuntime {
-  windowMode: EvidenceWindowMode;
-  dailyCap: number;
-  loadWindows(signal: {
-    session_id: string;
-    project_id: string;
-    occurred_ats: number[] | null;
-  }): Promise<WindowEvent[][]>;
+export function hasPromotionSupport(support: {
+  sessions: number;
+  identifiedUsers: number;
+}): boolean {
+  return support.sessions >= PROMOTION_THRESHOLD_SESSIONS
+    || support.identifiedUsers >= PROMOTION_THRESHOLD_IDENTIFIED_USERS;
 }
 
 /**
- * Batch 4 two-path policy (plan D1), run after writeFrictionSignals inside a
- * session_analysis job:
- *
- * - A signal with a possible same-session ±30s error fold is adjudicated
- *   eagerly (one model call for that signal).
- * - A signal with no fold target follows the bucket path: candidate ensured,
- *   raw threshold eligibility counted from active signals, and exactly one
- *   bucket-level model call when five identified users are present — owned
- *   by whichever job wins the durable generation claim.
- * - Later matching signals inherit a still-valid accepted generation with no
- *   model call. Anonymous signals may fold but never count toward or trigger
- *   standalone promotion (plan D3).
- *
- * Adjudicator failures propagate: the poller's failJob/dead-letter machinery
- * owns retries and the unchecked reconciliation (Task 9).
+ * Counts and promotes narrative observations inside the caller's transaction.
+ * The per-bucket advisory lock makes concurrent third-session writers converge
+ * on one incident and one optional investigation job.
  */
-export async function processFrictionOutcomes(
-  session: SessionRow,
-  jobId: string,
-  adjudicator: Adjudicator,
-  runtime: AdjudicationRuntime,
+export async function runPromotionCheck(
+  client: pg.PoolClient,
+  projectId: string,
+  environmentId: string,
+  fingerprints: string[],
 ): Promise<void> {
-  const { rows: pending } = await getPool().query<PendingSignalRow>(
-    `SELECT id, project_id, environment_id, end_user_id, session_id, fingerprint,
-            occurred_at::text AS occurred_at, signal_type, page_url_normalized,
-            element_selector, occurrence_count, rule_version, occurred_ats
-     FROM friction_signals
-     WHERE session_id = $1 AND project_id = $2
-       AND rule_version = $3
-       AND adjudication_status = 'pending'
-       AND incident_id IS NULL
-       AND retracted_at IS NULL AND superseded_by IS NULL
-     ORDER BY occurred_at ASC`,
-    [session.id, session.project_id, RULE_VERSION],
-  );
-
-  for (const signal of pending) {
-    const client = await getPool().connect();
-    let foldTarget;
-    try {
-      foldTarget = await findFoldTarget(
-        client,
-        signal.project_id,
-        signal.session_id,
-        signal.occurred_at,
-      );
-    } finally {
-      client.release();
-    }
-
-    if (foldTarget) {
-      if (!await reserveOrRevisit(session, signal, jobId, runtime)) break;
-      await withClient((c) => claimSignalsForAdjudication(c, [signal.id], jobId));
-      const input: AdjudicationInput = {
-        scope: 'fold',
-        signalType: signal.signal_type,
-        elementSelector: signal.element_selector,
-        pageUrlNormalized: signal.page_url_normalized,
-        occurrenceCount: signal.occurrence_count,
-        nearbyError: { title: foldTarget.title, secondsAway: foldTarget.secondsAway },
-      };
-      const verdict = await adjudicate(adjudicator, input, signal, jobId, runtime);
-      const stored = storedVerdict(verdict);
-      const outcome = await applyFoldOutcome({
-        signal,
-        verdict: stored,
-        meta: { modelId: adjudicator.modelId, promptVersion: adjudicator.promptVersion, jobId },
-      });
-      logger.info('Friction fold adjudicated', {
-        project_id: signal.project_id,
-        session_id: signal.session_id,
-        signal_id: signal.id,
-        job_id: jobId,
-        accepted: verdict.accepted,
-        uncertain_detail: verdict.uncertain ? verdict.reason : undefined,
-        outcome,
-      });
-      continue;
-    }
-
-    // No fold target. Anonymous signals stop here (plan D3).
-    if (!signal.end_user_id) {
-      logger.info('Friction signal anonymous, standalone path skipped', {
-        project_id: signal.project_id,
-        session_id: signal.session_id,
-        signal_id: signal.id,
-        job_id: jobId,
-      });
-      continue;
-    }
-
+  for (const fingerprint of [...new Set(fingerprints)].sort()) {
+    const [key1, key2] = tupleLockKey(projectId, environmentId, fingerprint);
+    await client.query('SELECT pg_advisory_xact_lock($1, $2)', [key1, key2]);
     const tuple: BucketTuple = {
-      projectId: signal.project_id,
-      environmentId: signal.environment_id,
-      fingerprint: signal.fingerprint,
-      ruleVersion: signal.rule_version,
-      promptVersion: adjudicator.promptVersion,
+      projectId,
+      environmentId,
+      fingerprint,
+      ruleVersion: NARRATIVE_RULE_VERSION,
+      promptVersion: 1,
     };
-
-    // Inheritance: a still-valid accepted generation attaches without a call.
-    const validGeneration = await withClient((c) => findValidAcceptedGeneration(c, tuple));
-    if (validGeneration) {
-      const outcome = await attachInheritedSignal(signal, validGeneration);
-      logger.info('Friction signal inherited accepted generation', {
-        project_id: signal.project_id,
-        session_id: signal.session_id,
-        signal_id: signal.id,
-        generation_id: validGeneration.id,
-        job_id: jobId,
-        outcome,
-      });
-      continue;
-    }
-
-    await withClient((c) =>
-      ensureCandidate(c, tuple, {
-        signalType: signal.signal_type,
-        pageUrlNormalized: signal.page_url_normalized,
-        elementSelector: signal.element_selector,
-      }),
+    const descriptorResult = await client.query<{
+      signal_type: string;
+      page_url_normalized: string;
+      element_selector: string | null;
+    }>(
+      `SELECT signal_type, page_url_normalized, element_selector
+       FROM friction_signals
+       WHERE project_id = $1 AND environment_id = $2 AND fingerprint = $3
+         AND rule_version = $4 AND adjudication_status = 'accepted'
+         AND observation_text IS NOT NULL
+         AND retracted_at IS NULL AND superseded_by IS NULL
+       ORDER BY occurred_at DESC, id DESC
+       LIMIT 1`,
+      [projectId, environmentId, fingerprint, NARRATIVE_RULE_VERSION],
     );
+    const descriptor = descriptorResult.rows[0];
+    if (!descriptor || descriptor.signal_type === 'other') continue;
 
-    const eligibleUsers = await withClient((c) => countEligibleUsers(c, tuple));
-    if (eligibleUsers < PROMOTION_THRESHOLD_USERS) {
-      logger.info('Friction candidate below threshold', {
-        project_id: signal.project_id,
-        session_id: signal.session_id,
-        signal_id: signal.id,
-        job_id: jobId,
-        eligible_users: eligibleUsers,
-      });
-      continue;
-    }
-
-    // Evidence now survives verdicts, so being over threshold is no longer a
-    // one-shot event: without this gate every later session in the bucket
-    // would re-ask the same question. The watermark expires with the evidence
-    // window, so a bucket whose evidence decayed is not frozen forever.
-    const state = await withClient((c) => readBucketState(c, tuple));
-    if (state && eligibleUsers < Math.ceil(state.evaluatedUsers * RE_ADJUDICATION_GROWTH)) {
-      logger.info('Friction bucket judged and not materially grown', {
-        project_id: signal.project_id,
-        signal_id: signal.id,
-        job_id: jobId,
-        eligible_users: eligibleUsers,
-        evaluated_users: state.evaluatedUsers,
-      });
-      continue;
-    }
-
-    // Threshold crossed. Claim the durable generation first, so a job that
-    // loses the claim never burns a call from the daily budget it was never
-    // going to make. If the budget is then exhausted, the claim must be
-    // released: a generation left 'adjudicating' holds the in-flight slot and
-    // uq_friction_generation_inflight would block every retry for this bucket.
-    const generation = await claimGeneration(tuple, jobId);
-    if (!generation) {
-      logger.info('Friction generation already in flight, skipping', {
-        project_id: signal.project_id,
-        signal_id: signal.id,
-        job_id: jobId,
-      });
-      continue;
-    }
-    if (!await reserveOrRevisit(session, signal, jobId, runtime)) {
-      await releaseGeneration(generation.id, signal.project_id, jobId);
-      logger.info('Released generation: adjudication budget exhausted', {
-        project_id: signal.project_id,
-        signal_id: signal.id,
-        job_id: jobId,
-        generation_id: generation.id,
-      });
-      break;
-    }
-    const eligible = await withClient((c) => listEligibleSignals(c, tuple));
-    await withClient((c) => claimSignalsForAdjudication(c, eligible.ids, jobId));
-    // Membership must exist before applyBucketOutcome runs: the outcome path
-    // reads it to attach the full evidence set to the incident.
-    await withClient((c) =>
-      recordGenerationEvidence(c, generation.id, signal.project_id, eligible.ids));
-    const input: AdjudicationInput = {
-      scope: 'bucket',
-      signalType: signal.signal_type,
-      elementSelector: signal.element_selector,
-      pageUrlNormalized: signal.page_url_normalized,
-      occurrenceCount: signal.occurrence_count,
-      bucketSummary: {
-        distinctUsers: eligibleUsers,
-        totalOccurrences: eligible.totalOccurrences,
-        windowDays: WINDOW_DAYS,
-      },
-    };
-    const verdict = await adjudicate(adjudicator, input, signal, jobId, runtime);
-    const stored = storedVerdict(verdict);
-    // The outcome transaction also attaches the generation's wider recorded
-    // evidence to an accepted incident and writes the growth-gate watermark,
-    // so a crash between verdict and either of those can never leave an
-    // undercounted incident or an unwatermarked judged bucket. A 'noop'
-    // outcome (the generation was released or terminalized under us) writes
-    // neither.
-    const outcome = await applyBucketOutcome({
-      tuple,
-      generationId: generation.id,
-      verdict: stored,
-      evaluatedUsers: eligibleUsers,
-      meta: { modelId: adjudicator.modelId, promptVersion: adjudicator.promptVersion, jobId },
+    const incidentId = await ensureCandidate(client, tuple, {
+      signalType: descriptor.signal_type,
+      pageUrlNormalized: descriptor.page_url_normalized,
+      elementSelector: descriptor.element_selector,
     });
-    logger.info('Friction bucket adjudicated', {
-      project_id: signal.project_id,
-      session_id: signal.session_id,
-      signal_id: signal.id,
-      generation_id: generation.id,
-      job_id: jobId,
-      accepted: verdict.accepted,
-      uncertain_detail: verdict.uncertain ? verdict.reason : undefined,
-      outcome,
-    });
-  }
-}
+    const support = await countEligibleSupport(client, tuple);
+    if (!hasPromotionSupport(support)) continue;
 
-function storedVerdict(verdict: AdjudicationVerdict): AdjudicationVerdict {
-  return verdict.uncertain === true
-    ? { accepted: false, reason: 'uncertain' }
-    : verdict;
-}
+    const group = await client.query<{ status: string }>(
+      `SELECT status FROM error_groups
+       WHERE id = $1 AND project_id = $2
+       FOR UPDATE`,
+      [incidentId, projectId],
+    );
+    const wasCandidate = group.rows[0]?.status === 'candidate';
+    await client.query(
+      `UPDATE friction_signals
+       SET incident_id = $5
+       WHERE project_id = $1 AND environment_id = $2 AND fingerprint = $3
+         AND rule_version = $4 AND signal_type <> 'other'
+         AND adjudication_status = 'accepted'
+         AND retracted_at IS NULL AND superseded_by IS NULL
+         AND incident_id IS NULL`,
+      [projectId, environmentId, fingerprint, NARRATIVE_RULE_VERSION, incidentId],
+    );
+    await recomputeIncidentImpact(client, incidentId, projectId);
+    await client.query(
+      `UPDATE sessions
+       SET retain_until = GREATEST(COALESCE(retain_until, 'epoch'::timestamptz),
+                                   started_at + interval '90 days')
+       WHERE project_id = $1 AND id IN (
+         SELECT session_id FROM friction_signals
+         WHERE incident_id = $2 AND retracted_at IS NULL AND superseded_by IS NULL)`,
+      [projectId, incidentId],
+    );
+    if (!wasCandidate) continue;
 
-async function reserveOrRevisit(
-  session: SessionRow,
-  signal: PendingSignalRow,
-  jobId: string,
-  runtime: AdjudicationRuntime,
-): Promise<boolean> {
-  const reserved = await withClient((client) =>
-    tryReserveAdjudicationCall(client, signal.project_id, runtime.dailyCap));
-  if (reserved) return true;
-  await db.enqueueSessionAnalysisForBudgetRetry(session.id, session.project_id);
-  logger.warn('Adjudication daily cap reached; re-enqueued for next budget day', {
-    project_id: signal.project_id,
-    job_id: jobId,
-    cap: runtime.dailyCap,
-  });
-  return false;
-}
-
-async function adjudicate(
-  adjudicator: Adjudicator,
-  input: AdjudicationInput,
-  signal: PendingSignalRow,
-  jobId: string,
-  runtime: AdjudicationRuntime,
-): Promise<AdjudicationVerdict> {
-  const windows = runtime.windowMode === 'off' ? [] : await runtime.loadWindows(signal);
-  const verdict = await adjudicator.adjudicate(
-    runtime.windowMode === 'on' ? { ...input, evidenceWindows: windows } : input,
-  );
-  if (runtime.windowMode === 'shadow') {
-    const reserved = await withClient((client) =>
-      tryReserveAdjudicationCall(client, signal.project_id, runtime.dailyCap));
-    if (reserved) {
-      try {
-        const shadowVerdict = await adjudicator.adjudicate({ ...input, evidenceWindows: windows });
-        logger.info('Adjudication shadow verdict', {
-          project_id: signal.project_id,
-          signal_id: signal.id,
-          job_id: jobId,
-          decided: verdict.accepted,
-          shadow: shadowVerdict.accepted,
-          shadow_uncertain: shadowVerdict.uncertain === true,
-        });
-      } catch (error: unknown) {
-        logger.warn('Adjudication shadow call failed', { signal_id: signal.id, error: String(error) });
-      }
-    }
-  }
-  return verdict;
-}
-
-async function withClient<T>(fn: (client: import('pg').PoolClient) => Promise<T>): Promise<T> {
-  const client = await getPool().connect();
-  try {
-    return await fn(client);
-  } finally {
-    client.release();
+    const representative = await client.query<{ id: string; session_id: string }>(
+      `SELECT id, session_id
+       FROM friction_signals
+       WHERE incident_id = $1 AND adjudication_status = 'accepted'
+         AND observation_text IS NOT NULL
+         AND retracted_at IS NULL AND superseded_by IS NULL
+       ORDER BY occurrence_count DESC, occurred_at ASC, id ASC
+       LIMIT 1`,
+      [incidentId],
+    );
+    // Decision 2026-09-01: every promoted incident is investigated. The verdict
+    // (processFrictionInvestigateJob) gates any fix, not signal severity.
+    // `severity` stays as data for display and ranking.
+    const promotedStatus = 'queued';
+    await client.query(
+      `UPDATE error_groups
+       SET status = $5::error_group_status, environment_id = $2,
+           representative_signal_id = $3,
+           representative_session_id = $4,
+           updated_at = now()
+       WHERE id = $1 AND status = 'candidate'`,
+      [
+        incidentId,
+        environmentId,
+        representative.rows[0]?.id ?? null,
+        representative.rows[0]?.session_id ?? null,
+        promotedStatus,
+      ],
+    );
+    // The insert sits inside the candidate→promoted transition (guarded by
+    // `if (!wasCandidate) continue` above), so it runs exactly once per incident
+    // lifetime. The NOT EXISTS guard stays as a belt against a concurrent
+    // transition; promotion passes themselves never re-enqueue.
+    await client.query(
+      `INSERT INTO error_group_jobs (error_group_id, project_id, job_type, triggered_by)
+       SELECT $1, $2, 'investigate', 'auto'
+       WHERE NOT EXISTS (
+         SELECT 1 FROM error_group_jobs
+         WHERE error_group_id = $1 AND project_id = $2 AND job_type = 'investigate'
+           AND status IN ('pending','claimed'))`,
+      [incidentId, projectId],
+    );
   }
 }
