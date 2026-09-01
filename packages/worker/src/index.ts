@@ -556,7 +556,7 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
   // smoke because no sandbox credential was available during implementation.
   // Provider failures fail open inside checkQuota.
   if (billing.billingEnabled()) {
-    const org = await db.getProjectOrg(job.projectId);
+    const org = await billing.billingOrgForProject(db.getProjectOrg, job.projectId);
     if (org) {
       const quota = await billing.checkQuota(
         org.orgId,
@@ -1371,7 +1371,7 @@ export async function processFixJob(job: ClaimedJob & { errorGroupId: string }, 
   // Stop before clone, sandbox, or model spend when the org has exhausted its
   // merged-fix-PR allowance. Provider failures fail open inside checkQuota.
   if (billing.billingEnabled()) {
-    const org = await db.getProjectOrg(job.projectId);
+    const org = await billing.billingOrgForProject(db.getProjectOrg, job.projectId);
     if (org) {
       const quota = await billing.checkQuota(org.orgId, org.orgName, 'merged_prs');
       if (!quota.allowed) {

@@ -91,12 +91,14 @@ func (s *Sweeper) RunOnce(ctx context.Context) (int, error) {
 		}
 
 		if _, err := s.Client.EnsureCustomer(ctx, pr.OrgID, pr.OrgName); err != nil {
+			slog.Warn("billing sweep: customer lookup failed", "ref", pr.Ref, "org_id", pr.OrgID, "error", err)
 			if firstErr == nil {
 				firstErr = err
 			}
 			continue
 		}
 		if err := s.Client.Track(ctx, pr.OrgID, "merged_prs", pr.Ref, 1, pr.OccurredAt); err != nil {
+			slog.Warn("billing sweep: track failed", "ref", pr.Ref, "org_id", pr.OrgID, "error", err)
 			if firstErr == nil {
 				firstErr = err
 			}
@@ -104,6 +106,7 @@ func (s *Sweeper) RunOnce(ctx context.Context) (int, error) {
 		}
 		inserted, err := s.Q.MarkBillingTracked(ctx, pr.Ref, pr.OrgID, "merged_prs", 1)
 		if err != nil {
+			slog.Warn("billing sweep: ledger write failed after accepted track", "ref", pr.Ref, "org_id", pr.OrgID, "error", err)
 			if firstErr == nil {
 				firstErr = err
 			}

@@ -17,6 +17,26 @@ export function billingEnabled(): boolean {
   return Boolean(process.env['AUTUMN_SECRET_KEY']?.trim());
 }
 
+/**
+ * Org lookup for billing gates. Fails open (null) on lookup errors: this query
+ * exists only for billing, so its failure must never fail a job the pipeline
+ * would otherwise run.
+ */
+export async function billingOrgForProject(
+  lookup: (projectId: string) => Promise<{ orgId: string; orgName: string } | null>,
+  projectId: string
+): Promise<{ orgId: string; orgName: string } | null> {
+  try {
+    return await lookup(projectId);
+  } catch (err: unknown) {
+    logger.warn('billing org lookup failed open', {
+      project_id: projectId,
+      error: safeErrorMessage(err),
+    });
+    return null;
+  }
+}
+
 function valueOrDefault(value: string | undefined, fallback: string): string {
   return value?.trim() || fallback;
 }

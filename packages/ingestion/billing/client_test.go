@@ -271,6 +271,21 @@ func TestAttachProReturnsPaymentURL(t *testing.T) {
 	}
 }
 
+func TestAttachProOmitsEmptySuccessURL(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body := decodeBody(t, r)
+		if _, present := body["success_url"]; present {
+			t.Errorf("success_url should be omitted when empty, body = %#v", body)
+		}
+		_, _ = w.Write([]byte(`{"payment_url":"https://checkout.stripe.test/session"}`))
+	}))
+	defer srv.Close()
+
+	if _, err := testClient(srv).AttachPro(context.Background(), "org-123", "  "); err != nil {
+		t.Fatalf("AttachPro() error = %v", err)
+	}
+}
+
 func TestAttachProEmptyURLIsError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"payment_url":null}`))

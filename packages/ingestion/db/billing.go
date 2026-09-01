@@ -27,26 +27,32 @@ type UnbilledMergedPR struct {
 // with Ambiguous=true. ProcessPRWebhook's match is arbitrary there, so callers
 // must alert an operator instead of billing a possibly-wrong org.
 func (q *Queries) ListUnbilledMergedPRs(ctx context.Context, limit int) ([]UnbilledMergedPR, error) {
+	// The outer ORDER BY puts ambiguous receipts last: they stay visible for
+	// reconciliation (and bill automatically once the cross-org binding is
+	// fixed) but can never occupy the whole batch and starve billable receipts.
 	rows, err := q.pool.Query(ctx, `
-		SELECT DISTINCT ON (po.project_id, lower(coalesce(po.github_repo, p.github_repo, '')), po.pr_number)
-		       'pr:' || po.project_id || ':' || lower(coalesce(po.github_repo, p.github_repo, '')) || ':' || po.pr_number,
-		       po.pr_number, p.org_id, o.name, po.occurred_at,
-		       EXISTS (
-		         SELECT 1 FROM projects p2
-		         WHERE lower(p2.github_repo) = lower(coalesce(po.github_repo, p.github_repo, ''))
-		           AND p2.org_id <> p.org_id
-		       ) AS ambiguous
-		FROM pr_outcomes po
-		JOIN projects p ON p.id = po.project_id
-		JOIN orgs o ON o.id = p.org_id
-		WHERE po.outcome = 'merged'
-		  AND po.fix_job_id IS NOT NULL
-		  AND NOT EXISTS (
-		    SELECT 1 FROM billing_tracked bt
-		    WHERE bt.ref = 'pr:' || po.project_id || ':' || lower(coalesce(po.github_repo, p.github_repo, '')) || ':' || po.pr_number
-		  )
-		ORDER BY po.project_id, lower(coalesce(po.github_repo, p.github_repo, '')), po.pr_number,
-		         po.occurred_at, po.created_at, po.id
+		SELECT ref, pr_number, org_id, org_name, occurred_at, ambiguous FROM (
+			SELECT DISTINCT ON (po.project_id, lower(coalesce(po.github_repo, p.github_repo, '')), po.pr_number)
+			       'pr:' || po.project_id || ':' || lower(coalesce(po.github_repo, p.github_repo, '')) || ':' || po.pr_number AS ref,
+			       po.pr_number, p.org_id, o.name AS org_name, po.occurred_at, po.created_at, po.id,
+			       EXISTS (
+			         SELECT 1 FROM projects p2
+			         WHERE lower(p2.github_repo) = lower(coalesce(po.github_repo, p.github_repo, ''))
+			           AND p2.org_id <> p.org_id
+			       ) AS ambiguous
+			FROM pr_outcomes po
+			JOIN projects p ON p.id = po.project_id
+			JOIN orgs o ON o.id = p.org_id
+			WHERE po.outcome = 'merged'
+			  AND po.fix_job_id IS NOT NULL
+			  AND NOT EXISTS (
+			    SELECT 1 FROM billing_tracked bt
+			    WHERE bt.ref = 'pr:' || po.project_id || ':' || lower(coalesce(po.github_repo, p.github_repo, '')) || ':' || po.pr_number
+			  )
+			ORDER BY po.project_id, lower(coalesce(po.github_repo, p.github_repo, '')), po.pr_number,
+			         po.occurred_at, po.created_at, po.id
+		) candidates
+		ORDER BY ambiguous, occurred_at, created_at, id
 		LIMIT $1`, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list unbilled merged PRs: %w", err)
@@ -97,7 +103,7 @@ func (q *Queries) OrgSessionCountsThisMonth(ctx context.Context, threshold int) 
 		SELECT p.org_id, count(*)
 		FROM sessions s
 		JOIN projects p ON p.id = s.project_id
-		WHERE s.started_at >= date_trunc('month', now())
+		WHERE s.started_at >= date_trunc('month', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
 		GROUP BY p.org_id
 		HAVING count(*) > $1`, threshold)
 	if err != nil {

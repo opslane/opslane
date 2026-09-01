@@ -182,6 +182,7 @@ export interface BillingFeature {
 
 export interface BillingSummary {
   plan_id?: string;
+  is_pro?: boolean;
   features: BillingFeature[];
 }
 

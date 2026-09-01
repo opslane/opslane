@@ -30,6 +30,13 @@ ALTER TABLE pr_outcomes ADD COLUMN IF NOT EXISTS github_repo TEXT;
 -- live merges). Advisory lock guards concurrent boots.
 BEGIN;
 SELECT pg_advisory_xact_lock(hashtext('070_billing_tracked'));
+-- Freeze repository identity onto legacy receipts BEFORE computing settle
+-- refs. Pre-070 rows have github_repo NULL; without this, their ref would
+-- track the project's CURRENT github_repo, and rebinding the project later
+-- would mint new refs for settled history and re-bill it as fresh usage.
+UPDATE pr_outcomes po SET github_repo = p.github_repo
+FROM projects p
+WHERE p.id = po.project_id AND po.github_repo IS NULL;
 INSERT INTO billing_tracked (ref, org_id, feature_id, value)
 SELECT DISTINCT ON (po.project_id, lower(coalesce(po.github_repo, p.github_repo, '')), po.pr_number)
        'pr:' || po.project_id || ':' || lower(coalesce(po.github_repo, p.github_repo, '')) || ':' || po.pr_number,
