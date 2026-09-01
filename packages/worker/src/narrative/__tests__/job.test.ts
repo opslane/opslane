@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { processNarration } from '../job.js';
+import { NARRATIVE_PROMPT_VERSION } from '../prompt.js';
 
 const dbMock = vi.hoisted(() => ({
   claimPendingNarrative: vi.fn(),
@@ -18,6 +19,9 @@ const envelopes = [{
     { type: 4, data: { href: 'https://x.test/assets' }, timestamp: 1_000 },
     { type: 5, timestamp: 2_000, data: { tag: 'opslane.telemetry', payload: {
       kind: 'click', clickId: 'c1', selector: 'button.a', cursor: 'pointer', at: 2_000,
+    } } },
+    { type: 5, timestamp: 64_000, data: { tag: 'opslane.telemetry', payload: {
+      kind: 'click', clickId: 'c2', selector: 'button.a', cursor: 'pointer', at: 64_000,
     } } },
   ],
   meta: { chunked_at: 1_000, has_full_snapshot: false, sdk_version: 'test' },
@@ -41,7 +45,7 @@ function dependencies(modelText: string) {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  dbMock.claimPendingNarrative.mockResolvedValue({ promptVersion: 1 });
+  dbMock.claimPendingNarrative.mockResolvedValue({ promptVersion: NARRATIVE_PROMPT_VERSION });
   dbMock.reserveNarrativeBudget.mockResolvedValue(true);
   dbMock.narrativeMonthlySpendExceeded.mockResolvedValue(false);
   dbMock.finishNarrative.mockResolvedValue({ written: true });
@@ -72,6 +76,10 @@ describe('processNarration', () => {
     expect(dbMock.finishNarrative).toHaveBeenCalledWith(job, expect.objectContaining({
       status: 'ok', verificationState: 'pending',
     }));
+    const stored = dbMock.finishNarrative.mock.calls[0]?.[1] as {
+      timeline?: { lines: Array<{ k?: string }> };
+    };
+    expect(stored.timeline?.lines).toContainEqual(expect.objectContaining({ k: 'idle' }));
     expect(dbMock.enqueueJob).toHaveBeenCalledWith('session_verify_frames', 'p1', 's1');
   });
 

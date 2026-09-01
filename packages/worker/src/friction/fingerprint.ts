@@ -35,13 +35,77 @@ export function canonicalizeSelector(selector: string | null): string {
     .replace(/:nth-last-child\(\s*[^)]*\)/g, '');
 }
 
+/** App-shell mount points appear in almost every SDK selector; anchoring on
+ * them merges unrelated controls. */
+const APP_SHELL_IDS = new Set(['#root', '#main', '#app', '#__next']);
+/** Compiled atomic CSS changes per build and carries no element identity. */
+const COMPILED_CLASS = /^\._[a-z0-9]+$/i;
+/** Ids minted per mount or per row are unstable. Short digit runs stay so
+ * authored ids such as #step-12 remain useful. */
+const GENERATED_ID = /^#react-select|\d{4,}/;
+/** UI-state classes toggle on the same control and must not split it. */
+const STATE_CLASSES = new Set([
+  '.active', '.selected', '.disabled', '.enabled', '.open', '.closed',
+  '.hover', '.focus', '.focused', '.loading', '.hidden', '.visible',
+  '.checked', '.expanded', '.collapsed',
+]);
+
+function segmentTokens(segment: string): string[] {
+  return segment.match(/#[\w-]+|\.[\w-]+|^[a-zA-Z][\w-]*/g) ?? [];
+}
+
+function semanticClasses(segment: string): string[] {
+  return segmentTokens(segment).filter(
+    (token) => token.startsWith('.')
+      && !COMPILED_CLASS.test(token)
+      && !STATE_CLASSES.has(token.toLowerCase())
+      && !/\d{4,}/.test(token),
+  );
+}
+
+function tagOf(segment: string): string {
+  return segment.match(/^[a-zA-Z][\w-]*/)?.[0] ?? '*';
+}
+
+/** Reduces an SDK CSS path to the most stable identity token it contains.
+ * Tiers: raw unparseable selectors, semantic id, deepest semantic classes,
+ * then a tag skeleton capped at the last three segments. */
+export function anchorIdentity(selector: string | null): string {
+  const canonical = canonicalizeSelector(selector);
+  if (!canonical) return '';
+  if (canonical.includes('[') || canonical.includes('\\')) {
+    return `raw:${canonical}`;
+  }
+  const segments = canonical
+    .split(/\s*>\s*|\s+/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  if (segments.length === 0) return '';
+  for (let i = segments.length - 1; i >= 0; i--) {
+    for (const token of segmentTokens(segments[i]!)) {
+      if (!token.startsWith('#')) continue;
+      if (APP_SHELL_IDS.has(token.toLowerCase()) || GENERATED_ID.test(token)) continue;
+      return `id:${token}`;
+    }
+  }
+  const leafIndex = segments.length - 1;
+  for (let i = leafIndex; i >= 0; i--) {
+    const classes = semanticClasses(segments[i]!);
+    if (classes.length > 0) {
+      const base = `cls:${[...classes].sort().join('')}`;
+      return i === leafIndex ? base : `${base}>${tagOf(segments[leafIndex]!)}`;
+    }
+  }
+  return `skel:${segments.slice(-3).map(tagOf).join('>')}`;
+}
+
 export function observationFingerprint(
   category: FrictionCategory,
   selector: string | null,
   normalizedRoute: string,
 ): string {
   const anchor = ELEMENT_ANCHORED_CATEGORIES.has(category) && selector
-    ? canonicalizeSelector(selector)
+    ? anchorIdentity(selector)
     : '';
   return createHash('sha256')
     .update(`${category}|${anchor}|${normalizedRoute}`)

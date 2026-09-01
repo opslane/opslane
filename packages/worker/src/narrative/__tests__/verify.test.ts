@@ -66,6 +66,24 @@ describe('verification validation', () => {
   it('selects highest-severity cited moments first', () => {
     expect(selectMoments(narrative, timeline)).toEqual([5_000, 9_000]);
   });
+
+  it('uses the first non-idle citation for a capture moment', () => {
+    const idleFirstNarrative: SessionNarrative = {
+      userGoal: 'Save an asset', narrative: 'Saving was confusing.', notable: true,
+      observations: [{
+        id: '0-idle', category: 'no_feedback_after_action', what: 'no feedback',
+        evidenceLines: ['L1', 'L2'], severity: 'high',
+      }],
+    };
+    const idleFirstTimeline = {
+      startTs: 1_000,
+      lines: [
+        { t: '[user idle 2m 0s — away from the app]', s: null, r: '/assets', a: 1_000, k: 'idle' as const },
+        { t: 'click', s: 'button.save', r: '/assets', a: 121_000 },
+      ],
+    };
+    expect(selectMoments(idleFirstNarrative, idleFirstTimeline)).toEqual([120_000]);
+  });
 });
 
 describe('processFrameVerification', () => {
