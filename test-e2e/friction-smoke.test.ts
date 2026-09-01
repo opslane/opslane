@@ -1,8 +1,11 @@
 // @vitest-environment node
 /**
  * Friction smoke: real rage-clicks in Chromium produce rrweb telemetry inside
- * replay chunks; the real scrubber and analyzer turn them into a rage_click
- * friction signal.
+ * replay chunks; the real scrubber and analyzer classify the session active
+ * and hand it to the narrative stage. Session narratives are the friction
+ * detector now, and narration needs a model key, so the keyless lane proves
+ * the handoff: a session_narratives reservation exists and a session_narrate
+ * job is enqueued. The narrative itself is covered by friction-incidents.
  *
  * Batch 3 does not auto-create session_analysis jobs, so this test inserts the
  * job directly. Remove that bridge when product scheduling lands.
@@ -12,8 +15,8 @@ import { resolve } from 'node:path';
 import {
   cleanupTenant,
   closePool,
-  getActiveFrictionSignals,
   getConfig,
+  getPool,
   insertSessionAnalysisJob,
   makeChunksScrubbable,
   pollScrubbedChunk,
@@ -35,7 +38,7 @@ const playwrightAvailable = await isPlaywrightAvailable();
 const VUE_FIXTURE = resolve(__dirname, '../test-fixtures/vue-app');
 
 describe.skipIf(hasLLMKey || !keylessWorkerRunning || !playwrightAvailable)(
-  'browser smoke: rage click to friction signal',
+  'browser smoke: friction session reaches the narrative stage',
   () => {
     let tenant: TestTenant;
     let fixture: FixtureServer;
@@ -62,7 +65,7 @@ describe.skipIf(hasLLMKey || !keylessWorkerRunning || !playwrightAvailable)(
       await closePool();
     });
 
-    it('rage clicks on a dead button become a rage_click friction signal', async () => {
+    it('an active session with rage clicks gets a narrative reservation and a narrate job', async () => {
       const page = await browser.newPage();
       try {
         await page.goto(fixture.url);
@@ -82,7 +85,6 @@ describe.skipIf(hasLLMKey || !keylessWorkerRunning || !playwrightAvailable)(
           await page.waitForTimeout(100);
         }
 
-        // The last click must remain unanswered for the analyzer's full window.
         await page.waitForTimeout(1_500);
 
         // An accepted error immediately flushes the current replay chunk.
@@ -101,10 +103,18 @@ describe.skipIf(hasLLMKey || !keylessWorkerRunning || !playwrightAvailable)(
         const status = await pollSessionStatus(sessionId, ['analyzed'], 90_000);
         expect(status).toBe('analyzed');
 
-        const signals = await getActiveFrictionSignals(sessionId);
-        const rageClick = signals.find((signal) => signal.signal_type === 'rage_click');
-        expect(rageClick).toBeDefined();
-        expect(rageClick!.element_selector).toBe('[data-testid="dead-button"]');
+        const narrative = await getPool().query(
+          `SELECT status FROM session_narratives WHERE session_id = $1 AND project_id = $2`,
+          [sessionId, tenant.projectId],
+        );
+        expect(narrative.rows[0]).toBeDefined();
+
+        const narrateJob = await getPool().query(
+          `SELECT status FROM error_group_jobs
+           WHERE project_id = $1 AND session_id = $2 AND job_type = 'session_narrate'`,
+          [tenant.projectId, sessionId],
+        );
+        expect(narrateJob.rows[0]).toBeDefined();
       } finally {
         await page.close();
       }
