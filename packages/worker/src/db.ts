@@ -392,7 +392,7 @@ export async function recordInvestigatedCommit(lease: JobLease, commit: string):
   );
 }
 
-export type UsagePhase = 'investigation' | 'fix' | 'judge' | 'product_context' | 'inquiry';
+export type UsagePhase = 'investigation' | 'fix' | 'judge' | 'product_context' | 'inquiry' | 'narrate';
 
 export interface TokenUsage {
   input: number;
@@ -1759,6 +1759,22 @@ export async function resolveInactiveGroups(ageDays: number): Promise<string[]> 
 }
 
 // === GitHub installation query ===
+
+export async function getProjectOrg(projectId: string): Promise<{
+  orgId: string;
+  orgName: string;
+} | null> {
+  const pool = getPool();
+  const { rows } = await pool.query<{ org_id: string; org_name: string }>(
+    `SELECT o.id AS org_id, o.name AS org_name
+     FROM projects p
+     JOIN orgs o ON o.id = p.org_id
+     WHERE p.id = $1`,
+    [projectId],
+  );
+  if (!rows[0]) return null;
+  return { orgId: rows[0].org_id, orgName: rows[0].org_name };
+}
 
 export async function getProjectGitHubInstallation(projectId: string): Promise<{
   installationId: number | null;

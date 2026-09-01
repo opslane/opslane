@@ -1,6 +1,8 @@
 import type { SessionChunkEnvelope } from '@opslane/shared';
+import { calculateCost } from '@opslane/agent-core';
 import * as db from '../db.js';
 import type { ClaimedJob } from '../db.js';
+import { pricingFor } from '../harness/agent-loop.js';
 import { logger } from '../logger.js';
 import type { NarrativeClient } from './client.js';
 import { buildNarrativePrompt } from './prompt.js';
@@ -60,6 +62,23 @@ export async function processNarration(
     timelineText: timeline.text,
   });
   const response = await deps.client.complete(prompt);
+  const usage = {
+    input: response.inputTokens,
+    output: response.outputTokens,
+    cacheRead: 0,
+    cacheWrite: 0,
+  };
+  // Spend ledger (design 2026-09-01 scope item): narration is the dominant
+  // prospective variable cost; it must appear in job_usage like every LLM job.
+  // recordJobUsage is best-effort and never fails the narration.
+  await db.recordJobUsage({
+    jobId: job.id,
+    execution: job.attempts,
+    phase: 'narrate',
+    model: deps.client.modelName,
+    usage,
+    costUsd: calculateCost(usage, pricingFor(deps.client.modelName)),
+  });
   const validation = response.stopReason === 'max_tokens'
     ? { ok: false as const, reason: 'truncated (max_tokens)' }
     : validateNarrative(response.text, timeline);

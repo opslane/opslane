@@ -7,11 +7,15 @@ const dbMock = vi.hoisted(() => ({
   narrativeMonthlySpendExceeded: vi.fn(),
   finishNarrative: vi.fn(),
   enqueueJob: vi.fn(),
+  recordJobUsage: vi.fn(),
 }));
-vi.mock('../../db.js', () => dbMock);
+vi.mock('../../db.js', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../db.js')>(),
+  ...dbMock,
+}));
 
 const job = {
-  id: 'j1', projectId: 'p1', sessionId: 's1', workerId: 'w1', leaseGeneration: '1',
+  id: 'j1', projectId: 'p1', sessionId: 's1', workerId: 'w1', leaseGeneration: '1', attempts: 2,
 } as never;
 const envelopes = [{
   events: [
@@ -60,6 +64,31 @@ describe('processNarration', () => {
     expect(dbMock.finishNarrative).toHaveBeenCalledWith(job, expect.objectContaining({
       status: 'parse_failed', rawResponse: 'not JSON',
     }));
+    expect(dbMock.recordJobUsage).toHaveBeenCalledOnce();
+    expect(dbMock.recordJobUsage).toHaveBeenCalledWith(expect.objectContaining({
+      jobId: 'j1',
+      execution: 2,
+      phase: 'narrate',
+      model: 'test-model',
+      usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0 },
+    }));
+  });
+
+  it('records model spend for a successful narration', async () => {
+    await processNarration(job, dependencies(JSON.stringify({
+      user_goal: 'Browse', narrative: 'No friction observed.', notable: false, observations: [],
+    })), new AbortController().signal);
+
+    expect(dbMock.recordJobUsage).toHaveBeenCalledOnce();
+    expect(dbMock.recordJobUsage).toHaveBeenCalledWith(expect.objectContaining({
+      jobId: 'j1',
+      execution: 2,
+      phase: 'narrate',
+      model: 'test-model',
+      usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0 },
+      costUsd: expect.any(Number),
+    }));
+    expect(dbMock.recordJobUsage.mock.calls[0]?.[0].costUsd).toBeGreaterThan(0);
   });
 
   it('stores observations before enqueueing frame verification', async () => {

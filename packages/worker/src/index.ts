@@ -69,6 +69,8 @@ import { parseRuntimeInfo } from './runtime-info.js';
 import { parseDiagnosis } from './diagnosis-schema.js';
 import { pushScore } from './scores.js';
 import { processScoreSyncJob } from './score-sync.js';
+import * as billing from './billing.js';
+import { emitUsageEvent } from './usage-events.js';
 
 function nonNegativeIntegerEnv(raw: string | undefined, fallback: number): number {
   const parsed = Number(raw);
@@ -546,6 +548,31 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
       status: group.status,
     });
     return;
+  }
+
+  // Fair-use cap is enforced at the single claim-time seam before any model
+  // or sandbox spend. Autumn documents send_event as an atomic allowed-check
+  // consumption; denied non-consumption still needs the deployment sandbox
+  // smoke because no sandbox credential was available during implementation.
+  // Provider failures fail open inside checkQuota.
+  if (billing.billingEnabled()) {
+    const org = await db.getProjectOrg(job.projectId);
+    if (org) {
+      const quota = await billing.checkQuota(
+        org.orgId,
+        org.orgName,
+        'investigations',
+        { sendEvent: true },
+      );
+      if (!quota.allowed) {
+        emitUsageEvent('investigation_quota_skipped', {
+          org_id: org.orgId,
+          project_id: job.projectId,
+          error_group_id: job.errorGroupId,
+        });
+        return;
+      }
+    }
   }
 
   await updateGroupStatus(job.errorGroupId, job.projectId, 'analyzing', undefined, job);
@@ -1340,6 +1367,31 @@ export async function processFixJob(job: ClaimedJob & { errorGroupId: string }, 
   const customerRuntime = parseRuntimeInfo(event?.context ?? '');
   const project = await db.getProject(job.projectId);
   if (!project) throw new Error(`Project ${job.projectId} not found`);
+
+  // Stop before clone, sandbox, or model spend when the org has exhausted its
+  // merged-fix-PR allowance. Provider failures fail open inside checkQuota.
+  if (billing.billingEnabled()) {
+    const org = await db.getProjectOrg(job.projectId);
+    if (org) {
+      const quota = await billing.checkQuota(org.orgId, org.orgName, 'merged_prs');
+      if (!quota.allowed) {
+        const reason = buildReason(
+          'billing_limit_reached',
+          'The monthly included fix-PR allowance for this organization is used up.',
+        );
+        await updateGroupStatus(job.errorGroupId, job.projectId, 'needs_human', {
+          reason,
+          terminalFixJobId: job.id,
+        }, job);
+        emitUsageEvent('billing_limit_reached', {
+          org_id: org.orgId,
+          project_id: job.projectId,
+          error_group_id: job.errorGroupId,
+        });
+        return;
+      }
+    }
+  }
 
   // Load investigation context
   const investigation = await getGroupInvestigation(job.errorGroupId, job.projectId);

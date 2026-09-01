@@ -34,6 +34,7 @@ When Opslane stops and hands an issue to a person, it records a `reason_code`, a
 | `low_confidence_fix` | Review the candidate diff and evidence manually; the candidate did not pass independent fix review or the checks required before Opslane opens a pull request. This code does not gate error diagnosis by confidence. |
 | `repro_not_achievable` | Review the candidate diff and evidence manually; Opslane could not construct a reliable reproduction test, so it checked the fix against the existing suite but did not call it verified. |
 | `draft_cap_reached` | Review or close an existing Opslane draft PR, then retry this fix. The candidate diff remains available on the incident. |
+| `billing_limit_reached` | This organization has used its included fix PRs for the month. Upgrade in Settings > Billing to resume automated fix PRs. |
 | `budget_exhausted` | Review the error manually; the agent could not complete within its step or budget limits. Consider guiding it with more context. |
 | `insufficient_context` | Add a replay, breadcrumbs, or a reproduction so Opslane has enough context to investigate. |
 
