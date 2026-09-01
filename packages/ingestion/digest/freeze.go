@@ -64,11 +64,24 @@ type Candidate struct {
 	ObservationQuote string `json:"observationQuote,omitempty"`
 }
 
+// UnifiedCardsMode is stamped on every digest run. New runs are always
+// unified; the constants survive so runs frozen before the operator switch
+// was removed rehydrate exactly as they ran.
+type UnifiedCardsMode string
+
+const (
+	UnifiedCardsOff UnifiedCardsMode = "off"
+	UnifiedCardsOn  UnifiedCardsMode = "on"
+)
+
 // FreezeCandidates selects publishable work and stores the exact facts before
 // a model runs. Repeated and concurrent calls for one project-local day reuse
 // the existing run and its snapshots.
 func FreezeCandidates(ctx context.Context, pool *pgxpool.Pool, projectID string, at time.Time) (string, []Candidate, error) {
-	configuredMode := ReadUnifiedCardsMode()
+	// Every new run is unified. Reusing an existing run below still adopts
+	// that run's stored mode, so a day frozen under the old switch keeps its
+	// meaning.
+	configuredMode := UnifiedCardsOn
 	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return "", nil, fmt.Errorf("begin digest freeze: %w", err)
@@ -114,25 +127,15 @@ func FreezeCandidates(ctx context.Context, pool *pgxpool.Pool, projectID string,
 	}
 
 	if inserted {
-		// One lane, chosen by mode. ON reads status alone; the episode/one-shot
-		// lane — with its issue_publications gate and its remediation-derived
-		// action — runs only in OFF, which is the rollback path.
 		var candidates []Candidate
 		var replayFloors []time.Time
 		var actionableCandidates []actionableCandidate
 		var unifiedExcluded map[string]string
-		if configuredMode == UnifiedCardsOff {
-			candidates, replayFloors, err = selectCandidates(ctx, tx, projectID, at, windowFrom)
-			if err != nil {
-				return "", nil, err
-			}
-		} else {
-			actionableCandidates, err = loadActionableCandidates(ctx, tx, projectID, onCardStatusSQL)
-			if err != nil {
-				return "", nil, err
-			}
-			candidates, replayFloors, unifiedExcluded = selectOnCardCandidates(actionableCandidates, at)
+		actionableCandidates, err = loadActionableCandidates(ctx, tx, projectID, onCardStatusSQL)
+		if err != nil {
+			return "", nil, err
 		}
+		candidates, replayFloors, unifiedExcluded = selectOnCardCandidates(actionableCandidates, at)
 		for i, candidate := range candidates {
 			replayFloor := replayFloors[i]
 			if replayFloor.Equal(time.Unix(0, 0).UTC()) {
@@ -158,10 +161,8 @@ func FreezeCandidates(ctx context.Context, pool *pgxpool.Pool, projectID string,
 			if _, err := tx.Exec(ctx, `RELEASE SAVEPOINT digest_replay_lookup`); err != nil {
 				return "", nil, fmt.Errorf("release replay lookup savepoint: %w", err)
 			}
-			if configuredMode != UnifiedCardsOff {
-				if err := attachCachedCard(ctx, tx, projectID, &candidate); err != nil {
-					return "", nil, err
-				}
+			if err := attachCachedCard(ctx, tx, projectID, &candidate); err != nil {
+				return "", nil, err
 			}
 			candidates[i] = candidate
 			snapshot, err := json.Marshal(candidate)
@@ -183,11 +184,9 @@ func FreezeCandidates(ctx context.Context, pool *pgxpool.Pool, projectID string,
 				return "", nil, fmt.Errorf("freeze candidate %s: %w", candidate.EpisodeID, err)
 			}
 		}
-		if configuredMode != UnifiedCardsOff {
-			if err := writeUnifiedFreezeLedger(ctx, tx, runID, configuredMode,
-				actionableCandidates, candidates, unifiedExcluded, at); err != nil {
-				return "", nil, err
-			}
+		if err := writeUnifiedFreezeLedger(ctx, tx, runID, configuredMode,
+			actionableCandidates, candidates, unifiedExcluded, at); err != nil {
+			return "", nil, err
 		}
 	}
 
@@ -205,121 +204,6 @@ type digestQuerier interface {
 	Query(context.Context, string, ...any) (pgx.Rows, error)
 }
 
-// selectCandidates is the OFF lane only: the episode/one-shot path, gated by
-// issue_publications so a card shows once. ON never calls it.
-func selectCandidates(ctx context.Context, q digestQuerier, projectID string, at, windowFrom time.Time) ([]Candidate, []time.Time, error) {
-	rows, err := q.Query(ctx, `
-		SELECT ep.id::text, ep.sequence, g.id::text, g.title,
-		       d.outcome, d.decision_reason,
-		       COALESCE(g.pr_url,''), g.occurrence_count,
-		       (SELECT count(DISTINCT eau.end_user_id)::int
-		          FROM error_group_affected_users eau
-		          JOIN end_users eu ON eu.id=eau.end_user_id AND eu.project_id=ep.project_id
-		         WHERE eau.error_group_id=g.id),
-		       COALESCE((SELECT array_agg(name) FROM (
-		          SELECT DISTINCT eu.account_name AS name
-		            FROM error_group_affected_users eau
-		            JOIN end_users eu ON eu.id=eau.end_user_id AND eu.project_id=ep.project_id
-		           WHERE eau.error_group_id=g.id AND NULLIF(btrim(eu.account_name),'') IS NOT NULL
-		           ORDER BY eu.account_name
-		           -- Bounded: the names feed a model prompt and one Slack context
-		           -- line; a group touching thousands of named accounts must not
-		           -- balloon the frozen snapshot or the prompt.
-		           LIMIT 8) capped), '{}'),
-		       g.last_seen,
-		       COALESCE((SELECT rm.purpose FROM route_map rm
-		                  WHERE rm.project_id=ep.project_id
-		                    AND g.page_url_normalized LIKE '%' || rm.pattern || '%'
-		                  ORDER BY length(rm.pattern) DESC LIMIT 1),''),
-		       d.decided_at, action.text,g.status::text,COALESCE(g.signal_type,''),
-		       COALESCE(g.root_cause,''),COALESCE(g.suggested_mitigation,''),
-		       md5(COALESCE(g.candidate_diff,'')),g.actionable_since,
-		       COALESCE((SELECT max(prev.closed_at)
-		                   FROM issue_episodes prev
-		                  WHERE prev.project_id=ep.project_id
-		                    AND prev.canonical_issue_id=ep.canonical_issue_id
-		                    AND prev.id<>ep.id), 'epoch'::timestamptz) AS replay_floor,
-		       validity.has_validated_diagnosis
-		  FROM issue_episodes ep
-		  -- kind='error' matches the filter sweep, which no longer evaluates
-	  -- friction episodes; without this guard a friction episode with
-	  -- historical decisions would stay frozen-eligible on facts that can
-	  -- never refresh. Friction reaches the digest through the actionable
-	  -- receipts lane instead.
-	  JOIN error_groups g ON g.id=ep.canonical_issue_id AND g.project_id=ep.project_id AND g.kind='error'
-		  LEFT JOIN LATERAL (`+diagnosisValidationLateralSQL+`) validity ON true
-		  JOIN LATERAL (
-		    SELECT dd.outcome,dd.decision_reason,dd.diagnosis,dd.decided_at
-		      FROM diagnosis_decisions dd
-		     WHERE dd.project_id=ep.project_id AND dd.episode_id=ep.id
-		     ORDER BY dd.decided_at DESC,dd.id DESC LIMIT 1
-		  ) d ON true
-		  JOIN LATERAL (
-		    SELECT idq.decision FROM issue_inquiry_decisions idq
-		     WHERE idq.project_id=ep.project_id AND idq.episode_id=ep.id
-		     ORDER BY idq.decided_at DESC,idq.id DESC LIMIT 1
-		  ) inquiry ON true
-		  JOIN LATERAL (
-		    SELECT CASE
-		      WHEN d.outcome='verified_fix' AND COALESCE(g.pr_url,'')<>'' THEN 'Review the fix PR.'
-		      ELSE COALESCE(NULLIF(btrim(g.remediation),''), NULLIF(btrim(g.reason_message),''), '')
-		    END AS text
-		  ) action ON true
-		 WHERE ep.project_id=$1
-		   AND ep.closed_at IS NULL
-		   AND inquiry.decision='investigate'
-		   AND d.outcome IN ('verified_fix','needs_human')
-		   AND action.text <> ''
-		   AND (g.last_seen >= $2::timestamptz - interval '7 days' OR d.decided_at >= $3::timestamptz)
-		   AND (d.decided_at >= $3::timestamptz OR EXISTS (
-		         SELECT 1 FROM digest_run_items old
-		          WHERE old.project_id=ep.project_id AND old.episode_id=ep.id
-		            AND old.outcome='deferred'))
-		   AND NOT EXISTS (
-		         SELECT 1 FROM issue_publications publication
-		          WHERE publication.project_id=ep.project_id
-		            AND publication.episode_id=ep.id AND publication.channel='digest')
-	 ORDER BY g.last_seen DESC,ep.id`, projectID, at, windowFrom)
-	if err != nil {
-		return nil, nil, fmt.Errorf("select digest candidates: %w", err)
-	}
-	defer rows.Close()
-	candidates := make([]Candidate, 0)
-	replayFloors := make([]time.Time, 0)
-	for rows.Next() {
-		var candidate Candidate
-		var episodeSequence int
-		var replayFloor time.Time
-		if err := rows.Scan(
-			&candidate.EpisodeID, &episodeSequence, &candidate.IssueID,
-			&candidate.Title, &candidate.Outcome, &candidate.Summary, &candidate.PRURL, &candidate.OccurrenceCount,
-			&candidate.AffectedUsers, &candidate.Accounts, &candidate.LastSeen,
-			&candidate.RoutePurpose, &candidate.DecidedAt, &candidate.ValidAction,
-			&candidate.Status, &candidate.SignalType, &candidate.RootCause, &candidate.Mitigation,
-			&candidate.DiffIdentity, &candidate.SpellStartedAt, &replayFloor,
-			&candidate.HasValidatedDiagnosis,
-		); err != nil {
-			return nil, nil, fmt.Errorf("scan digest candidate: %w", err)
-		}
-		candidate.ErrorGroupID = candidate.IssueID
-		candidate.Kind = "error"
-		candidate.EpisodeSequence = &episodeSequence
-		// No per-group dedup here: OFF is the rollback path and returns one
-		// candidate per eligible EPISODE, exactly as origin/main does. The ON
-		// lane is keyed per incident by loadActionableCandidates and never
-		// reaches this query.
-		candidate.Label = "new"
-		if episodeSequence > 1 {
-			candidate.Label = "returned"
-		}
-		candidates = append(candidates, candidate)
-		replayFloors = append(replayFloors, replayFloor)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, nil, fmt.Errorf("read digest candidates: %w", err)
-	}
-	return candidates, replayFloors, nil
-}
 
 func loadFrozenCandidates(ctx context.Context, q digestQuerier, projectID, runID string) ([]Candidate, error) {
 	rows, err := q.Query(ctx, `

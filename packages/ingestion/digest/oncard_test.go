@@ -96,7 +96,6 @@ func writeOnCardPayload(t *testing.T, pool *pgxpool.Pool, runID string, candidat
 
 func onCardFixture(t *testing.T, now time.Time) (*pgxpool.Pool, digestFixture) {
 	t.Helper()
-	t.Setenv("DIGEST_UNIFIED_CARDS", "on")
 	pool := testPool(t)
 	fixture := seedDigestFixture(t, pool, now)
 	quietBackgroundActionable(t, pool, fixture.ProjectID)

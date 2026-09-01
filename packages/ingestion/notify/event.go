@@ -87,7 +87,7 @@ type DigestPayload struct {
 	// cap; the renderer's "And N more" line reports it.
 	OverflowCount int    `json:"overflow_count,omitempty"`
 	DeliveryAlert string `json:"delivery_alert,omitempty"`
-	// UnifiedCards is the run's DIGEST_UNIFIED_CARDS mode, stamped by the
+	// UnifiedCards is the run's stored unified_cards_mode, stamped by the
 	// validator. It is the renderer's only mode signal, and it exists because
 	// the two modes budget the render cap differently: ON is one list of
 	// incidents where a receipt is a card that could not be authored, so cards
