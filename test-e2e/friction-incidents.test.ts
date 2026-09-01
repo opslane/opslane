@@ -97,11 +97,12 @@ async function startModelStub(): Promise<{ server: Server; baseURL: string }> {
       const observationID = /"id":"([^"]+)"/.exec(userText)?.[1] ?? '0-missing';
       text = JSON.stringify({ grades: [{ observationId: observationID, grade: 'confirmed', reason: 'The conflicting save and validation messages are visible.' }] });
     } else {
-      const evidenceLine = /^(L\d+) .*UI TEXT APPEARED/m.exec(userText)?.[1] ?? 'L1';
+      const clickLine = /^(L\d+) .*CLICK/m.exec(userText)?.[1] ?? 'L1';
+      const uiLine = /^(L\d+) .*UI TEXT APPEARED/m.exec(userText)?.[1] ?? 'L2';
       text = JSON.stringify({
         user_goal: 'Save an asset',
-        narrative: 'The user tried to save an asset and received contradictory feedback.',
-        observations: [{ category: 'validation_confusion', what: 'A success message appeared alongside a required-field error.', evidence_lines: [evidenceLine], severity: 'high' }],
+        narrative: 'The user clicked save and got no usable feedback.',
+        observations: [{ category: 'no_feedback_after_action', what: 'Clicking save produced contradictory feedback.', evidence_lines: [clickLine, uiLine], severity: 'high' }],
         notable: true,
       });
     }
@@ -245,11 +246,12 @@ describeLive('session narratives — live-service pipeline', () => {
     expect(narratives.rows).toHaveLength(3);
     expect(narratives.rows.every((row) => row.status === 'ok' && row.verification_state === 'ok')).toBe(true);
 
-    const signals = await db.query<{ signal_type: string; rule_version: number; observation_text: string | null }>(
-      `SELECT signal_type,rule_version,observation_text FROM friction_signals
+    const signals = await db.query<{ signal_type: string; rule_version: number; observation_text: string | null; element_selector: string | null }>(
+      `SELECT signal_type,rule_version,observation_text,element_selector FROM friction_signals
        WHERE project_id=$1 AND session_id=ANY($2::text[]) ORDER BY session_id`, [tenant.projectId, sessionIDs]);
     expect(signals.rows).toHaveLength(3);
-    expect(signals.rows.every((row) => row.signal_type === 'validation_confusion' && row.rule_version === 6 && row.observation_text !== null)).toBe(true);
+    expect(signals.rows.every((row) => row.signal_type === 'no_feedback_after_action' && row.rule_version === 7 && row.observation_text !== null)).toBe(true);
+    expect(signals.rows.every((row) => row.element_selector !== null)).toBe(true);
 
     const incident = await db.query<{ id: string; status: string }>(
       `SELECT id,status FROM error_groups WHERE project_id=$1 AND kind='friction' AND status<>'candidate'`, [tenant.projectId]);
@@ -262,7 +264,7 @@ describeLive('session narratives — live-service pipeline', () => {
     });
     expect(response.status).toBe(200);
     const narrative = await response.json() as { observations: Array<{ category: string; grade?: string }> };
-    expect(narrative.observations[0]).toMatchObject({ category: 'validation_confusion', grade: 'confirmed' });
+    expect(narrative.observations[0]).toMatchObject({ category: 'no_feedback_after_action', grade: 'confirmed' });
 
     const frames = await db.query<{ n: string }>(
       `SELECT count(*)::text AS n FROM session_narratives,

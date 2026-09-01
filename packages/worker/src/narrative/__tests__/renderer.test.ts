@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { SessionChunkEnvelope } from '@opslane/shared';
-import { renderTimeline } from '../renderer.js';
+import { IDLE_THRESHOLD_MS, renderTimeline } from '../renderer.js';
 
 const t0 = 1_700_000_000_000;
 const envelope = (events: unknown[]): SessionChunkEnvelope => ({
@@ -21,6 +21,21 @@ const click = (selector: string, at: number) => ({
   type: 5,
   timestamp: at,
   data: { tag: 'opslane.telemetry', payload: { kind: 'click', clickId: 'c1', selector, cursor: 'pointer', at } },
+});
+const requestStart = (requestId: string, method: string, url: string, at: number) => ({
+  type: 5,
+  timestamp: at,
+  data: { tag: 'opslane.telemetry', payload: { kind: 'request_start', requestId, method, url, at } },
+});
+const requestEnd = (requestId: string, status: number, at: number) => ({
+  type: 5,
+  timestamp: at,
+  data: { tag: 'opslane.telemetry', payload: { kind: 'request_end', requestId, status, at } },
+});
+const rawInput = (id: number, timestamp: number) => ({
+  type: 3,
+  timestamp,
+  data: { source: 5, id, text: '*' },
 });
 
 describe('renderTimeline', () => {
@@ -58,5 +73,71 @@ describe('renderTimeline', () => {
     const result = renderTimeline([envelope(events)], { maxLines: 20 });
     expect(result.lines).toHaveLength(20);
     expect(result.truncated).toBe(true);
+  });
+});
+
+describe('idle markers', () => {
+  it('inserts a marker before the interaction that ends an over-threshold gap', () => {
+    const rendered = renderTimeline([envelope([
+      meta('https://app.example.com/assets', t0),
+      snapshot(t0),
+      click('button.save-btn', t0 + 1_000),
+      click('button.save-btn', t0 + 2_764_000),
+    ])]);
+    const marker = rendered.lines.find((line) => line.kind === 'idle');
+    expect(marker).toBeDefined();
+    expect(marker!.text).toContain('[user idle 46m 3s — away from the app]');
+    expect(marker!.selector).toBeNull();
+    expect(rendered.text).toMatch(/L\d+ .*\[user idle 46m 3s — away from the app\]/);
+    const markerIndex = rendered.lines.indexOf(marker!);
+    expect(rendered.lines[markerIndex + 1]!.text).toContain('CLICK');
+  });
+
+  it('does not mark a gap at or under the threshold', () => {
+    const rendered = renderTimeline([envelope([
+      meta('https://app.example.com/assets', t0),
+      snapshot(t0),
+      click('button.save-btn', t0 + 1_000),
+      click('button.save-btn', t0 + 1_000 + IDLE_THRESHOLD_MS),
+    ])]);
+    expect(rendered.lines.some((line) => line.kind === 'idle')).toBe(false);
+  });
+
+  it('marks each long gap independently', () => {
+    const rendered = renderTimeline([envelope([
+      meta('https://app.example.com/assets', t0),
+      snapshot(t0),
+      click('button.save-btn', t0 + 1_000),
+      click('button.save-btn', t0 + 122_000),
+      click('button.save-btn', t0 + 243_000),
+    ])]);
+    expect(rendered.lines.filter((line) => line.kind === 'idle')).toHaveLength(2);
+  });
+
+  it('stays chronological when system lines land inside the gap', () => {
+    const rendered = renderTimeline([envelope([
+      meta('https://app.example.com/assets', t0),
+      snapshot(t0),
+      click('button.save-btn', t0 + 1_000),
+      requestStart('r1', 'POST', '/api/save', t0 + 1_100),
+      requestEnd('r1', 500, t0 + 90_000),
+      click('button.save-btn', t0 + 122_000),
+    ])]);
+    const texts = rendered.lines.map((line) => line.text);
+    const responseIndex = texts.findIndex((text) => text.includes('POST'));
+    const markerIndex = rendered.lines.findIndex((line) => line.kind === 'idle');
+    expect(markerIndex).toBeGreaterThan(responseIndex);
+    expect(rendered.lines[markerIndex + 1]!.text).toContain('CLICK');
+  });
+
+  it('emits no marker when the gap-ending activity renders no line', () => {
+    const rendered = renderTimeline([envelope([
+      meta('https://app.example.com/assets', t0),
+      snapshot(t0),
+      click('button.save-btn', t0 + 1_000),
+      rawInput(2, t0 + 122_000),
+    ])]);
+    expect(rendered.lines.some((line) => line.kind === 'idle')).toBe(false);
+    expect(rendered.lines[rendered.lines.length - 1]?.kind).not.toBe('idle');
   });
 });

@@ -3,7 +3,7 @@ import * as db from '../db.js';
 import type { ClaimedJob } from '../db.js';
 import { logger } from '../logger.js';
 import type { NarrativeClient } from './client.js';
-import { buildNarrativePrompt } from './prompt.js';
+import { buildNarrativePrompt, NARRATIVE_PROMPT_VERSION } from './prompt.js';
 import { renderTimeline } from './renderer.js';
 import { validateNarrative } from './validate.js';
 
@@ -21,7 +21,11 @@ export async function processNarration(
   deps: NarrateJobDeps,
   signal: AbortSignal,
 ): Promise<void> {
-  const pending = await db.claimPendingNarrative(job.sessionId, job.projectId);
+  const pending = await db.claimPendingNarrative(
+    job.sessionId,
+    job.projectId,
+    NARRATIVE_PROMPT_VERSION,
+  );
   if (!pending) return;
 
   const finish = async (args: Parameters<typeof db.finishNarrative>[1]): Promise<void> => {
@@ -88,6 +92,7 @@ export async function processNarration(
       s: line.selector,
       r: line.route,
       a: line.atMs,
+      ...(line.kind === 'idle' ? { k: 'idle' as const } : {}),
     })),
   };
   const hasObservations = validation.narrative.observations.length > 0;

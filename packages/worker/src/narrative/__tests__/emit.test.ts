@@ -27,3 +27,28 @@ describe('narrative signal emission', () => {
     expect(rows[0]?.occurredAts).toEqual([1_000, 1_200]);
   });
 });
+
+describe('idle lines as evidence', () => {
+  const idleTimeline = {
+    startTs: 1_000,
+    lines: [
+      { t: 'clicked button.save', s: 'button.save', r: '/assets', a: 1_000 },
+      { t: '[user idle 2m 0s — away from the app]', s: null, r: '/assets', a: 1_000, k: 'idle' as const },
+      { t: 'clicked button.save', s: 'button.save', r: '/checkout', a: 121_000 },
+    ],
+  };
+
+  it('resolveAnchor skips idle lines for both route and selector', () => {
+    expect(resolveAnchor(['L2', 'L3'], idleTimeline)).toEqual({
+      route: '/checkout', selector: 'button.save',
+    });
+  });
+
+  it('occurredAt comes from the first non-idle cited line', () => {
+    const rows = buildSignalRows(idleTimeline, [{
+      id: 'obs-1', category: 'no_feedback_after_action', what: 'x',
+      evidenceLines: ['L2', 'L3'], severity: 'low',
+    }]);
+    expect(rows[0]!.occurredAts).toEqual([121_000]);
+  });
+});

@@ -2,11 +2,11 @@ import type { NarrativeObservation } from '@opslane/shared';
 import { normalizePageUrl, observationFingerprint } from '../friction/fingerprint.js';
 import type { ObservationSignalRow } from '../friction/persist.js';
 
-export const NARRATIVE_RULE_VERSION = 6;
+export const NARRATIVE_RULE_VERSION = 7;
 
 export interface CompactTimeline {
   startTs: number;
-  lines: Array<{ t: string; s: string | null; r: string; a: number | null }>;
+  lines: Array<{ t: string; s: string | null; r: string; a: number | null; k?: 'idle' }>;
 }
 
 export function resolveAnchor(
@@ -18,7 +18,7 @@ export function resolveAnchor(
   for (const evidenceLine of evidenceLines) {
     const index = Number(evidenceLine.slice(1)) - 1;
     const line = timeline.lines[index];
-    if (!line) continue;
+    if (!line || line.k === 'idle') continue;
     if (!route) route = line.r;
     if (!selector && line.s) selector = line.s;
     if (route && selector) break;
@@ -36,7 +36,9 @@ export function buildSignalRows(
     const { route, selector } = resolveAnchor(observation.evidenceLines, timeline);
     const normalizedRoute = normalizePageUrl(route);
     const fingerprint = observationFingerprint(observation.category, selector, normalizedRoute);
-    const firstLine = timeline.lines[Number(observation.evidenceLines[0]?.slice(1)) - 1];
+    const firstLine = observation.evidenceLines
+      .map((evidenceLine) => timeline.lines[Number(evidenceLine.slice(1)) - 1])
+      .find((line) => line !== undefined && line.k !== 'idle');
     const occurredAt = firstLine?.a ?? timeline.startTs;
     const existing = rows.get(fingerprint);
     if (existing) {
