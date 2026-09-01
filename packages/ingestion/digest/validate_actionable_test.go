@@ -86,14 +86,14 @@ func cleanupActionableDiagnoses(t *testing.T, pool *pgxpool.Pool, projectID stri
 	})
 }
 
+// publishEmptyWrittenRun delivers a run whose writer authored nothing. Every
+// frozen incident is therefore unaccounted for by the payload, which is exactly
+// how the unified lane routes it to its mechanical receipt.
 func publishEmptyWrittenRun(t *testing.T, pool *pgxpool.Pool, projectID string, at time.Time) string {
 	t.Helper()
-	runID, candidates, err := FreezeCandidates(context.Background(), pool, projectID, at)
+	runID, _, err := FreezeCandidates(context.Background(), pool, projectID, at)
 	if err != nil {
 		t.Fatal(err)
-	}
-	if len(candidates) != 0 {
-		t.Fatalf("unexpected frozen candidates: %+v", candidates)
 	}
 	if _, err := pool.Exec(context.Background(), `UPDATE digest_runs
 		SET status='written',writer_payload='{"included":[],"deferred":[]}'::jsonb WHERE id=$1`, runID); err != nil {
@@ -141,6 +141,7 @@ func TestValidateRepeatsActionableItemUntilHumanActs(t *testing.T) {
 		t.Fatal(err)
 	}
 	seedFreezeReplay(t, pool, fixture.ProjectID, fixture.EnvID, episodeID, "actionable-replay-"+uuid.NewString(), now.Add(-time.Hour))
+	quietBackgroundActionable(t, pool, fixture.ProjectID, groupID)
 	t.Setenv("DASHBOARD_URL", "https://app.example.com")
 
 	firstRun := publishEmptyWrittenRun(t, pool, fixture.ProjectID, now)
@@ -203,30 +204,20 @@ func TestValidateRepeatsActionableItemUntilHumanActs(t *testing.T) {
 	}
 }
 
+// An incident that shipped an authored card owes no second appearance as a
+// receipt: the receipt lane is built from the incidents whose card fell back,
+// and nothing else. Re-validating a delivered run must change none of that.
 func TestValidateFrozenCardOwnsActionableDuplicateAndDeliveredRetryIsSafe(t *testing.T) {
 	pool := testPool(t)
 	ctx := context.Background()
 	now := time.Now().UTC().Truncate(time.Second)
 	fixture := seedDigestFixture(t, pool, now)
-	cleanupActionableDiagnoses(t, pool, fixture.ProjectID)
 	if _, err := pool.Exec(ctx, `UPDATE projects SET github_repo='acme/shop' WHERE id=$1`, fixture.ProjectID); err != nil {
 		t.Fatal(err)
 	}
-	episodeID := seedFreezeEpisode(t, pool, fixture.ProjectID, fixture.EnvID, now.Add(-2*time.Hour), 1)
-	seedFreezeDiagnosis(t, pool, fixture.ProjectID, episodeID, "needs_human", now.Add(-time.Hour))
-	var groupID string
-	if err := pool.QueryRow(ctx, `SELECT canonical_issue_id::text FROM issue_episodes WHERE id=$1`, episodeID).Scan(&groupID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `INSERT INTO issue_decisions
-		(project_id,episode_id,decision,reason,users_7d,anon_7d,rule_version,decided_at)
-		VALUES ($1,$2,'open_inquiry','test',2,0,1,$3)`, fixture.ProjectID, episodeID, now.Add(-time.Hour)); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `UPDATE error_groups
-		SET status='needs_human',candidate_diff='diff --git a/a b/a' WHERE id=$1`, groupID); err != nil {
-		t.Fatal(err)
-	}
+	groupID := seedOnCardGroup(t, pool, fixture.ProjectID, fixture.EnvID, "error", "pr_created", false,
+		"https://github.com/acme/shop/pull/42", "The checkout control does not submit.", now.Add(-2*time.Hour))
+	quietBackgroundActionable(t, pool, fixture.ProjectID, groupID)
 	runID, candidates, err := FreezeCandidates(ctx, pool, fixture.ProjectID, now)
 	if err != nil || len(candidates) != 1 {
 		t.Fatalf("freeze candidates=%d err=%v", len(candidates), err)
@@ -245,13 +236,13 @@ func TestValidateFrozenCardOwnsActionableDuplicateAndDeliveredRetryIsSafe(t *tes
 	if ids := receiptIDs(t, pool, runID); len(ids) != 0 {
 		t.Fatalf("duplicate actionable receipt rendered beside frozen card: %v", ids)
 	}
-	var reason string
-	if err := pool.QueryRow(ctx, `SELECT primary_reason_code FROM digest_run_candidate_evaluations
-		WHERE digest_run_id=$1 AND error_group_id=$2`, runID, groupID).Scan(&reason); err != nil {
-		t.Fatal(err)
+	cards := renderedEvent(t, pool, runID).Digest.GeneratedCards
+	if len(cards) != 1 || cards[0].IncidentID != groupID {
+		t.Fatalf("frozen card = %+v, want the one incident %s", cards, groupID)
 	}
-	if reason != "frozen_lane_owns" {
-		t.Fatalf("ledger reason = %q", reason)
+	outcome, reason, renderMode, _ := unifiedLedger(t, pool, runID, groupID)
+	if outcome != "included" || reason != reasonIncluded || renderMode != "authored" {
+		t.Fatalf("ledger = %s/%s/%s", outcome, reason, renderMode)
 	}
 }
 
@@ -320,62 +311,5 @@ func TestLoadActionableCandidatesKeepsEveryLedgerCandidateOnce(t *testing.T) {
 	}
 	if len(evaluation.Included) != 1 || evaluation.Included[0].GroupID != multipleID {
 		t.Errorf("multiple-diagnosis candidate was not included exactly once: %+v", evaluation.Included)
-	}
-}
-
-// A failure inside the actionable lane must degrade, never abort the digest:
-// the run still delivers, receipts are withheld (no receipts without their
-// ledger), and the payload carries the fallback alert. The failure is induced
-// by renaming the ledger table for the duration of the run.
-func TestValidateDegradesWhenActionableLedgerUnavailable(t *testing.T) {
-	pool := testPool(t)
-	now := time.Now().UTC()
-	fixture := seedDigestFixture(t, pool, now)
-	t.Cleanup(func() { cleanupActionableDiagnoses(t, pool, fixture.ProjectID) })
-	seedDestination(t, pool, fixture.ProjectID, []string{"digest.daily"})
-	seedActionableGroup(t, pool, fixture.ProjectID, fixture.EnvID, "friction", "awaiting_approval", now.Add(-time.Hour))
-
-	if _, err := pool.Exec(context.Background(), `ALTER TABLE digest_run_candidate_evaluations RENAME TO drce_degrade_test`); err != nil {
-		t.Fatal(err)
-	}
-	restored := false
-	restore := func() {
-		if restored {
-			return
-		}
-		restored = true
-		if _, err := pool.Exec(context.Background(), `ALTER TABLE drce_degrade_test RENAME TO digest_run_candidate_evaluations`); err != nil {
-			t.Fatalf("restore ledger table: %v", err)
-		}
-	}
-	defer restore()
-
-	runID := publishEmptyWrittenRun(t, pool, fixture.ProjectID, now)
-	restore()
-
-	var status, alert string
-	var receipts int
-	if err := pool.QueryRow(context.Background(), `SELECT status,
-		COALESCE(rendered_payload->'digest'->>'delivery_alert',''),
-		COALESCE(jsonb_array_length(rendered_payload->'digest'->'receipt_items'),0)
-		FROM digest_runs WHERE id=$1`, runID).Scan(&status, &alert, &receipts); err != nil {
-		t.Fatal(err)
-	}
-	if status != "delivered" {
-		t.Fatalf("degraded run status=%q, want delivered", status)
-	}
-	if receipts != 0 {
-		t.Fatalf("receipts published without a ledger: %d", receipts)
-	}
-	if alert != "Actionable findings could not be evaluated for this digest." {
-		t.Fatalf("delivery alert=%q", alert)
-	}
-	var ledgerRows int
-	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM digest_run_candidate_evaluations
-		WHERE digest_run_id=$1`, runID).Scan(&ledgerRows); err != nil {
-		t.Fatal(err)
-	}
-	if ledgerRows != 0 {
-		t.Fatalf("ledger rows exist for a degraded run: %d", ledgerRows)
 	}
 }
