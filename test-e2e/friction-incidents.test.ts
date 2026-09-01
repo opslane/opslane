@@ -130,7 +130,34 @@ async function claimJob(projectID: string, sessionID: string, jobType: string): 
         WHERE project_id=$1 AND session_id=$2 AND job_type=$3 AND status='pending'
         ORDER BY created_at DESC LIMIT 1 FOR UPDATE SKIP LOCKED)
       RETURNING id, lease_generation::text`, [projectID, sessionID, jobType, workerID]);
-  const row = rows[0];
+  let row = rows[0];
+  if (!row) {
+    // The live keyless worker container polls the same queue and can consume
+    // the job first. For session_narrate it is a no-op that leaves the
+    // reservation pending; for session_verify_frames it finalizes the
+    // narrative 'unsupported' and writes ungraded signals. Heal the state the
+    // container touched, then hand the pipeline a fresh claimed job row.
+    if (jobType === 'session_verify_frames') {
+      await getPool().query(
+        `UPDATE session_narratives
+         SET verification_state='pending', verification=NULL, verification_reason=NULL, updated_at=now()
+         WHERE session_id=$1 AND project_id=$2 AND verification_state IN ('verifying','unsupported','failed')`,
+        [sessionID, projectID],
+      );
+      await getPool().query(
+        `DELETE FROM friction_signals WHERE session_id=$1 AND project_id=$2`,
+        [sessionID, projectID],
+      );
+    }
+    const inserted = await getPool().query<{ id: string; lease_generation: string }>(
+      `INSERT INTO error_group_jobs
+         (project_id, session_id, job_type, status, triggered_by, worker_id, claimed_at, lease_expires_at)
+       VALUES ($1, $2, $3, 'claimed', 'auto', $4, now(), now()+interval '10 minutes')
+       RETURNING id, lease_generation::text`,
+      [projectID, sessionID, jobType, workerID],
+    );
+    row = inserted.rows[0];
+  }
   if (!row) throw new Error(`no ${jobType} job for ${sessionID}`);
   return {
     id: row.id, workerId: workerID, leaseGeneration: row.lease_generation,
