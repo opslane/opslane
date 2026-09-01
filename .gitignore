@@ -26,3 +26,4 @@ eval/results/
 
 .verify/
 .playwright-mcp/
+.env.verify
