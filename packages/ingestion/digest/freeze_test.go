@@ -656,3 +656,61 @@ func TestFreezeOnKeepsOneCandidatePerGroup(t *testing.T) {
 		t.Fatalf("ON froze %d candidates for one group, want 1", forGroup)
 	}
 }
+
+// TestFreezeAdmitsDiagnosedFrictionIncident is the consequence AC13 needs: a
+// friction diagnosis that needs product judgment lands on awaiting_approval
+// with a root cause and no candidate diff (decision 2026-09-01, replacing the
+// terminal-FYI `insight`). The freeze must admit it and ask the reader to
+// review the investigation, not to approve a fix that does not exist.
+func TestFreezeAdmitsDiagnosedFrictionIncident(t *testing.T) {
+	t.Setenv("DIGEST_UNIFIED_CARDS", "on")
+	pool := testPool(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	f := seedDigestFixture(t, pool, now)
+	cleanupActionableDiagnoses(t, pool, f.ProjectID)
+	groupID, _ := seedActionableGroup(t, pool, f.ProjectID, f.EnvID, "friction", "awaiting_approval", now.Add(-time.Hour))
+	if _, err := pool.Exec(ctx, `UPDATE error_groups SET signal_type='dead_click',
+		root_cause='Users expect the support email to be clickable; product decision.',
+		candidate_diff=NULL WHERE id=$1`, groupID); err != nil {
+		t.Fatal(err)
+	}
+	// The lifecycle trigger stamps the waiting age on the status write; without
+	// it the incident is not in the actionable lane at all.
+	var actionableSince *time.Time
+	if err := pool.QueryRow(ctx, `SELECT actionable_since FROM error_groups WHERE id=$1`,
+		groupID).Scan(&actionableSince); err != nil {
+		t.Fatal(err)
+	}
+	if actionableSince == nil {
+		t.Fatal("diagnosed friction incident was never stamped actionable")
+	}
+	quietBackgroundActionable(t, pool, f.ProjectID, groupID)
+
+	_, candidates, err := FreezeCandidates(ctx, pool, f.ProjectID, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var candidate Candidate
+	for _, item := range candidates {
+		if item.ErrorGroupID == groupID {
+			candidate = item
+			break
+		}
+	}
+	if candidate.ErrorGroupID == "" {
+		t.Fatalf("diagnosed friction incident was not frozen: %+v", candidates)
+	}
+	if candidate.Kind != "friction" || candidate.Status != "awaiting_approval" {
+		t.Fatalf("frozen candidate = %+v", candidate)
+	}
+	if candidate.HasSavedDiff {
+		t.Fatalf("candidate claims a saved diff it does not have: %+v", candidate)
+	}
+	if candidate.ValidAction != "Review the investigation." {
+		t.Fatalf("valid action = %q, want %q", candidate.ValidAction, "Review the investigation.")
+	}
+	if candidate.RootCause == "" {
+		t.Fatalf("the diagnosis did not reach the card: %+v", candidate)
+	}
+}

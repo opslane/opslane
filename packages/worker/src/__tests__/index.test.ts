@@ -4,6 +4,11 @@ import type { ClaimedJob, ErrorGroupData, ErrorEventData, ProjectData } from '..
 import type { EvidenceBundle } from '../evidence/bundle.js';
 import { VerificationInfraError } from '../harness/errors.js';
 
+const analysisDbClient = vi.hoisted(() => ({
+  query: vi.fn(async () => ({ rows: [], rowCount: 1 })),
+  release: vi.fn(),
+}));
+
 // index.ts is the worker entrypoint: it imports the whole world and calls main()
 // at module load. We mock every dependency so importing it is side-effect free,
 // and main() is guarded behind !process.env.VITEST so the poller/servers never
@@ -33,6 +38,8 @@ vi.mock('../db.js', async () => ({
   updateJobTraceUrl: vi.fn(),
   closePool: vi.fn(),
   getFrictionSignalsForGroup: vi.fn(),
+  getLatestNarrativeSignalForGroup: vi.fn(async () => null),
+  getPool: vi.fn(() => ({ connect: async () => analysisDbClient })),
   getScrubbedChunksForSession: vi.fn(),
   getSessionForAnalysis: vi.fn(),
   upsertSessionAnalysis: vi.fn(),
@@ -41,6 +48,9 @@ vi.mock('../db.js', async () => ({
   enqueueSessionAnalysisForBudgetRetry: vi.fn(),
   setSessionAnalysisStatus: vi.fn(),
   assertJobLease: vi.fn(),
+  reserveNarrative: vi.fn(),
+  enqueueJob: vi.fn(),
+  sweepNarratives: vi.fn(async () => ({ reEnqueued: 0, failed: 0 })),
   reserveDelivery: vi.fn(),
   recordDeliveryPushed: vi.fn(),
   finalizeDelivery: vi.fn(),
@@ -91,7 +101,9 @@ vi.mock('../harness/readonly-sandbox.js', async (importOriginal) => {
   const real = await importOriginal<typeof import('../harness/readonly-sandbox.js')>();
   return { ...real, createReadOnlyCheckout: vi.fn() };
 });
-vi.mock('../minio-client.js', () => ({ fetchObject: vi.fn(), getMinIOConfig: vi.fn(() => null) }));
+vi.mock('../minio-client.js', () => ({
+  fetchObject: vi.fn(), getMinIOConfig: vi.fn(() => null), putFrameObject: vi.fn(),
+}));
 vi.mock('../investigate.js', () => ({
   investigateError: vi.fn(),
   // index.ts records this on the immutable decision row, so the mock must carry
@@ -134,7 +146,7 @@ vi.mock('../friction/investigate-friction.js', () => ({
   FRICTION_INVESTIGATION_MODEL: 'claude-sonnet-4-6',
 }));
 vi.mock('../friction/chunk-reader.js', () => ({ readChunksBounded: vi.fn() }));
-vi.mock('../friction/analyzer.js', () => ({ analyzeSession: vi.fn(), RULE_VERSION: 2 }));
+vi.mock('../friction/analyzer.js', () => ({ RULE_VERSION: 6 }));
 vi.mock('../friction/facts.js', () => ({
   extractSessionFacts: vi.fn(() => ({
     entryPath: null, clickCount: 0, inputEventCount: 0, pageEventCount: 0,
@@ -146,15 +158,11 @@ vi.mock('../friction/facts.js', () => ({
   classifyActivity: vi.fn(() => 'unknown'),
 }));
 vi.mock('../facts/persist.js', () => ({ replaceSessionFacts: vi.fn() }));
-vi.mock('../friction/persist.js', () => ({ writeFrictionSignals: vi.fn() }));
-vi.mock('../friction/promotion.js', () => ({ processFrictionOutcomes: vi.fn() }));
-vi.mock('../friction/adjudicator.js', () => ({
-  createAnthropicAdjudicator: vi.fn(() => ({ modelId: 'real', promptVersion: 1, adjudicate: vi.fn() })),
-}));
-vi.mock('../friction/evidence-window.js', () => ({
-  EVIDENCE_WINDOW_MS: 15_000,
-  buildEvidenceWindows: vi.fn(() => []),
-}));
+vi.mock('../narrative/client.js', () => ({ narrativeClientFromEnv: vi.fn(() => null) }));
+vi.mock('../narrative/job.js', () => ({ processNarration: vi.fn() }));
+vi.mock('../narrative/prompt.js', () => ({ NARRATIVE_PROMPT_VERSION: 1 }));
+vi.mock('../narrative/frames/capture.js', () => ({ captureFrames: vi.fn() }));
+vi.mock('../narrative/verify.js', () => ({ processFrameVerification: vi.fn() }));
 
 const db = await import('../db.js');
 const { cloneRepo } = await import('../repo-clone.js');
@@ -165,10 +173,8 @@ const { mapDbSignals, processJobInner, processInvestigateJob, processFixJob, pro
 const { gatherFrictionEvidence } = await import('../friction/friction-evidence.js');
 const { investigateFriction } = await import('../friction/investigate-friction.js');
 const { readChunksBounded } = await import('../friction/chunk-reader.js');
-const { analyzeSession } = await import('../friction/analyzer.js');
 const { replaceSessionFacts } = await import('../facts/persist.js');
-const { writeFrictionSignals } = await import('../friction/persist.js');
-const { processFrictionOutcomes } = await import('../friction/promotion.js');
+const { classifyActivity } = await import('../friction/facts.js');
 const { processRouteMapJob } = await import('../route-map.js');
 const { runProductContext } = await import('../product-context/job.js');
 const { runInquiry } = await import('../inquiry/job.js');
@@ -1219,17 +1225,27 @@ describe('friction worker path', () => {
     );
   });
 
-  it('records friction without a code cause as an insight', async () => {
+  it('routes a non-code-cause verdict to awaiting_approval (reviewable diagnosis)', async () => {
     vi.mocked(investigateFriction).mockResolvedValue({
       status: 'verdict', investigatedCommit: 'abc123', costUsd: 0.1,
       usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
-      verdict: { codeCause: false, confidence: 'medium', reason: 'The workflow is confusing but functional.', evidence: [], agentTaskBrief: null },
+      verdict: {
+        codeCause: false,
+        confidence: 'high',
+        reason: 'Users expect the support email to be clickable; product decision, not a code defect',
+        evidence: [{ path: 'src/LicenseWall.vue', detail: 'the support address is plain text', symptomLink: 'users click a non-link' }],
+        agentTaskBrief: null,
+      },
     });
 
     await processInvestigateJob(makeJob(), new AbortController().signal);
 
     expect(db.updateGroupInvestigation).toHaveBeenCalledWith(
-      'grp-1', 'proj-1', 'insight', expect.objectContaining({ rootCause: expect.any(String) }),
+      'grp-1', 'proj-1', 'awaiting_approval', expect.objectContaining({
+        rootCause: expect.stringContaining('support email'),
+        // The decision ledger's meaning is unchanged; only where the human sees it moved.
+        decision: expect.objectContaining({ outcome: 'not_actionable' }),
+      }),
       makeJob(),
     );
     expect(db.updateGroupAndCreateFixJob).not.toHaveBeenCalled();
@@ -1398,6 +1414,8 @@ describe('unknown job type dispatch', () => {
 describe('session_analysis handler', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(classifyActivity).mockReturnValue('unknown');
+    vi.mocked(db.reserveNarrative).mockResolvedValue(false);
   });
 
   const job: ClaimedJob & { sessionId: string } = {
@@ -1412,87 +1430,45 @@ describe('session_analysis handler', () => {
     });
     vi.mocked(db.getScrubbedChunksForSession).mockResolvedValue([]);
     vi.mocked(readChunksBounded).mockResolvedValue({ envelopes: [], envelopeSeqs: [], inflatedBytes: 0, truncated: false, unreadableCount: 0 });
-    vi.mocked(analyzeSession).mockReturnValue([]);
-
     await expect(processJobInner(job, new AbortController().signal)).resolves.toBeUndefined();
-    expect(writeFrictionSignals).toHaveBeenCalled();
+    expect(replaceSessionFacts).toHaveBeenCalled();
   });
 
-  it('analyzes scrubbed chunks, persists signals, and marks the session analyzed', async () => {
-    const session = {
+  it('persists facts and analysis in one caller-owned transaction', async () => {
+    vi.mocked(db.getSessionForAnalysis).mockResolvedValue({
       id: 'session-1', project_id: 'proj-1', environment_id: 'env-1', end_user_id: null, status: 'closed', started_at: '2026-08-01T00:00:00Z', chunk_count: 0,
-    };
-    vi.mocked(db.getSessionForAnalysis).mockResolvedValue(session);
+    });
     vi.mocked(db.getScrubbedChunksForSession).mockResolvedValue([]);
     vi.mocked(readChunksBounded).mockResolvedValue({ envelopes: [], envelopeSeqs: [], inflatedBytes: 0, truncated: false, unreadableCount: 0 });
-    vi.mocked(analyzeSession).mockReturnValue([]);
 
     await processSessionAnalysisJob(job, new AbortController().signal);
 
     expect(db.setSessionAnalysisStatus).toHaveBeenNthCalledWith(1, 'session-1', 'proj-1', 'analyzing', undefined, job);
     expect(db.assertJobLease).toHaveBeenCalledWith(job);
-    expect(db.upsertSessionAnalysis).toHaveBeenCalledWith(expect.objectContaining({
-      sessionId: 'session-1', coverage: 'no_replay', activityClass: 'unknown', ruleVersion: 2,
-    }));
     expect(replaceSessionFacts).toHaveBeenCalledWith('proj-1', 'session-1', expect.objectContaining({
-      ruleVersion: 2, failures: [], successes: [],
-    }));
-    expect(vi.mocked(replaceSessionFacts).mock.invocationCallOrder[0]!).toBeLessThan(
-      vi.mocked(db.upsertSessionAnalysis).mock.invocationCallOrder[0]!,
-    );
-    expect(writeFrictionSignals).toHaveBeenCalledWith(session, [], 2);
-    expect(db.setSessionAnalysisStatus).toHaveBeenLastCalledWith('session-1', 'proj-1', 'analyzed', 2, job);
-    expect(db.updateGroupAndCreateFixJob).not.toHaveBeenCalled();
-    expect(vi.mocked(db.assertJobLease).mock.invocationCallOrder[0]!).toBeLessThan(
-      vi.mocked(db.upsertSessionAnalysis).mock.invocationCallOrder[0]!,
-    );
+      ruleVersion: 6, failures: [], successes: [],
+    }), analysisDbClient);
+    expect(db.upsertSessionAnalysis).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: 'session-1', coverage: 'no_replay', activityClass: 'unknown', ruleVersion: 6,
+    }), analysisDbClient);
+    expect(db.setSessionAnalysisStatus).toHaveBeenLastCalledWith('session-1', 'proj-1', 'analyzed', 6, job);
   });
 
-  it('runs friction adjudication after signal persistence when a key is set', async () => {
-    const session = {
+  it('reserves and enqueues narration only for active sessions', async () => {
+    vi.mocked(db.getSessionForAnalysis).mockResolvedValue({
       id: 'session-1', project_id: 'proj-1', environment_id: 'env-1', end_user_id: null, status: 'closed', started_at: '2026-08-01T00:00:00Z', chunk_count: 0,
-    };
-    vi.mocked(db.getSessionForAnalysis).mockResolvedValue(session);
+    });
     vi.mocked(db.getScrubbedChunksForSession).mockResolvedValue([]);
     vi.mocked(readChunksBounded).mockResolvedValue({ envelopes: [], envelopeSeqs: [], inflatedBytes: 0, truncated: false, unreadableCount: 0 });
-    vi.mocked(analyzeSession).mockReturnValue([]);
-    const prevKey = process.env['ANTHROPIC_API_KEY'];
-    process.env['ANTHROPIC_API_KEY'] = 'test-key';
-    try {
-      await processSessionAnalysisJob(job, new AbortController().signal);
-    } finally {
-      if (prevKey === undefined) delete process.env['ANTHROPIC_API_KEY'];
-      else process.env['ANTHROPIC_API_KEY'] = prevKey;
-    }
-    expect(processFrictionOutcomes).toHaveBeenCalledWith(
-      session,
-      'analysis-1',
-      expect.objectContaining({ modelId: 'real' }),
-      expect.objectContaining({ windowMode: 'off' }),
-    );
-    // Ordering: adjudication runs after persistence, before 'analyzed'.
-    expect(vi.mocked(writeFrictionSignals).mock.invocationCallOrder[0]!).toBeLessThan(
-      vi.mocked(processFrictionOutcomes).mock.invocationCallOrder[0]!,
-    );
-  });
+    vi.mocked(classifyActivity).mockReturnValue('active');
+    vi.mocked(db.reserveNarrative).mockResolvedValue(true);
 
-  it('skips friction adjudication without a key (keyless mode) and still analyzes', async () => {
-    const session = {
-      id: 'session-1', project_id: 'proj-1', environment_id: 'env-1', end_user_id: null, status: 'closed', started_at: '2026-08-01T00:00:00Z', chunk_count: 0,
-    };
-    vi.mocked(db.getSessionForAnalysis).mockResolvedValue(session);
-    vi.mocked(db.getScrubbedChunksForSession).mockResolvedValue([]);
-    vi.mocked(readChunksBounded).mockResolvedValue({ envelopes: [], envelopeSeqs: [], inflatedBytes: 0, truncated: false, unreadableCount: 0 });
-    vi.mocked(analyzeSession).mockReturnValue([]);
-    const prevKey = process.env['ANTHROPIC_API_KEY'];
-    delete process.env['ANTHROPIC_API_KEY'];
-    try {
-      await processSessionAnalysisJob(job, new AbortController().signal);
-    } finally {
-      if (prevKey !== undefined) process.env['ANTHROPIC_API_KEY'] = prevKey;
-    }
-    expect(processFrictionOutcomes).not.toHaveBeenCalled();
-    expect(db.setSessionAnalysisStatus).toHaveBeenLastCalledWith('session-1', 'proj-1', 'analyzed', 2, job);
+    await processSessionAnalysisJob(job, new AbortController().signal);
+
+    expect(db.reserveNarrative).toHaveBeenCalledWith(analysisDbClient, {
+      sessionId: 'session-1', projectId: 'proj-1', environmentId: 'env-1', promptVersion: 1,
+    });
+    expect(db.enqueueJob).toHaveBeenCalledWith('session_narrate', 'proj-1', 'session-1');
   });
 
   it('marks analysis_failed and rethrows corrupt chunk failures', async () => {

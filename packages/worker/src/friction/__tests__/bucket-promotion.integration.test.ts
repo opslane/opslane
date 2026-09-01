@@ -777,6 +777,25 @@ describeDb('bucket promotion integration', () => {
       expect((await getIncidentFor(fp)).status).toBe('queued');
     });
 
+    // The worker call alone does not prove digest visibility: the DB lifecycle
+    // trigger is what makes a diagnosed, diff-less incident actionable.
+    it('awaiting_approval without a diff stamps actionable_since via the lifecycle trigger', async () => {
+      const { group } = await promoteFresh('lifecycle', 'medium');
+      expect(group.status).toBe('queued');
+      await pool.query(
+        `UPDATE error_groups SET status = 'awaiting_approval', root_cause = $2 WHERE id = $1`,
+        [group.id, 'Users expect the support email to be clickable']
+      );
+      const row = (await pool.query(
+        `SELECT actionable_since,
+                error_groups_action_class(status::text, candidate_diff, pr_url) AS klass
+         FROM error_groups WHERE id = $1`,
+        [group.id]
+      )).rows[0]!;
+      expect(row.actionable_since).not.toBeNull();
+      expect(row.klass).toBe('Review the investigation.');
+    });
+
     it('leaves a sub-threshold fingerprint a candidate with no investigation', async () => {
       const fp = 'vgi-below';
       await seedNarrativeSignal('below-1', fp, 'high');

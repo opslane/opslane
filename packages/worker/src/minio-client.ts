@@ -1,6 +1,6 @@
 /** Minimal MinIO/S3 client for fetching objects from the worker. */
 
-import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3';
+import { S3Client, GetObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
 
 export interface MinIOConfig {
   endpoint: string;     // e.g., http://minio:9000
@@ -55,4 +55,17 @@ export async function fetchObject(objectKey: string, config: MinIOConfig): Promi
     chunks.push(chunk);
   }
   return Buffer.concat(chunks);
+}
+
+export async function putFrameObject(
+  objectKey: string,
+  body: Buffer,
+  config: MinIOConfig,
+): Promise<void> {
+  await getS3Client(config).send(new PutObjectCommand({
+    Bucket: config.bucket,
+    Key: objectKey,
+    Body: body,
+    ContentType: 'image/png',
+  }));
 }
