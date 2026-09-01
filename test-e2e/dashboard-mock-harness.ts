@@ -129,6 +129,7 @@ function defaultBody(method: string, pathname: string): unknown {
     return { sessions: mockSessions(), next_cursor: null, has_identified_sessions: true };
   }
   if (/\/sessions\/[^/]+\/chunks\/[0-9]+$/.test(pathname)) return { events: [] };
+  if (/\/sessions\/[^/]+\/narrative$/.test(pathname)) return mockNarrative();
   if (/\/sessions\/[^/]+$/.test(pathname)) return { ...mockSession(), chunks: [] };
   if (/\/replays\/[^/]+$/.test(pathname)) return { events: [], meta: {} };
   if (pathname === '/api/v1/admin/overview') return mockAdminOverview();
@@ -161,6 +162,25 @@ function mockIncident(): Record<string, unknown> {
     title: 'Mock incident title', status: 'pr_created', first_seen: '2026-01-01T00:00:00Z', last_seen: '2026-01-01T00:05:00Z',
     occurrence_count: 3, affected_users_count: 1, confidence: 'high', root_cause: 'Mock-only root cause',
     suggested_mitigation: 'Mock-only mitigation', pr_url: 'https://github.com/example/mock/pull/1', environments: [],
+  };
+}
+
+function mockNarrative(): Record<string, unknown> {
+  return {
+    userGoal: 'Complete checkout with a saved card',
+    narrative: 'The user reached payment, retried the pay button three times with no visible response, and abandoned the flow.',
+    observations: [
+      {
+        id: 'obs-1',
+        category: 'no_feedback_after_action',
+        what: 'Clicking Pay produced no visible response.',
+        severity: 'high',
+        evidenceLines: ['L12', 'L13'],
+        grade: 'confirmed',
+        atMs: 41_000,
+      },
+    ],
+    notable: true,
   };
 }
 
