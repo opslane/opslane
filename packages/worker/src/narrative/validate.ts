@@ -64,7 +64,12 @@ export function validateNarrative(rawText: string, timeline: RenderedTimeline): 
     for (const lineId of rawLines) {
       const match = typeof lineId === 'string' ? /^L(\d+)$/.exec(lineId) : null;
       const lineNumber = match ? Number(match[1]) : Number.NaN;
-      if (Number.isInteger(lineNumber) && lineNumber >= 1 && lineNumber <= timeline.lines.length) {
+      // Idle markers are narration aids, never evidence. Stripping them here,
+      // at the one choke point, keeps every downstream consumer (anchor
+      // resolution, occurred_at, frame moments, the Go read API) free of the
+      // convention; an observation citing only idle lines drops entirely.
+      if (Number.isInteger(lineNumber) && lineNumber >= 1 && lineNumber <= timeline.lines.length
+        && timeline.lines[lineNumber - 1]?.kind !== 'idle') {
         const canonical = `L${lineNumber}`;
         if (!seenLines.has(canonical)) {
           seenLines.add(canonical);
