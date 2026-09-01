@@ -1120,7 +1120,7 @@ async function handleDisconnectGithub(): Promise<void> {
         <div>
           <div class="text-xs font-medium uppercase tracking-wide text-muted">Current plan</div>
           <h3 class="mt-1 text-xl font-semibold text-text">
-            {{ billingSummary.plan_id === 'pro' ? 'Pro' : 'Free' }}
+            {{ billingSummary.is_pro ? 'Pro' : 'Free' }}
           </h3>
         </div>
 
@@ -1144,7 +1144,7 @@ async function handleDisconnectGithub(): Promise<void> {
 
         <div class="flex flex-wrap items-center gap-3">
           <Button
-            v-if="billingSummary.plan_id !== 'pro'"
+            v-if="!billingSummary.is_pro"
             data-billing-upgrade
             variant="primary"
             :busy="billingActionBusy"

@@ -113,7 +113,7 @@ describe('billing settings', () => {
     localStorage.clear();
     localStorage.setItem('opslane_project_id', project.id);
     localStorage.setItem('opslane_project_name', project.name);
-    vi.mocked(getBillingSummary).mockResolvedValue({ plan_id: 'free', features: [] });
+    vi.mocked(getBillingSummary).mockResolvedValue({ plan_id: 'free', is_pro: false, features: [] });
   });
 
   afterEach(() => {
@@ -151,6 +151,7 @@ describe('billing settings', () => {
   it('renders the plan and merged fix PR usage from the billing summary', async () => {
     vi.mocked(getBillingSummary).mockResolvedValue({
       plan_id: 'free',
+      is_pro: false,
       features: [
         { feature_id: 'merged_prs', allowed: true, granted: 2, usage: 1, remaining: 1 },
         { feature_id: 'investigations', allowed: true, unlimited: true },
@@ -201,7 +202,7 @@ describe('billing settings', () => {
   });
 
   it('hides upgrade on Pro and opens the customer billing portal', async () => {
-    vi.mocked(getBillingSummary).mockResolvedValue({ plan_id: 'pro', features: [] });
+    vi.mocked(getBillingSummary).mockResolvedValue({ plan_id: 'pro', is_pro: true, features: [] });
     vi.mocked(openBillingPortal).mockResolvedValue({ url: 'https://portal.example.test/customer' });
     const navigate = vi.fn();
     const wrapper = await mountSettings('owner', project, {

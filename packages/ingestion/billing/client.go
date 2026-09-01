@@ -77,6 +77,12 @@ func FromEnv() *Client {
 	}
 }
 
+// IsProPlan reports whether planID is the configured pro plan. The dashboard
+// must not hardcode plan ids: AUTUMN_PRO_PLAN_ID is deployment-configurable.
+func (c *Client) IsProPlan(planID string) bool {
+	return planID != "" && planID == c.proPlanID
+}
+
 func valueOrDefault(value, fallback string) string {
 	if value != "" {
 		return value
@@ -143,11 +149,16 @@ func (c *Client) AttachPro(ctx context.Context, orgID, successURL string) (strin
 	var response struct {
 		PaymentURL string `json:"payment_url"`
 	}
-	_, err := c.post(ctx, billingAttachPath, map[string]any{
+	body := map[string]any{
 		"customer_id": orgID,
 		"plan_id":     c.proPlanID,
-		"success_url": successURL,
-	}, nil, &response)
+	}
+	// A relative or empty success URL fails hosted checkout outright; omitting
+	// the field lets the provider fall back to its own default.
+	if strings.TrimSpace(successURL) != "" {
+		body["success_url"] = successURL
+	}
+	_, err := c.post(ctx, billingAttachPath, body, nil, &response)
 	if err != nil {
 		return "", err
 	}
@@ -162,10 +173,11 @@ func (c *Client) PortalURL(ctx context.Context, orgID, returnURL string) (string
 	var response struct {
 		URL string `json:"url"`
 	}
-	_, err := c.post(ctx, billingPortalPath, map[string]any{
-		"customer_id": orgID,
-		"return_url":  returnURL,
-	}, nil, &response)
+	body := map[string]any{"customer_id": orgID}
+	if strings.TrimSpace(returnURL) != "" {
+		body["return_url"] = returnURL
+	}
+	_, err := c.post(ctx, billingPortalPath, body, nil, &response)
 	if err != nil {
 		return "", err
 	}

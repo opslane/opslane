@@ -63,6 +63,7 @@ func (d *Dependencies) GetBillingSummary(w http.ResponseWriter, r *http.Request)
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"plan_id":  planID,
+		"is_pro":   d.Billing.IsProPlan(planID),
 		"features": features,
 	})
 }
@@ -121,6 +122,13 @@ func summarizeBillingFeature(featureID string, result billing.CheckResult) billi
 	return summary
 }
 
+// billingSettingsURL is empty when DASHBOARD_URL is unset: hosted billing
+// pages reject relative success/return URLs, and the client omits the field
+// entirely rather than sending one that fails every checkout.
 func billingSettingsURL() string {
-	return strings.TrimRight(os.Getenv("DASHBOARD_URL"), "/") + "/settings?tab=billing"
+	base := strings.TrimRight(strings.TrimSpace(os.Getenv("DASHBOARD_URL")), "/")
+	if base == "" {
+		return ""
+	}
+	return base + "/settings?tab=billing"
 }
