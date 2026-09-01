@@ -452,7 +452,7 @@ jobs:
           # (Slice 4). The environments group-keeping pin now names the
           # capture-bucket rewrite of the same proof.
           E2E_REQUIRED_PATTERNS: |
-            ^browser smoke: rage click to friction signal >
+            ^browser smoke: friction session reaches the narrative stage >
             ^notifications contract
             ^first-class environment ingestion > keeps one capture bucket across payload environments
             ^first-class environment ingestion > uses exact labels, discovers valid names, and falls back invalid labels to the default
@@ -467,10 +467,7 @@ jobs:
             ^origin allowlist with a server-side SDK > keeps browser-only routes strict for header-less callers$
             ^real Chromium always sends Origin to /events > rejects a page whose origin is not on the allowlist$
             ^real Chromium always sends Origin to /events > accepts the same page once its origin is allowlisted$
-            ^friction incidents — synthetic live-service gate > four users stay invisible
-            ^friction incidents — synthetic live-service gate > environments never combine
-            ^friction incidents — synthetic live-service gate > an error outside the ±30s window
-            ^friction incidents — synthetic live-service gate > the stepper fixture produces no signal
+            ^session narratives — live-service pipeline > emits verified narrative signals and promotes on the third session
             ^credential boundary >
         run: node scripts/check-e2e-results.mjs "${{ runner.temp }}/e2e-results.json"
       - name: Token-leak scan over logs and public HTTP surfaces
