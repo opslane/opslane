@@ -13,6 +13,8 @@ import {
   frictionIncidentFingerprint,
   type FoldSignal,
 } from '../promotion-db.js';
+import { runPromotionCheck } from '../promotion.js';
+import { NARRATIVE_RULE_VERSION } from '../../narrative/emit.js';
 
 const DATABASE_URL = process.env['DATABASE_URL'];
 const describeDb = DATABASE_URL ? describe : describe.skip;
@@ -67,6 +69,9 @@ async function seedSignal(opts: {
   status?: string;
   occurrenceCount?: number;
   jobId?: string | null;
+  ruleVersion?: number;
+  severity?: string | null;
+  observationText?: string | null;
 }): Promise<{ id: string; sessionId: string }> {
   const sessionId = await seedSession();
   const endUserId = opts.user === null || opts.user === undefined
@@ -76,20 +81,23 @@ async function seedSignal(opts: {
     `INSERT INTO friction_signals
        (session_id, project_id, environment_id, end_user_id, rule_version,
         signal_type, fingerprint, page_url_normalized, occurred_at,
-        adjudication_status, occurrence_count, adjudication_job_id)
-     VALUES ($1, $2, $3, $4, $5, 'rage_click', $6, '/checkout', $7, $8, $9, $10)
+        adjudication_status, occurrence_count, adjudication_job_id,
+        severity, observation_text)
+     VALUES ($1, $2, $3, $4, $5, 'rage_click', $6, '/checkout', $7, $8, $9, $10, $11, $12)
      RETURNING id`,
     [
       sessionId,
       projectId,
       opts.environmentId ?? environmentId,
       endUserId,
-      RULE_VERSION,
+      opts.ruleVersion ?? RULE_VERSION,
       opts.fingerprint ?? FP,
       opts.occurredAt ?? new Date().toISOString(),
       opts.status ?? 'pending',
       opts.occurrenceCount ?? 1,
       opts.jobId ?? null,
+      opts.severity ?? null,
+      opts.observationText ?? null,
     ]
   );
   return { id: res.rows[0]!.id, sessionId };
@@ -688,6 +696,94 @@ describeDb('bucket promotion integration', () => {
         [gen!.id]
       );
       expect(await withClient((c) => findValidAcceptedGeneration(c, tuple()))).toBeNull();
+    });
+  });
+
+  describe('runPromotionCheck', () => {
+    async function runPromotionCheckForTest(fingerprint: string): Promise<void> {
+      await withClient(async (client) => {
+        await client.query('BEGIN');
+        try {
+          await runPromotionCheck(client, projectId, environmentId, [fingerprint]);
+          await client.query('COMMIT');
+        } catch (error: unknown) {
+          await client.query('ROLLBACK');
+          throw error;
+        }
+      });
+    }
+
+    async function getIncidentFor(fingerprint: string): Promise<{ id: string; status: string }> {
+      const { rows } = await pool.query<{ id: string; status: string }>(
+        `SELECT id, status FROM error_groups WHERE project_id = $1 AND fingerprint = $2`,
+        [projectId, frictionIncidentFingerprint(environmentId, fingerprint)]
+      );
+      return rows[0]!;
+    }
+
+    async function investigationJobsFor(groupId: string): Promise<Array<{ status: string }>> {
+      const { rows } = await pool.query<{ status: string }>(
+        `SELECT status FROM error_group_jobs
+         WHERE error_group_id = $1 AND job_type = 'investigate'`,
+        [groupId]
+      );
+      return rows;
+    }
+
+    async function seedNarrativeSignal(
+      tag: string,
+      fingerprint: string,
+      severity: 'high' | 'medium' | 'low'
+    ): Promise<void> {
+      await seedSignal({
+        user: `vgi-${tag}`,
+        fingerprint,
+        severity,
+        status: 'accepted',
+        observationText: `observed ${tag}`,
+        ruleVersion: NARRATIVE_RULE_VERSION,
+      });
+    }
+
+    async function promoteFresh(
+      tag: string,
+      severity: 'high' | 'medium' | 'low'
+    ): Promise<{ fp: string; group: { id: string; status: string } }> {
+      const fp = `vgi-${tag}`;
+      for (const suffix of ['1', '2', '3']) {
+        await seedNarrativeSignal(`${tag}-${suffix}`, fp, severity);
+      }
+      await runPromotionCheckForTest(fp);
+      return { fp, group: await getIncidentFor(fp) };
+    }
+
+    it('queues and investigates a promoted incident with only medium severity', async () => {
+      const { group } = await promoteFresh('med', 'medium');
+      expect(group.status).toBe('queued');
+      expect(await investigationJobsFor(group.id)).toHaveLength(1);
+    });
+
+    it('queues and investigates a promoted incident with high severity', async () => {
+      const { group } = await promoteFresh('high', 'high');
+      expect(group.status).toBe('queued');
+      expect(await investigationJobsFor(group.id)).toHaveLength(1);
+    });
+
+    it('a later promotion pass never enqueues a second investigation', async () => {
+      const { fp, group } = await promoteFresh('dedupe', 'medium');
+      await seedNarrativeSignal('dedupe-4', fp, 'medium');
+      await runPromotionCheckForTest(fp);
+      expect(await investigationJobsFor(group.id)).toHaveLength(1);
+      expect((await getIncidentFor(fp)).status).toBe('queued');
+    });
+
+    it('leaves a sub-threshold fingerprint a candidate with no investigation', async () => {
+      const fp = 'vgi-below';
+      await seedNarrativeSignal('below-1', fp, 'high');
+      await runPromotionCheckForTest(fp);
+      const group = await getIncidentFor(fp);
+      expect(group.status).toBe('candidate');
+      expect(await investigationJobsFor(group.id)).toHaveLength(0);
     });
   });
 });
