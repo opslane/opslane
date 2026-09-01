@@ -14,15 +14,16 @@ func scheduledRunFixture(t *testing.T, at time.Time) (*Scheduler, string, string
 	if _, err := pool.Exec(context.Background(), `UPDATE projects SET github_repo='acme/shop',digest_timezone='UTC' WHERE id=$1`, f.ProjectID); err != nil {
 		t.Fatal(err)
 	}
-	episodeID := seedFreezeEpisode(t, pool, f.ProjectID, f.EnvID, at.Add(-2*time.Hour), 1)
-	seedFreezeDiagnosis(t, pool, f.ProjectID, episodeID, "verified_fix", at.Add(-time.Hour))
+	groupID := seedOnCardGroup(t, pool, f.ProjectID, f.EnvID, "error", "pr_created", false,
+		"https://github.com/acme/shop/pull/42", "The checkout control does not submit.", at.Add(-2*time.Hour))
+	quietBackgroundActionable(t, pool, f.ProjectID, groupID)
 	seedDestination(t, pool, f.ProjectID, []string{"digest.daily"})
 	t.Cleanup(func() {
 		if _, err := pool.Exec(context.Background(), `DELETE FROM error_group_jobs WHERE project_id=$1`, f.ProjectID); err != nil {
 			t.Errorf("delete scheduler jobs: %v", err)
 		}
 	})
-	return &Scheduler{pool: pool, now: func() time.Time { return at }}, f.ProjectID, episodeID
+	return &Scheduler{pool: pool, now: func() time.Time { return at }}, f.ProjectID, groupID
 }
 
 func TestSchedulerFreezesOncePerDailyBoundary(t *testing.T) {
@@ -76,8 +77,9 @@ func TestSchedulerRetriesTheSameFrozenSet(t *testing.T) {
 	if err != nil || len(candidates) != 1 {
 		t.Fatalf("freeze: candidates=%d err=%v", len(candidates), err)
 	}
-	bad := fmt.Sprintf(`{"included":[{"episodeId":%q,"copy":"x","action":"Review","label":"new","prUrl":"https://evil.example/pull/1"}],"deferred":[]}`,
-		candidates[0].EpisodeID)
+	// A deferral with no reason fails the whole run, which the scheduler retries.
+	bad := fmt.Sprintf(`{"included":[],"deferred":[{"errorGroupId":%q,"reason":""}]}`,
+		candidates[0].ErrorGroupID)
 	if _, err := s.pool.Exec(context.Background(), `UPDATE digest_runs SET status='written',payload=$2::jsonb WHERE id=$1`, runID, bad); err != nil {
 		t.Fatal(err)
 	}
@@ -86,14 +88,12 @@ func TestSchedulerRetriesTheSameFrozenSet(t *testing.T) {
 	}
 
 	// Work arriving later cannot join this run.
-	fresh := seedFreezeEpisode(t, s.pool, projectID, func() string {
-		var id string
-		if err := s.pool.QueryRow(context.Background(), `SELECT default_environment_id::text FROM projects WHERE id=$1`, projectID).Scan(&id); err != nil {
-			t.Fatal(err)
-		}
-		return id
-	}(), at, 1)
-	seedFreezeDiagnosis(t, s.pool, projectID, fresh, "needs_human", at)
+	var envID string
+	if err := s.pool.QueryRow(context.Background(), `SELECT default_environment_id::text FROM projects WHERE id=$1`, projectID).Scan(&envID); err != nil {
+		t.Fatal(err)
+	}
+	seedOnCardGroup(t, s.pool, projectID, envID, "error", "needs_human", true, "",
+		"The save request never leaves the page.", at)
 	if _, err := s.pool.Exec(context.Background(), `UPDATE digest_runs SET status='written',payload=$2::jsonb WHERE id=$1`,
 		runID, validWrittenPayload(candidates[0])); err != nil {
 		t.Fatal(err)
@@ -102,7 +102,7 @@ func TestSchedulerRetriesTheSameFrozenSet(t *testing.T) {
 		t.Fatal(err)
 	}
 	var items int
-	if err := s.pool.QueryRow(context.Background(), `SELECT count(*) FROM digest_run_items WHERE run_id=$1`, runID).Scan(&items); err != nil {
+	if err := s.pool.QueryRow(context.Background(), `SELECT count(*) FROM digest_unified_run_items WHERE run_id=$1`, runID).Scan(&items); err != nil {
 		t.Fatal(err)
 	}
 	if items != 1 {

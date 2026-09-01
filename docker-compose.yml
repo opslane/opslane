@@ -98,10 +98,6 @@ services:
       NOTIFY_UNSAFE_EXTRA_WEBHOOK_HOSTS: ${NOTIFY_UNSAFE_EXTRA_WEBHOOK_HOSTS:-}
       INTERNAL_READ_TOKEN: ${INTERNAL_READ_TOKEN:-dev-internal-token}
       ADMIN_EMAILS: ${OPSLANE_ADMIN_EMAILS:-}
-      # Ingestion reads this flag (digest/mode.go), not the worker: without it
-      # here a Compose operator who sets DIGEST_UNIFIED_CARDS=on silently gets
-      # the off lane.
-      DIGEST_UNIFIED_CARDS: ${DIGEST_UNIFIED_CARDS:-}
       # Test lanes shorten the scrub tick. The retained 30s eligibility grace
       # is not tunable; shortening it is a separate privacy-timing decision.
       PRIORITY_SCORE_INTERVAL_SECONDS: ${PRIORITY_SCORE_INTERVAL_SECONDS:-}
