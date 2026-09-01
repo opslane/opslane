@@ -15,9 +15,8 @@ import (
 	"github.com/opslane/opslane/packages/ingestion/notify"
 )
 
-func freezeUnifiedFriction(t *testing.T, mode string, now time.Time) (*pgxpool.Pool, digestFixture, string, Candidate) {
+func freezeUnifiedFriction(t *testing.T, now time.Time) (*pgxpool.Pool, digestFixture, string, Candidate) {
 	t.Helper()
-	t.Setenv("DIGEST_UNIFIED_CARDS", mode)
 	pool := testPool(t)
 	fixture := seedDigestFixture(t, pool, now)
 	cleanupActionableDiagnoses(t, pool, fixture.ProjectID)
@@ -58,7 +57,7 @@ func writeUnifiedPayload(t *testing.T, pool *pgxpool.Pool, runID string, candida
 
 func TestValidateOnPublishesAuthoredFrictionAndCachesCopy(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
-	pool, fixture, runID, candidate := freezeUnifiedFriction(t, "on", now)
+	pool, fixture, runID, candidate := freezeUnifiedFriction(t, now)
 	seedDestination(t, pool, fixture.ProjectID, []string{"digest.daily"})
 	writeUnifiedPayload(t, pool, runID, candidate, "People cannot save because the control never submits.")
 	if err := ValidateAndPublish(context.Background(), pool, runID); err != nil {
@@ -119,7 +118,7 @@ func TestValidateOnPublishesAuthoredFrictionAndCachesCopy(t *testing.T) {
 
 func TestValidateUnifiedDigitSmuggleFallsBackPerCard(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
-	pool, fixture, runID, candidate := freezeUnifiedFriction(t, "on", now)
+	pool, fixture, runID, candidate := freezeUnifiedFriction(t, now)
 	seedDestination(t, pool, fixture.ProjectID, []string{"digest.daily"})
 	writeUnifiedPayload(t, pool, runID, candidate, "People clicked save 17 times.")
 	if err := ValidateAndPublish(context.Background(), pool, runID); err != nil {
@@ -142,7 +141,6 @@ func TestValidateUnifiedDigitSmuggleFallsBackPerCard(t *testing.T) {
 
 func TestValidateWriterFailureFallsBackForZeroDiagnosisFriction(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
-	t.Setenv("DIGEST_UNIFIED_CARDS", "on")
 	pool := testPool(t)
 	fixture := seedDigestFixture(t, pool, now)
 	var groupID string
@@ -179,7 +177,7 @@ func TestValidateWriterFailureFallsBackForZeroDiagnosisFriction(t *testing.T) {
 
 func TestValidateSnoozedUnifiedFallbackIsExcludedNotDelivered(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
-	pool, fixture, runID, candidate := freezeUnifiedFriction(t, "on", now)
+	pool, fixture, runID, candidate := freezeUnifiedFriction(t, now)
 	seedDestination(t, pool, fixture.ProjectID, []string{"digest.daily"})
 	if _, err := pool.Exec(context.Background(), `UPDATE error_groups SET snoozed_until=$2 WHERE id=$1`,
 		candidate.ErrorGroupID, now.Add(24*time.Hour)); err != nil {
@@ -206,7 +204,7 @@ func TestValidateSnoozedUnifiedFallbackIsExcludedNotDelivered(t *testing.T) {
 
 func TestValidateCacheConflictDoesNotOverwriteConcurrentWinner(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
-	pool, fixture, runID, candidate := freezeUnifiedFriction(t, "on", now)
+	pool, fixture, runID, candidate := freezeUnifiedFriction(t, now)
 	seedDestination(t, pool, fixture.ProjectID, []string{"digest.daily"})
 	if candidate.SpellStartedAt == nil {
 		t.Fatal("candidate has no actionable spell")
@@ -237,7 +235,7 @@ func TestValidateCacheConflictDoesNotOverwriteConcurrentWinner(t *testing.T) {
 
 func TestValidateCacheConflictAdoptsMatchingConcurrentWinner(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
-	pool, fixture, runID, candidate := freezeUnifiedFriction(t, "on", now)
+	pool, fixture, runID, candidate := freezeUnifiedFriction(t, now)
 	seedDestination(t, pool, fixture.ProjectID, []string{"digest.daily"})
 	if candidate.SpellStartedAt == nil {
 		t.Fatal("candidate has no actionable spell")
@@ -295,7 +293,7 @@ func TestCapDigestDeliverySharesOneDecisionReceiptFixBudget(t *testing.T) {
 
 func TestValidateUnifiedLedgerFailureRollsBackCacheAndDeliversReceipts(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
-	pool, fixture, runID, candidate := freezeUnifiedFriction(t, "on", now)
+	pool, fixture, runID, candidate := freezeUnifiedFriction(t, now)
 	seedDestination(t, pool, fixture.ProjectID, []string{"digest.daily"})
 	functionName := "fail_unified_ledger_" + strings.ReplaceAll(runID, "-", "")
 	triggerName := functionName + "_trigger"
