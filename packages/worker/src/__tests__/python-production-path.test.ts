@@ -33,7 +33,7 @@ vi.mock('../investigate.js', () => ({
 }));
 vi.mock('../agent-fix.js', () => ({ runAgentFix: vi.fn() }));
 vi.mock('../pr.js', () => ({ createPR: vi.fn(), createGitHubClient: vi.fn() }));
-vi.mock('../minio-client.js', () => ({ fetchObject: vi.fn(), getMinIOConfig: vi.fn(() => null) }));
+vi.mock('../minio-client.js', () => ({ fetchObject: vi.fn(), getMinIOConfig: vi.fn(() => null), putFrameObject: vi.fn() }));
 vi.mock('../poller.js', () => ({ createPoller: vi.fn(() => ({ start: vi.fn(), stop: vi.fn() })) }));
 vi.mock('../github-app.js', () => ({ getInstallationToken: vi.fn() }));
 vi.mock('../route-map.js', () => ({ processRouteMapJob: vi.fn() }));
@@ -59,12 +59,12 @@ vi.mock('../tracing.js', () => ({
 vi.mock('../friction/friction-evidence.js', () => ({ gatherFrictionEvidence: vi.fn() }));
 vi.mock('../friction/investigate-friction.js', () => ({ investigateFriction: vi.fn() }));
 vi.mock('../friction/chunk-reader.js', () => ({ readChunksBounded: vi.fn() }));
-vi.mock('../friction/analyzer.js', () => ({ analyzeSession: vi.fn(), RULE_VERSION: 1 }));
-vi.mock('../friction/persist.js', () => ({ writeFrictionSignals: vi.fn() }));
-vi.mock('../friction/promotion.js', () => ({ processFrictionOutcomes: vi.fn() }));
-vi.mock('../friction/adjudicator.js', () => ({
-  createAnthropicAdjudicator: vi.fn(() => ({ modelId: 'test', promptVersion: 1, adjudicate: vi.fn() })),
-}));
+vi.mock('../friction/analyzer.js', () => ({ RULE_VERSION: 6 }));
+vi.mock('../narrative/client.js', () => ({ narrativeClientFromEnv: vi.fn(() => null) }));
+vi.mock('../narrative/job.js', () => ({ processNarration: vi.fn() }));
+vi.mock('../narrative/prompt.js', () => ({ NARRATIVE_PROMPT_VERSION: 1 }));
+vi.mock('../narrative/frames/capture.js', () => ({ captureFrames: vi.fn() }));
+vi.mock('../narrative/verify.js', () => ({ processFrameVerification: vi.fn() }));
 
 const db = await import('../db.js');
 const { processJobInner } = await import('../index.js');

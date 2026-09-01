@@ -1,7 +1,6 @@
 import crypto from 'node:crypto';
 import http from 'node:http';
 import type { ClaimedJob, ErrorEventData, QueueDepthRow } from './db.js';
-import type { SessionChunkEnvelope } from '@opslane/shared';
 import * as db from './db.js';
 import {
   requeueStaleJobs,
@@ -19,7 +18,7 @@ import {
 } from './db.js';
 import { buildReason, reasonCodeForDecision, reproductionRemediation } from './reason-codes.js';
 import { logger, safeErrorMessage, setWorkerId } from './logger.js';
-import { fetchObject, getMinIOConfig } from './minio-client.js';
+import { fetchObject, getMinIOConfig, putFrameObject } from './minio-client.js';
 import { INVESTIGATION_MODEL, investigateError } from './investigate.js';
 import { runPipeline } from './pipeline.js';
 import { buildSessionUrl } from './narrative.js';
@@ -44,17 +43,14 @@ import { hasNoAppFrames } from './harness/stack-trace-utils.js';
 import { gatherFrictionEvidence } from './friction/friction-evidence.js';
 import { FRICTION_INVESTIGATION_MODEL, investigateFriction } from './friction/investigate-friction.js';
 import { readChunksBounded } from './friction/chunk-reader.js';
-import { analyzeSession, RULE_VERSION } from './friction/analyzer.js';
+import { RULE_VERSION } from './friction/analyzer.js';
 import { classifyActivity, deriveCoverage, extractSessionFacts, formatSessionContext } from './friction/facts.js';
 import { replaceSessionFacts } from './facts/persist.js';
-import { writeFrictionSignals } from './friction/persist.js';
-import { processFrictionOutcomes } from './friction/promotion.js';
-import {
-  createAnthropicAdjudicator,
-  type Adjudicator,
-  type EvidenceWindowMode,
-} from './friction/adjudicator.js';
-import { buildEvidenceWindows, EVIDENCE_WINDOW_MS } from './friction/evidence-window.js';
+import { narrativeClientFromEnv } from './narrative/client.js';
+import { processNarration } from './narrative/job.js';
+import { NARRATIVE_PROMPT_VERSION } from './narrative/prompt.js';
+import { captureFrames } from './narrative/frames/capture.js';
+import { processFrameVerification } from './narrative/verify.js';
 import { MachineUnavailableError, VerificationInfraError } from './harness/errors.js';
 import {
   createReadOnlyCheckout,
@@ -74,30 +70,9 @@ import { parseDiagnosis } from './diagnosis-schema.js';
 import { pushScore } from './scores.js';
 import { processScoreSyncJob } from './score-sync.js';
 
-/** Injectable seam: unit tests and the e2e gate substitute a deterministic
- * adjudicator; production uses the real Anthropic-backed one. */
-let frictionAdjudicatorFactory: (apiKey: string, mode: EvidenceWindowMode) => Adjudicator = createAnthropicAdjudicator;
-export function setFrictionAdjudicatorFactory(
-  factory: (apiKey: string, mode: EvidenceWindowMode) => Adjudicator,
-): void {
-  frictionAdjudicatorFactory = factory;
-}
-
-const configuredEvidenceWindowMode = process.env['ADJUDICATION_EVIDENCE_WINDOWS'] ?? 'off';
-const evidenceWindowMode: EvidenceWindowMode = ['off', 'shadow', 'on'].includes(configuredEvidenceWindowMode)
-  ? configuredEvidenceWindowMode as EvidenceWindowMode
-  : 'off';
-if (evidenceWindowMode !== configuredEvidenceWindowMode) {
-  logger.warn('Invalid ADJUDICATION_EVIDENCE_WINDOWS; using off', {
-    configured: configuredEvidenceWindowMode,
-  });
-}
-const configuredDailyCap = Number(process.env['ADJUDICATION_DAILY_CAP'] ?? 500);
-const adjudicationDailyCap = Number.isInteger(configuredDailyCap) && configuredDailyCap >= 0
-  ? configuredDailyCap
-  : 500;
-if (adjudicationDailyCap !== configuredDailyCap) {
-  logger.warn('Invalid ADJUDICATION_DAILY_CAP; using 500', { configured: configuredDailyCap });
+function nonNegativeIntegerEnv(raw: string | undefined, fallback: number): number {
+  const parsed = Number(raw);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : fallback;
 }
 
 /**
@@ -353,6 +328,18 @@ export async function processJobInner(job: ClaimedJob, signal: AbortSignal): Pro
   if (job.jobType === 'session_analysis') {
     if (!job.sessionId) throw new Error(`Job ${job.id} missing session_id`);
     await processSessionAnalysisJob(job as ClaimedJob & { sessionId: string }, signal);
+    return;
+  }
+
+  if (job.jobType === 'session_narrate') {
+    if (!job.sessionId) throw new Error(`Job ${job.id} missing session_id`);
+    await processSessionNarrateJob(job as ClaimedJob & { sessionId: string }, signal);
+    return;
+  }
+
+  if (job.jobType === 'session_verify_frames') {
+    if (!job.sessionId) throw new Error(`Job ${job.id} missing session_id`);
+    await processSessionVerifyFramesJob(job as ClaimedJob & { sessionId: string }, signal);
     return;
   }
 
@@ -1003,6 +990,10 @@ export async function processFrictionInvestigateJob(
       ? await db.getSessionAnalysis(evidenceSessionID, job.projectId)
       : null;
     const sessionContext = sessionAnalysis ? formatSessionContext(sessionAnalysis) : null;
+    const narrativeObservation = await db.getLatestNarrativeSignalForGroup(
+      job.errorGroupId,
+      job.projectId,
+    );
     checkAbort(signal);
     const result = await investigateFriction(apiKey, {
       group,
@@ -1010,6 +1001,7 @@ export async function processFrictionInvestigateJob(
       reader: checkout.reader,
       tree: checkout.tree,
       sessionContext,
+      narrativeObservation,
       investigatedCommit: checkout.headSha,
     });
     await recordJobUsage({
@@ -1035,7 +1027,7 @@ export async function processFrictionInvestigateJob(
           investigatedCommit: result.investigatedCommit,
         },
         model: FRICTION_INVESTIGATION_MODEL,
-        promptVersion: 'friction-diagnosis-v2',
+        promptVersion: 'friction-diagnosis-v3',
         jobId: job.id,
         basis: 'friction_classify' as const,
         confidence: 'low' as const,
@@ -1070,7 +1062,7 @@ export async function processFrictionInvestigateJob(
         verdict,
       },
       model: FRICTION_INVESTIGATION_MODEL,
-      promptVersion: 'friction-diagnosis-v2',
+      promptVersion: 'friction-diagnosis-v3',
       jobId: job.id,
       basis: 'friction_classify' as const,
       confidence: verdict.confidence,
@@ -1121,12 +1113,16 @@ export async function processFrictionInvestigateJob(
         });
       }
     } else {
-      await updateGroupInvestigation(job.errorGroupId, job.projectId, 'insight', {
+      // Decision 2026-09-01: a diagnosis that needs human or product judgment
+      // is a reviewable finding rather than a terminal FYI. awaiting_approval
+      // without a candidate diff renders as "Review the investigation." and
+      // enters the digest's actionable lane via the lifecycle trigger.
+      await updateGroupInvestigation(job.errorGroupId, job.projectId, 'awaiting_approval', {
         rootCause: verdict.reason,
         confidence: verdict.confidence,
         decision,
       }, job);
-      logger.info('Friction investigation: recorded insight', {
+      logger.info('Friction investigation: diagnosis awaiting review (no code cause)', {
         job_id: job.id,
         confidence: verdict.confidence,
       });
@@ -1138,6 +1134,55 @@ export async function processFrictionInvestigateJob(
   } finally {
     await checkout.close();
   }
+}
+
+export async function processSessionNarrateJob(
+  job: ClaimedJob & { sessionId: string },
+  signal: AbortSignal,
+): Promise<void> {
+  const client = narrativeClientFromEnv();
+  if (!client) {
+    logger.warn('Narrative model key unset; leaving reservation pending', {
+      job_id: job.id,
+      session_id: job.sessionId,
+    });
+    return;
+  }
+  const project = await db.getProject(job.projectId);
+  if (!project) throw new Error(`Project ${job.projectId} not found`);
+  await processNarration(job, {
+    client,
+    loadChunks: async (sessionId, projectId) => {
+      const chunks = await db.getScrubbedChunksForSession(sessionId, projectId);
+      return (await readChunksBounded(chunks, { skipUnreadable: true })).envelopes;
+    },
+    dailyCap: nonNegativeIntegerEnv(process.env['NARRATIVE_DAILY_CAP'], 2_000),
+    wallClockBudgetMs: nonNegativeIntegerEnv(process.env['NARRATIVE_RENDER_BUDGET_MS'], 60_000),
+    appContext: process.env['NARRATIVE_APP_CONTEXT'] ?? '',
+    projectName: project.name,
+  }, signal);
+}
+
+export async function processSessionVerifyFramesJob(
+  job: ClaimedJob & { sessionId: string },
+  signal: AbortSignal,
+): Promise<void> {
+  const client = narrativeClientFromEnv();
+  const storage = getMinIOConfig();
+  await processFrameVerification(job, {
+    client: client as NonNullable<typeof client>,
+    supported: client !== null && storage !== null,
+    loadChunks: async (sessionId, projectId) => {
+      const chunks = await db.getScrubbedChunksForSession(sessionId, projectId);
+      return (await readChunksBounded(chunks, { skipUnreadable: true })).envelopes;
+    },
+    capture: captureFrames,
+    uploadFrame: async (objectKey, png) => {
+      if (!storage) throw new Error('Replay store not configured');
+      await putFrameObject(objectKey, png, storage);
+    },
+    dailyCap: nonNegativeIntegerEnv(process.env['NARRATIVE_DAILY_CAP'], 2_000),
+  }, signal);
 }
 
 export async function processSessionAnalysisJob(
@@ -1162,7 +1207,6 @@ export async function processSessionAnalysisJob(
       });
     }
     checkAbort(signal);
-    const signals = analyzeSession(read.envelopes);
     await db.assertJobLease(job);
     const facts = extractSessionFacts(read.envelopes);
     const coverage = deriveCoverage({
@@ -1170,70 +1214,50 @@ export async function processSessionAnalysisJob(
       envelopeCount: read.envelopes.length,
       truncated: read.truncated,
     });
-    await replaceSessionFacts(session.project_id, session.id, {
-      ...facts,
-      ruleVersion: RULE_VERSION,
-    });
-    await db.upsertSessionAnalysis({
-      sessionId: session.id,
-      projectId: session.project_id,
-      environmentId: session.environment_id,
-      sessionStartedAt: session.started_at,
-      coverage,
-      activityClass: classifyActivity(facts, coverage),
-      entryPath: facts.entryPath,
-      clickCount: facts.clickCount,
-      inputEventCount: facts.inputEventCount,
-      pageEventCount: facts.pageEventCount,
-      failedRequest4xxCount: facts.failedRequest4xxCount,
-      failedRequest5xxCount: facts.failedRequest5xxCount,
-      unattributedFailedRequestCount: facts.unattributedFailedRequestCount,
-      successfulWriteCount: facts.successfulWriteCount,
-      failedWriteCount: facts.failedWriteCount,
-      ruleVersion: RULE_VERSION,
-    });
-    await writeFrictionSignals(session, signals, RULE_VERSION);
-    // Batch 4: adjudicate → fold/aggregate before the session is marked
-    // analyzed, so a crash retries the whole ordered pass. Keyless
-    // deployments skip adjudication; signals stay pending and invisible.
-    const adjudicationKey = process.env['ANTHROPIC_API_KEY'];
-    if (adjudicationKey) {
-      checkAbort(signal);
-      await processFrictionOutcomes(
-        session,
-        job.id,
-        frictionAdjudicatorFactory(adjudicationKey, evidenceWindowMode),
-        {
-          windowMode: evidenceWindowMode,
-          dailyCap: adjudicationDailyCap,
-          loadWindows: async (candidate) => {
-            const occurredAts = candidate.occurred_ats ?? [];
-            if (occurredAts.length === 0) return [];
-            const envelopesBySeq = new Map<number, SessionChunkEnvelope>();
-            for (const occurredAt of occurredAts) {
-              const rangeChunks = await db.getScrubbedChunksInRange(
-                candidate.session_id,
-                candidate.project_id,
-                occurredAt - EVIDENCE_WINDOW_MS,
-                occurredAt + EVIDENCE_WINDOW_MS,
-              );
-              const unseen = rangeChunks.filter((chunk) => !envelopesBySeq.has(chunk.seq));
-              if (unseen.length === 0) continue;
-              const windowRead = await readChunksBounded(unseen, { skipUnreadable: true });
-              windowRead.envelopes.forEach((envelope, index) => {
-                const seq = windowRead.envelopeSeqs[index];
-                if (seq !== undefined) envelopesBySeq.set(seq, envelope);
-              });
-            }
-            return buildEvidenceWindows([...envelopesBySeq.values()], occurredAts);
-          },
-        },
-      );
-    } else {
-      logger.warn('ANTHROPIC_API_KEY unset; friction adjudication skipped, signals stay pending', {
-        job_id: job.id,
-        session_id: job.sessionId,
-      });
+    const activityClass = classifyActivity(facts, coverage);
+    const client = await db.getPool().connect();
+    let narrativeReserved = false;
+    try {
+      await client.query('BEGIN');
+      await replaceSessionFacts(session.project_id, session.id, {
+        ...facts,
+        ruleVersion: RULE_VERSION,
+      }, client);
+      await db.upsertSessionAnalysis({
+        sessionId: session.id,
+        projectId: session.project_id,
+        environmentId: session.environment_id,
+        sessionStartedAt: session.started_at,
+        coverage,
+        activityClass,
+        entryPath: facts.entryPath,
+        clickCount: facts.clickCount,
+        inputEventCount: facts.inputEventCount,
+        pageEventCount: facts.pageEventCount,
+        failedRequest4xxCount: facts.failedRequest4xxCount,
+        failedRequest5xxCount: facts.failedRequest5xxCount,
+        unattributedFailedRequestCount: facts.unattributedFailedRequestCount,
+        successfulWriteCount: facts.successfulWriteCount,
+        failedWriteCount: facts.failedWriteCount,
+        ruleVersion: RULE_VERSION,
+      }, client);
+      if (activityClass === 'active') {
+        narrativeReserved = await db.reserveNarrative(client, {
+          sessionId: session.id,
+          projectId: session.project_id,
+          environmentId: session.environment_id,
+          promptVersion: NARRATIVE_PROMPT_VERSION,
+        });
+      }
+      await client.query('COMMIT');
+    } catch (error: unknown) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw error;
+    } finally {
+      client.release();
+    }
+    if (narrativeReserved) {
+      await db.enqueueJob('session_narrate', session.project_id, session.id);
     }
     await db.setSessionAnalysisStatus(job.sessionId, job.projectId, 'analyzed', RULE_VERSION, job);
     if (read.truncated) {
@@ -1770,6 +1794,20 @@ async function main(): Promise<void> {
       });
   }, REAPER_INTERVAL_MS);
 
+  const narrativeSweepTimer = setInterval(() => {
+    db.sweepNarratives()
+      .then(({ reEnqueued, failed }) => {
+        if (reEnqueued > 0 || failed > 0) {
+          logger.info('Narrative sweeper completed', { re_enqueued: reEnqueued, failed });
+        }
+      })
+      .catch((err: unknown) => {
+        logger.error('Narrative sweeper error', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+  }, 5 * 60_000);
+
   // Silence window checker — auto-resolve merged groups after 24h of no recurrence
   const silenceTimer = setInterval(() => {
     resolveSilentMergedGroups()
@@ -1822,6 +1860,7 @@ async function main(): Promise<void> {
   async function shutdown(): Promise<void> {
     logger.info('Worker shutting down');
     clearInterval(reaperTimer);
+    clearInterval(narrativeSweepTimer);
     clearInterval(silenceTimer);
     clearInterval(inactivityTimer);
     clearInterval(queueSampleTimer);

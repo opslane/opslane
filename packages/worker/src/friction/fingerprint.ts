@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto';
+import type { FrictionCategory } from '@opslane/shared';
+import { ELEMENT_ANCHORED_CATEGORIES } from '../narrative/categories.js';
 export { normalizePageUrl } from './urlnorm.js';
 
 /** Normalized pathname only for session entry attribution. */
@@ -24,13 +26,27 @@ export function normalizeEntryPath(href: string): string | null {
  * each have to independently clear the promotion threshold. Strip them.
  * Deliberately no whitespace collapsing: it would rewrite the inside of quoted
  * attribute values and merge selectors that target different elements. */
-function canonicalizeSelector(selector: string | null): string {
+export function canonicalizeSelector(selector: string | null): string {
   return (selector ?? '')
     .replace(/#react-select-(\d+)-[\w-]+/g, '#react-select-$1')
     .replace(/:nth-of-type\(\s*[^)]*\)/g, '')
     .replace(/:nth-child\(\s*[^)]*\)/g, '')
     .replace(/:nth-last-of-type\(\s*[^)]*\)/g, '')
     .replace(/:nth-last-child\(\s*[^)]*\)/g, '');
+}
+
+export function observationFingerprint(
+  category: FrictionCategory,
+  selector: string | null,
+  normalizedRoute: string,
+): string {
+  const anchor = ELEMENT_ANCHORED_CATEGORIES.has(category) && selector
+    ? canonicalizeSelector(selector)
+    : '';
+  return createHash('sha256')
+    .update(`${category}|${anchor}|${normalizedRoute}`)
+    .digest('hex')
+    .slice(0, 32);
 }
 
 export function frictionFingerprint(

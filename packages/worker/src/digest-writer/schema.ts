@@ -24,6 +24,11 @@ export interface DigestCard {
   claimedOccurrences?: number;
   accounts?: string[];
   prUrl?: string;
+  frictionCategory?: string;
+  route?: string;
+  sessionCount?: number;
+  identifiedCount?: number;
+  observationQuote?: string;
 }
 
 export interface DeferredDigestItem {
@@ -57,6 +62,11 @@ export const DIGEST_PAYLOAD_SCHEMA = {
           claimedOccurrences: { type: 'integer' },
           accounts: { type: 'array', items: { type: 'string', minLength: 1 } },
           prUrl: { type: 'string', minLength: 1 },
+          frictionCategory: { type: 'string', minLength: 1 },
+          route: { type: 'string' },
+          sessionCount: { type: 'integer', minimum: 0 },
+          identifiedCount: { type: 'integer', minimum: 0 },
+          observationQuote: { type: 'string', minLength: 1 },
         },
         additionalProperties: false,
       },
@@ -177,6 +187,7 @@ function identity(value: Record<string, unknown>, label: string): { errorGroupId
 const CARD_KEYS: ReadonlySet<string> = new Set([
   'errorGroupId', 'episodeId', 'title', 'copy', 'action',
   'claimedUsers', 'claimedOccurrences', 'accounts', 'prUrl', 'label',
+  'frictionCategory', 'route', 'sessionCount', 'identifiedCount', 'observationQuote',
 ]);
 const DEFERRED_KEYS: ReadonlySet<string> = new Set(['errorGroupId', 'episodeId', 'reason']);
 
@@ -205,6 +216,12 @@ export function parseDigestPayload(raw: unknown): ParsedDigestPayload {
     if (card['claimedOccurrences'] !== undefined
       && (!Number.isInteger(card['claimedOccurrences']) || (card['claimedOccurrences'] as number) < 0)) {
       throw new Error(`included[${index}].claimedOccurrences must be a non-negative integer`);
+    }
+    for (const field of ['sessionCount', 'identifiedCount'] as const) {
+      if (card[field] !== undefined
+        && (!Number.isInteger(card[field]) || (card[field] as number) < 0)) {
+        throw new Error(`included[${index}].${field} must be a non-negative integer`);
+      }
     }
     if (card['accounts'] !== undefined
       && (!Array.isArray(card['accounts']) || card['accounts'].some((account) => typeof account !== 'string' || account.trim() === ''))) {
@@ -238,6 +255,15 @@ export function parseDigestPayload(raw: unknown): ParsedDigestPayload {
       ...(typeof card['claimedOccurrences'] === 'number' ? { claimedOccurrences: card['claimedOccurrences'] } : {}),
       ...(Array.isArray(card['accounts']) ? { accounts: card['accounts'].map((account) => String(account).trim()) } : {}),
       ...(card['prUrl'] !== undefined ? { prUrl: text(card['prUrl'], `included[${index}].prUrl`) } : {}),
+      ...(card['frictionCategory'] !== undefined
+        ? { frictionCategory: text(card['frictionCategory'], `included[${index}].frictionCategory`) }
+        : {}),
+      ...(typeof card['route'] === 'string' ? { route: card['route'] } : {}),
+      ...(typeof card['sessionCount'] === 'number' ? { sessionCount: card['sessionCount'] } : {}),
+      ...(typeof card['identifiedCount'] === 'number' ? { identifiedCount: card['identifiedCount'] } : {}),
+      ...(card['observationQuote'] !== undefined
+        ? { observationQuote: text(card['observationQuote'], `included[${index}].observationQuote`) }
+        : {}),
     };
   };
   const included: Array<Omit<DigestCard, 'label'>> = [];

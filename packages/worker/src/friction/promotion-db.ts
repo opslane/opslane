@@ -1,7 +1,11 @@
 import { createHash } from 'node:crypto';
 import type pg from 'pg';
 import { getPool } from '../db.js';
-import type { AdjudicationVerdict } from './adjudicator.js';
+
+interface AdjudicationVerdict {
+  accepted: boolean;
+  reason: string;
+}
 
 export async function tryReserveAdjudicationCall(
   client: pg.PoolClient,
@@ -278,6 +282,15 @@ const SIGNAL_TYPE_TITLES: Record<string, string> = {
   rage_click: 'Rage clicks',
   dead_click: 'Dead clicks',
   form_abandon: 'Form abandonment',
+  unclickable_affordance: 'Unclickable affordance',
+  no_feedback_after_action: 'No feedback after action',
+  dead_end_state: 'Dead end',
+  validation_confusion: 'Validation confusion',
+  slow_response: 'Slow response',
+  repetitive_workflow: 'Repetitive workflow',
+  discoverability_gap: 'Discoverability gap',
+  hard_blocker: 'Hard blocker',
+  other: 'Other friction',
 };
 
 export interface CandidateDescriptor {
@@ -345,6 +358,29 @@ export async function countEligibleUsers(
     [tuple.projectId, tuple.environmentId, tuple.fingerprint, tuple.ruleVersion],
   );
   return rows[0]!.n;
+}
+
+export async function countEligibleSupport(
+  client: pg.PoolClient,
+  tuple: Pick<BucketTuple, 'projectId' | 'environmentId' | 'fingerprint' | 'ruleVersion'>,
+): Promise<{ sessions: number; identifiedUsers: number }> {
+  const { rows } = await client.query<{ sessions: number; identified_users: number }>(
+    `SELECT COUNT(DISTINCT session_id)::int AS sessions,
+            COUNT(DISTINCT end_user_id) FILTER (WHERE end_user_id IS NOT NULL)::int
+              AS identified_users
+     FROM friction_signals
+     WHERE project_id = $1 AND environment_id = $2 AND fingerprint = $3
+       AND rule_version = $4
+       AND signal_type <> 'other'
+       AND adjudication_status = 'accepted'
+       AND retracted_at IS NULL AND superseded_by IS NULL
+       AND occurred_at > now() - interval '7 days'`,
+    [tuple.projectId, tuple.environmentId, tuple.fingerprint, tuple.ruleVersion],
+  );
+  return {
+    sessions: rows[0]?.sessions ?? 0,
+    identifiedUsers: rows[0]?.identified_users ?? 0,
+  };
 }
 
 /** Distinct identified users present the last time this bucket was judged by

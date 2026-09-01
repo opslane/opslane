@@ -1,0 +1,27 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="rrweb.umd.min.cjs"></script>
+  <style>body { margin: 0; background: #fff; } iframe { border: 0; }</style>
+</head>
+<body>
+  <div id="player"></div>
+  <script>
+    let replayer = null;
+    window.initReplayer = (events) => {
+      replayer = new rrweb.Replayer(events, {
+        root: document.getElementById('player'),
+        skipInactive: false,
+        showWarning: false,
+        mouseTail: false,
+        pauseAnimation: true,
+        useVirtualDom: true,
+      });
+      replayer.pause(0);
+      return true;
+    };
+    window.seekTo = (ms) => { replayer.pause(ms); return true; };
+  </script>
+</body>
+</html>

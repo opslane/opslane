@@ -1,5 +1,6 @@
 import { getPool } from '../db.js';
 import type { SessionFacts } from '../friction/facts.js';
+import type pg from 'pg';
 
 export type VersionedSessionFacts = SessionFacts & { ruleVersion: number };
 
@@ -23,6 +24,7 @@ export async function replaceSessionFacts(
   projectId: string,
   sessionId: string,
   facts: VersionedSessionFacts,
+  suppliedClient?: pg.PoolClient,
 ): Promise<void> {
   for (const f of facts.failures) {
     assertNormalized(f.pageRoute, 'failure page_route');
@@ -32,9 +34,10 @@ export async function replaceSessionFacts(
     assertNormalized(r.pageRoute, 'rollup page_route');
     assertNormalized(r.endpointPattern, 'rollup endpoint_pattern');
   }
-  const client = await getPool().connect();
+  const client = suppliedClient ?? await getPool().connect();
+  const ownsTransaction = suppliedClient === undefined;
   try {
-    await client.query('BEGIN');
+    if (ownsTransaction) await client.query('BEGIN');
     const session = await client.query(
       `SELECT 1 FROM sessions WHERE project_id=$1 AND id=$2 FOR KEY SHARE`,
       [projectId, sessionId],
@@ -107,11 +110,11 @@ export async function replaceSessionFacts(
       );
     }
 
-    await client.query('COMMIT');
+    if (ownsTransaction) await client.query('COMMIT');
   } catch (error: unknown) {
-    await client.query('ROLLBACK');
+    if (ownsTransaction) await client.query('ROLLBACK');
     throw error;
   } finally {
-    client.release();
+    if (ownsTransaction) client.release();
   }
 }

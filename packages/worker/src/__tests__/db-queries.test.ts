@@ -316,8 +316,8 @@ describe('claimJob friction scheduling fields', () => {
       .toBeLessThan(claimSql.indexOf("WHEN job_type <> 'session_analysis' THEN 2"));
     expect(claimSql).toContain("AND job_type = 'session_analysis'");
     expect(claimSql).toContain('< $3');
-    // Cap defaults to 2 when SESSION_ANALYSIS_MAX_CONCURRENT is unset.
-    expect(mockQuery.mock.calls[2][1]).toEqual(['worker-1', 30, 2]);
+    // Caps default to 2 analysis, 2 narrative, and 1 frame-verification job.
+    expect(mockQuery.mock.calls[2][1]).toEqual(['worker-1', 30, 2, 2, 1]);
     expect(mockQuery.mock.calls[3][0]).toBe('COMMIT');
     expect(mockClient.release).toHaveBeenCalled();
   });
@@ -328,7 +328,7 @@ describe('claimJob friction scheduling fields', () => {
     mockQuery.mockResolvedValueOnce({ rows: [] });
     mockQuery.mockResolvedValueOnce({}); // COMMIT
     await claimJob('worker-1', 30_000, 0);
-    expect(mockQuery.mock.calls[2][1]).toEqual(['worker-1', 30, 0]);
+    expect(mockQuery.mock.calls[2][1]).toEqual(['worker-1', 30, 0, 2, 1]);
   });
 });
 
