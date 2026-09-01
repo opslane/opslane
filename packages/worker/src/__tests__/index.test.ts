@@ -82,6 +82,13 @@ vi.mock('../logger.js', () => ({
 vi.mock('../billing.js', () => ({
   billingEnabled: vi.fn(() => false),
   checkQuota: vi.fn(async () => ({ allowed: true, failedOpen: false })),
+  // Passthrough: tests control the org via their db.getProjectOrg mock.
+  billingOrgForProject: vi.fn(
+    async (
+      lookup: (projectId: string) => Promise<{ orgId: string; orgName: string } | null>,
+      projectId: string
+    ) => lookup(projectId)
+  ),
 }));
 vi.mock('../usage-events.js', () => ({ emitUsageEvent: vi.fn() }));
 vi.mock('../repo-clone.js', async (importOriginal) => {
