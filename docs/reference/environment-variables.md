@@ -64,6 +64,7 @@ systems use it for a branch name.
 | `RESOLVE_SWEEP_INTERVAL_SECONDS` | no (300) | How often a background task retries source-map processing and, after waiting too long, continues with the minified stack trace. |
 | `IDENTITY_SETTLE_INTERVAL_SECONDS` | no (5) | How often the server groups reported errors after source-map processing finishes. |
 | `FILTER_SWEEP_INTERVAL_SECONDS` | no (30) | How often the server checks uninvestigated errors for enough recent users in enabled environments, then queues a short repository review that decides whether to start a full investigation. Invalid values use the default. |
+| `MCP_FRAME_URL_TTL` | no (`15m`) | Lifetime of signed session-frame URLs returned by MCP tools. Use a positive Go duration such as `5m` or `1h`. Invalid values use the default. |
 | `ADMIN_EMAILS` | no | Comma-separated operator email allowlist for the cross-tenant admin dashboard. Empty disables the admin API. Docker Compose maps it from the host-side `OPSLANE_ADMIN_EMAILS`. |
 | `VERSION` | no | Reported by `/health` |
 
@@ -100,8 +101,19 @@ The Opslane server reads **only** the `REPLAY_STORE_*` names; `MINIO_*` names ap
 | `RESOLVE_AGE_DAYS` | no (14) | Inactivity period before eligible human-review or completed-analysis issues resolve automatically |
 | `INACTIVITY_CHECK_INTERVAL_MS` | no (900000) | How often the worker sweeps for inactive issues (15 minutes by default) |
 | `SESSION_ANALYSIS_MAX_CONCURRENT` | no (2) | Fleet-wide cap on `session_analysis` jobs running at the same time; `0` prevents workers from starting analysis jobs; raising it has no effect at fleet size 1 |
-| `ADJUDICATION_EVIDENCE_WINDOWS` | no (`off`) | Mode for an optional second review of a detected session problem using activity around the click: `off`, `shadow`, or `on`. `shadow` records the second opinion but does not use it. |
-| `ADJUDICATION_DAILY_CAP` | no (500) | Per-project daily cap on model calls for the optional second review. Extra detected session problems remain pending and are revisited on the next budget day. |
+| `NARRATIVE_API_KEY` | when session narratives are enabled | Model API key for session narratives and frame verification. Falls back to `ANTHROPIC_API_KEY`. Without either key, narrative reservations remain pending. |
+| `NARRATIVE_MODEL` | no (`claude-sonnet-5`) | Model used to write session narratives and verify findings against captured frames. |
+| `NARRATIVE_BASE_URL` | no (Anthropic default) | Alternate Anthropic-compatible endpoint for narrative and frame-verification calls. |
+| `NARRATIVE_MAX_TOKENS` | no (8192) | Maximum output tokens for a narrative call. Values below 1024 use the default. |
+| `NARRATIVE_REASONING` | no (`off`) | Set to `on` to enable a 4096-token thinking budget for narrative and frame-verification calls. |
+| `NARRATIVE_APP_CONTEXT` | no | Application details included in the session-narrative prompt. |
+| `NARRATIVE_DAILY_CAP` | no (2000) | Per-project daily cap on distinct sessions that may reserve narrative or frame-verification calls. |
+| `NARRATIVE_RENDER_BUDGET_MS` | no (60000) | Wall-clock limit for rendering one replay timeline before the model call. |
+| `NARRATIVE_MAX_CONCURRENT` | no (2) | Fleet-wide cap on concurrent `session_narrate` jobs. `0` pauses this job type. |
+| `FRAMES_MAX_CONCURRENT` | no (1) | Fleet-wide cap on concurrent `session_verify_frames` jobs. `0` pauses this job type. |
+| `NARRATIVE_MONTHLY_BUDGET_USD` | no | Optional per-project estimated monthly spend ceiling for narrative calls. It takes effect only when both narrative token-price variables are valid numbers. |
+| `NARRATIVE_COST_PER_MTOK_INPUT` | with narrative monthly budget | Estimated input-token price in USD per million tokens. |
+| `NARRATIVE_COST_PER_MTOK_OUTPUT` | with narrative monthly budget | Estimated output-token price in USD per million tokens. |
 | `HEALTH_PORT` | no (8081) | Health endpoint port. The worker's `/health` returns `status: ok`, `stalled` (eligible work waiting, no jobs started in the last minute, and none running), or `unknown` (no queue sample has landed, or the last one is stale). It also returns `claims_per_minute`, the number of jobs started per minute, and a per-job-type `queue_depth` with eligible, backed-off, and oldest-eligible-seconds counts. The queue is sampled once a minute, not every time a worker starts a job. |
 | `REPLAY_STORE_ENDPOINT` / `REPLAY_STORE_ACCESS_KEY` / `REPLAY_STORE_SECRET_KEY` / `REPLAY_STORE_BUCKET` | for replay analysis | Reading stored replays |
 | `MINIO_ENDPOINT` / `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` / `MINIO_BUCKET` | legacy aliases | Worker-side fallback names for the same settings |
