@@ -683,6 +683,11 @@ export async function cleanupTenant(orgId: string): Promise<void> {
       WHERE project_id IN (SELECT id FROM projects WHERE org_id = $1)`,
     [orgId]
   );
+	await db.query(
+		`UPDATE error_groups SET representative_signal_id = NULL
+		  WHERE project_id IN (SELECT id FROM projects WHERE org_id = $1)`,
+		[orgId],
+	);
   // Sessions cascade to session_chunks and friction_signals.
   await db.query(
     `DELETE FROM sessions WHERE project_id IN (SELECT id FROM projects WHERE org_id = $1)`,
@@ -748,6 +753,12 @@ export async function cleanupTenant(orgId: string): Promise<void> {
      )`,
     [orgId]
   );
+	await db.query(
+		`DELETE FROM narrative_call_budget WHERE project_id IN (
+		  SELECT id FROM projects WHERE org_id = $1
+		)`,
+		[orgId],
+	);
   await db.query(`UPDATE projects SET default_environment_id = NULL WHERE org_id = $1`, [orgId]);
   await db.query(
     `DELETE FROM environments WHERE project_id IN (SELECT id FROM projects WHERE org_id = $1)`,

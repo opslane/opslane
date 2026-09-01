@@ -85,6 +85,13 @@ func selectOnCardCandidates(all []actionableCandidate, at time.Time) ([]Candidat
 			HasValidatedDiagnosis: source.HasValidatedDiagnosis, Label: "new",
 			NotCardEligible: !actionablePublishable(source),
 		}
+		if source.ObservationQuote != "" {
+			candidate.FrictionCategory = source.SignalType
+			candidate.Route = source.Route
+			candidate.SessionCount = source.SessionCount
+			candidate.IdentifiedCount = source.IdentifiedCount
+			candidate.ObservationQuote = source.ObservationQuote
+		}
 		candidate.Fingerprint = candidateFingerprint(candidate, digestPromptVersion, digestValidatorVersion)
 		candidates = append(candidates, candidate)
 		floors = append(floors, time.Time{})

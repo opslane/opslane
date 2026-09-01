@@ -158,6 +158,7 @@ func NewRouterWithPool(deps *Dependencies, pool *pgxpool.Pool) *chi.Mux {
 		// Always-on session browsing and bounded chunk playback.
 		r.With(deps.AuthenticateUserSession).Get("/projects/{projectID}/sessions", deps.ListSessionsEndpoint)
 		r.With(deps.AuthenticateUserSession).Get("/projects/{projectID}/sessions/{sessionID}", deps.GetSessionEndpoint)
+		r.With(deps.AuthenticateUserSession).Get("/projects/{projectID}/sessions/{sessionID}/narrative", deps.GetSessionNarrativeEndpoint)
 		r.With(deps.AuthenticateUserSession).Get("/projects/{projectID}/sessions/{sessionID}/chunks/{seq}", deps.GetSessionChunk)
 		r.With(deps.AuthenticateUserSession).Get("/projects/{projectID}/incidents/{incidentID}/affected-users", deps.ListAffectedUsers)
 		r.With(deps.AuthenticateUserSession).Post("/projects/{projectID}/incidents/{incidentID}/fix", deps.TriggerFix)

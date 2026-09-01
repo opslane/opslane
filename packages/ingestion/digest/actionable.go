@@ -128,6 +128,10 @@ type actionableCandidate struct {
 	DiffIdentity          string
 	DiagnosisDecidedAt    *time.Time
 	Accounts              []string
+	Route                 string
+	SessionCount          int
+	IdentifiedCount       int
+	ObservationQuote      string
 }
 
 type evaluation struct {
@@ -160,7 +164,29 @@ func loadActionableCandidates(ctx context.Context, tx pgx.Tx, projectID string, 
 		         FROM error_group_affected_users eau JOIN end_users eu ON eu.id=eau.end_user_id
 		         WHERE eau.error_group_id=g.id AND eu.project_id=g.project_id
 		           AND NULLIF(btrim(eu.account_name),'') IS NOT NULL
-		         ORDER BY eu.account_name LIMIT 8) names),'{}')
+		         ORDER BY eu.account_name LIMIT 8) names),'{}'),
+		       COALESCE(g.page_url_normalized,''),
+		       COALESCE((SELECT COUNT(DISTINCT fs.session_id)::int
+		         FROM friction_signals fs
+		         WHERE fs.incident_id=g.id AND fs.project_id=g.project_id
+		           AND fs.rule_version=6 AND fs.signal_type<>'other'
+		           AND fs.adjudication_status='accepted'
+		           AND fs.retracted_at IS NULL AND fs.superseded_by IS NULL
+		           AND fs.occurred_at > now() - interval '7 days'),0),
+		       COALESCE((SELECT COUNT(DISTINCT fs.end_user_id)::int
+		         FROM friction_signals fs
+		         WHERE fs.incident_id=g.id AND fs.project_id=g.project_id
+		           AND fs.rule_version=6 AND fs.signal_type<>'other'
+		           AND fs.adjudication_status='accepted'
+		           AND fs.end_user_id IS NOT NULL
+		           AND fs.retracted_at IS NULL AND fs.superseded_by IS NULL
+		           AND fs.occurred_at > now() - interval '7 days'),0),
+		       COALESCE((SELECT fs.observation_text
+		         FROM friction_signals fs
+		         WHERE fs.incident_id=g.id AND fs.project_id=g.project_id
+		           AND fs.observation_text IS NOT NULL
+		           AND fs.retracted_at IS NULL AND fs.superseded_by IS NULL
+		         ORDER BY fs.occurred_at DESC,fs.id DESC LIMIT 1),'')
 		  FROM error_groups g
 		  LEFT JOIN LATERAL (` + diagnosisValidationLateralSQL + `) d ON true
 		 WHERE g.project_id=$1
@@ -185,6 +211,8 @@ func loadActionableCandidates(ctx context.Context, tx pgx.Tx, projectID string, 
 			&candidate.SignalType, &candidate.AffectedUsers, &candidate.LastSeen,
 			&candidate.RoutePurpose, &candidate.DiffIdentity, &candidate.DiagnosisDecidedAt,
 			&candidate.Accounts,
+			&candidate.Route, &candidate.SessionCount, &candidate.IdentifiedCount,
+			&candidate.ObservationQuote,
 		); err != nil {
 			return nil, fmt.Errorf("scan actionable digest candidate: %w", err)
 		}

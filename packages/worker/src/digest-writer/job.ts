@@ -157,7 +157,7 @@ function factNumbers(truth: DigestCandidate): Set<string> {
   return digits;
 }
 
-function groundPayload(raw: unknown, candidates: DigestCandidate[]): DigestPayload {
+export function groundPayload(raw: unknown, candidates: DigestCandidate[]): DigestPayload {
   const parsed = parseDigestPayload(raw);
   for (const warning of parsed.warnings) log('warn', warning.message, warning.fields);
   const allowed = new Map<string, DigestCandidate>();
@@ -192,10 +192,15 @@ function groundPayload(raw: unknown, candidates: DigestCandidate[]): DigestPaylo
     if (card.prUrl !== undefined && card.prUrl !== truth.prUrl) {
       throw new Error(`unsupported link for ${truthIdentity}`);
     }
-    if (card.sessionCount !== undefined && card.sessionCount !== truth.sessionCount) {
+    // The frozen candidate arrives through Go json omitempty, which drops a
+    // zero count entirely — an all-anonymous incident has identifiedCount 0 on
+    // the writer input but undefined here. The model is ordered to preserve
+    // the number exactly, so compare against the same zero default the input
+    // was built with, or every anonymous-only incident dead-letters the run.
+    if (card.sessionCount !== undefined && card.sessionCount !== (truth.sessionCount ?? 0)) {
       throw new Error(`unsupported session count for ${truthIdentity}`);
     }
-    if (card.identifiedCount !== undefined && card.identifiedCount !== truth.identifiedCount) {
+    if (card.identifiedCount !== undefined && card.identifiedCount !== (truth.identifiedCount ?? 0)) {
       throw new Error(`unsupported identified count for ${truthIdentity}`);
     }
     const numbers = factNumbers(truth);

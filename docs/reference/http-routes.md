@@ -93,6 +93,7 @@ The automated-setup callback requires `code`, `installation_id`, and UUID `state
 | GET | `/api/v1/projects/{projectID}/replays/{replayID}` | Fetch a replay |
 | GET | `/api/v1/projects/{projectID}/sessions` | List sessions with filters and keyset pagination |
 | GET | `/api/v1/projects/{projectID}/sessions/{sessionID}` | Session detail and recording metadata with sensitive values removed |
+| GET | `/api/v1/projects/{projectID}/sessions/{sessionID}/narrative` | Fetch the session narrative, finding grades, and verification timestamp |
 | GET | `/api/v1/projects/{projectID}/sessions/{sessionID}/chunks/{seq}` | Fetch one decoded, redacted part of the recording |
 | GET | `/api/v1/projects/{projectID}/incidents/{incidentID}/affected-users` | Affected users |
 | GET | `/api/v1/projects/{projectID}/incidents/{incidentID}/sample-event` | Fetch the redacted representative error event for traceback, breadcrumbs, and request context |

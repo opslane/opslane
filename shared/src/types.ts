@@ -324,6 +324,51 @@ export type ConfidenceLevel = 'high' | 'medium' | 'low';
 
 export type IncidentKind = 'error' | 'friction';
 export type FrictionSignalType = 'rage_click' | 'dead_click' | 'form_abandon';
+
+// === Session narratives (docs/design/2026-08-31-session-narratives.md) ===
+
+export type FrictionCategory =
+  | 'unclickable_affordance'
+  | 'no_feedback_after_action'
+  | 'dead_end_state'
+  | 'validation_confusion'
+  | 'slow_response'
+  | 'repetitive_workflow'
+  | 'discoverability_gap'
+  | 'hard_blocker'
+  | 'other';
+
+export interface NarrativeObservation {
+  id: string;
+  category: FrictionCategory;
+  what: string;
+  evidenceLines: string[];
+  severity: 'low' | 'medium' | 'high';
+}
+
+export interface SessionNarrative {
+  userGoal: string;
+  narrative: string;
+  observations: NarrativeObservation[];
+  notable: boolean;
+}
+
+export type ObservationGrade = 'confirmed' | 'corrected' | 'refuted' | 'inconclusive';
+
+export interface FrameVerification {
+  grades: Array<{
+    observationId: string;
+    grade: ObservationGrade;
+    reason: string;
+    replacementWhat?: string;
+  }>;
+  frames: Array<{
+    offsetMs: number;
+    pair: 'a' | 'b';
+    objectKey: string;
+    caption: string;
+  }>;
+}
 export type IssuePipelineState =
   | 'processing'
   | 'watching'
@@ -501,7 +546,7 @@ export interface Account {
   last_seen: string;
 }
 
-export type JobType = 'error_fix' | 'investigate' | 'fix' | 'session_analysis' | 'ci_watch' | 'route_map' | 'product_context' | 'issue_inquiry' | 'digest_write' | 'score_sync' | 'stack_resolve';
+export type JobType = 'error_fix' | 'investigate' | 'fix' | 'session_analysis' | 'session_narrate' | 'session_verify_frames' | 'ci_watch' | 'route_map' | 'product_context' | 'issue_inquiry' | 'digest_write' | 'score_sync' | 'stack_resolve';
 
 export type PRPosture = 'verified_only' | 'draft_when_unverified';
 

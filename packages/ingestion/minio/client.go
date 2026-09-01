@@ -85,6 +85,21 @@ func (c *Client) PresignedPutURL(ctx context.Context, objectKey string, expiry t
 	return u.String(), nil
 }
 
+// PresignedGetURL generates a time-boxed GET URL for the given object key.
+// Browser-facing URLs are signed against the configured public endpoint so
+// the request Host matches the signature.
+func (c *Client) PresignedGetURL(ctx context.Context, objectKey string, expiry time.Duration) (string, error) {
+	client := c.mc
+	if c.publicMC != nil {
+		client = c.publicMC
+	}
+	u, err := client.PresignedGetObject(ctx, c.bucket, objectKey, expiry, nil)
+	if err != nil {
+		return "", err
+	}
+	return u.String(), nil
+}
+
 // BucketExists checks whether the configured bucket exists and is accessible.
 // Works with any S3-compatible backend (MinIO, R2, real S3).
 func (c *Client) BucketExists(ctx context.Context) (bool, error) {

@@ -35,6 +35,8 @@ func candidateFingerprint(candidate Candidate, promptVersion, validatorVersion i
 		RootCause, Mitigation     string
 		ValidAction, DiffIdentity string
 		RoutePurpose              string
+		FrictionCategory, Route   string
+		ObservationQuote          string
 		Accounts                  []string
 		HasValidatedDiagnosis     bool
 		PromptVersion             int
@@ -47,6 +49,8 @@ func candidateFingerprint(candidate Candidate, promptVersion, validatorVersion i
 		RootCause: candidate.RootCause, Mitigation: candidate.Mitigation,
 		ValidAction: candidate.ValidAction, DiffIdentity: candidate.DiffIdentity,
 		RoutePurpose: candidate.RoutePurpose, Accounts: accounts,
+		FrictionCategory: candidate.FrictionCategory, Route: candidate.Route,
+		ObservationQuote:      candidate.ObservationQuote,
 		HasValidatedDiagnosis: candidate.HasValidatedDiagnosis,
 		PromptVersion:         promptVersion, ValidatorVersion: validatorVersion,
 	}

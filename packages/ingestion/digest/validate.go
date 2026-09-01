@@ -39,6 +39,11 @@ type writtenDigestCard struct {
 	ClaimedOccurrences *int     `json:"claimedOccurrences,omitempty"`
 	Accounts           []string `json:"accounts,omitempty"`
 	PRURL              string   `json:"prUrl,omitempty"`
+	FrictionCategory   string   `json:"frictionCategory,omitempty"`
+	Route              string   `json:"route,omitempty"`
+	SessionCount       *int     `json:"sessionCount,omitempty"`
+	IdentifiedCount    *int     `json:"identifiedCount,omitempty"`
+	ObservationQuote   string   `json:"observationQuote,omitempty"`
 }
 
 type deferredDigestItem struct {
@@ -286,6 +291,21 @@ func checkUnifiedWrittenCard(
 	}
 	if card.PRURL != "" && card.PRURL != candidate.PRURL {
 		return card, "", fmt.Errorf("unsupported link for %s", identity)
+	}
+	if card.SessionCount != nil && *card.SessionCount != candidate.SessionCount {
+		return card, "", fmt.Errorf("unsupported session count for %s", identity)
+	}
+	if card.IdentifiedCount != nil && *card.IdentifiedCount != candidate.IdentifiedCount {
+		return card, "", fmt.Errorf("unsupported identified count for %s", identity)
+	}
+	if card.FrictionCategory != "" && card.FrictionCategory != candidate.FrictionCategory {
+		return card, "", fmt.Errorf("unsupported friction category for %s", identity)
+	}
+	if card.Route != "" && card.Route != candidate.Route {
+		return card, "", fmt.Errorf("unsupported route for %s", identity)
+	}
+	if card.ObservationQuote != "" && card.ObservationQuote != candidate.ObservationQuote {
+		return card, "", fmt.Errorf("unsupported observation quote for %s", identity)
 	}
 	if candidate.PRURL != "" && !projectPullRequest(candidate.PRURL, run.GithubRepo) {
 		return card, "", fmt.Errorf("frozen link for %s is outside the project repository", identity)
@@ -615,7 +635,10 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string) e
 				AffectedUsers: candidate.AffectedUsers, OccurrenceCount: candidate.OccurrenceCount,
 				SignalCount: int64(candidate.OccurrenceCount), Accounts: candidate.Accounts,
 				PRURL: candidate.PRURL, ReplayURL: replayURL, PRNumber: prNumber(candidate.PRURL),
-				ActionableSince: candidate.SpellStartedAt,
+				ActionableSince:  candidate.SpellStartedAt,
+				FrictionCategory: candidate.FrictionCategory, Route: candidate.Route,
+				SessionCount: candidate.SessionCount, IdentifiedCount: candidate.IdentifiedCount,
+				ObservationQuote: candidate.ObservationQuote,
 			})
 			continue
 		}
@@ -664,6 +687,12 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string) e
 		if card.PRURL != "" && card.PRURL != candidate.PRURL {
 			return fmt.Errorf("unsupported link for episode %s", card.EpisodeID)
 		}
+		if card.SessionCount != nil && *card.SessionCount != candidate.SessionCount {
+			return fmt.Errorf("unsupported session count for episode %s", card.EpisodeID)
+		}
+		if card.IdentifiedCount != nil && *card.IdentifiedCount != candidate.IdentifiedCount {
+			return fmt.Errorf("unsupported identified count for episode %s", card.EpisodeID)
+		}
 		if card.PRURL != "" && !projectPullRequest(card.PRURL, run.GithubRepo) {
 			return fmt.Errorf("link for episode %s is outside the project repository", card.EpisodeID)
 		}
@@ -693,8 +722,11 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string) e
 			Title: title, Label: candidate.Label, Outcome: candidate.Outcome, Copy: strings.TrimSpace(card.Copy),
 			Action: strings.TrimSpace(card.Action), AffectedUsers: candidate.AffectedUsers,
 			OccurrenceCount: candidate.OccurrenceCount, Accounts: candidate.Accounts, PRURL: candidate.PRURL,
-			ReplayURL: replayURL,
-			PRNumber:  prNumber(candidate.PRURL),
+			ReplayURL:        replayURL,
+			PRNumber:         prNumber(candidate.PRURL),
+			FrictionCategory: candidate.FrictionCategory, Route: candidate.Route,
+			SessionCount: candidate.SessionCount, IdentifiedCount: candidate.IdentifiedCount,
+			ObservationQuote: candidate.ObservationQuote,
 		})
 	}
 	for _, item := range payload.Deferred {
@@ -1249,6 +1281,8 @@ func firstUngroundedNumber(card writtenDigestCard, candidate Candidate) (string,
 	allowed := map[string]struct{}{
 		strconv.Itoa(candidate.AffectedUsers):   {},
 		strconv.Itoa(candidate.OccurrenceCount): {},
+		strconv.Itoa(candidate.SessionCount):    {},
+		strconv.Itoa(candidate.IdentifiedCount): {},
 	}
 	// The prompt orders the writer to copy account names and links exactly, so
 	// digits inside them ("42Floors", PR #42) must be grounded facts — without
@@ -1256,7 +1290,8 @@ func firstUngroundedNumber(card writtenDigestCard, candidate Candidate) (string,
 	if number := prNumber(candidate.PRURL); number > 0 {
 		allowed[strconv.Itoa(number)] = struct{}{}
 	}
-	sources := []string{candidate.Title, candidate.Summary, candidate.ValidAction, candidate.RoutePurpose}
+	sources := []string{candidate.Title, candidate.Summary, candidate.ValidAction, candidate.RoutePurpose,
+		candidate.Route, candidate.ObservationQuote}
 	sources = append(sources, candidate.Accounts...)
 	for _, source := range sources {
 		for _, number := range proseNumber.FindAllString(normalizeProseNumbers(source), -1) {

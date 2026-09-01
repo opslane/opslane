@@ -406,6 +406,29 @@ func TestFormatSlackDigestV4NativeLayout(t *testing.T) {
 	}
 }
 
+func TestFormatSlackDigestV4SessionIntelligence(t *testing.T) {
+	payload := EventPayload{
+		Version: 1, EventType: "digest.daily", Project: ProjectRef{ID: "p1", Name: "Shop"},
+		DashboardURL: "https://app.example",
+		Digest: &DigestPayload{SchemaVersion: 4, Date: "2026-08-31", GeneratedCards: []GeneratedDigestCard{{
+			IncidentID: "friction-1", Kind: "friction", Outcome: "needs_human",
+			Title: "Save feedback is unclear", Copy: "People could not tell whether saving worked.", Action: "Review the replay.",
+			FrictionCategory: "no_feedback_after_action", Route: "/assets", SessionCount: 3, IdentifiedCount: 2,
+			ObservationQuote: "The save button produced no visible confirmation.",
+		}}},
+	}
+
+	_, body := formatV4Blocks(t, payload)
+	for _, want := range []string{"Session intelligence", "/assets · 3 sessions (2 identified)", "Save feedback is unclear"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("session intelligence digest missing %q: %s", want, body)
+		}
+	}
+	if strings.Contains(body, "friction signals") || strings.Contains(body, "no_feedback_after_action") {
+		t.Fatalf("session intelligence exposed implementation vocabulary: %s", body)
+	}
+}
+
 func TestFormatSlackDigestV4RendersAuthoredFrictionCard(t *testing.T) {
 	clock := time.Date(2026, 8, 27, 9, 0, 0, 0, time.UTC)
 	actionableSince := clock.Add(-3 * 24 * time.Hour)
