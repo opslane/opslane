@@ -5,7 +5,12 @@ export interface TimelineLine {
   selector: string | null;
   route: string;
   atMs: number | null;
+  kind?: 'idle';
 }
+
+/** No user interaction for longer than this is the user being away, not the
+ * app being slow. */
+export const IDLE_THRESHOLD_MS = 60_000;
 
 export interface RenderedTimeline {
   lines: TimelineLine[];
@@ -111,6 +116,7 @@ export function renderTimeline(
   let lastUrl = '';
   const openRequests = new Map<string, { method: string; url: string; at: number }>();
   const inputCounts = new Map<number, { count: number; first: number }>();
+  const userActivityMs: number[] = [];
   let scrollCount = 0;
   let lastScrollFlush = 0;
   const flushInputs = (): void => {
@@ -153,6 +159,7 @@ export function renderTimeline(
       const kind = item['kind'];
       const at = Number(item['at']);
       if (kind === 'click') {
+        userActivityMs.push(at);
         flushInputs();
         const selector = typeof item['selector'] === 'string' ? item['selector'] : '';
         push(`${relative(at)} CLICK ${selector}${item['cursor'] ? ` [cursor:${String(item['cursor'])}]` : ''}`, selector, at);
@@ -174,6 +181,7 @@ export function renderTimeline(
           }
         }
       } else if (kind === 'form_submit') {
+        userActivityMs.push(at);
         flushInputs();
         const selector = typeof item['selector'] === 'string' ? item['selector'] : '';
         push(`${relative(at)} FORM SUBMIT ${selector}`, selector, at);
@@ -232,12 +240,15 @@ export function renderTimeline(
         push(`${relative(timestamp)} UI TEXT APPEARED: "${sanitize(significant).slice(0, 160)}"`, null, timestamp);
       }
     } else if (source === 2 && data['type'] === 2 && typeof data['id'] === 'number') {
+      userActivityMs.push(timestamp);
       push(`${relative(timestamp)}   -> target: ${label(data['id'])}`, null, timestamp);
     } else if (source === 5 && typeof data['id'] === 'number') {
+      userActivityMs.push(timestamp);
       const aggregate = inputCounts.get(data['id']) ?? { count: 0, first: timestamp };
       aggregate.count += 1;
       inputCounts.set(data['id'], aggregate);
     } else if (source === 3) {
+      userActivityMs.push(timestamp);
       scrollCount += 1;
       if (timestamp - lastScrollFlush > 5_000 && scrollCount > 3) {
         push(`${relative(timestamp)} (scrolling, ${scrollCount} scroll events)`, null, timestamp);
@@ -248,15 +259,44 @@ export function renderTimeline(
   }
   flushInputs();
 
-  let output = lines;
+  const withIdleMarkers = (batch: TimelineLine[]): TimelineLine[] => {
+    const sortedActivity = [...userActivityMs].sort((a, b) => a - b);
+    const out = [...batch];
+    for (let i = 1; i < sortedActivity.length; i++) {
+      const gapStart = sortedActivity[i - 1]!;
+      const gapEnd = sortedActivity[i]!;
+      if (gapEnd - gapStart <= IDLE_THRESHOLD_MS) continue;
+      const successor = out.findIndex((line) => line.atMs !== null && line.atMs >= gapEnd);
+      if (successor === -1) continue;
+      const gapSeconds = Math.round((gapEnd - gapStart) / 1_000);
+      const minutes = Math.floor(gapSeconds / 60);
+      const seconds = gapSeconds % 60;
+      out.splice(successor, 0, {
+        text: sanitize(`${relative(gapStart)} [user idle ${minutes}m ${seconds}s — away from the app]`),
+        selector: null,
+        route: out[successor - 1]?.route ?? out[successor]!.route,
+        atMs: gapStart,
+        kind: 'idle',
+      });
+    }
+    return out;
+  };
+
+  let output = withIdleMarkers(lines);
   if (output.length > options.maxLines) {
     output = output.slice(0, options.maxLines);
     truncated = true;
+  }
+  while (output.length > 0 && output[output.length - 1]!.kind === 'idle') {
+    output = output.slice(0, -1);
   }
   let text = output.map((line, index) => `L${index + 1} ${line.text}`).join('\n');
   while (Buffer.byteLength(text, 'utf8') > options.maxBytes && output.length > 1) {
     truncated = true;
     output = output.slice(0, Math.max(1, output.length - 50));
+    while (output.length > 0 && output[output.length - 1]!.kind === 'idle') {
+      output = output.slice(0, -1);
+    }
     text = output.map((line, index) => `L${index + 1} ${line.text}`).join('\n');
   }
   return { lines: output, text, truncated, startTs };

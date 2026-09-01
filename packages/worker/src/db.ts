@@ -3394,13 +3394,14 @@ export async function reserveNarrative(
 export async function claimPendingNarrative(
   sessionId: string,
   projectId: string,
+  promptVersion: number,
 ): Promise<{ promptVersion: number } | null> {
   const result = await getPool().query<{ prompt_version: number }>(
     `UPDATE session_narratives
-     SET status = 'narrating', updated_at = now()
+     SET status = 'narrating', prompt_version = $3, updated_at = now()
      WHERE session_id = $1 AND project_id = $2 AND status = 'pending'
      RETURNING prompt_version`,
-    [sessionId, projectId],
+    [sessionId, projectId, promptVersion],
   );
   const row = result.rows[0];
   return row ? { promptVersion: row.prompt_version } : null;
