@@ -131,7 +131,7 @@ func TestValidateLeavesConcurrentReplacementCacheRowAlone(t *testing.T) {
 	}
 	if _, err := pool.Exec(ctx, `INSERT INTO digest_card_copy
 		(error_group_id,spell_started_at,authored_at,input_fingerprint,title,copy,action,model,prompt_version)
-		VALUES ($1,$2,now(),$3,'Newer title','Newer copy.','Review the investigation.','test',4)`,
+		VALUES ($1,$2,now(),$3,'Newer title','Newer copy.','Review the investigation.','test',5)`,
 		groupID, *second[0].SpellStartedAt, second[0].Fingerprint); err != nil {
 		t.Fatal(err)
 	}
