@@ -861,11 +861,11 @@ interface DeadLetterEventRow {
 function emitDeadLetterUsageEvents(
   jobId: string,
   row: DeadLetterEventRow,
-  error: string,
+  error: string | null | undefined,
 ): void {
   if (row.status !== 'dead_letter') return;
   const deadLetterClass = row.dead_letter_class ?? 'transient';
-  const lastError = scrubSecrets(error).slice(0, 300);
+  const lastError = scrubSecrets(error ?? '').slice(0, 300);
   emitUsageEvent('job_dead_lettered', {
     job_id: jobId,
     project_id: row.project_id,
