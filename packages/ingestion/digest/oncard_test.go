@@ -545,6 +545,91 @@ func TestFreezeOnCapsAtTheRendererLimitAndRendersOverflow(t *testing.T) {
 	}
 }
 
+// TestFreezeOnRanksCardEligibleIncidentsAboveReceiptOnlyOnes: the card lane's
+// scarce resource is an authored card, so an incident that can earn one wins a
+// slot over a higher-impact incident that can only ever render its mechanical
+// receipt. The receipt-only incident that loses the slot is still ledgered, so
+// it reaches the reader through the overflow line rather than vanishing.
+func TestFreezeOnRanksCardEligibleIncidentsAboveReceiptOnlyOnes(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	pool, fixture := onCardFixture(t, now)
+	ctx := context.Background()
+
+	// Nine receipt-only incidents: needs_human, no saved diff and no validated
+	// diagnosis, so publishable() refuses each of them an authored card. They
+	// carry the whole impact range, and the oldest of them is the least
+	// impactful, so it takes the oldest-waiter slot in either ranking.
+	receiptOnly := make([]string, 0, notify.DigestV4CardCap)
+	for i := 0; i < notify.DigestV4CardCap; i++ {
+		groupID := seedOnCardGroup(t, pool, fixture.ProjectID, fixture.EnvID, "friction", "needs_human",
+			false, "", "", now.Add(-time.Duration(i+2)*time.Hour))
+		if _, err := pool.Exec(ctx, `UPDATE error_groups SET impact_visits=$2 WHERE id=$1`,
+			groupID, 100-i); err != nil {
+			t.Fatal(err)
+		}
+		receiptOnly = append(receiptOnly, groupID)
+	}
+	// One card-eligible incident: the least impactful and the most recently
+	// waiting, so pure impact ranking would cap it out of the digest entirely.
+	eligible := seedOnCardGroup(t, pool, fixture.ProjectID, fixture.EnvID, "friction", "needs_human",
+		false, "", "The checkout control does not submit.", now.Add(-time.Hour))
+	seedValidatedDiagnosis(t, pool, fixture.ProjectID, eligible, now.Add(-time.Hour))
+	if _, err := pool.Exec(ctx, `UPDATE error_groups SET impact_visits=1 WHERE id=$1`, eligible); err != nil {
+		t.Fatal(err)
+	}
+
+	runID, candidates, err := FreezeCandidates(ctx, pool, fixture.ProjectID, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates) != notify.DigestV4CardCap {
+		t.Fatalf("frozen candidates = %d, want the cap %d", len(candidates), notify.DigestV4CardCap)
+	}
+	frozen := make(map[string]Candidate, len(candidates))
+	for _, candidate := range candidates {
+		frozen[candidate.ErrorGroupID] = candidate
+	}
+	if _, ok := frozen[eligible]; !ok {
+		t.Fatalf("the card-eligible incident lost its slot to higher-impact receipt-only ones: %+v", candidates)
+	}
+	if frozen[eligible].NotCardEligible {
+		t.Fatalf("the diagnosed incident was frozen as receipt-only: %+v", frozen[eligible])
+	}
+
+	// Exactly one receipt-only incident lost the slot, and it is accounted for.
+	capped := make([]string, 0, 1)
+	for _, groupID := range receiptOnly {
+		if _, ok := frozen[groupID]; ok {
+			continue
+		}
+		var outcome, reason string
+		if err := pool.QueryRow(ctx, `SELECT outcome,primary_reason_code
+			FROM digest_run_candidate_evaluations WHERE digest_run_id=$1 AND error_group_id=$2`,
+			runID, groupID).Scan(&outcome, &reason); err != nil {
+			t.Fatalf("displaced incident %s has no ledger row: %v", groupID, err)
+		}
+		if outcome != "excluded" || reason != reasonCappedOverflow {
+			t.Fatalf("displaced incident %s ledger = %s/%s", groupID, outcome, reason)
+		}
+		capped = append(capped, groupID)
+	}
+	if len(capped) != 1 {
+		t.Fatalf("displaced %d receipt-only incidents, want 1: %v", len(capped), capped)
+	}
+
+	writeOnCardPayload(t, pool, runID, candidates)
+	if err := ValidateAndPublish(ctx, pool, runID); err != nil {
+		t.Fatal(err)
+	}
+	payload := renderedEvent(t, pool, runID).Digest
+	if len(payload.GeneratedCards) != 1 || payload.GeneratedCards[0].IncidentID != eligible {
+		t.Fatalf("authored cards = %+v, want only the eligible incident", payload.GeneratedCards)
+	}
+	if len(payload.ReceiptItems) != notify.DigestV4CardCap-1 {
+		t.Fatalf("receipts = %d, want %d", len(payload.ReceiptItems), notify.DigestV4CardCap-1)
+	}
+}
+
 // TestValidateOnKeepsAnIncidentWhoseAskChangedAfterFreeze: migration 066 resets
 // actionable_since whenever the action class changes, so a normal minutes-long
 // gap between freeze and validate (a PR opening, a diff arriving) moved the
