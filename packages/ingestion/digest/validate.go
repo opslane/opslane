@@ -285,8 +285,12 @@ func checkUnifiedWrittenCard(
 		len([]rune(card.Why)) > 300 || len([]rune(card.Action)) > 300 {
 		return card, "", fmt.Errorf("card length exceeded for %s", identity)
 	}
-	if containsDigit(card.Copy) || containsDigit(card.Action) {
-		return card, "", fmt.Errorf("authored copy/action contains a numeric glyph for %s", identity)
+	// Copy may carry digits because grounding (firstUngroundedNumber, below)
+	// verifies every one against a frozen fact — impact numbers belong in the
+	// prose now that the counts line is gone. The action keeps the outright
+	// ban: it is state-stamped and has no legitimate number to state.
+	if containsDigit(card.Action) {
+		return card, "", fmt.Errorf("authored action contains a numeric glyph for %s", identity)
 	}
 	if card.Label != candidate.Label {
 		return card, "", fmt.Errorf("unsupported label for %s", identity)
