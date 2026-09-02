@@ -14,6 +14,7 @@ import {
   askModelForClaims,
   buildProductContextPrompt,
   groundRouteClaims,
+  productContextLimits,
   runProductContext,
 } from '../product-context/job.js';
 import { parseRouteClaims, routeClaimsTerminalTool } from '../product-context/schema.js';
@@ -26,6 +27,23 @@ afterEach(async () => {
 });
 
 describe('product context schema', () => {
+  it('scales model limits with route count and caps runaway inputs', () => {
+    expect(productContextLimits(0)).toEqual({ maxTurns: 20, budgetUsd: 0.5 });
+    expect(productContextLimits(59)).toEqual({ maxTurns: 50, budgetUsd: 2.27 });
+    expect(productContextLimits(500)).toEqual({ maxTurns: 80, budgetUsd: 3 });
+  });
+
+  it('allows explicit positive product-context limit overrides', () => {
+    process.env['PRODUCT_CONTEXT_MAX_TURNS'] = '60';
+    process.env['PRODUCT_CONTEXT_BUDGET_USD'] = '2';
+    try {
+      expect(productContextLimits(59)).toEqual({ maxTurns: 60, budgetUsd: 2 });
+    } finally {
+      delete process.env['PRODUCT_CONTEXT_MAX_TURNS'];
+      delete process.env['PRODUCT_CONTEXT_BUDGET_USD'];
+    }
+  });
+
   it('classifies a model limit stop as non-retryable', async () => {
     process.env['ANTHROPIC_API_KEY'] = 'test-key';
     sdk.run.mockResolvedValueOnce({

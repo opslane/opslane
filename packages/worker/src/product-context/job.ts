@@ -78,6 +78,26 @@ const MODEL_PRICING: Record<string, {
 };
 const DEFAULT_PRICING = { input: 3, output: 15, cacheWrite: 3.75, cacheRead: 0.30 };
 
+function positiveOverride(raw: string | undefined): number | null {
+  if (raw === undefined || raw.trim() === '') return null;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+/** Scale the repository pass to the number of observed routes, with explicit operator overrides. */
+export function productContextLimits(routeCount: number): {
+  maxTurns: number;
+  budgetUsd: number;
+} {
+  const boundedCount = Number.isFinite(routeCount) ? Math.max(0, Math.ceil(routeCount)) : 0;
+  return {
+    maxTurns: positiveOverride(process.env['PRODUCT_CONTEXT_MAX_TURNS'])
+      ?? Math.min(80, 20 + Math.ceil(boundedCount / 2)),
+    budgetUsd: positiveOverride(process.env['PRODUCT_CONTEXT_BUDGET_USD'])
+      ?? Math.min(3, 0.5 + 0.03 * boundedCount),
+  };
+}
+
 const SYSTEM_PROMPT = `You build product understanding from repository code.
 Find every user-facing route in the repository. Use run_command to locate route
 registrations and file-system routes efficiently, then inspect each route or
@@ -259,17 +279,20 @@ export async function askModelForClaims(input: {
     );
   }
   const startedAt = Date.now();
+  const limits = productContextLimits(input.routes.length);
   const result = await traceSpan('product_context.build', {
     'product_context.prompt_version': PRODUCT_CONTEXT_PROMPT_VERSION,
     'product_context.route_count': input.routes.length,
     'product_context.model': PRODUCT_CONTEXT_MODEL,
+    'product_context.max_turns': limits.maxTurns,
+    'product_context.budget_usd': limits.budgetUsd,
   }, () => runReadOnlyAgentSdk({
     apiKey,
     model: PRODUCT_CONTEXT_MODEL,
     reader: input.reader,
     commandRunner: input.commandRunner,
-    maxTurns: 20,
-    budgetUsd: 0.5,
+    maxTurns: limits.maxTurns,
+    budgetUsd: limits.budgetUsd,
     pricing: MODEL_PRICING[PRODUCT_CONTEXT_MODEL] ?? DEFAULT_PRICING,
     systemPrompt: SYSTEM_PROMPT,
     firstMessage: buildProductContextPrompt(input.routes),
@@ -312,6 +335,8 @@ export async function askModelForClaims(input: {
     cache_read_tokens: result.usage.cacheRead,
     cache_write_tokens: result.usage.cacheWrite,
     cost_usd: result.costUsd,
+    max_turns: limits.maxTurns,
+    budget_usd: limits.budgetUsd,
     latency_ms: Date.now() - startedAt,
   });
   return {
@@ -341,6 +366,11 @@ export async function runProductContext(
   const startedAt = Date.now();
   checkAbort(signal);
   const prepared = await dependencies.prepare(job, signal);
+  logger.info('Product context repository prepared', {
+    job_id: job.id,
+    project_id: job.projectId,
+    route_count: prepared.routes.length,
+  });
   try {
     checkAbort(signal);
     const result = await dependencies.askModel({
