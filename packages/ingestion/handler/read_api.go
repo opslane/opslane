@@ -704,8 +704,16 @@ func receiptStateFor(g db.ErrorGroup, inc incidentJSON) (string, bool) {
 		if g.HasSavedDiff {
 			return "attempt_failed_with_diff", true
 		}
+		// "The fix attempt failed" is only honest when a fix job actually ran.
+		// Reconciling a dead-lettered investigation stores that investigation's
+		// id in terminal_fix_job_id, and this page used to read the status alone
+		// and tell the reader a fix had failed on an incident where none was
+		// ever attempted. The digest's ask reads the same database function.
 		if hasReport {
-			return "attempt_failed_no_diff", true
+			if g.FixAttempted {
+				return "attempt_failed_no_diff", true
+			}
+			return "report_ready", true
 		}
 	case "investigated", "insight", "awaiting_approval":
 		if hasReport {
