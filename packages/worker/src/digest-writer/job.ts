@@ -10,7 +10,7 @@ import {
 
 export type { DigestPayload } from './schema.js';
 
-export const DIGEST_PROMPT_VERSION = 5;
+export const DIGEST_PROMPT_VERSION = 6;
 export const DIGEST_MODEL = process.env['DIGEST_MODEL']
   ?? process.env['INVESTIGATION_MODEL']
   ?? 'claude-sonnet-5';
@@ -51,8 +51,9 @@ export interface DigestCandidate {
   /** Absent on candidates frozen by pre-v4 ingestion during a deploy window. */
   occurrenceCount?: number;
   /** Measured recording impact: visits that hit the problem, and visits that
-   * got past it. The message template no longer prints them, so the card's own
-   * prose carries them and both must ground. */
+   * got past it. Carried for ranking and diagnostics only. The message prints
+   * them mechanically, so they are NOT grounding facts: a card that states one
+   * would repeat that line, or replay a stale value from cached copy. */
   impactVisits?: number;
   impactRecovered?: number;
   accounts: string[];
@@ -151,21 +152,42 @@ function factNumbers(truth: DigestCandidate): Set<string> {
   if (typeof truth.occurrenceCount === 'number') digits.add(String(truth.occurrenceCount));
   if (typeof truth.sessionCount === 'number') digits.add(String(truth.sessionCount));
   if (typeof truth.identifiedCount === 'number') digits.add(String(truth.identifiedCount));
-  if (typeof truth.impactVisits === 'number') digits.add(String(truth.impactVisits));
-  if (typeof truth.impactRecovered === 'number') digits.add(String(truth.impactRecovered));
+  // impactVisits and impactRecovered are deliberately absent: the message
+  // prints them, so a card naming one is repeating that line.
   // Accounts and the PR number are facts the prompt orders copied exactly;
   // digits inside them ("42Floors") must not fail the day's digest.
   const prNumber = /\/pull\/(\d+)$/.exec(truth.prUrl ?? '');
   if (prNumber?.[1]) digits.add(prNumber[1]);
-  // rootCause in its own right, not left to the summary alias: the alias holds
-  // the cause only while it is non-empty, and the why sentence is written from
-  // the cause, so its digits must ground on the cause itself.
   const sources = [truth.title, truth.summary, truth.rootCause ?? '', truth.validAction ?? '',
     truth.routePurpose ?? '', truth.route ?? '', truth.observationQuote ?? '', ...truth.accounts];
   for (const source of sources) {
     for (const match of normalizeProseNumbers(source).matchAll(PROSE_NUMBER)) digits.add(match[0]);
   }
   return digits;
+}
+
+/** The cause sentence grounds against the stored cause alone. It is written
+ * from rootCause and nothing else, so a digit borrowed from an account name or
+ * an occurrence count is invented as far as the cause is concerned. Go's
+ * firstUngroundedNumber applies the same field-specific rule. */
+function causeNumbers(truth: DigestCandidate): Set<string> {
+  const digits = new Set<string>();
+  for (const match of normalizeProseNumbers(truth.rootCause ?? '').matchAll(PROSE_NUMBER)) {
+    digits.add(match[0]);
+  }
+  return digits;
+}
+
+/** Copy and action carry no digits at all on a unified card. The message
+ * prints the measured scale under the copy and stamps the action from incident
+ * state, so a number in either is a duplicate or a stale replay from cached
+ * prose. Gated on the fingerprint because that is what marks a candidate frozen
+ * under the unified contract; a pre-unified snapshot replays under the older
+ * prompt, which invited counts into the copy. checkUnifiedWrittenCard in Go
+ * bans the same two fields. */
+function bannedDigitField(truth: DigestCandidate, copy: string, action: string): boolean {
+  if (truth.fingerprint === undefined) return false;
+  return /\p{Nd}/u.test(copy) || /\p{Nd}/u.test(action);
 }
 
 export function groundPayload(raw: unknown, candidates: DigestCandidate[]): DigestPayload {
@@ -221,11 +243,20 @@ export function groundPayload(raw: unknown, candidates: DigestCandidate[]): Dige
     // Overwrite, never compare: demoting a correct card over the wording of a
     // line with exactly one correct value would waste the authoring call.
     const action = stateAction(truth) ?? stripInvisible(card.action);
-    for (const field of [title, copy, why ?? '', action]) {
+    if (bannedDigitField(truth, copy, action)) {
+      throw new Error(`authored copy/action contains a numeric glyph for ${truthIdentity}`);
+    }
+    for (const field of [title, copy, action]) {
       for (const match of normalizeProseNumbers(field).matchAll(PROSE_NUMBER)) {
         if (!numbers.has(match[0])) {
           throw new Error(`ungrounded number ${match[0]} in card for ${truthIdentity}`);
         }
+      }
+    }
+    const causeDigits = causeNumbers(truth);
+    for (const match of normalizeProseNumbers(why ?? '').matchAll(PROSE_NUMBER)) {
+      if (!causeDigits.has(match[0])) {
+        throw new Error(`ungrounded number ${match[0]} in card for ${truthIdentity}`);
       }
     }
     return {
@@ -409,7 +440,7 @@ The reader is a busy product owner. Every card has exactly four parts:
 2. copy — two or three short sentences. Lead with who was affected and what they were trying to do: derive that from routePurpose and summary; if the facts do not say what they were doing, describe the symptom without inventing intent. Then say what actually happened and what it cost them. Keep copy under 300 characters. If episodeSequence is greater than 1, say the problem is back (do not claim it was fixed before; you do not know that).
 3. why — one sentence naming the mechanism, taken from this candidate's rootCause. Say what in the product is broken, not what the reader should feel. Omit it only when rootCause is empty; when rootCause has text, a card without a why is thrown away.
 4. action — one imperative instruction for the reader, based on this candidate's validAction. Do not start it with a label like "Needs you" or "Ready" — the message template adds that. If the candidate has replaySessionId, the instruction may tell the reader to watch the replay.
-The copy carries the measured scale, because the message no longer prints a counts line: state impactVisits, impactRecovered, sessionCount, identifiedCount, or affectedUsers exactly as supplied ("17 visits this week, 14 got through eventually"). Never write a number the facts do not contain, and never put numbers in the action.
+Never state counts as digits in copy or action. Do not spell out volatile quantities either ("dozens", "three people"). The message prints the measured numbers under your copy; never restate them.
 Every candidate must appear exactly once in included or deferred. Include every candidate by default. Defer one only when it is redundant with an included card, and never defer the candidate with the most affected users. A deferral reason states the specific redundancy, never that the item awaits review.
 Copy account names and links exactly; never invent them.
 For friction incidents, build the card copy from the provided observationQuote. Preserve sessionCount and identifiedCount exactly. The title must name the problem in plain language and never repeat the frictionCategory token or the route.

@@ -503,6 +503,63 @@ func TestFormatSlackDigestV4RendersTheCauseLine(t *testing.T) {
 	}
 }
 
+// The measured scale is printed from the stamped facts, never from the prose.
+// It is a friction line only, it sits between the cause and the ask, and it
+// disappears rather than print a zero.
+func TestFormatSlackDigestV4RendersTheMeasuredImpactLine(t *testing.T) {
+	visits, recovered, zero := int64(17), int64(14), int64(0)
+	card := func(incidentID, kind string, impactVisits, impactRecovered *int64) GeneratedDigestCard {
+		return GeneratedDigestCard{
+			IncidentID: incidentID, Kind: kind, Title: "Saving is blocked", Outcome: "needs_human",
+			Copy: "People cannot save their work.", Why: "The submit handler is never wired up.",
+			Action: "Decide how to handle this.",
+			ImpactVisits: impactVisits, ImpactRecovered: impactRecovered,
+		}
+	}
+	render := func(cards ...GeneratedDigestCard) string {
+		_, body := formatV4Blocks(t, EventPayload{
+			Version: 1, EventType: "digest.daily", Project: ProjectRef{ID: "p1", Name: "Shop"},
+			DashboardURL: "https://app.example",
+			Digest: &DigestPayload{SchemaVersion: 4, Date: "2026-08-27", GeneratedCards: cards},
+		})
+		return body
+	}
+
+	both := render(card("friction-both", "friction", &visits, &recovered))
+	if !strings.Contains(both, "Why: The submit handler is never wired up.\\n17 visits this week, 14 recovered\\n*Needs you:*") {
+		t.Fatalf("impact line missing or out of place: %s", both)
+	}
+
+	for name, impactRecovered := range map[string]*int64{"nil": nil, "zero": &zero} {
+		body := render(card("friction-visits", "friction", &visits, impactRecovered))
+		if !strings.Contains(body, "17 visits this week\\n*Needs you:*") {
+			t.Fatalf("%s recovery rendered the wrong impact line: %s", name, body)
+		}
+		if strings.Contains(body, "recovered") {
+			t.Fatalf("%s recovery still printed a recovery count: %s", name, body)
+		}
+	}
+
+	for name, impactVisits := range map[string]*int64{"nil": nil, "zero": &zero} {
+		body := render(card("friction-none", "friction", impactVisits, &recovered))
+		if strings.Contains(body, "visits this week") {
+			t.Fatalf("%s visit count still rendered an impact line: %s", name, body)
+		}
+	}
+
+	// An error card keeps exactly the rendering it has today: no impact line,
+	// and its people count where it has always been.
+	errorCard := card("error-1", "error", &visits, &recovered)
+	errorCard.AffectedUsers = 3
+	body := render(errorCard)
+	if strings.Contains(body, "visits this week") {
+		t.Fatalf("error card grew an impact line: %s", body)
+	}
+	if !strings.Contains(body, "👥 3 users") {
+		t.Fatalf("error card lost its people count: %s", body)
+	}
+}
+
 // An incident that can never earn a written card gets one line under "Also
 // waiting". A receipt that lost its card for any other reason keeps the full
 // rendering, because that one marks an authoring failure worth seeing.

@@ -155,6 +155,11 @@ func FormatDigest(input DigestInput) string {
 			line += "  replay: " + card.ReplayURL
 		}
 		lines = append(lines, line)
+		// The same mechanical impact sentence Slack prints, from the same facts,
+		// so an agent reading the digest and a reader seeing it get one story.
+		if impact := notify.DigestImpactLine(card); impact != "" {
+			lines = append(lines, "  "+impact)
+		}
 		if card.Action != "" {
 			lines = append(lines, "  next: "+Fence(Truncate(card.Action, TitleLimit)))
 		}

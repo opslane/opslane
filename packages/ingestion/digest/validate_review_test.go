@@ -61,20 +61,39 @@ func TestSessionCountsGroundOnlyNarrativeCards(t *testing.T) {
 	}
 }
 
-// The renderer stopped printing the measured impact as a counts line, so the
-// card's own prose has to be able to say it. Both numbers are frozen facts, and
-// a visit count the writer invented still fails.
-func TestMeasuredImpactGroundsCardProse(t *testing.T) {
+// The renderer owns the measured impact again: it prints today's numbers under
+// the card. Prose that names them is either duplicating that line or replaying
+// a stale value from cached copy, so neither number grounds anything.
+func TestMeasuredImpactStaysOutOfProse(t *testing.T) {
 	candidate := groundingCandidate()
 	visits, recovered := int64(17), int64(14)
 	candidate.ImpactVisits, candidate.ImpactRecovered = &visits, &recovered
 	if number, bad := firstUngroundedNumber(
-		groundingCard("Saving is blocked", "It hit 17 visits, and 14 recovered.", "a"), candidate); bad {
-		t.Fatalf("measured impact should be grounded, rejected %q", number)
+		groundingCard("Saving is blocked", "It hit 17 visits, and 14 recovered.", "a"), candidate); !bad || number != "17" {
+		t.Fatalf("frozen impact number = (%q, %v), want a rejection of 17", number, bad)
 	}
 	if number, bad := firstUngroundedNumber(
 		groundingCard("t", "It hit 99 visits.", "a"), candidate); !bad || number != "99" {
 		t.Fatalf("invented visit count = (%q, %v), want a rejection of 99", number, bad)
+	}
+}
+
+// The cause sentence grounds against the stored cause and nothing else. A digit
+// the rest of the candidate happens to contain is still invented as far as the
+// cause is concerned.
+func TestCauseSentenceGroundsAgainstRootCauseAlone(t *testing.T) {
+	candidate := groundingCandidate()
+	candidate.RootCause = "The export request times out after 10 seconds"
+	card := groundingCard("t", "c", "a")
+	card.Why = "Requests time out after 10 seconds."
+	if number, bad := firstUngroundedNumber(card, candidate); bad {
+		t.Fatalf("cause sentence rejected its own root cause number %q", number)
+	}
+	// 34 is the frozen occurrence count, so the pooled whitelist holds it. The
+	// cause does not, and the why sentence answers to the cause.
+	card.Why = "The handler retries 34 times before giving up."
+	if number, bad := firstUngroundedNumber(card, candidate); !bad || number != "34" {
+		t.Fatalf("pooled fact number in the why = (%q, %v), want a rejection of 34", number, bad)
 	}
 }
 
@@ -101,7 +120,7 @@ func TestPRNumberFailurePaths(t *testing.T) {
 		"https://github.com/acme/shop/pull/not-a-number": 0,
 		"https://github.com/acme/shop/issues/42":         0,
 		"://malformed":                                   0,
-		"": 0,
+		"":                                               0,
 	}
 	for input, want := range cases {
 		if got := prNumber(input); got != want {

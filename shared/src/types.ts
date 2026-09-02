@@ -51,6 +51,10 @@ export interface GeneratedDigestCard {
   copy: string;
   action: string;
   affected_users: number;
+  /** Measured recording impact, stamped by validation from today's facts. The
+   *  renderer prints these under the authored copy; the copy never states them. */
+  impact_visits?: number;
+  impact_visits_recovered?: number;
   occurrence_count?: number;
   accounts: string[];
   pr_url?: string;

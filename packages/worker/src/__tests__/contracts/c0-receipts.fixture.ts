@@ -37,6 +37,7 @@ export const digestReceiptFieldsV4: DigestReceiptFields = {
     episode_id: 'episode-1', incident_id: 'incident-1', title: 'Sign-in crashes',
     label: 'new', outcome: 'needs_human', copy: 'Sign-in fails.', action: 'Choose the fallback.',
     affected_users: 3, occurrence_count: 7, accounts: ['Acme'], pr_number: 9,
+    impact_visits: 17, impact_visits_recovered: 14,
   }],
   receipt_items: [{ ...receiptItem, has_validated_diagnosis: true, actionable_since: '2026-08-27T10:00:00Z' }],
   receipt_overflow: 1,
