@@ -467,6 +467,22 @@ func neverEligibleRendersReceipt(t *testing.T, kind, status string) {
 	if payload.ReceiptItems[0].IncidentID != groupID {
 		t.Fatalf("receipt = %+v", payload.ReceiptItems[0])
 	}
+	// The freeze already knew no card would ever be written here, so the
+	// receipt carries that reason and the message spends one line on it.
+	if payload.ReceiptItems[0].FallbackReason != notify.ReceiptFallbackNeverEligible {
+		t.Fatalf("receipt fallback reason = %q, want %q",
+			payload.ReceiptItems[0].FallbackReason, notify.ReceiptFallbackNeverEligible)
+	}
+	body, _, err := notify.FormatSlack(renderedEvent(t, pool, runID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), "Also waiting") {
+		t.Fatalf("never-eligible receipt did not render compactly: %s", body)
+	}
+	if strings.Contains(string(body), "Fix attempt failed") || strings.Contains(string(body), "recording impact unavailable") {
+		t.Fatalf("never-eligible receipt still rendered its full card: %s", body)
+	}
 	var cacheRows int
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM digest_card_copy WHERE error_group_id=$1`,
 		groupID).Scan(&cacheRows); err != nil {

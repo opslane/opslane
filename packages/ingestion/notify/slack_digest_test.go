@@ -503,6 +503,54 @@ func TestFormatSlackDigestV4RendersTheCauseLine(t *testing.T) {
 	}
 }
 
+// An incident that can never earn a written card gets one line under "Also
+// waiting". A receipt that lost its card for any other reason keeps the full
+// rendering, because that one marks an authoring failure worth seeing.
+func TestFormatSlackDigestV4CompactsNeverEligibleReceipts(t *testing.T) {
+	clock := time.Date(2026, 8, 27, 9, 0, 0, 0, time.UTC)
+	waiting := clock.Add(-2 * 24 * time.Hour)
+	visits, recovered := int64(45), int64(0)
+	payload := EventPayload{
+		Version: 1, EventType: "digest.daily", Project: ProjectRef{ID: "p1", Name: "Shop"},
+		DashboardURL: "https://app.example",
+		Digest: &DigestPayload{
+			SchemaVersion: 4, Date: "2026-08-27", UnifiedCards: true,
+			Window: DigestWindow{To: clock.Format(time.RFC3339)},
+			ReceiptItems: []ReceiptItem{
+				{
+					Kind: "friction", IncidentID: "never-eligible", Title: "Validation confusion",
+					OccurrenceCount: 47, ImpactClass: "blocked", ImpactVisits: &visits, ImpactRecovered: &recovered,
+					ReceiptState: "attempt_failed_no_diff", HasValidatedDiagnosis: true,
+					ActionableSince: &waiting, FallbackReason: ReceiptFallbackNeverEligible,
+				},
+				{
+					Kind: "error", IncidentID: "card-failed", Title: "Checkout crashes",
+					OccurrenceCount: 12, ImpactClass: "blocked", ImpactVisits: &visits, ImpactRecovered: &recovered,
+					ReceiptState: "attempt_failed_no_diff", HasValidatedDiagnosis: true,
+					ActionableSince: &waiting,
+				},
+			},
+		},
+	}
+	_, body := formatV4Blocks(t, payload)
+	if !strings.Contains(body, "Also waiting") {
+		t.Fatalf("compact receipts have no heading: %s", body)
+	}
+	if !strings.Contains(body, "Validation confusion · waiting on you since Aug 25 (2 days) · <https://app.example/incidents/never-eligible?project_id=p1|Issue page>") {
+		t.Fatalf("compact receipt line is wrong: %s", body)
+	}
+	// The full rendering's mechanical lines belong to the other receipt only.
+	if strings.Count(body, "47 friction signals") != 0 {
+		t.Fatalf("never-eligible receipt kept its counts line: %s", body)
+	}
+	if !strings.Contains(body, "12 crashes across 45 visits") {
+		t.Fatalf("the receipt that lost its card was compacted too: %s", body)
+	}
+	if !strings.Contains(body, "Fix attempt failed before producing a change") {
+		t.Fatalf("full receipt lost its state line: %s", body)
+	}
+}
+
 func TestFormatSlackDigestV4ErrorCardSnapshotIsUnchanged(t *testing.T) {
 	payload := EventPayload{
 		Version: 1, EventType: "digest.daily", Project: ProjectRef{ID: "p1", Name: "Shop"},
