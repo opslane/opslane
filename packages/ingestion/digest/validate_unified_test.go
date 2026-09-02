@@ -82,6 +82,17 @@ func TestValidateOnPublishesAuthoredFrictionAndCachesCopy(t *testing.T) {
 		WHERE error_group_id=$1 AND invalidated_at IS NULL`, candidate.ErrorGroupID).Scan(&cacheRows); err != nil {
 		t.Fatal(err)
 	}
+	// The cached row records the contract it was written under. A card written
+	// to one prompt and replayed against another is what the version stamp
+	// exists to prevent.
+	var cachedPromptVersion int
+	if err := pool.QueryRow(context.Background(), `SELECT prompt_version FROM digest_card_copy
+		WHERE error_group_id=$1 AND invalidated_at IS NULL`, candidate.ErrorGroupID).Scan(&cachedPromptVersion); err != nil {
+		t.Fatal(err)
+	}
+	if cachedPromptVersion != digestPromptVersion || digestPromptVersion != 5 {
+		t.Fatalf("cached prompt version = %d, live = %d, want 5", cachedPromptVersion, digestPromptVersion)
+	}
 	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM issue_publications
 		WHERE project_id=$1 AND channel='digest'`, fixture.ProjectID).Scan(&publications); err != nil {
 		t.Fatal(err)
@@ -212,7 +223,7 @@ func TestValidateCacheConflictDoesNotOverwriteConcurrentWinner(t *testing.T) {
 	}
 	if _, err := pool.Exec(context.Background(), `INSERT INTO digest_card_copy
 		(error_group_id,spell_started_at,input_fingerprint,title,copy,action,model,prompt_version)
-		VALUES ($1,$2,'concurrent-fingerprint','Concurrent title','Concurrent copy','Concurrent action','test',4)`,
+		VALUES ($1,$2,'concurrent-fingerprint','Concurrent title','Concurrent copy','Concurrent action','test',5)`,
 		candidate.ErrorGroupID, *candidate.SpellStartedAt); err != nil {
 		t.Fatal(err)
 	}

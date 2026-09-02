@@ -18,8 +18,13 @@ func TestCandidateFingerprintSemanticContract(t *testing.T) {
 		SpellStartedAt: &spell, AffectedUsers: 3, OccurrenceCount: 42,
 		LastSeen: spell.Add(time.Hour),
 	}
-	want := candidateFingerprint(base, 4, 1)
-	if want == "" || want != candidateFingerprint(base, 4, 1) {
+	// Pinned to the live constants: the prompt version is the cache authority,
+	// so a bump here is what retires every card written under the old contract.
+	if digestPromptVersion != 5 || digestValidatorVersion != 1 {
+		t.Fatalf("prompt/validator version = %d/%d, want 5/1", digestPromptVersion, digestValidatorVersion)
+	}
+	want := candidateFingerprint(base, digestPromptVersion, digestValidatorVersion)
+	if want == "" || want != candidateFingerprint(base, digestPromptVersion, digestValidatorVersion) {
 		t.Fatal("fingerprint is empty or nondeterministic")
 	}
 	permuted := base
@@ -27,7 +32,7 @@ func TestCandidateFingerprintSemanticContract(t *testing.T) {
 	permuted.AffectedUsers = 99
 	permuted.OccurrenceCount = 1000
 	permuted.LastSeen = base.LastSeen.Add(24 * time.Hour)
-	if got := candidateFingerprint(permuted, 4, 1); got != want {
+	if got := candidateFingerprint(permuted, digestPromptVersion, digestValidatorVersion); got != want {
 		t.Fatalf("volatile facts or account ordering changed fingerprint: %s != %s", got, want)
 	}
 
@@ -51,11 +56,12 @@ func TestCandidateFingerprintSemanticContract(t *testing.T) {
 		changed := base
 		changed.Accounts = append([]string(nil), base.Accounts...)
 		mutate(&changed)
-		if got := candidateFingerprint(changed, 4, 1); got == want {
+		if got := candidateFingerprint(changed, digestPromptVersion, digestValidatorVersion); got == want {
 			t.Errorf("%s did not change fingerprint", name)
 		}
 	}
-	if candidateFingerprint(base, 5, 1) == want || candidateFingerprint(base, 4, 2) == want {
+	if candidateFingerprint(base, digestPromptVersion+1, digestValidatorVersion) == want ||
+		candidateFingerprint(base, digestPromptVersion, digestValidatorVersion+1) == want {
 		t.Error("prompt or validator version did not change fingerprint")
 	}
 }
