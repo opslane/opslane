@@ -49,6 +49,11 @@ export interface DigestCandidate {
   affectedUsers: number;
   /** Absent on candidates frozen by pre-v4 ingestion during a deploy window. */
   occurrenceCount?: number;
+  /** Measured recording impact: visits that hit the problem, and visits that
+   * got past it. The message template no longer prints them, so the card's own
+   * prose carries them and both must ground. */
+  impactVisits?: number;
+  impactRecovered?: number;
   accounts: string[];
   lastSeen: string;
   routePurpose?: string;
@@ -145,6 +150,8 @@ function factNumbers(truth: DigestCandidate): Set<string> {
   if (typeof truth.occurrenceCount === 'number') digits.add(String(truth.occurrenceCount));
   if (typeof truth.sessionCount === 'number') digits.add(String(truth.sessionCount));
   if (typeof truth.identifiedCount === 'number') digits.add(String(truth.identifiedCount));
+  if (typeof truth.impactVisits === 'number') digits.add(String(truth.impactVisits));
+  if (typeof truth.impactRecovered === 'number') digits.add(String(truth.impactRecovered));
   // Accounts and the PR number are facts the prompt orders copied exactly;
   // digits inside them ("42Floors") must not fail the day's digest.
   const prNumber = /\/pull\/(\d+)$/.exec(truth.prUrl ?? '');

@@ -83,6 +83,7 @@ func selectOnCardCandidates(all []actionableCandidate, at time.Time) ([]Candidat
 			Mitigation: source.Mitigation, DiffIdentity: source.DiffIdentity,
 			HasSavedDiff: source.HasSavedDiff, PRURL: source.PRURL,
 			AffectedUsers: source.AffectedUsers, OccurrenceCount: int(source.OccurrenceCount),
+			ImpactVisits: source.ImpactVisits, ImpactRecovered: source.ImpactRecovered,
 			Accounts: source.Accounts, LastSeen: source.LastSeen, RoutePurpose: source.RoutePurpose,
 			DecidedAt: decidedAt, ValidAction: action, SpellStartedAt: source.ActionableSince,
 			HasValidatedDiagnosis: source.HasValidatedDiagnosis, Label: "new",

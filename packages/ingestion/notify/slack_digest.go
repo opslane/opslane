@@ -249,14 +249,13 @@ func digestV4CardBlocks(payload EventPayload, card GeneratedDigestCard, position
 	// card's own copy (v3 hid the count the same way).
 	contextParts := make([]string, 0, 4)
 	if card.ObservationQuote != "" {
+		// Route only. The session tally used to follow it, and a reader who had
+		// just been told in prose who was affected got the same fact back as
+		// arithmetic. The writer owns the impact sentence now; a receipt card
+		// still shows its counts, because nobody wrote prose for it.
 		if card.Route != "" {
 			contextParts = append(contextParts, cleanProse(card.Route, digestPageMax))
 		}
-		sessionNoun := "sessions"
-		if card.SessionCount == 1 {
-			sessionNoun = "session"
-		}
-		contextParts = append(contextParts, fmt.Sprintf("%d %s (%d identified)", card.SessionCount, sessionNoun, card.IdentifiedCount))
 	} else if card.AffectedUsers > 0 {
 		noun := "users"
 		if card.AffectedUsers == 1 {
@@ -270,13 +269,6 @@ func digestV4CardBlocks(payload EventPayload, card GeneratedDigestCard, position
 			accounts = "👥 " + accounts
 		}
 		contextParts = append(contextParts, accounts)
-	}
-	if card.Kind == "friction" && card.ObservationQuote == "" {
-		noun := "friction signals"
-		if card.SignalCount == 1 {
-			noun = "friction signal"
-		}
-		contextParts = append(contextParts, fmt.Sprintf("%d %s", card.SignalCount, noun))
 	}
 	if age := digestWaitingAgeLine(payload, card.IncidentID, card.ActionableSince,
 		"digest card aging line dropped: window is not RFC3339Nano"); age != "" {

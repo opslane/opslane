@@ -61,6 +61,23 @@ func TestSessionCountsGroundOnlyNarrativeCards(t *testing.T) {
 	}
 }
 
+// The renderer stopped printing the measured impact as a counts line, so the
+// card's own prose has to be able to say it. Both numbers are frozen facts, and
+// a visit count the writer invented still fails.
+func TestMeasuredImpactGroundsCardProse(t *testing.T) {
+	candidate := groundingCandidate()
+	visits, recovered := int64(17), int64(14)
+	candidate.ImpactVisits, candidate.ImpactRecovered = &visits, &recovered
+	if number, bad := firstUngroundedNumber(
+		groundingCard("Saving is blocked", "It hit 17 visits, and 14 recovered.", "a"), candidate); bad {
+		t.Fatalf("measured impact should be grounded, rejected %q", number)
+	}
+	if number, bad := firstUngroundedNumber(
+		groundingCard("t", "It hit 99 visits.", "a"), candidate); !bad || number != "99" {
+		t.Fatalf("invented visit count = (%q, %v), want a rejection of 99", number, bad)
+	}
+}
+
 func TestNormalizeProseNumbersCollapsesGroups(t *testing.T) {
 	if got := normalizeProseNumbers("1,234,567 users"); got != "1234567 users" {
 		t.Fatalf("got %q", got)

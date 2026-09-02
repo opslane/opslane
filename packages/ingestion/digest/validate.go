@@ -1295,6 +1295,16 @@ func firstUngroundedNumber(card writtenDigestCard, candidate Candidate) (string,
 	if number := prNumber(candidate.PRURL); number > 0 {
 		allowed[strconv.Itoa(number)] = struct{}{}
 	}
+	// The renderer no longer prints the measured impact as a counts line, so the
+	// card's own prose carries it. Both numbers are frozen facts, refreshed on
+	// every freeze, so a card that names them is grounded and one that invents a
+	// visit count is not.
+	if candidate.ImpactVisits != nil {
+		allowed[strconv.FormatInt(*candidate.ImpactVisits, 10)] = struct{}{}
+	}
+	if candidate.ImpactRecovered != nil {
+		allowed[strconv.FormatInt(*candidate.ImpactRecovered, 10)] = struct{}{}
+	}
 	sources := []string{candidate.Title, candidate.Summary, candidate.ValidAction, candidate.RoutePurpose,
 		candidate.Route, candidate.ObservationQuote}
 	sources = append(sources, candidate.Accounts...)
