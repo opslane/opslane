@@ -44,8 +44,11 @@ func selectOnCardCandidates(all []actionableCandidate, at time.Time) ([]Candidat
 	}
 	// The ON lane's bound is the renderer's real Slack-block constraint, not the
 	// OFF receipts lane's product-era five: capping lower would hide waiting
-	// incidents the message has room for.
-	selected, _ := selectActionable(eligible, notify.DigestV4CardCap)
+	// incidents the message has room for. Its ranking is eligibility first: the
+	// cap rations authored cards, so a diagnosed incident that can earn one is
+	// worth more of that budget than a louder incident that can only ever render
+	// a mechanical receipt.
+	selected, _ := selectOnCardEligibleFirst(eligible, notify.DigestV4CardCap)
 	picked := make(map[string]bool, len(selected))
 	for _, source := range selected {
 		picked[source.GroupID] = true

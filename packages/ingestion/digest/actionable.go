@@ -286,28 +286,40 @@ func onCardEligible(status, prURL, rootCause string, hasSavedDiff, hasValidatedD
 func selectActionable(eligible []actionableCandidate, limit int) (picked []actionableCandidate, overflow int) {
 	byImpact := append([]actionableCandidate(nil), eligible...)
 	sort.SliceStable(byImpact, func(i, j int) bool {
-		left, right := byImpact[i], byImpact[j]
-		if left.ImpactVisits != nil || right.ImpactVisits != nil {
-			if left.ImpactVisits == nil {
-				return false
-			}
-			if right.ImpactVisits == nil {
-				return true
-			}
-			if *left.ImpactVisits != *right.ImpactVisits {
-				return *left.ImpactVisits > *right.ImpactVisits
-			}
-		}
-		if left.OccurrenceCount != right.OccurrenceCount {
-			return left.OccurrenceCount > right.OccurrenceCount
-		}
-		return left.GroupID < right.GroupID
+		return moreImpactfulActionable(byImpact[i], byImpact[j])
 	})
-	if len(byImpact) <= limit {
-		return byImpact, 0
-	}
+	return takeWithOldestWaiter(eligible, byImpact, limit)
+}
 
-	picked = append(picked, byImpact[:limit-1]...)
+// moreImpactfulActionable is the digest's impact ordering: recorded visits
+// first, then raw occurrences, then the group id so equal rows never reorder
+// between runs. Both selectors rank with it, and neither owns it.
+func moreImpactfulActionable(left, right actionableCandidate) bool {
+	if left.ImpactVisits != nil || right.ImpactVisits != nil {
+		if left.ImpactVisits == nil {
+			return false
+		}
+		if right.ImpactVisits == nil {
+			return true
+		}
+		if *left.ImpactVisits != *right.ImpactVisits {
+			return *left.ImpactVisits > *right.ImpactVisits
+		}
+	}
+	if left.OccurrenceCount != right.OccurrenceCount {
+		return left.OccurrenceCount > right.OccurrenceCount
+	}
+	return left.GroupID < right.GroupID
+}
+
+// takeWithOldestWaiter keeps the top (limit-1) of an already ranked list plus
+// the single oldest waiting item, so the longest-ignored incident always has a
+// slot no matter how it ranks.
+func takeWithOldestWaiter(eligible, ranked []actionableCandidate, limit int) ([]actionableCandidate, int) {
+	if len(ranked) <= limit {
+		return ranked, 0
+	}
+	picked := append([]actionableCandidate(nil), ranked[:limit-1]...)
 	inPicked := make(map[string]bool, limit-1)
 	for _, candidate := range picked {
 		inPicked[candidate.GroupID] = true
@@ -327,9 +339,30 @@ func selectActionable(eligible []actionableCandidate, limit int) (picked []actio
 	if oldest != nil {
 		picked = append(picked, *oldest)
 	} else {
-		picked = append(picked, byImpact[limit-1])
+		picked = append(picked, ranked[limit-1])
 	}
 	return picked, len(eligible) - len(picked)
+}
+
+// selectOnCardEligibleFirst is the ON card lane's selector. The scarce resource
+// the cap rations is an authored card, so an incident that can earn one ranks
+// above one that can only ever render its mechanical receipt, whatever their
+// impact. Within each of those two groups the impact ordering is unchanged, and
+// the oldest waiting item still holds its own slot.
+//
+// The OFF receipts lane keeps selectActionable, where every candidate is
+// already publishable and this split would be a no-op.
+func selectOnCardEligibleFirst(eligible []actionableCandidate, limit int) ([]actionableCandidate, int) {
+	ranked := append([]actionableCandidate(nil), eligible...)
+	sort.SliceStable(ranked, func(i, j int) bool {
+		left, right := ranked[i], ranked[j]
+		leftCard, rightCard := actionablePublishable(left), actionablePublishable(right)
+		if leftCard != rightCard {
+			return leftCard
+		}
+		return moreImpactfulActionable(left, right)
+	})
+	return takeWithOldestWaiter(eligible, ranked, limit)
 }
 
 func toReceiptItems(candidates []actionableCandidate) ([]notify.ReceiptItem, error) {
