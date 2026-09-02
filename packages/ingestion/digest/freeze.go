@@ -38,6 +38,13 @@ type Candidate struct {
 	PRURL           string    `json:"prUrl,omitempty"`
 	AffectedUsers   int       `json:"affectedUsers"`
 	OccurrenceCount int       `json:"occurrenceCount"`
+	// ImpactVisits and ImpactRecovered are the measured recording impact: how
+	// many visits hit the problem and how many got past it. The renderer stopped
+	// printing them as a counts line, so the writer needs them as grounded facts
+	// to say the same thing in prose. Deliberately absent from the fingerprint:
+	// they roll every day and must not retire a cached card.
+	ImpactVisits    *int64    `json:"impactVisits,omitempty"`
+	ImpactRecovered *int64    `json:"impactRecovered,omitempty"`
 	Accounts        []string  `json:"accounts"`
 	LastSeen        time.Time `json:"lastSeen"`
 	RoutePurpose    string    `json:"routePurpose,omitempty"`

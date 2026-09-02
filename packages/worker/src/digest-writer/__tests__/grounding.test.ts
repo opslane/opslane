@@ -43,6 +43,34 @@ describe('groundPayload zero-count normalization', () => {
     expect(grounded.included[0]!.identifiedCount).toBe(0);
   });
 
+  it('grounds the measured visit and recovery counts the template stopped printing', () => {
+    const measured: DigestCandidate = {
+      ...anonymousFrictionCandidate,
+      impactVisits: 17,
+      impactRecovered: 14,
+    };
+    const grounded = groundPayload({
+      included: [{
+        errorGroupId: 'g-anon',
+        title: 'Support email is not clickable',
+        copy: 'It hit 17 visits, and 14 recovered by finding another way through.',
+        action: 'Review the investigation.',
+      }],
+      deferred: [],
+    }, [measured]);
+    expect(grounded.included).toHaveLength(1);
+
+    expect(() => groundPayload({
+      included: [{
+        errorGroupId: 'g-anon',
+        title: 'Support email is not clickable',
+        copy: 'It hit 42 visits.',
+        action: 'Review the investigation.',
+      }],
+      deferred: [],
+    }, [measured])).toThrow(/ungrounded number 42/);
+  });
+
   it('still rejects a card inventing a nonzero identified count', () => {
     const payload = {
       included: [{

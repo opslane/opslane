@@ -419,13 +419,18 @@ func TestFormatSlackDigestV4SessionIntelligence(t *testing.T) {
 	}
 
 	_, body := formatV4Blocks(t, payload)
-	for _, want := range []string{"Session intelligence", "/assets · 3 sessions (2 identified)", "Save feedback is unclear"} {
+	for _, want := range []string{"Session intelligence", "/assets", "Save feedback is unclear"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("session intelligence digest missing %q: %s", want, body)
 		}
 	}
 	if strings.Contains(body, "friction signals") || strings.Contains(body, "no_feedback_after_action") {
 		t.Fatalf("session intelligence exposed implementation vocabulary: %s", body)
+	}
+	// The session tally is the writer's job now: repeating it as arithmetic
+	// beside the prose is what made these cards read like receipts.
+	if strings.Contains(body, "3 sessions") || strings.Contains(body, "identified") {
+		t.Fatalf("authored card still carries the mechanical session tally: %s", body)
 	}
 }
 
@@ -449,7 +454,6 @@ func TestFormatSlackDigestV4RendersAuthoredFrictionCard(t *testing.T) {
 	_, body := formatV4Blocks(t, payload)
 	for _, want := range []string{
 		"People try to continue but the checkout remains unchanged.",
-		"17 friction signals",
 		"waiting on you since Aug 24 (3 days)",
 		"Watch replay",
 		"Issue page",
@@ -460,6 +464,11 @@ func TestFormatSlackDigestV4RendersAuthoredFrictionCard(t *testing.T) {
 	}
 	if strings.Contains(body, "👥") {
 		t.Fatalf("zero-user friction card rendered people context: %s", body)
+	}
+	// The card was written for a reader; a signal tally underneath it is the
+	// receipt vocabulary this card exists to replace.
+	if strings.Contains(body, "friction signal") {
+		t.Fatalf("authored friction card still carries the mechanical signal count: %s", body)
 	}
 }
 
