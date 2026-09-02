@@ -69,6 +69,11 @@ type Candidate struct {
 	// frozen before this field existed keep their meaning. The writer defers
 	// these mechanically, so a never-eligible incident costs no model call and
 	// still renders its receipt.
+	//
+	// This is a freeze-time signal for skipping the model call, and nothing
+	// else. How the receipt renders is decided at validation from the live row,
+	// because an incident can acquire a validated diagnosis overnight and its
+	// receipt must then show the cause instead of compacting to one line.
 	NotCardEligible  bool   `json:"notCardEligible,omitempty"`
 	FrictionCategory string `json:"frictionCategory,omitempty"`
 	Route            string `json:"route,omitempty"`
