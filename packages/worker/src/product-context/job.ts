@@ -7,6 +7,8 @@ import { logger, safeErrorMessage } from '../logger.js';
 import type { RepoReader } from '../investigate-tools.js';
 import { runReadOnlyAgentSdk, type CommandRunner } from '../harness/sdk-agent.js';
 import { createReadOnlyCheckout } from '../harness/readonly-sandbox.js';
+import { NonRetryableJobError } from '../harness/errors.js';
+import { classifyModelFailure, deadLetterClassForStop } from '../harness/model-failure-policy.js';
 import { buildRepoUrl } from '../repo-url.js';
 import { traceSpan } from '../tracing.js';
 import { parseRouteClaims, type RouteClaim } from './schema.js';
@@ -242,7 +244,7 @@ function productContextStopMessage(stop: string): string {
   }
 }
 
-async function askModelForClaims(input: {
+export async function askModelForClaims(input: {
   reader: RepoReader;
   commandRunner: CommandRunner;
   routes: DiscoveredRoute[];
@@ -250,7 +252,12 @@ async function askModelForClaims(input: {
 }): Promise<{ raw: unknown; filesRead: string[]; usage: TokenUsage; costUsd: number }> {
   checkAbort(input.signal);
   const apiKey = process.env['ANTHROPIC_API_KEY'];
-  if (!apiKey) throw new Error('ANTHROPIC_API_KEY environment variable is not set');
+  if (!apiKey) {
+    throw new NonRetryableJobError(
+      'ANTHROPIC_API_KEY environment variable is not set',
+      'config',
+    );
+  }
   const startedAt = Date.now();
   const result = await traceSpan('product_context.build', {
     'product_context.prompt_version': PRODUCT_CONTEXT_PROMPT_VERSION,
@@ -279,7 +286,21 @@ async function askModelForClaims(input: {
   }));
   checkAbort(input.signal);
   if (result.stop !== 'terminal' || result.terminalInput === null) {
-    throw new Error(productContextStopMessage(result.stop));
+    if (result.stop === 'api_error') {
+      const failureClass = classifyModelFailure({
+        ...(result.apiErrorStatus === undefined ? {} : { status: result.apiErrorStatus }),
+        detail: result.apiErrorDetail ?? '',
+      });
+      if (failureClass === 'transient') throw new Error(productContextStopMessage(result.stop));
+      throw new NonRetryableJobError(productContextStopMessage(result.stop), 'config', {
+        stop: result.stop, costUsd: result.costUsd,
+      });
+    }
+    throw new NonRetryableJobError(
+      productContextStopMessage(result.stop),
+      deadLetterClassForStop(result.stop),
+      { stop: result.stop, costUsd: result.costUsd },
+    );
   }
   logger.info('Product context model completed', {
     model: PRODUCT_CONTEXT_MODEL,

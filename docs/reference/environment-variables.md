@@ -82,7 +82,7 @@ The Opslane server reads **only** the `REPLAY_STORE_*` names; `MINIO_*` names ap
 | `DATABASE_URL` | yes (hard exit without it) | Postgres connection string |
 | `INGESTION_BASE_URL` | for session replay evidence | Opslane server base URL used to fetch decoded recording parts with sensitive values removed |
 | `INTERNAL_READ_TOKEN` | for session replay evidence | Shared secret sent to the Opslane server as `X-Internal-Token` |
-| `ANTHROPIC_API_KEY` | for investigation | Claude API access; missing → `missing_llm_key` outcomes |
+| `ANTHROPIC_API_KEY` | for investigation | Claude API access; jobs that require it dead-letter as operator configuration failures when it is missing. |
 | `INVESTIGATION_MODEL` | no (`claude-sonnet-5`) | Anthropic model used by the codebase-aware diagnosis pass. Unknown model names use the default pricing estimate for budget enforcement. |
 | `DIGEST_MODEL` | no (`INVESTIGATION_MODEL`, then `claude-sonnet-5`) | Anthropic model used to write daily-summary items selected by the server. |
 | `DIGEST_WRITER_MAX_WRITES` | no (unlimited) | Most daily-summary items one run may write from scratch. Items reused from an earlier day cost nothing and are always delivered; anything over the limit is held for the next day with a stated reason. `0` delivers only reused items. A value that is not a whole number of zero or more runs unlimited and logs one warning. Compose passes this through; on AWS, add it to the worker task definition in the deploy repository or it has no effect there. |
@@ -92,7 +92,7 @@ The Opslane server reads **only** the `REPLAY_STORE_*` names; `MINIO_*` names ap
 | `INVESTIGATION_MAX_TURNS` | no (10) | Maximum model and tool steps allowed for one investigation. |
 | `INVESTIGATION_BUDGET_USD` | no (2.00) | Estimated model-spend ceiling for one investigation. It is a runaway backstop, not an operating target. Crossing it stops the attempt without inventing a conclusion. |
 | `FRICTION_INVESTIGATION_MODEL` | no (`claude-sonnet-4-6`) | Anthropic model that reviews whether a session recording shows a real user problem. |
-| `FRICTION_INVESTIGATION_MAX_TURNS` | no (20) | Maximum model and tool steps for exploring the repository before the model must submit a conclusion. Zero stops without a conclusion. |
+| `FRICTION_INVESTIGATION_MAX_TURNS` | no (30) | Maximum model and tool steps for exploring the repository before the model must submit a conclusion. Zero stops without a conclusion. |
 | `FRICTION_INVESTIGATION_BUDGET_USD` | no (2.00) | Estimated model-spend ceiling in USD for investigating a problem detected from a session recording. Exceeding it stops the investigation without publishing a cause. |
 | `E2B_API_KEY` | for verification | Sandbox where fixes are tested |
 | `GITHUB_TOKEN` | one of the two GitHub modes | PAT for clone + PR |

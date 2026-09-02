@@ -11,6 +11,8 @@ import {
   toInfraError,
 } from '../harness/readonly-sandbox.js';
 import { runReadOnlyAgentSdk } from '../harness/sdk-agent.js';
+import { NonRetryableJobError } from '../harness/errors.js';
+import { classifyModelFailure, deadLetterClassForStop } from '../harness/model-failure-policy.js';
 import { buildRepoUrl } from '../repo-url.js';
 import { traceSpan } from '../tracing.js';
 import {
@@ -140,7 +142,12 @@ async function prepareInquiryRepository(
   }
   githubToken ??= process.env['GITHUB_TOKEN'];
   const apiKey = process.env['ANTHROPIC_API_KEY'];
-  if (!apiKey) throw new Error('ANTHROPIC_API_KEY environment variable is not set');
+  if (!apiKey) {
+    throw new NonRetryableJobError(
+      'ANTHROPIC_API_KEY environment variable is not set',
+      'config',
+    );
+  }
   checkAbort(signal);
   // The checkout lives in a per-run sandbox: the customer's code is never
   // written to this host, and the worker-side SDK loop keeps the model key out
@@ -185,7 +192,12 @@ export async function askInquiryModel(input: {
 }): Promise<InquiryModelResult> {
   checkAbort(input.signal);
   const apiKey = process.env['ANTHROPIC_API_KEY'];
-  if (!apiKey) throw new Error('ANTHROPIC_API_KEY environment variable is not set');
+  if (!apiKey) {
+    throw new NonRetryableJobError(
+      'ANTHROPIC_API_KEY environment variable is not set',
+      'config',
+    );
+  }
   const result = await traceSpan('inquiry.review', {
     'inquiry.prompt_version': INQUIRY_PROMPT_VERSION,
     'inquiry.model': INQUIRY_MODEL,
@@ -203,7 +215,21 @@ export async function askInquiryModel(input: {
   }));
   checkAbort(input.signal);
   if (result.stop !== 'terminal' || result.terminalInput === null) {
-    throw new Error(inquiryStopMessage(result.stop));
+    if (result.stop === 'api_error') {
+      const failureClass = classifyModelFailure({
+        ...(result.apiErrorStatus === undefined ? {} : { status: result.apiErrorStatus }),
+        detail: result.apiErrorDetail ?? '',
+      });
+      if (failureClass === 'transient') throw new Error(inquiryStopMessage(result.stop));
+      throw new NonRetryableJobError(inquiryStopMessage(result.stop), 'config', {
+        stop: result.stop, costUsd: result.costUsd,
+      });
+    }
+    throw new NonRetryableJobError(
+      inquiryStopMessage(result.stop),
+      deadLetterClassForStop(result.stop),
+      { stop: result.stop, costUsd: result.costUsd },
+    );
   }
   return { raw: result.terminalInput, usage: result.usage, costUsd: result.costUsd };
 }

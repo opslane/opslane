@@ -1,7 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { ClaimedJob } from '../db.js';
 import type { EvidenceBundle } from '../evidence/bundle.js';
-import { evidenceSignature, runInquiry, type InquiryPersistInput } from '../inquiry/job.js';
+import { NonRetryableJobError } from '../harness/errors.js';
+
+const sdk = vi.hoisted(() => ({ run: vi.fn() }));
+vi.mock('../harness/sdk-agent.js', () => ({ runReadOnlyAgentSdk: sdk.run }));
+
+import { askInquiryModel, evidenceSignature, runInquiry, type InquiryPersistInput } from '../inquiry/job.js';
 import { inquiryDecisionTerminalTool, parseInquiryDecision } from '../inquiry/schema.js';
 
 const evidence: EvidenceBundle = {
@@ -38,6 +43,48 @@ const job = {
 } satisfies ClaimedJob;
 
 describe('issue inquiry', () => {
+  it('classifies a limit stop as non-retryable', async () => {
+    process.env['ANTHROPIC_API_KEY'] = 'test-key';
+    sdk.run.mockResolvedValueOnce({
+      terminalInput: null,
+      stop: 'turns_exhausted',
+      filesRead: [],
+      lastModelText: '',
+      costUsd: 0.31,
+      usage: { input: 10, output: 4, cacheRead: 0, cacheWrite: 0 },
+    });
+    const error = await askInquiryModel({
+      evidence,
+      reader: { readFile: async () => '', grep: async () => '', list: async () => '', exists: async () => [] },
+      signal: new AbortController().signal,
+    }).catch((caught: unknown) => caught);
+    delete process.env['ANTHROPIC_API_KEY'];
+    expect(error).toBeInstanceOf(NonRetryableJobError);
+    expect((error as NonRetryableJobError).deadLetterClass).toBe('limit');
+  });
+
+  it('leaves a provider failure retryable', async () => {
+    process.env['ANTHROPIC_API_KEY'] = 'test-key';
+    sdk.run.mockResolvedValueOnce({
+      terminalInput: null,
+      stop: 'api_error',
+      apiErrorStatus: 529,
+      apiErrorDetail: 'overloaded',
+      filesRead: [],
+      lastModelText: '',
+      costUsd: 0,
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    });
+    const error = await askInquiryModel({
+      evidence,
+      reader: { readFile: async () => '', grep: async () => '', list: async () => '', exists: async () => [] },
+      signal: new AbortController().signal,
+    }).catch((caught: unknown) => caught);
+    delete process.env['ANTHROPIC_API_KEY'];
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(NonRetryableJobError);
+  });
+
   it('records an investigate decision through the persist seam', async () => {
     const persist = vi.fn(async (_input: InquiryPersistInput) => true);
 
