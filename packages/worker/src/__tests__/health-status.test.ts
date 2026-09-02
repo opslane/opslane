@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { computeHealthStatus } from '../index.js';
+import { computeHealthStatus, formatDeadLetterCounts } from '../index.js';
 import type { QueueDepthRow } from '../db.js';
 
 const WINDOW = 60_000;
@@ -129,5 +129,15 @@ describe('computeHealthStatus', () => {
         jobsInFlight: 0,
       }),
     ).toBe('stalled');
+  });
+});
+
+describe('formatDeadLetterCounts', () => {
+  it('uses the health endpoint snake_case contract', () => {
+    expect(formatDeadLetterCounts([
+      { jobType: 'investigate', deadLetterClass: 'limit', count: 2 },
+    ])).toEqual([
+      { job_type: 'investigate', class: 'limit', count: 2 },
+    ]);
   });
 });

@@ -14,6 +14,7 @@ import {
   resolveSilentMergedGroups,
   updateJobTraceUrl,
   getQueueDepth,
+  getDeadLetterCounts,
   recordJobUsage,
   resolveEvidenceEventId,
 } from './db.js';
@@ -209,6 +210,7 @@ let jobsInFlight = 0;
 let claimsLastMinute = 0;
 let claimRatePerMinute = 0;
 let queueDepth: QueueDepthRow[] = [];
+let deadLetterCounts: Array<{ jobType: string; deadLetterClass: string; count: number }> = [];
 let queueSampleInFlight: Promise<void> = Promise.resolve();
 /** Epoch ms of the last SUCCESSFUL sample. Null until the first one lands. */
 let queueSampleAt: number | null = null;
@@ -251,6 +253,16 @@ export function computeHealthStatus(input: HealthInput): 'ok' | 'stalled' | 'unk
   return eligible > 0 && input.claimRatePerMinute === 0 && input.jobsInFlight === 0
     ? 'stalled'
     : 'ok';
+}
+
+export function formatDeadLetterCounts(
+  counts: Array<{ jobType: string; deadLetterClass: string; count: number }>,
+): Array<{ job_type: string; class: string; count: number }> {
+  return counts.map((count) => ({
+    job_type: count.jobType,
+    class: count.deadLetterClass,
+    count: count.count,
+  }));
 }
 
 function healthStatus(): 'ok' | 'stalled' | 'unknown' {
@@ -1767,6 +1779,7 @@ async function main(): Promise<void> {
           backed_off: depth.backedOff,
           oldest_eligible_seconds: depth.oldestEligibleSeconds,
         })),
+        dead_letters_24h: formatDeadLetterCounts(deadLetterCounts),
         queue_depth_sampled_at:
           queueSampleAt === null ? null : new Date(queueSampleAt).toISOString(),
         queue_sample_error: queueSampleError,
@@ -1794,9 +1807,10 @@ async function main(): Promise<void> {
   // Sampled on a timer, never per claim: the aggregate scans the pending set
   // and the drain loop claims far too often to pay for it each time.
   function sampleQueueDepth(): void {
-    queueSampleInFlight = getQueueDepth()
-      .then((depth) => {
+    queueSampleInFlight = Promise.all([getQueueDepth(), getDeadLetterCounts()])
+      .then(([depth, deadLetters]) => {
         queueDepth = depth;
+        deadLetterCounts = deadLetters;
         queueSampleAt = Date.now();
         queueSampleError = null;
       })
