@@ -2,7 +2,7 @@ import { afterEach, describe, it, expect, vi, beforeEach } from 'vitest';
 import { readFileSync } from 'node:fs';
 import type { ClaimedJob, ErrorGroupData, ErrorEventData, ProjectData } from '../db.js';
 import type { EvidenceBundle } from '../evidence/bundle.js';
-import { VerificationInfraError } from '../harness/errors.js';
+import { NonRetryableJobError, VerificationInfraError } from '../harness/errors.js';
 import { NARRATIVE_PROMPT_VERSION } from '../narrative/prompt.js';
 
 const analysisDbClient = vi.hoisted(() => ({
@@ -25,6 +25,7 @@ vi.mock('../db.js', async () => ({
   cacheProjectDefaultBranch: vi.fn(),
   updateGroupStatus: vi.fn(),
   updateGroupInvestigation: vi.fn(),
+  recordFrictionIncompleteDecision: vi.fn(),
   updateGroupAndCreateFixJob: vi.fn(),
   getGroupInvestigation: vi.fn(),
   getReplayForGroup: vi.fn(),
@@ -589,35 +590,29 @@ describe('processInvestigateJob diagnosis routing', () => {
     expect(db.updateGroupInvestigation).not.toHaveBeenCalled();
   });
 
-  it('terminalizes a transient model failure only when the retry budget is exhausted', async () => {
+  it('keeps retrying a transient model failure when the queue budget is exhausted', async () => {
     mockInvestigateError.mockResolvedValue(apiFailureResult({
       apiErrorStatus: 529,
       apiErrorDetail: 'overloaded',
     }) as never);
     const job = { ...makeJob(), attempts: 2, maxAttempts: 3 };
 
-    await processInvestigateJob(job, new AbortController().signal);
-
-    expect(db.updateGroupInvestigation).toHaveBeenCalledWith(
-      'grp-1', 'proj-1', 'needs_human', expect.objectContaining({
-        decision: expect.objectContaining({ outcome: 'unable_to_establish_cause' }),
-      }), job,
-    );
+    await expect(processInvestigateJob(job, new AbortController().signal))
+      .rejects.toThrow('Investigation model unavailable (HTTP 529)');
+    expect(db.updateGroupInvestigation).not.toHaveBeenCalled();
   });
 
-  it('treats an oversized prompt as an evidence condition, not an operator failure', async () => {
+  it('treats an oversized prompt as non-retryable config', async () => {
     mockInvestigateError.mockResolvedValue(apiFailureResult({
       apiErrorStatus: 400,
       apiErrorDetail: 'prompt is too long: 250000 tokens > 200000 maximum',
     }) as never);
 
-    await processInvestigateJob(makeJob(), new AbortController().signal);
-
-    expect(db.updateGroupInvestigation).toHaveBeenCalledWith(
-      'grp-1', 'proj-1', 'needs_human', expect.objectContaining({
-        decision: expect.objectContaining({ outcome: 'unable_to_establish_cause' }),
-      }), makeJob(),
-    );
+    const error = await processInvestigateJob(makeJob(), new AbortController().signal)
+      .catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(NonRetryableJobError);
+    expect((error as NonRetryableJobError).deadLetterClass).toBe('config');
+    expect(db.updateGroupInvestigation).not.toHaveBeenCalled();
   });
 
   it('fails the job on a transient clone failure instead of writing a terminal', async () => {
@@ -680,7 +675,7 @@ describe('processInvestigateJob diagnosis routing', () => {
     );
   });
 
-  it('persists an invalid adjudication as terminal needs_human without creating a fix job', async () => {
+  it('dead-letters an invalid adjudication as an agent failure', async () => {
     mockInvestigateError.mockResolvedValue({
       fixable: false,
       confidence: 'low',
@@ -697,17 +692,11 @@ describe('processInvestigateJob diagnosis routing', () => {
       stop: 'terminal',
     });
 
-    await processInvestigateJob(makeJob(), new AbortController().signal);
-
-    expect(db.updateGroupInvestigation).toHaveBeenCalledWith(
-      'grp-1', 'proj-1', 'needs_human', expect.objectContaining({
-        reason: expect.objectContaining({ reason_code: 'insufficient_context' }),
-        decision: expect.objectContaining({
-          outcome: 'unable_to_establish_cause', basis: 'invalid_verdict',
-          decisionReason: 'duplicate_candidate_id: c1',
-        }),
-      }), makeJob(),
-    );
+    const error = await processInvestigateJob(makeJob(), new AbortController().signal)
+      .catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(NonRetryableJobError);
+    expect((error as NonRetryableJobError).deadLetterClass).toBe('agent');
+    expect(db.updateGroupInvestigation).not.toHaveBeenCalled();
     expect(db.updateGroupAndCreateFixJob).not.toHaveBeenCalled();
   });
 
@@ -1208,6 +1197,64 @@ describe('friction worker path', () => {
       status: 'pr_created', confidence: 'high', pr_url: 'https://github.com/org/app/pull/9', pr_number: 9,
       head_sha: 'head-9',
     });
+  });
+
+  const modelFailure = (status: number | undefined, detail: string) => ({
+    status: 'model_failure' as const,
+    investigatedCommit: 'abc123',
+    costUsd: 0.4,
+    usage: { input: 900, output: 40, cacheRead: 0, cacheWrite: 0 },
+    ...(status === undefined ? {} : { apiErrorStatus: status }),
+    apiErrorDetail: detail,
+  });
+
+  it('records usage, then retries a transient failure through the queue', async () => {
+    vi.mocked(investigateFriction).mockResolvedValue(modelFailure(529, 'overloaded'));
+    await expect(processInvestigateJob(makeJob(), new AbortController().signal))
+      .rejects.toThrow(/model unavailable \(HTTP 529\)/);
+    expect(db.recordJobUsage).toHaveBeenCalledWith(expect.objectContaining({ costUsd: 0.4 }));
+    expect(db.updateGroupInvestigation).not.toHaveBeenCalled();
+  });
+
+  it('dead-letters a deterministic 4xx once, as config', async () => {
+    vi.mocked(investigateFriction).mockResolvedValue(modelFailure(401, 'invalid x-api-key'));
+    const error = await processInvestigateJob(makeJob(), new AbortController().signal)
+      .catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(NonRetryableJobError);
+    expect((error as NonRetryableJobError).deadLetterClass).toBe('config');
+    expect(db.updateGroupInvestigation).not.toHaveBeenCalled();
+  });
+
+  it('never writes an incomplete investigation to the customer', async () => {
+    vi.mocked(investigateFriction).mockResolvedValue({
+      status: 'incomplete',
+      reason: 'no_verdict_submitted: the model never called classify_friction',
+      investigatedCommit: 'abc123',
+      costUsd: 0.3,
+      usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+    });
+    const error = await processInvestigateJob(makeJob(), new AbortController().signal)
+      .catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(NonRetryableJobError);
+    expect((error as NonRetryableJobError).deadLetterClass).toBe('agent');
+    expect(db.recordFrictionIncompleteDecision).toHaveBeenCalledOnce();
+    expect(db.updateGroupInvestigation).not.toHaveBeenCalledWith(
+      expect.anything(), expect.anything(), 'needs_human', expect.anything(), expect.anything(),
+    );
+  });
+
+  it('classifies a spend ceiling as limit', async () => {
+    vi.mocked(investigateFriction).mockResolvedValue({
+      status: 'incomplete',
+      reason: 'budget_exhausted: spend ceiling reached before a verdict',
+      investigatedCommit: 'abc123',
+      costUsd: 2,
+      usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+    });
+    const error = await processInvestigateJob(makeJob(), new AbortController().signal)
+      .catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(NonRetryableJobError);
+    expect((error as NonRetryableJobError).deadLetterClass).toBe('limit');
   });
 
   it('parks code-caused friction under ask-first autonomy', async () => {

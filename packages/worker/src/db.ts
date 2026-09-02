@@ -131,6 +131,19 @@ async function insertDiagnosisDecision(
 }
 
 /**
+ * Preserve an incomplete friction decision for operators without changing the
+ * customer-visible group state. The durable job failure records the execution
+ * outcome separately and the group remains analyzing for a later requeue.
+ */
+export async function recordFrictionIncompleteDecision(
+  errorGroupId: string,
+  projectId: string,
+  decision: DecisionRow,
+): Promise<void> {
+  await insertDiagnosisDecision(getPool(), errorGroupId, projectId, decision);
+}
+
+/**
  * The most recent decision for a group, or null.
  *
  * Fix jobs read this rather than trusting an in-memory value, so a requeued or

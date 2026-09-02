@@ -138,9 +138,15 @@ describe('investigateFriction', () => {
     });
   });
 
-  it('rethrows infrastructure failures so the poller retries', async () => {
-    mockMessagesCreate.mockRejectedValueOnce(new Error('429 rate limited'));
-    await expect(investigateFriction('key', input())).rejects.toThrow(/Friction investigation API call failed/);
+  it('returns a model failure carrying status and the usage already paid', async () => {
+    mockMessagesCreate
+      .mockResolvedValueOnce(response([tool('list_files', { path: '.' })], USAGE))
+      .mockRejectedValueOnce(Object.assign(new Error('overloaded'), { status: 529 }));
+    const out = await investigateFriction('key', input());
+    expect(out).toMatchObject({ status: 'model_failure', apiErrorStatus: 529 });
+    if (out.status !== 'model_failure') throw new Error('unreachable');
+    expect(out.usage.input).toBe(USAGE.input_tokens);
+    expect(out.costUsd).toBeGreaterThan(0);
   });
 
   it('maps a spend-ceiling stop to structured incomplete', async () => {

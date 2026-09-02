@@ -1,4 +1,18 @@
 import type { EvidenceRecord } from '@opslane/shared';
+import type { DeadLetterClass } from './model-failure-policy.js';
+
+/** A job outcome that retrying cannot change. */
+export class NonRetryableJobError extends Error {
+  override readonly name = 'NonRetryableJobError';
+
+  constructor(
+    message: string,
+    readonly deadLetterClass: DeadLetterClass,
+    readonly detail: { stop?: string; costUsd?: number } = {},
+  ) {
+    super(message);
+  }
+}
 
 /**
  * Signals that verification could not produce a patch verdict because the

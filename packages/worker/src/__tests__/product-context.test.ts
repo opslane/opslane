@@ -5,7 +5,13 @@ import pg from 'pg';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { closePool, type ClaimedJob, upsertProductContextClaims } from '../db.js';
 import { createHostReader } from '../harness/host-reader.js';
+import { NonRetryableJobError } from '../harness/errors.js';
+
+const sdk = vi.hoisted(() => ({ run: vi.fn() }));
+vi.mock('../harness/sdk-agent.js', () => ({ runReadOnlyAgentSdk: sdk.run }));
+
 import {
+  askModelForClaims,
   buildProductContextPrompt,
   groundRouteClaims,
   runProductContext,
@@ -20,6 +26,50 @@ afterEach(async () => {
 });
 
 describe('product context schema', () => {
+  it('classifies a model limit stop as non-retryable', async () => {
+    process.env['ANTHROPIC_API_KEY'] = 'test-key';
+    sdk.run.mockResolvedValueOnce({
+      terminalInput: null,
+      stop: 'budget',
+      filesRead: [],
+      lastModelText: '',
+      costUsd: 0.5,
+      usage: { input: 10, output: 4, cacheRead: 0, cacheWrite: 0 },
+    });
+    const error = await askModelForClaims({
+      reader: { readFile: async () => '', grep: async () => '', list: async () => '', exists: async () => [] },
+      commandRunner,
+      routes: [],
+      signal: new AbortController().signal,
+    }).catch((caught: unknown) => caught);
+    delete process.env['ANTHROPIC_API_KEY'];
+    expect(error).toBeInstanceOf(NonRetryableJobError);
+    expect((error as NonRetryableJobError).deadLetterClass).toBe('limit');
+  });
+
+  it('leaves a provider failure retryable', async () => {
+    process.env['ANTHROPIC_API_KEY'] = 'test-key';
+    sdk.run.mockResolvedValueOnce({
+      terminalInput: null,
+      stop: 'api_error',
+      apiErrorStatus: 529,
+      apiErrorDetail: 'overloaded',
+      filesRead: [],
+      lastModelText: '',
+      costUsd: 0,
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    });
+    const error = await askModelForClaims({
+      reader: { readFile: async () => '', grep: async () => '', list: async () => '', exists: async () => [] },
+      commandRunner,
+      routes: [],
+      signal: new AbortController().signal,
+    }).catch((caught: unknown) => caught);
+    delete process.env['ANTHROPIC_API_KEY'];
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(NonRetryableJobError);
+  });
+
   it('accepts grounded claims for discovered routes', () => {
     const claims = parseRouteClaims({ claims: [{
       route: '/assets/:id/edit',

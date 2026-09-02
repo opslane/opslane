@@ -51,7 +51,8 @@ import { processNarration } from './narrative/job.js';
 import { NARRATIVE_PROMPT_VERSION } from './narrative/prompt.js';
 import { captureFrames } from './narrative/frames/capture.js';
 import { processFrameVerification } from './narrative/verify.js';
-import { MachineUnavailableError, VerificationInfraError } from './harness/errors.js';
+import { MachineUnavailableError, NonRetryableJobError, VerificationInfraError } from './harness/errors.js';
+import { classifyModelFailure, deadLetterClassForStop } from './harness/model-failure-policy.js';
 import {
   createReadOnlyCheckout,
   NO_VERIFICATION_EVIDENCE,
@@ -627,18 +628,10 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
   // the real blocker instead of a downstream clone failure.
   const apiKey = process.env['ANTHROPIC_API_KEY'];
   if (!apiKey) {
-    const reason = {
-      reason_code: 'missing_llm_key' as const,
-      reason_message: 'ANTHROPIC_API_KEY environment variable is not set',
-      remediation: 'Set the ANTHROPIC_API_KEY environment variable with a valid Anthropic API key',
-    };
-    await updateGroupInvestigation(job.errorGroupId, job.projectId, 'needs_human', {
-      reason,
-      decision: preflightDecision(job, 'needs_human', reason.reason_message),
-    }, job);
-    jobsFailed++;
-    lastJobAt = new Date().toISOString();
-    return;
+    throw new NonRetryableJobError(
+      'ANTHROPIC_API_KEY environment variable is not set',
+      'config',
+    );
   }
 
   // Resolve GitHub token
@@ -747,28 +740,31 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
     if (triage.stop === 'api_error') {
       const status = triage.apiErrorStatus;
       const detail = triage.apiErrorDetail ?? 'model call failed';
-      const oversized = status === 400 && /prompt is too long|too many tokens|exceeds? .*(context|token)/i.test(detail);
-      const deterministic = status !== undefined && status >= 400 && status < 500
-        && status !== 408 && status !== 429 && !oversized;
-      if (deterministic) {
-        // A 4xx here is a request-construction failure — tool schema, model id,
-        // auth — an operator bug that retries cannot fix and evidence did not
-        // cause. Writing unable_to_establish_cause would blame missing evidence
-        // for a config failure, so fail the durable job instead: it retries
-        // cheaply (the call dies before any tokens) and dead-letters into the
-        // operator's view with the real error.
-        throw new Error(`Investigation model request rejected (HTTP ${status}): ${detail}`);
+      const statusText = status === undefined ? '' : ` (HTTP ${status})`;
+      if (classifyModelFailure({
+        ...(status === undefined ? {} : { status }), detail,
+      }) === 'transient') {
+        throw new Error(`Investigation model unavailable${statusText}: ${detail}`);
       }
-      if (!oversized && job.attempts + 1 < (job.maxAttempts ?? 3)) {
-        // A transient outage (429/5xx/network) with retry budget left retries
-        // the same durable job rather than terminalizing the round on its
-        // first bad minute. Exhausted budget falls through to the existing
-        // unable_to_establish_cause terminal, which is the designed ending for
-        // exhausted model failures. Oversized input also falls through: it is
-        // deterministic per input, so retries cannot help, but it is an
-        // evidence-shaped condition, not an operator bug.
-        throw new Error(`Investigation model unavailable${status !== undefined ? ` (HTTP ${status})` : ''}; retrying: ${detail}`);
-      }
+      throw new NonRetryableJobError(
+        `Investigation model request rejected${statusText}: ${detail}`,
+        'config',
+        { stop: 'api_error', costUsd: triage.costUsd },
+      );
+    }
+    if (triage.stop !== 'terminal') {
+      throw new NonRetryableJobError(
+        triage.decisionReason,
+        deadLetterClassForStop(triage.stop),
+        { stop: triage.stop, costUsd: triage.costUsd },
+      );
+    }
+    if (triage.outcome === 'incomplete') {
+      throw new NonRetryableJobError(
+        `Investigation submitted an invalid verdict: ${triage.decisionReason}`,
+        'agent',
+        { stop: 'invalid_verdict', costUsd: triage.costUsd },
+      );
     }
 
     logger.info('Investigation result', {
@@ -812,23 +808,7 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
     let parked = false;
     let kindGateRefusal: string | null = null;
 
-    if (triage.outcome === 'incomplete') {
-      await updateGroupInvestigation(job.errorGroupId, job.projectId, 'needs_human', {
-        rootCause: null,
-        confidence: triage.confidence,
-        reason: {
-          reason_code: 'insufficient_context',
-          reason_message: triage.decisionReason,
-          remediation: 'Re-run the investigation after more evidence accumulates; the previous run could not verify a cause.',
-        },
-        decision: { ...decision, outcome: 'unable_to_establish_cause' as const },
-      }, job);
-      jobsFailed++;
-      logger.warn('Investigation: needs_human (unverified verdict)', {
-        job_id: job.id, duration_ms: durationMs,
-      });
-
-    } else if (triage.outcome === 'needs_more_context') {
+    if (triage.outcome === 'needs_more_context') {
       // decisionReason here is model-derived prose from an UNVALIDATED verdict.
       // It must not reach any rendered field: the readiness gate nulls
       // root_cause on the API, but reason_message renders ungated, so both get
@@ -957,16 +937,10 @@ export async function processFrictionInvestigateJob(
   checkAbort(signal);
   const apiKey = process.env['ANTHROPIC_API_KEY'];
   if (!apiKey) {
-    await updateGroupInvestigation(job.errorGroupId, job.projectId, 'needs_human', {
-      reason: {
-        reason_code: 'missing_llm_key',
-        reason_message: 'ANTHROPIC_API_KEY environment variable is not set',
-        remediation: 'Set ANTHROPIC_API_KEY so the friction incident can be classified against the codebase',
-      },
-    }, job);
-    jobsFailed++;
-    lastJobAt = new Date().toISOString();
-    return;
+    throw new NonRetryableJobError(
+      'ANTHROPIC_API_KEY environment variable is not set',
+      'config',
+    );
   }
 
   const project = await db.getProject(job.projectId);
@@ -1040,8 +1014,25 @@ export async function processFrictionInvestigateJob(
       costUsd: result.costUsd,
     });
     checkAbort(signal);
+    if (result.status === 'model_failure') {
+      const failureClass = classifyModelFailure({
+        ...(result.apiErrorStatus === undefined ? {} : { status: result.apiErrorStatus }),
+        detail: result.apiErrorDetail,
+      });
+      const statusText = result.apiErrorStatus === undefined ? '' : ` (HTTP ${result.apiErrorStatus})`;
+      if (failureClass === 'transient') {
+        throw new Error(
+          `Friction investigation model unavailable${statusText}: ${result.apiErrorDetail}`,
+        );
+      }
+      throw new NonRetryableJobError(
+        `Friction investigation model request rejected${statusText}: ${result.apiErrorDetail}`,
+        'config',
+        { stop: 'api_error', costUsd: result.costUsd },
+      );
+    }
     if (result.status === 'incomplete') {
-      const decision = {
+      await db.recordFrictionIncompleteDecision(job.errorGroupId, job.projectId, {
         outcome: 'incomplete' as const,
         decisionReason: result.reason,
         causeLocation: null,
@@ -1058,20 +1049,16 @@ export async function processFrictionInvestigateJob(
         jobId: job.id,
         basis: 'friction_classify' as const,
         confidence: 'low' as const,
-      };
-      await updateGroupInvestigation(job.errorGroupId, job.projectId, 'needs_human', {
-        rootCause: null,
-        confidence: 'low',
-        reason: {
-          reason_code: 'insufficient_context',
-          reason_message: result.reason,
-          remediation: 'Re-run the investigation after more evidence accumulates; the previous run could not verify a cause.',
-        },
-        decision,
-      }, job);
-      jobsFailed++;
-      lastJobAt = new Date().toISOString();
-      return;
+      });
+      const stop = result.reason.split(':')[0] ?? 'incomplete';
+      const deadLetterClass = ['budget_exhausted', 'truncated_response'].includes(stop)
+        ? 'limit'
+        : 'agent';
+      throw new NonRetryableJobError(
+        `Friction investigation incomplete: ${result.reason}`,
+        deadLetterClass,
+        { stop, costUsd: result.costUsd },
+      );
     }
 
     const verdict = result.verdict;

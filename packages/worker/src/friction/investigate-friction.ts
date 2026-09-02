@@ -13,7 +13,7 @@ import { CATEGORY_DEFINITIONS } from '../narrative/prompt.js';
 
 export const FRICTION_INVESTIGATION_MODEL =
   process.env['FRICTION_INVESTIGATION_MODEL'] ?? 'claude-sonnet-4-6';
-const MAX_TURNS = Number(process.env['FRICTION_INVESTIGATION_MAX_TURNS'] ?? 20);
+const MAX_TURNS = Number(process.env['FRICTION_INVESTIGATION_MAX_TURNS'] ?? 30);
 const BUDGET_USD = Number(process.env['FRICTION_INVESTIGATION_BUDGET_USD'] ?? 2.0);
 
 export interface FrictionInvestigateInput {
@@ -64,6 +64,14 @@ export type FrictionInvestigationResult =
      * 2026-08-11 rehearsal could not distinguish a real filler brief from a
      * regex over-match for exactly this reason). */
     rejected?: { evidence: EvidenceCitation[]; agentTaskBrief: string | null };
+  }
+  | {
+    status: 'model_failure';
+    apiErrorStatus?: number;
+    apiErrorDetail: string;
+    investigatedCommit: string;
+    usage: ReadOnlyRunResult['usage'];
+    costUsd: number;
   };
 
 export const CLASSIFY_TOOL: Anthropic.Tool = {
@@ -227,7 +235,14 @@ export async function investigateFriction(
 
   switch (run.stop) {
     case 'api_error':
-      throw new Error('Friction investigation API call failed; retry the job');
+      return {
+        status: 'model_failure',
+        ...(run.apiErrorStatus === undefined ? {} : { apiErrorStatus: run.apiErrorStatus }),
+        apiErrorDetail: run.apiErrorDetail ?? 'model call failed',
+        investigatedCommit: input.investigatedCommit,
+        usage: run.usage,
+        costUsd: run.costUsd,
+      };
     case 'no_evidence':
       return incomplete('no_files_read: the investigation read no repository files', input, run);
     case 'budget':
