@@ -238,7 +238,7 @@ func TestFormatSlackDigestV2Golden(t *testing.T) {
 		"A draft fix PR needs your review.",
 		"A fix is written and needs your approval.",
 		"Fix attempt failed its checks; saved diff and report on the issue page.",
-		"Fix attempt failed before producing a change; investigation report on the issue page.",
+		"We tried a fix and couldn't produce a working change; details on the issue page.",
 		"We could not establish a cause. Details in the issue.",
 		"Cause found; no fix opened yet. Details in the issue.",
 		"Review fix PR", "Review draft PR",
@@ -483,11 +483,11 @@ func TestFormatSlackDigestV4RendersTheCauseLine(t *testing.T) {
 			{
 				IncidentID: "with-cause", Title: "Saving is blocked", Outcome: "needs_human",
 				Copy: "People cannot save.", Why: "The submit handler is never wired to the control.",
-				Action: "Review the investigation.",
+				Action: "Decide how to handle this.",
 			},
 			{
 				IncidentID: "no-cause", Title: "Export never starts", Outcome: "needs_human",
-				Copy: "People cannot export.", Action: "Review the investigation.",
+				Copy: "People cannot export.", Action: "Decide how to handle this.",
 			},
 		}},
 	}
@@ -603,7 +603,7 @@ func TestFormatSlackDigestV4CompactsNeverEligibleReceipts(t *testing.T) {
 	if !strings.Contains(body, "12 crashes across 45 visits") {
 		t.Fatalf("the receipt that lost its card was compacted too: %s", body)
 	}
-	if !strings.Contains(body, "Fix attempt failed before producing a change") {
+	if !strings.Contains(body, "We tried a fix and couldn't produce a working change") {
 		t.Fatalf("full receipt lost its state line: %s", body)
 	}
 }
@@ -614,7 +614,7 @@ func TestFormatSlackDigestV4ErrorCardSnapshotIsUnchanged(t *testing.T) {
 		DashboardURL: "https://app.example",
 		Digest: &DigestPayload{SchemaVersion: 4, Date: "2026-08-27", GeneratedCards: []GeneratedDigestCard{{
 			IncidentID: "error-1", Title: "Checkout fails", Outcome: "needs_human",
-			Copy: "Checkout stops before payment.", Action: "Review the investigation.",
+			Copy: "Checkout stops before payment.", Action: "Decide how to handle this.",
 			AffectedUsers: 2, Accounts: []string{"Acme"}, ReplayURL: "https://app.example/sessions/s1",
 		}}},
 	}
@@ -623,7 +623,7 @@ func TestFormatSlackDigestV4ErrorCardSnapshotIsUnchanged(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const want = `{"blocks":[{"text":{"emoji":true,"text":"Daily digest · Shop","type":"plain_text"},"type":"header"},{"elements":[{"text":"Aug 27 · 1 issue that matters · 1 needs a decision","type":"mrkdwn"}],"type":"context"},{"text":{"text":"⚠️ *Needs a decision*","type":"mrkdwn"},"type":"section"},{"text":{"text":"*Checkout fails*\nCheckout stops before payment.\n*Needs you:* Review the investigation.","type":"mrkdwn"},"type":"section"},{"elements":[{"text":"👥 2 users · Acme","type":"mrkdwn"}],"type":"context"},{"elements":[{"action_id":"digest_replay_0","style":"primary","text":{"emoji":true,"text":"Watch replay","type":"plain_text"},"type":"button","url":"https://app.example/sessions/s1"},{"action_id":"digest_issue_0","text":{"emoji":true,"text":"View issue","type":"plain_text"},"type":"button","url":"https://app.example/incidents/error-1?project_id=p1"}],"type":"actions"}]}
+	const want = `{"blocks":[{"text":{"emoji":true,"text":"Daily digest · Shop","type":"plain_text"},"type":"header"},{"elements":[{"text":"Aug 27 · 1 issue that matters · 1 needs a decision","type":"mrkdwn"}],"type":"context"},{"text":{"text":"⚠️ *Needs a decision*","type":"mrkdwn"},"type":"section"},{"text":{"text":"*Checkout fails*\nCheckout stops before payment.\n*Needs you:* Decide how to handle this.","type":"mrkdwn"},"type":"section"},{"elements":[{"text":"👥 2 users · Acme","type":"mrkdwn"}],"type":"context"},{"elements":[{"action_id":"digest_replay_0","style":"primary","text":{"emoji":true,"text":"Watch replay","type":"plain_text"},"type":"button","url":"https://app.example/sessions/s1"},{"action_id":"digest_issue_0","text":{"emoji":true,"text":"View issue","type":"plain_text"},"type":"button","url":"https://app.example/incidents/error-1?project_id=p1"}],"type":"actions"}]}
 `
 	if string(body) != want {
 		t.Fatalf("error card snapshot changed:\nwant: %s\n got: %s", want, body)
@@ -641,7 +641,7 @@ func TestFormatSlackDigestV4CapsMergedKindsOnceWithinSlackBlockLimit(t *testing.
 		}
 		cards = append(cards, GeneratedDigestCard{
 			IncidentID: "issue-" + strconv.Itoa(index), Kind: kind, Title: "Problem " + strconv.Itoa(index),
-			Outcome: "needs_human", Copy: "People cannot complete the flow.", Action: "Review the investigation.",
+			Outcome: "needs_human", Copy: "People cannot complete the flow.", Action: "Decide how to handle this.",
 			AffectedUsers: 1, SignalCount: int64(index + 1), ActionableSince: &actionableSince,
 			ReplayURL: "https://app.example/sessions/s1",
 		})
@@ -873,7 +873,7 @@ func v4CapFixture(cards, receipts, receiptOverflow int, unified bool) EventPaylo
 		generated = append(generated, GeneratedDigestCard{
 			IncidentID: "card-" + strconv.Itoa(index), Kind: "error",
 			Title: "Card " + strconv.Itoa(index), Outcome: "needs_human",
-			Copy: "People cannot complete the flow.", Action: "Review the investigation.",
+			Copy: "People cannot complete the flow.", Action: "Decide how to handle this.",
 		})
 	}
 	items := make([]ReceiptItem, 0, receipts)

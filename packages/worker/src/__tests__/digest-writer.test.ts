@@ -290,7 +290,7 @@ describe('digest writer', () => {
   it('authors an actionable card once per status and then serves it from cache', async () => {
     const statuses: Array<[string, string]> = [
       ['awaiting_approval', 'Approve the proposed fix.'],
-      ['needs_human', 'Review the investigation.'],
+      ['needs_human', 'Decide how to handle this.'],
       ['pr_created', 'Review the fix PR.'],
       ['pr_draft', 'Review the fix PR.'],
     ];
@@ -386,7 +386,7 @@ describe('digest writer', () => {
       status: 'needs_human',
       spellStartedAt: '2026-08-20T07:00:00Z',
       fingerprint: 'fingerprint-1',
-      validAction: 'Review the investigation.',
+      validAction: 'Decide how to handle this.',
       notCardEligible: true,
     });
     const deps = dependencies([receiptOnly]);
@@ -409,7 +409,7 @@ describe('digest writer', () => {
     });
     const receiptOnly = candidate(2, {
       episodeId: undefined, status: 'needs_human', spellStartedAt: '2026-08-20T07:00:00Z',
-      fingerprint: 'fingerprint-2', validAction: 'Review the investigation.', notCardEligible: true,
+      fingerprint: 'fingerprint-2', validAction: 'Decide how to handle this.', notCardEligible: true,
     });
     const deps = dependencies([eligible, receiptOnly], {
       included: [{

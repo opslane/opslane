@@ -1142,7 +1142,7 @@ export async function processFrictionInvestigateJob(
     } else {
       // Decision 2026-09-01: a diagnosis that needs human or product judgment
       // is a reviewable finding rather than a terminal FYI. awaiting_approval
-      // without a candidate diff renders as "Review the investigation." and
+      // without a candidate diff renders as "Decide how to handle this." and
       // enters the digest's actionable lane via the lifecycle trigger.
       await updateGroupInvestigation(job.errorGroupId, job.projectId, 'awaiting_approval', {
         rootCause: verdict.reason,
