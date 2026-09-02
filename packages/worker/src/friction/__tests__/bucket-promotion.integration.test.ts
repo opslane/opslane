@@ -787,13 +787,17 @@ describeDb('bucket promotion integration', () => {
         [group.id, 'Users expect the support email to be clickable']
       );
       const row = (await pool.query(
+        // The four-argument classifier migration 072 introduced and 073
+        // re-created is the one the lifecycle trigger calls; 066's three-argument
+        // version is left behind and unreferenced.
         `SELECT actionable_since,
-                error_groups_action_class(status::text, candidate_diff, pr_url) AS klass
+                error_groups_action_class(status::text, candidate_diff, pr_url,
+                  error_groups_fix_attempted(terminal_fix_job_id, project_id)) AS klass
          FROM error_groups WHERE id = $1`,
         [group.id]
       )).rows[0]!;
       expect(row.actionable_since).not.toBeNull();
-      expect(row.klass).toBe('Review the investigation.');
+      expect(row.klass).toBe('Decide how to handle this.');
     });
 
     it('leaves a sub-threshold fingerprint a candidate with no investigation', async () => {

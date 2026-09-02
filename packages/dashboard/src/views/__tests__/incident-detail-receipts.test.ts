@@ -77,8 +77,8 @@ describe('IncidentDetail receipts', () => {
 
   it.each([
     ['attempt_failed_with_diff', 'Fix attempt failed its checks; the working diff was saved.'],
-    ['attempt_failed_no_diff', 'Fix attempt failed before producing a change.'],
-    ['report_ready', 'Investigation report ready.'],
+    ['attempt_failed_no_diff', "We tried a fix and couldn't produce a working change."],
+    ['report_ready', 'We found the cause.'],
   ] as const)('renders the %s receipt', async (receiptState, receiptLine) => {
     const wrapper = mountView({
       ...base,

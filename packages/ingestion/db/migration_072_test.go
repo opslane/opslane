@@ -43,11 +43,12 @@ func seedTerminalJob(t *testing.T, pool *pgxpool.Pool, projectID, groupID, jobTy
 	return jobID
 }
 
-// TestMigration072ActionClassSplitsAFailedFixFromAVerdict pins the SQL twin of
+// TestMigration072ActionClassMatchesTheDigestAsks pins the SQL twin of
 // digest.digestAction. The two must agree: this function decides when the
 // waiting age restarts, so a classification only Go knows about would leave the
-// age stale on a day the reader's ask changed.
-func TestMigration072ActionClassSplitsAFailedFixFromAVerdict(t *testing.T) {
+// age stale on a day the reader's ask changed. Migration 073 collapsed the two
+// jargon asks, so a fix attempt no longer changes the answer here either.
+func TestMigration072ActionClassMatchesTheDigestAsks(t *testing.T) {
 	pool, _ := applyAllMigrationsForFixProvenance(t)
 	ctx := context.Background()
 	for _, tc := range []struct {
@@ -57,11 +58,11 @@ func TestMigration072ActionClassSplitsAFailedFixFromAVerdict(t *testing.T) {
 		want                         string
 	}{
 		{name: "approval with a diff", status: "awaiting_approval", candidateDiff: "diff --git a b", want: "Approve the proposed fix."},
-		{name: "approval after a fix ran", status: "awaiting_approval", fixAttempted: true, want: "Review the investigation."},
-		{name: "approval with no fix ever run", status: "awaiting_approval", want: "Review the diagnosis."},
-		{name: "needs human after a fix ran", status: "needs_human", fixAttempted: true, want: "Review the investigation."},
-		{name: "needs human with a saved diff", status: "needs_human", candidateDiff: "diff --git a b", want: "Review the investigation."},
-		{name: "needs human with no fix ever run", status: "needs_human", want: "Review the diagnosis."},
+		{name: "approval after a fix ran", status: "awaiting_approval", fixAttempted: true, want: "Decide how to handle this."},
+		{name: "approval with no fix ever run", status: "awaiting_approval", want: "Decide how to handle this."},
+		{name: "needs human after a fix ran", status: "needs_human", fixAttempted: true, want: "Decide how to handle this."},
+		{name: "needs human with a saved diff", status: "needs_human", candidateDiff: "diff --git a b", want: "Decide how to handle this."},
+		{name: "needs human with no fix ever run", status: "needs_human", want: "Decide how to handle this."},
 		{name: "pr with a url", status: "pr_created", prURL: "https://github.com/o/r/pull/1", want: "Review the fix PR."},
 		{name: "pr without a url", status: "pr_draft", want: "Review the issue."},
 	} {
@@ -124,10 +125,12 @@ func TestMigration072FixAttemptedChecksTheJobType(t *testing.T) {
 	}
 }
 
-// TestMigration072ResetsTheWaitingAgeWhenAFixJobArrives: the ask a reader sees
-// changes the moment a fix attempt exists, so the lifecycle trigger must watch
-// the column that carries that fact.
-func TestMigration072ResetsTheWaitingAgeWhenAFixJobArrives(t *testing.T) {
+// TestMigration072PreservesTheWaitingAgeWhenAFixJobArrives: a fix attempt
+// arriving no longer changes what the reader is asked to do — both sides of
+// that split now say "Decide how to handle this." — so the waiting age must
+// survive it. Restarting the clock on an incident whose ask never moved would
+// hide the oldest waiter from the digest's guarantee.
+func TestMigration072PreservesTheWaitingAgeWhenAFixJobArrives(t *testing.T) {
 	pool, projectID := applyAllMigrationsForFixProvenance(t)
 	ctx := context.Background()
 	groupID := seedLifecycleGroup(t, pool, projectID, "072-reset", "needs_human")
@@ -146,14 +149,15 @@ func TestMigration072ResetsTheWaitingAgeWhenAFixJobArrives(t *testing.T) {
 		t.Fatal(err)
 	}
 	after, _ := lifecycleState(t, pool, groupID)
-	if after == nil || !after.After(*before) {
-		t.Fatalf("waiting age = %v, want a reset past %v", after, before)
+	if after == nil {
+		t.Fatal("a still-waiting incident lost its waiting age")
+	}
+	if !after.Equal(*before) {
+		t.Fatalf("waiting age = %v, want it held at %v: the ask did not change", after, before)
 	}
 
-	// Replacing the fix job with an investigation job takes the fix attempt
-	// away, so the ask goes back to the diagnosis and the age restarts again.
-	// The incident is still waiting either way, so it must keep an age at all.
-	held := *after
+	// The same holds when the fix attempt goes away again: replacing the fix
+	// job with an investigation job leaves the ask exactly where it was.
 	investigation := seedTerminalJob(t, pool, projectID, groupID, "investigate")
 	if _, err := pool.Exec(ctx, `UPDATE error_groups SET terminal_fix_job_id=$2 WHERE id=$1`,
 		groupID, investigation); err != nil {
@@ -163,7 +167,7 @@ func TestMigration072ResetsTheWaitingAgeWhenAFixJobArrives(t *testing.T) {
 	if settled == nil {
 		t.Fatal("a still-waiting incident lost its waiting age")
 	}
-	if !settled.After(held) {
-		t.Fatalf("waiting age = %v, want a reset past %v when the fix attempt went away", settled, held)
+	if !settled.Equal(*before) {
+		t.Fatalf("waiting age = %v, want it held at %v when the fix attempt went away", settled, before)
 	}
 }

@@ -31,28 +31,33 @@ const (
 // state, so the model never owns them: validation stamps the value digestAction
 // returns onto the card before it is cached or rendered.
 const (
-	actionApproveFix          = "Approve the proposed fix."
-	actionReviewInvestigation = "Review the investigation."
-	actionReviewPR            = "Review the fix PR."
-	actionReviewIssue         = "Review the issue."
-	// actionReviewDiagnosis is the ask for an incident that reached a verdict
-	// and never had a fix attempted. "Review the investigation" implies a fix
-	// run the reader could look at; there is none.
-	actionReviewDiagnosis = "Review the diagnosis."
+	actionApproveFix = "Approve the proposed fix."
+	actionReviewPR   = "Review the fix PR."
+	// actionDecide is the ask for every waiting incident with no artifact to
+	// act on. "Review the investigation" and "Review the diagnosis" named
+	// internal machinery and split a distinction the reader cannot act on
+	// differently: either way the next move is theirs, and the issue page holds
+	// whatever the system found.
+	actionDecide      = "Decide how to handle this."
+	actionReviewIssue = "Review the issue."
 )
 
 // digestAction is the single source of an ON card's instruction line. It reads
 // only incident state: stored prose (remediation, reason_message) and model
 // output never gate it, which is what keeps an incident with an empty
-// remediation field from vanishing from the digest. Migration 072's
-// error_groups_action_class is its SQL twin; change both together.
+// remediation field from vanishing from the digest. The action-class function
+// migrations 072 and 073 define is its SQL twin; change both together.
+//
+// fixAttempted no longer changes the answer, and the parameter stays because
+// the SQL twin still takes it: whether a fix ran decides how the incident is
+// described elsewhere, not what the reader is asked to do about it.
 func digestAction(status string, hasSavedDiff bool, prURL string, fixAttempted bool) string {
 	switch status {
 	case "awaiting_approval":
 		if hasSavedDiff {
 			return actionApproveFix
 		}
-		return verdictAction(fixAttempted)
+		return actionDecide
 	case "pr_created", "pr_draft":
 		if prURL != "" {
 			return actionReviewPR
@@ -62,21 +67,8 @@ func digestAction(status string, hasSavedDiff bool, prURL string, fixAttempted b
 		// caller logs a diagnostic so the inconsistency is visible.
 		return actionReviewIssue
 	default: // needs_human
-		if hasSavedDiff {
-			return actionReviewInvestigation
-		}
-		return verdictAction(fixAttempted)
+		return actionDecide
 	}
-}
-
-// verdictAction picks between the two asks an incident with no fix artifact can
-// honestly make. A saved diff or a completed fix job means there is fix work to
-// review; without either, the only thing waiting is the diagnosis.
-func verdictAction(fixAttempted bool) string {
-	if fixAttempted {
-		return actionReviewInvestigation
-	}
-	return actionReviewDiagnosis
 }
 
 // onCardOutcome maps an ON status onto the renderer's two card families, which

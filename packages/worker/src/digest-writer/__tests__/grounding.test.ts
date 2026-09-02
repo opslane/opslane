@@ -42,7 +42,7 @@ describe('groundPayload zero-count normalization', () => {
         errorGroupId: 'g-anon',
         title: 'Support email is not clickable',
         copy: 'Users hit a license wall and clicked the plain-text support address with no way forward.',
-        action: 'Review the investigation.',
+        action: 'Decide how to handle this.',
         sessionCount: 3,
         identifiedCount: 0,
       }],
@@ -67,7 +67,7 @@ describe('groundPayload zero-count normalization', () => {
         errorGroupId: 'g-anon',
         title: 'Support email is not clickable',
         copy: 'It hit 17 visits, and 14 recovered by finding another way through.',
-        action: 'Review the investigation.',
+        action: 'Decide how to handle this.',
       }],
       deferred: [],
     }, [measured]))).toMatch(/ungrounded number 17/);
@@ -77,7 +77,7 @@ describe('groundPayload zero-count normalization', () => {
         errorGroupId: 'g-anon',
         title: 'Support email is not clickable',
         copy: 'It hit 42 visits.',
-        action: 'Review the investigation.',
+        action: 'Decide how to handle this.',
       }],
       deferred: [],
     }, [measured]))).toMatch(/ungrounded number 42/);
@@ -98,7 +98,7 @@ describe('groundPayload zero-count normalization', () => {
         errorGroupId: 'g-anon',
         title: 'Support email is not clickable',
         copy: 'It happened in 3 sessions.',
-        action: 'Review the investigation.',
+        action: 'Decide how to handle this.',
       }],
       deferred: [],
     }, [unified]))).toMatch(/numeric glyph/);
@@ -115,7 +115,7 @@ describe('groundPayload zero-count normalization', () => {
         title: 'Support email is not clickable',
         copy: 'Users hit a license wall with no way forward.',
         why: 'Both 2 contact addresses render as plain text, so neither opens a mail client.',
-        action: 'Review the investigation.',
+        action: 'Decide how to handle this.',
       }],
       deferred: [],
     }, [diagnosed]);
@@ -129,7 +129,7 @@ describe('groundPayload zero-count normalization', () => {
         title: 'Support email is not clickable',
         copy: 'Users hit a license wall with no way forward.',
         why: 'All 9 contact addresses render as plain text.',
-        action: 'Review the investigation.',
+        action: 'Decide how to handle this.',
       }],
       deferred: [],
     }, [diagnosed]))).toMatch(/ungrounded number 9/);
@@ -141,7 +141,7 @@ describe('groundPayload zero-count normalization', () => {
         errorGroupId: 'g-anon',
         title: 'Support email is not clickable',
         copy: 'Users hit a license wall.',
-        action: 'Review the investigation.',
+        action: 'Decide how to handle this.',
         sessionCount: 3,
         identifiedCount: 3,
       }],

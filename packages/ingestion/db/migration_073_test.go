@@ -11,7 +11,7 @@ import (
 
 // migration073File is the one file under test; the upgrade-path case applies
 // everything before it, then it, exactly as a running deployment would.
-const migration073File = "migrations/073_fix_provenance_scope.sql"
+const migration073File = "migrations/073_fix_provenance_and_plain_asks.sql"
 
 // seedFixProvenanceProject creates an org, a project and one waiting incident.
 func seedFixProvenanceProject(t *testing.T, pool *pgxpool.Pool, name string) (string, string) {

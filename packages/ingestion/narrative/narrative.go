@@ -86,9 +86,9 @@ func PageReceiptLine(state string) (string, bool) {
 	case "attempt_failed_with_diff":
 		return "Fix attempt failed its checks; the working diff was saved.", true
 	case "attempt_failed_no_diff":
-		return "Fix attempt failed before producing a change.", true
+		return "We tried a fix and couldn't produce a working change.", true
 	case "report_ready":
-		return "Investigation report ready.", true
+		return "We found the cause.", true
 	default:
 		return "", false
 	}
@@ -119,7 +119,7 @@ func ReceiptLine(state string, hasValidatedDiagnosis bool) (string, bool) {
 	case "attempt_failed_with_diff":
 		return "Fix attempt failed its checks; saved diff and report on the issue page.", true
 	case "attempt_failed_no_diff":
-		return "Fix attempt failed before producing a change; investigation report on the issue page.", true
+		return "We tried a fix and couldn't produce a working change; details on the issue page.", true
 	case "report_ready":
 		if hasValidatedDiagnosis {
 			return "Cause found; no fix opened yet. Details in the issue.", true

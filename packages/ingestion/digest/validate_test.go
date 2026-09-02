@@ -353,7 +353,7 @@ func TestValidateRehydratesOffModeRunThroughLegacyLane(t *testing.T) {
 	frozen := Candidate{
 		EpisodeID: episodeID, EpisodeSequence: &sequence, IssueID: groupID, ErrorGroupID: groupID,
 		Kind: "error", Title: strings.Repeat("界", 100), Outcome: "needs_human",
-		Summary: "verified terminal result", ValidAction: "Review the investigation.",
+		Summary: "verified terminal result", ValidAction: "Decide how to handle this.",
 		DecidedAt: decidedAt, LastSeen: now.Add(-2 * time.Hour),
 		Accounts: []string{}, OccurrenceCount: 3, Label: "new",
 	}

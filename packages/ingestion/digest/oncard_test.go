@@ -140,15 +140,15 @@ func TestDigestActionIsExhaustive(t *testing.T) {
 		prURL, want  string
 	}{
 		{"approval with diff", "awaiting_approval", true, false, "", "Approve the proposed fix."},
-		{"approval without diff after a fix ran", "awaiting_approval", false, true, "", "Review the investigation."},
-		{"approval without diff or fix", "awaiting_approval", false, false, "", "Review the diagnosis."},
+		{"approval without diff after a fix ran", "awaiting_approval", false, true, "", "Decide how to handle this."},
+		{"approval without diff or fix", "awaiting_approval", false, false, "", "Decide how to handle this."},
 		{"pr open", "pr_created", false, false, "https://github.com/o/r/pull/1", "Review the fix PR."},
 		{"pr draft", "pr_draft", true, false, "https://github.com/o/r/pull/1", "Review the fix PR."},
 		{"pr without url", "pr_created", false, false, "", "Review the issue."},
 		{"pr draft without url", "pr_draft", false, false, "", "Review the issue."},
-		{"needs human after a fix ran", "needs_human", false, true, "", "Review the investigation."},
-		{"needs human with no fix ever run", "needs_human", false, false, "", "Review the diagnosis."},
-		{"needs human with diff", "needs_human", true, false, "", "Review the investigation."},
+		{"needs human after a fix ran", "needs_human", false, true, "", "Decide how to handle this."},
+		{"needs human with no fix ever run", "needs_human", false, false, "", "Decide how to handle this."},
+		{"needs human with diff", "needs_human", true, false, "", "Decide how to handle this."},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := digestAction(tc.status, tc.hasSavedDiff, tc.prURL, tc.fixAttempted); got != tc.want {
@@ -175,21 +175,21 @@ func TestFreezeOnCoversEveryStatusAndKind(t *testing.T) {
 		{name: "error awaiting approval with diff", kind: "error", status: "awaiting_approval",
 			hasDiff: true, validatedDiagnosis: true, wantAction: "Approve the proposed fix."},
 		{name: "error awaiting approval after a fix ran", kind: "error", status: "awaiting_approval",
-			validatedDiagnosis: true, terminalJobType: "fix", wantAction: "Review the investigation."},
+			validatedDiagnosis: true, terminalJobType: "fix", wantAction: "Decide how to handle this."},
 		{name: "error awaiting approval with no fix ever run", kind: "error", status: "awaiting_approval",
-			validatedDiagnosis: true, wantAction: "Review the diagnosis."},
+			validatedDiagnosis: true, wantAction: "Decide how to handle this."},
 		{name: "friction awaiting approval without diff", kind: "friction", status: "awaiting_approval",
-			validatedDiagnosis: true, wantAction: "Review the diagnosis."},
+			validatedDiagnosis: true, wantAction: "Decide how to handle this."},
 		{name: "friction needs human with diff", kind: "friction", status: "needs_human",
-			hasDiff: true, wantAction: "Review the investigation."},
+			hasDiff: true, wantAction: "Decide how to handle this."},
 		{name: "error needs human after a fix produced nothing", kind: "error", status: "needs_human",
-			terminalJobType: "error_fix", wantAction: "Review the investigation.", wantNotEligible: true},
+			terminalJobType: "error_fix", wantAction: "Decide how to handle this.", wantNotEligible: true},
 		{name: "error needs human without diagnosis", kind: "error", status: "needs_human",
-			wantAction: "Review the diagnosis.", wantNotEligible: true},
+			wantAction: "Decide how to handle this.", wantNotEligible: true},
 		// The dead-lettered-investigation reconciliation writes an investigation
 		// job id into the same column. It is not a fix attempt.
 		{name: "error needs human after a dead-lettered investigation", kind: "error", status: "needs_human",
-			validatedDiagnosis: true, terminalJobType: "investigate", wantAction: "Review the diagnosis."},
+			validatedDiagnosis: true, terminalJobType: "investigate", wantAction: "Decide how to handle this."},
 		{name: "error pr created with url", kind: "error", status: "pr_created",
 			prURL: "https://github.com/acme/shop/pull/7", wantAction: "Review the fix PR."},
 		{name: "friction pr draft with url", kind: "friction", status: "pr_draft",
@@ -333,7 +333,7 @@ func TestValidateOnRendersEmptyRemediationIncident(t *testing.T) {
 	}{
 		{name: "with saved diff", hasDiff: true, wantAction: "Approve the proposed fix."},
 		// No diff and no fix job: the only thing waiting is the diagnosis.
-		{name: "without saved diff", wantAction: "Review the diagnosis."},
+		{name: "without saved diff", wantAction: "Decide how to handle this."},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			now := time.Now().UTC().Truncate(time.Second)
