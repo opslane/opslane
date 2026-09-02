@@ -14,8 +14,11 @@ const digestPromptVersion = 4
 // CachedDigestCard is an atomic, already validated card frozen into a run.
 // Partial cache hits are never represented.
 type CachedDigestCard struct {
-	Title       string    `json:"title"`
-	Copy        string    `json:"copy"`
+	Title string `json:"title"`
+	Copy  string `json:"copy"`
+	// Why is the card's one-sentence cause. Empty for an incident whose stored
+	// root cause is empty, which publishable() still admits.
+	Why         string    `json:"why,omitempty"`
 	Action      string    `json:"action"`
 	AuthoredAt  time.Time `json:"authoredAt"`
 	Fingerprint string    `json:"fingerprint"`

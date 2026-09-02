@@ -71,6 +71,37 @@ describe('groundPayload zero-count normalization', () => {
     }, [measured])).toThrow(/ungrounded number 42/);
   });
 
+  it('grounds the cause sentence against the stored root cause', () => {
+    const diagnosed: DigestCandidate = {
+      ...anonymousFrictionCandidate,
+      rootCause: 'LicenseWall renders the 2 contact addresses as plain text',
+    };
+    const grounded = groundPayload({
+      included: [{
+        errorGroupId: 'g-anon',
+        title: 'Support email is not clickable',
+        copy: 'Users hit a license wall with no way forward.',
+        why: 'Both 2 contact addresses render as plain text, so neither opens a mail client.',
+        action: 'Review the investigation.',
+      }],
+      deferred: [],
+    }, [diagnosed]);
+    expect(grounded.included[0]).toMatchObject({
+      why: 'Both 2 contact addresses render as plain text, so neither opens a mail client.',
+    });
+
+    expect(() => groundPayload({
+      included: [{
+        errorGroupId: 'g-anon',
+        title: 'Support email is not clickable',
+        copy: 'Users hit a license wall with no way forward.',
+        why: 'All 9 contact addresses render as plain text.',
+        action: 'Review the investigation.',
+      }],
+      deferred: [],
+    }, [diagnosed])).toThrow(/ungrounded number 9/);
+  });
+
   it('still rejects a card inventing a nonzero identified count', () => {
     const payload = {
       included: [{

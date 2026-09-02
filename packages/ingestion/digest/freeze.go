@@ -26,18 +26,18 @@ type Candidate struct {
 	Label                 string            `json:"label"`
 	// IssueID remains during the rolling transition for workers that predate
 	// incident-keyed cards. New consumers use ErrorGroupID.
-	IssueID         string    `json:"issueId"`
-	Title           string    `json:"title"`
-	Outcome         string    `json:"outcome"`
-	Status          string    `json:"status,omitempty"`
-	SignalType      string    `json:"signalType,omitempty"`
-	Summary         string    `json:"summary"`
-	RootCause       string    `json:"rootCause,omitempty"`
-	Mitigation      string    `json:"mitigation,omitempty"`
-	DiffIdentity    string    `json:"diffIdentity,omitempty"`
-	PRURL           string    `json:"prUrl,omitempty"`
-	AffectedUsers   int       `json:"affectedUsers"`
-	OccurrenceCount int       `json:"occurrenceCount"`
+	IssueID         string `json:"issueId"`
+	Title           string `json:"title"`
+	Outcome         string `json:"outcome"`
+	Status          string `json:"status,omitempty"`
+	SignalType      string `json:"signalType,omitempty"`
+	Summary         string `json:"summary"`
+	RootCause       string `json:"rootCause,omitempty"`
+	Mitigation      string `json:"mitigation,omitempty"`
+	DiffIdentity    string `json:"diffIdentity,omitempty"`
+	PRURL           string `json:"prUrl,omitempty"`
+	AffectedUsers   int    `json:"affectedUsers"`
+	OccurrenceCount int    `json:"occurrenceCount"`
 	// ImpactVisits and ImpactRecovered are the measured recording impact: how
 	// many visits hit the problem and how many got past it. The renderer stopped
 	// printing them as a counts line, so the writer needs them as grounded facts

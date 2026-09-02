@@ -242,8 +242,14 @@ func digestV4Summary(rawDate string, decisions, fixes int) string {
 }
 
 func digestV4CardBlocks(payload EventPayload, card GeneratedDigestCard, position int, leadIn string) []map[string]any {
-	text := "*" + cleanProse(card.Title, 80) + "*\n" +
-		cleanProse(card.Copy, digestDetailMax) + "\n*" + leadIn + ":* " + cleanProse(card.Action, digestDetailMax)
+	text := "*" + cleanProse(card.Title, 80) + "*\n" + cleanProse(card.Copy, digestDetailMax)
+	// Its own line, between what happened and what to do: the reader decides on
+	// the cause, and burying it inside the copy is what made these cards read as
+	// a symptom with no explanation.
+	if why := cleanProse(card.Why, digestDetailMax); why != "" {
+		text += "\nWhy: " + why
+	}
+	text += "\n*" + leadIn + ":* " + cleanProse(card.Action, digestDetailMax)
 	// No people fragment at zero: the prompt tells the writer to describe a
 	// zero-user problem without a count, and "👥 0 users" would contradict the
 	// card's own copy (v3 hid the count the same way).

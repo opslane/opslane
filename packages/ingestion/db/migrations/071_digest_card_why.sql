@@ -1,0 +1,11 @@
+-- 071_digest_card_why.sql -- the authored card keeps its one-sentence cause.
+--
+-- A "Needs a decision" card now carries a Why line: one sentence, taken from
+-- the investigation's root cause. It is authored with the rest of the card and
+-- cached with it, so a repeat day serves the same sentence instead of paying
+-- for it again. Without this column the cache would rehydrate a card whose Why
+-- had vanished, and the card would fall back to its receipt every second day.
+--
+-- Additive and nullable: rows cached under prompt version 4 predate the field,
+-- and the prompt-version bump already retires them by fingerprint.
+ALTER TABLE digest_card_copy ADD COLUMN IF NOT EXISTS why TEXT;

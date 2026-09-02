@@ -33,6 +33,7 @@ type writtenDigestCard struct {
 	EpisodeID          string   `json:"episodeId"`
 	Title              string   `json:"title,omitempty"`
 	Copy               string   `json:"copy"`
+	Why                string   `json:"why,omitempty"`
 	Action             string   `json:"action"`
 	Label              string   `json:"label"`
 	ClaimedUsers       *int     `json:"claimedUsers,omitempty"`
@@ -251,6 +252,7 @@ func checkUnifiedWrittenCard(
 	identity := candidateIdentity(candidate)
 	card.Title = stripInvisible(card.Title)
 	card.Copy = stripInvisible(card.Copy)
+	card.Why = stripInvisible(card.Why)
 	card.Action = stripInvisible(card.Action)
 	// The instruction line has exactly one correct value, so the model does not
 	// own it: overwrite rather than compare. Demoting a good card over wording
@@ -268,10 +270,19 @@ func checkUnifiedWrittenCard(
 	if strings.TrimSpace(card.Title) == "" || strings.TrimSpace(card.Copy) == "" || strings.TrimSpace(card.Action) == "" {
 		return card, "", fmt.Errorf("malformed card for %s", identity)
 	}
-	if internalVocabulary.MatchString(card.Title) || internalVocabulary.MatchString(card.Copy) || internalVocabulary.MatchString(card.Action) {
+	// A diagnosed incident owes the reader the one sentence that explains it. An
+	// incident admitted on a validated diagnosis whose stored cause is empty has
+	// nothing to say, so it is excused rather than demoted for a missing field.
+	if candidate.HasValidatedDiagnosis && strings.TrimSpace(candidate.RootCause) != "" &&
+		strings.TrimSpace(card.Why) == "" {
+		return card, "", fmt.Errorf("diagnosed card for %s carries no cause sentence", identity)
+	}
+	if internalVocabulary.MatchString(card.Title) || internalVocabulary.MatchString(card.Copy) ||
+		internalVocabulary.MatchString(card.Why) || internalVocabulary.MatchString(card.Action) {
 		return card, "", fmt.Errorf("internal vocabulary in card for %s", identity)
 	}
-	if len([]rune(strings.TrimSpace(card.Title))) > 80 || len([]rune(card.Copy)) > 300 || len([]rune(card.Action)) > 300 {
+	if len([]rune(strings.TrimSpace(card.Title))) > 80 || len([]rune(card.Copy)) > 300 ||
+		len([]rune(card.Why)) > 300 || len([]rune(card.Action)) > 300 {
 		return card, "", fmt.Errorf("card length exceeded for %s", identity)
 	}
 	if containsDigit(card.Copy) || containsDigit(card.Action) {
@@ -330,7 +341,8 @@ func checkUnifiedWrittenCard(
 	renderMode := "authored"
 	if candidate.CachedCard != nil {
 		cached := candidate.CachedCard
-		if card.Title != cached.Title || card.Copy != cached.Copy || card.Action != cached.Action || cached.Fingerprint != candidate.Fingerprint {
+		if card.Title != cached.Title || card.Copy != cached.Copy || card.Why != cached.Why ||
+			card.Action != cached.Action || cached.Fingerprint != candidate.Fingerprint {
 			return card, "", fmt.Errorf("cached card for %s changed in transit", identity)
 		}
 		return card, "cached", nil
@@ -480,27 +492,27 @@ func cacheValidatedCard(ctx context.Context, tx pgx.Tx, run validationRun, candi
 		return card, "", unifiedInfrastructureError{fmt.Errorf("retire stale digest card cache for %s: %w", candidate.ErrorGroupID, err)}
 	}
 	command, err := tx.Exec(ctx, `INSERT INTO digest_card_copy
-		(error_group_id,spell_started_at,input_fingerprint,title,copy,action,model,prompt_version)
-		SELECT $1,$2,$3,$4,$5,$6,'digest-writer',$7
-		FROM error_groups g WHERE g.id=$1 AND g.project_id=$8
+		(error_group_id,spell_started_at,input_fingerprint,title,copy,why,action,model,prompt_version)
+		SELECT $1,$2,$3,$4,$5,NULLIF($6,''),$7,'digest-writer',$8
+		FROM error_groups g WHERE g.id=$1 AND g.project_id=$9
 		ON CONFLICT (error_group_id,spell_started_at) WHERE invalidated_at IS NULL DO NOTHING`,
 		candidate.ErrorGroupID, *candidate.SpellStartedAt, candidate.Fingerprint,
-		strings.TrimSpace(card.Title), strings.TrimSpace(card.Copy), strings.TrimSpace(card.Action),
-		digestPromptVersion, run.ProjectID)
+		strings.TrimSpace(card.Title), strings.TrimSpace(card.Copy), strings.TrimSpace(card.Why),
+		strings.TrimSpace(card.Action), digestPromptVersion, run.ProjectID)
 	if err != nil {
 		return card, "", unifiedInfrastructureError{fmt.Errorf("cache validated digest card for %s: %w", candidate.ErrorGroupID, err)}
 	}
 	if command.RowsAffected() == 0 {
-		var winner, title, copy, action string
-		if err := tx.QueryRow(ctx, `SELECT c.input_fingerprint,c.title,c.copy,c.action
+		var winner, title, copy, why, action string
+		if err := tx.QueryRow(ctx, `SELECT c.input_fingerprint,c.title,c.copy,COALESCE(c.why,''),c.action
 			FROM digest_card_copy c JOIN error_groups g ON g.id=c.error_group_id
 			WHERE g.project_id=$1 AND c.error_group_id=$2 AND c.spell_started_at=$3
 			  AND c.invalidated_at IS NULL`, run.ProjectID, candidate.ErrorGroupID,
-			*candidate.SpellStartedAt).Scan(&winner, &title, &copy, &action); err != nil {
+			*candidate.SpellStartedAt).Scan(&winner, &title, &copy, &why, &action); err != nil {
 			return card, "", unifiedInfrastructureError{fmt.Errorf("load digest cache winner for %s: %w", candidate.ErrorGroupID, err)}
 		}
 		if winner == candidate.Fingerprint {
-			card.Title, card.Copy, card.Action = title, copy, action
+			card.Title, card.Copy, card.Why, card.Action = title, copy, why, action
 			return card, "cached", nil
 		} else {
 			slog.Warn("digest cache conflict", "diagnostic", "cache_conflict",
@@ -631,7 +643,8 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string) e
 			generated = append(generated, notify.GeneratedDigestCard{
 				EpisodeID: candidate.EpisodeID, IncidentID: candidate.ErrorGroupID, Kind: candidate.Kind,
 				Title: strings.TrimSpace(card.Title), Label: candidate.Label, Outcome: candidate.Outcome,
-				Copy: strings.TrimSpace(card.Copy), Action: strings.TrimSpace(card.Action),
+				Copy: strings.TrimSpace(card.Copy), Why: strings.TrimSpace(card.Why),
+				Action:        strings.TrimSpace(card.Action),
 				AffectedUsers: candidate.AffectedUsers, OccurrenceCount: candidate.OccurrenceCount,
 				SignalCount: int64(candidate.OccurrenceCount), Accounts: candidate.Accounts,
 				PRURL: candidate.PRURL, ReplayURL: replayURL, PRNumber: prNumber(candidate.PRURL),
@@ -1305,15 +1318,18 @@ func firstUngroundedNumber(card writtenDigestCard, candidate Candidate) (string,
 	if candidate.ImpactRecovered != nil {
 		allowed[strconv.FormatInt(*candidate.ImpactRecovered, 10)] = struct{}{}
 	}
-	sources := []string{candidate.Title, candidate.Summary, candidate.ValidAction, candidate.RoutePurpose,
-		candidate.Route, candidate.ObservationQuote}
+	// RootCause is listed in its own right, not left to the Summary alias: the
+	// alias holds the cause only while it is non-empty, and the Why sentence is
+	// written from the cause, so its digits must ground on the cause itself.
+	sources := []string{candidate.Title, candidate.Summary, candidate.RootCause, candidate.ValidAction,
+		candidate.RoutePurpose, candidate.Route, candidate.ObservationQuote}
 	sources = append(sources, candidate.Accounts...)
 	for _, source := range sources {
 		for _, number := range proseNumber.FindAllString(normalizeProseNumbers(source), -1) {
 			allowed[number] = struct{}{}
 		}
 	}
-	for _, field := range []string{card.Title, card.Copy, card.Action} {
+	for _, field := range []string{card.Title, card.Copy, card.Why, card.Action} {
 		for _, number := range proseNumber.FindAllString(normalizeProseNumbers(field), -1) {
 			if _, ok := allowed[number]; !ok {
 				return number, true

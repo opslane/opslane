@@ -10,6 +10,19 @@ describe('digest narrative card schema', () => {
     expect(parsed.included[0]).not.toHaveProperty('observationQuote');
   });
 
+  it('carries the cause sentence through and drops a card whose cause is blank', () => {
+    const parsed = parseDigestPayload({
+      included: [
+        { errorGroupId: 'g1', title: 'Save fails', copy: 'Saving failed.', why: 'The handler is unbound.', action: 'Review it.' },
+        { errorGroupId: 'g2', title: 'Export fails', copy: 'Exports failed.', why: '   ', action: 'Review it.' },
+      ],
+      deferred: [],
+    });
+    expect(parsed.included).toHaveLength(1);
+    expect(parsed.included[0]).toMatchObject({ why: 'The handler is unbound.' });
+    expect(parsed.rejected).toEqual([{ errorGroupId: 'g2', reason: expect.any(String) }]);
+  });
+
   it('accepts and preserves session intelligence fields', () => {
     const parsed = parseDigestPayload({
       included: [{

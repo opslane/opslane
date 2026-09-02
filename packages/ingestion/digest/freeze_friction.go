@@ -113,12 +113,12 @@ func attachCachedCard(ctx context.Context, tx pgx.Tx, projectID string, candidat
 		return nil
 	}
 	var cached CachedDigestCard
-	err := tx.QueryRow(ctx, `SELECT c.title,c.copy,c.action,c.authored_at,c.input_fingerprint
+	err := tx.QueryRow(ctx, `SELECT c.title,c.copy,COALESCE(c.why,''),c.action,c.authored_at,c.input_fingerprint
 		FROM digest_card_copy c JOIN error_groups g ON g.id=c.error_group_id
 		WHERE g.project_id=$1 AND c.error_group_id=$2 AND c.spell_started_at=$3
 		  AND c.invalidated_at IS NULL AND c.input_fingerprint=$4`, projectID,
 		candidate.ErrorGroupID, *candidate.SpellStartedAt, candidate.Fingerprint).Scan(
-		&cached.Title, &cached.Copy, &cached.Action, &cached.AuthoredAt, &cached.Fingerprint,
+		&cached.Title, &cached.Copy, &cached.Why, &cached.Action, &cached.AuthoredAt, &cached.Fingerprint,
 	)
 	if err == pgx.ErrNoRows {
 		return nil

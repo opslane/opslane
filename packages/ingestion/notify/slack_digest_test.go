@@ -472,6 +472,37 @@ func TestFormatSlackDigestV4RendersAuthoredFrictionCard(t *testing.T) {
 	}
 }
 
+// The cause gets its own line between what happened and what to do, and a card
+// whose incident has no stored cause renders without one rather than with a
+// dangling label.
+func TestFormatSlackDigestV4RendersTheCauseLine(t *testing.T) {
+	payload := EventPayload{
+		Version: 1, EventType: "digest.daily", Project: ProjectRef{ID: "p1", Name: "Shop"},
+		DashboardURL: "https://app.example",
+		Digest: &DigestPayload{SchemaVersion: 4, Date: "2026-08-27", GeneratedCards: []GeneratedDigestCard{
+			{
+				IncidentID: "with-cause", Title: "Saving is blocked", Outcome: "needs_human",
+				Copy: "People cannot save.", Why: "The submit handler is never wired to the control.",
+				Action: "Review the investigation.",
+			},
+			{
+				IncidentID: "no-cause", Title: "Export never starts", Outcome: "needs_human",
+				Copy: "People cannot export.", Action: "Review the investigation.",
+			},
+		}},
+	}
+	_, body := formatV4Blocks(t, payload)
+	if !strings.Contains(body, "People cannot save.\\nWhy: The submit handler is never wired to the control.\\n*Needs you:*") {
+		t.Fatalf("cause line is missing or out of place: %s", body)
+	}
+	if !strings.Contains(body, "People cannot export.\\n*Needs you:*") {
+		t.Fatalf("card without a stored cause grew a cause line: %s", body)
+	}
+	if strings.Count(body, "Why: ") != 1 {
+		t.Fatalf("cause line rendered %d times: %s", strings.Count(body, "Why: "), body)
+	}
+}
+
 func TestFormatSlackDigestV4ErrorCardSnapshotIsUnchanged(t *testing.T) {
 	payload := EventPayload{
 		Version: 1, EventType: "digest.daily", Project: ProjectRef{ID: "p1", Name: "Shop"},

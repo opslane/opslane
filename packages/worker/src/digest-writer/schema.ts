@@ -18,6 +18,10 @@ export interface DigestCard {
    * Go validator falls back to the frozen candidate title. */
   title?: string;
   copy: string;
+  /** One sentence naming the cause, written from the candidate's rootCause.
+   * Required of a diagnosed incident by the Go validator; absent on a card
+   * whose incident has no stored cause, and on pre-v5 replayed payloads. */
+  why?: string;
   action: string;
   label: DigestLabel;
   claimedUsers?: number;
@@ -57,6 +61,7 @@ export const DIGEST_PAYLOAD_SCHEMA = {
           episodeId: { type: 'string', minLength: 1 },
           title: { type: 'string', minLength: 1 },
           copy: { type: 'string', minLength: 1 },
+          why: { type: 'string', minLength: 1 },
           action: { type: 'string', minLength: 1 },
           claimedUsers: { type: 'integer' },
           claimedOccurrences: { type: 'integer' },
@@ -185,7 +190,7 @@ function identity(value: Record<string, unknown>, label: string): { errorGroupId
 /** label is absent from the model schema, but present when replaying a payload
  * already grounded and stored by the writer. */
 const CARD_KEYS: ReadonlySet<string> = new Set([
-  'errorGroupId', 'episodeId', 'title', 'copy', 'action',
+  'errorGroupId', 'episodeId', 'title', 'copy', 'why', 'action',
   'claimedUsers', 'claimedOccurrences', 'accounts', 'prUrl', 'label',
   'frictionCategory', 'route', 'sessionCount', 'identifiedCount', 'observationQuote',
 ]);
@@ -235,12 +240,16 @@ export function parseDigestPayload(raw: unknown): ParsedDigestPayload {
       throw new Error(`included[${index}].title must be at most ${DIGEST_TITLE_MAX} characters`);
     }
     const copy = text(card['copy'], `included[${index}].copy`);
+    const why = card['why'] === undefined ? undefined : text(card['why'], `included[${index}].why`);
     const action = text(card['action'], `included[${index}].action`);
     if (title !== undefined) {
       // Length caps apply to writer-authored (titled) cards only; legacy
       // replayed payloads keep render-time truncation.
       if ([...copy].length > DIGEST_TEXT_MAX) {
         throw new Error(`included[${index}].copy must be at most ${DIGEST_TEXT_MAX} characters`);
+      }
+      if (why !== undefined && [...why].length > DIGEST_TEXT_MAX) {
+        throw new Error(`included[${index}].why must be at most ${DIGEST_TEXT_MAX} characters`);
       }
       if ([...action].length > DIGEST_TEXT_MAX) {
         throw new Error(`included[${index}].action must be at most ${DIGEST_TEXT_MAX} characters`);
@@ -250,6 +259,7 @@ export function parseDigestPayload(raw: unknown): ParsedDigestPayload {
       ...cardIdentity,
       ...(title === undefined ? {} : { title }),
       copy,
+      ...(why === undefined ? {} : { why }),
       action,
       ...(typeof card['claimedUsers'] === 'number' ? { claimedUsers: card['claimedUsers'] } : {}),
       ...(typeof card['claimedOccurrences'] === 'number' ? { claimedOccurrences: card['claimedOccurrences'] } : {}),

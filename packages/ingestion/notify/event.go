@@ -102,13 +102,16 @@ type DigestPayload struct {
 // GeneratedDigestCard is model-authored prose grounded in a frozen candidate.
 // Its IDs, counts, accounts and links have all been mechanically validated.
 type GeneratedDigestCard struct {
-	EpisodeID        string     `json:"episode_id"`
-	IncidentID       string     `json:"incident_id"`
-	Kind             string     `json:"kind,omitempty"`
-	Title            string     `json:"title"`
-	Label            string     `json:"label"`
-	Outcome          string     `json:"outcome,omitempty"`
-	Copy             string     `json:"copy"`
+	EpisodeID  string `json:"episode_id"`
+	IncidentID string `json:"incident_id"`
+	Kind       string `json:"kind,omitempty"`
+	Title      string `json:"title"`
+	Label      string `json:"label"`
+	Outcome    string `json:"outcome,omitempty"`
+	Copy       string `json:"copy"`
+	// Why is the card's one-sentence cause, written from the investigation's
+	// root cause. Empty when the incident has no stored cause to explain.
+	Why              string     `json:"why,omitempty"`
 	Action           string     `json:"action"`
 	AffectedUsers    int        `json:"affected_users"`
 	OccurrenceCount  int        `json:"occurrence_count,omitempty"`
