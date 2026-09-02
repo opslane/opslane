@@ -70,7 +70,7 @@ func selectOnCardCandidates(all []actionableCandidate, at time.Time) ([]Candidat
 		if source.DiagnosisDecidedAt != nil {
 			decidedAt = *source.DiagnosisDecidedAt
 		}
-		action := digestAction(source.Status, source.HasSavedDiff, source.PRURL)
+		action := digestAction(source.Status, source.HasSavedDiff, source.PRURL, source.FixAttempted)
 		if action == actionReviewIssue {
 			slog.Warn("digest card renders an inconsistent PR state",
 				"diagnostic", "pr_status_without_url",
@@ -81,7 +81,7 @@ func selectOnCardCandidates(all []actionableCandidate, at time.Time) ([]Candidat
 			Title: source.Title, Outcome: onCardOutcome(source.Status), Status: source.Status,
 			SignalType: source.SignalType, Summary: summary, RootCause: source.RootCause,
 			Mitigation: source.Mitigation, DiffIdentity: source.DiffIdentity,
-			HasSavedDiff: source.HasSavedDiff, PRURL: source.PRURL,
+			HasSavedDiff: source.HasSavedDiff, FixAttempted: source.FixAttempted, PRURL: source.PRURL,
 			AffectedUsers: source.AffectedUsers, OccurrenceCount: int(source.OccurrenceCount),
 			ImpactVisits: source.ImpactVisits, ImpactRecovered: source.ImpactRecovered,
 			Accounts: source.Accounts, LastSeen: source.LastSeen, RoutePurpose: source.RoutePurpose,

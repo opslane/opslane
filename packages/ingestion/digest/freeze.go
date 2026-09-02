@@ -59,6 +59,11 @@ type Candidate struct {
 	// HasSavedDiff is the exact fact digestAction reads, carried explicitly so
 	// the action never has to be reconstructed from a diff hash.
 	HasSavedDiff bool `json:"hasSavedDiff,omitempty"`
+	// FixAttempted says a real fix job ran for this incident. It separates a
+	// fix run that produced nothing from a verdict nobody ever tried to fix,
+	// which look identical in status and diff. Absent on snapshots frozen
+	// before it existed, so those keep reading as "no attempt".
+	FixAttempted bool `json:"fixAttempted,omitempty"`
 	// NotCardEligible marks a candidate publishable() refuses an authored card.
 	// Inverted so the zero value means eligible: OFF snapshots and snapshots
 	// frozen before this field existed keep their meaning. The writer defers

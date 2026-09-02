@@ -504,11 +504,12 @@ func TestValidateStampsActionSoWriterDigitsNeverShip(t *testing.T) {
 	if cards[0].Action != candidate.ValidAction {
 		t.Fatalf("action = %q, want the stamped %q", cards[0].Action, candidate.ValidAction)
 	}
-	rendered, err := json.Marshal(renderedEvent(t, pool, runID))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(rendered), "99") {
-		t.Fatalf("a writer digit reached the reader: %s", rendered)
+	// Every field the writer owns, and only those: a random run or incident uuid
+	// carrying the digits "99" is not a writer digit, and scanning the whole
+	// encoded payload for them failed this test on roughly one run in ten.
+	for _, authored := range []string{cards[0].Title, cards[0].Copy, cards[0].Why, cards[0].Action} {
+		if strings.Contains(authored, "99") {
+			t.Fatalf("a writer digit reached the reader: %q", authored)
+		}
 	}
 }

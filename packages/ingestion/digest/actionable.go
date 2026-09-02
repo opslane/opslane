@@ -35,20 +35,24 @@ const (
 	actionReviewInvestigation = "Review the investigation."
 	actionReviewPR            = "Review the fix PR."
 	actionReviewIssue         = "Review the issue."
+	// actionReviewDiagnosis is the ask for an incident that reached a verdict
+	// and never had a fix attempted. "Review the investigation" implies a fix
+	// run the reader could look at; there is none.
+	actionReviewDiagnosis = "Review the diagnosis."
 )
 
 // digestAction is the single source of an ON card's instruction line. It reads
 // only incident state: stored prose (remediation, reason_message) and model
 // output never gate it, which is what keeps an incident with an empty
-// remediation field from vanishing from the digest. Migration 066's
+// remediation field from vanishing from the digest. Migration 072's
 // error_groups_action_class is its SQL twin; change both together.
-func digestAction(status string, hasSavedDiff bool, prURL string) string {
+func digestAction(status string, hasSavedDiff bool, prURL string, fixAttempted bool) string {
 	switch status {
 	case "awaiting_approval":
 		if hasSavedDiff {
 			return actionApproveFix
 		}
-		return actionReviewInvestigation
+		return verdictAction(fixAttempted)
 	case "pr_created", "pr_draft":
 		if prURL != "" {
 			return actionReviewPR
@@ -58,8 +62,21 @@ func digestAction(status string, hasSavedDiff bool, prURL string) string {
 		// caller logs a diagnostic so the inconsistency is visible.
 		return actionReviewIssue
 	default: // needs_human
+		if hasSavedDiff {
+			return actionReviewInvestigation
+		}
+		return verdictAction(fixAttempted)
+	}
+}
+
+// verdictAction picks between the two asks an incident with no fix artifact can
+// honestly make. A saved diff or a completed fix job means there is fix work to
+// review; without either, the only thing waiting is the diagnosis.
+func verdictAction(fixAttempted bool) string {
+	if fixAttempted {
 		return actionReviewInvestigation
 	}
+	return actionReviewDiagnosis
 }
 
 // onCardOutcome maps an ON status onto the renderer's two card families, which
@@ -118,20 +135,26 @@ type actionableCandidate struct {
 	Mitigation            string
 	HasSavedDiff          bool
 	HasValidatedDiagnosis bool
-	ActionableSince       *time.Time
-	SnoozedUntil          *time.Time
-	ErrorLaneEligible     bool
-	SignalType            string
-	AffectedUsers         int
-	LastSeen              time.Time
-	RoutePurpose          string
-	DiffIdentity          string
-	DiagnosisDecidedAt    *time.Time
-	Accounts              []string
-	Route                 string
-	SessionCount          int
-	IdentifiedCount       int
-	ObservationQuote      string
+	// FixAttempted is true only when this incident's terminal fix job is really
+	// a fix job. The dead-lettered-investigation reconciliation writes an
+	// INVESTIGATION job id into terminal_fix_job_id, so the id alone proves
+	// nothing, and an incident that never ran a fix must not be told a fix
+	// attempt failed.
+	FixAttempted       bool
+	ActionableSince    *time.Time
+	SnoozedUntil       *time.Time
+	ErrorLaneEligible  bool
+	SignalType         string
+	AffectedUsers      int
+	LastSeen           time.Time
+	RoutePurpose       string
+	DiffIdentity       string
+	DiagnosisDecidedAt *time.Time
+	Accounts           []string
+	Route              string
+	SessionCount       int
+	IdentifiedCount    int
+	ObservationQuote   string
 }
 
 type evaluation struct {
@@ -151,6 +174,7 @@ func loadActionableCandidates(ctx context.Context, tx pgx.Tx, projectID string, 
 		       COALESCE(g.suggested_mitigation,''),
 		       NULLIF(btrim(g.candidate_diff),'') IS NOT NULL,
 		       COALESCE(d.has_validated_diagnosis,false),
+		       ` + fixAttemptedSQL("g") + `,
 		       g.actionable_since,g.snoozed_until,
 		       COALESCE(g.kind='error' AND (` + pipelineEligibleSQL("g") + `),false),
 		       COALESCE(g.signal_type,''),g.affected_users_count,g.last_seen,
@@ -208,7 +232,7 @@ func loadActionableCandidates(ctx context.Context, tx pgx.Tx, projectID string, 
 			&candidate.OccurrenceCount, &candidate.ImpactClass, &candidate.ImpactVisits,
 			&candidate.ImpactRecovered, &candidate.PRURL,
 			&candidate.RootCause, &candidate.Mitigation, &candidate.HasSavedDiff,
-			&candidate.HasValidatedDiagnosis, &candidate.ActionableSince,
+			&candidate.HasValidatedDiagnosis, &candidate.FixAttempted, &candidate.ActionableSince,
 			&candidate.SnoozedUntil, &candidate.ErrorLaneEligible,
 			&candidate.SignalType, &candidate.AffectedUsers, &candidate.LastSeen,
 			&candidate.RoutePurpose, &candidate.DiffIdentity, &candidate.DiagnosisDecidedAt,
@@ -260,17 +284,33 @@ func evaluateActionable(candidates []actionableCandidate, frozenIncidentIDs map[
 	return result
 }
 
+// fixAttemptedSQL is the one spelling of "a fix really ran for this incident".
+// The job type is checked, not just the id: reconciling a dead-lettered
+// investigation stores that INVESTIGATION job's id in terminal_fix_job_id, and
+// reading the id alone would report a fix attempt that never happened. A NULL
+// id, or one whose job is gone, is false.
+//
+// Migration 072's error_groups_action_class carries the same rule in SQL.
+func fixAttemptedSQL(groupAlias string) string {
+	return fmt.Sprintf(`EXISTS (
+		SELECT 1 FROM error_group_jobs j
+		 WHERE j.id = %[1]s.terminal_fix_job_id
+		   AND j.project_id = %[1]s.project_id
+		   AND j.job_type IN ('fix','error_fix')
+	)`, groupAlias)
+}
+
 func actionablePublishable(candidate actionableCandidate) bool {
 	return onCardEligible(candidate.Status, candidate.PRURL, candidate.RootCause,
-		candidate.HasSavedDiff, candidate.HasValidatedDiagnosis)
+		candidate.HasSavedDiff, candidate.HasValidatedDiagnosis, candidate.FixAttempted)
 }
 
 // onCardEligible answers "does this incident deserve an authored card?", and
 // nothing else. A false answer routes it to its mechanical receipt; it can
 // never remove the incident from the digest.
-func onCardEligible(status, prURL, rootCause string, hasSavedDiff, hasValidatedDiagnosis bool) bool {
+func onCardEligible(status, prURL, rootCause string, hasSavedDiff, hasValidatedDiagnosis, fixAttempted bool) bool {
 	item := notify.ReceiptItem{
-		ReceiptState:     receiptState(status, hasSavedDiff),
+		ReceiptState:     receiptState(status, hasSavedDiff, fixAttempted),
 		PRURL:            prURL,
 		RootCauseExcerpt: narrative.SanitizeExcerpt(rootCause, excerptMax),
 		HasSavedDiff:     hasSavedDiff,
@@ -381,7 +421,7 @@ func toReceiptItems(candidates []actionableCandidate) ([]notify.ReceiptItem, err
 			Title:           narrative.SanitizeExcerpt(candidate.Title, excerptMax),
 			OccurrenceCount: candidate.OccurrenceCount, ImpactClass: candidate.ImpactClass,
 			ImpactVisits: candidate.ImpactVisits, ImpactRecovered: candidate.ImpactRecovered,
-			ReceiptState: receiptState(candidate.Status, candidate.HasSavedDiff),
+			ReceiptState: receiptState(candidate.Status, candidate.HasSavedDiff, candidate.FixAttempted),
 			PRURL:        candidate.PRURL, SessionURL: candidate.SessionURL, HasSavedDiff: candidate.HasSavedDiff,
 			HasValidatedDiagnosis: candidate.HasValidatedDiagnosis,
 			ActionableSince:       candidate.ActionableSince,

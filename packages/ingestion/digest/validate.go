@@ -369,7 +369,7 @@ func candidateStillUnified(ctx context.Context, tx pgx.Tx, projectID string, fro
 		}
 	}
 	var status, title, signalType, rootCause, mitigation, diffIdentity, routePurpose, prURL, remediation, reasonMessage string
-	var hasValidatedDiagnosis, hasSavedDiff bool
+	var hasValidatedDiagnosis, hasSavedDiff, fixAttempted bool
 	var snoozedUntil, actionableSince *time.Time
 	if err := tx.QueryRow(ctx, `SELECT g.status::text,g.title,COALESCE(g.signal_type,''),
 		COALESCE(g.root_cause,''),COALESCE(g.suggested_mitigation,''),
@@ -379,13 +379,13 @@ func candidateStillUnified(ctx context.Context, tx pgx.Tx, projectID string, fro
 		 WHERE rm.project_id=g.project_id AND g.page_url_normalized LIKE '%' || rm.pattern || '%'
 		 ORDER BY length(rm.pattern) DESC LIMIT 1),''),COALESCE(g.pr_url,''),
 		COALESCE(g.remediation,''),COALESCE(g.reason_message,''),
-		validity.has_validated_diagnosis
+		validity.has_validated_diagnosis,`+fixAttemptedSQL("g")+`
 		FROM error_groups g
 		LEFT JOIN LATERAL (`+diagnosisValidationLateralSQL+`) validity ON true
 		WHERE g.project_id=$1 AND g.id=$2`, projectID, frozen.ErrorGroupID).Scan(
 		&status, &title, &signalType, &rootCause, &mitigation, &diffIdentity, &hasSavedDiff,
 		&snoozedUntil, &actionableSince, &routePurpose, &prURL, &remediation, &reasonMessage,
-		&hasValidatedDiagnosis,
+		&hasValidatedDiagnosis, &fixAttempted,
 	); err != nil {
 		if err == pgx.ErrNoRows {
 			return false, nil
@@ -417,10 +417,10 @@ func candidateStillUnified(ctx context.Context, tx pgx.Tx, projectID string, fro
 		if current.Summary == "" {
 			current.Summary = title
 		}
-		current.HasSavedDiff = hasSavedDiff
-		current.ValidAction = digestAction(status, hasSavedDiff, prURL)
+		current.HasSavedDiff, current.FixAttempted = hasSavedDiff, fixAttempted
+		current.ValidAction = digestAction(status, hasSavedDiff, prURL, fixAttempted)
 		current.Outcome = onCardOutcome(status)
-		current.NotCardEligible = !onCardEligible(status, prURL, rootCause, hasSavedDiff, hasValidatedDiagnosis)
+		current.NotCardEligible = !onCardEligible(status, prURL, rootCause, hasSavedDiff, hasValidatedDiagnosis, fixAttempted)
 	} else {
 		var outcome, summary string
 		var decidedAt time.Time
@@ -1224,7 +1224,7 @@ func receiptForUnifiedFallback(candidate Candidate) notify.ReceiptItem {
 	case candidate.SpellStartedAt != nil && candidate.Status != "":
 		// ON candidates carry their live status, so the receipt line is the same
 		// mechanical one prod renders today.
-		state = receiptState(candidate.Status, candidate.HasSavedDiff)
+		state = receiptState(candidate.Status, candidate.HasSavedDiff, candidate.FixAttempted)
 	case candidate.Outcome == "verified_fix" && candidate.PRURL != "":
 		state = "pr_open"
 	}
