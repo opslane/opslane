@@ -162,12 +162,33 @@ func formatSlackDigestV4(payload EventPayload) ([]byte, string, error) {
 			position++
 			needDivider = true
 		}
+		// An incident nothing was ever going to write a card for gets one line,
+		// not a card: its full rendering is three mechanical sentences the
+		// reader cannot act on differently from the one line. Every other
+		// receipt keeps its card, because those mark an authoring failure and
+		// compacting them would hide it.
+		full := make([]renderableReceipt, 0, len(renderedReceipts))
+		compact := make([]renderableReceipt, 0, len(renderedReceipts))
 		for _, receipt := range renderedReceipts {
+			if receipt.item.FallbackReason == ReceiptFallbackNeverEligible {
+				compact = append(compact, receipt)
+				continue
+			}
+			full = append(full, receipt)
+		}
+		for _, receipt := range full {
 			if needDivider {
 				blocks = append(blocks, map[string]any{"type": "divider"})
 			}
 			blocks = append(blocks, digestReceiptCardBlocks(payload, receipt.item, receipt.line)...)
 			needDivider = true
+		}
+		if len(compact) > 0 {
+			blocks = append(blocks, map[string]any{"type": "divider"},
+				digestContextBlock("*Also waiting*"))
+			for _, receipt := range compact {
+				blocks = append(blocks, digestContextBlock(digestCompactReceiptLine(payload, receipt.item)))
+			}
 		}
 	}
 	if len(intelligence) > 0 {
@@ -524,6 +545,21 @@ func digestReceiptCardBlocks(payload EventPayload, item ReceiptItem, receiptLine
 		digestSectionBlock(text),
 		digestContextBlock(strings.Join(links, " · ")),
 	}
+}
+
+// digestCompactReceiptLine is the whole rendering of an incident that can never
+// earn a written card: what it is, how long it has waited, and where to open
+// it. Everything the full card adds is derived from those three.
+func digestCompactReceiptLine(payload EventPayload, item ReceiptItem) string {
+	parts := make([]string, 0, 3)
+	parts = append(parts, cleanProse(item.Title, digestTitleMax))
+	if age := digestWaitingAgeLine(payload, item.IncidentID, item.ActionableSince,
+		"digest compact receipt aging line dropped: window is not RFC3339Nano"); age != "" {
+		parts = append(parts, age)
+	}
+	issueURL := BuildIncidentURL(payload.DashboardURL, item.IncidentID, payload.Project.ID)
+	parts = append(parts, slackDigestLink(issueURL, "Issue page"))
+	return strings.Join(parts, " · ")
 }
 
 func digestWaitingAgeLine(payload EventPayload, incidentID string, actionableSince *time.Time, invalidWindowWarning string) string {

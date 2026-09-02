@@ -928,6 +928,18 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string) e
 			actionableErr = fmt.Errorf("map actionable receipts: %w", err)
 		}
 		receiptOverflow = actionableEval.Overflow
+		// The freeze already decided this incident can never earn an authored
+		// card, and stamped that reason on its ledger row. Carry the same fact
+		// onto the receipt so the renderer can spend one line on it instead of
+		// a whole card. OFF never stamps it: that lane's receipts are its
+		// product, not a fallback, and its output may not drift.
+		if run.Mode == UnifiedCardsOn {
+			for i := range receiptItems {
+				if frozen, ok := byIdentity[receiptItems[i].IncidentID]; ok && frozen.NotCardEligible {
+					receiptItems[i].FallbackReason = notify.ReceiptFallbackNeverEligible
+				}
+			}
+		}
 		actionableBaseReceipts = append(actionableBaseReceipts, receiptItems...)
 		for _, item := range receiptItems {
 			if _, ok := byIdentity[item.IncidentID]; ok {
@@ -1229,6 +1241,12 @@ func receiptForUnifiedFallback(candidate Candidate) notify.ReceiptItem {
 		PRURL: candidate.PRURL, HasSavedDiff: candidate.HasSavedDiff,
 		HasValidatedDiagnosis: candidate.HasValidatedDiagnosis,
 		ActionableSince:       candidate.SpellStartedAt,
+	}
+	// Same fact its sibling constructor carries: an incident refused a card at
+	// freeze is still refused one when the card section degrades, so it renders
+	// compactly either way.
+	if candidate.NotCardEligible {
+		item.FallbackReason = notify.ReceiptFallbackNeverEligible
 	}
 	if candidate.HasValidatedDiagnosis {
 		item.RootCauseExcerpt = narrative.SanitizeExcerpt(candidate.RootCause, excerptMax)

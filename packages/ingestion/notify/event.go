@@ -157,7 +157,17 @@ type ReceiptItem struct {
 	HasValidatedDiagnosis bool       `json:"has_validated_diagnosis,omitempty"`
 	ClusterIncidentIDs    []string   `json:"cluster_incident_ids,omitempty"`
 	ActionableSince       *time.Time `json:"actionable_since,omitempty"`
+	// FallbackReason says why this incident has a receipt instead of a written
+	// card. Only ReceiptFallbackNeverEligible changes how it renders: nothing
+	// was ever going to be written for it, so a full card of mechanical lines
+	// is noise. Every other reason is an authoring failure a reader should be
+	// able to see in full. Absent on payloads written before the field existed.
+	FallbackReason string `json:"fallback_reason,omitempty"`
 }
+
+// ReceiptFallbackNeverEligible marks an incident publishable() refused an
+// authored card at freeze. The digest package stamps it; the renderer reads it.
+const ReceiptFallbackNeverEligible = "never_card_eligible"
 
 type DigestWindow struct {
 	From string `json:"from"`
