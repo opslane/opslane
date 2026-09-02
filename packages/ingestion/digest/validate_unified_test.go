@@ -128,11 +128,36 @@ func TestValidateOnPublishesAuthoredFrictionAndCachesCopy(t *testing.T) {
 	}
 }
 
+// The copy digit ban became grounding: a digit matching a frozen fact ships,
+// an invented one still costs the card. The smuggle test below pins the
+// invented side; this pins the grounded side.
+func TestValidateUnifiedGroundedDigitInCopyShips(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	pool, fixture, runID, candidate := freezeUnifiedFriction(t, now)
+	seedDestination(t, pool, fixture.ProjectID, []string{"digest.daily"})
+	writeUnifiedPayload(t, pool, runID, candidate,
+		fmt.Sprintf("It reached %d visits this week.", derefInt64(candidate.ImpactVisits)))
+	if err := ValidateAndPublish(context.Background(), pool, runID); err != nil {
+		t.Fatal(err)
+	}
+	payload := renderedEvent(t, pool, runID)
+	if len(payload.Digest.GeneratedCards) != 1 {
+		t.Fatalf("grounded digit demoted the card: cards=%d", len(payload.Digest.GeneratedCards))
+	}
+}
+
+func derefInt64(v *int64) int64 {
+	if v == nil {
+		return 0
+	}
+	return *v
+}
+
 func TestValidateUnifiedDigitSmuggleFallsBackPerCard(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	pool, fixture, runID, candidate := freezeUnifiedFriction(t, now)
 	seedDestination(t, pool, fixture.ProjectID, []string{"digest.daily"})
-	writeUnifiedPayload(t, pool, runID, candidate, "People clicked save 17 times.")
+	writeUnifiedPayload(t, pool, runID, candidate, "People clicked save 987 times.")
 	if err := ValidateAndPublish(context.Background(), pool, runID); err != nil {
 		t.Fatal(err)
 	}

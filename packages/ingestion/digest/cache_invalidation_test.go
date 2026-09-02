@@ -70,7 +70,7 @@ func TestValidateInvalidatesRejectedCachedRow(t *testing.T) {
 
 	// A digit smuggled into the stored copy: the exact shape verification found.
 	if _, err := pool.Exec(ctx, `UPDATE digest_card_copy
-		SET copy='People clicked save 17 times.'
+		SET copy='People clicked save 987 times.'
 		WHERE error_group_id=$1 AND invalidated_at IS NULL`, groupID); err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +114,7 @@ func TestValidateLeavesConcurrentReplacementCacheRowAlone(t *testing.T) {
 	pool, fixture, groupID := authorOneOnCardRun(t, now)
 	ctx := context.Background()
 	if _, err := pool.Exec(ctx, `UPDATE digest_card_copy
-		SET copy='People clicked save 17 times.'
+		SET copy='People clicked save 987 times.'
 		WHERE error_group_id=$1 AND invalidated_at IS NULL`, groupID); err != nil {
 		t.Fatal(err)
 	}
