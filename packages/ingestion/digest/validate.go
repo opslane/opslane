@@ -945,18 +945,17 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string) e
 			actionableErr = fmt.Errorf("map actionable receipts: %w", err)
 		}
 		receiptOverflow = actionableEval.Overflow
-		// The freeze already decided this incident can never earn an authored
-		// card, and stamped that reason on its ledger row. Carry the same fact
-		// onto the receipt so the renderer can spend one line on it instead of
-		// a whole card. OFF never stamps it: that lane's receipts are its
+		// Whether this incident could ever earn an authored card is answered
+		// from the live row, not from the freeze. A diagnosis validated between
+		// the freeze and now makes the incident card-worthy, and reading the
+		// frozen flag compacted it to one line anyway, hiding the cause it had
+		// just acquired. OFF never stamps this: that lane's receipts are its
 		// product, not a fallback, and its output may not drift.
 		if run.Mode == UnifiedCardsOn {
 			for i := range receiptItems {
 				identity := receiptItems[i].IncidentID
-				if frozen, ok := byIdentity[identity]; ok && frozen.NotCardEligible &&
-					!writerDemotedCard(receiptReasons[identity]) {
-					receiptItems[i].FallbackReason = notify.ReceiptFallbackNeverEligible
-				}
+				live, ok := actionableByGroup[identity]
+				receiptItems[i].FallbackReason = liveFallbackReason(live, ok, receiptReasons[identity])
 			}
 		}
 		actionableBaseReceipts = append(actionableBaseReceipts, receiptItems...)
@@ -1035,7 +1034,11 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string) e
 			}
 			renderModes[identity] = "receipt_fallback"
 			if !receipted[candidate.ErrorGroupID] {
-				receiptItems = append(receiptItems, receiptForUnifiedFallback(candidate, receiptReasons[identity]))
+				// Same rule as the stamp above: live eligibility when the live
+				// rows loaded, and an un-compacted receipt when they did not.
+				live, haveLive := actionableByGroup[candidate.ErrorGroupID]
+				receiptItems = append(receiptItems, receiptForUnifiedFallback(candidate,
+					liveFallbackReason(live, haveLive && actionableErr == nil, receiptReasons[identity])))
 				receipted[candidate.ErrorGroupID] = true
 			}
 			accounted[identity] = "included"
@@ -1250,7 +1253,30 @@ func writerDemotedCard(reason string) bool {
 	return strings.HasPrefix(reason, cardCheckReasonPrefix)
 }
 
-func receiptForUnifiedFallback(candidate Candidate, writerReason string) notify.ReceiptItem {
+// liveFallbackReason decides whether a receipt compacts to one line, from
+// today's incident state rather than the freeze's. Only an incident nothing
+// was ever going to write a card for compacts; everything else marks an
+// authoring failure a reader should see in full.
+//
+// An empty answer is the safe default, and it is what a caller with no live
+// row gets: an un-compacted receipt shows more than it needs to, while a
+// wrongly compacted one hides a cause the incident has.
+func liveFallbackReason(live actionableCandidate, haveLive bool, writerReason string) string {
+	if !haveLive || writerDemotedCard(writerReason) {
+		return ""
+	}
+	if actionablePublishable(live) {
+		return ""
+	}
+	return notify.ReceiptFallbackNeverEligible
+}
+
+// receiptForUnifiedFallback builds the receipt for a frozen candidate when the
+// authored-card section degraded. fallbackReason is decided by the caller from
+// today's eligibility, never from the frozen flag: the frozen flag is a
+// freeze-time signal for skipping a model call, and the freeze ledger keeps its
+// own historical record of it.
+func receiptForUnifiedFallback(candidate Candidate, fallbackReason string) notify.ReceiptItem {
 	state := "report_ready"
 	switch {
 	case candidate.SpellStartedAt != nil && candidate.Status != "":
@@ -1274,13 +1300,7 @@ func receiptForUnifiedFallback(candidate Candidate, writerReason string) notify.
 		HasValidatedDiagnosis: candidate.HasValidatedDiagnosis,
 		ActionableSince:       candidate.SpellStartedAt,
 	}
-	// Same fact its sibling constructor carries: an incident refused a card at
-	// freeze is still refused one when the card section degrades, so it renders
-	// compactly either way. A card the writer built and then threw away over its
-	// own facts is the exception, and keeps its full receipt.
-	if candidate.NotCardEligible && !writerDemotedCard(writerReason) {
-		item.FallbackReason = notify.ReceiptFallbackNeverEligible
-	}
+	item.FallbackReason = fallbackReason
 	if candidate.HasValidatedDiagnosis {
 		item.RootCauseExcerpt = narrative.SanitizeExcerpt(candidate.RootCause, excerptMax)
 		item.MitigationExcerpt = narrative.SanitizeExcerpt(candidate.Mitigation, excerptMax)

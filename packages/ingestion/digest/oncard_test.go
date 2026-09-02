@@ -448,6 +448,54 @@ func TestValidateOnPRCardRepeatsFromCache(t *testing.T) {
 	}
 }
 
+// A diagnosis validated between the freeze and validation makes the incident
+// card-worthy again. Compaction reads today's eligibility, so its receipt shows
+// the cause it just acquired instead of collapsing to one line.
+func TestValidateOnCompactionReadsTodaysEligibility(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	pool, fixture := onCardFixture(t, now)
+	ctx := context.Background()
+	groupID := seedOnCardGroup(t, pool, fixture.ProjectID, fixture.EnvID, "friction", "awaiting_approval",
+		false, "", "The submit handler never fires.", now.Add(-time.Hour))
+
+	runID, candidates, err := FreezeCandidates(ctx, pool, fixture.ProjectID, now)
+	if err != nil || len(candidates) != 1 {
+		t.Fatalf("freeze candidates=%+v err=%v", candidates, err)
+	}
+	if !candidates[0].NotCardEligible {
+		t.Fatalf("candidate without a validated diagnosis was card-eligible: %+v", candidates[0])
+	}
+
+	// Overnight the diagnosis lands. Nothing re-freezes; the frozen snapshot
+	// still says no card was ever going to be written.
+	seedValidatedDiagnosis(t, pool, fixture.ProjectID, groupID, now)
+
+	writeOnCardPayload(t, pool, runID, candidates)
+	if err := ValidateAndPublish(ctx, pool, runID); err != nil {
+		t.Fatal(err)
+	}
+	payload := renderedEvent(t, pool, runID).Digest
+	if len(payload.ReceiptItems) != 1 {
+		t.Fatalf("newly diagnosed incident receipts=%+v", payload.ReceiptItems)
+	}
+	if got := payload.ReceiptItems[0].FallbackReason; got != "" {
+		t.Fatalf("receipt fallback reason = %q, want none: the incident is card-worthy today", got)
+	}
+	if payload.ReceiptItems[0].RootCauseExcerpt == "" {
+		t.Fatalf("full receipt carries no cause: %+v", payload.ReceiptItems[0])
+	}
+	body, _, err := notify.FormatSlack(renderedEvent(t, pool, runID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), "Also waiting") {
+		t.Fatalf("a card-worthy incident was compacted to one line: %s", body)
+	}
+	if !strings.Contains(string(body), "The submit handler never fires.") {
+		t.Fatalf("compacted receipt hid the cause: %s", body)
+	}
+}
+
 // TestValidateOnNeverEligibleRendersReceiptWithoutAuthoring covers the
 // card-versus-receipt split: no card is authored, and the incident still ships.
 func TestValidateOnNeverEligibleRendersReceiptWithoutAuthoring(t *testing.T) {
