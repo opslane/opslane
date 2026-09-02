@@ -72,6 +72,7 @@ import { pushScore } from './scores.js';
 import { processScoreSyncJob } from './score-sync.js';
 import * as billing from './billing.js';
 import { emitUsageEvent } from './usage-events.js';
+import { optionalEnvMissing, requiredEnvMissing } from './startup-env.js';
 
 function nonNegativeIntegerEnv(raw: string | undefined, fallback: number): number {
   const parsed = Number(raw);
@@ -1725,22 +1726,13 @@ async function main(): Promise<void> {
     logger.info('Swept abandoned clone directories', { count: sweptClones });
   }
 
-  const requiredEnv = ['DATABASE_URL'];
-  for (const key of requiredEnv) {
-    if (!process.env[key]) {
-      logger.error('Missing required environment variable', { key });
-      process.exit(1);
-    }
+  const missingRequired = requiredEnvMissing(process.env);
+  for (const key of missingRequired) {
+    logger.error('Missing required environment variable', { key });
   }
-
-  // Warn about optional env vars that will cause job failures if missing
-  const warnEnv = [
-    'ANTHROPIC_API_KEY', 'E2B_API_KEY', 'OPSLANE_E2B_JAVASCRIPT_TEMPLATE', 'GITHUB_TOKEN',
-  ];
-  for (const key of warnEnv) {
-    if (!process.env[key]) {
-      logger.warn('Optional environment variable not set — jobs requiring it will fail', { key });
-    }
+  if (missingRequired.length > 0) process.exit(1);
+  for (const key of optionalEnvMissing(process.env)) {
+    logger.warn('Optional environment variable not set — jobs requiring it will fail', { key });
   }
 
   // Initialize tracing (no-op if LANGFUSE env vars unset).

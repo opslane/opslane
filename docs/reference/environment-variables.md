@@ -129,7 +129,7 @@ The Opslane server reads **only** the `REPLAY_STORE_*` names; `MINIO_*` names ap
 | `ANTHROPIC_BASE_URL` | no (Anthropic default) | Alternate Claude API endpoint; automated tests use it for a fake model server |
 | `OPSLANE_SANDBOX_BACKEND` | no (`e2b`) | Fix-verification sandbox backend; `local` is only for trusted automated reliability tests and also requires `OPSLANE_RELIABILITY_HARNESS=1` |
 | `SANDBOX_LIFETIME_MS` | no (`1800000`) | Wall-clock ceiling for a verification sandbox. Values below `900000` fall back to the default; values above `1800000` are clamped to it (E2B enforces account-tier maximums). The ceiling is not billed unless consumed; raising it increases orphan exposure if the worker crashes. |
-| `OPSLANE_E2B_JAVASCRIPT_TEMPLATE` | for JavaScript jobs | Immutable E2B template name built by `packages/worker/e2b-javascript/build.ts`. JavaScript fix and read-only jobs refuse to start a machine when it is unset. |
+| `OPSLANE_E2B_JAVASCRIPT_TEMPLATE` | when `E2B_API_KEY` is set | Immutable E2B template name built by `packages/worker/e2b-javascript/build.ts`. On the default `e2b` backend, the worker refuses to start when `E2B_API_KEY` is set and this is missing. |
 | `FIX_SANDBOX_EGRESS_DISABLED` | no | Emergency escape hatch. Set to `1` to leave JavaScript fix sandboxes on unrestricted egress; Python fix sandboxes remain unrestricted until their dependency hosts are measured. |
 | `OPSLANE_PYTHON_PIPELINE` | no (off) | Routes Python errors through the Python-specific fix workflow for `1` or `true`; Opslane saves the chosen platform with the repair task. |
 | `OPSLANE_E2B_PYTHON_TEMPLATE` | no (`opslane-python`) | Overrides the E2B template name used by Python repair tasks. |
@@ -137,7 +137,7 @@ The Opslane server reads **only** the `REPLAY_STORE_*` names; `MINIO_*` names ap
 | `OPSLANE_GITHUB_URL` | no (`https://github.com`) | Alternate git host for clones; used by tests and self-hosted git |
 | `OPSLANE_GITHUB_API_URL` | no (GitHub default) | Alternate GitHub REST API base URL for PR creation |
 
-The worker starts with only `DATABASE_URL` and logs a warning for missing `ANTHROPIC_API_KEY`, `E2B_API_KEY`, `OPSLANE_E2B_JAVASCRIPT_TEMPLATE`, and `GITHUB_TOKEN`. Work that needs a missing credential stops with a reason instead of crashing the worker.
+The worker starts with only `DATABASE_URL` and logs a warning for missing `ANTHROPIC_API_KEY`, `E2B_API_KEY`, and `GITHUB_TOKEN`. A half-configured E2B worker—with `E2B_API_KEY` but no JavaScript template—exits at startup. Work that needs another missing credential dead-letters as an operator configuration failure.
 
 ## Set in Compose but consumed by no code (known dead config)
 
