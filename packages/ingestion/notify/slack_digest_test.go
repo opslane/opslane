@@ -512,7 +512,7 @@ func TestFormatSlackDigestV4RendersTheMeasuredImpactLine(t *testing.T) {
 		return GeneratedDigestCard{
 			IncidentID: incidentID, Kind: kind, Title: "Saving is blocked", Outcome: "needs_human",
 			Copy: "People cannot save their work.", Why: "The submit handler is never wired up.",
-			Action: "Decide how to handle this.",
+			Action:       "Decide how to handle this.",
 			ImpactVisits: impactVisits, ImpactRecovered: impactRecovered,
 		}
 	}
@@ -520,7 +520,7 @@ func TestFormatSlackDigestV4RendersTheMeasuredImpactLine(t *testing.T) {
 		_, body := formatV4Blocks(t, EventPayload{
 			Version: 1, EventType: "digest.daily", Project: ProjectRef{ID: "p1", Name: "Shop"},
 			DashboardURL: "https://app.example",
-			Digest: &DigestPayload{SchemaVersion: 4, Date: "2026-08-27", GeneratedCards: cards},
+			Digest:       &DigestPayload{SchemaVersion: 4, Date: "2026-08-27", GeneratedCards: cards},
 		})
 		return body
 	}

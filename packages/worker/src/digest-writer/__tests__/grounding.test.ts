@@ -1,6 +1,16 @@
 import { describe, expect, it } from 'vitest';
-import { groundPayload } from '../job.js';
+import { CARD_CHECK_REASON_PREFIX, groundPayload } from '../job.js';
 import type { DigestCandidate } from '../job.js';
+
+/** A card that fails one of its own factual checks is demoted to its receipt,
+ * never allowed to fail the run. This reads the reason back off the deferral. */
+function demotedReason(payload: { included: unknown[]; deferred: Array<{ reason: string }> }): string {
+  expect(payload.included).toHaveLength(0);
+  expect(payload.deferred).toHaveLength(1);
+  const reason = payload.deferred[0]!.reason;
+  expect(reason.startsWith(CARD_CHECK_REASON_PREFIX)).toBe(true);
+  return reason;
+}
 
 // The frozen candidate crosses a Go json boundary where omitempty drops zero
 // counts. An all-anonymous friction incident therefore has identifiedCount
@@ -52,7 +62,7 @@ describe('groundPayload zero-count normalization', () => {
       impactVisits: 17,
       impactRecovered: 14,
     };
-    expect(() => groundPayload({
+    expect(demotedReason(groundPayload({
       included: [{
         errorGroupId: 'g-anon',
         title: 'Support email is not clickable',
@@ -60,9 +70,9 @@ describe('groundPayload zero-count normalization', () => {
         action: 'Review the investigation.',
       }],
       deferred: [],
-    }, [measured])).toThrow(/ungrounded number 17/);
+    }, [measured]))).toMatch(/ungrounded number 17/);
 
-    expect(() => groundPayload({
+    expect(demotedReason(groundPayload({
       included: [{
         errorGroupId: 'g-anon',
         title: 'Support email is not clickable',
@@ -70,7 +80,7 @@ describe('groundPayload zero-count normalization', () => {
         action: 'Review the investigation.',
       }],
       deferred: [],
-    }, [measured])).toThrow(/ungrounded number 42/);
+    }, [measured]))).toMatch(/ungrounded number 42/);
   });
 
   // Copy and action carry no digits at all once the candidate is frozen under
@@ -83,7 +93,7 @@ describe('groundPayload zero-count normalization', () => {
       spellStartedAt: '2026-09-01T07:00:00Z',
       sessionCount: 3,
     };
-    expect(() => groundPayload({
+    expect(demotedReason(groundPayload({
       included: [{
         errorGroupId: 'g-anon',
         title: 'Support email is not clickable',
@@ -91,7 +101,7 @@ describe('groundPayload zero-count normalization', () => {
         action: 'Review the investigation.',
       }],
       deferred: [],
-    }, [unified])).toThrow(/numeric glyph/);
+    }, [unified]))).toMatch(/numeric glyph/);
   });
 
   it('grounds the cause sentence against the stored root cause', () => {
@@ -113,7 +123,7 @@ describe('groundPayload zero-count normalization', () => {
       why: 'Both 2 contact addresses render as plain text, so neither opens a mail client.',
     });
 
-    expect(() => groundPayload({
+    expect(demotedReason(groundPayload({
       included: [{
         errorGroupId: 'g-anon',
         title: 'Support email is not clickable',
@@ -122,7 +132,7 @@ describe('groundPayload zero-count normalization', () => {
         action: 'Review the investigation.',
       }],
       deferred: [],
-    }, [diagnosed])).toThrow(/ungrounded number 9/);
+    }, [diagnosed]))).toMatch(/ungrounded number 9/);
   });
 
   it('still rejects a card inventing a nonzero identified count', () => {
@@ -137,6 +147,6 @@ describe('groundPayload zero-count normalization', () => {
       }],
       deferred: [],
     };
-    expect(() => groundPayload(payload, [anonymousFrictionCandidate])).toThrow(/unsupported identified count/);
+    expect(demotedReason(groundPayload(payload, [anonymousFrictionCandidate]))).toMatch(/unsupported identified count/);
   });
 });

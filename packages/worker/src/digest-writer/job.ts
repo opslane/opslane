@@ -203,83 +203,28 @@ export function groundPayload(raw: unknown, candidates: DigestCandidate[]): Dige
     }
   }
   const accounted = new Set<string>();
-  const included = parsed.included.map((card) => {
+  const included: DigestPayload['included'] = [];
+  const cardCheckDeferred: DigestPayload['deferred'] = [];
+  for (const card of parsed.included) {
     const suppliedIdentity = dispositionIdentity(card);
     const truth = allowed.get(suppliedIdentity);
     if (!truth) throw new Error(`unknown episode or error group ${suppliedIdentity}`);
     const truthIdentity = candidateIdentity(truth);
     if (accounted.has(truthIdentity)) throw new Error(`duplicate disposition for ${truthIdentity}`);
     accounted.add(truthIdentity);
-    if (card.claimedUsers !== undefined && card.claimedUsers !== truth.affectedUsers) {
-      throw new Error(`unsupported count for ${truthIdentity}: claimed ${card.claimedUsers}, stored ${truth.affectedUsers}`);
+    try {
+      included.push(groundIncludedCard(card, truth, truthIdentity));
+    } catch (error: unknown) {
+      // Every check inside groundIncludedCard is about this card's facts, so
+      // the card is the blast radius. Failing the run instead would cost the
+      // whole day's digest for one bad sentence; deferring routes this
+      // incident to its mechanical receipt and leaves its siblings alone.
+      const message = error instanceof Error ? error.message : String(error);
+      log('warn', 'digest card failed a factual check and fell back to its receipt',
+        { identity: truthIdentity, error: message });
+      cardCheckDeferred.push({ ...frozenIdentities(truth), reason: `${CARD_CHECK_REASON_PREFIX}${message}` });
     }
-    // typeof check: a candidate frozen by pre-v4 ingestion during a deploy
-    // window has no occurrenceCount; a claim against it must not fail the run.
-    if (card.claimedOccurrences !== undefined && typeof truth.occurrenceCount === 'number'
-      && card.claimedOccurrences !== truth.occurrenceCount) {
-      throw new Error(`unsupported occurrence count for ${truthIdentity}: claimed ${card.claimedOccurrences}, stored ${truth.occurrenceCount}`);
-    }
-    if (card.accounts !== undefined && !sameStrings(card.accounts, truth.accounts)) {
-      throw new Error(`unsupported accounts for ${truthIdentity}`);
-    }
-    if (card.prUrl !== undefined && card.prUrl !== truth.prUrl) {
-      throw new Error(`unsupported link for ${truthIdentity}`);
-    }
-    // The frozen candidate arrives through Go json omitempty, which drops a
-    // zero count entirely — an all-anonymous incident has identifiedCount 0 on
-    // the writer input but undefined here. The model is ordered to preserve
-    // the number exactly, so compare against the same zero default the input
-    // was built with, or every anonymous-only incident dead-letters the run.
-    if (card.sessionCount !== undefined && card.sessionCount !== (truth.sessionCount ?? 0)) {
-      throw new Error(`unsupported session count for ${truthIdentity}`);
-    }
-    if (card.identifiedCount !== undefined && card.identifiedCount !== (truth.identifiedCount ?? 0)) {
-      throw new Error(`unsupported identified count for ${truthIdentity}`);
-    }
-    const numbers = factNumbers(truth);
-    const title = stripInvisible(card.title ?? '');
-    const copy = stripInvisible(card.copy);
-    const why = card.why === undefined ? undefined : stripInvisible(card.why);
-    // Overwrite, never compare: demoting a correct card over the wording of a
-    // line with exactly one correct value would waste the authoring call.
-    const action = stateAction(truth) ?? stripInvisible(card.action);
-    if (bannedDigitField(truth, copy, action)) {
-      throw new Error(`authored copy/action contains a numeric glyph for ${truthIdentity}`);
-    }
-    for (const field of [title, copy, action]) {
-      for (const match of normalizeProseNumbers(field).matchAll(PROSE_NUMBER)) {
-        if (!numbers.has(match[0])) {
-          throw new Error(`ungrounded number ${match[0]} in card for ${truthIdentity}`);
-        }
-      }
-    }
-    const causeDigits = causeNumbers(truth);
-    for (const match of normalizeProseNumbers(why ?? '').matchAll(PROSE_NUMBER)) {
-      if (!causeDigits.has(match[0])) {
-        throw new Error(`ungrounded number ${match[0]} in card for ${truthIdentity}`);
-      }
-    }
-    return {
-      ...card,
-      ...frozenIdentities(truth),
-      ...(card.title === undefined ? {} : { title }),
-      copy,
-      ...(why === undefined ? {} : { why }),
-      action,
-      label: (truth.episodeSequence ?? 0) > 1 ? 'returned' as const : 'new' as const,
-      claimedUsers: truth.affectedUsers,
-      ...(typeof truth.occurrenceCount === 'number' ? { claimedOccurrences: truth.occurrenceCount } : {}),
-      accounts: truth.accounts,
-      ...(truth.prUrl ? { prUrl: truth.prUrl } : {}),
-      ...(truth.observationQuote ? {
-        frictionCategory: truth.frictionCategory,
-        route: truth.route ?? '',
-        sessionCount: truth.sessionCount ?? 0,
-        identifiedCount: truth.identifiedCount ?? 0,
-        observationQuote: truth.observationQuote,
-      } : {}),
-    };
-  });
+  }
   const deferred = parsed.deferred.map((item) => {
     const suppliedIdentity = dispositionIdentity(item);
     const truth = allowed.get(suppliedIdentity);
@@ -289,6 +234,7 @@ export function groundPayload(raw: unknown, candidates: DigestCandidate[]): Dige
     accounted.add(truthIdentity);
     return { ...item, ...frozenIdentities(truth) };
   });
+  deferred.push(...cardCheckDeferred);
   // A card the parser rejected still has to reach the reader: deferring it here
   // routes the incident to its mechanical receipt (the Go validator's
   // receipt_fallback) instead of dropping it out of the digest.
@@ -316,6 +262,91 @@ export function groundPayload(raw: unknown, candidates: DigestCandidate[]): Dige
     throw new Error(`candidate ${identity} was neither included nor deferred`);
   }
   return { included, deferred };
+}
+
+/** The prefix a demoted card's deferral reason carries. Go's validator reads it
+ * to tell a card that failed its own checks from an incident nothing was ever
+ * going to write for: the first keeps its full receipt, the second compacts. */
+export const CARD_CHECK_REASON_PREFIX = 'card check: ';
+
+/** One card's factual checks. Everything here is local to the card, so a
+ * failure demotes it alone; the identity and disposition checks in
+ * groundPayload stay throws because a run that cannot tell which incident a
+ * card is about cannot be accounted at all. */
+function groundIncludedCard(
+  card: Omit<DigestPayload['included'][number], 'label'>,
+  truth: DigestCandidate,
+  truthIdentity: string,
+): DigestPayload['included'][number] {
+  if (card.claimedUsers !== undefined && card.claimedUsers !== truth.affectedUsers) {
+    throw new Error(`unsupported count for ${truthIdentity}: claimed ${card.claimedUsers}, stored ${truth.affectedUsers}`);
+  }
+  // typeof check: a candidate frozen by pre-v4 ingestion during a deploy
+  // window has no occurrenceCount; a claim against it must not fail the run.
+  if (card.claimedOccurrences !== undefined && typeof truth.occurrenceCount === 'number'
+    && card.claimedOccurrences !== truth.occurrenceCount) {
+    throw new Error(`unsupported occurrence count for ${truthIdentity}: claimed ${card.claimedOccurrences}, stored ${truth.occurrenceCount}`);
+  }
+  if (card.accounts !== undefined && !sameStrings(card.accounts, truth.accounts)) {
+    throw new Error(`unsupported accounts for ${truthIdentity}`);
+  }
+  if (card.prUrl !== undefined && card.prUrl !== truth.prUrl) {
+    throw new Error(`unsupported link for ${truthIdentity}`);
+  }
+  // The frozen candidate arrives through Go json omitempty, which drops a
+  // zero count entirely — an all-anonymous incident has identifiedCount 0 on
+  // the writer input but undefined here. The model is ordered to preserve
+  // the number exactly, so compare against the same zero default the input
+  // was built with, or every anonymous-only incident dead-letters the run.
+  if (card.sessionCount !== undefined && card.sessionCount !== (truth.sessionCount ?? 0)) {
+    throw new Error(`unsupported session count for ${truthIdentity}`);
+  }
+  if (card.identifiedCount !== undefined && card.identifiedCount !== (truth.identifiedCount ?? 0)) {
+    throw new Error(`unsupported identified count for ${truthIdentity}`);
+  }
+  const numbers = factNumbers(truth);
+  const title = stripInvisible(card.title ?? '');
+  const copy = stripInvisible(card.copy);
+  const why = card.why === undefined ? undefined : stripInvisible(card.why);
+  // Overwrite, never compare: demoting a correct card over the wording of a
+  // line with exactly one correct value would waste the authoring call.
+  const action = stateAction(truth) ?? stripInvisible(card.action);
+  if (bannedDigitField(truth, copy, action)) {
+    throw new Error(`authored copy/action contains a numeric glyph for ${truthIdentity}`);
+  }
+  for (const field of [title, copy, action]) {
+    for (const match of normalizeProseNumbers(field).matchAll(PROSE_NUMBER)) {
+      if (!numbers.has(match[0])) {
+        throw new Error(`ungrounded number ${match[0]} in card for ${truthIdentity}`);
+      }
+    }
+  }
+  const causeDigits = causeNumbers(truth);
+  for (const match of normalizeProseNumbers(why ?? '').matchAll(PROSE_NUMBER)) {
+    if (!causeDigits.has(match[0])) {
+      throw new Error(`ungrounded number ${match[0]} in card for ${truthIdentity}`);
+    }
+  }
+  return {
+    ...card,
+    ...frozenIdentities(truth),
+    ...(card.title === undefined ? {} : { title }),
+    copy,
+    ...(why === undefined ? {} : { why }),
+    action,
+    label: (truth.episodeSequence ?? 0) > 1 ? 'returned' as const : 'new' as const,
+    claimedUsers: truth.affectedUsers,
+    ...(typeof truth.occurrenceCount === 'number' ? { claimedOccurrences: truth.occurrenceCount } : {}),
+    accounts: truth.accounts,
+    ...(truth.prUrl ? { prUrl: truth.prUrl } : {}),
+    ...(truth.observationQuote ? {
+      frictionCategory: truth.frictionCategory,
+      route: truth.route ?? '',
+      sessionCount: truth.sessionCount ?? 0,
+      identifiedCount: truth.identifiedCount ?? 0,
+      observationQuote: truth.observationQuote,
+    } : {}),
+  };
 }
 
 /** The one correct instruction line for an actionable (ON-lane) candidate, or

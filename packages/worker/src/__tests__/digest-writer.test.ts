@@ -143,25 +143,62 @@ describe('digest writer', () => {
     await expect(writeDigest('run-1', 'project-1', deps)).rejects.toThrow(/unknown episode/);
   });
 
-  it('rejects unsupported counts and account names', async () => {
+  // One invented number used to cost the reader every other card that morning.
+  it('keeps the sibling card when one card carries an ungrounded number', async () => {
+    logged.length = 0;
+    const broken = candidate(1, { title: 'Checkout failed', summary: 'Payment stopped' });
+    const healthy = candidate(2, { title: 'Export failed', summary: 'Exports stopped' });
+    const payload = await writeDigest('run-1', 'project-1', dependencies([broken, healthy], {
+      included: [
+        { episodeId: broken.episodeId, title: broken.title, copy: 'Around 99 people hit this.', action: 'Review it' },
+        { episodeId: healthy.episodeId, title: healthy.title, copy: healthy.summary, action: 'Review it' },
+      ],
+      deferred: [],
+    }));
+
+    expect(payload.included.map((card) => card.episodeId)).toEqual([healthy.episodeId]);
+    expect(payload.deferred).toEqual([{
+      errorGroupId: broken.errorGroupId,
+      episodeId: broken.episodeId,
+      reason: expect.stringMatching(/^card check: ungrounded number 99/) as unknown as string,
+    }]);
+    expect(logged.some((entry) => entry.level === 'warn'
+      && /failed a factual check/.test(entry.message))).toBe(true);
+  });
+
+  // Counts, accounts and links are facts of one card, so a card that gets one
+  // wrong loses its own card and nothing else. It used to fail the whole run,
+  // which cost every sibling incident its place in the day's digest.
+  it('demotes a card claiming unsupported counts or account names', async () => {
     const frozen = candidate(1, { affectedUsers: 9, accounts: ['Acme'] });
-    await expect(writeDigest('run-1', 'project-1', dependencies([frozen], {
+    const sibling = candidate(2);
+    const payload = await writeDigest('run-1', 'project-1', dependencies([frozen, sibling], {
       included: [{
         episodeId: frozen.episodeId, title: 'Checkout is blocked', copy: '40 customers affected', action: 'Review',
         claimedUsers: 40, accounts: ['Not Acme'], prUrl: frozen.prUrl,
+      }, {
+        episodeId: sibling.episodeId, title: 'Export is blocked', copy: sibling.summary, action: 'Review',
       }], deferred: [],
-    }))).rejects.toThrow(/unsupported count/);
+    }));
+    expect(payload.included.map((card) => card.episodeId)).toEqual([sibling.episodeId]);
+    expect(payload.deferred).toHaveLength(1);
+    expect(payload.deferred[0]).toMatchObject({ errorGroupId: frozen.errorGroupId, episodeId: frozen.episodeId });
+    expect(payload.deferred[0]?.reason).toMatch(/^card check: unsupported count/);
   });
 
-  it('rejects invented links and omitted candidates', async () => {
+  it('demotes a card citing an invented link but still fails on an omitted candidate', async () => {
     const frozen = candidate(1);
-    await expect(writeDigest('run-1', 'project-1', dependencies([frozen], {
+    const payload = await writeDigest('run-1', 'project-1', dependencies([frozen], {
       included: [{
         episodeId: frozen.episodeId, title: 'Checkout is blocked', copy: 'x', action: 'Review',
         prUrl: 'https://evil.example/pull/1',
       }], deferred: [],
-    }))).rejects.toThrow(/unsupported link/);
+    }));
+    expect(payload.included).toEqual([]);
+    expect(payload.deferred[0]?.reason).toMatch(/^card check: unsupported link/);
 
+    // A candidate the writer never dispositioned is a protocol violation, not a
+    // card defect: nothing says what should have happened to that incident.
     await expect(writeDigest('run-1', 'project-1', dependencies([frozen], {
       included: [], deferred: [],
     }))).rejects.toThrow(/neither included nor deferred/);
@@ -451,9 +488,11 @@ describe('digest writer', () => {
       included: [{ episodeId: frozen.episodeId, copy: 'c', action: 'a' }], deferred: [],
     }));
     expect(replayed.included[0]?.title).toBeUndefined();
-    await expect(writeDigest('run-1', 'project-1', dependencies([frozen], {
+    const wrongCount = await writeDigest('run-1', 'project-1', dependencies([frozen], {
       included: [{ episodeId: frozen.episodeId, title: 't', copy: 'c', action: 'a', claimedOccurrences: 99 }], deferred: [],
-    }))).rejects.toThrow(/occurrence/);
+    }));
+    expect(wrongCount.included).toEqual([]);
+    expect(wrongCount.deferred[0]?.reason).toMatch(/^card check: unsupported occurrence count/);
     const ok = await writeDigest('run-1', 'project-1', dependencies([frozen], {
       included: [{ episodeId: frozen.episodeId, title: 't', copy: 'c', action: 'a', claimedOccurrences: 34 }], deferred: [],
     }));
@@ -482,13 +521,15 @@ describe('digest writer', () => {
       && /at most 80 characters/.test(JSON.stringify(entry.fields ?? {})))).toBe(true);
   });
 
-  it.each(['title', 'copy', 'action'] as const)('rejects an ungrounded number in %s', async (field) => {
+  it.each(['title', 'copy', 'action'] as const)('demotes a card carrying an ungrounded number in %s', async (field) => {
     const frozen = candidate(1, { title: 'Checkout failed', summary: 'Payment stopped', occurrenceCount: 34, affectedUsers: 18 });
     const card = { episodeId: frozen.episodeId, title: 'Checkout failed', copy: 'Payment stopped', action: 'Review it' };
     card[field] = `${card[field]} 99`;
-    await expect(writeDigest('run-1', 'project-1', dependencies([frozen], {
+    const payload = await writeDigest('run-1', 'project-1', dependencies([frozen], {
       included: [card], deferred: [],
-    }))).rejects.toThrow(/ungrounded number 99/);
+    }));
+    expect(payload.included).toEqual([]);
+    expect(payload.deferred[0]?.reason).toMatch(/^card check: ungrounded number 99/);
   });
 
   it('allows a number already present in a frozen prose fact', async () => {
