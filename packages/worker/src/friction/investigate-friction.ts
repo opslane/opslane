@@ -9,6 +9,7 @@ import { runReadOnlyAgentSdk, type ReadOnlyRunResult } from '../harness/sdk-agen
 import { validateVerdict } from '../verdict-validation.js';
 import type { FrictionEvidence } from './friction-evidence.js';
 import { CATEGORY_DEFINITIONS } from '../narrative/prompt.js';
+import { traceSpan } from '../tracing.js';
 
 
 export const FRICTION_INVESTIGATION_MODEL =
@@ -220,18 +221,23 @@ export async function investigateFriction(
     return knownMissing.has(key) ? null : key;
   };
 
-  const run = await runReadOnlyAgentSdk({
+  const prompt = await systemPrompt(input);
+  const run = await traceSpan('friction.investigate', {
+    'friction.model': FRICTION_INVESTIGATION_MODEL,
+    'friction.max_turns': MAX_TURNS,
+    'friction.budget_usd': BUDGET_USD,
+  }, () => runReadOnlyAgentSdk({
     apiKey,
     model: FRICTION_INVESTIGATION_MODEL,
     maxTurns: MAX_TURNS,
     budgetUsd: BUDGET_USD,
     pricing: MODEL_PRICING[FRICTION_INVESTIGATION_MODEL] ?? DEFAULT_PRICING,
-    systemPrompt: await systemPrompt(input),
+    systemPrompt: prompt,
     firstMessage: 'Inspect the repository, then call classify_friction with your evidence-backed conclusion.',
     terminalTool: CLASSIFY_TOOL,
     reader: recordingReader,
     classification: { minFilesRead: 1 },
-  });
+  }));
 
   switch (run.stop) {
     case 'api_error':

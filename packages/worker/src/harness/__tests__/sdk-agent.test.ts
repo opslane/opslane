@@ -21,6 +21,9 @@ const sdk = vi.hoisted(() => ({
   queryOptions: null as Record<string, unknown> | null,
   returned: vi.fn(async () => ({ done: true, value: undefined })),
 }));
+const tracing = vi.hoisted(() => ({ annotate: vi.fn() }));
+
+vi.mock('../../tracing.js', () => ({ annotateActiveSpan: tracing.annotate }));
 
 vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
   tool: (name: string, _description: string, _schema: unknown, handler: Handler): FakeTool => ({ name, handler }),
@@ -108,6 +111,7 @@ beforeEach(() => {
   sdk.actions.length = 0;
   sdk.queryOptions = null;
   sdk.returned.mockClear();
+  tracing.annotate.mockClear();
 });
 
 describe('SDK read-only agent', () => {
@@ -225,6 +229,21 @@ describe('SDK read-only agent', () => {
 });
 
 describe('how a run ends', () => {
+  it('annotates the enclosing span with how the run ended and what it cost', async () => {
+    sdk.actions.push(
+      { kind: 'assistant', text: 'looking' },
+      { kind: 'result', subtype: 'error_max_turns' },
+    );
+    await runReadOnlyAgentSdk(fakeInput());
+    expect(tracing.annotate).toHaveBeenCalledWith(expect.objectContaining({
+      'agent.stop': 'turns_exhausted',
+      'agent.cost_usd': expect.any(Number),
+      'agent.input_tokens': 100,
+      'agent.output_tokens': 20,
+      'agent.files_read': 0,
+    }));
+  });
+
   it('spends nothing when zero turns cannot meet the evidence gate', async () => {
     const out = await runReadOnlyAgentSdk(fakeInput({
       maxTurns: 0, classification: { minFilesRead: 1 },

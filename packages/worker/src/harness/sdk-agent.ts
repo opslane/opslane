@@ -15,6 +15,7 @@ import {
   type RepoReader,
 } from '../investigate-tools.js';
 import { logger } from '../logger.js';
+import { annotateActiveSpan } from '../tracing.js';
 import { pricingFor } from './agent-loop.js';
 import { MachineUnavailableError } from './errors.js';
 
@@ -292,6 +293,13 @@ function addUsage(target: TokenUsage, delta: TokenUsage): void {
 /** Run the SDK loop on the worker while every repository tool executes remotely. */
 export async function runReadOnlyAgentSdk(input: ReadOnlyRunInput): Promise<ReadOnlyRunResult> {
   if (input.maxTurns <= 0) {
+    annotateActiveSpan({
+      'agent.stop': input.classification ? 'no_evidence' : 'turns_exhausted',
+      'agent.cost_usd': 0,
+      'agent.files_read': 0,
+      'agent.input_tokens': 0,
+      'agent.output_tokens': 0,
+    });
     return {
       terminalInput: null,
       stop: input.classification ? 'no_evidence' : 'turns_exhausted',
@@ -387,6 +395,17 @@ export async function runReadOnlyAgentSdk(input: ReadOnlyRunInput): Promise<Read
   if (terminalInput && stop !== 'api_error' && stop !== 'budget') stop = 'terminal';
   if (!terminalInput && input.classification && state.filesRead.size < input.classification.minFilesRead
       && (stop === 'no_tool_call' || stop === 'turns_exhausted')) stop = 'no_evidence';
+  annotateActiveSpan({
+    'agent.stop': stop,
+    'agent.cost_usd': costUsd,
+    'agent.files_read': state.filesRead.size,
+    'agent.input_tokens': usage.input,
+    'agent.output_tokens': usage.output,
+    ...(apiErrorStatus === undefined ? {} : { 'agent.api_error_status': apiErrorStatus }),
+    ...(apiErrorDetail === undefined
+      ? {}
+      : { 'agent.api_error_detail': apiErrorDetail.slice(0, 200) }),
+  });
   return {
     terminalInput,
     stop,

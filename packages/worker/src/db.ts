@@ -25,6 +25,7 @@ import { logger, safeErrorMessage } from './logger.js';
 import { emitUsageEvent, incidentUrlFor } from './usage-events.js';
 import type { LedgerEntry } from './verification-ledger.js';
 import type { DeadLetterClass } from './harness/model-failure-policy.js';
+import { scrubSecrets } from './harness/redact.js';
 
 const { Pool } = pg;
 
@@ -848,6 +849,43 @@ export async function completeJob(
 export const RETRY_BACKOFF_BASE_SECONDS = 30;
 export const RETRY_BACKOFF_CAP_SECONDS = 900;
 
+interface DeadLetterEventRow {
+  status: string;
+  job_type: JobType;
+  project_id: string;
+  attempts: number;
+  dead_letter_class: DeadLetterClass | null;
+  requeues: number;
+}
+
+function emitDeadLetterUsageEvents(
+  jobId: string,
+  row: DeadLetterEventRow,
+  error: string,
+): void {
+  if (row.status !== 'dead_letter') return;
+  const deadLetterClass = row.dead_letter_class ?? 'transient';
+  const lastError = scrubSecrets(error).slice(0, 300);
+  emitUsageEvent('job_dead_lettered', {
+    job_id: jobId,
+    project_id: row.project_id,
+    job_type: row.job_type,
+    class: deadLetterClass,
+    attempts: String(row.attempts),
+    requeues: String(row.requeues),
+    last_error: lastError,
+  });
+  if (row.requeues >= 3) {
+    emitUsageEvent('job_given_up', {
+      job_id: jobId,
+      project_id: row.project_id,
+      job_type: row.job_type,
+      class: deadLetterClass,
+      last_error: lastError,
+    });
+  }
+}
+
 /**
  * Fails a job: increments attempts and records the error.
  * Resets to 'pending' for retry, or 'dead_letter' at max_attempts.
@@ -935,6 +973,7 @@ export async function failJob(
       await releaseUnfinishedGeneration(client, jobId, row.project_id);
     }
     await client.query('COMMIT');
+    if (row) emitDeadLetterUsageEvents(jobId, row, error);
     if (row && row.status === 'dead_letter' && row.job_type === 'investigate' && row.error_group_id) {
       logDeadLetteredInvestigation(row.error_group_id, row.project_id, jobId);
     }
@@ -974,6 +1013,10 @@ export async function requeueStaleJobs(): Promise<number> {
     project_id: string;
     job_type: JobType;
     status: string;
+    attempts: number;
+    dead_letter_class: DeadLetterClass | null;
+    requeues: number;
+    last_error: string;
   }>;
   try {
     await client.query('BEGIN');
@@ -984,6 +1027,10 @@ export async function requeueStaleJobs(): Promise<number> {
       project_id: string;
       job_type: JobType;
       status: string;
+      attempts: number;
+      dead_letter_class: DeadLetterClass | null;
+      requeues: number;
+      last_error: string;
     }>(
       `UPDATE error_group_jobs
        SET attempts = attempts + 1,
@@ -1023,7 +1070,8 @@ export async function requeueStaleJobs(): Promise<number> {
            END,
            updated_at = now()
        WHERE status = 'claimed' AND lease_expires_at < now()
-       RETURNING id, error_group_id, session_id, project_id, job_type, status`,
+       RETURNING id, error_group_id, session_id, project_id, job_type, status,
+                 attempts, dead_letter_class, requeues, last_error`,
       [RETRY_BACKOFF_BASE_SECONDS, RETRY_BACKOFF_CAP_SECONDS],
     );
     rows = result.rows;
@@ -1053,6 +1101,10 @@ export async function requeueStaleJobs(): Promise<number> {
     throw err;
   } finally {
     client.release();
+  }
+
+  for (const row of rows) {
+    emitDeadLetterUsageEvents(row.id, row, row.last_error);
   }
 
   // Reconcile any FIX job that just dead-lettered: its error group is stuck in
@@ -1135,13 +1187,47 @@ export async function requeueDeadLetters(
       RETURNING id, job_type, project_id, error_group_id, dead_letter_class, requeues`,
     [classes, trigger === 'boot'],
   );
-  return rows.map((row) => ({
+  const requeued = rows.map((row) => ({
     id: row.id,
     jobType: row.job_type,
     projectId: row.project_id,
     errorGroupId: row.error_group_id,
     deadLetterClass: row.dead_letter_class,
     requeues: row.requeues,
+  }));
+  for (const row of requeued) {
+    emitUsageEvent('job_requeued', {
+      job_id: row.id,
+      project_id: row.projectId,
+      job_type: row.jobType,
+      class: row.deadLetterClass,
+      requeues: String(row.requeues),
+      trigger,
+    });
+  }
+  return requeued;
+}
+
+export async function getDeadLetterCounts(): Promise<Array<{
+  jobType: string;
+  deadLetterClass: string;
+  count: number;
+}>> {
+  const { rows } = await getPool().query<{
+    job_type: string;
+    dead_letter_class: string | null;
+    count: string;
+  }>(
+    `SELECT job_type, dead_letter_class, count(*)::text AS count
+       FROM error_group_jobs
+      WHERE status = 'dead_letter'
+        AND dead_lettered_at > now() - interval '24 hours'
+      GROUP BY 1, 2`,
+  );
+  return rows.map((row) => ({
+    jobType: row.job_type,
+    deadLetterClass: row.dead_letter_class ?? 'unclassed',
+    count: Number(row.count),
   }));
 }
 

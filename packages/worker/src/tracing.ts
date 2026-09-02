@@ -333,6 +333,17 @@ export async function traceSpan<T>(
   });
 }
 
+/** Attach attributes to whichever span is active; no-op without tracing. */
+export function annotateActiveSpan(
+  attributes: Record<string, string | number | boolean>,
+): void {
+  const span = trace.getSpan(context.active());
+  if (!span) return;
+  for (const [key, value] of Object.entries(attributes)) {
+    span.setAttribute(key, value);
+  }
+}
+
 /**
  * Returns the trace ID of the currently active span, or null if no span is active.
  */

@@ -1,8 +1,15 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { purgeDiagnosisDecisions } from './purge-diagnosis-decisions.js';
 import { purgeFixRunLedger } from './purge-fix-run-ledger.js';
 import pg from 'pg';
+
+const usageEvents = vi.hoisted(() => ({ emit: vi.fn() }));
+vi.mock('../usage-events.js', () => ({
+  emitUsageEvent: usageEvents.emit,
+  incidentUrlFor: () => '',
+}));
+
 import {
   claimJob,
   heartbeat,
@@ -22,6 +29,7 @@ import {
   recordDeliveryPushed,
   finalizeDelivery,
   getQueueDepth,
+  getDeadLetterCounts,
   recordDiagnosisDecision,
   loadDiagnosisDecision,
   loadDiagnosisDecisionForSource,
@@ -184,6 +192,7 @@ describeDb('db.ts integration tests', () => {
   });
 
   beforeEach(async () => {
+    usageEvents.emit.mockClear();
     // Clean only jobs and error groups between tests, keep tenant
     await testPool.query(`DELETE FROM friction_signals WHERE project_id = $1`, [testProjectId]);
     await testPool.query(`DELETE FROM friction_adjudication_generations WHERE project_id = $1`, [testProjectId]);
@@ -2217,6 +2226,12 @@ describeDb('db.ts integration tests', () => {
         status: 'dead_letter', attempts: 1, dead_letter_class: 'limit',
       });
       expect(rows[0]!.dead_lettered_at).not.toBeNull();
+      expect(usageEvents.emit).toHaveBeenCalledWith('job_dead_lettered', expect.objectContaining({
+        job_id: jobId,
+        class: 'limit',
+        attempts: '1',
+        requeues: '0',
+      }));
     });
 
     it('classes a max-attempts dead letter as transient', async () => {
@@ -2287,6 +2302,9 @@ describeDb('db.ts integration tests', () => {
       expect(row.worker_id).toBeNull();
       expect(row.claimed_at).toBeNull();
       expect(row.lease_expires_at).toBeNull();
+      expect(usageEvents.emit).not.toHaveBeenCalledWith(
+        'job_dead_lettered', expect.anything(),
+      );
     });
 
     it('schedules a retry in the future instead of immediately', async () => {
@@ -2401,6 +2419,9 @@ describeDb('db.ts integration tests', () => {
       );
       const first = await requeueDeadLetters('boot');
       expect(first.map((row) => row.id).sort()).toEqual(ids.slice(0, 3).sort());
+      expect(usageEvents.emit).toHaveBeenCalledWith('job_requeued', expect.objectContaining({
+        class: 'limit', trigger: 'boot', requeues: '1',
+      }));
       for (const id of ids.slice(0, 3)) {
         const { rows } = await testPool.query<{
           status: string;
@@ -2453,6 +2474,38 @@ describeDb('db.ts integration tests', () => {
         [testProjectId],
       );
       expect(await requeueDeadLetters('interval')).toEqual([]);
+    });
+
+    it('announces when the third requeue dead-letters again', async () => {
+      const { jobId } = await seedErrorGroupAndJob({ max_attempts: 1 });
+      await testPool.query(
+        `UPDATE error_group_jobs SET requeues = 3 WHERE id = $1`,
+        [jobId],
+      );
+      const claimed = await claimJob('worker-give-up', 60_000);
+      await failJob(
+        jobId,
+        'worker-give-up',
+        claimed!.leaseGeneration,
+        'token sk-ant-secret-value failed',
+      );
+      expect(usageEvents.emit).toHaveBeenCalledWith('job_given_up', expect.objectContaining({
+        job_id: jobId,
+        class: 'transient',
+        last_error: expect.not.stringContaining('sk-ant-secret-value'),
+      }));
+    });
+
+    it('counts dead letters from the last 24 hours for health', async () => {
+      await deadLetteredJob('limit');
+      const old = await deadLetteredJob('transient');
+      await testPool.query(
+        `UPDATE error_group_jobs SET dead_lettered_at = now() - interval '25 hours' WHERE id = $1`,
+        [old],
+      );
+      expect(await getDeadLetterCounts()).toEqual([
+        { jobType: 'investigate', deadLetterClass: 'limit', count: 1 },
+      ]);
     });
   });
 
