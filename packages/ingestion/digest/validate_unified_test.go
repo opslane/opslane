@@ -231,6 +231,48 @@ func TestValidateUnifiedGroundedDigitInCopyFallsBack(t *testing.T) {
 	}
 }
 
+// The writer's own words for throwing a card away survive into the freeze
+// ledger. Without them a demoted card is indistinguishable from an incident
+// nothing was ever going to write for, and the demotion is invisible.
+func TestValidateUnifiedKeepsTheWriterDeferralReason(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	pool, fixture, runID, candidate := freezeUnifiedFriction(t, now)
+	seedDestination(t, pool, fixture.ProjectID, []string{"digest.daily"})
+	const reason = "card check: ungrounded number 99 in card for the incident"
+	encoded, err := json.Marshal(writtenDigestPayload{Deferred: []deferredDigestItem{{
+		ErrorGroupID: candidate.ErrorGroupID, Reason: reason,
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(context.Background(), `UPDATE digest_runs
+		SET status='written',writer_payload=$2::jsonb WHERE id=$1`, runID, encoded); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateAndPublish(context.Background(), pool, runID); err != nil {
+		t.Fatal(err)
+	}
+	payload := renderedEvent(t, pool, runID)
+	if len(payload.Digest.GeneratedCards) != 0 || len(payload.Digest.ReceiptItems) != 1 {
+		t.Fatalf("writer deferral cards=%d receipts=%d",
+			len(payload.Digest.GeneratedCards), len(payload.Digest.ReceiptItems))
+	}
+	// A demoted card records an authoring failure, so its receipt renders in
+	// full rather than compacting to one line under "Also waiting".
+	if got := payload.Digest.ReceiptItems[0].FallbackReason; got != "" {
+		t.Fatalf("demoted card compacted its receipt: fallback reason = %q", got)
+	}
+	var stored string
+	if err := pool.QueryRow(context.Background(), `SELECT details->>'receipt_reason'
+		FROM digest_run_candidate_evaluations WHERE digest_run_id=$1 AND error_group_id=$2`,
+		runID, candidate.ErrorGroupID).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored != reason {
+		t.Fatalf("ledger receipt reason = %q, want %q", stored, reason)
+	}
+}
+
 func TestValidateUnifiedDigitSmuggleFallsBackPerCard(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	pool, fixture, runID, candidate := freezeUnifiedFriction(t, now)
@@ -547,7 +589,7 @@ func TestReceiptForUnifiedFallbackSanitizesLikeItsSibling(t *testing.T) {
 		HasValidatedDiagnosis: true, HasSavedDiff: true, SpellStartedAt: &since,
 	}
 
-	item := receiptForUnifiedFallback(candidate)
+	item := receiptForUnifiedFallback(candidate, "")
 
 	sibling, err := toReceiptItems([]actionableCandidate{{
 		GroupID: "group-1", Kind: "error", Status: "awaiting_approval",

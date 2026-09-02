@@ -772,6 +772,12 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string) e
 		accounted[identity] = "deferred"
 		if run.Mode != UnifiedCardsOff {
 			renderModes[identity] = "receipt_fallback"
+			// The writer's own words for why this incident has no card. Once its
+			// receipt is admitted the run ledger flips the item back to
+			// "included" and drops the reason, so the freeze ledger is the only
+			// place a "card check: …" demotion is distinguishable from an
+			// incident nothing was ever going to write for.
+			receiptReasons[identity] = strings.TrimSpace(item.Reason)
 		}
 	}
 	for _, candidate := range candidates {
@@ -946,7 +952,9 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string) e
 		// product, not a fallback, and its output may not drift.
 		if run.Mode == UnifiedCardsOn {
 			for i := range receiptItems {
-				if frozen, ok := byIdentity[receiptItems[i].IncidentID]; ok && frozen.NotCardEligible {
+				identity := receiptItems[i].IncidentID
+				if frozen, ok := byIdentity[identity]; ok && frozen.NotCardEligible &&
+					!writerDemotedCard(receiptReasons[identity]) {
 					receiptItems[i].FallbackReason = notify.ReceiptFallbackNeverEligible
 				}
 			}
@@ -1027,7 +1035,7 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string) e
 			}
 			renderModes[identity] = "receipt_fallback"
 			if !receipted[candidate.ErrorGroupID] {
-				receiptItems = append(receiptItems, receiptForUnifiedFallback(candidate))
+				receiptItems = append(receiptItems, receiptForUnifiedFallback(candidate, receiptReasons[identity]))
 				receipted[candidate.ErrorGroupID] = true
 			}
 			accounted[identity] = "included"
@@ -1229,7 +1237,20 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string) e
 	return nil
 }
 
-func receiptForUnifiedFallback(candidate Candidate) notify.ReceiptItem {
+// cardCheckReasonPrefix marks a deferral the writer produced by failing one
+// card's own factual checks. Its twin is CARD_CHECK_REASON_PREFIX in
+// packages/worker/src/digest-writer/job.ts; change both together.
+const cardCheckReasonPrefix = "card check: "
+
+// writerDemotedCard says whether the writer had a card for this incident and
+// threw it away over its own facts. Such a receipt always renders in full: it
+// records an authoring failure a reader should be able to see, unlike an
+// incident nothing was ever going to write for, which compacts to one line.
+func writerDemotedCard(reason string) bool {
+	return strings.HasPrefix(reason, cardCheckReasonPrefix)
+}
+
+func receiptForUnifiedFallback(candidate Candidate, writerReason string) notify.ReceiptItem {
 	state := "report_ready"
 	switch {
 	case candidate.SpellStartedAt != nil && candidate.Status != "":
@@ -1255,8 +1276,9 @@ func receiptForUnifiedFallback(candidate Candidate) notify.ReceiptItem {
 	}
 	// Same fact its sibling constructor carries: an incident refused a card at
 	// freeze is still refused one when the card section degrades, so it renders
-	// compactly either way.
-	if candidate.NotCardEligible {
+	// compactly either way. A card the writer built and then threw away over its
+	// own facts is the exception, and keeps its full receipt.
+	if candidate.NotCardEligible && !writerDemotedCard(writerReason) {
 		item.FallbackReason = notify.ReceiptFallbackNeverEligible
 	}
 	if candidate.HasValidatedDiagnosis {
