@@ -5,7 +5,7 @@ type Handler = (args: Record<string, unknown>) => Promise<unknown>;
 interface FakeTool { name: string; handler: Handler }
 type Action =
   | { kind: 'call'; name: string; input: Record<string, unknown> }
-  | { kind: 'assistant'; id?: string; text?: string; usage?: Partial<typeof DEFAULT_USAGE> }
+  | { kind: 'assistant'; id?: string; text?: string; usage?: Partial<typeof DEFAULT_USAGE>; stopReason?: 'max_tokens' }
   | { kind: 'result'; subtype?: string; isError?: boolean }
   | { kind: 'throw'; error: unknown };
 
@@ -42,7 +42,7 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
             message: {
               id: action.id ?? crypto.randomUUID(), type: 'message', role: 'assistant', model: 'test-model',
               content: action.text ? [{ type: 'text', text: action.text }] : [],
-              stop_reason: null, stop_sequence: null,
+              stop_reason: action.stopReason ?? null, stop_sequence: null,
               usage: { ...DEFAULT_USAGE, ...action.usage },
             },
           };
@@ -264,6 +264,74 @@ describe('how a run ends', () => {
     const out = await runReadOnlyAgentSdk(fakeInput());
     expect(out).toMatchObject({ stop: 'api_error', apiErrorStatus: 529 });
     expect(sdk.returned).toHaveBeenCalled();
+  });
+
+  it('keeps turns_exhausted when the SDK throws after the typed max-turns result', async () => {
+    sdk.actions.push(
+      { kind: 'result', subtype: 'error_max_turns' },
+      { kind: 'throw', error: new Error('Claude Code returned an error result: Reached maximum number of turns (20)') },
+    );
+    const out = await runReadOnlyAgentSdk(fakeInput());
+    expect(out.stop).toBe('turns_exhausted');
+    expect(out.apiErrorDetail).toBeUndefined();
+    expect(sdk.returned).toHaveBeenCalled();
+  });
+
+  it('keeps budget when the SDK throws after the typed max-budget result', async () => {
+    sdk.actions.push(
+      { kind: 'result', subtype: 'error_max_budget_usd' },
+      { kind: 'throw', error: new Error('Claude Code returned an error result: budget exceeded') },
+    );
+    expect((await runReadOnlyAgentSdk(fakeInput())).stop).toBe('budget');
+  });
+
+  it('keeps the typed api_error detail when the SDK throws afterwards', async () => {
+    sdk.actions.push(
+      { kind: 'result', subtype: 'success', isError: true },
+      { kind: 'throw', error: new Error('Claude Code returned an error result: failed') },
+    );
+    expect(await runReadOnlyAgentSdk(fakeInput())).toMatchObject({
+      stop: 'api_error', apiErrorStatus: 503, apiErrorDetail: 'failed',
+    });
+  });
+
+  it('classifies a throw-only max-turns exit as turns_exhausted', async () => {
+    sdk.actions.push({
+      kind: 'throw',
+      error: new Error('Claude Code returned an error result: Reached maximum number of turns (20)'),
+    });
+    expect((await runReadOnlyAgentSdk(fakeInput())).stop).toBe('turns_exhausted');
+  });
+
+  it('does not read an unrelated error that mentions turns as a limit', async () => {
+    sdk.actions.push({
+      kind: 'throw',
+      error: Object.assign(new Error('upstream 502: Reached maximum number of turns proxy page'), { status: 502 }),
+    });
+    expect(await runReadOnlyAgentSdk(fakeInput())).toMatchObject({ stop: 'api_error', apiErrorStatus: 502 });
+  });
+
+  it('treats the structured-output retry limit as an api_error with its text', async () => {
+    sdk.actions.push({ kind: 'result', subtype: 'error_max_structured_output_retries' });
+    expect(await runReadOnlyAgentSdk(fakeInput())).toMatchObject({
+      stop: 'api_error', apiErrorDetail: 'query failed',
+    });
+  });
+
+  it('does not let a successful result shield a later transport failure', async () => {
+    sdk.actions.push(
+      { kind: 'result', subtype: 'success' },
+      { kind: 'throw', error: Object.assign(new Error('stream died'), { status: 529 }) },
+    );
+    expect(await runReadOnlyAgentSdk(fakeInput())).toMatchObject({ stop: 'api_error', apiErrorStatus: 529 });
+  });
+
+  it('does not let a truncated assistant turn hide a real transport failure', async () => {
+    sdk.actions.push(
+      { kind: 'assistant', text: 'partial', stopReason: 'max_tokens' },
+      { kind: 'throw', error: Object.assign(new Error('stream died'), { status: 529 }) },
+    );
+    expect(await runReadOnlyAgentSdk(fakeInput())).toMatchObject({ stop: 'api_error', apiErrorStatus: 529 });
   });
 
   it('lets a dead machine win over a failing query, because the job must retry', async () => {
