@@ -40,6 +40,12 @@ If the `curl` returns `{"status":"ok"}`-style output with HTTP 200, the stack is
 >
 > Put those in `.env` if you want them to stick: every later `docker compose` command in this directory needs the same values, or the services disagree about where to find each other. The compose command's output is the source of truth; a healthy response on 8082 can come from a different app entirely, so always check `docker compose ps` shows *these* services healthy.
 
+## Upgrading a running stack
+
+Pull and bring the stack back up the same way. The one-shot `migrate` service runs before the API service and the worker serve anything, so a release's database migrations are always committed before any code that depends on them starts. That ordering is what lets a migration and the code that reads it ship together.
+
+The daily summary is the one surface a mid-flight upgrade can visibly change. A run picks its issues, writes the summary, and checks it a few minutes later. That is normally a ten-minute window around 09:00 in the project's own timezone, and longer on a day a run is retrying. An upgrade landing inside that window can leave a run whose text was written by one version and checked by another. Any item that fails the check falls back to its plain mechanical lines for that day, so the reader sees the same issues described more tersely rather than losing them, and the next morning's run writes them normally again. Deploy outside a project's summary window if you would rather not spend that day.
+
 ## Path 1: capture and group an error, no credentials
 
 **What this proves:** your app can send an error and Opslane captures and groups it, without any AI or GitHub account.
