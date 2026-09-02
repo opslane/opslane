@@ -43,6 +43,7 @@ func writeUnifiedPayload(t *testing.T, pool *pgxpool.Pool, runID string, candida
 	t.Helper()
 	payload := writtenDigestPayload{Included: []writtenDigestCard{{
 		ErrorGroupID: candidate.ErrorGroupID, Title: "Saving is blocked", Copy: copy,
+		Why:    "The checkout control does not submit.",
 		Action: "Review the proposed repair.", Label: candidate.Label,
 	}}}
 	encoded, err := json.Marshal(payload)
@@ -241,8 +242,8 @@ func TestValidateCacheConflictAdoptsMatchingConcurrentWinner(t *testing.T) {
 		t.Fatal("candidate has no actionable spell")
 	}
 	if _, err := pool.Exec(context.Background(), `INSERT INTO digest_card_copy
-		(error_group_id,spell_started_at,input_fingerprint,title,copy,action,model,prompt_version)
-		VALUES ($1,$2,$3,'Concurrent winner','Winner copy.','Use the winner.','test',4)`,
+		(error_group_id,spell_started_at,input_fingerprint,title,copy,why,action,model,prompt_version)
+		VALUES ($1,$2,$3,'Concurrent winner','Winner copy.','Winner cause.','Use the winner.','test',5)`,
 		candidate.ErrorGroupID, *candidate.SpellStartedAt, candidate.Fingerprint); err != nil {
 		t.Fatal(err)
 	}
@@ -471,8 +472,8 @@ func TestValidateStampsActionSoWriterDigitsNeverShip(t *testing.T) {
 	seedDestination(t, pool, fixture.ProjectID, []string{"digest.daily"})
 	payload := writtenDigestPayload{Included: []writtenDigestCard{{
 		ErrorGroupID: candidate.ErrorGroupID, Title: "Saving is blocked",
-		Copy: "People cannot save their work.", Action: "Retry the save 99 times.",
-		Label: candidate.Label,
+		Copy: "People cannot save their work.", Why: "The checkout control does not submit.",
+		Action: "Retry the save 99 times.", Label: candidate.Label,
 	}}}
 	encoded, err := json.Marshal(payload)
 	if err != nil {

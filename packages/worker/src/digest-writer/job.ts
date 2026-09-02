@@ -18,6 +18,7 @@ export const DIGEST_MODEL = process.env['DIGEST_MODEL']
 export interface CachedDigestCard {
   title: string;
   copy: string;
+  why?: string;
   action: string;
   authoredAt: string;
   fingerprint: string;
@@ -156,8 +157,11 @@ function factNumbers(truth: DigestCandidate): Set<string> {
   // digits inside them ("42Floors") must not fail the day's digest.
   const prNumber = /\/pull\/(\d+)$/.exec(truth.prUrl ?? '');
   if (prNumber?.[1]) digits.add(prNumber[1]);
-  const sources = [truth.title, truth.summary, truth.validAction ?? '', truth.routePurpose ?? '',
-    truth.route ?? '', truth.observationQuote ?? '', ...truth.accounts];
+  // rootCause in its own right, not left to the summary alias: the alias holds
+  // the cause only while it is non-empty, and the why sentence is written from
+  // the cause, so its digits must ground on the cause itself.
+  const sources = [truth.title, truth.summary, truth.rootCause ?? '', truth.validAction ?? '',
+    truth.routePurpose ?? '', truth.route ?? '', truth.observationQuote ?? '', ...truth.accounts];
   for (const source of sources) {
     for (const match of normalizeProseNumbers(source).matchAll(PROSE_NUMBER)) digits.add(match[0]);
   }
@@ -213,10 +217,11 @@ export function groundPayload(raw: unknown, candidates: DigestCandidate[]): Dige
     const numbers = factNumbers(truth);
     const title = stripInvisible(card.title ?? '');
     const copy = stripInvisible(card.copy);
+    const why = card.why === undefined ? undefined : stripInvisible(card.why);
     // Overwrite, never compare: demoting a correct card over the wording of a
     // line with exactly one correct value would waste the authoring call.
     const action = stateAction(truth) ?? stripInvisible(card.action);
-    for (const field of [title, copy, action]) {
+    for (const field of [title, copy, why ?? '', action]) {
       for (const match of normalizeProseNumbers(field).matchAll(PROSE_NUMBER)) {
         if (!numbers.has(match[0])) {
           throw new Error(`ungrounded number ${match[0]} in card for ${truthIdentity}`);
@@ -228,6 +233,7 @@ export function groundPayload(raw: unknown, candidates: DigestCandidate[]): Dige
       ...frozenIdentities(truth),
       ...(card.title === undefined ? {} : { title }),
       copy,
+      ...(why === undefined ? {} : { why }),
       action,
       label: (truth.episodeSequence ?? 0) > 1 ? 'returned' as const : 'new' as const,
       claimedUsers: truth.affectedUsers,
@@ -298,6 +304,7 @@ function cachedDisposition(candidate: DigestCandidate): DigestDisposition {
       ...frozenIdentities(candidate),
       title: cached.title,
       copy: cached.copy,
+      ...(cached.why ? { why: cached.why } : {}),
       action: stateAction(candidate) ?? cached.action,
       label: (candidate.episodeSequence ?? 0) > 1 ? 'returned' : 'new',
       claimedUsers: candidate.affectedUsers,
@@ -397,10 +404,11 @@ export async function loadFrozenDigestRun(runId: string, projectId: string): Pro
 }
 
 export const DIGEST_SYSTEM_PROMPT = `Write today's operations cards from only the frozen facts supplied.
-The reader is a busy product owner. Every card has exactly three parts:
+The reader is a busy product owner. Every card has exactly four parts:
 1. title — what broke, in the user's words, under 80 characters (aim for a short phrase). Name the action that failed ("Send invoice does nothing"), never the error text or a stack frame.
 2. copy — two or three short sentences. Start with the people affected without stating a quantity: derive what they were doing from routePurpose and summary; if the facts do not say what they were doing, describe the symptom without inventing intent. Then say what actually happened and the consequence. Keep copy under 300 characters. If episodeSequence is greater than 1, say the problem is back (do not claim it was fixed before; you do not know that).
-3. action — one imperative instruction for the reader, based on this candidate's validAction. Do not start it with a label like "Needs you" or "Ready" — the message template adds that. If the candidate has replaySessionId, the instruction may tell the reader to watch the replay.
+3. why — one sentence naming the mechanism, taken from this candidate's rootCause. Say what in the product is broken, not what the reader should feel. Omit it only when rootCause is empty; when rootCause has text, a card without a why is thrown away.
+4. action — one imperative instruction for the reader, based on this candidate's validAction. Do not start it with a label like "Needs you" or "Ready" — the message template adds that. If the candidate has replaySessionId, the instruction may tell the reader to watch the replay.
 Never state counts as digits in copy or action; the message template renders people and occurrence counts separately. Do not spell out volatile quantities either ("dozens", "three people").
 Every candidate must appear exactly once in included or deferred. Include every candidate by default. Defer one only when it is redundant with an included card, and never defer the candidate with the most affected users. A deferral reason states the specific redundancy, never that the item awaits review.
 Copy account names and links exactly; never invent them.

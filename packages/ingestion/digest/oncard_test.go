@@ -88,6 +88,7 @@ func writeOnCardPayload(t *testing.T, pool *pgxpool.Pool, runID string, candidat
 		payload.Included = append(payload.Included, writtenDigestCard{
 			ErrorGroupID: candidate.ErrorGroupID, Title: "Saving is blocked",
 			Copy:   "People cannot save because the control never submits.",
+			Why:    "The submit handler is never wired to the control.",
 			Action: "Take a look when you can.", Label: candidate.Label,
 		})
 	}
@@ -383,7 +384,7 @@ func TestValidateOnPRCardRepeatsFromCache(t *testing.T) {
 		}
 		payload := writtenDigestPayload{Included: []writtenDigestCard{{
 			ErrorGroupID: groupID, Title: next[0].CachedCard.Title, Copy: next[0].CachedCard.Copy,
-			Action: next[0].CachedCard.Action, Label: next[0].Label,
+			Why: next[0].CachedCard.Why, Action: next[0].CachedCard.Action, Label: next[0].Label,
 		}}}
 		encoded, err := json.Marshal(payload)
 		if err != nil {
@@ -627,6 +628,120 @@ func TestFreezeOnRanksCardEligibleIncidentsAboveReceiptOnlyOnes(t *testing.T) {
 	}
 	if len(payload.ReceiptItems) != notify.DigestV4CardCap-1 {
 		t.Fatalf("receipts = %d, want %d", len(payload.ReceiptItems), notify.DigestV4CardCap-1)
+	}
+}
+
+// TestValidateOnRequiresACauseSentenceFromADiagnosedCard: the card exists to
+// answer "why", so a diagnosed incident whose card omits that sentence loses
+// its card and ships as a receipt. Only that card falls back; the run stands.
+func TestValidateOnRequiresACauseSentenceFromADiagnosedCard(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	pool, fixture := onCardFixture(t, now)
+	ctx := context.Background()
+	diagnosed := seedOnCardGroup(t, pool, fixture.ProjectID, fixture.EnvID, "friction", "awaiting_approval",
+		true, "", "The submit handler is never wired to the control.", now.Add(-2*time.Hour))
+	seedValidatedDiagnosis(t, pool, fixture.ProjectID, diagnosed, now.Add(-time.Hour))
+	// Admitted on its validated diagnosis with no stored cause to explain: the
+	// cause sentence is excused rather than demanded, and its card still ships.
+	causeless := seedOnCardGroup(t, pool, fixture.ProjectID, fixture.EnvID, "friction", "awaiting_approval",
+		false, "", "", now.Add(-time.Hour))
+	seedValidatedDiagnosis(t, pool, fixture.ProjectID, causeless, now.Add(-time.Hour))
+
+	runID, candidates, err := FreezeCandidates(ctx, pool, fixture.ProjectID, now)
+	if err != nil || len(candidates) != 2 {
+		t.Fatalf("freeze candidates=%+v err=%v", candidates, err)
+	}
+	for _, candidate := range candidates {
+		if candidate.NotCardEligible {
+			t.Fatalf("candidate %s was refused a card: %+v", candidate.ErrorGroupID, candidate)
+		}
+	}
+	// Neither card carries a cause sentence.
+	payload := writtenDigestPayload{Deferred: []deferredDigestItem{}}
+	for _, candidate := range candidates {
+		payload.Included = append(payload.Included, writtenDigestCard{
+			ErrorGroupID: candidate.ErrorGroupID, Title: "Saving is blocked",
+			Copy:   "People cannot save because the control never submits.",
+			Action: "Take a look when you can.", Label: candidate.Label,
+		})
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE digest_runs
+		SET status='written',writer_payload=$2::jsonb WHERE id=$1`, runID, encoded); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateAndPublish(ctx, pool, runID); err != nil {
+		t.Fatal(err)
+	}
+
+	delivered := renderedEvent(t, pool, runID).Digest
+	if len(delivered.GeneratedCards) != 1 || delivered.GeneratedCards[0].IncidentID != causeless {
+		t.Fatalf("cards = %+v, want only the incident with no cause to explain", delivered.GeneratedCards)
+	}
+	if len(delivered.ReceiptItems) != 1 || delivered.ReceiptItems[0].IncidentID != diagnosed {
+		t.Fatalf("receipts = %+v, want the diagnosed card demoted", delivered.ReceiptItems)
+	}
+	var reason string
+	if err := pool.QueryRow(ctx, `SELECT COALESCE(details->>'receipt_reason','')
+		FROM digest_run_candidate_evaluations WHERE digest_run_id=$1 AND error_group_id=$2`,
+		runID, diagnosed).Scan(&reason); err != nil {
+		t.Fatal(err)
+	}
+	if reason != "card_validation_failed" {
+		t.Fatalf("ledger receipt reason = %q, want card_validation_failed", reason)
+	}
+}
+
+// TestValidateOnCachesAndRendersTheCauseSentence: the Why survives the cache
+// round trip and reaches the reader on its own line.
+func TestValidateOnCachesAndRendersTheCauseSentence(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	pool, fixture := onCardFixture(t, now)
+	ctx := context.Background()
+	groupID := seedOnCardGroup(t, pool, fixture.ProjectID, fixture.EnvID, "friction", "awaiting_approval",
+		true, "", "The submit handler is never wired to the control.", now.Add(-time.Hour))
+	seedValidatedDiagnosis(t, pool, fixture.ProjectID, groupID, now.Add(-time.Hour))
+
+	runID, candidates, err := FreezeCandidates(ctx, pool, fixture.ProjectID, now)
+	if err != nil || len(candidates) != 1 {
+		t.Fatalf("freeze candidates=%+v err=%v", candidates, err)
+	}
+	writeOnCardPayload(t, pool, runID, candidates)
+	if err := ValidateAndPublish(ctx, pool, runID); err != nil {
+		t.Fatal(err)
+	}
+	delivered := renderedEvent(t, pool, runID)
+	if len(delivered.Digest.GeneratedCards) != 1 ||
+		delivered.Digest.GeneratedCards[0].Why != "The submit handler is never wired to the control." {
+		t.Fatalf("delivered cards = %+v", delivered.Digest.GeneratedCards)
+	}
+	body, _, err := notify.FormatSlack(delivered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), "Why: The submit handler is never wired to the control.") {
+		t.Fatalf("Slack message has no cause line: %s", body)
+	}
+
+	// Day two serves the same sentence from the cache.
+	secondRun, second, err := FreezeCandidates(ctx, pool, fixture.ProjectID, now.Add(24*time.Hour))
+	if err != nil || len(second) != 1 || second[0].CachedCard == nil {
+		t.Fatalf("second freeze candidates=%+v err=%v", second, err)
+	}
+	if second[0].CachedCard.Why != "The submit handler is never wired to the control." {
+		t.Fatalf("cached card lost its cause sentence: %+v", second[0].CachedCard)
+	}
+	echoCachedPayload(t, pool, secondRun, second[0])
+	if err := ValidateAndPublish(ctx, pool, secondRun); err != nil {
+		t.Fatal(err)
+	}
+	repeat := renderedEvent(t, pool, secondRun).Digest
+	if len(repeat.GeneratedCards) != 1 ||
+		repeat.GeneratedCards[0].Why != "The submit handler is never wired to the control." {
+		t.Fatalf("cached day cards = %+v", repeat.GeneratedCards)
 	}
 }
 

@@ -47,7 +47,8 @@ func echoCachedPayload(t *testing.T, pool *pgxpool.Pool, runID string, candidate
 	}
 	payload := writtenDigestPayload{Included: []writtenDigestCard{{
 		ErrorGroupID: candidate.ErrorGroupID, Title: candidate.CachedCard.Title,
-		Copy: candidate.CachedCard.Copy, Action: candidate.CachedCard.Action, Label: candidate.Label,
+		Copy: candidate.CachedCard.Copy, Why: candidate.CachedCard.Why,
+		Action: candidate.CachedCard.Action, Label: candidate.Label,
 	}}}
 	encoded, err := json.Marshal(payload)
 	if err != nil {

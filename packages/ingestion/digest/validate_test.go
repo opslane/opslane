@@ -213,7 +213,7 @@ func TestValidatePublishesSchemaV4GroundedCard(t *testing.T) {
 		t.Fatalf("freeze: candidates=%d err=%v", len(candidates), err)
 	}
 	candidate := candidates[0]
-	body := fmt.Sprintf(`{"included":[{"errorGroupId":%q,"title":"Send invoice does nothing","copy":"Checkout is blocked before payment.","action":%q,"label":%q,"claimedOccurrences":34,"accounts":[]}],"deferred":[]}`,
+	body := fmt.Sprintf(`{"included":[{"errorGroupId":%q,"title":"Send invoice does nothing","copy":"Checkout is blocked before payment.","why":"The checkout control does not submit.","action":%q,"label":%q,"claimedOccurrences":34,"accounts":[]}],"deferred":[]}`,
 		candidate.ErrorGroupID, candidate.ValidAction, candidate.Label)
 	if _, err := pool.Exec(ctx, `UPDATE digest_runs SET status='written',writer_payload=$2::jsonb WHERE id=$1`, runID, body); err != nil {
 		t.Fatal(err)

@@ -170,8 +170,9 @@ func TestFreezeOnIncludesFrictionAndReusesValidatedCopy(t *testing.T) {
 		t.Fatal("friction spell was not frozen")
 	}
 	if _, err := pool.Exec(ctx, `INSERT INTO digest_card_copy
-		(error_group_id,spell_started_at,input_fingerprint,title,copy,action,model,prompt_version)
-		VALUES ($1,$2,$3,'Saving is blocked','The save control never submits.','Review the proposed repair.','test',4)`,
+		(error_group_id,spell_started_at,input_fingerprint,title,copy,why,action,model,prompt_version)
+		VALUES ($1,$2,$3,'Saving is blocked','The save control never submits.',
+		        'The submit handler is never wired to the control.','Review the proposed repair.','test',5)`,
 		groupID, *candidate.SpellStartedAt, candidate.Fingerprint); err != nil {
 		t.Fatal(err)
 	}
@@ -183,6 +184,12 @@ func TestFreezeOnIncludesFrictionAndReusesValidatedCopy(t *testing.T) {
 		if item.ErrorGroupID == groupID {
 			if item.CachedCard == nil || item.CachedCard.Copy != "The save control never submits." {
 				t.Fatalf("cache not frozen atomically: %+v", item.CachedCard)
+			}
+			// The cause sentence rides with the rest of the card. A cached card
+			// that lost it would fail its own validation the next day and demote
+			// the incident to a receipt forever.
+			if item.CachedCard.Why != "The submit handler is never wired to the control." {
+				t.Fatalf("cached cause sentence did not survive the round trip: %+v", item.CachedCard)
 			}
 			return
 		}
