@@ -91,7 +91,8 @@ var (
 		       COALESCE(g.pr_url, ''), COALESCE(g.root_cause, ''),
 		       COALESCE(g.suggested_mitigation, ''),
 		       NULLIF(btrim(g.candidate_diff), '') IS NOT NULL,
-		       d.has_validated_diagnosis`+receiptItemsFromClause+`
+		       d.has_validated_diagnosis,
+		       `+fixAttemptedSQL("g")+receiptItemsFromClause+`
 		   AND pub.publishable
 		 ORDER BY COALESCE(g.priority_score, 0) DESC, g.last_seen DESC, g.id DESC
 		 LIMIT %d`, receiptCap*2)
@@ -219,9 +220,14 @@ type receiptQueryRow struct {
 	rootCause             string
 	mitigation            string
 	hasValidatedDiagnosis bool
+	fixAttempted          bool
 }
 
-func receiptState(status string, hasSavedDiff bool) string {
+// receiptState maps an incident onto the sentence the reader is shown.
+// fixAttempted is what separates "the fix run produced nothing" from "we
+// reached a verdict and never ran a fix": both end in needs_human with no
+// saved diff, and only one of them may claim a failed attempt.
+func receiptState(status string, hasSavedDiff, fixAttempted bool) string {
 	switch status {
 	case "pr_created":
 		return "pr_open"
@@ -233,7 +239,10 @@ func receiptState(status string, hasSavedDiff bool) string {
 		if hasSavedDiff {
 			return "attempt_failed_with_diff"
 		}
-		return "attempt_failed_no_diff"
+		if fixAttempted {
+			return "attempt_failed_no_diff"
+		}
+		return "report_ready"
 	default:
 		return "report_ready"
 	}
@@ -283,14 +292,14 @@ func (s *Sweeper) buildReceiptItems(ctx context.Context, projectID string, from,
 			&row.item.IncidentID, &row.item.Kind, &row.item.Title, &row.item.OccurrenceCount,
 			&impactClass, &row.item.ImpactVisits, &row.item.ImpactRecovered,
 			&row.status, &row.item.PRURL, &row.rootCause, &row.mitigation,
-			&row.item.HasSavedDiff, &row.hasValidatedDiagnosis,
+			&row.item.HasSavedDiff, &row.hasValidatedDiagnosis, &row.fixAttempted,
 		); err != nil {
 			return nil, 0, 0, fmt.Errorf("digest receipt items scan: %w", err)
 		}
 		if impactClass != nil {
 			row.item.ImpactClass = *impactClass
 		}
-		row.item.ReceiptState = receiptState(row.status, row.item.HasSavedDiff)
+		row.item.ReceiptState = receiptState(row.status, row.item.HasSavedDiff, row.fixAttempted)
 		row.item.HasValidatedDiagnosis = row.hasValidatedDiagnosis
 		row.item.Title = narrative.SanitizeExcerpt(row.item.Title, excerptMax)
 		if row.hasValidatedDiagnosis {

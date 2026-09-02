@@ -229,7 +229,8 @@ func TestFreezeOnRepeatsActionableErrorPastLegacyWindows(t *testing.T) {
 	if len(second) != 1 || second[0].ErrorGroupID != groupID {
 		t.Fatalf("repeat freeze candidates=%+v, want group %s", second, groupID)
 	}
-	if second[0].ValidAction != "Review the investigation." {
+	// No fix job ever ran for this fixture, so the ask names the diagnosis.
+	if second[0].ValidAction != "Review the diagnosis." {
 		t.Fatalf("repeat action = %q", second[0].ValidAction)
 	}
 }
@@ -461,8 +462,9 @@ func TestFreezeAdmitsDiagnosedFrictionIncident(t *testing.T) {
 	if candidate.HasSavedDiff {
 		t.Fatalf("candidate claims a saved diff it does not have: %+v", candidate)
 	}
-	if candidate.ValidAction != "Review the investigation." {
-		t.Fatalf("valid action = %q, want %q", candidate.ValidAction, "Review the investigation.")
+	// Diagnosed, no diff and no fix job: the diagnosis is the thing waiting.
+	if candidate.ValidAction != "Review the diagnosis." {
+		t.Fatalf("valid action = %q, want %q", candidate.ValidAction, "Review the diagnosis.")
 	}
 	if candidate.RootCause == "" {
 		t.Fatalf("the diagnosis did not reach the card: %+v", candidate)

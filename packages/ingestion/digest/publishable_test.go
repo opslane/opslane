@@ -3,6 +3,7 @@ package digest
 import (
 	"testing"
 
+	"github.com/opslane/opslane/packages/ingestion/narrative"
 	"github.com/opslane/opslane/packages/ingestion/notify"
 )
 
@@ -48,9 +49,16 @@ func TestPublishableRequiresAnArtifactPerState(t *testing.T) {
 func TestEveryReceiptStateIsRenderable(t *testing.T) {
 	for _, status := range []string{"pr_created", "pr_draft", "awaiting_approval", "needs_human", "investigated", "insight"} {
 		for _, savedDiff := range []bool{false, true} {
-			state := receiptState(status, savedDiff)
-			if state == "" {
-				t.Errorf("status %q (savedDiff=%v) produced an empty receipt state", status, savedDiff)
+			for _, fixAttempted := range []bool{false, true} {
+				state := receiptState(status, savedDiff, fixAttempted)
+				if state == "" {
+					t.Errorf("status %q (savedDiff=%v fixAttempted=%v) produced an empty receipt state",
+						status, savedDiff, fixAttempted)
+				}
+				if _, ok := narrative.ReceiptLine(state, true); !ok {
+					t.Errorf("status %q (savedDiff=%v fixAttempted=%v) produced unrenderable state %q",
+						status, savedDiff, fixAttempted, state)
+				}
 			}
 		}
 	}

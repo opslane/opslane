@@ -162,16 +162,18 @@ func seedDigestFixtureWithSessionAge(t *testing.T, pool *pgxpool.Pool, now time.
 			`DELETE FROM error_group_affected_users WHERE error_group_id IN (SELECT id FROM error_groups WHERE project_id IN (SELECT id FROM projects WHERE org_id = $1))`,
 			`DELETE FROM sessions WHERE project_id IN (SELECT id FROM projects WHERE org_id = $1)`,
 			`DELETE FROM end_users WHERE project_id IN (SELECT id FROM projects WHERE org_id = $1)`,
-			`DELETE FROM error_groups WHERE project_id IN (SELECT id FROM projects WHERE org_id = $1)`,
 			// Jobs are not only created by digest tests: the priority sweeper's
 			// pass (priority/sweeper.go) inserts error_group_jobs for every
 			// project it scans, and under `go test ./...` its package runs in
 			// parallel against this shared database. Without these two deletes,
 			// DELETE FROM projects races that sweep and fails on
 			// error_group_jobs_project_id_fkey (observed on main pushes
-			// 33015197337 and 33016532031).
+			// 33015197337 and 33016532031). They run BEFORE the groups go: a job
+			// row points at its group, so deleting groups first fails outright
+			// for any fixture that seeds a job of its own.
 			`DELETE FROM job_usage WHERE job_id IN (SELECT id FROM error_group_jobs WHERE project_id IN (SELECT id FROM projects WHERE org_id = $1))`,
 			`DELETE FROM error_group_jobs WHERE project_id IN (SELECT id FROM projects WHERE org_id = $1)`,
+			`DELETE FROM error_groups WHERE project_id IN (SELECT id FROM projects WHERE org_id = $1)`,
 			`UPDATE projects SET default_environment_id = NULL WHERE org_id = $1`,
 			`DELETE FROM environments WHERE project_id IN (SELECT id FROM projects WHERE org_id = $1)`,
 			`DELETE FROM projects WHERE org_id = $1`,
@@ -828,15 +830,18 @@ func TestBuildReceiptItemsStatesAndValidatedProse(t *testing.T) {
 	})
 
 	type receiptSeed struct {
-		status, wantState  string
-		withDiff, decision bool
-		prURL              string
+		status, wantState          string
+		withDiff, decision, fixRan bool
+		prURL                      string
 	}
 	seeds := []receiptSeed{
 		{status: "pr_draft", wantState: "pr_draft", prURL: "https://github.example/pr/1"},
 		{status: "awaiting_approval", wantState: "awaiting_approval", decision: true},
-		{status: "needs_human", wantState: "attempt_failed_with_diff", withDiff: true, decision: true},
-		{status: "needs_human", wantState: "attempt_failed_no_diff", decision: true},
+		{status: "needs_human", wantState: "attempt_failed_with_diff", withDiff: true, decision: true, fixRan: true},
+		{status: "needs_human", wantState: "attempt_failed_no_diff", decision: true, fixRan: true},
+		// The same status and the same empty diff, with no fix job behind it:
+		// this one has a report to read, not a failed attempt to explain.
+		{status: "needs_human", wantState: "report_ready", decision: true},
 		{status: "investigated", wantState: "report_ready", decision: true},
 	}
 	wants := map[string]string{}
@@ -863,6 +868,18 @@ func TestBuildReceiptItemsStatesAndValidatedProse(t *testing.T) {
 			t.Fatal(err)
 		}
 		wants[groupID] = seed.wantState
+		if seed.fixRan {
+			var jobID string
+			if err := pool.QueryRow(ctx, `INSERT INTO error_group_jobs
+				(error_group_id,project_id,job_type,status) VALUES ($1,$2,'fix','completed')
+				RETURNING id::text`, groupID, f.ProjectID).Scan(&jobID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := pool.Exec(ctx, `UPDATE error_groups SET terminal_fix_job_id=$2 WHERE id=$1`,
+				groupID, jobID); err != nil {
+				t.Fatal(err)
+			}
+		}
 		if seed.decision {
 			if _, err := pool.Exec(ctx, `INSERT INTO diagnosis_decisions
 				(error_group_id,project_id,outcome,decision_reason,diagnosis,model,prompt_version,basis,confidence,decided_at)
@@ -891,7 +908,7 @@ func TestBuildReceiptItemsStatesAndValidatedProse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(payload.Digest.ReceiptItems) != 5 || payload.Digest.HeldBackCount != 2 {
+	if len(payload.Digest.ReceiptItems) != 6 || payload.Digest.HeldBackCount != 2 {
 		t.Fatalf("items/held = %d/%d", len(payload.Digest.ReceiptItems), payload.Digest.HeldBackCount)
 	}
 	for _, item := range payload.Digest.ReceiptItems {
@@ -915,9 +932,30 @@ func TestReceiptStateSurfacesApproval(t *testing.T) {
 		"investigated":      "report_ready",
 	}
 	for groupStatus, want := range cases {
-		if got := receiptState(groupStatus, false); got != want {
+		if got := receiptState(groupStatus, false, false); got != want {
 			t.Errorf("receiptState(%q) = %q, want %q", groupStatus, got, want)
 		}
+	}
+}
+
+// A diffless needs_human is two different incidents wearing one status: a fix
+// run that produced nothing, and a verdict nobody ever tried to fix. Only the
+// first may be told a fix attempt failed.
+func TestReceiptStateSeparatesAFailedFixFromAVerdict(t *testing.T) {
+	for _, tc := range []struct {
+		name                       string
+		hasSavedDiff, fixAttempted bool
+		want                       string
+	}{
+		{name: "fix ran and saved a diff", hasSavedDiff: true, fixAttempted: true, want: "attempt_failed_with_diff"},
+		{name: "fix ran and produced nothing", fixAttempted: true, want: "attempt_failed_no_diff"},
+		{name: "no fix ever ran", want: "report_ready"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := receiptState("needs_human", tc.hasSavedDiff, tc.fixAttempted); got != tc.want {
+				t.Fatalf("receiptState = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 

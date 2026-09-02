@@ -73,6 +73,25 @@ func seedValidatedDiagnosis(t *testing.T, pool *pgxpool.Pool, projectID, groupID
 	cleanupActionableDiagnoses(t, pool, projectID)
 }
 
+// seedTerminalFixJob points an incident's terminal fix job at a real job row.
+// jobType is a parameter because the fact under test is the TYPE: reconciling
+// a dead-lettered investigation stores that investigation's id in the same
+// column, and reading the id alone would claim a fix attempt that never was.
+func seedTerminalFixJob(t *testing.T, pool *pgxpool.Pool, projectID, groupID, jobType string) {
+	t.Helper()
+	ctx := context.Background()
+	var jobID string
+	if err := pool.QueryRow(ctx, `INSERT INTO error_group_jobs
+		(error_group_id,project_id,job_type,status) VALUES ($1,$2,$3,'completed')
+		RETURNING id::text`, groupID, projectID, jobType).Scan(&jobID); err != nil {
+		t.Fatalf("seed terminal fix job: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE error_groups SET terminal_fix_job_id=$2 WHERE id=$1`,
+		groupID, jobID); err != nil {
+		t.Fatalf("stamp terminal fix job: %v", err)
+	}
+}
+
 func writeOnCardPayload(t *testing.T, pool *pgxpool.Pool, runID string, candidates []Candidate) {
 	t.Helper()
 	payload := writtenDigestPayload{Included: []writtenDigestCard{}, Deferred: []deferredDigestItem{}}
@@ -112,25 +131,29 @@ func onCardFixture(t *testing.T, now time.Time) (*pgxpool.Pool, digestFixture) {
 }
 
 // TestDigestActionIsExhaustive pins the deterministic action function itself.
-// Migration 066's error_groups_action_class is its SQL twin.
+// Migration 072's error_groups_action_class is its SQL twin.
 func TestDigestActionIsExhaustive(t *testing.T) {
 	for _, tc := range []struct {
 		name, status string
 		hasSavedDiff bool
+		fixAttempted bool
 		prURL, want  string
 	}{
-		{"approval with diff", "awaiting_approval", true, "", "Approve the proposed fix."},
-		{"approval without diff", "awaiting_approval", false, "", "Review the investigation."},
-		{"pr open", "pr_created", false, "https://github.com/o/r/pull/1", "Review the fix PR."},
-		{"pr draft", "pr_draft", true, "https://github.com/o/r/pull/1", "Review the fix PR."},
-		{"pr without url", "pr_created", false, "", "Review the issue."},
-		{"pr draft without url", "pr_draft", false, "", "Review the issue."},
-		{"needs human", "needs_human", false, "", "Review the investigation."},
-		{"needs human with diff", "needs_human", true, "", "Review the investigation."},
+		{"approval with diff", "awaiting_approval", true, false, "", "Approve the proposed fix."},
+		{"approval without diff after a fix ran", "awaiting_approval", false, true, "", "Review the investigation."},
+		{"approval without diff or fix", "awaiting_approval", false, false, "", "Review the diagnosis."},
+		{"pr open", "pr_created", false, false, "https://github.com/o/r/pull/1", "Review the fix PR."},
+		{"pr draft", "pr_draft", true, false, "https://github.com/o/r/pull/1", "Review the fix PR."},
+		{"pr without url", "pr_created", false, false, "", "Review the issue."},
+		{"pr draft without url", "pr_draft", false, false, "", "Review the issue."},
+		{"needs human after a fix ran", "needs_human", false, true, "", "Review the investigation."},
+		{"needs human with no fix ever run", "needs_human", false, false, "", "Review the diagnosis."},
+		{"needs human with diff", "needs_human", true, false, "", "Review the investigation."},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := digestAction(tc.status, tc.hasSavedDiff, tc.prURL); got != tc.want {
-				t.Fatalf("digestAction(%q,%v,%q) = %q, want %q", tc.status, tc.hasSavedDiff, tc.prURL, got, tc.want)
+			if got := digestAction(tc.status, tc.hasSavedDiff, tc.prURL, tc.fixAttempted); got != tc.want {
+				t.Fatalf("digestAction(%q,%v,%q,%v) = %q, want %q",
+					tc.status, tc.hasSavedDiff, tc.prURL, tc.fixAttempted, got, tc.want)
 			}
 		})
 	}
@@ -145,19 +168,28 @@ func TestFreezeOnCoversEveryStatusAndKind(t *testing.T) {
 		hasDiff            bool
 		prURL              string
 		validatedDiagnosis bool
+		terminalJobType    string
 		wantAction         string
 		wantNotEligible    bool
 	}{
 		{name: "error awaiting approval with diff", kind: "error", status: "awaiting_approval",
 			hasDiff: true, validatedDiagnosis: true, wantAction: "Approve the proposed fix."},
-		{name: "error awaiting approval without diff", kind: "error", status: "awaiting_approval",
-			validatedDiagnosis: true, wantAction: "Review the investigation."},
+		{name: "error awaiting approval after a fix ran", kind: "error", status: "awaiting_approval",
+			validatedDiagnosis: true, terminalJobType: "fix", wantAction: "Review the investigation."},
+		{name: "error awaiting approval with no fix ever run", kind: "error", status: "awaiting_approval",
+			validatedDiagnosis: true, wantAction: "Review the diagnosis."},
 		{name: "friction awaiting approval without diff", kind: "friction", status: "awaiting_approval",
-			validatedDiagnosis: true, wantAction: "Review the investigation."},
+			validatedDiagnosis: true, wantAction: "Review the diagnosis."},
 		{name: "friction needs human with diff", kind: "friction", status: "needs_human",
 			hasDiff: true, wantAction: "Review the investigation."},
+		{name: "error needs human after a fix produced nothing", kind: "error", status: "needs_human",
+			terminalJobType: "error_fix", wantAction: "Review the investigation.", wantNotEligible: true},
 		{name: "error needs human without diagnosis", kind: "error", status: "needs_human",
-			wantAction: "Review the investigation.", wantNotEligible: true},
+			wantAction: "Review the diagnosis.", wantNotEligible: true},
+		// The dead-lettered-investigation reconciliation writes an investigation
+		// job id into the same column. It is not a fix attempt.
+		{name: "error needs human after a dead-lettered investigation", kind: "error", status: "needs_human",
+			validatedDiagnosis: true, terminalJobType: "investigate", wantAction: "Review the diagnosis."},
 		{name: "error pr created with url", kind: "error", status: "pr_created",
 			prURL: "https://github.com/acme/shop/pull/7", wantAction: "Review the fix PR."},
 		{name: "friction pr draft with url", kind: "friction", status: "pr_draft",
@@ -172,6 +204,9 @@ func TestFreezeOnCoversEveryStatusAndKind(t *testing.T) {
 				tc.hasDiff, tc.prURL, "The checkout control does not submit.", now.Add(-time.Hour))
 			if tc.validatedDiagnosis {
 				seedValidatedDiagnosis(t, pool, fixture.ProjectID, groupID, now.Add(-time.Hour))
+			}
+			if tc.terminalJobType != "" {
+				seedTerminalFixJob(t, pool, fixture.ProjectID, groupID, tc.terminalJobType)
 			}
 			_, candidates, err := FreezeCandidates(context.Background(), pool, fixture.ProjectID, now)
 			if err != nil {
@@ -297,7 +332,8 @@ func TestValidateOnRendersEmptyRemediationIncident(t *testing.T) {
 		wantAction string
 	}{
 		{name: "with saved diff", hasDiff: true, wantAction: "Approve the proposed fix."},
-		{name: "without saved diff", wantAction: "Review the investigation."},
+		// No diff and no fix job: the only thing waiting is the diagnosis.
+		{name: "without saved diff", wantAction: "Review the diagnosis."},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			now := time.Now().UTC().Truncate(time.Second)
