@@ -68,6 +68,29 @@ func TestFormatDigestListsSystemFactsAndFencesCustomerText(t *testing.T) {
 	}
 }
 
+// An agent reading the digest gets the same measured impact sentence the Slack
+// message prints, from the same stamped facts.
+func TestFormatDigestPrintsTheFrictionImpactLine(t *testing.T) {
+	runDate := "2026-08-21"
+	visits, recovered := int64(17), int64(14)
+	got := FormatDigest(DigestInput{
+		RunDate:      &runDate,
+		ProjectLabel: "project-1",
+		View: notify.DigestView{Cards: []notify.GeneratedDigestCard{
+			{IncidentID: "i-friction", Kind: "friction", Title: "Saving is blocked", Action: "Decide how to handle this.",
+				ImpactVisits: &visits, ImpactRecovered: &recovered},
+			{IncidentID: "i-error", Kind: "error", Title: "TypeError", AffectedUsers: 3,
+				ImpactVisits: &visits, ImpactRecovered: &recovered},
+		}},
+	})
+	if !strings.Contains(got, "17 visits this week, 14 recovered") {
+		t.Fatalf("friction card missing its impact line:\n%s", got)
+	}
+	if strings.Count(got, "visits this week") != 1 {
+		t.Fatalf("error card grew an impact line:\n%s", got)
+	}
+}
+
 func TestFormatDigestEmpty(t *testing.T) {
 	got := FormatDigest(DigestInput{ProjectLabel: "project-1"})
 	if !strings.Contains(strings.ToLower(got), "no digest") {

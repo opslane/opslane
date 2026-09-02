@@ -270,6 +270,13 @@ func digestV4CardBlocks(payload EventPayload, card GeneratedDigestCard, position
 	if why := cleanProse(card.Why, digestDetailMax); why != "" {
 		text += "\nWhy: " + why
 	}
+	// The measured scale is printed here, never written by the model: the prose
+	// is cached across days and these numbers roll every morning. Friction only
+	// — an error card's people count already appears in its context line below,
+	// and a second tally would say the same thing twice.
+	if line := DigestImpactLine(card); line != "" {
+		text += "\n" + line
+	}
 	text += "\n*" + leadIn + ":* " + cleanProse(card.Action, digestDetailMax)
 	// No people fragment at zero: the prompt tells the writer to describe a
 	// zero-user problem without a count, and "👥 0 users" would contradict the
@@ -328,6 +335,21 @@ func digestV4CardBlocks(payload EventPayload, card GeneratedDigestCard, position
 		blocks = append(blocks, map[string]any{"type": "actions", "elements": buttons})
 	}
 	return blocks
+}
+
+// DigestImpactLine renders the measured scale of a friction card from the facts
+// stamped on it. It is the one place Slack and the MCP digest formatter agree on
+// that sentence. An error card, or a friction card with no measured visits,
+// gets no line: a zero would contradict the prose above it.
+func DigestImpactLine(card GeneratedDigestCard) string {
+	if card.Kind != "friction" || card.ImpactVisits == nil || *card.ImpactVisits <= 0 {
+		return ""
+	}
+	line := fmt.Sprintf("%d visits this week", *card.ImpactVisits)
+	if card.ImpactRecovered != nil && *card.ImpactRecovered > 0 {
+		line += fmt.Sprintf(", %d recovered", *card.ImpactRecovered)
+	}
+	return line
 }
 
 func digestButton(actionID, text, buttonURL, style string) map[string]any {

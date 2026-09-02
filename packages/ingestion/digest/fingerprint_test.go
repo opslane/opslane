@@ -20,8 +20,8 @@ func TestCandidateFingerprintSemanticContract(t *testing.T) {
 	}
 	// Pinned to the live constants: the prompt version is the cache authority,
 	// so a bump here is what retires every card written under the old contract.
-	if digestPromptVersion != 5 || digestValidatorVersion != 1 {
-		t.Fatalf("prompt/validator version = %d/%d, want 5/1", digestPromptVersion, digestValidatorVersion)
+	if digestPromptVersion != 6 || digestValidatorVersion != 1 {
+		t.Fatalf("prompt/validator version = %d/%d, want 6/1", digestPromptVersion, digestValidatorVersion)
 	}
 	want := candidateFingerprint(base, digestPromptVersion, digestValidatorVersion)
 	if want == "" || want != candidateFingerprint(base, digestPromptVersion, digestValidatorVersion) {
@@ -31,6 +31,10 @@ func TestCandidateFingerprintSemanticContract(t *testing.T) {
 	permuted.Accounts = []string{"Acme", "Beta"}
 	permuted.AffectedUsers = 99
 	permuted.OccurrenceCount = 1000
+	// The measured impact rolls every morning and the message prints it
+	// mechanically, so it must never retire a day-old cached card.
+	visits, recovered := int64(23), int64(4)
+	permuted.ImpactVisits, permuted.ImpactRecovered = &visits, &recovered
 	permuted.LastSeen = base.LastSeen.Add(24 * time.Hour)
 	if got := candidateFingerprint(permuted, digestPromptVersion, digestValidatorVersion); got != want {
 		t.Fatalf("volatile facts or account ordering changed fingerprint: %s != %s", got, want)

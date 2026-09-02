@@ -9,7 +9,7 @@ import (
 )
 
 const digestValidatorVersion = 1
-const digestPromptVersion = 5
+const digestPromptVersion = 6
 
 // CachedDigestCard is an atomic, already validated card frozen into a run.
 // Partial cache hits are never represented.

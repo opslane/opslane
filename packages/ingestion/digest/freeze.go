@@ -39,10 +39,10 @@ type Candidate struct {
 	AffectedUsers   int    `json:"affectedUsers"`
 	OccurrenceCount int    `json:"occurrenceCount"`
 	// ImpactVisits and ImpactRecovered are the measured recording impact: how
-	// many visits hit the problem and how many got past it. The renderer stopped
-	// printing them as a counts line, so the writer needs them as grounded facts
-	// to say the same thing in prose. Deliberately absent from the fingerprint:
-	// they roll every day and must not retire a cached card.
+	// many visits hit the problem and how many got past it. The writer never
+	// sees them as usable numbers — validation stamps them onto the rendered
+	// card and the message prints them mechanically. Deliberately absent from
+	// the fingerprint: they roll every day and must not retire a cached card.
 	ImpactVisits    *int64    `json:"impactVisits,omitempty"`
 	ImpactRecovered *int64    `json:"impactRecovered,omitempty"`
 	Accounts        []string  `json:"accounts"`

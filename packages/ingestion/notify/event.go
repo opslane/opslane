@@ -111,9 +111,16 @@ type GeneratedDigestCard struct {
 	Copy       string `json:"copy"`
 	// Why is the card's one-sentence cause, written from the investigation's
 	// root cause. Empty when the incident has no stored cause to explain.
-	Why              string     `json:"why,omitempty"`
-	Action           string     `json:"action"`
-	AffectedUsers    int        `json:"affected_users"`
+	Why           string `json:"why,omitempty"`
+	Action        string `json:"action"`
+	AffectedUsers int    `json:"affected_users"`
+	// ImpactVisits and ImpactRecovered are the measured recording impact,
+	// stamped by validation from the frozen candidate. The renderer prints them
+	// mechanically under the authored prose, so today's numbers ship even when
+	// yesterday's cached copy does. Absent on payloads written before the fields
+	// existed, which render no impact line at all.
+	ImpactVisits     *int64     `json:"impact_visits,omitempty"`
+	ImpactRecovered  *int64     `json:"impact_visits_recovered,omitempty"`
 	OccurrenceCount  int        `json:"occurrence_count,omitempty"`
 	SignalCount      int64      `json:"signal_count,omitempty"`
 	Accounts         []string   `json:"accounts"`

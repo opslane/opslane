@@ -43,13 +43,16 @@ describe('groundPayload zero-count normalization', () => {
     expect(grounded.included[0]!.identifiedCount).toBe(0);
   });
 
-  it('grounds the measured visit and recovery counts the template stopped printing', () => {
+  // The message prints the measured visits and recoveries under the copy, so
+  // they are no longer facts a card may state. Naming one is a duplicate of
+  // that line, or a stale number replayed from cached prose.
+  it('refuses the measured visit and recovery counts the message prints itself', () => {
     const measured: DigestCandidate = {
       ...anonymousFrictionCandidate,
       impactVisits: 17,
       impactRecovered: 14,
     };
-    const grounded = groundPayload({
+    expect(() => groundPayload({
       included: [{
         errorGroupId: 'g-anon',
         title: 'Support email is not clickable',
@@ -57,8 +60,7 @@ describe('groundPayload zero-count normalization', () => {
         action: 'Review the investigation.',
       }],
       deferred: [],
-    }, [measured]);
-    expect(grounded.included).toHaveLength(1);
+    }, [measured])).toThrow(/ungrounded number 17/);
 
     expect(() => groundPayload({
       included: [{
@@ -69,6 +71,27 @@ describe('groundPayload zero-count normalization', () => {
       }],
       deferred: [],
     }, [measured])).toThrow(/ungrounded number 42/);
+  });
+
+  // Copy and action carry no digits at all once the candidate is frozen under
+  // the unified contract, grounded or not. Go's checkUnifiedWrittenCard bans
+  // the same two fields.
+  it('bans every digit from the copy and action of a unified card', () => {
+    const unified: DigestCandidate = {
+      ...anonymousFrictionCandidate,
+      fingerprint: 'fingerprint-1',
+      spellStartedAt: '2026-09-01T07:00:00Z',
+      sessionCount: 3,
+    };
+    expect(() => groundPayload({
+      included: [{
+        errorGroupId: 'g-anon',
+        title: 'Support email is not clickable',
+        copy: 'It happened in 3 sessions.',
+        action: 'Review the investigation.',
+      }],
+      deferred: [],
+    }, [unified])).toThrow(/numeric glyph/);
   });
 
   it('grounds the cause sentence against the stored root cause', () => {

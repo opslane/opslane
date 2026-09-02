@@ -15,7 +15,10 @@ import (
 	"github.com/opslane/opslane/packages/ingestion/notify"
 )
 
-func freezeUnifiedFriction(t *testing.T, now time.Time) (*pgxpool.Pool, digestFixture, string, Candidate) {
+// seedUnifiedFrictionIncident builds the one waiting friction incident the
+// unified-lane tests validate against, and stops short of freezing it so a
+// caller can set the facts a freeze will capture.
+func seedUnifiedFrictionIncident(t *testing.T, now time.Time) (*pgxpool.Pool, digestFixture, string) {
 	t.Helper()
 	pool := testPool(t)
 	fixture := seedDigestFixture(t, pool, now)
@@ -26,6 +29,12 @@ func freezeUnifiedFriction(t *testing.T, now time.Time) (*pgxpool.Pool, digestFi
 		t.Fatal(err)
 	}
 	quietBackgroundActionable(t, pool, fixture.ProjectID, groupID)
+	return pool, fixture, groupID
+}
+
+func freezeUnifiedFriction(t *testing.T, now time.Time) (*pgxpool.Pool, digestFixture, string, Candidate) {
+	t.Helper()
+	pool, fixture, groupID := seedUnifiedFrictionIncident(t, now)
 	runID, candidates, err := FreezeCandidates(context.Background(), pool, fixture.ProjectID, now)
 	if err != nil {
 		t.Fatal(err)
@@ -90,8 +99,8 @@ func TestValidateOnPublishesAuthoredFrictionAndCachesCopy(t *testing.T) {
 		WHERE error_group_id=$1 AND invalidated_at IS NULL`, candidate.ErrorGroupID).Scan(&cachedPromptVersion); err != nil {
 		t.Fatal(err)
 	}
-	if cachedPromptVersion != digestPromptVersion || digestPromptVersion != 5 {
-		t.Fatalf("cached prompt version = %d, live = %d, want 5", cachedPromptVersion, digestPromptVersion)
+	if cachedPromptVersion != digestPromptVersion || digestPromptVersion != 6 {
+		t.Fatalf("cached prompt version = %d, live = %d, want 6", cachedPromptVersion, digestPromptVersion)
 	}
 	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM issue_publications
 		WHERE project_id=$1 AND channel='digest'`, fixture.ProjectID).Scan(&publications); err != nil {
@@ -128,29 +137,98 @@ func TestValidateOnPublishesAuthoredFrictionAndCachesCopy(t *testing.T) {
 	}
 }
 
-// The copy digit ban became grounding: a digit matching a frozen fact ships,
-// an invented one still costs the card. The smuggle test below pins the
-// invented side; this pins the grounded side.
-func TestValidateUnifiedGroundedDigitInCopyShips(t *testing.T) {
+// Yesterday's prose, today's numbers. The cache stores copy only, so a card
+// replayed the morning after its impact moved must still print what the
+// incident measures now.
+func TestValidateUnifiedCachedCardCarriesTodaysImpact(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	pool, fixture, groupID := seedUnifiedFrictionIncident(t, now)
+	seedDestination(t, pool, fixture.ProjectID, []string{"digest.daily"})
+	setImpactVisits(t, pool, groupID, 17)
+
+	// Day one authors and caches the prose beside a visit count of 17.
+	firstRun, firstCandidates, err := FreezeCandidates(context.Background(), pool, fixture.ProjectID, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := candidateByGroup(t, firstCandidates, groupID)
+	writeUnifiedPayload(t, pool, firstRun, first, "People cannot save because the control never submits.")
+	if err := ValidateAndPublish(context.Background(), pool, firstRun); err != nil {
+		t.Fatal(err)
+	}
+	if visits := renderedEvent(t, pool, firstRun).Digest.GeneratedCards[0].ImpactVisits; visits == nil || *visits != 17 {
+		t.Fatalf("day one impact = %v, want 17", visits)
+	}
+
+	// Overnight the incident is hit more often.
+	setImpactVisits(t, pool, groupID, 23)
+	secondRun, secondCandidates, err := FreezeCandidates(context.Background(), pool, fixture.ProjectID, now.Add(24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cached := candidateByGroup(t, secondCandidates, groupID)
+	if cached.CachedCard == nil {
+		t.Fatal("second run did not freeze cached authored copy")
+	}
+	writeUnifiedPayload(t, pool, secondRun, cached, cached.CachedCard.Copy)
+	if err := ValidateAndPublish(context.Background(), pool, secondRun); err != nil {
+		t.Fatal(err)
+	}
+	payload := renderedEvent(t, pool, secondRun)
+	if len(payload.Digest.GeneratedCards) != 1 {
+		t.Fatalf("cached replay lost its card: %+v", payload.Digest.GeneratedCards)
+	}
+	if visits := payload.Digest.GeneratedCards[0].ImpactVisits; visits == nil || *visits != 23 {
+		t.Fatalf("day two payload impact = %v, want 23", visits)
+	}
+	body, _, err := notify.FormatSlack(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), "23 visits this week") {
+		t.Fatalf("day two message does not print today's impact: %s", body)
+	}
+	if strings.Contains(string(body), "17 visits") {
+		t.Fatalf("day two message replayed yesterday's impact: %s", body)
+	}
+}
+
+func setImpactVisits(t *testing.T, pool *pgxpool.Pool, groupID string, visits int64) {
+	t.Helper()
+	if _, err := pool.Exec(context.Background(),
+		`UPDATE error_groups SET impact_visits=$2 WHERE id=$1`, groupID, visits); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func candidateByGroup(t *testing.T, candidates []Candidate, groupID string) Candidate {
+	t.Helper()
+	for _, candidate := range candidates {
+		if candidate.ErrorGroupID == groupID {
+			return candidate
+		}
+	}
+	t.Fatalf("group %s was not frozen: %+v", groupID, candidates)
+	return Candidate{}
+}
+
+// Grounded or not, a digit in the copy costs the card. The number the reader
+// needs is printed under it from today's facts, so prose that states one is
+// duplicating that line or replaying a stale value from cached copy.
+func TestValidateUnifiedGroundedDigitInCopyFallsBack(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	pool, fixture, runID, candidate := freezeUnifiedFriction(t, now)
 	seedDestination(t, pool, fixture.ProjectID, []string{"digest.daily"})
 	writeUnifiedPayload(t, pool, runID, candidate,
-		fmt.Sprintf("It reached %d visits this week.", derefInt64(candidate.ImpactVisits)))
+		fmt.Sprintf("People clicked save %d times.", candidate.OccurrenceCount))
 	if err := ValidateAndPublish(context.Background(), pool, runID); err != nil {
 		t.Fatal(err)
 	}
 	payload := renderedEvent(t, pool, runID)
-	if len(payload.Digest.GeneratedCards) != 1 {
-		t.Fatalf("grounded digit demoted the card: cards=%d", len(payload.Digest.GeneratedCards))
+	if len(payload.Digest.GeneratedCards) != 0 || len(payload.Digest.ReceiptItems) != 1 {
+		t.Fatalf("grounded digit in copy cards=%d receipts=%d",
+			len(payload.Digest.GeneratedCards), len(payload.Digest.ReceiptItems))
 	}
-}
-
-func derefInt64(v *int64) int64 {
-	if v == nil {
-		return 0
-	}
-	return *v
 }
 
 func TestValidateUnifiedDigitSmuggleFallsBackPerCard(t *testing.T) {

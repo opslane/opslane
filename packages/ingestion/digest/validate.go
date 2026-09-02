@@ -285,12 +285,14 @@ func checkUnifiedWrittenCard(
 		len([]rune(card.Why)) > 300 || len([]rune(card.Action)) > 300 {
 		return card, "", fmt.Errorf("card length exceeded for %s", identity)
 	}
-	// Copy may carry digits because grounding (firstUngroundedNumber, below)
-	// verifies every one against a frozen fact — impact numbers belong in the
-	// prose now that the counts line is gone. The action keeps the outright
-	// ban: it is state-stamped and has no legitimate number to state.
-	if containsDigit(card.Action) {
-		return card, "", fmt.Errorf("authored action contains a numeric glyph for %s", identity)
+	// Copy and action are digit-free. The renderer prints the measured scale
+	// mechanically under the copy, so a number written into the prose is either
+	// a duplicate of that line or a stale value repeated from a cached card the
+	// day its facts moved. The action is state-stamped and has no number to
+	// state at all. The why sentence is exempt and grounds below: a cause can
+	// legitimately name a timeout or a status code.
+	if containsDigit(card.Copy) || containsDigit(card.Action) {
+		return card, "", fmt.Errorf("authored copy/action contains a numeric glyph for %s", identity)
 	}
 	if card.Label != candidate.Label {
 		return card, "", fmt.Errorf("unsupported label for %s", identity)
@@ -649,8 +651,13 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string) e
 				Title: strings.TrimSpace(card.Title), Label: candidate.Label, Outcome: candidate.Outcome,
 				Copy: strings.TrimSpace(card.Copy), Why: strings.TrimSpace(card.Why),
 				Action:        strings.TrimSpace(card.Action),
-				AffectedUsers: candidate.AffectedUsers, OccurrenceCount: candidate.OccurrenceCount,
-				SignalCount: int64(candidate.OccurrenceCount), Accounts: candidate.Accounts,
+				AffectedUsers: candidate.AffectedUsers,
+				// Today's measured impact, not the prose's: the copy above may
+				// have been authored days ago and cached, while these roll
+				// every morning. The renderer prints them under it.
+				ImpactVisits: candidate.ImpactVisits, ImpactRecovered: candidate.ImpactRecovered,
+				OccurrenceCount: candidate.OccurrenceCount,
+				SignalCount:     int64(candidate.OccurrenceCount), Accounts: candidate.Accounts,
 				PRURL: candidate.PRURL, ReplayURL: replayURL, PRNumber: prNumber(candidate.PRURL),
 				ActionableSince:  candidate.SpellStartedAt,
 				FrictionCategory: candidate.FrictionCategory, Route: candidate.Route,
@@ -1330,19 +1337,9 @@ func firstUngroundedNumber(card writtenDigestCard, candidate Candidate) (string,
 	if number := prNumber(candidate.PRURL); number > 0 {
 		allowed[strconv.Itoa(number)] = struct{}{}
 	}
-	// The renderer no longer prints the measured impact as a counts line, so the
-	// card's own prose carries it. Both numbers are frozen facts, refreshed on
-	// every freeze, so a card that names them is grounded and one that invents a
-	// visit count is not.
-	if candidate.ImpactVisits != nil {
-		allowed[strconv.FormatInt(*candidate.ImpactVisits, 10)] = struct{}{}
-	}
-	if candidate.ImpactRecovered != nil {
-		allowed[strconv.FormatInt(*candidate.ImpactRecovered, 10)] = struct{}{}
-	}
-	// RootCause is listed in its own right, not left to the Summary alias: the
-	// alias holds the cause only while it is non-empty, and the Why sentence is
-	// written from the cause, so its digits must ground on the cause itself.
+	// The measured impact is deliberately absent. The renderer owns those two
+	// numbers now, so a card naming one is either repeating the line printed
+	// under it or replaying a cached day's value; either way it does not ship.
 	sources := []string{candidate.Title, candidate.Summary, candidate.RootCause, candidate.ValidAction,
 		candidate.RoutePurpose, candidate.Route, candidate.ObservationQuote}
 	sources = append(sources, candidate.Accounts...)
@@ -1351,11 +1348,24 @@ func firstUngroundedNumber(card writtenDigestCard, candidate Candidate) (string,
 			allowed[number] = struct{}{}
 		}
 	}
-	for _, field := range []string{card.Title, card.Copy, card.Why, card.Action} {
+	for _, field := range []string{card.Title, card.Copy, card.Action} {
 		for _, number := range proseNumber.FindAllString(normalizeProseNumbers(field), -1) {
 			if _, ok := allowed[number]; !ok {
 				return number, true
 			}
+		}
+	}
+	// The cause sentence grounds against the stored cause alone, not the pooled
+	// set. The why is written from RootCause and nothing else, so a digit it
+	// borrowed from an account name or an occurrence count is invented as far as
+	// the cause is concerned.
+	cause := make(map[string]struct{})
+	for _, number := range proseNumber.FindAllString(normalizeProseNumbers(candidate.RootCause), -1) {
+		cause[number] = struct{}{}
+	}
+	for _, number := range proseNumber.FindAllString(normalizeProseNumbers(card.Why), -1) {
+		if _, ok := cause[number]; !ok {
+			return number, true
 		}
 	}
 	return "", false
