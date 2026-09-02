@@ -179,7 +179,10 @@ func TestReceiptStateFor(t *testing.T) {
 		{"blank PR URL", db.ErrorGroup{Status: "pr_created", PrURL: ptr("   "), InvestigationReadiness: eligible}, incidentJSON{}, ""},
 		{"unsafe PR URL", db.ErrorGroup{Status: "pr_created", PrURL: ptr("javascript:x"), InvestigationReadiness: eligible}, incidentJSON{}, ""},
 		{"failed with diff", db.ErrorGroup{Status: "needs_human", HasSavedDiff: true, InvestigationReadiness: eligible}, incidentJSON{}, "attempt_failed_with_diff"},
-		{"failed with report", db.ErrorGroup{Status: "needs_human", InvestigationReadiness: eligible}, incidentJSON{RootCause: ptr("cause")}, "attempt_failed_no_diff"},
+		{"failed with report", db.ErrorGroup{Status: "needs_human", FixAttempted: true, InvestigationReadiness: eligible}, incidentJSON{RootCause: ptr("cause")}, "attempt_failed_no_diff"},
+		// A dead-lettered investigation leaves its own job id in
+		// terminal_fix_job_id. No fix ran, so the page must not say one failed.
+		{"report with no fix attempt", db.ErrorGroup{Status: "needs_human", InvestigationReadiness: eligible}, incidentJSON{RootCause: ptr("cause")}, "report_ready"},
 		{"blank report", db.ErrorGroup{Status: "needs_human", InvestigationReadiness: eligible}, incidentJSON{RootCause: ptr(" \n ")}, ""},
 		{"failed no report", db.ErrorGroup{Status: "needs_human", InvestigationReadiness: eligible}, incidentJSON{}, ""},
 		{"pending with diff", db.ErrorGroup{Status: "needs_human", HasSavedDiff: true, InvestigationReadiness: pending}, incidentJSON{}, ""},

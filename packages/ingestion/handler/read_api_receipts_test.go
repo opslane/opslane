@@ -205,3 +205,84 @@ func TestLifecycleResponsesCarryReceiptAndRecordings(t *testing.T) {
 		t.Fatalf("unarchive response receipt_line = %s", unarchived["receipt_line"])
 	}
 }
+
+// The incident page must not tell a reader a fix attempt failed when no fix
+// job ever ran. Reconciling a dead-lettered investigation stores that
+// INVESTIGATION job's id in terminal_fix_job_id, and the page used to read the
+// status alone. It now reads the same database function the digest's ask does.
+func TestGetIncidentDistinguishesAFailedFixFromADeadLetteredInvestigation(t *testing.T) {
+	deps, pool := testDeps(t)
+	orgID, projectID, environmentID, _ := seedTenant(t, deps.Queries)
+	t.Cleanup(func() { cleanupTenantHandler(t, pool, orgID) })
+
+	ctx := context.Background()
+	seed := func(fingerprint, jobType string) string {
+		t.Helper()
+		result, err := deps.Queries.InsertErrorEventAndGroup(ctx, db.IngestParams{
+			ProjectID: projectID, DefaultEnvironmentID: environmentID,
+			Fingerprint: fingerprint, Title: "fix provenance incident",
+			ErrorType: "TypeError", ErrorMessage: "boom", StackTraceRaw: "at test",
+			EventTime: time.Now().UTC().Add(-time.Minute),
+		})
+		if err != nil {
+			t.Fatalf("insert error event: %v", err)
+		}
+		var jobID string
+		if err := pool.QueryRow(ctx, `INSERT INTO error_group_jobs
+			(error_group_id,project_id,job_type,status) VALUES ($1,$2,$3,'completed')
+			RETURNING id::text`, result.GroupID, projectID, jobType).Scan(&jobID); err != nil {
+			t.Fatalf("seed %s job: %v", jobType, err)
+		}
+		if _, err := pool.Exec(ctx, `UPDATE error_groups
+			SET status='needs_human',root_cause='The submit handler exits early.',
+			    terminal_fix_job_id=$2::uuid WHERE id=$1`, result.GroupID, jobID); err != nil {
+			t.Fatalf("set terminal state: %v", err)
+		}
+		// The receipt framing is served only for an investigation-eligible
+		// incident, so the episode and its two decisions are part of the fixture.
+		var episodeID string
+		if err := pool.QueryRow(ctx, `INSERT INTO issue_episodes (project_id,canonical_issue_id,sequence)
+			VALUES ($1,$2,1) RETURNING id`, projectID, result.GroupID).Scan(&episodeID); err != nil {
+			t.Fatalf("seed episode: %v", err)
+		}
+		if _, err := pool.Exec(ctx, `INSERT INTO issue_decisions
+			(project_id,episode_id,decision,reason,users_7d,anon_7d,rule_version)
+			VALUES ($1,$2,'open_inquiry','test',2,0,1)`, projectID, episodeID); err != nil {
+			t.Fatalf("seed factual decision: %v", err)
+		}
+		if _, err := pool.Exec(ctx, `INSERT INTO issue_inquiry_decisions
+			(project_id,episode_id,decision,reason,evaluated_units,evidence_signature,model,prompt_version)
+			VALUES ($1,$2,'investigate','test',2,$3,'test',1)`,
+			projectID, episodeID, fingerprint+"-"+result.GroupID); err != nil {
+			t.Fatalf("seed inquiry decision: %v", err)
+		}
+		return result.GroupID
+	}
+	failedFix := seed("handler-fix-provenance-fix", "fix")
+	deadLetteredInvestigation := seed("handler-fix-provenance-investigate", "investigate")
+
+	router := handler.NewRouterWithPool(deps, pool)
+	receiptState := func(groupID string) string {
+		t.Helper()
+		request := httptest.NewRequest(http.MethodGet,
+			"/api/v1/projects/"+projectID+"/incidents/"+groupID, nil)
+		request.Header.Set("Authorization", "Bearer "+dashboardToken(t, orgID))
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("GET incident returned %d: %s", response.Code, response.Body.String())
+		}
+		var body map[string]json.RawMessage
+		if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+			t.Fatalf("decode incident: %v", err)
+		}
+		return string(body["receipt_state"])
+	}
+
+	if got := receiptState(failedFix); got != `"attempt_failed_no_diff"` {
+		t.Fatalf("incident whose fix job ran = %s, want attempt_failed_no_diff", got)
+	}
+	if got := receiptState(deadLetteredInvestigation); got != `"report_ready"` {
+		t.Fatalf("incident whose fix never ran = %s, want report_ready", got)
+	}
+}

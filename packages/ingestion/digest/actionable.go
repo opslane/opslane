@@ -284,20 +284,18 @@ func evaluateActionable(candidates []actionableCandidate, frozenIncidentIDs map[
 	return result
 }
 
-// fixAttemptedSQL is the one spelling of "a fix really ran for this incident".
-// The job type is checked, not just the id: reconciling a dead-lettered
-// investigation stores that INVESTIGATION job's id in terminal_fix_job_id, and
-// reading the id alone would report a fix attempt that never happened. A NULL
-// id, or one whose job is gone, is false.
+// fixAttemptedSQL is the one spelling of "a fix really ran for this incident",
+// and it is a call, not a copy. The rule lives in the database function
+// error_groups_fix_attempted (migrations 072 and 073), which the lifecycle
+// trigger also uses to decide when the waiting age restarts. Two hand-written
+// copies of it drifted apart once already, and the drift is invisible until a
+// reader's ask changes on a day nothing reset the age.
 //
-// Migration 072's error_groups_action_class carries the same rule in SQL.
+// The function checks the job type, not just the id: reconciling a
+// dead-lettered investigation stores that INVESTIGATION job's id in
+// terminal_fix_job_id. A NULL id, or one whose job is gone, is false.
 func fixAttemptedSQL(groupAlias string) string {
-	return fmt.Sprintf(`EXISTS (
-		SELECT 1 FROM error_group_jobs j
-		 WHERE j.id = %[1]s.terminal_fix_job_id
-		   AND j.project_id = %[1]s.project_id
-		   AND j.job_type IN ('fix','error_fix')
-	)`, groupAlias)
+	return fmt.Sprintf(`error_groups_fix_attempted(%[1]s.terminal_fix_job_id, %[1]s.project_id)`, groupAlias)
 }
 
 func actionablePublishable(candidate actionableCandidate) bool {

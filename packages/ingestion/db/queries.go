@@ -1158,17 +1158,22 @@ type ErrorGroup struct {
 	ImpactVisits           *int64
 	ImpactVisitsRecovered  *int64
 	HasSavedDiff           bool
-	SignalType             *string
-	ElementSelector        *string
-	PageURLNormalized      *string
-	PriorityScore          *float64
-	PriorityInputs         []byte
-	PriorityScoredAt       *time.Time
-	CreatedAt              time.Time
-	UpdatedAt              time.Time
-	MergedAt               *time.Time
-	ResolvedAt             *time.Time
-	ArchivedAt             *time.Time
+	// FixAttempted is error_groups_fix_attempted's answer for this row: a fix
+	// job really ran, as opposed to a dead-lettered investigation whose id was
+	// stored in the same column. The receipt state on the incident page reads
+	// it, so the page and the digest cannot disagree about whether a fix ran.
+	FixAttempted      bool
+	SignalType        *string
+	ElementSelector   *string
+	PageURLNormalized *string
+	PriorityScore     *float64
+	PriorityInputs    []byte
+	PriorityScoredAt  *time.Time
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
+	MergedAt          *time.Time
+	ResolvedAt        *time.Time
+	ArchivedAt        *time.Time
 }
 
 type IngestParams struct {
@@ -1906,6 +1911,7 @@ func (q *Queries) GetErrorGroup(ctx context.Context, projectID, groupID string) 
 		        g.verification_evidence, g.candidate_diff,
 		        g.impact_class, g.impact_visits, g.impact_visits_recovered,
 		        NULLIF(btrim(g.candidate_diff), '') IS NOT NULL AS has_saved_diff,
+		        error_groups_fix_attempted(g.terminal_fix_job_id, g.project_id),
 		        g.signal_type, g.element_selector, g.page_url_normalized,
 		        g.priority_score, g.priority_inputs, g.priority_scored_at,
 		        g.created_at, g.updated_at,
@@ -1922,6 +1928,7 @@ func (q *Queries) GetErrorGroup(ctx context.Context, projectID, groupID string) 
 		&g.Confidence, &g.PrURL, &g.RootCause, &g.SuggestedMitigation, &g.InvestigationReadiness,
 		&g.VerificationEvidence, &g.CandidateDiff,
 		&g.ImpactClass, &g.ImpactVisits, &g.ImpactVisitsRecovered, &g.HasSavedDiff,
+		&g.FixAttempted,
 		&g.SignalType, &g.ElementSelector, &g.PageURLNormalized,
 		&g.PriorityScore, &g.PriorityInputs, &g.PriorityScoredAt,
 		&g.CreatedAt, &g.UpdatedAt,
