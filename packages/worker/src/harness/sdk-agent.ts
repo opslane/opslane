@@ -308,6 +308,11 @@ export async function runReadOnlyAgentSdk(input: ReadOnlyRunInput): Promise<Read
   let stop: ReadOnlyStop = 'no_tool_call';
   let apiErrorStatus: number | undefined;
   let apiErrorDetail: string | undefined;
+  // SDK 0.3.251 can yield a typed error result and then throw when its
+  // subprocess exits non-zero. Once that result classified the failure, the
+  // follow-on throw must not reinterpret it. Successful and truncated
+  // messages do not set this guard because a later stream failure still wins.
+  let typedErrorSeen = false;
   let costUsd = 0;
   const q = query({ prompt: input.firstMessage, options: buildQueryOptions(input, state) });
 
@@ -331,17 +336,25 @@ export async function runReadOnlyAgentSdk(input: ReadOnlyRunInput): Promise<Read
         if (message.error === 'max_output_tokens' || message.message.stop_reason === 'max_tokens') stop = 'truncated';
       }
       if (message.type === 'result') {
-        if (message.subtype === 'error_max_turns') stop = 'turns_exhausted';
-        else if (message.subtype === 'error_max_budget_usd') stop = 'budget';
-        else if (message.subtype === 'error_during_execution') {
+        if (message.subtype === 'error_max_turns') {
+          stop = 'turns_exhausted';
+          typedErrorSeen = true;
+        } else if (message.subtype === 'error_max_budget_usd') {
+          stop = 'budget';
+          typedErrorSeen = true;
+        } else if (message.subtype === 'success') {
+          if (message.is_error) {
+            stop = 'api_error';
+            apiErrorDetail = message.result;
+            if ('api_error_status' in message && typeof message.api_error_status === 'number') {
+              apiErrorStatus = message.api_error_status;
+            }
+            typedErrorSeen = true;
+          }
+        } else {
           stop = 'api_error';
           apiErrorDetail = message.errors.join('; ');
-        } else if (message.subtype === 'success' && message.is_error) {
-          stop = 'api_error';
-          apiErrorDetail = message.result;
-          if ('api_error_status' in message && typeof message.api_error_status === 'number') {
-            apiErrorStatus = message.api_error_status;
-          }
+          typedErrorSeen = true;
         }
       }
       if (state.fatal) break;
@@ -349,9 +362,18 @@ export async function runReadOnlyAgentSdk(input: ReadOnlyRunInput): Promise<Read
       if (costUsd > input.budgetUsd) { stop = 'budget'; break; }
     }
   } catch (error: unknown) {
-    if (!state.fatal) {
+    const detail = error instanceof Error ? error.message : String(error);
+    if (state.fatal) {
+      // The tool handler recorded the machine death; it wins below.
+    } else if (typedErrorSeen) {
+      logger.info('diagnose: SDK threw after a typed result; keeping the typed classification', {
+        stop, error: detail,
+      });
+    } else if (/^Claude Code returned an error result: Reached maximum number of turns/.test(detail)) {
+      stop = 'turns_exhausted';
+    } else {
       stop = 'api_error';
-      apiErrorDetail = error instanceof Error ? error.message : String(error);
+      apiErrorDetail = detail;
       const status = (error as { status?: unknown }).status;
       if (typeof status === 'number') apiErrorStatus = status;
       logger.warn('diagnose: SDK query failed', { error: apiErrorDetail, status: apiErrorStatus });
