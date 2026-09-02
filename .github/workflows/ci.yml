@@ -304,6 +304,7 @@ jobs:
       # scan below fails the job if they surface in logs or HTTP responses.
       GITHUB_APP_CLIENT_SECRET: OPSLANE-E2E-CANARY-ingestion-2f9c41d7
       E2B_API_KEY: OPSLANE-E2E-CANARY-worker-8b1e63aa
+      OPSLANE_E2B_JAVASCRIPT_TEMPLATE: opslane-e2e-canary-template
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
