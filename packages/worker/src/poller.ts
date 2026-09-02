@@ -8,6 +8,7 @@ import {
   LeaseLostError,
 } from './db.js';
 import { logger } from './logger.js';
+import { NonRetryableJobError } from './harness/errors.js';
 
 export interface Poller {
   start(): void;
@@ -158,14 +159,26 @@ export function createPoller(options: PollerOptions): Poller {
         return 'completed';
       }
       const message = err instanceof Error ? err.message : String(err);
+      const nonRetryable = err instanceof NonRetryableJobError ? err : null;
       logger.error('Job failed', {
         job_id: job.id,
         error_group_id: job.errorGroupId,
         job_type: job.jobType,
         error: message,
+        non_retryable: nonRetryable !== null,
+        stop: nonRetryable?.detail.stop,
+        cost_usd: nonRetryable?.detail.costUsd,
       });
       try {
-        const failed = await failJob(job.id, workerId, job.leaseGeneration, message);
+        const failed = await failJob(
+          job.id,
+          workerId,
+          job.leaseGeneration,
+          message,
+          nonRetryable
+            ? { exhaust: true, deadLetterClass: nonRetryable.deadLetterClass }
+            : undefined,
+        );
         if (!failed) {
           logger.warn('Failure update rejected: lease lost', {
             job_id: job.id,

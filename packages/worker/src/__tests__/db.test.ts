@@ -8,6 +8,7 @@ import {
   heartbeat,
   completeJob,
   failJob,
+  requeueDeadLetters,
   requeueStaleJobs,
   resolveInactiveGroups,
   resolveSilentMergedGroups,
@@ -2192,6 +2193,64 @@ describeDb('db.ts integration tests', () => {
   });
 
   describe('failJob', () => {
+    it('exhausts in one execution and records the class', async () => {
+      const { jobId } = await seedErrorGroupAndJob({ max_attempts: 3 });
+      const claimed = await claimJob('worker-1', 60_000);
+      await failJob(
+        jobId,
+        'worker-1',
+        claimed!.leaseGeneration,
+        'ran out of turns',
+        { exhaust: true, deadLetterClass: 'limit' },
+      );
+      const { rows } = await testPool.query<{
+        status: string;
+        attempts: number;
+        dead_letter_class: string | null;
+        dead_lettered_at: Date | null;
+      }>(
+        `SELECT status, attempts, dead_letter_class, dead_lettered_at
+           FROM error_group_jobs WHERE id = $1`,
+        [jobId],
+      );
+      expect(rows[0]).toMatchObject({
+        status: 'dead_letter', attempts: 1, dead_letter_class: 'limit',
+      });
+      expect(rows[0]!.dead_lettered_at).not.toBeNull();
+    });
+
+    it('classes a max-attempts dead letter as transient', async () => {
+      const { jobId } = await seedErrorGroupAndJob({ max_attempts: 1 });
+      const claimed = await claimJob('worker-1', 60_000);
+      await failJob(jobId, 'worker-1', claimed!.leaseGeneration, 'socket hang up');
+      const { rows } = await testPool.query<{ dead_letter_class: string | null }>(
+        `SELECT dead_letter_class FROM error_group_jobs WHERE id = $1`,
+        [jobId],
+      );
+      expect(rows[0]!.dead_letter_class).toBe('transient');
+    });
+
+    it('leaves a dead-lettered investigation group in analyzing', async () => {
+      const { errorGroupId, jobId } = await seedErrorGroupAndJob({ max_attempts: 3 });
+      await testPool.query(
+        `UPDATE error_groups SET status = 'analyzing' WHERE id = $1`,
+        [errorGroupId],
+      );
+      const claimed = await claimJob('worker-1', 60_000);
+      await failJob(
+        jobId,
+        'worker-1',
+        claimed!.leaseGeneration,
+        'template missing',
+        { exhaust: true, deadLetterClass: 'config' },
+      );
+      const { rows } = await testPool.query<{ status: string; reason_code: string | null }>(
+        `SELECT status, reason_code FROM error_groups WHERE id = $1`,
+        [errorGroupId],
+      );
+      expect(rows[0]).toMatchObject({ status: 'analyzing', reason_code: null });
+    });
+
     it('should retry (reset to pending) when under max_attempts', async () => {
       const { jobId } = await seedErrorGroupAndJob({
         attempts: 0,
@@ -2317,6 +2376,83 @@ describeDb('db.ts integration tests', () => {
       expect(row.status).toBe('dead_letter');
       expect(row.attempts).toBe(3);
       expect(row.last_error).toBe('Final failure');
+    });
+  });
+
+  describe('requeueDeadLetters', () => {
+    async function deadLetteredJob(
+      deadLetterClass: 'limit' | 'agent' | 'config' | 'transient',
+      jobType: 'investigate' | 'session_analysis' = 'investigate',
+    ): Promise<string> {
+      const { jobId } = await seedErrorGroupAndJob({ status: 'dead_letter' });
+      await testPool.query(
+        `UPDATE error_group_jobs
+            SET job_type = $2, dead_letter_class = $3, requeues = 0,
+                dead_lettered_at = now()
+          WHERE id = $1`,
+        [jobId, jobType, deadLetterClass],
+      );
+      return jobId;
+    }
+
+    it('boot requeues limit, agent, and config dead letters up to three times', async () => {
+      const ids = await Promise.all(
+        (['limit', 'agent', 'config', 'transient'] as const).map((value) => deadLetteredJob(value)),
+      );
+      const first = await requeueDeadLetters('boot');
+      expect(first.map((row) => row.id).sort()).toEqual(ids.slice(0, 3).sort());
+      for (const id of ids.slice(0, 3)) {
+        const { rows } = await testPool.query<{
+          status: string;
+          attempts: number;
+          requeues: number;
+          worker_id: string | null;
+        }>(
+          `SELECT status, attempts, requeues, worker_id FROM error_group_jobs WHERE id = $1`,
+          [id],
+        );
+        expect(rows[0]).toMatchObject({
+          status: 'pending', attempts: 0, requeues: 1, worker_id: null,
+        });
+      }
+      await testPool.query(
+        `UPDATE error_group_jobs SET status = 'dead_letter', requeues = 3
+          WHERE id = ANY($1::uuid[])`,
+        [ids.slice(0, 3)],
+      );
+      expect(await requeueDeadLetters('boot')).toEqual([]);
+    });
+
+    it('interval requeues transient dead letters on a 1h/4h/16h backoff', async () => {
+      const id = await deadLetteredJob('transient');
+      expect(await requeueDeadLetters('interval')).toEqual([]);
+      await testPool.query(
+        `UPDATE error_group_jobs SET dead_lettered_at = now() - interval '61 minutes' WHERE id = $1`,
+        [id],
+      );
+      expect((await requeueDeadLetters('interval')).map((row) => row.id)).toEqual([id]);
+      await testPool.query(
+        `UPDATE error_group_jobs
+            SET status = 'dead_letter', dead_lettered_at = now() - interval '2 hours'
+          WHERE id = $1`,
+        [id],
+      );
+      expect(await requeueDeadLetters('interval')).toEqual([]);
+      await testPool.query(
+        `UPDATE error_group_jobs SET dead_lettered_at = now() - interval '5 hours' WHERE id = $1`,
+        [id],
+      );
+      expect((await requeueDeadLetters('interval')).map((row) => row.id)).toEqual([id]);
+    });
+
+    it('does not replay reconciled session-analysis dead letters', async () => {
+      await deadLetteredJob('transient', 'session_analysis');
+      await testPool.query(
+        `UPDATE error_group_jobs SET dead_lettered_at = now() - interval '1 day'
+          WHERE job_type = 'session_analysis' AND project_id = $1`,
+        [testProjectId],
+      );
+      expect(await requeueDeadLetters('interval')).toEqual([]);
     });
   });
 

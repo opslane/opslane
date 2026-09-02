@@ -24,6 +24,7 @@ import type { RouteClaim } from './product-context/schema.js';
 import { logger, safeErrorMessage } from './logger.js';
 import { emitUsageEvent, incidentUrlFor } from './usage-events.js';
 import type { LedgerEntry } from './verification-ledger.js';
+import type { DeadLetterClass } from './harness/model-failure-policy.js';
 
 const { Pool } = pg;
 
@@ -855,7 +856,8 @@ export async function failJob(
   jobId: string,
   workerId: string,
   leaseGeneration: string,
-  error: string
+  error: string,
+  options?: { exhaust?: boolean; deadLetterClass?: DeadLetterClass },
 ): Promise<boolean> {
   const client = await getPool().connect();
   try {
@@ -865,31 +867,43 @@ export async function failJob(
       job_type: JobType;
       project_id: string;
       error_group_id: string | null;
+      attempts: number;
+      dead_letter_class: DeadLetterClass | null;
+      requeues: number;
     }>(
       `UPDATE error_group_jobs
        SET attempts = attempts + 1,
            last_error = $4,
            status = CASE
-             WHEN attempts + 1 >= max_attempts THEN 'dead_letter'::job_status
+             WHEN $7::boolean OR attempts + 1 >= max_attempts THEN 'dead_letter'::job_status
              ELSE 'pending'::job_status
            END,
            worker_id = CASE
-             WHEN attempts + 1 >= max_attempts THEN worker_id
+             WHEN $7::boolean OR attempts + 1 >= max_attempts THEN worker_id
              ELSE NULL
            END,
            claimed_at = CASE
-             WHEN attempts + 1 >= max_attempts THEN claimed_at
+             WHEN $7::boolean OR attempts + 1 >= max_attempts THEN claimed_at
              ELSE NULL
            END,
            lease_expires_at = CASE
-             WHEN attempts + 1 >= max_attempts THEN lease_expires_at
+             WHEN $7::boolean OR attempts + 1 >= max_attempts THEN lease_expires_at
              ELSE NULL
            END,
            available_at = CASE
-             WHEN attempts + 1 >= max_attempts THEN available_at
+             WHEN $7::boolean OR attempts + 1 >= max_attempts THEN available_at
              ELSE now() + make_interval(secs => LEAST(
                     $5::double precision * power(2, attempts) * (0.5 + random()),
                     $6::double precision))
+           END,
+           dead_letter_class = CASE
+             WHEN $7::boolean OR attempts + 1 >= max_attempts
+               THEN COALESCE($8::text, 'transient')
+             ELSE dead_letter_class
+           END,
+           dead_lettered_at = CASE
+             WHEN $7::boolean OR attempts + 1 >= max_attempts THEN now()
+             ELSE dead_lettered_at
            END,
            updated_at = now()
        WHERE id = $1
@@ -897,7 +911,8 @@ export async function failJob(
          AND lease_generation = $3::bigint
          AND status = 'claimed'
          AND lease_expires_at > now()
-       RETURNING status, job_type, project_id, error_group_id`,
+       RETURNING status, job_type, project_id, error_group_id, attempts,
+                 dead_letter_class, requeues`,
       [
         jobId,
         workerId,
@@ -905,6 +920,8 @@ export async function failJob(
         error,
         RETRY_BACKOFF_BASE_SECONDS,
         RETRY_BACKOFF_CAP_SECONDS,
+        options?.exhaust === true,
+        options?.deadLetterClass ?? null,
       ]
     );
     const row = result.rows[0];
@@ -919,7 +936,7 @@ export async function failJob(
     }
     await client.query('COMMIT');
     if (row && row.status === 'dead_letter' && row.job_type === 'investigate' && row.error_group_id) {
-      await reconcileDeadLetteredInvestigation(row.error_group_id, row.project_id, jobId);
+      logDeadLetteredInvestigation(row.error_group_id, row.project_id, jobId);
     }
     return row !== undefined;
   } catch (err) {
@@ -930,36 +947,18 @@ export async function failJob(
   }
 }
 
-/** A dead-lettered investigation leaves its group in 'analyzing' with no
- * further job to move it, so nothing downstream (digest lanes, the
- * awaiting_approval flow) ever sees the incident again. Terminate it as
- * needs_human so an operator gets the signal. Best-effort and guarded on the
- * group still being in 'analyzing': a group an earlier attempt already moved
- * must not be clobbered. */
-async function reconcileDeadLetteredInvestigation(
+/** A dead-lettered investigation deliberately leaves its group in analyzing;
+ * requeueDeadLetters is the sole path that runs the same durable row again. */
+function logDeadLetteredInvestigation(
   errorGroupId: string,
   projectId: string,
   jobId: string,
-): Promise<void> {
-  try {
-    const group = await getPool().query<{ status: string }>(
-      `SELECT status FROM error_groups WHERE id = $1 AND project_id = $2`,
-      [errorGroupId, projectId],
-    );
-    if (group.rows[0]?.status !== 'analyzing') return;
-    await updateGroupStatus(errorGroupId, projectId, 'needs_human', {
-      reason: {
-        reason_code: 'worker_runtime_error',
-        reason_message: 'The investigation job exceeded its retry limit and was abandoned.',
-        remediation:
-          'Re-run the investigation from the incident, or review manually — repeated attempts failed before a verdict was reached.',
-      },
-      terminalFixJobId: jobId,
-    });
-  } catch {
-    // Best-effort: the job flip already committed; a failure here leaves the
-    // group for the next dead-letter sweep or manual triage.
-  }
+): void {
+  logger.info('Investigation dead-lettered; group stays in analyzing for requeue', {
+    error_group_id: errorGroupId,
+    project_id: projectId,
+    job_id: jobId,
+  });
 }
 
 /**
@@ -1013,6 +1012,14 @@ export async function requeueStaleJobs(): Promise<number> {
              ELSE now() + make_interval(secs => LEAST(
                     $1::double precision * power(2, attempts) * (0.5 + random()),
                     $2::double precision))
+           END,
+           dead_letter_class = CASE
+             WHEN attempts + 1 >= max_attempts THEN COALESCE(dead_letter_class, 'transient')
+             ELSE dead_letter_class
+           END,
+           dead_lettered_at = CASE
+             WHEN attempts + 1 >= max_attempts THEN now()
+             ELSE dead_lettered_at
            END,
            updated_at = now()
        WHERE status = 'claimed' AND lease_expires_at < now()
@@ -1072,11 +1079,70 @@ export async function requeueStaleJobs(): Promise<number> {
       row.job_type === 'investigate' &&
       row.error_group_id
     ) {
-      await reconcileDeadLetteredInvestigation(row.error_group_id, row.project_id, row.id);
+      logDeadLetteredInvestigation(row.error_group_id, row.project_id, row.id);
     }
   }
 
   return rows.length;
+}
+
+export interface RequeuedJob {
+  id: string;
+  jobType: JobType;
+  projectId: string;
+  errorGroupId: string | null;
+  deadLetterClass: string;
+  requeues: number;
+}
+
+/**
+ * The only path out of dead_letter. Deploy-triggered classes run on boot;
+ * transient failures run after 1h, 4h, and 16h. Session-analysis rows are
+ * excluded because dead-letter reconciliation terminalizes their claimed
+ * signals and generation; replaying only the job would not reclaim that work.
+ */
+export async function requeueDeadLetters(
+  trigger: 'boot' | 'interval',
+): Promise<RequeuedJob[]> {
+  const classes = trigger === 'boot' ? ['limit', 'agent', 'config'] : ['transient'];
+  const { rows } = await getPool().query<{
+    id: string;
+    job_type: JobType;
+    project_id: string;
+    error_group_id: string | null;
+    dead_letter_class: string;
+    requeues: number;
+  }>(
+    `UPDATE error_group_jobs
+        SET status = 'pending'::job_status,
+            attempts = 0,
+            worker_id = NULL,
+            claimed_at = NULL,
+            lease_expires_at = NULL,
+            available_at = now(),
+            requeues = requeues + 1,
+            requeued_at = now(),
+            last_error = NULL,
+            updated_at = now()
+      WHERE status = 'dead_letter'
+        AND job_type <> 'session_analysis'
+        AND dead_letter_class = ANY($1::text[])
+        AND requeues < 3
+        AND (
+          $2::boolean
+          OR dead_lettered_at <= now() - make_interval(hours => power(4, requeues)::int)
+        )
+      RETURNING id, job_type, project_id, error_group_id, dead_letter_class, requeues`,
+    [classes, trigger === 'boot'],
+  );
+  return rows.map((row) => ({
+    id: row.id,
+    jobType: row.job_type,
+    projectId: row.project_id,
+    errorGroupId: row.error_group_id,
+    deadLetterClass: row.dead_letter_class,
+    requeues: row.requeues,
+  }));
 }
 
 /** Stores the Langfuse trace URL on a job row (fire-and-forget). */

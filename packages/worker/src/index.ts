@@ -4,6 +4,7 @@ import type { ClaimedJob, ErrorEventData, QueueDepthRow } from './db.js';
 import * as db from './db.js';
 import {
   requeueStaleJobs,
+  requeueDeadLetters,
   updateGroupStatus,
   closePool,
   updateGroupInvestigation,
@@ -1735,6 +1736,14 @@ async function main(): Promise<void> {
     logger.warn('Optional environment variable not set — jobs requiring it will fail', { key });
   }
 
+  const requeued = await requeueDeadLetters('boot');
+  if (requeued.length > 0) {
+    logger.info('Requeued dead letters on boot', {
+      count: requeued.length,
+      classes: requeued.map((job) => job.deadLetterClass),
+    });
+  }
+
   // Initialize tracing (no-op if LANGFUSE env vars unset).
   // Must complete before poller starts so Anthropic SDK is instrumented.
   await initTracing();
@@ -1820,6 +1829,17 @@ async function main(): Promise<void> {
       })
       .catch((err: unknown) => {
         logger.error('Reaper error', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    requeueDeadLetters('interval')
+      .then((jobs) => {
+        if (jobs.length > 0) {
+          logger.info('Requeued transient dead letters', { count: jobs.length });
+        }
+      })
+      .catch((err: unknown) => {
+        logger.error('Dead-letter requeue error', {
           error: err instanceof Error ? err.message : String(err),
         });
       });

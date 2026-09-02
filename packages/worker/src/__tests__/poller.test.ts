@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { ClaimedJob } from '../db.js';
+import { NonRetryableJobError } from '../harness/errors.js';
 
 // Mock the db module before importing poller
 vi.mock('../db.js', () => ({
@@ -134,9 +135,59 @@ describe('poller', () => {
     // Let the error handling complete
     await vi.advanceTimersByTimeAsync(0);
 
-    expect(mockFailJob).toHaveBeenCalledWith('job-1', 'test-worker', '1', 'Pipeline exploded');
+    expect(mockFailJob).toHaveBeenCalledWith(
+      'job-1', 'test-worker', '1', 'Pipeline exploded', undefined,
+    );
     expect(mockCompleteJob).not.toHaveBeenCalled();
 
+    await poller.stop();
+  });
+
+  it('exhausts a NonRetryableJobError in one attempt with its class', async () => {
+    const job = makeJob();
+    mockClaimJob.mockResolvedValueOnce(job);
+    const processJob = vi.fn<(j: ClaimedJob, signal: AbortSignal) => Promise<void>>()
+      .mockRejectedValue(new NonRetryableJobError(
+        'Inquiry ran out of turns',
+        'limit',
+        { stop: 'turns_exhausted', costUsd: 0.31 },
+      ));
+    const poller = createPoller({
+      intervalMs: 1000,
+      leaseDurationMs: 30_000,
+      workerId: 'test-worker',
+      processJob,
+    });
+
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mockFailJob).toHaveBeenCalledWith(
+      job.id,
+      'test-worker',
+      job.leaseGeneration,
+      'Inquiry ran out of turns',
+      { exhaust: true, deadLetterClass: 'limit' },
+    );
+    await poller.stop();
+  });
+
+  it('retries an ordinary failure through the queue', async () => {
+    const job = makeJob();
+    mockClaimJob.mockResolvedValueOnce(job);
+    const processJob = vi.fn<(j: ClaimedJob, signal: AbortSignal) => Promise<void>>()
+      .mockRejectedValue(new Error('socket hang up'));
+    const poller = createPoller({
+      intervalMs: 1000,
+      leaseDurationMs: 30_000,
+      workerId: 'test-worker',
+      processJob,
+    });
+
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mockFailJob).toHaveBeenCalledWith(
+      job.id, 'test-worker', job.leaseGeneration, 'socket hang up', undefined,
+    );
     await poller.stop();
   });
 
