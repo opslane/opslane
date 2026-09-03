@@ -21,12 +21,12 @@ Revision 2 — after codex round 1 (three parallel focused reviews). Confirmed: 
 - (C) Impact numbers are rendered mechanically from today's facts, never written by the model.
 - Card slots go to incidents with finished investigation reports; others appear via the overflow count and the oldest-waiter guarantee (already implemented in commit `88bc323`; unchanged here).
 - Deploy safety: NO version gating (revision 4 decision). The only mixed-version exposure is deploying while a digest run is in flight (normally a ~10-minute morning window, or a stuck retrying run); the consequence, given Task 2's per-card demotion, is one day's cards rendering as receipts, self-healed the next morning. Task 6's deploy note states exactly that sentence. Do not implement promptVersion stamping or version-branched validation.
-- Exactly two authored ask lines for report-bearing states: `Review the fix PR.` and `Decide how to handle this.` (`Approve the proposed fix.` survives only until the separate autonomy-removal change ships; "fix attempt failed" ceases to be an ask and becomes story context.)
+- Two plain ask lines for report-bearing states — `Review the fix PR.` and `Decide how to handle this.` — plus the interim `Approve the proposed fix.` (three asks total until the separate autonomy-removal change ships; "fix attempt failed" ceases to be an ask and becomes story context). Task 4's action matrix is the authority.
 - No system jargon in reader-facing copy (no "diagnosis", "investigation", "friction", category names, or route templates).
 
 ## Global Constraints
 
-- The writer's copy and action are digit-free again, enforced in BOTH validators: Go's restored ban, and a matching unified-card check in the worker that rejects per-card (demotion, never a run failure). The `why` sentence's digits ground FIELD-SPECIFICALLY against `RootCause` alone in both validators (not the pooled whitelist); title keeps the pooled whitelist. Legacy (pre-v6 payload) cards validate under the old rules via the protocol gate. The spelled-out-quantities ban returns to the prompt. Tests to invert, not supplement: the worker tests asserting whole-run rejection for account/link/number defects (digest-writer.test.ts:146, :485) and the impact-digits-pass expectation (digest-writer/__tests__/grounding.test.ts:46).
+- The writer's copy and action are digit-free again, enforced in BOTH validators: Go's restored ban, and a matching unified-card check in the worker that rejects per-card (demotion, never a run failure). The `why` sentence's digits ground FIELD-SPECIFICALLY against `RootCause` alone in both validators (not the pooled whitelist); title keeps the pooled whitelist. There is no protocol gate (revision 4): the prompt-version bump to 6 changes every candidate fingerprint, so no pre-v6 cached copy is ever replayed into the new rules, and a pre-v6 payload caught mid-deploy demotes per-card and self-heals next morning. The spelled-out-quantities ban returns to the prompt. Tests to invert, not supplement: the worker tests asserting whole-run rejection for account/link/number defects (digest-writer.test.ts:146, :485) and the impact-digits-pass expectation (digest-writer/__tests__/grounding.test.ts:46).
 - `ImpactVisits`/`ImpactRecovered` leave both grounding whitelists (added in commit `2e20c2c`; that commit's relaxation of the copy digit ban is reverted).
 - Both prompt-version constants (TS DIGEST_PROMPT_VERSION, Go digestPromptVersion in fingerprint.go:11) bump 5 -> 6 in Task 1: v5's semantics change here pre-ship, and the bump guarantees no v5-cached copy (from any environment or test database) survives into the new rules.
 - Migration 072 is NOT edited (it is durably applied in at least one volume-backed database, the runner reapplies all migrations on boot, and the repo rule is append-only). The SQL fix ships as migration 073: CREATE OR REPLACE the function KEEPING the existing parameter names but correcting the body to use $1/$2 positional references (sidesteps both the rename restriction and the self-comparison), and update ask strings in a re-created action-class function. 073's tests: double-apply idempotency AND an upgrade-path case that applies 073 over a database already carrying 072's definitions, asserting the wrong-project call now returns false.
@@ -54,7 +54,7 @@ Revision 2 — after codex round 1 (three parallel focused reviews). Confirmed: 
 - Test: `packages/ingestion/notify/slack_digest_test.go`, `packages/ingestion/digest/validate_review_test.go`, `validate_unified_test.go`, `packages/worker/src/__tests__/digest-writer.test.ts`
 
 **Interfaces:**
-- Produces: `GeneratedDigestCard.ImpactVisits *int64`, `ImpactRecovered *int64` (json `impact_visits`/`impact_recovered`, omitempty), stamped by validation from the candidate; renderer contract: authored friction card block order is title, copy, `Why: …` (when present), impact line, context line.
+- Produces: `GeneratedDigestCard.ImpactVisits *int64`, `ImpactRecovered *int64` (json `impact_visits`/`impact_visits_recovered`, omitempty — the TS mirror uses the same json names), stamped by validation from the candidate; renderer contract: authored friction card block order is title, copy, `Why: …` (when present), impact line, context line.
 
 - [ ] **Step 1: Failing renderer tests**
 
@@ -95,7 +95,7 @@ Two-day cached-card round-trip test (Go, DB-backed): author and cache prose on d
 
 - [ ] **Step 5b: Version bump** — TS `DIGEST_PROMPT_VERSION` and Go `digestPromptVersion` both 5 -> 6; update the tests that pin 5 (`TestCandidateFingerprintSemanticContract`, the cached-copy prompt-version assertion in `TestValidateOnPublishesAuthoredFrictionAndCachesCopy`, the TS prompt-contract test name).
 
-Known and accepted: the why sentence's digits ground against the whole candidate fact set, not RootCause alone (grounding is one whitelist); acceptable because every entry in it is a frozen fact.
+(Superseded note removed in the final pass: the why sentence's digits ground against `RootCause` alone, exactly as the Global Constraints state; the earlier "whole candidate fact set" concession predates the field-specific check and was implemented the strict way.)
 
 - [ ] **Step 6: Commit** `fix(digest): render measured impact mechanically, keep the writer digit-free`
 
@@ -122,7 +122,7 @@ Known and accepted: the why sentence's digits ground against the whole candidate
 - Modify: `packages/ingestion/db/migrations/072_action_class_fix_provenance.sql`, `packages/ingestion/digest/actionable.go` (`fixAttemptedSQL`), `packages/ingestion/handler/read_api.go` (`receiptStateFor` + its query, ~line 708)
 - Test: `packages/ingestion/db/migration_test` file for 072 (extend), `packages/ingestion/handler/` incident-detail test
 
-- [ ] **Step 1: Fix the tautology** — in 072, rename the function parameters (`p_terminal_fix_job_id UUID, p_project_id UUID`) and qualify the predicate (`j.id = p_terminal_fix_job_id AND j.project_id = p_project_id`). Update every call site inside the migration's trigger bodies.
+- [ ] **Step 1: Fix the tautology** — as built: migration 073 (append-only; see Global Constraints) re-creates `error_groups_fix_attempted` KEEPING 072's parameter names and referencing the arguments positionally (`j.id = $1 AND j.project_id = $2`), which sidesteps both the CREATE-OR-REPLACE rename restriction and the self-comparison. 072 itself changes only in one way: its two superseded function creations gain create-if-absent guards so the boot replay (which runs 072 again after 073 is already applied) cannot reinstall the buggy body and retired asks for the window between the two files.
 
 - [ ] **Step 2: Failing SQL test** — extend `TestMigration072FixAttemptedChecksTheJobType` (or add a sibling): a fix job in project A queried with project B's id returns false; with project A's id returns true.
 
