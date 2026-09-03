@@ -89,6 +89,11 @@ func PageReceiptLine(state string) (string, bool) {
 		return "We tried a fix and couldn't produce a working change.", true
 	case "report_ready":
 		return "We found the cause.", true
+	case "report_ready_no_cause":
+		// report_ready needs only a report, and a report can exist without a
+		// stored cause (a task brief alone). Claiming "we found the cause" on
+		// such an incident asserts something the page below cannot show.
+		return "We could not establish a cause; what we found is on this page.", true
 	default:
 		return "", false
 	}

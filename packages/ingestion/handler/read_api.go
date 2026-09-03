@@ -666,6 +666,11 @@ func (d *Dependencies) attachReceiptAndRecordings(ctx context.Context, projectID
 		if state == "pr_open" && g.Status == "pr_draft" {
 			lineKey = "pr_open_draft"
 		}
+		// report_ready admits a task brief without a stored cause; the page
+		// line must not claim a cause was found on those incidents.
+		if state == "report_ready" && (inc.RootCause == nil || strings.TrimSpace(*inc.RootCause) == "") {
+			lineKey = "report_ready_no_cause"
+		}
 		if line, lineOK := narrative.PageReceiptLine(lineKey); lineOK {
 			inc.ReceiptState = &state
 			inc.ReceiptLine = &line

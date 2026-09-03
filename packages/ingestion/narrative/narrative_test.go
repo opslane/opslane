@@ -58,6 +58,7 @@ func TestPageReceiptLine(t *testing.T) {
 		"attempt_failed_with_diff": "Fix attempt failed its checks; the working diff was saved.",
 		"attempt_failed_no_diff":   "We tried a fix and couldn't produce a working change.",
 		"report_ready":             "We found the cause.",
+		"report_ready_no_cause":    "We could not establish a cause; what we found is on this page.",
 	}
 	for state, want := range wants {
 		got, ok := narrative.PageReceiptLine(state)
