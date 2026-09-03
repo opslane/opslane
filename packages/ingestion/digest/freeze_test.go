@@ -96,6 +96,114 @@ func seedFreezeReplay(t *testing.T, pool *pgxpool.Pool, projectID, environmentID
 	}
 }
 
+// seedFrictionReplay is seedFreezeReplay's friction twin: an accepted, live
+// friction signal whose session has a covered, scrubbed recording.
+func seedFrictionReplay(t *testing.T, pool *pgxpool.Pool, projectID, environmentID, groupID, sessionID string, anchor time.Time) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := pool.Exec(ctx, `INSERT INTO sessions
+		(id,project_id,environment_id,started_at,last_chunk_at)
+		VALUES ($1,$2,$3,$4,$4)`, sessionID, projectID, environmentID, anchor.Add(-time.Minute)); err != nil {
+		t.Fatalf("seed friction replay session: %v", err)
+	}
+	first, last := anchor.Add(-20*time.Second).UnixMilli(), anchor.Add(20*time.Second).UnixMilli()
+	if _, err := pool.Exec(ctx, `INSERT INTO session_chunks
+		(session_id,seq,project_id,object_key,has_full_snapshot,scrubbed_at,first_event_ms,last_event_ms)
+		VALUES ($1,0,$2,$3,true,now(),$4,$5)`, sessionID, projectID, "digest/"+sessionID, first, last); err != nil {
+		t.Fatalf("seed friction replay chunk: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO friction_signals
+		(project_id,environment_id,incident_id,session_id,signal_type,fingerprint,page_url_normalized,occurred_at,adjudication_status,rule_version)
+		VALUES ($1,$2,$3,$4,'dead_click','fp-'||$4,'/checkout',$5,'accepted',7)`,
+		projectID, environmentID, groupID, sessionID, anchor); err != nil {
+		t.Fatalf("seed friction replay signal: %v", err)
+	}
+}
+
+// A young spell has no covered recording yet, but the incident's history does.
+// The freeze must fall back to the older recording instead of shipping a card
+// with no replay: older evidence of the same behavior beats none.
+func TestFreezeFallsBackToAPreSpellRecording(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	f := seedDigestFixture(t, pool, now)
+	cleanupActionableDiagnoses(t, pool, f.ProjectID)
+	groupID, episodeID := seedActionableGroup(t, pool, f.ProjectID, f.EnvID, "error", "needs_human", now.Add(-3*time.Hour))
+	quietBackgroundActionable(t, pool, f.ProjectID, groupID)
+	preSpell := "prespell-" + uuid.NewString()
+	// The only covered recording is anchored two hours ago...
+	seedFreezeReplay(t, pool, f.ProjectID, f.EnvID, episodeID, preSpell, now.Add(-2*time.Hour))
+	// ...and the current spell started one hour ago, after that recording.
+	if _, err := pool.Exec(ctx, `UPDATE error_groups SET actionable_since=$2 WHERE id=$1`,
+		groupID, now.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	_, candidates, err := FreezeCandidates(ctx, pool, f.ProjectID, now)
+	if err != nil || len(candidates) != 1 {
+		t.Fatalf("freeze candidates=%+v err=%v", candidates, err)
+	}
+	wantAnchor := now.Add(-2 * time.Hour).UnixMilli()
+	if candidates[0].ReplaySessionID != preSpell || candidates[0].ReplayAnchorMs != wantAnchor {
+		t.Fatalf("replay = %q@%d, want the pre-spell session %q@%d",
+			candidates[0].ReplaySessionID, candidates[0].ReplayAnchorMs, preSpell, wantAnchor)
+	}
+}
+
+// When the current spell has its own covered recording, the fallback must not
+// replace it with an older one.
+func TestFreezePrefersTheInSpellRecording(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	f := seedDigestFixture(t, pool, now)
+	cleanupActionableDiagnoses(t, pool, f.ProjectID)
+	groupID, episodeID := seedActionableGroup(t, pool, f.ProjectID, f.EnvID, "error", "needs_human", now.Add(-3*time.Hour))
+	quietBackgroundActionable(t, pool, f.ProjectID, groupID)
+	inSpell := "inspell-" + uuid.NewString()
+	seedFreezeReplay(t, pool, f.ProjectID, f.EnvID, episodeID, "prespell-"+uuid.NewString(), now.Add(-2*time.Hour))
+	seedFreezeReplay(t, pool, f.ProjectID, f.EnvID, episodeID, inSpell, now.Add(-30*time.Minute))
+	if _, err := pool.Exec(ctx, `UPDATE error_groups SET actionable_since=$2 WHERE id=$1`,
+		groupID, now.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	_, candidates, err := FreezeCandidates(ctx, pool, f.ProjectID, now)
+	if err != nil || len(candidates) != 1 {
+		t.Fatalf("freeze candidates=%+v err=%v", candidates, err)
+	}
+	if candidates[0].ReplaySessionID != inSpell {
+		t.Fatalf("replay = %q, want the in-spell session %q", candidates[0].ReplaySessionID, inSpell)
+	}
+}
+
+// The production failure was a friction incident: the friction watchable
+// query (not the error one) must take the same fallback.
+func TestFreezeFallsBackToAPreSpellFrictionRecording(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	f := seedDigestFixture(t, pool, now)
+	cleanupActionableDiagnoses(t, pool, f.ProjectID)
+	groupID, _ := seedActionableGroup(t, pool, f.ProjectID, f.EnvID, "friction", "needs_human", now.Add(-3*time.Hour))
+	quietBackgroundActionable(t, pool, f.ProjectID, groupID)
+	preSpell := "prespell-friction-" + uuid.NewString()
+	seedFrictionReplay(t, pool, f.ProjectID, f.EnvID, groupID, preSpell, now.Add(-2*time.Hour))
+	if _, err := pool.Exec(ctx, `UPDATE error_groups SET actionable_since=$2 WHERE id=$1`,
+		groupID, now.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	_, candidates, err := FreezeCandidates(ctx, pool, f.ProjectID, now)
+	if err != nil || len(candidates) != 1 {
+		t.Fatalf("freeze candidates=%+v err=%v", candidates, err)
+	}
+	if candidates[0].ReplaySessionID != preSpell {
+		t.Fatalf("friction replay = %q, want the pre-spell session %q", candidates[0].ReplaySessionID, preSpell)
+	}
+}
+
 func TestFreezeCapturesOccurrenceAndReplayFacts(t *testing.T) {
 	pool := testPool(t)
 	ctx := context.Background()
