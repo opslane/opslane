@@ -8,7 +8,7 @@
 
 **Tech Stack:** Go (ingestion digest package, pgx), TypeScript (worker poller, vitest).
 
-**Spec:** The Background section below. It is the prod diagnosis of 2026-09-03 (incident `028a6aa2-d411-4674-bd33-99b4f8c1fc60`); no separate spec document exists.
+**Spec:** The Background section below. It is the prod diagnosis of 2026-09-03 (incident id redacted; no separate spec document exists).
 
 ## Background (the spec)
 
