@@ -132,4 +132,20 @@ func TestMigration073AppliesOverADatabaseCarrying072AndReapplies(t *testing.T) {
 		t.Errorf("reapplying 073 changed the schema:\n--- before ---\n%s\n--- after ---\n%s", first, second)
 	}
 	assertScoped("after two reapplications")
+
+	// The boot replay also runs 072 again, BEFORE 073's turn comes. An
+	// unguarded 072 would reinstall its cross-project body and retired asks
+	// for that window; the guard must make the replay a no-op instead.
+	if err := applyMigration(t, psql, dsn, "migrations/072_action_class_fix_provenance.sql"); err != nil {
+		t.Fatalf("replay 072 after 073: %v", err)
+	}
+	assertScoped("after replaying 072 over 073")
+	var ask *string
+	if err := pool.QueryRow(ctx,
+		`SELECT error_groups_action_class('needs_human',NULL,NULL,false)`).Scan(&ask); err != nil {
+		t.Fatal(err)
+	}
+	if ask == nil || *ask != "Decide how to handle this." {
+		t.Fatalf("replaying 072 reinstalled a retired ask: %v", ask)
+	}
 }

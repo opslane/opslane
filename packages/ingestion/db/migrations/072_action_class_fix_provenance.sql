@@ -24,48 +24,78 @@ BEGIN;
 -- 066's three-argument function is deliberately left in place. The runner
 -- replays every file on every boot and 066 recreates it each time; this file
 -- runs after and owns the trigger bodies below, so the old one is unreferenced.
-CREATE OR REPLACE FUNCTION error_groups_action_class(
-  status TEXT, candidate_diff TEXT, pr_url TEXT, fix_attempted BOOLEAN
-) RETURNS TEXT AS $$
+--
+-- Create-if-absent, not CREATE OR REPLACE: 073 replaces this body (and
+-- fix_attempted's below), and the boot replay runs this file again after 073
+-- has already been applied. An unguarded replacement would reinstall this
+-- superseded body for the moment between the two migrations' commits — a
+-- window in which a concurrent trigger firing classifies with retired asks and
+-- can permanently reset actionable_since. The guard makes the replay a no-op;
+-- only a database that has never seen the function gets this version, and 073
+-- corrects it moments later in the same migration run.
+DO $$
 BEGIN
-  CASE status
-    WHEN 'awaiting_approval' THEN
-      IF NULLIF(btrim(COALESCE(candidate_diff,'')),'') IS NOT NULL THEN
-        RETURN 'Approve the proposed fix.';
-      END IF;
-      IF COALESCE(fix_attempted,false) THEN
-        RETURN 'Review the investigation.';
-      END IF;
-      RETURN 'Review the diagnosis.';
-    WHEN 'pr_created', 'pr_draft' THEN
-      IF NULLIF(btrim(COALESCE(pr_url,'')),'') IS NOT NULL THEN
-        RETURN 'Review the fix PR.';
-      END IF;
-      -- Inconsistent state: the digest still renders it and logs a diagnostic.
-      RETURN 'Review the issue.';
-    WHEN 'needs_human' THEN
-      IF NULLIF(btrim(COALESCE(candidate_diff,'')),'') IS NOT NULL
-         OR COALESCE(fix_attempted,false) THEN
-        RETURN 'Review the investigation.';
-      END IF;
-      RETURN 'Review the diagnosis.';
-    ELSE
-      RETURN NULL;
-  END CASE;
-END $$ LANGUAGE plpgsql IMMUTABLE;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+     WHERE n.nspname = 'public' AND p.proname = 'error_groups_action_class'
+       AND pg_get_function_identity_arguments(p.oid) = 'status text, candidate_diff text, pr_url text, fix_attempted boolean'
+  ) THEN
+    CREATE FUNCTION error_groups_action_class(
+      status TEXT, candidate_diff TEXT, pr_url TEXT, fix_attempted BOOLEAN
+    ) RETURNS TEXT AS $body$
+    BEGIN
+      CASE status
+        WHEN 'awaiting_approval' THEN
+          IF NULLIF(btrim(COALESCE(candidate_diff,'')),'') IS NOT NULL THEN
+            RETURN 'Approve the proposed fix.';
+          END IF;
+          IF COALESCE(fix_attempted,false) THEN
+            RETURN 'Review the investigation.';
+          END IF;
+          RETURN 'Review the diagnosis.';
+        WHEN 'pr_created', 'pr_draft' THEN
+          IF NULLIF(btrim(COALESCE(pr_url,'')),'') IS NOT NULL THEN
+            RETURN 'Review the fix PR.';
+          END IF;
+          -- Inconsistent state: the digest still renders it and logs a diagnostic.
+          RETURN 'Review the issue.';
+        WHEN 'needs_human' THEN
+          IF NULLIF(btrim(COALESCE(candidate_diff,'')),'') IS NOT NULL
+             OR COALESCE(fix_attempted,false) THEN
+            RETURN 'Review the investigation.';
+          END IF;
+          RETURN 'Review the diagnosis.';
+        ELSE
+          RETURN NULL;
+      END CASE;
+    END $body$ LANGUAGE plpgsql IMMUTABLE;
+  END IF;
+END $$;
 
 -- error_groups_fix_attempted answers "did a fix job really run for this
 -- incident". STABLE, not IMMUTABLE: it reads another table.
-CREATE OR REPLACE FUNCTION error_groups_fix_attempted(
-  terminal_fix_job_id UUID, project_id UUID
-) RETURNS BOOLEAN AS $$
-  SELECT EXISTS (
-    SELECT 1 FROM error_group_jobs j
-     WHERE j.id = terminal_fix_job_id
-       AND j.project_id = project_id
-       AND j.job_type IN ('fix','error_fix')
-  );
-$$ LANGUAGE sql STABLE;
+--
+-- Guarded for the same reason as the classifier above: 073 owns the corrected
+-- body, and a replay must not reinstall this one over it.
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+     WHERE n.nspname = 'public' AND p.proname = 'error_groups_fix_attempted'
+       AND pg_get_function_identity_arguments(p.oid) = 'terminal_fix_job_id uuid, project_id uuid'
+  ) THEN
+    CREATE FUNCTION error_groups_fix_attempted(
+      terminal_fix_job_id UUID, project_id UUID
+    ) RETURNS BOOLEAN AS $body$
+      SELECT EXISTS (
+        SELECT 1 FROM error_group_jobs j
+         WHERE j.id = terminal_fix_job_id
+           AND j.project_id = project_id
+           AND j.job_type IN ('fix','error_fix')
+      );
+    $body$ LANGUAGE sql STABLE;
+  END IF;
+END $$;
 
 -- Replaced, not duplicated: 064's triggers keep calling this one function.
 CREATE OR REPLACE FUNCTION error_groups_actionable_lifecycle() RETURNS trigger AS $$
