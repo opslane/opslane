@@ -698,6 +698,32 @@ describe('poller', () => {
     await stopped;
   });
 
+  it('names the operator\'s actual typo in the invalid-concurrency warning', async () => {
+    // A raw env-var string is never a valid JS number; index.ts used to
+    // pre-convert with Number() before this option existed, so a typo like
+    // "banana" became NaN and then null once logged as JSON, telling nobody
+    // what was actually typed. concurrency now accepts the raw string so the
+    // warning can name it directly.
+    mockClaimJob.mockResolvedValue(null);
+    const poller = createPoller({
+      intervalMs: 60_000,
+      leaseDurationMs: 30_000,
+      workerId: 'w',
+      processJob: vi.fn(),
+      concurrency: 'banana',
+    });
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mockClaimJob).toHaveBeenCalledTimes(1);
+    expect(logger.warn).toHaveBeenCalledWith(
+      'Invalid concurrency; running one loop',
+      expect.objectContaining({ requested: 'banana' }),
+    );
+    const stopped = poller.stop();
+    await vi.advanceTimersByTimeAsync(0);
+    await stopped;
+  });
+
   it('keeps claim-error backoff per loop: two failing loops claim twice as often as one', async () => {
     // With per-loop counters, each loop backs off from its own error count;
     // if the counters regressed to shared closure state, the combined count

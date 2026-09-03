@@ -1807,11 +1807,10 @@ async function main(): Promise<void> {
     logger.info('Health server started', { port: HEALTH_PORT });
   });
 
+  // Pass the raw string through unconverted: createPoller does its own
+  // parsing so an invalid value's warning can name exactly what was typed.
   const rawWorkerConcurrency = process.env['WORKER_CONCURRENCY'];
-  const WORKER_CONCURRENCY =
-    rawWorkerConcurrency === undefined || rawWorkerConcurrency === ''
-      ? undefined
-      : Number(rawWorkerConcurrency);
+  const WORKER_CONCURRENCY = rawWorkerConcurrency === '' ? undefined : rawWorkerConcurrency;
   const poller = createPoller({
     intervalMs: POLL_INTERVAL_MS,
     leaseDurationMs: LEASE_DURATION_MS,
