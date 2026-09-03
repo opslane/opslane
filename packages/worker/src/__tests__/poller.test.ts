@@ -642,6 +642,35 @@ describe('poller', () => {
     expect(mockCompleteJob).toHaveBeenCalledTimes(2);
   });
 
+  it('a claim queued behind a slow one does not fire after stop()', async () => {
+    // 3 loops start together, so 2 of their claims queue behind the first on
+    // the in-process claim chain. stop() fires while the first claim is still
+    // pending. The queued claims must resolve to "no job" instead of issuing
+    // their own claimJob call once their turn comes -- otherwise shutdown
+    // starts new work instead of only waiting for work already claimed.
+    let resolveFirstClaim: (job: ClaimedJob | null) => void = () => {};
+    const firstClaim = new Promise<ClaimedJob | null>((resolve) => {
+      resolveFirstClaim = resolve;
+    });
+    mockClaimJob.mockReturnValueOnce(firstClaim);
+    const poller = createPoller({
+      intervalMs: 60_000,
+      leaseDurationMs: 30_000,
+      workerId: 'w',
+      processJob: vi.fn(),
+      concurrency: 3,
+    });
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mockClaimJob).toHaveBeenCalledTimes(1); // 2 more are queued, not yet called
+    const stopped = poller.stop();
+    resolveFirstClaim(null);
+    await vi.advanceTimersByTimeAsync(0);
+    await stopped;
+    // The queued claims resolved to null without ever calling claimJob again.
+    expect(mockClaimJob).toHaveBeenCalledTimes(1);
+  });
+
   it('stop() wakes every sleeping loop, not just the last to sleep', async () => {
     mockClaimJob.mockResolvedValue(null);
     const poller = createPoller({
