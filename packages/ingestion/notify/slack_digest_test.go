@@ -530,6 +530,12 @@ func TestFormatSlackDigestV4RendersTheMeasuredImpactLine(t *testing.T) {
 		t.Fatalf("impact line missing or out of place: %s", both)
 	}
 
+	one := int64(1)
+	single := render(card("friction-one", "friction", &one, nil))
+	if !strings.Contains(single, "1 visit this week\\n*Needs you:*") {
+		t.Fatalf("a single measured visit rendered with plural grammar: %s", single)
+	}
+
 	for name, impactRecovered := range map[string]*int64{"nil": nil, "zero": &zero} {
 		body := render(card("friction-visits", "friction", &visits, impactRecovered))
 		if !strings.Contains(body, "17 visits this week\\n*Needs you:*") {
