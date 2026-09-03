@@ -56,6 +56,46 @@ func TestMigration071RepairsStrandedInvestigation(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Controls the backfill must not touch: a needs_human with an evidence
+	// verdict, one whose terminal job is a fix, and one whose dead job is
+	// already classed. Each keeps its status and reason on every replay.
+	type control struct {
+		fingerprint, reasonCode, jobType string
+		classed                          bool
+	}
+	controls := []control{
+		{"071-verdict", "unfixable_no_app_frames", "investigate", false},
+		{"071-fix", "worker_runtime_error", "fix", false},
+	}
+	controlIDs := map[string]string{}
+	seedControl := func(c control) {
+		var gid, jid string
+		if err := pool.QueryRow(ctx, `INSERT INTO error_groups
+			(project_id,fingerprint,title,first_seen,last_seen,status,reason_code,
+			 reason_message,remediation,needs_human_at)
+			VALUES ($1,$2,'x',now(),now(),'needs_human',$3,'why','do',now() - interval '1 day') RETURNING id`,
+			projectID, c.fingerprint, c.reasonCode).Scan(&gid); err != nil {
+			t.Fatal(err)
+		}
+		if err := pool.QueryRow(ctx, `INSERT INTO error_group_jobs
+			(error_group_id,project_id,job_type,status,attempts,max_attempts,last_error)
+			VALUES ($1,$2,$3,'dead_letter',3,3,'x') RETURNING id`, gid, projectID, c.jobType).Scan(&jid); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, `UPDATE error_groups SET terminal_fix_job_id=$2 WHERE id=$1`, gid, jid); err != nil {
+			t.Fatal(err)
+		}
+		if c.classed {
+			if _, err := pool.Exec(ctx, `UPDATE error_group_jobs SET dead_letter_class='agent' WHERE id=$1`, jid); err != nil {
+				t.Fatal(err)
+			}
+		}
+		controlIDs[c.fingerprint] = gid
+	}
+	for _, c := range controls {
+		seedControl(c)
+	}
+
 	path := filepath.Join("migrations", "071_dead_letter_class.sql")
 	var retainedNeedsHumanAt time.Time
 	for boot := 0; boot < 2; boot++ {
@@ -89,6 +129,22 @@ func TestMigration071RepairsStrandedInvestigation(t *testing.T) {
 		}
 		if class != "config" || requeues != 0 || deadLetteredAt.IsZero() {
 			t.Fatalf("boot %d job not classed: class=%q requeues=%d dead_lettered_at=%s", boot, class, requeues, deadLetteredAt)
+		}
+		if boot == 0 {
+			// A stranded row whose dead job already carries a class (only
+			// possible once the column exists) belongs to the worker's requeue
+			// policy, not to the backfill; the second replay must leave it.
+			seedControl(control{"071-classed", "worker_runtime_error", "investigate", true})
+		}
+		for fingerprint, gid := range controlIDs {
+			var cs string
+			var cr *string
+			if err := pool.QueryRow(ctx, `SELECT status, reason_code FROM error_groups WHERE id=$1`, gid).Scan(&cs, &cr); err != nil {
+				t.Fatal(err)
+			}
+			if cs != "needs_human" || cr == nil {
+				t.Fatalf("boot %d control %s was repaired: status=%q reason=%v", boot, fingerprint, cs, cr)
+			}
 		}
 	}
 }

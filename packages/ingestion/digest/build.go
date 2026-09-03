@@ -565,7 +565,8 @@ func (s *Sweeper) buildNeedsHuman(ctx context.Context, projectID string, from, t
 	rows, err := s.pool.Query(ctx, `
 		SELECT g.id, g.title, COALESCE(g.reason_message,'')
 		FROM error_groups g
-		WHERE g.project_id = $1 AND g.needs_human_at >= $2 AND g.needs_human_at < $3
+		WHERE g.project_id = $1 AND g.status = 'needs_human'
+		  AND g.needs_human_at >= $2 AND g.needs_human_at < $3
 		  AND `+pipelineEligibleSQL("g")+`
 		ORDER BY g.needs_human_at DESC
 		LIMIT $4`, projectID, from, to, listCap+1)

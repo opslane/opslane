@@ -418,3 +418,20 @@ describe.skipIf(!process.env['DATABASE_URL'])('product context persistence', () 
     expect(stored.rows[0]).toEqual({ purpose: 'Human purpose', source: 'human' });
   });
 });
+
+describe('productContextLimits edge cases', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it.each(['0', '-1', 'abc', ' '])('ignores the override %j and keeps the scaled default', (raw) => {
+    vi.stubEnv('PRODUCT_CONTEXT_MAX_TURNS', raw);
+    vi.stubEnv('PRODUCT_CONTEXT_BUDGET_USD', raw);
+    expect(productContextLimits(10)).toEqual({ maxTurns: 25, budgetUsd: 0.8 });
+  });
+
+  it('clamps a nonsense route count to zero routes', () => {
+    expect(productContextLimits(Number.NaN)).toEqual(productContextLimits(0));
+    expect(productContextLimits(-5)).toEqual(productContextLimits(0));
+  });
+});
