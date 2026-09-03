@@ -110,7 +110,8 @@ The Opslane server reads **only** the `REPLAY_STORE_*` names; `MINIO_*` names ap
 | `LEASE_DURATION_MS` / `REAPER_INTERVAL_MS` / `SILENCE_CHECK_INTERVAL_MS` | no | Duration of a worker's temporary job ownership, expired-job cleanup interval, and stalled-queue check interval |
 | `RESOLVE_AGE_DAYS` | no (14) | Inactivity period before eligible human-review or completed-analysis issues resolve automatically |
 | `INACTIVITY_CHECK_INTERVAL_MS` | no (900000) | How often the worker sweeps for inactive issues (15 minutes by default) |
-| `SESSION_ANALYSIS_MAX_CONCURRENT` | no (2) | Fleet-wide cap on `session_analysis` jobs running at the same time; `0` prevents workers from starting analysis jobs; raising it has no effect at fleet size 1 |
+| `SESSION_ANALYSIS_MAX_CONCURRENT` | no (2) | Fleet-wide cap on `session_analysis` jobs running at the same time; `0` prevents workers from starting analysis jobs. Raising it only helps if a worker also runs enough concurrent loops to use the extra room; see `WORKER_CONCURRENCY` |
+| `WORKER_CONCURRENCY` | no (1) | How many jobs one worker process runs at once (any job type, mixed). Accepted range 1-16; invalid or out-of-range values log a warning and fall back to 1, or clamp to 16. The simultaneous-analysis ceiling is `min(SESSION_ANALYSIS_MAX_CONCURRENT, replicas × WORKER_CONCURRENCY)`; the uncapped investigate/fix lanes are bounded only by this value times the replica count |
 | `NARRATIVE_API_KEY` | when session narratives are enabled | Model API key for session narratives and frame verification. Falls back to `ANTHROPIC_API_KEY`. Without either key, narrative reservations remain pending. |
 | `NARRATIVE_MODEL` | no (`claude-sonnet-5`) | Model used to write session narratives and verify findings against captured frames. |
 | `NARRATIVE_BASE_URL` | no (Anthropic default) | Alternate Anthropic-compatible endpoint for narrative and frame-verification calls. |
