@@ -61,10 +61,8 @@ export function createPoller(options: PollerOptions): Poller {
 
   let running = false;
   let loopPromise: Promise<void> | null = null;
-  let wake: (() => void) | null = null;
+  const wakers = new Set<() => void>();
   let abandoned = false;
-  let consecutiveClaimErrors = 0;
-  let consecutiveNonCompletions = 0;
 
   /** Capped exponential backoff with jitter. Jitter prevents a retry convoy. */
   function backoffMs(attempt: number, baseMs: number, capMs: number): number {
@@ -76,21 +74,22 @@ export function createPoller(options: PollerOptions): Poller {
   function interruptibleSleep(ms: number): Promise<void> {
     if (!running) return Promise.resolve();
     return new Promise<void>((resolve) => {
+      const waker = () => {
+        clearTimeout(timer);
+        wakers.delete(waker);
+        resolve();
+      };
       const timer = setTimeout(() => {
-        wake = null;
+        wakers.delete(waker);
         resolve();
       }, ms);
       timer.unref();
-      wake = () => {
-        clearTimeout(timer);
-        wake = null;
-        resolve();
-      };
+      wakers.add(waker);
     });
   }
 
   function wakeSleep(): void {
-    wake?.();
+    for (const waker of [...wakers]) waker();
   }
 
   async function processOneJob(job: ClaimedJob): Promise<JobOutcome> {
@@ -198,6 +197,8 @@ export function createPoller(options: PollerOptions): Poller {
   }
 
   async function runLoop(): Promise<void> {
+    let consecutiveClaimErrors = 0;
+    let consecutiveNonCompletions = 0;
     while (running) {
       let job: ClaimedJob | null;
       try {
