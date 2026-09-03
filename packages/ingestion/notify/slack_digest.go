@@ -345,7 +345,11 @@ func DigestImpactLine(card GeneratedDigestCard) string {
 	if card.Kind != "friction" || card.ImpactVisits == nil || *card.ImpactVisits <= 0 {
 		return ""
 	}
-	line := fmt.Sprintf("%d visits this week", *card.ImpactVisits)
+	noun := "visits"
+	if *card.ImpactVisits == 1 {
+		noun = "visit"
+	}
+	line := fmt.Sprintf("%d %s this week", *card.ImpactVisits, noun)
 	if card.ImpactRecovered != nil && *card.ImpactRecovered > 0 {
 		line += fmt.Sprintf(", %d recovered", *card.ImpactRecovered)
 	}
