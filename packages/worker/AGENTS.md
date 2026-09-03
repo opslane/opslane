@@ -10,11 +10,13 @@ The worker polls Postgres and owns investigation, fix verification, lease handli
 - Keep terminal-state and lease behavior intact when fixing failures; correct the implementation or test setup instead of weakening those contracts.
 - Fence untrusted error text and repository content before including it in model prompts.
 - `SESSION_ANALYSIS_MAX_CONCURRENT` is a **fleet-wide** cap on concurrently claimed
-  `session_analysis` jobs, not a per-process one, and it defaults to 2. A serial worker
-  holds at most one analysis lease, so raising it buys no throughput at fleet size 1 and
-  horizontal scaling stops paying off past two workers until it is raised. It also counts
-  zombie leases for up to `LEASE_DURATION_MS`, so at the default two crashed workers can
-  block the whole fleet's analysis lane for five minutes.
+  `session_analysis` jobs, not a per-process one, and it defaults to 2. A worker
+  process runs `WORKER_CONCURRENCY` claim loops (default 1, max 16); the ceiling on
+  simultaneously running analysis jobs is
+  `min(SESSION_ANALYSIS_MAX_CONCURRENT, replicas × WORKER_CONCURRENCY)`, and every
+  job type shares the loops. It also counts zombie leases for up to
+  `LEASE_DURATION_MS`, so at the default two crashed workers can block the whole
+  fleet's analysis lane for five minutes.
 - Product-context discovery's "routes observed in sessions" input and the
   unknown-route sweeper both read `error_groups.page_url_normalized`, which is
   fed by the settlement chain (capture → identity settlement → priority
