@@ -564,4 +564,166 @@ describe('poller', () => {
 
     await poller.stop();
   });
+
+  it('runs two jobs at once when concurrency is 2', async () => {
+    let inFlight = 0;
+    let peak = 0;
+    const jobs = [makeJob({ id: 'job-1' }), makeJob({ id: 'job-2' })];
+    mockClaimJob.mockImplementation(async () => jobs.shift() ?? null);
+    const release: Array<() => void> = [];
+    const processJob = vi.fn(async () => {
+      inFlight += 1;
+      peak = Math.max(peak, inFlight);
+      await new Promise<void>((resolve) => release.push(resolve));
+      inFlight -= 1;
+    });
+    const poller = createPoller({
+      intervalMs: 1_000,
+      leaseDurationMs: 30_000,
+      workerId: 'w',
+      processJob,
+      concurrency: 2,
+    });
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(peak).toBe(2);
+    release.forEach((resolve) => resolve());
+    await vi.advanceTimersByTimeAsync(0);
+    await poller.stop();
+  });
+
+  it('stays serial by default', async () => {
+    let inFlight = 0;
+    let peak = 0;
+    const jobs = [makeJob({ id: 'job-1' }), makeJob({ id: 'job-2' })];
+    mockClaimJob.mockImplementation(async () => jobs.shift() ?? null);
+    const processJob = vi.fn(async () => {
+      inFlight += 1;
+      peak = Math.max(peak, inFlight);
+      await Promise.resolve();
+      inFlight -= 1;
+    });
+    const poller = createPoller({
+      intervalMs: 1_000,
+      leaseDurationMs: 30_000,
+      workerId: 'w',
+      processJob,
+    });
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(peak).toBe(1);
+    await poller.stop();
+  });
+
+  it('stop() waits for every in-flight job across loops', async () => {
+    const jobs = [makeJob({ id: 'job-1' }), makeJob({ id: 'job-2' })];
+    mockClaimJob.mockImplementation(async () => jobs.shift() ?? null);
+    const release: Array<() => void> = [];
+    let finished = 0;
+    const processJob = vi.fn(async () => {
+      await new Promise<void>((resolve) => release.push(resolve));
+      finished += 1;
+    });
+    const poller = createPoller({
+      intervalMs: 1_000,
+      leaseDurationMs: 30_000,
+      workerId: 'w',
+      processJob,
+      concurrency: 2,
+    });
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(release).toHaveLength(2);
+    const stopped = poller.stop();
+    release.forEach((resolve) => resolve());
+    await vi.advanceTimersByTimeAsync(0);
+    await stopped;
+    expect(finished).toBe(2);
+    expect(mockCompleteJob).toHaveBeenCalledTimes(2);
+  });
+
+  it('stop() wakes every sleeping loop, not just the last to sleep', async () => {
+    mockClaimJob.mockResolvedValue(null);
+    const poller = createPoller({
+      intervalMs: 60_000,
+      leaseDurationMs: 30_000,
+      workerId: 'w',
+      processJob: vi.fn(),
+      concurrency: 3,
+    });
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0); // all three loops claim null and sleep
+    const stopped = poller.stop();
+    await vi.advanceTimersByTimeAsync(0);
+    await expect(stopped).resolves.toBeUndefined();
+  });
+
+  it('clamps a wild concurrency value to the documented bounds', async () => {
+    mockClaimJob.mockResolvedValue(null);
+    const poller = createPoller({
+      intervalMs: 60_000,
+      leaseDurationMs: 30_000,
+      workerId: 'w',
+      processJob: vi.fn(),
+      concurrency: 5_000,
+    });
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    // 16 loops, not 5000: each issues exactly one claim before sleeping.
+    expect(mockClaimJob).toHaveBeenCalledTimes(16);
+    const stopped = poller.stop();
+    await vi.advanceTimersByTimeAsync(0);
+    await stopped;
+  });
+
+  it.each([
+    ['zero', 0],
+    ['negative', -3],
+    ['fractional', 1.5],
+    ['non-numeric', Number.NaN],
+  ])('falls back to one loop for a %s concurrency value', async (_name, value) => {
+    mockClaimJob.mockResolvedValue(null);
+    const poller = createPoller({
+      intervalMs: 60_000,
+      leaseDurationMs: 30_000,
+      workerId: 'w',
+      processJob: vi.fn(),
+      concurrency: value,
+    });
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mockClaimJob).toHaveBeenCalledTimes(1);
+    const stopped = poller.stop();
+    await vi.advanceTimersByTimeAsync(0);
+    await stopped;
+  });
+
+  it('keeps claim-error backoff per loop: two failing loops claim twice as often as one', async () => {
+    // With per-loop counters, each loop backs off from its own error count;
+    // if the counters regressed to shared closure state, the combined count
+    // would inflate both loops' delays and halve the claim rate. random: () => 0
+    // removes the jitter so the arithmetic is exact.
+    const countAttempts = async (concurrency: number): Promise<number> => {
+      vi.clearAllMocks();
+      mockClaimJob.mockRejectedValue(new Error('db down'));
+      const poller = createPoller({
+        intervalMs: 1_000,
+        leaseDurationMs: 30_000,
+        workerId: 'w',
+        processJob: vi.fn(),
+        concurrency,
+        random: () => 0,
+      });
+      poller.start();
+      await vi.advanceTimersByTimeAsync(30_000);
+      const attempts = mockClaimJob.mock.calls.length;
+      const stopped = poller.stop();
+      await vi.advanceTimersByTimeAsync(0);
+      await stopped;
+      return attempts;
+    };
+    const single = await countAttempts(1);
+    const dual = await countAttempts(2);
+    expect(dual).toBe(single * 2);
+  });
 });

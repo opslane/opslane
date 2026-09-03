@@ -27,6 +27,17 @@ export interface PollerOptions {
   /** Fired once per successful claim, before processing. Metrics only. */
   onClaim?: (job: ClaimedJob) => void;
   /**
+   * Number of concurrent claim loops in this process (integer, 1-16; other
+   * values fall back to 1, oversize values clamp to 16 with a warning).
+   * Loops claim through claimJob, whose advisory-lock-serialized admission
+   * enforces the fleet-wide lane caps regardless of this value; the
+   * uncapped interactive lanes (investigate/fix) are bounded only by this
+   * number times the replica count. The pg pool (driver default max 10)
+   * holds connections per query, not per job. Defaults to 1: today's
+   * serial worker.
+   */
+  concurrency?: number;
+  /**
    * Fault-injection seam for reliability tests only. Runs after processJob
    * resolves and before the completion write, so a test can simulate a crash
    * or lease loss at that exact boundary. Never set in production.
@@ -58,11 +69,38 @@ export function createPoller(options: PollerOptions): Poller {
   const CLAIM_ERROR_CAP_MS = 60_000;
   const CIRCUIT_BREAKER_THRESHOLD = 3;
   const CIRCUIT_BREAKER_CAP_MS = 300_000;
+  const MAX_CONCURRENCY = 16;
+
+  let concurrency: number;
+  if (options.concurrency === undefined) {
+    concurrency = 1;
+  } else if (!Number.isInteger(options.concurrency) || options.concurrency < 1) {
+    logger.warn('Invalid concurrency; running one loop', { requested: options.concurrency });
+    concurrency = 1;
+  } else if (options.concurrency > MAX_CONCURRENCY) {
+    logger.warn('Concurrency clamped', { requested: options.concurrency, max: MAX_CONCURRENCY });
+    concurrency = MAX_CONCURRENCY;
+  } else {
+    concurrency = options.concurrency;
+  }
 
   let running = false;
-  let loopPromise: Promise<void> | null = null;
+  let loopPromises: Promise<void>[] = [];
   const wakers = new Set<() => void>();
   let abandoned = false;
+
+  // Claims are serialized fleet-wide by claimJob's advisory lock, so chaining
+  // them in-process costs no throughput and keeps N loops from parking N pool
+  // connections on the same lock.
+  let claimChain: Promise<unknown> = Promise.resolve();
+  function claimSerially(): Promise<ClaimedJob | null> {
+    const next = claimChain.then(
+      () => claimJob(workerId, leaseDurationMs),
+      () => claimJob(workerId, leaseDurationMs),
+    );
+    claimChain = next.catch(() => undefined);
+    return next;
+  }
 
   /** Capped exponential backoff with jitter. Jitter prevents a retry convoy. */
   function backoffMs(attempt: number, baseMs: number, capMs: number): number {
@@ -202,7 +240,7 @@ export function createPoller(options: PollerOptions): Poller {
     while (running) {
       let job: ClaimedJob | null;
       try {
-        job = await claimJob(workerId, leaseDurationMs);
+        job = await claimSerially();
       } catch (err: unknown) {
         logger.error('Failed to claim job', {
           error: err instanceof Error ? err.message : String(err),
@@ -275,7 +313,7 @@ export function createPoller(options: PollerOptions): Poller {
 
   return {
     start(): void {
-      if (loopPromise || abandoned) {
+      if (loopPromises.length > 0 || abandoned) {
         logger.warn('Poller already started or abandoned mid-shutdown; ignoring start()', {
           abandoned,
         });
@@ -286,14 +324,15 @@ export function createPoller(options: PollerOptions): Poller {
         interval_ms: intervalMs,
         lease_duration_ms: leaseDurationMs,
         worker_id: workerId,
+        concurrency,
       });
-      loopPromise = runLoop();
+      loopPromises = Array.from({ length: concurrency }, () => runLoop());
     },
 
     async stop(): Promise<void> {
       running = false;
       wakeSleep();
-      if (loopPromise) {
+      if (loopPromises.length > 0) {
         logger.info('Waiting for the poll loop to finish');
         let timer: ReturnType<typeof setTimeout> | undefined;
         const deadline = new Promise<'timeout'>((resolve) => {
@@ -301,7 +340,7 @@ export function createPoller(options: PollerOptions): Poller {
           timer.unref();
         });
         const result = await Promise.race([
-          loopPromise.then(() => 'clean' as const),
+          Promise.all(loopPromises).then(() => 'clean' as const),
           deadline,
         ]);
         if (timer) clearTimeout(timer);
@@ -312,7 +351,7 @@ export function createPoller(options: PollerOptions): Poller {
           abandoned = true;
           return;
         }
-        loopPromise = null;
+        loopPromises = [];
       }
       logger.info('Poller stopped');
     },
