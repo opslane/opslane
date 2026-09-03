@@ -76,6 +76,22 @@ func (s *Sweeper) replayURLFor(ctx context.Context, groupID, projectID string) *
 	return s.sessionURLAt(sessionID, anchorMs)
 }
 
+// watchableSessionAnySpell prefers a covered recording from the current
+// waiting spell, then falls back to the incident's whole history. A spell that
+// started this morning often has no analyzed-and-scrubbed session yet; an
+// older recording of the same behavior is better evidence than no button.
+// Both underlying queries bound their candidate pool before the coverage
+// probes run (sessions_read.go), and the unfloored form already runs per
+// digest build on the insights lane (build.go), so the fallback costs one
+// extra bounded query, only on a miss.
+func watchableSessionAnySpell(ctx context.Context, q ingestiondb.RowQuerier, groupID, projectID string, floor time.Time) (string, int64, bool, error) {
+	sessionID, anchorMs, ok, err := ingestiondb.WatchableSessionForGroupOn(ctx, q, groupID, projectID, floor)
+	if err != nil || ok || floor.IsZero() {
+		return sessionID, anchorMs, ok, err
+	}
+	return ingestiondb.WatchableSessionForGroupOn(ctx, q, groupID, projectID, time.Time{})
+}
+
 func rootCauseExcerpt(rootCause *string) *string {
 	if rootCause == nil || strings.TrimSpace(*rootCause) == "" {
 		return nil

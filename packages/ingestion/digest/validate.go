@@ -18,7 +18,6 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	ingestiondb "github.com/opslane/opslane/packages/ingestion/db"
 	"github.com/opslane/opslane/packages/ingestion/narrative"
 	"github.com/opslane/opslane/packages/ingestion/notify"
 )
@@ -915,16 +914,14 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string) e
 					"project_id", run.ProjectID, "error", err)
 				break
 			}
-			// Bound the lookup by the moment the item became actionable. An
-			// unbounded floor makes the watchable query sort the group's
-			// whole event history inside the transaction that must commit
-			// for the digest to be delivered, and a recording from before
-			// the item was actionable is stale anyway.
+			// Prefer a recording from the current spell; fall back to the
+			// incident's history when the spell is too young to have one
+			// (see watchableSessionAnySpell for why that is bounded).
 			replayFloor := time.Time{}
 			if candidate.ActionableSince != nil {
 				replayFloor = *candidate.ActionableSince
 			}
-			sessionID, anchorMs, ok, lookupErr := ingestiondb.WatchableSessionForGroupOn(ctx, tx, candidate.GroupID, run.ProjectID, replayFloor)
+			sessionID, anchorMs, ok, lookupErr := watchableSessionAnySpell(ctx, tx, candidate.GroupID, run.ProjectID, replayFloor)
 			if lookupErr != nil {
 				slog.Warn("actionable digest replay lookup failed; omitting the link", "group_id", candidate.GroupID, "project_id", run.ProjectID, "error", lookupErr)
 				if _, err := tx.Exec(ctx, `ROLLBACK TO SAVEPOINT actionable_replay_lookup`); err != nil {

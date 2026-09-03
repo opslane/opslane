@@ -9,7 +9,6 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	ingestiondb "github.com/opslane/opslane/packages/ingestion/db"
 )
 
 // Candidate is the immutable fact envelope supplied to the daily writer.
@@ -164,7 +163,7 @@ func FreezeCandidates(ctx context.Context, pool *pgxpool.Pool, projectID string,
 			if _, err := tx.Exec(ctx, `SAVEPOINT digest_replay_lookup`); err != nil {
 				return "", nil, fmt.Errorf("open replay lookup savepoint: %w", err)
 			}
-			if id, anchor, ok, lookupErr := ingestiondb.WatchableSessionForGroupOn(ctx, tx, candidate.IssueID, projectID, replayFloor); lookupErr != nil {
+			if id, anchor, ok, lookupErr := watchableSessionAnySpell(ctx, tx, candidate.IssueID, projectID, replayFloor); lookupErr != nil {
 				slog.Warn("digest replay lookup failed; freezing without replay", "group_id", candidate.IssueID, "error", lookupErr)
 				if _, err := tx.Exec(ctx, `ROLLBACK TO SAVEPOINT digest_replay_lookup`); err != nil {
 					return "", nil, fmt.Errorf("roll back replay lookup savepoint: %w", err)

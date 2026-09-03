@@ -211,6 +211,36 @@ func TestValidateRepeatsActionableItemUntilHumanActs(t *testing.T) {
 	}
 }
 
+// The receipts lane mirrors the card lane: a spell too young to have its own
+// covered recording still links the incident's older one.
+func TestActionableReceiptFallsBackToAPreSpellRecording(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	fixture := seedDigestFixture(t, pool, now)
+	cleanupActionableDiagnoses(t, pool, fixture.ProjectID)
+	seedDestination(t, pool, fixture.ProjectID, []string{"digest.daily"})
+	groupID, episodeID := seedActionableGroup(t, pool, fixture.ProjectID, fixture.EnvID, "error", "awaiting_approval", now.Add(-3*time.Hour))
+	quietBackgroundActionable(t, pool, fixture.ProjectID, groupID)
+	sessionID := "prespell-receipt-" + uuid.NewString()
+	seedFreezeReplay(t, pool, fixture.ProjectID, fixture.EnvID, episodeID, sessionID, now.Add(-2*time.Hour))
+	if _, err := pool.Exec(ctx, `UPDATE error_groups SET actionable_since=$2 WHERE id=$1`,
+		groupID, now.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DASHBOARD_URL", "https://app.example.com")
+
+	runID := publishEmptyWrittenRun(t, pool, fixture.ProjectID, now)
+	payload := renderedEvent(t, pool, runID)
+	if len(payload.Digest.ReceiptItems) != 1 {
+		t.Fatalf("receipts = %+v, want one", payload.Digest.ReceiptItems)
+	}
+	if !strings.Contains(payload.Digest.ReceiptItems[0].SessionURL, sessionID) {
+		t.Fatalf("receipt session url = %q, want the pre-spell session %s",
+			payload.Digest.ReceiptItems[0].SessionURL, sessionID)
+	}
+}
+
 // An incident that shipped an authored card owes no second appearance as a
 // receipt: the receipt lane is built from the incidents whose card fell back,
 // and nothing else. Re-validating a delivered run must change none of that.
