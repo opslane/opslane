@@ -35,8 +35,13 @@ export interface PollerOptions {
    * number times the replica count. The pg pool (driver default max 10)
    * holds connections per query, not per job. Defaults to 1: today's
    * serial worker.
+   *
+   * Accepts the raw env-var string as well as a number: parsing happens
+   * here, not at the call site, so an invalid value's warning can name
+   * exactly what was typed (a caller that pre-converts with Number() would
+   * hand this NaN, which logs as null and loses the operator's typo).
    */
-  concurrency?: number;
+  concurrency?: number | string;
   /**
    * Fault-injection seam for reliability tests only. Runs after processJob
    * resolves and before the completion write, so a test can simulate a crash
@@ -72,16 +77,23 @@ export function createPoller(options: PollerOptions): Poller {
   const MAX_CONCURRENCY = 16;
 
   let concurrency: number;
-  if (options.concurrency === undefined) {
+  const rawConcurrency = options.concurrency;
+  if (rawConcurrency === undefined) {
     concurrency = 1;
-  } else if (!Number.isInteger(options.concurrency) || options.concurrency < 1) {
-    logger.warn('Invalid concurrency; running one loop', { requested: options.concurrency });
-    concurrency = 1;
-  } else if (options.concurrency > MAX_CONCURRENCY) {
-    logger.warn('Concurrency clamped', { requested: options.concurrency, max: MAX_CONCURRENCY });
-    concurrency = MAX_CONCURRENCY;
   } else {
-    concurrency = options.concurrency;
+    const parsedConcurrency = typeof rawConcurrency === 'number' ? rawConcurrency : Number(rawConcurrency);
+    if (!Number.isInteger(parsedConcurrency) || parsedConcurrency < 1) {
+      // Log the pre-parse value: for a string input this is the operator's
+      // literal typo ("banana"), which survives JSON logging, unlike NaN
+      // (which serializes to null and says nothing about what was typed).
+      logger.warn('Invalid concurrency; running one loop', { requested: rawConcurrency });
+      concurrency = 1;
+    } else if (parsedConcurrency > MAX_CONCURRENCY) {
+      logger.warn('Concurrency clamped', { requested: rawConcurrency, max: MAX_CONCURRENCY });
+      concurrency = MAX_CONCURRENCY;
+    } else {
+      concurrency = parsedConcurrency;
+    }
   }
 
   let running = false;
