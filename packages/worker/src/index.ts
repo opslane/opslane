@@ -1807,6 +1807,11 @@ async function main(): Promise<void> {
     logger.info('Health server started', { port: HEALTH_PORT });
   });
 
+  const rawWorkerConcurrency = process.env['WORKER_CONCURRENCY'];
+  const WORKER_CONCURRENCY =
+    rawWorkerConcurrency === undefined || rawWorkerConcurrency === ''
+      ? undefined
+      : Number(rawWorkerConcurrency);
   const poller = createPoller({
     intervalMs: POLL_INTERVAL_MS,
     leaseDurationMs: LEASE_DURATION_MS,
@@ -1814,6 +1819,7 @@ async function main(): Promise<void> {
     processJob,
     onClaim: () => { claimsLastMinute += 1; },
     shutdownGraceMs: SHUTDOWN_GRACE_MS,
+    concurrency: WORKER_CONCURRENCY,
   });
   poller.start();
 
