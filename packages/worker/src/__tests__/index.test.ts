@@ -568,6 +568,37 @@ describe('processInvestigateJob diagnosis routing', () => {
     };
   }
 
+  it('dead-letters an exhausted-turns investigation as limit without touching the group', async () => {
+    mockInvestigateError.mockResolvedValue(apiFailureResult({
+      stop: 'turns_exhausted', decisionReason: 'ran out of turns',
+    }));
+    const error = await processInvestigateJob(makeJob(), new AbortController().signal)
+      .catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(NonRetryableJobError);
+    expect((error as NonRetryableJobError).deadLetterClass).toBe('limit');
+    expect(db.updateGroupInvestigation).not.toHaveBeenCalled();
+  });
+
+  it('dead-letters an investigation that read nothing as agent', async () => {
+    mockInvestigateError.mockResolvedValue(apiFailureResult({
+      stop: 'no_evidence', decisionReason: 'no files read',
+    }));
+    const error = await processInvestigateJob(makeJob(), new AbortController().signal)
+      .catch((caught: unknown) => caught);
+    expect((error as NonRetryableJobError).deadLetterClass).toBe('agent');
+    expect(db.updateGroupInvestigation).not.toHaveBeenCalled();
+  });
+
+  it('dead-letters an error investigation as config when the model key is missing', async () => {
+    delete process.env['ANTHROPIC_API_KEY'];
+    const error = await processInvestigateJob(makeJob(), new AbortController().signal)
+      .catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(NonRetryableJobError);
+    expect((error as NonRetryableJobError).deadLetterClass).toBe('config');
+    expect(mockInvestigateError).not.toHaveBeenCalled();
+    expect(db.updateGroupInvestigation).not.toHaveBeenCalled();
+  });
+
   it('fails the job on a deterministic 4xx instead of writing a customer terminal', async () => {
     mockInvestigateError.mockResolvedValue(apiFailureResult({
       apiErrorStatus: 400,
@@ -1232,6 +1263,7 @@ describe('friction worker path', () => {
     vi.mocked(investigateFriction).mockResolvedValue({
       status: 'incomplete',
       reason: 'no_verdict_submitted: the model never called classify_friction',
+      stop: 'no_tool_call',
       investigatedCommit: 'abc123',
       costUsd: 0.3,
       usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
@@ -1250,6 +1282,7 @@ describe('friction worker path', () => {
     vi.mocked(investigateFriction).mockResolvedValue({
       status: 'incomplete',
       reason: 'budget_exhausted: spend ceiling reached before a verdict',
+      stop: 'budget',
       investigatedCommit: 'abc123',
       costUsd: 2,
       usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
@@ -1258,6 +1291,32 @@ describe('friction worker path', () => {
       .catch((caught: unknown) => caught);
     expect(error).toBeInstanceOf(NonRetryableJobError);
     expect((error as NonRetryableJobError).deadLetterClass).toBe('limit');
+  });
+
+  it('classes a validator-rejected friction verdict as agent, not limit', async () => {
+    // The run reached its terminal tool; the verdict failed validation. That is
+    // the agent's fault, whatever the prose of the reason says.
+    vi.mocked(investigateFriction).mockResolvedValue({
+      status: 'incomplete',
+      reason: 'budget: cited path src/missing.ts is not in the checkout',
+      stop: 'terminal',
+      investigatedCommit: 'abc123',
+      costUsd: 0.4,
+      usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+    });
+    const error = await processInvestigateJob(makeJob(), new AbortController().signal)
+      .catch((caught: unknown) => caught);
+    expect((error as NonRetryableJobError).deadLetterClass).toBe('agent');
+  });
+
+  it('dead-letters as config when the model key is missing, without a customer terminal', async () => {
+    delete process.env['ANTHROPIC_API_KEY'];
+    const error = await processInvestigateJob(makeJob(), new AbortController().signal)
+      .catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(NonRetryableJobError);
+    expect((error as NonRetryableJobError).deadLetterClass).toBe('config');
+    expect(vi.mocked(investigateFriction)).not.toHaveBeenCalled();
+    expect(db.updateGroupInvestigation).not.toHaveBeenCalled();
   });
 
   it('parks code-caused friction under ask-first autonomy', async () => {

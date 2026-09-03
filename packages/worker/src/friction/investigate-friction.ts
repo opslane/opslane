@@ -56,6 +56,9 @@ export type FrictionInvestigationResult =
   | {
     status: 'incomplete';
     reason: string;
+    /** How the run ended, for the handler's dead-letter class. A verdict the
+     * validator rejected still carries the run's own stop ('terminal'). */
+    stop: ReadOnlyRunResult['stop'];
     investigatedCommit: string;
     usage: ReadOnlyRunResult['usage'];
     costUsd: number;
@@ -176,6 +179,7 @@ function incomplete(
   return {
     status: 'incomplete',
     reason,
+    stop: run.stop,
     investigatedCommit: input.investigatedCommit,
     usage: run.usage,
     costUsd: run.costUsd,

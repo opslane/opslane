@@ -15,6 +15,9 @@ export function scrubSecrets(raw: string): string {
     // their own forge, and that token is written verbatim into the sandbox
     // .netrc, so it can appear in any command output this scrubs.
     .replace(/glpat-[A-Za-z0-9_-]+/g, '[REDACTED]')
+    // E2B sandbox keys can surface in machine-provisioning errors that now
+    // travel to the operator Slack channel.
+    .replace(/\be2b_[A-Za-z0-9_-]+/g, '[REDACTED]')
     // The clone credential as git spells it in a URL or a netrc line.
     .replace(/x-access-token:[^@\s]+@/g, 'x-access-token:***@')
     .replace(/(password\s+)\S+/gi, '$1[REDACTED]')

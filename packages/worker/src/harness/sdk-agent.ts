@@ -16,6 +16,7 @@ import {
 } from '../investigate-tools.js';
 import { logger } from '../logger.js';
 import { annotateActiveSpan } from '../tracing.js';
+import { scrubSecrets } from './redact.js';
 import { pricingFor } from './agent-loop.js';
 import { MachineUnavailableError } from './errors.js';
 
@@ -290,6 +291,14 @@ function addUsage(target: TokenUsage, delta: TokenUsage): void {
   target.cacheWrite += delta.cacheWrite;
 }
 
+/**
+ * The exact prefix @anthropic-ai/claude-agent-sdk 0.3.251 puts on the error it
+ * throws after a max-turns exit when it did not first yield the typed result.
+ * Anchored so an unrelated error quoting the phrase stays an api_error. Check
+ * it against sdk.mjs on every SDK bump.
+ */
+const SDK_MAX_TURNS_THROW = /^Claude Code returned an error result: Reached maximum number of turns/;
+
 /** Run the SDK loop on the worker while every repository tool executes remotely. */
 export async function runReadOnlyAgentSdk(input: ReadOnlyRunInput): Promise<ReadOnlyRunResult> {
   if (input.maxTurns <= 0) {
@@ -377,7 +386,7 @@ export async function runReadOnlyAgentSdk(input: ReadOnlyRunInput): Promise<Read
       logger.info('diagnose: SDK threw after a typed result; keeping the typed classification', {
         stop, error: detail,
       });
-    } else if (/^Claude Code returned an error result: Reached maximum number of turns/.test(detail)) {
+    } else if (SDK_MAX_TURNS_THROW.test(detail)) {
       stop = 'turns_exhausted';
     } else {
       stop = 'api_error';
@@ -404,7 +413,7 @@ export async function runReadOnlyAgentSdk(input: ReadOnlyRunInput): Promise<Read
     ...(apiErrorStatus === undefined ? {} : { 'agent.api_error_status': apiErrorStatus }),
     ...(apiErrorDetail === undefined
       ? {}
-      : { 'agent.api_error_detail': apiErrorDetail.slice(0, 200) }),
+      : { 'agent.api_error_detail': scrubSecrets(apiErrorDetail).slice(0, 200) }),
   });
   return {
     terminalInput,

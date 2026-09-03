@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi, afterEach } from 'vitest';
 import type { ClaimedJob } from '../db.js';
 import type { EvidenceBundle } from '../evidence/bundle.js';
 import { NonRetryableJobError } from '../harness/errors.js';
@@ -42,9 +42,13 @@ const job = {
   sessionId: null,
 } satisfies ClaimedJob;
 
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
+
 describe('issue inquiry', () => {
   it('classifies a limit stop as non-retryable', async () => {
-    process.env['ANTHROPIC_API_KEY'] = 'test-key';
+    vi.stubEnv('ANTHROPIC_API_KEY', 'test-key');
     sdk.run.mockResolvedValueOnce({
       terminalInput: null,
       stop: 'turns_exhausted',
@@ -58,13 +62,12 @@ describe('issue inquiry', () => {
       reader: { readFile: async () => '', grep: async () => '', list: async () => '', exists: async () => [] },
       signal: new AbortController().signal,
     }).catch((caught: unknown) => caught);
-    delete process.env['ANTHROPIC_API_KEY'];
     expect(error).toBeInstanceOf(NonRetryableJobError);
     expect((error as NonRetryableJobError).deadLetterClass).toBe('limit');
   });
 
   it('leaves a provider failure retryable', async () => {
-    process.env['ANTHROPIC_API_KEY'] = 'test-key';
+    vi.stubEnv('ANTHROPIC_API_KEY', 'test-key');
     sdk.run.mockResolvedValueOnce({
       terminalInput: null,
       stop: 'api_error',
@@ -80,7 +83,6 @@ describe('issue inquiry', () => {
       reader: { readFile: async () => '', grep: async () => '', list: async () => '', exists: async () => [] },
       signal: new AbortController().signal,
     }).catch((caught: unknown) => caught);
-    delete process.env['ANTHROPIC_API_KEY'];
     expect(error).toBeInstanceOf(Error);
     expect(error).not.toBeInstanceOf(NonRetryableJobError);
   });

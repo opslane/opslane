@@ -12,7 +12,7 @@ import {
 } from '../harness/readonly-sandbox.js';
 import { runReadOnlyAgentSdk } from '../harness/sdk-agent.js';
 import { NonRetryableJobError } from '../harness/errors.js';
-import { classifyModelFailure, deadLetterClassForStop } from '../harness/model-failure-policy.js';
+import { deadLetterClassForStop, modelFailureError } from '../harness/model-failure-policy.js';
 import { buildRepoUrl } from '../repo-url.js';
 import { traceSpan } from '../tracing.js';
 import {
@@ -216,13 +216,11 @@ export async function askInquiryModel(input: {
   checkAbort(input.signal);
   if (result.stop !== 'terminal' || result.terminalInput === null) {
     if (result.stop === 'api_error') {
-      const failureClass = classifyModelFailure({
+      throw modelFailureError({
         ...(result.apiErrorStatus === undefined ? {} : { status: result.apiErrorStatus }),
         detail: result.apiErrorDetail ?? '',
-      });
-      if (failureClass === 'transient') throw new Error(inquiryStopMessage(result.stop));
-      throw new NonRetryableJobError(inquiryStopMessage(result.stop), 'config', {
-        stop: result.stop, costUsd: result.costUsd,
+        costUsd: result.costUsd,
+        message: inquiryStopMessage(result.stop),
       });
     }
     throw new NonRetryableJobError(

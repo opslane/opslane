@@ -849,6 +849,20 @@ export async function completeJob(
 export const RETRY_BACKOFF_BASE_SECONDS = 30;
 export const RETRY_BACKOFF_CAP_SECONDS = 900;
 
+/** Re-runs a dead letter may receive before the worker leaves it alone for good. */
+export const MAX_DEAD_LETTER_REQUEUES = 3;
+/** Transient dead letters re-run after 1h, then 4h, then 16h: base^requeues hours. */
+export const DEAD_LETTER_BACKOFF_BASE_HOURS = 4;
+/** A boot re-run skips a dead letter younger than this. A rolling restart is
+ * several boots in a row; without the gate each one would spend a requeue on
+ * a job that just died for the same reason, before an operator touched anything. */
+export const BOOT_REQUEUE_MIN_AGE_MINUTES = 10;
+/** Job types a dead-letter re-run may replay. Fix jobs terminalize their own
+ * group and could open a PR; inquiries re-admit through the filter dispatcher
+ * at a new input version; session work releases its claimed signals on dead
+ * letter. Only the read-only investigation lanes are safe to run again as-is. */
+export const REQUEUEABLE_JOB_TYPES: readonly JobType[] = ['investigate', 'route_map', 'product_context'];
+
 interface DeadLetterEventRow {
   status: string;
   job_type: JobType;
@@ -875,7 +889,7 @@ function emitDeadLetterUsageEvents(
     requeues: String(row.requeues),
     last_error: lastError,
   });
-  if (row.requeues >= 3) {
+  if (row.requeues >= MAX_DEAD_LETTER_REQUEUES) {
     emitUsageEvent('job_given_up', {
       job_id: jobId,
       project_id: row.project_id,
@@ -887,8 +901,11 @@ function emitDeadLetterUsageEvents(
 }
 
 /**
- * Fails a job: increments attempts and records the error.
- * Resets to 'pending' for retry, or 'dead_letter' at max_attempts.
+ * Fails a job: increments attempts and records the error. Resets to 'pending'
+ * for retry, or 'dead_letter' when attempts reach max_attempts or the caller
+ * passes options.exhaust (a NonRetryableJobError: one execution was enough to
+ * know). A dead letter records options.deadLetterClass (default transient) and
+ * dead_lettered_at; requeueDeadLetters reads both to decide when it runs again.
  */
 export async function failJob(
   jobId: string,
@@ -1061,7 +1078,7 @@ export async function requeueStaleJobs(): Promise<number> {
                     $2::double precision))
            END,
            dead_letter_class = CASE
-             WHEN attempts + 1 >= max_attempts THEN COALESCE(dead_letter_class, 'transient')
+             WHEN attempts + 1 >= max_attempts THEN 'transient'
              ELSE dead_letter_class
            END,
            dead_lettered_at = CASE
@@ -1148,15 +1165,24 @@ export interface RequeuedJob {
 }
 
 /**
- * The only path out of dead_letter. Deploy-triggered classes run on boot;
- * transient failures run after 1h, 4h, and 16h. Session-analysis rows are
- * excluded because dead-letter reconciliation terminalizes their claimed
- * signals and generation; replaying only the job would not reclaim that work.
+ * The only path out of dead_letter. Boot re-runs the classes whose fix is a
+ * deploy (limit, agent, config); the reaper interval re-runs transient
+ * failures and agent stops on a 1h/4h/16h backoff. Three re-runs, then the
+ * row is left alone and the dead letter announces job_given_up.
+ *
+ * attempts is NOT reset: the usage ledger keys executions on it, and a reset
+ * would silently drop every re-run's spend on the ledger's conflict clause. A
+ * re-run therefore gets one execution before it dead-letters again, which is
+ * the point: it is a re-run, not a fresh retry budget.
+ *
+ * A row whose project/type/group/episode/run already has a live job is skipped
+ * rather than flipped: the partial unique indexes on active jobs would reject
+ * the whole statement and nothing would be requeued.
  */
 export async function requeueDeadLetters(
   trigger: 'boot' | 'interval',
 ): Promise<RequeuedJob[]> {
-  const classes = trigger === 'boot' ? ['limit', 'agent', 'config'] : ['transient'];
+  const classes = trigger === 'boot' ? ['limit', 'agent', 'config'] : ['transient', 'agent'];
   const { rows } = await getPool().query<{
     id: string;
     job_type: JobType;
@@ -1165,27 +1191,53 @@ export async function requeueDeadLetters(
     dead_letter_class: string;
     requeues: number;
   }>(
-    `UPDATE error_group_jobs
+    `WITH due AS (
+       SELECT j.id, j.dead_letter_class
+         FROM error_group_jobs j
+        WHERE j.status = 'dead_letter'
+          AND j.job_type = ANY($5::text[])
+          AND j.dead_letter_class = ANY($1::text[])
+          AND j.requeues < $3::int
+          AND j.dead_lettered_at IS NOT NULL
+          AND (
+            ($2::boolean AND j.dead_lettered_at <= now() - make_interval(mins => $6::int))
+            OR (NOT $2::boolean
+                AND j.dead_lettered_at <= now() - make_interval(hours => power($4::int, j.requeues)::int))
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM error_group_jobs live
+             WHERE live.status IN ('pending', 'claimed')
+               AND live.project_id = j.project_id
+               AND live.job_type = j.job_type
+               AND live.error_group_id IS NOT DISTINCT FROM j.error_group_id
+               AND live.episode_id IS NOT DISTINCT FROM j.episode_id
+               AND live.run_id IS NOT DISTINCT FROM j.run_id
+          )
+        FOR UPDATE SKIP LOCKED
+     )
+     UPDATE error_group_jobs j
         SET status = 'pending'::job_status,
-            attempts = 0,
             worker_id = NULL,
             claimed_at = NULL,
             lease_expires_at = NULL,
             available_at = now(),
-            requeues = requeues + 1,
+            requeues = j.requeues + 1,
             requeued_at = now(),
-            last_error = NULL,
+            dead_letter_class = NULL,
+            dead_lettered_at = NULL,
             updated_at = now()
-      WHERE status = 'dead_letter'
-        AND job_type <> 'session_analysis'
-        AND dead_letter_class = ANY($1::text[])
-        AND requeues < 3
-        AND (
-          $2::boolean
-          OR dead_lettered_at <= now() - make_interval(hours => power(4, requeues)::int)
-        )
-      RETURNING id, job_type, project_id, error_group_id, dead_letter_class, requeues`,
-    [classes, trigger === 'boot'],
+       FROM due
+      WHERE j.id = due.id
+      RETURNING j.id, j.job_type, j.project_id, j.error_group_id,
+                due.dead_letter_class, j.requeues`,
+    [
+      classes,
+      trigger === 'boot',
+      MAX_DEAD_LETTER_REQUEUES,
+      DEAD_LETTER_BACKOFF_BASE_HOURS,
+      [...REQUEUEABLE_JOB_TYPES],
+      BOOT_REQUEUE_MIN_AGE_MINUTES,
+    ],
   );
   const requeued = rows.map((row) => ({
     id: row.id,
@@ -1208,27 +1260,44 @@ export async function requeueDeadLetters(
   return requeued;
 }
 
-export async function getDeadLetterCounts(): Promise<Array<{
+export interface DeadLetterCountRow {
   jobType: string;
   deadLetterClass: string;
   count: number;
-}>> {
-  const { rows } = await getPool().query<{
-    job_type: string;
-    dead_letter_class: string | null;
-    count: string;
-  }>(
-    `SELECT job_type, dead_letter_class, count(*)::text AS count
-       FROM error_group_jobs
-      WHERE status = 'dead_letter'
-        AND dead_lettered_at > now() - interval '24 hours'
-      GROUP BY 1, 2`,
-  );
-  return rows.map((row) => ({
-    jobType: row.job_type,
-    deadLetterClass: row.dead_letter_class ?? 'unclassed',
-    count: Number(row.count),
-  }));
+}
+
+export interface DeadLetterCounts {
+  /** Dead letters from the last 24 hours, by job type and class. */
+  recent: DeadLetterCountRow[];
+  /** Dead letters the worker will never re-run again. Never ages out. */
+  givenUp: number;
+}
+
+export async function getDeadLetterCounts(): Promise<DeadLetterCounts> {
+  const pool = getPool();
+  const [recent, givenUp] = await Promise.all([
+    pool.query<{ job_type: string; dead_letter_class: string | null; count: string }>(
+      `SELECT job_type, dead_letter_class, count(*)::text AS count
+         FROM error_group_jobs
+        WHERE status = 'dead_letter'
+          AND dead_lettered_at > now() - interval '24 hours'
+        GROUP BY 1, 2`,
+    ),
+    pool.query<{ count: string }>(
+      `SELECT count(*)::text AS count
+         FROM error_group_jobs
+        WHERE status = 'dead_letter' AND requeues >= $1`,
+      [MAX_DEAD_LETTER_REQUEUES],
+    ),
+  ]);
+  return {
+    recent: recent.rows.map((row) => ({
+      jobType: row.job_type,
+      deadLetterClass: row.dead_letter_class ?? 'unclassed',
+      count: Number(row.count),
+    })),
+    givenUp: Number(givenUp.rows[0]?.count ?? 0),
+  };
 }
 
 /** Stores the Langfuse trace URL on a job row (fire-and-forget). */

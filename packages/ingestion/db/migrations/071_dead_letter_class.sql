@@ -22,9 +22,6 @@ DO $$ BEGIN
       );
   END IF;
 END $$;
-CREATE INDEX IF NOT EXISTS idx_error_group_jobs_dead_letter_requeue
-  ON error_group_jobs (dead_letter_class, requeues, dead_lettered_at)
-  WHERE status = 'dead_letter';
 
 -- An abandoned investigation is a system failure, not a needs_human card.
 -- Repair the incidents the old reconciler stranded and hand their existing
@@ -61,3 +58,43 @@ UPDATE error_group_jobs j
  WHERE j.id = groups.job_id;
 
 COMMIT;
+
+-- Indexes on the live queue table are built CONCURRENTLY outside the
+-- transaction, per the 044/049 precedent: a plain CREATE INDEX would hold a
+-- SHARE lock on error_group_jobs across every claim, fail, and enqueue for the
+-- length of the build, during a deploy while the old worker is still writing.
+-- The DO blocks clear an invalid leftover from an interrupted build.
+DO $$ BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_index i
+    JOIN pg_class c ON c.oid = i.indexrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = 'public'
+      AND c.relname = 'idx_error_group_jobs_dead_letter_requeue'
+      AND NOT i.indisvalid
+  ) THEN
+    DROP INDEX public.idx_error_group_jobs_dead_letter_requeue;
+  END IF;
+END $$;
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_error_group_jobs_dead_letter_requeue
+  ON error_group_jobs (dead_letter_class, requeues, dead_lettered_at)
+  WHERE status = 'dead_letter';
+
+-- The 24-hour dead-letter count on /health filters on dead_lettered_at alone.
+DO $$ BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_index i
+    JOIN pg_class c ON c.oid = i.indexrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = 'public'
+      AND c.relname = 'idx_error_group_jobs_dead_lettered_at'
+      AND NOT i.indisvalid
+  ) THEN
+    DROP INDEX public.idx_error_group_jobs_dead_lettered_at;
+  END IF;
+END $$;
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_error_group_jobs_dead_lettered_at
+  ON error_group_jobs (dead_lettered_at)
+  WHERE status = 'dead_letter';

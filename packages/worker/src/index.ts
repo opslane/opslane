@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import http from 'node:http';
-import type { ClaimedJob, ErrorEventData, QueueDepthRow } from './db.js';
+import type { ClaimedJob, DeadLetterCountRow, DeadLetterCounts, ErrorEventData, QueueDepthRow } from './db.js';
 import * as db from './db.js';
 import {
   requeueStaleJobs,
@@ -54,7 +54,7 @@ import { NARRATIVE_PROMPT_VERSION } from './narrative/prompt.js';
 import { captureFrames } from './narrative/frames/capture.js';
 import { processFrameVerification } from './narrative/verify.js';
 import { MachineUnavailableError, NonRetryableJobError, VerificationInfraError } from './harness/errors.js';
-import { classifyModelFailure, deadLetterClassForStop } from './harness/model-failure-policy.js';
+import { classifyModelFailure, deadLetterClassForStop, modelFailureError } from './harness/model-failure-policy.js';
 import {
   createReadOnlyCheckout,
   NO_VERIFICATION_EVIDENCE,
@@ -210,7 +210,7 @@ let jobsInFlight = 0;
 let claimsLastMinute = 0;
 let claimRatePerMinute = 0;
 let queueDepth: QueueDepthRow[] = [];
-let deadLetterCounts: Array<{ jobType: string; deadLetterClass: string; count: number }> = [];
+let deadLetterCounts: DeadLetterCounts = { recent: [], givenUp: 0 };
 let queueSampleInFlight: Promise<void> = Promise.resolve();
 /** Epoch ms of the last SUCCESSFUL sample. Null until the first one lands. */
 let queueSampleAt: number | null = null;
@@ -256,7 +256,7 @@ export function computeHealthStatus(input: HealthInput): 'ok' | 'stalled' | 'unk
 }
 
 export function formatDeadLetterCounts(
-  counts: Array<{ jobType: string; deadLetterClass: string; count: number }>,
+  counts: DeadLetterCountRow[],
 ): Array<{ job_type: string; class: string; count: number }> {
   return counts.map((count) => ({
     job_type: count.jobType,
@@ -304,6 +304,13 @@ export async function processJob(job: ClaimedJob, signal: AbortSignal): Promise<
       job.projectId,
       () => processJobInner(job, signal),
     );
+  } catch (err: unknown) {
+    // One seam for every thrown failure, so /health's jobs_failed agrees with
+    // the dead letters the poller records instead of only the branches that
+    // used to terminalize inline.
+    jobsFailed++;
+    lastJobAt = new Date().toISOString();
+    throw err;
   } finally {
     jobsInFlight -= 1;
   }
@@ -755,16 +762,14 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
       const status = triage.apiErrorStatus;
       const detail = triage.apiErrorDetail ?? 'model call failed';
       const statusText = status === undefined ? '' : ` (HTTP ${status})`;
-      if (classifyModelFailure({
-        ...(status === undefined ? {} : { status }), detail,
-      }) === 'transient') {
-        throw new Error(`Investigation model unavailable${statusText}: ${detail}`);
-      }
-      throw new NonRetryableJobError(
-        `Investigation model request rejected${statusText}: ${detail}`,
-        'config',
-        { stop: 'api_error', costUsd: triage.costUsd },
-      );
+      throw modelFailureError({
+        ...(status === undefined ? {} : { status }),
+        detail,
+        costUsd: triage.costUsd,
+        message: classifyModelFailure({ ...(status === undefined ? {} : { status }), detail }) === 'transient'
+          ? `Investigation model unavailable${statusText}: ${detail}`
+          : `Investigation model request rejected${statusText}: ${detail}`,
+      });
     }
     if (triage.stop !== 'terminal') {
       throw new NonRetryableJobError(
@@ -1029,21 +1034,19 @@ export async function processFrictionInvestigateJob(
     });
     checkAbort(signal);
     if (result.status === 'model_failure') {
-      const failureClass = classifyModelFailure({
-        ...(result.apiErrorStatus === undefined ? {} : { status: result.apiErrorStatus }),
+      const status = result.apiErrorStatus;
+      const statusText = status === undefined ? '' : ` (HTTP ${status})`;
+      const transient = classifyModelFailure({
+        ...(status === undefined ? {} : { status }), detail: result.apiErrorDetail,
+      }) === 'transient';
+      throw modelFailureError({
+        ...(status === undefined ? {} : { status }),
         detail: result.apiErrorDetail,
+        costUsd: result.costUsd,
+        message: transient
+          ? `Friction investigation model unavailable${statusText}: ${result.apiErrorDetail}`
+          : `Friction investigation model request rejected${statusText}: ${result.apiErrorDetail}`,
       });
-      const statusText = result.apiErrorStatus === undefined ? '' : ` (HTTP ${result.apiErrorStatus})`;
-      if (failureClass === 'transient') {
-        throw new Error(
-          `Friction investigation model unavailable${statusText}: ${result.apiErrorDetail}`,
-        );
-      }
-      throw new NonRetryableJobError(
-        `Friction investigation model request rejected${statusText}: ${result.apiErrorDetail}`,
-        'config',
-        { stop: 'api_error', costUsd: result.costUsd },
-      );
     }
     if (result.status === 'incomplete') {
       await db.recordFrictionIncompleteDecision(job.errorGroupId, job.projectId, {
@@ -1064,14 +1067,12 @@ export async function processFrictionInvestigateJob(
         basis: 'friction_classify' as const,
         confidence: 'low' as const,
       });
-      const stop = result.reason.split(':')[0] ?? 'incomplete';
-      const deadLetterClass = ['budget_exhausted', 'truncated_response'].includes(stop)
-        ? 'limit'
-        : 'agent';
+      // A validator-rejected verdict arrives with stop 'terminal' and classes
+      // as agent; a cap arrives with its own stop and classes as limit.
       throw new NonRetryableJobError(
         `Friction investigation incomplete: ${result.reason}`,
-        deadLetterClass,
-        { stop, costUsd: result.costUsd },
+        deadLetterClassForStop(result.stop),
+        { stop: result.stop, costUsd: result.costUsd },
       );
     }
 
@@ -1748,11 +1749,20 @@ async function main(): Promise<void> {
     logger.warn('Optional environment variable not set — jobs requiring it will fail', { key });
   }
 
-  const requeued = await requeueDeadLetters('boot');
-  if (requeued.length > 0) {
-    logger.info('Requeued dead letters on boot', {
-      count: requeued.length,
-      classes: requeued.map((job) => job.deadLetterClass),
+  // Best-effort: a schema that is one migration behind, or a requeue that
+  // collides with live work, must not keep the worker from starting. The
+  // reaper interval retries the transient half; the next boot retries the rest.
+  try {
+    const requeued = await requeueDeadLetters('boot');
+    if (requeued.length > 0) {
+      logger.info('Requeued dead letters on boot', {
+        count: requeued.length,
+        classes: requeued.map((job) => job.deadLetterClass),
+      });
+    }
+  } catch (err: unknown) {
+    logger.error('Boot dead-letter requeue failed; continuing', {
+      error: err instanceof Error ? err.message : String(err),
     });
   }
 
@@ -1779,7 +1789,10 @@ async function main(): Promise<void> {
           backed_off: depth.backedOff,
           oldest_eligible_seconds: depth.oldestEligibleSeconds,
         })),
-        dead_letters_24h: formatDeadLetterCounts(deadLetterCounts),
+        dead_letters_24h: formatDeadLetterCounts(deadLetterCounts.recent),
+        // Never ages out: a job the worker has given up on stays here until an
+        // operator does something about it.
+        dead_letters_given_up: deadLetterCounts.givenUp,
         queue_depth_sampled_at:
           queueSampleAt === null ? null : new Date(queueSampleAt).toISOString(),
         queue_sample_error: queueSampleError,
@@ -1807,10 +1820,18 @@ async function main(): Promise<void> {
   // Sampled on a timer, never per claim: the aggregate scans the pending set
   // and the drain loop claims far too often to pay for it each time.
   function sampleQueueDepth(): void {
-    queueSampleInFlight = Promise.all([getQueueDepth(), getDeadLetterCounts()])
-      .then(([depth, deadLetters]) => {
+    // The dead-letter counters are operator telemetry; their failure must not
+    // blank the queue sample that decides the health verdict.
+    getDeadLetterCounts()
+      .then((deadLetters) => { deadLetterCounts = deadLetters; })
+      .catch((err: unknown) => {
+        logger.warn('Dead-letter count sample failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    queueSampleInFlight = getQueueDepth()
+      .then((depth) => {
         queueDepth = depth;
-        deadLetterCounts = deadLetters;
         queueSampleAt = Date.now();
         queueSampleError = null;
       })

@@ -321,6 +321,22 @@ func TestBuildDigestSections(t *testing.T) {
 	if d.NeedsHumanBacklog != 2 {
 		t.Errorf("backlog = %d, want 2", d.NeedsHumanBacklog)
 	}
+	// A group requeued out of needs_human keeps needs_human_at (retention is
+	// intentional) but must leave the section: the reader is current status.
+	if _, err := pool.Exec(context.Background(), `UPDATE error_groups
+		SET status = 'analyzing', reason_code = NULL, reason_message = NULL
+		WHERE project_id = $1 AND fingerprint = 'fp-nh'`, f.ProjectID); err != nil {
+		t.Fatalf("requeue seed: %v", err)
+	}
+	requeued, err := s.Build(context.Background(), f.ProjectID, now)
+	if err != nil {
+		t.Fatalf("Build after requeue: %v", err)
+	}
+	for _, item := range requeued.Digest.Outcomes.NeedsHuman {
+		if item.Title == "Error: cancelled" {
+			t.Fatalf("requeued group still rendered in needs_human: %+v", requeued.Digest.Outcomes.NeedsHuman)
+		}
+	}
 	if d.Watching.Sessions != 2 || d.Watching.Users != 2 {
 		t.Errorf("watching = %+v", d.Watching)
 	}
