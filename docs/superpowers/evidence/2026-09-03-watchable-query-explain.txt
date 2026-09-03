@@ -1,0 +1,14 @@
+EXPLAIN (ANALYZE, BUFFERS) of the unfloored watchableFrictionSessionSQL against
+prod, incident 028a6aa2-d411-4674-bd33-99b4f8c1fc60 (101 accepted signals at
+time of query, 2026-09-03):
+
+  Bitmap Index Scan on idx_friction_signals_incident_occurred
+    Index Cond: (incident_id = '028a6aa2-d411-4674-bd33-99b4f8c1fc60'::uuid)
+    (rows=101 loops=1)
+  ...
+  Planning Time: 4.255 ms
+  Execution Time: 4.865 ms
+
+The unfloored lookup walks the partial index built for exactly this query
+shape (046_impact_query_index.sql); it does not sort the incident's full
+history. 4.9ms total against a live 101-signal incident.
