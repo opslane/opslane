@@ -104,12 +104,16 @@ export function createPoller(options: PollerOptions): Poller {
   // Claims are serialized fleet-wide by claimJob's advisory lock, so chaining
   // them in-process costs no throughput and keeps N loops from parking N pool
   // connections on the same lock.
+  //
+  // A queued link must recheck `running`: stop() only stops loops that are
+  // between iterations, not claims already queued on this chain. Without the
+  // check, every loop waiting its turn would still fire claimJob after
+  // shutdown was requested, starting new work during (or after) the grace
+  // window instead of just letting already-claimed jobs finish.
   let claimChain: Promise<unknown> = Promise.resolve();
   function claimSerially(): Promise<ClaimedJob | null> {
-    const next = claimChain.then(
-      () => claimJob(workerId, leaseDurationMs),
-      () => claimJob(workerId, leaseDurationMs),
-    );
+    const attemptClaim = () => (running ? claimJob(workerId, leaseDurationMs) : Promise.resolve(null));
+    const next = claimChain.then(attemptClaim, attemptClaim);
     claimChain = next.catch(() => undefined);
     return next;
   }
