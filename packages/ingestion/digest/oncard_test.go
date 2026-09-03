@@ -795,6 +795,47 @@ func TestValidateOnRequiresACauseSentenceFromADiagnosedCard(t *testing.T) {
 	}
 }
 
+// The rule cuts both ways: the cause sentence answers to the stored cause and
+// nothing else, so a card that writes one for an incident with no stored cause
+// is asserting something nothing can check, and it loses its card.
+func TestValidateOnRefusesACauseSentenceWithoutAStoredCause(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	pool, fixture := onCardFixture(t, now)
+	ctx := context.Background()
+	causeless := seedOnCardGroup(t, pool, fixture.ProjectID, fixture.EnvID, "friction", "awaiting_approval",
+		false, "", "", now.Add(-time.Hour))
+	seedValidatedDiagnosis(t, pool, fixture.ProjectID, causeless, now.Add(-time.Hour))
+
+	runID, candidates, err := FreezeCandidates(ctx, pool, fixture.ProjectID, now)
+	if err != nil || len(candidates) != 1 {
+		t.Fatalf("freeze candidates=%+v err=%v", candidates, err)
+	}
+	payload := writtenDigestPayload{Deferred: []deferredDigestItem{}, Included: []writtenDigestCard{{
+		ErrorGroupID: candidates[0].ErrorGroupID, Title: "Saving is blocked",
+		Copy:   "People cannot save because the control never submits.",
+		Why:    "The handler was never wired to the control.",
+		Action: "Take a look when you can.", Label: candidates[0].Label,
+	}}}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE digest_runs
+		SET status='written',writer_payload=$2::jsonb WHERE id=$1`, runID, encoded); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateAndPublish(ctx, pool, runID); err != nil {
+		t.Fatal(err)
+	}
+	delivered := renderedEvent(t, pool, runID).Digest
+	if len(delivered.GeneratedCards) != 0 {
+		t.Fatalf("cards = %+v, want the unchecked cause sentence demoted", delivered.GeneratedCards)
+	}
+	if len(delivered.ReceiptItems) != 1 || delivered.ReceiptItems[0].IncidentID != causeless {
+		t.Fatalf("receipts = %+v, want the causeless incident as a receipt", delivered.ReceiptItems)
+	}
+}
+
 // TestValidateOnCachesAndRendersTheCauseSentence: the Why survives the cache
 // round trip and reaches the reader on its own line.
 func TestValidateOnCachesAndRendersTheCauseSentence(t *testing.T) {

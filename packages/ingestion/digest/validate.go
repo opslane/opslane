@@ -277,6 +277,12 @@ func checkUnifiedWrittenCard(
 		strings.TrimSpace(card.Why) == "" {
 		return card, "", fmt.Errorf("diagnosed card for %s carries no cause sentence", identity)
 	}
+	// The reverse also holds: the why answers to the stored cause and nothing
+	// else, so with no stored cause there is nothing for the sentence to be
+	// checked against and it must not publish.
+	if strings.TrimSpace(card.Why) != "" && strings.TrimSpace(candidate.RootCause) == "" {
+		return card, "", fmt.Errorf("cause sentence for %s has no stored cause to answer to", identity)
+	}
 	if internalVocabulary.MatchString(card.Title) || internalVocabulary.MatchString(card.Copy) ||
 		internalVocabulary.MatchString(card.Why) || internalVocabulary.MatchString(card.Action) {
 		return card, "", fmt.Errorf("internal vocabulary in card for %s", identity)
