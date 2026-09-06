@@ -36,7 +36,7 @@ function dependencies(modelText: string) {
     client: {
       modelName: 'test-model',
       complete: vi.fn().mockResolvedValue({
-        text: modelText, inputTokens: 10, outputTokens: 5, stopReason: 'end_turn',
+        text: modelText, inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0, stopReason: 'end_turn',
       }),
     } as never,
     loadChunks: vi.fn().mockResolvedValue(envelopes),
@@ -93,6 +93,17 @@ describe('processNarration', () => {
       costUsd: expect.any(Number),
     }));
     expect(dbMock.recordJobUsage.mock.calls[0]?.[0].costUsd).toBeGreaterThan(0);
+  });
+
+  it('preserves provider cache tokens in the narration ledger', async () => {
+    const deps = dependencies('{}');
+    (deps.client as unknown as { complete: ReturnType<typeof vi.fn> }).complete.mockResolvedValue({
+      text: 'invalid', inputTokens: 10, outputTokens: 5, cacheReadTokens: 30, cacheWriteTokens: 40, stopReason: 'end_turn',
+    });
+    await processNarration(job, deps, new AbortController().signal);
+    expect(dbMock.recordJobUsage).toHaveBeenCalledWith(expect.objectContaining({
+      usage: { input: 10, output: 5, cacheRead: 30, cacheWrite: 40 },
+    }));
   });
 
   it('stores observations before enqueueing frame verification', async () => {
