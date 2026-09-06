@@ -13,6 +13,9 @@ export interface CapturedFrame {
 
 const require = createRequire(import.meta.url);
 
+/** Half-scale verification capture: one quarter of the previous image pixels. */
+export const DEFAULT_CAPTURE_VIEWPORT = { width: 720, height: 450 } as const;
+
 export async function captureFrames(
   envelopes: SessionChunkEnvelope[],
   offsetsMs: number[],
@@ -21,7 +24,7 @@ export async function captureFrames(
     wallClockBudgetMs?: number;
   } = {},
 ): Promise<{ frames: CapturedFrame[]; assetsMissing: boolean }> {
-  const viewport = opts.viewport ?? { width: 1_440, height: 900 };
+  const viewport = opts.viewport ?? { ...DEFAULT_CAPTURE_VIEWPORT };
   const deadline = Date.now() + (opts.wallClockBudgetMs ?? 120_000);
   const offsets = offsetsMs.slice(0, 3);
   const harness = readFileSync(new URL('./harness.html', import.meta.url), 'utf8');

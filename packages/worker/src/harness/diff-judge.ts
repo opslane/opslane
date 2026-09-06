@@ -5,6 +5,8 @@
  */
 import type Anthropic from '@anthropic-ai/sdk';
 import { createAnthropicClient } from '../anthropic-client.js';
+import type { TokenUsage } from '../db.js';
+import { usageFromResponse } from '../metered.js';
 
 export interface DiffJudgeResult {
   scope: number;       // 0-2
@@ -15,7 +17,7 @@ export interface DiffJudgeResult {
   explanation: string;
 }
 
-const JUDGE_MODEL = 'claude-haiku-4-5-20251001';
+export const JUDGE_MODEL = 'claude-haiku-4-5-20251001';
 
 const JUDGE_TOOL: Anthropic.Tool = {
   name: 'score_diff',
@@ -56,6 +58,7 @@ export interface DiffJudgeInput {
 export async function judgeDiff(
   apiKey: string,
   input: DiffJudgeInput,
+  onUsage?: (usage: TokenUsage) => void,
 ): Promise<DiffJudgeResult> {
   const client = createAnthropicClient(apiKey);
 
@@ -98,6 +101,8 @@ ${input.diff.slice(0, 10000)}
     tools: [JUDGE_TOOL],
     tool_choice: { type: 'tool', name: 'score_diff' },
   });
+  // Report immediately: parsing below can reject a response that was paid for.
+  onUsage?.(usageFromResponse(response));
 
   const toolUse = response.content.find(b => b.type === 'tool_use');
   if (!toolUse || toolUse.type !== 'tool_use') {

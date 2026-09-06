@@ -284,6 +284,33 @@ function usageFromMessage(message: SDKMessage): TokenUsage | null {
   };
 }
 
+/**
+ * Replace per-message estimates with the SDK result's cumulative usage.
+ * Fields are applied independently because result messages may omit cache
+ * counters that assistant messages already reported.
+ */
+export function applyResultUsage(target: TokenUsage, message: unknown): boolean {
+  if (typeof message !== 'object' || message === null) return false;
+  const record = message as { type?: unknown; usage?: unknown };
+  if (record.type !== 'result' || typeof record.usage !== 'object' || record.usage === null) {
+    return false;
+  }
+  const usage = record.usage as Record<string, unknown>;
+  const assign = (key: string, field: keyof TokenUsage): boolean => {
+    const value = usage[key];
+    if (typeof value !== 'number' || !Number.isFinite(value)) return false;
+    target[field] = value;
+    return true;
+  };
+
+  let applied = false;
+  applied = assign('input_tokens', 'input') || applied;
+  applied = assign('output_tokens', 'output') || applied;
+  applied = assign('cache_read_input_tokens', 'cacheRead') || applied;
+  applied = assign('cache_creation_input_tokens', 'cacheWrite') || applied;
+  return applied;
+}
+
 function addUsage(target: TokenUsage, delta: TokenUsage): void {
   target.input += delta.input;
   target.output += delta.output;
@@ -298,6 +325,7 @@ function addUsage(target: TokenUsage, delta: TokenUsage): void {
  * it against sdk.mjs on every SDK bump.
  */
 const SDK_MAX_TURNS_THROW = /^Claude Code returned an error result: Reached maximum number of turns/;
+const MAX_DRAIN_AFTER_CAPTURE = 20;
 
 /** Run the SDK loop on the worker while every repository tool executes remotely. */
 export async function runReadOnlyAgentSdk(input: ReadOnlyRunInput): Promise<ReadOnlyRunResult> {
@@ -331,6 +359,8 @@ export async function runReadOnlyAgentSdk(input: ReadOnlyRunInput): Promise<Read
   // messages do not set this guard because a later stream failure still wins.
   let typedErrorSeen = false;
   let costUsd = 0;
+  let resultUsageSeen = false;
+  let drainedAfterCapture = 0;
   const q = query({ prompt: input.firstMessage, options: buildQueryOptions(input, state) });
 
   try {
@@ -353,6 +383,10 @@ export async function runReadOnlyAgentSdk(input: ReadOnlyRunInput): Promise<Read
         if (message.error === 'max_output_tokens' || message.message.stop_reason === 'max_tokens') stop = 'truncated';
       }
       if (message.type === 'result') {
+        if (applyResultUsage(usage, message)) {
+          costUsd = calculateCost(usage, pricingFor(input.model));
+          resultUsageSeen = true;
+        }
         if (message.subtype === 'error_max_turns') {
           stop = 'turns_exhausted';
           typedErrorSeen = true;
@@ -375,7 +409,14 @@ export async function runReadOnlyAgentSdk(input: ReadOnlyRunInput): Promise<Read
         }
       }
       if (state.fatal) break;
-      if (state.captured) { stop = 'terminal'; break; }
+      if (state.captured) {
+        stop = 'terminal';
+        // The terminal tool fires mid-turn. Keep consuming until the SDK's
+        // authoritative cumulative result arrives, but never wait forever.
+        if (resultUsageSeen) break;
+        if (++drainedAfterCapture > MAX_DRAIN_AFTER_CAPTURE) break;
+        continue;
+      }
       if (costUsd > input.budgetUsd) { stop = 'budget'; break; }
     }
   } catch (error: unknown) {

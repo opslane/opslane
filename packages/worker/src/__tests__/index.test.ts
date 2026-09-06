@@ -134,7 +134,10 @@ vi.mock('../github-app.js', () => ({ getInstallationToken: vi.fn() }));
 vi.mock('../route-map.js', () => ({ processRouteMapJob: vi.fn() }));
 vi.mock('../product-context/job.js', () => ({ runProductContext: vi.fn() }));
 vi.mock('../inquiry/job.js', () => ({ runInquiry: vi.fn() }));
-vi.mock('../digest-writer/job.js', () => ({ writeDigest: vi.fn() }));
+vi.mock('../digest-writer/job.js', () => ({
+  writeDigest: vi.fn(),
+  defaultDependencies: vi.fn(() => ({})),
+}));
 vi.mock('../evidence/bundle.js', () => ({ loadEvidence: vi.fn() }));
 vi.mock('../score-sync.js', () => ({ processScoreSyncJob: vi.fn() }));
 vi.mock('../resolve/job.js', () => ({ runStackResolve: vi.fn() }));
@@ -154,6 +157,9 @@ vi.mock('../tracing.js', () => ({
   initTracing: vi.fn(),
   shutdownTracing: vi.fn(),
   withJobTrace: vi.fn(),
+  getTracingExportHealth: vi.fn(() => ({
+    failures: 0, lastError: null, lastErrorAt: null, suspended: false,
+  })),
   getActiveTraceId: vi.fn(() => null),
   buildLangfuseTraceUrl: vi.fn(() => null),
 }));
@@ -195,7 +201,7 @@ const { classifyActivity } = await import('../friction/facts.js');
 const { processRouteMapJob } = await import('../route-map.js');
 const { runProductContext } = await import('../product-context/job.js');
 const { runInquiry } = await import('../inquiry/job.js');
-const { writeDigest } = await import('../digest-writer/job.js');
+const { defaultDependencies, writeDigest } = await import('../digest-writer/job.js');
 const { loadEvidence } = await import('../evidence/bundle.js');
 const { processScoreSyncJob } = await import('../score-sync.js');
 const { runStackResolve } = await import('../resolve/job.js');
@@ -1537,7 +1543,8 @@ describe('digest_write dispatch', () => {
     };
 
     await expect(processJobInner(job, new AbortController().signal)).resolves.toBeUndefined();
-    expect(writeDigest).toHaveBeenCalledWith('run-1', 'proj-1');
+    expect(defaultDependencies).toHaveBeenCalledWith({ jobId: 'digest-write-1', execution: 0 });
+    expect(writeDigest).toHaveBeenCalledWith('run-1', 'proj-1', expect.anything());
   });
 
   it('rejects a job without its digest run', async () => {

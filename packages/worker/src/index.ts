@@ -33,7 +33,14 @@ import { type ReplaySignals } from './pr.js';
 import type { ResolvedFrame } from './source-map.js';
 import { framesFromEnvelope } from './resolve-stack.js';
 import { runStackResolve } from './resolve/job.js';
-import { initTracing, shutdownTracing, withJobTrace, getActiveTraceId, buildLangfuseTraceUrl } from './tracing.js';
+import {
+  initTracing,
+  shutdownTracing,
+  withJobTrace,
+  getActiveTraceId,
+  buildLangfuseTraceUrl,
+  getTracingExportHealth,
+} from './tracing.js';
 import { runVisualAnalysis, type VisualAnalysisOutput } from './visual-analysis.js';
 import {
   buildReplayEvidenceFromRecording,
@@ -65,7 +72,7 @@ import { processCIWatchJob } from './ci-watch.js';
 import { processRouteMapJob } from './route-map.js';
 import { runProductContext } from './product-context/job.js';
 import { runInquiry } from './inquiry/job.js';
-import { writeDigest } from './digest-writer/job.js';
+import { defaultDependencies as digestWriterDependencies, writeDigest } from './digest-writer/job.js';
 import { loadEvidence, type EvidenceBundle } from './evidence/bundle.js';
 import { effectivePlatform, pythonPipelineEnabled } from './platform.js';
 import { parseRuntimeInfo } from './runtime-info.js';
@@ -298,12 +305,7 @@ async function resolvedFramesForEvent(
 export async function processJob(job: ClaimedJob, signal: AbortSignal): Promise<void> {
   jobsInFlight += 1;
   try {
-    await withJobTrace(
-      job.id,
-      job.errorGroupId ?? job.sourceId ?? 'unknown',
-      job.projectId,
-      () => processJobInner(job, signal),
-    );
+    await withJobTrace(job, () => processJobInner(job, signal));
   } catch (err: unknown) {
     // One seam for every thrown failure, so /health's jobs_failed agrees with
     // the dead letters the poller records instead of only the branches that
@@ -390,7 +392,10 @@ export async function processJobInner(job: ClaimedJob, signal: AbortSignal): Pro
 
   if (job.jobType === 'digest_write') {
     if (!job.runId) throw new Error(`Digest writer job ${job.id} missing run_id`);
-    await writeDigest(job.runId, job.projectId);
+    await writeDigest(job.runId, job.projectId, digestWriterDependencies({
+      jobId: job.id,
+      execution: job.attempts,
+    }));
     return;
   }
 
@@ -1539,6 +1544,7 @@ export async function processFixJob(job: ClaimedJob & { errorGroupId: string }, 
           signals: mapDbSignals(replay?.replay_signals) ?? {},
           errorType: event?.error_type ?? 'Unknown',
           errorMessage: event?.error_message ?? '',
+          jobContext: { jobId: job.id, execution: job.attempts },
         });
       }
     } else if (!visualOutput && replay?.object_key && minioConfig) {
@@ -1779,6 +1785,15 @@ async function main(): Promise<void> {
         uptime_seconds: Math.floor((Date.now() - startTime) / 1000),
         jobs_processed: jobsProcessed,
         jobs_failed: jobsFailed,
+        tracing_export: (() => {
+          const health = getTracingExportHealth();
+          return {
+            failures: health.failures,
+            last_error: health.lastError,
+            last_error_at: health.lastErrorAt,
+            suspended: health.suspended,
+          };
+        })(),
         last_job_at: lastJobAt,
         claims_per_minute: claimRatePerMinute,
         // Serialized snake_case to match the rest of the payload; QueueDepthRow

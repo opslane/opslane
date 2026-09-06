@@ -20,6 +20,7 @@ import {
   type Tracer,
   type Span,
 } from '@opentelemetry/api';
+import type { JobType } from '@opslane/shared';
 import { logger, safeErrorMessage } from './logger.js';
 import {
   resolveTracingConfig,
@@ -27,16 +28,52 @@ import {
   type EnabledTracingConfig,
 } from './tracing-config.js';
 import { DiagThrottle, createDiagLogger, createRedactor } from './tracing-diag.js';
+import { tracePolicyFor } from './trace-policy.js';
 
 const SHUTDOWN_TIMEOUT_MS = 5000;
+const EXPORT_FAILURE_LIMIT = 50;
 
 let sdk: { shutdown(): Promise<void> } | null = null;
 let tracer: Tracer | null = null;
 let activeConfig: EnabledTracingConfig | null = null;
 let diagThrottle: DiagThrottle | null = null;
 let initialized = false;
+let exportFailures = 0;
+let exportLastError: string | null = null;
+let exportLastErrorAt: string | null = null;
+let exportSuspended = false;
+let shutdownInFlight: Promise<void> | null = null;
 /** Set once the config resolves to enabled. SDK errors can quote the keys. */
 let redactError: (text: string) => string = (text) => text;
+
+export function getTracingExportHealth(): {
+  failures: number;
+  lastError: string | null;
+  lastErrorAt: string | null;
+  suspended: boolean;
+} {
+  return {
+    failures: exportFailures,
+    lastError: exportLastError,
+    lastErrorAt: exportLastErrorAt,
+    suspended: exportSuspended,
+  };
+}
+
+function noteExportError(text: string): void {
+  exportFailures += 1;
+  exportLastError = text.slice(0, 300);
+  exportLastErrorAt = new Date().toISOString();
+  if (exportFailures < EXPORT_FAILURE_LIMIT || exportSuspended) return;
+
+  // Set before shutdown: flushing can emit another export error synchronously.
+  exportSuspended = true;
+  safeWarn('Langfuse export suspended after sustained failures', {
+    failures: exportFailures,
+    last_error: exportLastError,
+  });
+  void shutdownTracing();
+}
 
 /**
  * `logger.warn` can throw — it JSON.stringifies its fields unguarded. Shutdown
@@ -119,6 +156,10 @@ export async function initTracing(): Promise<void> {
     return;
   }
   initialized = true;
+  exportFailures = 0;
+  exportLastError = null;
+  exportLastErrorAt = null;
+  exportSuspended = false;
 
   const config = resolveTracingConfig(process.env);
 
@@ -200,7 +241,10 @@ export async function initTracing(): Promise<void> {
     // (sdk-node sdk.js:96-98). Installing ours first means an operator who sets
     // OTEL_LOG_LEVEL to debug this very subsystem silently replaces the
     // redacting, throttled adapter with a raw console logger.
-    diag.setLogger(createDiagLogger(diagThrottle, redact), DiagLogLevel.WARN);
+    diag.setLogger(
+      createDiagLogger(diagThrottle, redact, Date.now, noteExportError),
+      DiagLogLevel.WARN,
+    );
 
     sdk = nodeSdk;
     tracer = trace.getTracer('opslane-worker');
@@ -249,7 +293,7 @@ async function rollbackPartialInit(
 /**
  * Flush pending spans and shut down the OTel SDK. Never throws.
  */
-export async function shutdownTracing(): Promise<void> {
+async function doShutdownTracing(): Promise<void> {
   const current = sdk;
   // Shut down BEFORE draining: the flush itself can produce export failures,
   // and draining first would discard exactly those counts.
@@ -270,21 +314,44 @@ export async function shutdownTracing(): Promise<void> {
   redactError = (text) => text;
 }
 
-/**
- * Wrap a job execution in a root OTel trace with job metadata.
- * No-op pass-through if tracing is not initialized.
- */
+/** Serialize normal and breaker-triggered teardown. */
+export function shutdownTracing(): Promise<void> {
+  shutdownInFlight ??= doShutdownTracing().finally(() => {
+    shutdownInFlight = null;
+  });
+  return shutdownInFlight;
+}
+
+/** The subset of a claimed job needed to apply tracing policy and metadata. */
+export interface TraceableJob {
+  id: string;
+  jobType: JobType;
+  projectId: string;
+  errorGroupId: string | null;
+  sourceId: string | null;
+  sessionId: string | null;
+  episodeId?: string | null;
+  runId?: string | null;
+  attempts: number;
+}
+
+/** Wrap model-calling jobs in a root OTel trace; pass policy-off jobs through. */
 export async function withJobTrace<T>(
-  jobId: string,
-  errorGroupId: string,
-  projectId: string,
+  job: TraceableJob,
   fn: () => Promise<T>,
 ): Promise<T> {
   if (!tracer) return fn();
+  if (tracePolicyFor(job.jobType).mode === 'off') return fn();
   return tracer.startActiveSpan('process-job', async (span: Span) => {
-    span.setAttribute('job.id', jobId);
-    span.setAttribute('job.error_group_id', errorGroupId);
-    span.setAttribute('job.project_id', projectId);
+    span.setAttribute('job.type', job.jobType);
+    span.setAttribute('job.id', job.id);
+    span.setAttribute('job.project_id', job.projectId);
+    span.setAttribute('job.attempt', job.attempts);
+    if (job.errorGroupId) span.setAttribute('job.error_group_id', job.errorGroupId);
+    if (job.sourceId) span.setAttribute('job.source_id', job.sourceId);
+    if (job.sessionId) span.setAttribute('job.session_id', job.sessionId);
+    if (job.episodeId) span.setAttribute('job.episode_id', job.episodeId);
+    if (job.runId) span.setAttribute('job.run_id', job.runId);
     try {
       const result = await fn();
       span.setStatus({ code: SpanStatusCode.OK });

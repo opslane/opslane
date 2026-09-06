@@ -36,7 +36,10 @@ describe('tracing', () => {
 
   describe('withJobTrace', () => {
     it('passes through when tracing is not initialized', async () => {
-      const result = await withJobTrace('job-1', 'eg-1', 'proj-1', async () => {
+      const result = await withJobTrace({
+        id: 'job-1', jobType: 'investigate', projectId: 'proj-1',
+        errorGroupId: 'eg-1', sourceId: null, sessionId: null, attempts: 0,
+      }, async () => {
         return 'done';
       });
       expect(result).toBe('done');
@@ -44,7 +47,10 @@ describe('tracing', () => {
 
     it('re-throws errors from wrapped function', async () => {
       await expect(
-        withJobTrace('job-1', 'eg-1', 'proj-1', async () => {
+        withJobTrace({
+          id: 'job-1', jobType: 'investigate', projectId: 'proj-1',
+          errorGroupId: 'eg-1', sourceId: null, sessionId: null, attempts: 0,
+        }, async () => {
           throw new Error('job failed');
         }),
       ).rejects.toThrow('job failed');

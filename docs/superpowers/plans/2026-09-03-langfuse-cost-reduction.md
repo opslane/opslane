@@ -1511,7 +1511,7 @@ git commit -m "perf(narrative): capture verification frames at half scale"
 
 ---
 
-### Task 10: File the two deferred findings
+### Task 10: File the two deferred findings ([#460](https://github.com/opslane/opslane/issues/460), [#461](https://github.com/opslane/opslane/issues/461))
 
 **Files:** none. Produces two GitHub issues.
 

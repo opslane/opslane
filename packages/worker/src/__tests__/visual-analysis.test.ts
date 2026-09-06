@@ -1,12 +1,16 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // Mock the Anthropic SDK
-const mockCreate = vi.fn();
+const { mockCreate, mockRecordJobUsage } = vi.hoisted(() => ({
+  mockCreate: vi.fn(),
+  mockRecordJobUsage: vi.fn().mockResolvedValue(undefined),
+}));
 vi.mock('@anthropic-ai/sdk', () => ({
   default: vi.fn().mockImplementation(() => ({
     messages: { create: mockCreate },
   })),
 }));
+vi.mock('../db.js', () => ({ recordJobUsage: mockRecordJobUsage }));
 
 import { runVisualAnalysis, type VisualAnalysisInput } from '../visual-analysis.js';
 
@@ -31,6 +35,7 @@ describe('runVisualAnalysis', () => {
 
   beforeEach(() => {
     mockCreate.mockReset();
+    mockRecordJobUsage.mockClear();
     process.env['ANTHROPIC_API_KEY'] = 'test-key-123';
   });
 
@@ -70,6 +75,26 @@ describe('runVisualAnalysis', () => {
     const result = await runVisualAnalysis(makeInput());
     expect(result).toEqual(analysisResult);
     expect(mockCreate).toHaveBeenCalledTimes(1);
+  });
+
+  it('records visual-analysis usage when job context is supplied', async () => {
+    mockCreate.mockResolvedValueOnce({
+      content: [{ type: 'text', text: JSON.stringify({
+        whatUserSaw: 'A blank page', failureMoment: 'On submit',
+        uxImpact: 'The task stopped', confidence: 'high',
+      }) }],
+      usage: { input_tokens: 90, output_tokens: 15 },
+    });
+
+    await runVisualAnalysis(makeInput({
+      jobContext: { jobId: 'visual-job', execution: 2 },
+    }));
+
+    expect(mockRecordJobUsage).toHaveBeenCalledWith(expect.objectContaining({
+      jobId: 'visual-job', execution: 2, phase: 'visual_analysis',
+      model: 'claude-sonnet-4-5-20250929',
+      usage: { input: 90, output: 15, cacheRead: 0, cacheWrite: 0 },
+    }));
   });
 
   it('handles LLM response wrapped in code fences', async () => {
