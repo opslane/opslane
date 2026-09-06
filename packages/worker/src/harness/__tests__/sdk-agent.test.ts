@@ -116,6 +116,7 @@ beforeEach(() => {
 
 describe('SDK read-only agent', () => {
   it('exposes only our tools, by allowlist', () => {
+    expect(buildQueryOptions(fakeInput()).title).toBe('Opslane investigation');
     expect(buildQueryOptions(fakeInput()).allowedTools).toEqual([
       'mcp__repo__read_file', 'mcp__repo__search', 'mcp__repo__list_files', 'mcp__repo__submit',
     ]);
