@@ -246,6 +246,8 @@ export function buildQueryOptions(input: ReadOnlyRunInput, state?: RunState): Op
   names.push(input.terminalTool.name);
   return {
     model: input.model,
+    // Headless jobs do not need a separate model call to name their session.
+    title: 'Opslane investigation',
     systemPrompt: input.systemPrompt,
     maxTurns: input.maxTurns,
     // `tools: []` is what actually disables the built-ins; `disallowedTools`
