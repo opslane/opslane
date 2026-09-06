@@ -12,6 +12,8 @@ export interface NarrativeModelResult {
   text: string;
   inputTokens: number;
   outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
   stopReason: string;
 }
 
@@ -95,11 +97,13 @@ export class NarrativeClient {
       .filter((block): block is Anthropic.TextBlock => block.type === 'text')
       .map((block) => block.text)
       .join('');
-    const usage = (response as { usage?: { input_tokens?: number; output_tokens?: number } }).usage;
+    const usage = response.usage;
     return {
       text,
       inputTokens: Number.isFinite(usage?.input_tokens) ? usage?.input_tokens ?? 0 : 0,
       outputTokens: Number.isFinite(usage?.output_tokens) ? usage?.output_tokens ?? 0 : 0,
+      cacheReadTokens: Number.isFinite(usage?.cache_read_input_tokens) ? usage?.cache_read_input_tokens ?? 0 : 0,
+      cacheWriteTokens: Number.isFinite(usage?.cache_creation_input_tokens) ? usage?.cache_creation_input_tokens ?? 0 : 0,
       stopReason: response.stop_reason ?? 'unknown',
     };
   }
