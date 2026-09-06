@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { chromium } from 'playwright-core';
-import { captureFrames } from '../frames/capture.js';
+import { captureFrames, MODEL_FRAME_BOX } from '../frames/capture.js';
 
 const chromiumAvailable = (() => {
   try { return existsSync(chromium.executablePath()); } catch { return false; }
@@ -21,6 +21,12 @@ describe.skipIf(!chromiumAvailable)('captureFrames', () => {
     ], meta: { chunked_at: start, has_full_snapshot: true, sdk_version: 'test' } }] as never, [1_000]);
     expect(result.frames).toHaveLength(2);
     expect(result.frames[0]?.png.length).toBeGreaterThan(1_000);
+    // PNG IHDR dimensions: the replay viewport and stored evidence stay intact.
+    for (const frame of result.frames) {
+      expect([frame.png.readUInt32BE(16), frame.png.readUInt32BE(20)]).toEqual([1440, 900]);
+      expect([frame.modelPng.readUInt32BE(16), frame.modelPng.readUInt32BE(20)])
+        .toEqual([MODEL_FRAME_BOX.width, MODEL_FRAME_BOX.height]);
+    }
     expect(result.assetsMissing).toBe(true);
   }, 60_000);
 });

@@ -9,7 +9,7 @@ import * as db from '../db.js';
 import type { ClaimedJob } from '../db.js';
 import { logger } from '../logger.js';
 import { PhaseMeter } from '../metered.js';
-import type { NarrativeClient } from './client.js';
+import type { NarrativeClient, NarrativeModelResult } from './client.js';
 import { extractJsonObject } from './client.js';
 import { buildSignalRows, type CompactTimeline } from './emit.js';
 import type { CapturedFrame } from './frames/capture.js';
@@ -169,6 +169,7 @@ export async function processFrameVerification(
   const finalizeFallback = async (
     state: 'failed' | 'unsupported' | 'skipped_budget',
     reason?: string,
+    response?: NarrativeModelResult,
   ): Promise<void> => {
     await db.finalizeVerification(job, {
       sessionId: job.sessionId,
@@ -177,6 +178,7 @@ export async function processFrameVerification(
       claimedPromptVersion: claimed.promptVersion,
       verifyPromptVersion: VERIFY_PROMPT_VERSION,
       ...(reason === undefined ? {} : { reason }),
+      ...(response === undefined ? {} : { inputTokens: response.inputTokens, outputTokens: response.outputTokens }),
       signalRows: unverifiedRows,
     });
   };
@@ -233,19 +235,22 @@ export async function processFrameVerification(
     response = await deps.client.complete({
       system: buildVerifyPrompt(),
       user: `OBSERVATIONS_START\n${JSON.stringify(narrative.observations)}\nOBSERVATIONS_END\nTIMELINE_START\n${timeline.lines.map((line, index) => `L${index + 1} ${line.t}`).join('\n')}\nTIMELINE_END`,
-      images: captureResult.frames.map((frame) => ({ mediaType: 'image/png', base64: frame.png.toString('base64') })),
+      images: captureResult.frames.map((frame) => ({ mediaType: 'image/png', base64: frame.modelPng.toString('base64') })),
     });
-    // The cache counters are zeros, not measurements: NarrativeModelResult
-    // carries only input and output, so this phase's cost_usd is a lower
-    // bound. Nothing is lost today because the narrative client sets no
-    // cache_control. Surface the cache counts on that result before it does.
+    // These were zeros until the narrative client started returning what the
+    // provider reports, which is what the note here used to ask for. They are
+    // still zero in practice: the verify prompt is under Sonnet 5's minimum
+    // cacheable prefix, so no cache_control is sent. The ledger now records
+    // the measurement rather than an assumption.
     meter.add(deps.client.modelName, {
       input: response.inputTokens,
       output: response.outputTokens,
-      cacheRead: 0,
-      cacheWrite: 0,
+      cacheRead: response.cacheReadTokens,
+      cacheWrite: response.cacheWriteTokens,
     });
   } finally {
+    // Flushing in a finally is what makes a rejected, truncated or thrown
+    // call still land in the ledger.
     await meter.flush();
   }
   const validated = response.stopReason === 'max_tokens'
@@ -257,7 +262,7 @@ export async function processFrameVerification(
       session_id: job.sessionId,
       reason: validated.reason,
     });
-    await finalizeFallback('failed', `vision output rejected: ${validated.reason}`);
+    await finalizeFallback('failed', `vision output rejected: ${validated.reason}`, response);
     return;
   }
   const verification: FrameVerification = { grades: validated.grades, frames: manifest };

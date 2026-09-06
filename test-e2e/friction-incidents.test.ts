@@ -80,12 +80,13 @@ function activeNarrativeChunk(t0: number) {
   };
 }
 
-async function startModelStub(): Promise<{ server: Server; baseURL: string }> {
+async function startModelStub(): Promise<{ server: Server; baseURL: string; imageDimensions: number[][] }> {
+  const imageDimensions: number[][] = [];
   const server = createServer(async (request, response) => {
     const chunks: Buffer[] = [];
     for await (const chunk of request) chunks.push(Buffer.from(chunk));
     const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as {
-      messages?: Array<{ content?: string | Array<{ type?: string; text?: string }> }>;
+      messages?: Array<{ content?: string | Array<{ type?: string; text?: string; source?: { data: string } }> }>;
     };
     const content = body.messages?.[0]?.content;
     const imageRequest = Array.isArray(content) && content.some((part) => part.type === 'image');
@@ -94,6 +95,12 @@ async function startModelStub(): Promise<{ server: Server; baseURL: string }> {
       : (content ?? []).filter((part) => part.type === 'text').map((part) => part.text ?? '').join('\n');
     let text: string;
     if (imageRequest) {
+      for (const part of content) {
+        if (part.type === 'image' && part.source) {
+          const png = Buffer.from(part.source.data, 'base64');
+          imageDimensions.push([png.readUInt32BE(16), png.readUInt32BE(20)]);
+        }
+      }
       const observationID = /"id":"([^"]+)"/.exec(userText)?.[1] ?? '0-missing';
       text = JSON.stringify({ grades: [{ observationId: observationID, grade: 'confirmed', reason: 'The conflicting save and validation messages are visible.' }] });
     } else {
@@ -116,7 +123,7 @@ async function startModelStub(): Promise<{ server: Server; baseURL: string }> {
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const address = server.address();
   if (address === null || typeof address === 'string') throw new Error('model stub did not bind');
-  return { server, baseURL: `http://127.0.0.1:${address.port}` };
+  return { server, baseURL: `http://127.0.0.1:${address.port}`, imageDimensions };
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -180,6 +187,7 @@ const describeLive = process.env['DATABASE_URL'] && (process.env['MINIO_ENDPOINT
 describeLive('session narratives — live-service pipeline', () => {
   let tenant: TestTenant;
   let modelServer: Server;
+  let imageDimensions: number[][];
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let modelClient: any;
 
@@ -188,6 +196,7 @@ describeLive('session narratives — live-service pipeline', () => {
     tenant = await seedTenant();
     const stub = await startModelStub();
     modelServer = stub.server;
+    imageDimensions = stub.imageDimensions;
     modelClient = new NarrativeClient({ model: 'e2e-stub', baseURL: stub.baseURL, apiKey: 'e2e', maxTokens: 2048, reasoning: 'off' });
   });
 
@@ -245,6 +254,22 @@ describeLive('session narratives — live-service pipeline', () => {
       `SELECT status,verification_state FROM session_narratives WHERE project_id=$1 ORDER BY session_id`, [tenant.projectId]);
     expect(narratives.rows).toHaveLength(3);
     expect(narratives.rows.every((row) => row.status === 'ok' && row.verification_state === 'ok')).toBe(true);
+    expect(imageDimensions.length).toBeGreaterThan(0);
+    // Assert the bound, not the exact size: a fixture recorded at a smaller
+    // viewport is downscaled correctly and must not turn this red.
+    expect(imageDimensions.every(([width, height]) => width <= 720 && height <= 450)).toBe(true);
+    // The seeded fixtures all record a 1440x900 viewport, so they do hit the box exactly.
+    expect(imageDimensions[0]).toEqual([720, 450]);
+    const usage = await db.query<{ phase: string; rows: string; input: string; output: string }>(
+      `SELECT u.phase, count(*)::text AS rows, sum(u.input_tokens)::text AS input,
+              sum(u.output_tokens)::text AS output
+       FROM job_usage u JOIN error_group_jobs j ON j.id=u.job_id
+       WHERE j.project_id=$1 AND j.session_id=ANY($2::text[])
+       GROUP BY u.phase ORDER BY u.phase`, [tenant.projectId, sessionIDs]);
+    expect(usage.rows).toEqual([
+      { phase: 'narrate', rows: '3', input: '30', output: '30' },
+      { phase: 'verify', rows: '3', input: '30', output: '30' },
+    ]);
 
     const signals = await db.query<{ signal_type: string; rule_version: number; observation_text: string | null; element_selector: string | null }>(
       `SELECT signal_type,rule_version,observation_text,element_selector FROM friction_signals

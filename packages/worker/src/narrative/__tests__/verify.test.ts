@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SessionNarrative } from '@opslane/shared';
 import { processFrameVerification, selectMoments, validateVerification } from '../verify.js';
+import { calculateCost } from '@opslane/agent-core';
+import { pricingFor } from '../../harness/agent-loop.js';
 
 const dbMock = vi.hoisted(() => ({
   claimVerifyingNarrative: vi.fn(),
@@ -38,12 +40,12 @@ function dependencies(modelText = gradesJson) {
   return {
     client: {
       modelName: 'claude-sonnet-5',
-      complete: vi.fn().mockResolvedValue({ text: modelText, inputTokens: 20, outputTokens: 10, stopReason: 'end_turn' }),
+      complete: vi.fn().mockResolvedValue({ text: modelText, inputTokens: 20, outputTokens: 10, cacheReadTokens: 30, cacheWriteTokens: 40, stopReason: 'end_turn' }),
     } as never,
     loadChunks: vi.fn().mockResolvedValue([]),
     capture: vi.fn().mockResolvedValue({ frames: [
-      { offsetMs: 5_000, pair: 'a' as const, png: Buffer.from('png') },
-      { offsetMs: 5_000, pair: 'b' as const, png: Buffer.from('png2') },
+      { offsetMs: 5_000, pair: 'a' as const, png: Buffer.from('png'), modelPng: Buffer.from('small-png') },
+      { offsetMs: 5_000, pair: 'b' as const, png: Buffer.from('png2'), modelPng: Buffer.from('small-png2') },
     ], assetsMissing: false }),
     uploadFrame: vi.fn().mockResolvedValue(undefined),
     dailyCap: 2_000,
@@ -90,15 +92,57 @@ describe('verification validation', () => {
 });
 
 describe('processFrameVerification', () => {
-  it('records the verification model usage in the job ledger', async () => {
-    await processFrameVerification(job, dependencies(), new AbortController().signal);
-    expect(dbMock.recordJobUsage).toHaveBeenCalledWith(expect.objectContaining({
-      jobId: 'j1',
-      execution: 0,
-      phase: 'verify',
-      model: 'claude-sonnet-5',
-      usage: { input: 20, output: 10, cacheRead: 0, cacheWrite: 0 },
+  it.each(['valid', 'invalid', 'truncated'])('ledgers paid %s responses before finalizing', async (outcome) => {
+    const deps = dependencies(outcome === 'invalid' ? 'not json' : gradesJson);
+    const complete = deps.client as unknown as { complete: ReturnType<typeof vi.fn> };
+    if (outcome === 'truncated') {
+      complete.complete.mockResolvedValue({ text: gradesJson, inputTokens: 20, outputTokens: 10, cacheReadTokens: 30, cacheWriteTokens: 40, stopReason: 'max_tokens' });
+    }
+    await processFrameVerification(job, deps, new AbortController().signal);
+    expect(dbMock.recordJobUsage).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      jobId: 'j1', execution: 0, phase: 'verify', model: 'claude-sonnet-5',
+      usage: { input: 20, output: 10, cacheRead: 30, cacheWrite: 40 },
+      // Derived from the pricing table, not a hand-computed literal: a rate
+      // change should move this expectation, not fail it with a bare number.
+      // Rounded to 4dp because that is the precision the meter writes and the
+      // only precision cost_usd can hold, so a sub-$0.0001 call lands as zero.
+      costUsd: Number(calculateCost(
+        { input: 20, output: 10, cacheRead: 30, cacheWrite: 40 },
+        pricingFor('claude-sonnet-5'),
+      ).toFixed(4)),
     }));
+    expect(dbMock.recordJobUsage.mock.invocationCallOrder[0])
+      .toBeLessThan(dbMock.finalizeVerification.mock.invocationCallOrder[0]!);
+    expect(dbMock.finalizeVerification).toHaveBeenCalledWith(job, expect.objectContaining({
+      state: outcome === 'valid' ? 'ok' : 'failed', inputTokens: 20, outputTokens: 10,
+    }));
+  });
+
+  it('sends downsampled images to the model and stores original evidence', async () => {
+    const deps = dependencies();
+    await processFrameVerification(job, deps, new AbortController().signal);
+    expect(deps.uploadFrame).toHaveBeenNthCalledWith(1, expect.any(String), Buffer.from('png'));
+    expect((deps.client as unknown as { complete: ReturnType<typeof vi.fn> }).complete)
+      .toHaveBeenCalledWith(expect.objectContaining({ images: [
+        { mediaType: 'image/png', base64: Buffer.from('small-png').toString('base64') },
+        { mediaType: 'image/png', base64: Buffer.from('small-png2').toString('base64') },
+      ] }));
+  });
+
+  it('keeps the usage record when finalization loses the lease', async () => {
+    dbMock.finalizeVerification.mockRejectedValueOnce(new Error('lease lost'));
+    await expect(processFrameVerification(job, dependencies(), new AbortController().signal))
+      .rejects.toThrow('lease lost');
+    expect(dbMock.recordJobUsage).toHaveBeenCalledOnce();
+  });
+
+  it('does not invent usage when the provider fails before returning a response', async () => {
+    const deps = dependencies();
+    (deps.client as unknown as { complete: ReturnType<typeof vi.fn> }).complete
+      .mockRejectedValueOnce(new Error('connection failed'));
+    await expect(processFrameVerification(job, deps, new AbortController().signal))
+      .rejects.toThrow('connection failed');
+    expect(dbMock.recordJobUsage).not.toHaveBeenCalled();
   });
 
   it('drops refuted observations and substitutes corrected text', async () => {
@@ -117,6 +161,7 @@ describe('processFrameVerification', () => {
     expect(dbMock.finalizeVerification.mock.calls[0]?.[1]).toMatchObject({
       state: 'failed', signalRows: expect.arrayContaining([expect.objectContaining({ what: 'phantom error' })]),
     });
+    expect(dbMock.recordJobUsage).not.toHaveBeenCalled();
   });
 
   it('stores the failure reason on fallback', async () => {
@@ -139,5 +184,6 @@ describe('processFrameVerification', () => {
     dbMock.claimVerifyingNarrative.mockResolvedValue(null);
     await processFrameVerification(job, dependencies(), new AbortController().signal);
     expect(dbMock.finalizeVerification).not.toHaveBeenCalled();
+    expect(dbMock.recordJobUsage).not.toHaveBeenCalled();
   });
 });
