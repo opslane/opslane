@@ -255,6 +255,11 @@ export function buildQueryOptions(input: ReadOnlyRunInput, state?: RunState): Op
     tools: [],
     disallowedTools: [...DENIED_BUILTIN_TOOLS],
     allowedTools: names.map((name) => `mcp__repo__${name}`),
+    // The loop's own budget check only runs between messages, so it cannot
+    // stop a single expensive turn, and the post-capture drain widens that
+    // window further. This makes the ceiling the SDK's own: it ends the query
+    // with an error_max_budget_usd result, which the loop already classifies.
+    maxBudgetUsd: input.budgetUsd,
     permissionMode: 'dontAsk',
     settingSources: [],
     mcpServers: { repo: buildServer(input, runState) },
@@ -299,7 +304,10 @@ export function applyResultUsage(target: TokenUsage, message: unknown): boolean 
   const assign = (key: string, field: keyof TokenUsage): boolean => {
     const value = usage[key];
     if (typeof value !== 'number' || !Number.isFinite(value)) return false;
-    target[field] = value;
+    // Floored like the per-message deltas above. These totals price the ledger
+    // row and gate the budget stop, so a negative counter would under-bill and
+    // raise the effective ceiling at the same time.
+    target[field] = Math.max(0, value);
     return true;
   };
 
@@ -325,7 +333,15 @@ function addUsage(target: TokenUsage, delta: TokenUsage): void {
  * it against sdk.mjs on every SDK bump.
  */
 const SDK_MAX_TURNS_THROW = /^Claude Code returned an error result: Reached maximum number of turns/;
+/**
+ * Bounds on reading past the terminal tool to reach the SDK's cumulative usage.
+ *
+ * Two bounds, because they fail differently. The message cap stops a stream
+ * that keeps talking; the deadline stops one that goes quiet mid-drain, which
+ * a counter incremented per arriving message can never catch.
+ */
 const MAX_DRAIN_AFTER_CAPTURE = 20;
+const MAX_DRAIN_AFTER_CAPTURE_MS = 30_000;
 
 /** Run the SDK loop on the worker while every repository tool executes remotely. */
 export async function runReadOnlyAgentSdk(input: ReadOnlyRunInput): Promise<ReadOnlyRunResult> {
@@ -361,6 +377,7 @@ export async function runReadOnlyAgentSdk(input: ReadOnlyRunInput): Promise<Read
   let costUsd = 0;
   let resultUsageSeen = false;
   let drainedAfterCapture = 0;
+  let drainDeadline: number | null = null;
   const q = query({ prompt: input.firstMessage, options: buildQueryOptions(input, state) });
 
   try {
@@ -387,34 +404,54 @@ export async function runReadOnlyAgentSdk(input: ReadOnlyRunInput): Promise<Read
           costUsd = calculateCost(usage, pricingFor(input.model));
           resultUsageSeen = true;
         }
-        if (message.subtype === 'error_max_turns') {
-          stop = 'turns_exhausted';
-          typedErrorSeen = true;
-        } else if (message.subtype === 'error_max_budget_usd') {
-          stop = 'budget';
-          typedErrorSeen = true;
-        } else if (message.subtype === 'success') {
-          if (message.is_error) {
-            stop = 'api_error';
-            apiErrorDetail = message.result;
-            if ('api_error_status' in message && typeof message.api_error_status === 'number') {
-              apiErrorStatus = message.api_error_status;
+        // Usage from a post-capture result is wanted; its verdict is not. The
+        // submission already succeeded, so letting a late result reclassify the
+        // run would turn a captured answer into an api_error or a turns
+        // exhaustion, and hand the catch below the wrong branch to take. The
+        // drain's own exit checks still run, so this must not `continue`.
+        if (!state.captured) {
+          if (message.subtype === 'error_max_turns') {
+            stop = 'turns_exhausted';
+            typedErrorSeen = true;
+          } else if (message.subtype === 'error_max_budget_usd') {
+            stop = 'budget';
+            typedErrorSeen = true;
+          } else if (message.subtype === 'success') {
+            if (message.is_error) {
+              stop = 'api_error';
+              apiErrorDetail = message.result;
+              if ('api_error_status' in message && typeof message.api_error_status === 'number') {
+                apiErrorStatus = message.api_error_status;
+              }
+              typedErrorSeen = true;
             }
+          } else {
+            stop = 'api_error';
+            apiErrorDetail = message.errors.join('; ');
             typedErrorSeen = true;
           }
-        } else {
-          stop = 'api_error';
-          apiErrorDetail = message.errors.join('; ');
-          typedErrorSeen = true;
         }
       }
       if (state.fatal) break;
       if (state.captured) {
         stop = 'terminal';
-        // The terminal tool fires mid-turn. Keep consuming until the SDK's
-        // authoritative cumulative result arrives, but never wait forever.
+        // The terminal tool fires mid-turn, so the SDK's authoritative
+        // cumulative result has not arrived yet. Keep consuming until it does.
+        //
+        // Every exit below is a real bound, because draining is not free: the
+        // terminal tool returns a tool result rather than ending the turn, so
+        // the model can keep generating while we read.
         if (resultUsageSeen) break;
+        // Over budget stops the drain but keeps `stop = 'terminal'`. A
+        // submission that arrives in the same response that blows the budget
+        // is still a submission, and downgrading it to 'budget' here threw the
+        // diagnosis away.
+        if (costUsd > input.budgetUsd) break;
         if (++drainedAfterCapture > MAX_DRAIN_AFTER_CAPTURE) break;
+        drainDeadline ??= Date.now() + MAX_DRAIN_AFTER_CAPTURE_MS;
+        // A message-count cap alone cannot bound a stream that stalls between
+        // messages, so the wall clock bounds it too.
+        if (Date.now() > drainDeadline) break;
         continue;
       }
       if (costUsd > input.budgetUsd) { stop = 'budget'; break; }

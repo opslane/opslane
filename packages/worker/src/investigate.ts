@@ -61,6 +61,11 @@ export const MODEL_PRICING: Record<string, { input: number; output: number; cach
   // price overstated what the runs actually cost by half.
   'claude-sonnet-5': { input: 2, output: 10, cacheWrite: 2.50, cacheRead: 0.20 },
   'claude-haiku-4-5-20251001': { input: 1, output: 5, cacheWrite: 1.25, cacheRead: 0.10 },
+  // Visual analysis pins this id (visual-analysis.ts:13). Its rate matches
+  // DEFAULT_PRICING, so omitting it priced correctly by luck; listed here so
+  // the ledger's model column and its rate agree by construction rather than
+  // by coincidence, and so a future default change cannot silently reprice it.
+  'claude-sonnet-4-5-20250929': { input: 3, output: 15, cacheWrite: 3.75, cacheRead: 0.30 },
 };
 export const DEFAULT_PRICING = { input: 3, output: 15, cacheWrite: 3.75, cacheRead: 0.30 };
 

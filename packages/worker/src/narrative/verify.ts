@@ -235,6 +235,10 @@ export async function processFrameVerification(
       user: `OBSERVATIONS_START\n${JSON.stringify(narrative.observations)}\nOBSERVATIONS_END\nTIMELINE_START\n${timeline.lines.map((line, index) => `L${index + 1} ${line.t}`).join('\n')}\nTIMELINE_END`,
       images: captureResult.frames.map((frame) => ({ mediaType: 'image/png', base64: frame.png.toString('base64') })),
     });
+    // The cache counters are zeros, not measurements: NarrativeModelResult
+    // carries only input and output, so this phase's cost_usd is a lower
+    // bound. Nothing is lost today because the narrative client sets no
+    // cache_control. Surface the cache counts on that result before it does.
     meter.add(deps.client.modelName, {
       input: response.inputTokens,
       output: response.outputTokens,
