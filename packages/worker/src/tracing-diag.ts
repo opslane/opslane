@@ -156,12 +156,22 @@ export function createDiagLogger(
   throttle: DiagThrottle,
   redact: (text: string) => string,
   now: () => number = Date.now,
+  onExportError?: (text: string) => void,
 ): DiagLogger {
   const emit =
     (level: 'warn' | 'error') =>
     (message: string, ...args: unknown[]): void => {
       try {
         const text = normalizeDiagMessage(message, args, redact);
+        // Counting is independent of log throttling so a sustained outage
+        // cannot look quieter merely because its diagnostics repeat.
+        if (onExportError && text.includes('OTLPExporterError')) {
+          try {
+            onExportError(text);
+          } catch {
+            // A broken health callback must never escape into OTel.
+          }
+        }
         const suppressed = throttle.admit(`${level}:${text}`, now());
         if (suppressed === null) return;
         const fields: Record<string, unknown> = { component: 'otel' };

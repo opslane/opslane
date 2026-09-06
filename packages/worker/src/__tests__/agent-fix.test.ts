@@ -16,6 +16,7 @@ vi.mock('../harness/agent-loop.js', () => ({
 
 // Mock the diff judge
 vi.mock('../harness/diff-judge.js', () => ({
+  JUDGE_MODEL: 'claude-haiku-4-5-20251001',
   judgeDiff: vi.fn(),
 }));
 
@@ -1104,6 +1105,46 @@ describe('runAgentFix', () => {
       costUsd: expect.any(Number),
     });
     expect(mockRecordJobUsage.mock.calls[0]?.[0].costUsd).toBeCloseTo(0.0047475, 10);
+  });
+
+  it('records diff-judge and fix-narrative usage under their actual models', async () => {
+    mockSandboxWithPassingTests();
+    vi.mocked(runAgentLoop).mockResolvedValue(makeAgentResult({ testsRan: true }));
+    vi.mocked(judgeDiff).mockImplementationOnce(async (_apiKey, _input, onUsage) => {
+      onUsage?.({ input: 30, output: 7, cacheRead: 0, cacheWrite: 0 });
+      return {
+        scope: 2, correctness: 2, preservation: 2, total: 6,
+        qualityPassed: true, explanation: 'Looks good',
+      };
+    });
+    mockMessagesCreate.mockResolvedValueOnce({
+      content: [{
+        type: 'tool_use', id: 'narrative-1', name: 'submit_fix_narrative',
+        input: {
+          subject: 'Guard missing profiles in UserCard',
+          whatHappened: 'Saving a user without a profile crashed the page.',
+          whyItBroke: 'UserCard read the profile before checking whether it existed.',
+          fixApproach: 'Guard the nullable profile before rendering dependent fields.',
+        },
+      }],
+      usage: { input_tokens: 50, output_tokens: 11 },
+    });
+
+    await runAgentFix(makeInput({
+      model: 'claude-sonnet-4-6',
+      usageContext: { jobId: 'fix-job-1', execution: 2 },
+    }));
+
+    expect(mockRecordJobUsage).toHaveBeenCalledWith(expect.objectContaining({
+      phase: 'diff_judge',
+      model: 'claude-haiku-4-5-20251001',
+      usage: { input: 30, output: 7, cacheRead: 0, cacheWrite: 0 },
+    }));
+    expect(mockRecordJobUsage).toHaveBeenCalledWith(expect.objectContaining({
+      phase: 'fix_narrative',
+      model: 'claude-haiku-4-5-20251001',
+      usage: { input: 50, output: 11, cacheRead: 0, cacheWrite: 0 },
+    }));
   });
 
   it('includes filesRead and findings in system prompt when investigation provides them', async () => {

@@ -7,6 +7,7 @@ const dbMock = vi.hoisted(() => ({
   reserveNarrativeBudget: vi.fn(),
   narrativeMonthlySpendExceeded: vi.fn(),
   finalizeVerification: vi.fn(),
+  recordJobUsage: vi.fn().mockResolvedValue(undefined),
 }));
 vi.mock('../../db.js', () => dbMock);
 
@@ -25,7 +26,9 @@ const timeline = {
     { t: 'slow', s: null, r: '/assets', a: 10_000 },
   ],
 };
-const job = { id: 'j1', projectId: 'p1', sessionId: 's1', workerId: 'w', leaseGeneration: '1' } as never;
+const job = {
+  id: 'j1', projectId: 'p1', sessionId: 's1', workerId: 'w', leaseGeneration: '1', attempts: 0,
+} as never;
 const gradesJson = JSON.stringify({ grades: [
   { observationId: '0-aaaa', grade: 'refuted', reason: 'not visible' },
   { observationId: '1-bbbb', grade: 'corrected', reason: 'different delay', replacementWhat: 'save takes 12 seconds' },
@@ -34,7 +37,7 @@ const gradesJson = JSON.stringify({ grades: [
 function dependencies(modelText = gradesJson) {
   return {
     client: {
-      modelName: 'vision',
+      modelName: 'claude-sonnet-5',
       complete: vi.fn().mockResolvedValue({ text: modelText, inputTokens: 20, outputTokens: 10, stopReason: 'end_turn' }),
     } as never,
     loadChunks: vi.fn().mockResolvedValue([]),
@@ -87,6 +90,17 @@ describe('verification validation', () => {
 });
 
 describe('processFrameVerification', () => {
+  it('records the verification model usage in the job ledger', async () => {
+    await processFrameVerification(job, dependencies(), new AbortController().signal);
+    expect(dbMock.recordJobUsage).toHaveBeenCalledWith(expect.objectContaining({
+      jobId: 'j1',
+      execution: 0,
+      phase: 'verify',
+      model: 'claude-sonnet-5',
+      usage: { input: 20, output: 10, cacheRead: 0, cacheWrite: 0 },
+    }));
+  });
+
   it('drops refuted observations and substitutes corrected text', async () => {
     await processFrameVerification(job, dependencies(), new AbortController().signal);
     const args = dbMock.finalizeVerification.mock.calls[0]?.[1];

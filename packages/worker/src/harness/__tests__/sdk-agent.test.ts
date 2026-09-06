@@ -6,7 +6,7 @@ interface FakeTool { name: string; handler: Handler }
 type Action =
   | { kind: 'call'; name: string; input: Record<string, unknown> }
   | { kind: 'assistant'; id?: string; text?: string; usage?: Partial<typeof DEFAULT_USAGE>; stopReason?: 'max_tokens' }
-  | { kind: 'result'; subtype?: string; isError?: boolean }
+  | { kind: 'result'; subtype?: string; isError?: boolean; usage?: Partial<typeof DEFAULT_USAGE> }
   | { kind: 'throw'; error: unknown };
 
 const DEFAULT_USAGE = {
@@ -55,14 +55,14 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
                 type: 'result', subtype: 'success', is_error: action.isError ?? false,
                 result: action.isError ? 'failed' : 'done', api_error_status: action.isError ? 503 : null,
                 duration_ms: 1, duration_api_ms: 1, num_turns: 1, stop_reason: null,
-                total_cost_usd: 0, usage: DEFAULT_USAGE, modelUsage: {}, permission_denials: [],
+                total_cost_usd: 0, usage: { ...DEFAULT_USAGE, ...action.usage }, modelUsage: {}, permission_denials: [],
                 uuid: 'r', session_id: 's',
               }
             : {
                 type: 'result', subtype: action.subtype, is_error: true,
                 errors: ['query failed'], duration_ms: 1, duration_api_ms: 1,
                 num_turns: 1, stop_reason: null, total_cost_usd: 0,
-                usage: DEFAULT_USAGE, modelUsage: {}, permission_denials: [], uuid: 'r', session_id: 's',
+                usage: { ...DEFAULT_USAGE, ...action.usage }, modelUsage: {}, permission_denials: [], uuid: 'r', session_id: 's',
               };
         }
       }
@@ -149,6 +149,26 @@ describe('SDK read-only agent', () => {
       usage: { input: 100, output: 20, cacheRead: 0, cacheWrite: 0 },
     });
     expect(sdk.returned).toHaveBeenCalledOnce();
+  });
+
+  it('drains after terminal capture and returns cumulative result usage', async () => {
+    sdk.actions.push(
+      { kind: 'assistant', usage: { input_tokens: 5, output_tokens: 9 } },
+      { kind: 'call', name: 'submit', input: { answer: 'yes' } },
+      { kind: 'result', usage: {
+        input_tokens: 120,
+        output_tokens: 9_400,
+        cache_read_input_tokens: 250_000,
+        cache_creation_input_tokens: 31_000,
+      } },
+    );
+
+    const out = await runReadOnlyAgentSdk(fakeInput({ budgetUsd: 100 }));
+
+    expect(out.stop).toBe('terminal');
+    expect(out.usage).toEqual({
+      input: 120, output: 9_400, cacheRead: 250_000, cacheWrite: 31_000,
+    });
   });
 
   it('enforces the dollar budget from streamed usage', async () => {

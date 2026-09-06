@@ -6,7 +6,7 @@ import { createToolBridge } from './harness/tool-bridge.js';
 import { createDefaultMiddleware } from './harness/tool-middleware.js';
 import { extractStackTraceFiles, resolveTrackedFiles } from './harness/stack-trace-utils.js';
 import { parsePythonFrames, resolveFrames } from './harness/python-frames.js';
-import { judgeDiff } from './harness/diff-judge.js';
+import { JUDGE_MODEL, judgeDiff } from './harness/diff-judge.js';
 import { createHostReader } from './harness/host-reader.js';
 import { investigateError } from './investigate.js';
 import { logger } from './logger.js';
@@ -52,6 +52,7 @@ import { reproChecksNotRun,
 } from './verification-ledger.js';
 import { runFailFirst } from './harness/fail-first.js';
 import { FIX_JUDGE_MODEL, judgeFixAttempt } from './harness/fix-judge.js';
+import { PhaseMeter, usageFromResponse } from './metered.js';
 
 /**
  * Record the machine's identity at the moment it failed. sandboxId appears
@@ -229,7 +230,7 @@ async function generateFixNarrative(
   rootCause: string,
   diff: string,
   primaryFile?: string,
-): Promise<FixNarrative> {
+): Promise<{ narrative: FixNarrative; usage: ReturnType<typeof usageFromResponse> }> {
   const client = createAnthropicClient(apiKey);
   const fallbackInput: NarrativeFallbackInput = {
     errorType: input.errorType,
@@ -286,10 +287,13 @@ ${fenced(diff, 4000)}
   const toolUse = response.content.find(
     (block) => block.type === 'tool_use' && block.name === FIX_NARRATIVE_TOOL.name,
   );
-  return parseFixNarrative(
-    toolUse?.type === 'tool_use' ? toolUse.input : undefined,
-    fallbackInput,
-  );
+  return {
+    narrative: parseFixNarrative(
+      toolUse?.type === 'tool_use' ? toolUse.input : undefined,
+      fallbackInput,
+    ),
+    usage: usageFromResponse(response),
+  };
 }
 
 
@@ -857,8 +861,16 @@ async function runAgentFixCore(input: AgentFixInput): Promise<AgentFixResult> {
     // is the burn opslane-oss#255 is named after.
     if (sandbox.unavailable) raiseSandboxGone('pre-agent-loop');
 
+    const judgeMeter = input.usageContext
+      ? new PhaseMeter({ ...input.usageContext, phase: 'diff_judge' })
+      : null;
+    const narrativeMeter = input.usageContext
+      ? new PhaseMeter({ ...input.usageContext, phase: 'fix_narrative' })
+      : null;
+
     // Model cascade: try each model in order, escalate on failure or poor quality
-    for (let tierIdx = 0; tierIdx < cascade.length; tierIdx++) {
+    try {
+      for (let tierIdx = 0; tierIdx < cascade.length; tierIdx++) {
       const tier = cascade[tierIdx];
       const isLastTier = tierIdx === cascade.length - 1;
 
@@ -1277,7 +1289,7 @@ async function runAgentFixCore(input: AgentFixInput): Promise<AgentFixResult> {
       try {
         const judgeResult = await traceSpan(
           'diff-judge',
-          { 'judge.model': tier.model, 'judge.tier': tierIdx },
+          { 'judge.model': JUDGE_MODEL, 'judge.tier': tierIdx },
           () => judgeDiff(apiKey, {
             errorType: input.errorType,
             errorMessage: input.errorMessage,
@@ -1285,11 +1297,11 @@ async function runAgentFixCore(input: AgentFixInput): Promise<AgentFixResult> {
             diff,
             stackTraceFiles,
             frictionEvidence: input.frictionEvidence,
-          }),
+          }, (usage) => judgeMeter?.add(JUDGE_MODEL, usage)),
         );
 
         logger.info('Diff judge result', {
-          model: tier.model,
+          model: JUDGE_MODEL,
           scope: judgeResult.scope,
           correctness: judgeResult.correctness,
           preservation: judgeResult.preservation,
@@ -1304,7 +1316,7 @@ async function runAgentFixCore(input: AgentFixInput): Promise<AgentFixResult> {
         // Judge failure = quality NOT confirmed. Under the precision gate a fix we
         // cannot quality-check must never become a PR (treat as below floor).
         logger.warn('Diff judge failed — treating fix as unverified (below floor)', {
-          model: tier.model,
+          model: JUDGE_MODEL,
           error: judgeErr instanceof Error ? judgeErr.message : String(judgeErr),
         });
         qualityConfirmed = false;
@@ -1438,11 +1450,13 @@ async function runAgentFixCore(input: AgentFixInput): Promise<AgentFixResult> {
         };
         let narrative = buildFallbackNarrative(fallbackInput);
         try {
-          narrative = await traceSpan(
+          const generated = await traceSpan(
             'fix-narrative',
             { 'summary.model': FIX_NARRATIVE_MODEL },
             () => generateFixNarrative(apiKey, input, result!.summary, diff, affectedFiles[0]),
           );
+          narrative = generated.narrative;
+          narrativeMeter?.add(FIX_NARRATIVE_MODEL, generated.usage);
         } catch (summaryErr: unknown) {
           logger.warn('Fix narrative generation failed; using deterministic fallback', {
             error: summaryErr instanceof Error ? summaryErr.message : String(summaryErr),
@@ -1507,18 +1521,24 @@ async function runAgentFixCore(input: AgentFixInput): Promise<AgentFixResult> {
           });
         }
       }
-    }
+      }
 
-    // Should not reach here, but satisfy TypeScript
-    return {
-      status: 'needs_human',
-      reason: {
-        reason_code: 'worker_runtime_error',
-        reason_message: 'Model cascade exhausted without result',
-        remediation: 'Review the error manually',
-      },
-      evidence: evidence.record(),
-    };
+      // Should not reach here, but satisfy TypeScript
+      return {
+        status: 'needs_human',
+        reason: {
+          reason_code: 'worker_runtime_error',
+          reason_message: 'Model cascade exhausted without result',
+          remediation: 'Review the error manually',
+        },
+        evidence: evidence.record(),
+      };
+    } finally {
+      // One meter spans the cascade so repeated Haiku diff-judge calls become
+      // one immutable ledger insert instead of colliding on the ledger key.
+      await judgeMeter?.flush();
+      await narrativeMeter?.flush();
+    }
   } catch (err: unknown) {
     if (err instanceof VerificationInfraError) throw err;
     if (err instanceof SandboxImageError) {

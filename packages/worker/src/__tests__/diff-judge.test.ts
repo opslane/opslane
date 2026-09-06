@@ -24,6 +24,7 @@ function makeInput(overrides?: Partial<DiffJudgeInput>): DiffJudgeInput {
 function mockJudgeResponse(input: Record<string, unknown>): void {
   mockCreate.mockResolvedValueOnce({
     content: [{ type: 'tool_use', id: 'tu_1', name: 'score_diff', input }],
+    usage: { input_tokens: 40, output_tokens: 12 },
   });
 }
 
@@ -50,6 +51,20 @@ describe('judgeDiff', () => {
       content: [{ type: 'text', text: 'I cannot score this.' }],
     });
     await expect(judgeDiff('test-key', makeInput())).rejects.toThrow('Judge returned no tool_use block');
+  });
+
+  it('reports paid usage before rejecting a malformed response', async () => {
+    const onUsage = vi.fn();
+    mockCreate.mockResolvedValueOnce({
+      content: [{ type: 'text', text: 'I cannot score this.' }],
+      usage: { input_tokens: 40, output_tokens: 12 },
+    });
+
+    await expect(judgeDiff('test-key', makeInput(), onUsage))
+      .rejects.toThrow('Judge returned no tool_use block');
+    expect(onUsage).toHaveBeenCalledWith({
+      input: 40, output: 12, cacheRead: 0, cacheWrite: 0,
+    });
   });
 
   it('throws when a score is missing', async () => {

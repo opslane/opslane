@@ -214,7 +214,10 @@ describe('initTracing', () => {
     });
     expect(disableSpy).toHaveBeenCalled();
     // Spans degrade to pass-through.
-    expect(await tracing.withJobTrace('j', 'e', 'p', async () => 'ok')).toBe('ok');
+    expect(await tracing.withJobTrace({
+      id: 'j', jobType: 'investigate', projectId: 'p', errorGroupId: 'e',
+      sourceId: null, sessionId: null, attempts: 0,
+    }, async () => 'ok')).toBe('ok');
   });
 
   it('does not hang startup when rollback shutdown never settles', async () => {

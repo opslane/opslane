@@ -8,6 +8,7 @@ import type {
 import * as db from '../db.js';
 import type { ClaimedJob } from '../db.js';
 import { logger } from '../logger.js';
+import { PhaseMeter } from '../metered.js';
 import type { NarrativeClient } from './client.js';
 import { extractJsonObject } from './client.js';
 import { buildSignalRows, type CompactTimeline } from './emit.js';
@@ -222,11 +223,27 @@ export async function processFrameVerification(
       caption: `t+${(frame.offsetMs / 1_000).toFixed(1)}s (${frame.pair})`,
     });
   }
-  const response = await deps.client.complete({
-    system: buildVerifyPrompt(),
-    user: `OBSERVATIONS_START\n${JSON.stringify(narrative.observations)}\nOBSERVATIONS_END\nTIMELINE_START\n${timeline.lines.map((line, index) => `L${index + 1} ${line.t}`).join('\n')}\nTIMELINE_END`,
-    images: captureResult.frames.map((frame) => ({ mediaType: 'image/png', base64: frame.png.toString('base64') })),
+  const meter = new PhaseMeter({
+    jobId: job.id,
+    execution: job.attempts,
+    phase: 'verify',
   });
+  let response: Awaited<ReturnType<NarrativeClient['complete']>>;
+  try {
+    response = await deps.client.complete({
+      system: buildVerifyPrompt(),
+      user: `OBSERVATIONS_START\n${JSON.stringify(narrative.observations)}\nOBSERVATIONS_END\nTIMELINE_START\n${timeline.lines.map((line, index) => `L${index + 1} ${line.t}`).join('\n')}\nTIMELINE_END`,
+      images: captureResult.frames.map((frame) => ({ mediaType: 'image/png', base64: frame.png.toString('base64') })),
+    });
+    meter.add(deps.client.modelName, {
+      input: response.inputTokens,
+      output: response.outputTokens,
+      cacheRead: 0,
+      cacheWrite: 0,
+    });
+  } finally {
+    await meter.flush();
+  }
   const validated = response.stopReason === 'max_tokens'
     ? { ok: false as const, reason: 'truncated (max_tokens)' }
     : validateVerification(response.text, narrative);

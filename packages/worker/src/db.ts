@@ -407,7 +407,18 @@ export async function recordInvestigatedCommit(lease: JobLease, commit: string):
   );
 }
 
-export type UsagePhase = 'investigation' | 'fix' | 'judge' | 'product_context' | 'inquiry' | 'narrate';
+export type UsagePhase =
+  | 'investigation'
+  | 'fix'
+  | 'judge'
+  | 'product_context'
+  | 'inquiry'
+  | 'narrate'
+  | 'verify'
+  | 'digest_write'
+  | 'visual_analysis'
+  | 'fix_narrative'
+  | 'diff_judge';
 
 export interface TokenUsage {
   input: number;

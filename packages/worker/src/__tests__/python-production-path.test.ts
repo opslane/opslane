@@ -51,7 +51,10 @@ vi.mock('../ci-watch.js', () => ({ processCIWatchJob: vi.fn() }));
 vi.mock('../tracing.js', () => ({
   initTracing: vi.fn(),
   shutdownTracing: vi.fn(),
-  withJobTrace: vi.fn((_jobId: string, _groupId: string, _projectId: string, fn: () => unknown) => fn()),
+  withJobTrace: vi.fn((_job: unknown, fn: () => unknown) => fn()),
+  getTracingExportHealth: vi.fn(() => ({
+    failures: 0, lastError: null, lastErrorAt: null, suspended: false,
+  })),
   traceSpan: vi.fn((_name: string, _attributes: unknown, fn: () => unknown) => fn()),
   getActiveTraceId: vi.fn(() => null),
   buildLangfuseTraceUrl: vi.fn(() => null),
