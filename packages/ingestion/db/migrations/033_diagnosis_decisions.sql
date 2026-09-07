@@ -15,8 +15,26 @@ CREATE TABLE IF NOT EXISTS diagnosis_decisions (
   decided_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS uq_diagnosis_decisions_job
-  ON diagnosis_decisions(job_id) WHERE job_id IS NOT NULL;
+-- Create-if-not-superseded, per 072's precedent: 037 retires this index in
+-- favor of one decision row per attempt, and the boot replay runs this file
+-- again on every deploy. Once a retried job has written its second decision —
+-- exactly what 037 legalizes — an unguarded CREATE UNIQUE INDEX can never
+-- succeed again, and the replay (and with it every deploy) fails here. 037
+-- leaves idx_diagnosis_decisions_job behind as its marker: when that index
+-- exists, the unique index must stay retired and the replay is a no-op. A
+-- fresh database carries neither index at this point, so it still gets 033's
+-- version first and 037 retires it moments later in the same run.
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_indexes
+     WHERE schemaname = 'public'
+       AND indexname = 'idx_diagnosis_decisions_job'
+  ) THEN
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_diagnosis_decisions_job
+      ON diagnosis_decisions(job_id) WHERE job_id IS NOT NULL;
+  END IF;
+END $$;
 CREATE INDEX IF NOT EXISTS idx_diagnosis_decisions_group
   ON diagnosis_decisions(error_group_id, decided_at DESC);
 CREATE INDEX IF NOT EXISTS idx_diagnosis_decisions_project
