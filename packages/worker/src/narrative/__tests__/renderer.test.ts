@@ -32,6 +32,11 @@ const requestEnd = (requestId: string, status: number, at: number) => ({
   timestamp: at,
   data: { tag: 'opslane.telemetry', payload: { kind: 'request_end', requestId, status, at } },
 });
+let nextFeedbackNodeId = 900; // above the snapshot's ids so feedback nodes never collide
+const feedback = (text: string, timestamp: number) => ({
+  type: 3, timestamp,
+  data: { source: 0, adds: [{ parentId: 1, node: { id: nextFeedbackNodeId++, type: 3, textContent: text } }], removes: [], texts: [], attributes: [] },
+});
 const rawInput = (id: number, timestamp: number) => ({
   type: 3,
   timestamp,
@@ -114,7 +119,7 @@ describe('idle markers', () => {
     expect(rendered.lines.filter((line) => line.kind === 'idle')).toHaveLength(2);
   });
 
-  it('stays chronological when system lines land inside the gap', () => {
+  it('does not call a wait on an in-flight request idle, before the response or the click after it', () => {
     const rendered = renderTimeline([envelope([
       meta('https://app.example.com/assets', t0),
       snapshot(t0),
@@ -123,11 +128,119 @@ describe('idle markers', () => {
       requestEnd('r1', 500, t0 + 90_000),
       click('button.save-btn', t0 + 122_000),
     ])]);
-    const texts = rendered.lines.map((line) => line.text);
-    const responseIndex = texts.findIndex((text) => text.includes('POST'));
+    expect(rendered.lines.some((line) => line.kind === 'idle')).toBe(false);
+    expect(rendered.lines.find((line) => line.text.includes('POST'))?.text).toContain('SLOW 88.9s');
+  });
+
+  it('marks the stretch after a waited-on response once the user goes quiet again', () => {
+    const rendered = renderTimeline([envelope([
+      meta('https://app.example.com/assets', t0),
+      snapshot(t0),
+      click('button.save-btn', t0 + 1_000),
+      requestStart('r1', 'POST', '/api/save', t0 + 1_100),
+      requestEnd('r1', 500, t0 + 90_000),
+      click('button.save-btn', t0 + 400_000),
+    ])]);
+    const markers = rendered.lines.filter((line) => line.kind === 'idle');
+    expect(markers).toHaveLength(1);
+    expect(markers[0]!.text).toContain('[user idle 5m 10s — away from the app]');
+    expect(rendered.lines[rendered.lines.indexOf(markers[0]!) + 1]!.text).toContain('CLICK');
+  });
+
+  it('marks a silence that ends with the page updating itself', () => {
+    const rendered = renderTimeline([envelope([
+      meta('https://app.example.com/assets', t0),
+      snapshot(t0),
+      click('button.save-btn', t0 + 1_000),
+      feedback('2 out of 10 assets match your filter criteria', t0 + 1_000 + 32 * 60_000),
+    ])]);
     const markerIndex = rendered.lines.findIndex((line) => line.kind === 'idle');
-    expect(markerIndex).toBeGreaterThan(responseIndex);
+    expect(markerIndex).toBeGreaterThan(-1);
+    expect(rendered.lines[markerIndex]!.text).toContain('[user idle 32m 0s — away from the app]');
+    expect(rendered.lines[markerIndex + 1]!.text).toContain('UI TEXT APPEARED');
+  });
+
+  it('does not mark a silence at or under the threshold before a self-update', () => {
+    const rendered = renderTimeline([envelope([
+      meta('https://app.example.com/assets', t0),
+      snapshot(t0),
+      click('button.save-btn', t0 + 1_000),
+      feedback('2 out of 10 assets match your filter criteria', t0 + 1_000 + IDLE_THRESHOLD_MS),
+    ])]);
+    expect(rendered.lines.some((line) => line.kind === 'idle')).toBe(false);
+  });
+
+  it('marks every long quiet stretch inside one silence', () => {
+    const rendered = renderTimeline([envelope([
+      meta('https://app.example.com/assets', t0),
+      snapshot(t0),
+      click('button.save-btn', t0 + 1_000),
+      feedback('Save failed', t0 + 62_000),
+      feedback('Save failed again', t0 + 1_921_000),
+    ])]);
+    const markers = rendered.lines.filter((line) => line.kind === 'idle').map((line) => line.text);
+    expect(markers).toHaveLength(2);
+    expect(markers[0]).toContain('[user idle 1m 1s — away from the app]');
+    expect(markers[1]).toContain('[user idle 30m 59s — away from the app]');
+  });
+
+  it('still marks an activity gap when a system line lands early in it', () => {
+    const rendered = renderTimeline([envelope([
+      meta('https://app.example.com/assets', t0),
+      snapshot(t0),
+      click('button.save-btn', t0 + 1_000),
+      requestStart('r1', 'POST', '/api/save', t0 + 1_100),
+      requestEnd('r1', 500, t0 + 2_000),
+      click('button.save-btn', t0 + 122_000),
+    ])]);
+    const markerIndex = rendered.lines.findIndex((line) => line.kind === 'idle');
+    expect(markerIndex).toBeGreaterThan(-1);
+    expect(rendered.lines[markerIndex]!.text).toContain('[user idle 2m 1s — away from the app]');
     expect(rendered.lines[markerIndex + 1]!.text).toContain('CLICK');
+  });
+
+  it('marks an absence between two clicks that frequent background updates would otherwise hide', () => {
+    const rendered = renderTimeline([envelope([
+      meta('https://app.example.com/assets', t0),
+      snapshot(t0),
+      click('button.refresh', t0),
+      ...Array.from({ length: 19 }, (_, i) => feedback(`${i} out of 10 assets match`, t0 + (i + 1) * 30_000)),
+      click('button.refresh', t0 + 600_000),
+    ])]);
+    const markers = rendered.lines.filter((line) => line.kind === 'idle');
+    expect(markers).toHaveLength(1);
+    expect(markers[0]!.text).toContain('[user idle 10m 0s — away from the app]');
+    expect(rendered.lines[rendered.lines.indexOf(markers[0]!) + 1]!.text).toContain('CLICK');
+  });
+
+  it('emits no marker before the first user action', () => {
+    const rendered = renderTimeline([envelope([
+      meta('https://app.example.com/assets', t0),
+      snapshot(t0),
+      requestStart('r1', 'GET', '/api/list', t0 + 100),
+      requestEnd('r1', 200, t0 + 90_000),
+      feedback('Save failed', t0 + 200_000),
+    ])]);
+    expect(rendered.lines.some((line) => line.kind === 'idle')).toBe(false);
+  });
+
+  it('orders late-flushed typed lines chronologically so a marker can sit between them and later feedback', () => {
+    const rendered = renderTimeline([envelope([
+      meta('https://app.example.com/assets', t0),
+      snapshot(t0),
+      rawInput(2, t0 + 2_000),
+      rawInput(2, t0 + 3_000),
+      feedback('Save failed', t0 + 122_000),
+    ])]);
+    const texts = rendered.lines.map((line) => line.text);
+    const typedIndex = texts.findIndex((text) => text.includes('typed in'));
+    const feedbackIndex = texts.findIndex((text) => text.includes('Save failed'));
+    const markerIndex = rendered.lines.findIndex((line) => line.kind === 'idle');
+    expect(typedIndex).toBeGreaterThan(-1);
+    expect(typedIndex).toBeLessThan(markerIndex);
+    expect(markerIndex).toBeLessThan(feedbackIndex);
+    const stamps = rendered.lines.map((line) => line.atMs).filter((at): at is number => at !== null && Number.isFinite(at));
+    expect([...stamps].sort((a, b) => a - b)).toEqual(stamps);
   });
 
   it('emits no marker when the gap-ending activity renders no line', () => {
@@ -155,17 +268,79 @@ describe('idle marker hardening', () => {
     expect(rendered.text).not.toContain('[user idle');
   });
 
-  it('skips the marker when the gap-ending activity rendered no line', () => {
-    // a lone keystroke ends the gap but stays below the aggregation display
-    // threshold; asserting absence up to the later feedback line would lie
+  it('marks the silence after a lone keystroke, before the feedback that ends it', () => {
+    // the keystroke at t+122s is a user action: the 1s→122s silence has no line
+    // to attach a marker to, while the 122s→400s silence gets one
     const rendered = renderTimeline([envelope([
       meta('https://app.example.com/assets', t0), snapshot(t0),
       click('button.save-btn', t0 + 1_000),
       rawInput(2, t0 + 122_000),
-      { type: 3, timestamp: t0 + 400_000, data: { source: 0, adds: [
-        { parentId: 1, node: { id: 9, type: 3, textContent: 'Save failed' } }], removes: [], texts: [], attributes: [] } },
+      feedback('Save failed', t0 + 400_000),
     ])]);
-    expect(rendered.text).not.toContain('[user idle');
+    const markers = rendered.lines.filter((line) => line.kind === 'idle');
+    expect(markers).toHaveLength(1);
+    expect(markers[0]!.text).toContain('[user idle 4m 38s — away from the app]');
+    expect(rendered.lines[rendered.lines.indexOf(markers[0]!) + 1]!.text).toContain('Save failed');
+  });
+
+  it('keeps a non-finite line in its slot while reordering typed lines around it', () => {
+    // the click has no payload stamp, so its line is inert; the keystrokes that
+    // follow it are flushed last with their first stamp and must sort back
+    // before the feedback without disturbing the click's slot
+    const badClick = { type: 5, timestamp: t0 + 1_500, data: { tag: 'opslane.telemetry',
+      payload: { kind: 'click', clickId: 'cx', selector: 'button.save-btn', cursor: 'pointer' } } };
+    const rendered = renderTimeline([envelope([
+      meta('https://app.example.com/assets', t0), snapshot(t0),
+      badClick,
+      rawInput(2, t0 + 2_000), rawInput(2, t0 + 3_000),
+      feedback('Save failed', t0 + 10_000),
+    ])]);
+    const texts = rendered.lines.map((line) => line.text);
+    expect(texts.findIndex((text) => text.includes('CLICK'))).toBe(1);
+    expect(texts.findIndex((text) => text.includes('typed in'))).toBeLessThan(texts.findIndex((text) => text.includes('Save failed')));
+  });
+
+  it('leaves a payload stamp outside the session window in place and gives it no marker', () => {
+    const forged = { type: 5, timestamp: t0 + 4_000, data: { tag: 'opslane.telemetry',
+      payload: { kind: 'click', at: -5, clickId: 'cx', selector: 'button.evil', cursor: 'pointer' } } };
+    const nullAt = { type: 5, timestamp: t0 + 5_000, data: { tag: 'opslane.telemetry',
+      payload: { kind: 'click', at: null, clickId: 'cy', selector: 'button.null', cursor: 'pointer' } } };
+    const rendered = renderTimeline([envelope([
+      meta('https://app.example.com/assets', t0), snapshot(t0),
+      click('button.save-btn', t0 + 1_000),
+      forged,
+      nullAt,
+      feedback('Save failed', t0 + 122_000),
+    ])]);
+    const texts = rendered.lines.map((line) => line.text);
+    expect(texts[1]).toContain('button.save-btn');
+    expect(texts.findIndex((text) => text.includes('button.evil'))).toBe(2);
+    expect(texts.findIndex((text) => text.includes('button.null'))).toBe(3);
+    expect(rendered.text).not.toContain('[user idle 29');
+    expect(rendered.lines.filter((line) => line.kind === 'idle').map((line) => line.text)).toEqual([
+      expect.stringContaining('[user idle 2m 1s — away from the app]'),
+    ]);
+  });
+
+  it('drops an event with a non-numeric outer timestamp instead of letting it poison startTs', () => {
+    const rendered = renderTimeline([envelope([
+      { type: 4, timestamp: 'abc', data: { href: 'https://app.example.com/assets' } },
+      meta('https://app.example.com/assets', t0), snapshot(t0),
+      click('button.save-btn', t0 + 1_000),
+    ])]);
+    expect(rendered.startTs).toBe(t0);
+    expect(rendered.text).not.toContain('NaN');
+  });
+
+  it('gives up markers before evidence at the byte budget', () => {
+    const rendered = renderTimeline([envelope([
+      meta('https://app.example.com/assets', t0), snapshot(t0),
+      click('button.save-btn', t0 + 1_000),
+      ...Array.from({ length: 6 }, (_, i) => feedback(`Save failed ${i}`, t0 + 1_000 + (i + 1) * 61_000)),
+    ])], { maxBytes: 420 });
+    expect(rendered.lines.some((line) => line.kind === 'idle')).toBe(false);
+    expect(rendered.lines.filter((line) => line.text.includes('Save failed'))).toHaveLength(6);
+    expect(rendered.truncated).toBe(false);
   });
 
   it('markers do not displace trailing real lines at the maxLines budget', () => {

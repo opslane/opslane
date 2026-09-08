@@ -6,6 +6,8 @@ export interface TimelineLine {
   route: string;
   atMs: number | null;
   kind?: 'idle';
+  /** For a request line: when the request went out. A stretch the user spent waiting on it is not idle time. */
+  waitingSince?: number;
 }
 
 /** No user interaction for longer than this is the user being away, not the
@@ -60,8 +62,13 @@ export function renderTimeline(
     events = events.slice(0, options.maxInputEvents);
     truncated = true;
   }
-  events.sort((a, b) => Number(a['timestamp'] ?? 0) - Number(b['timestamp'] ?? 0));
+  // A non-numeric outer timestamp would make the sort comparator return NaN
+  // and the order implementation-defined; such an event cannot be placed, so
+  // it is dropped rather than allowed to poison startTs and every relative stamp.
+  events = events.filter((event) => Number.isFinite(Number(event['timestamp'])));
+  events.sort((a, b) => Number(a['timestamp']) - Number(b['timestamp']));
   const startTs = Number(events[0]?.['timestamp'] ?? 0);
+  const endTs = Number(events[events.length - 1]?.['timestamp'] ?? startTs);
   const relative = (timestamp: number): string => `t+${((timestamp - startTs) / 1_000).toFixed(1)}s`;
 
   const nodes = new Map<number, MirrorNode>();
@@ -110,8 +117,8 @@ export function renderTimeline(
 
   const lines: TimelineLine[] = [];
   let route = '';
-  const push = (text: string, selector: string | null, atMs: number | null): void => {
-    lines.push({ text: sanitize(text), selector, route, atMs });
+  const push = (text: string, selector: string | null, atMs: number | null, extra: Pick<TimelineLine, 'waitingSince'> = {}): void => {
+    lines.push({ text: sanitize(text), selector, route, atMs, ...extra });
   };
   let lastUrl = '';
   const openRequests = new Map<string, { method: string; url: string; at: number }>();
@@ -182,7 +189,7 @@ export function renderTimeline(
           const status = Number(item['status']);
           const slow = at - request.at > 1_000 ? ` SLOW ${((at - request.at) / 1_000).toFixed(1)}s` : '';
           if (request.method !== 'GET' || status >= 400 || slow) {
-            push(`${relative(at)} ${request.method} ${shortUrl(request.url)} -> ${status}${slow}`, null, at);
+            push(`${relative(at)} ${request.method} ${shortUrl(request.url)} -> ${status}${slow}`, null, at, { waitingSince: request.at });
           }
         }
       } else if (kind === 'form_submit') {
@@ -264,30 +271,86 @@ export function renderTimeline(
   }
   flushInputs();
 
-  const withIdleMarkers = (batch: TimelineLine[]): TimelineLine[] => {
-    const sortedActivity = [...userActivityMs].sort((a, b) => a - b);
+  // A line's own stamp comes from the SDK payload, which the client controls.
+  // Only a finite stamp inside the session's event window may reorder lines
+  // or measure a silence; anything else keeps its slot and is inert. The
+  // slack covers a payload stamped a moment after its carrying event.
+  const PLAUSIBLE_SLACK_MS = 5_000;
+  const plausibleAt = (line: TimelineLine): line is TimelineLine & { atMs: number } =>
+    line.atMs !== null && Number.isFinite(line.atMs)
+    && line.atMs >= startTs - PLAUSIBLE_SLACK_MS && line.atMs <= endTs + PLAUSIBLE_SLACK_MS;
+
+  // Lines are pushed in event order except typed-input aggregates, which are
+  // flushed later with their first timestamp. Order plausible stamps by time;
+  // every other line keeps its slot. The comparator only ever compares two
+  // finite numbers, so it stays transitive.
+  const chronological = (batch: TimelineLine[]): TimelineLine[] => {
+    const entries = batch.map((line, index) => ({ line, index })).filter((entry) => plausibleAt(entry.line));
+    const sorted = [...entries].sort((a, b) => (a.line.atMs! - b.line.atMs!) || (a.index - b.index));
     const out = [...batch];
-    for (let i = 1; i < sortedActivity.length; i++) {
-      const gapStart = sortedActivity[i - 1]!;
-      const gapEnd = sortedActivity[i]!;
-      if (gapEnd - gapStart <= IDLE_THRESHOLD_MS) continue;
-      const successor = out.findIndex((line) => line.atMs !== null && line.atMs >= gapEnd);
-      if (successor === -1) continue;
-      // Only assert absence when the line after the marker is the activity
-      // that ended the gap. Attaching the marker to an arbitrarily later line
-      // would tell the model the user was away across a span in which they
-      // were active but rendered nothing (a lone keystroke, a small scroll).
-      if (out[successor]!.atMs! - gapEnd > 1_000) continue;
-      const gapSeconds = Math.round((gapEnd - gapStart) / 1_000);
-      const minutes = Math.floor(gapSeconds / 60);
-      const seconds = gapSeconds % 60;
-      out.splice(successor, 0, {
-        text: sanitize(`${relative(gapStart)} [user idle ${minutes}m ${seconds}s — away from the app]`),
+    entries.forEach((entry, position) => { out[entry.index] = sorted[position]!.line; });
+    return out;
+  };
+
+  // A silence starts at a user action. Inside it, every rendered line that
+  // lands more than the threshold after the previous line or action gets a
+  // marker for that quiet stretch, whatever kind of line it is: a page that
+  // refreshes itself half an hour after the last click is still a user who
+  // walked away. Two exceptions keep the marker honest. A response to a
+  // request that was already in flight when the stretch began is time the
+  // user spent waiting, not away, so it gets no marker and counts as attended.
+  // And the action that ends a silence still gets a marker for the whole
+  // unattended span when nothing inside it earned one, so frequent background
+  // updates cannot hide a long absence.
+  const withIdleMarkers = (batch: TimelineLine[]): TimelineLine[] => {
+    const activity = [...new Set(userActivityMs)]
+      .filter((at) => at >= startTs - PLAUSIBLE_SLACK_MS && at <= endTs + PLAUSIBLE_SLACK_MS)
+      .sort((a, b) => a - b);
+    const out: TimelineLine[] = [];
+    let activityIndex = 0;
+    let lastActivity: number | null = null;
+    let attended: number | null = null;
+    let previousLine: number | null = null;
+    let markedSinceActivity = false;
+    const marker = (from: number, to: number): TimelineLine => {
+      const gapSeconds = Math.round((to - from) / 1_000);
+      return {
+        text: sanitize(`${relative(from)} [user idle ${Math.floor(gapSeconds / 60)}m ${gapSeconds % 60}s — away from the app]`),
         selector: null,
-        route: out[successor - 1]?.route ?? out[successor]!.route,
-        atMs: gapStart,
+        route: out[out.length - 1]?.route ?? '',
+        atMs: from,
         kind: 'idle',
-      });
+      };
+    };
+    for (const line of batch) {
+      if (!plausibleAt(line)) {
+        out.push(line);
+        continue;
+      }
+      const at = line.atMs;
+      while (activityIndex < activity.length && activity[activityIndex]! < at) {
+        lastActivity = activity[activityIndex]!;
+        markedSinceActivity = false;
+        activityIndex++;
+      }
+      if (lastActivity !== null) {
+        const stretchStart = Math.max(lastActivity, previousLine ?? lastActivity);
+        const endsSilence = activity[activityIndex] === at;
+        const unattendedSince = Math.max(lastActivity, attended ?? lastActivity);
+        if (endsSilence && !markedSinceActivity && at - unattendedSince > IDLE_THRESHOLD_MS) {
+          out.push(marker(unattendedSince, at));
+          markedSinceActivity = true;
+        } else if (!endsSilence && at - stretchStart > IDLE_THRESHOLD_MS) {
+          if (line.waitingSince !== undefined && line.waitingSince <= stretchStart + PLAUSIBLE_SLACK_MS) {
+            attended = at;
+          } else {
+            out.push(marker(stretchStart, at));
+            markedSinceActivity = true;
+          }
+        }
+      }
+      previousLine = at;
+      out.push(line);
     }
     return out;
   };
@@ -295,23 +358,24 @@ export function renderTimeline(
   // Markers are inserted after the line-count cut so they never displace real
   // trailing evidence; long gap-riddled sessions are exactly where late-session
   // abandonment lines live. A marker whose successor was cut simply drops.
-  let output = lines;
+  let output = chronological(lines);
   if (output.length > options.maxLines) {
     output = output.slice(0, options.maxLines);
     truncated = true;
   }
   output = withIdleMarkers(output);
-  while (output.length > 0 && output[output.length - 1]!.kind === 'idle') {
-    output = output.slice(0, -1);
+  const render = (batch: TimelineLine[]): string => batch.map((line, index) => `L${index + 1} ${line.text}`).join('\n');
+  let text = render(output);
+  // Markers are narration aids and can be regenerated; evidence cannot. When
+  // the byte budget is exceeded, markers go first, then real lines from the end.
+  if (Buffer.byteLength(text, 'utf8') > options.maxBytes && output.some((line) => line.kind === 'idle')) {
+    output = output.filter((line) => line.kind !== 'idle');
+    text = render(output);
   }
-  let text = output.map((line, index) => `L${index + 1} ${line.text}`).join('\n');
   while (Buffer.byteLength(text, 'utf8') > options.maxBytes && output.length > 1) {
     truncated = true;
     output = output.slice(0, Math.max(1, output.length - 50));
-    while (output.length > 0 && output[output.length - 1]!.kind === 'idle') {
-      output = output.slice(0, -1);
-    }
-    text = output.map((line, index) => `L${index + 1} ${line.text}`).join('\n');
+    text = render(output);
   }
   return { lines: output, text, truncated, startTs };
 }
