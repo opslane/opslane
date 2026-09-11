@@ -1,15 +1,11 @@
 import { createHash } from 'node:crypto';
-import type { FrictionCategory, NarrativeObservation, SessionNarrative } from '@opslane/shared';
-import { FRICTION_CATEGORIES } from './categories.js';
+import type { NarrativeObservation, SessionNarrative } from '@opslane/shared';
 import { extractJsonObject } from './client.js';
 import type { RenderedTimeline } from './renderer.js';
 
 export type ValidationResult =
   | { ok: true; narrative: SessionNarrative; droppedCitations: number }
   | { ok: false; reason: string };
-
-const CATEGORY_SET: ReadonlySet<string> = new Set(FRICTION_CATEGORIES);
-const SEVERITIES = new Set(['low', 'medium', 'high']);
 
 export function validateNarrative(rawText: string, timeline: RenderedTimeline): ValidationResult {
   const extracted = extractJsonObject(rawText);
@@ -40,22 +36,14 @@ export function validateNarrative(rawText: string, timeline: RenderedTimeline): 
       return { ok: false, reason: `observation ${index} not an object` };
     }
     const observation = rawObservation as Record<string, unknown>;
-    const category = observation['category'];
     const what = observation['what'];
-    const severity = observation['severity'];
-    if (typeof category !== 'string' || !CATEGORY_SET.has(category)) {
-      return { ok: false, reason: `observation ${index}: unknown category` };
-    }
     if (typeof what !== 'string' || what.length === 0 || what.length > 400) {
       return { ok: false, reason: `observation ${index}: bad what` };
-    }
-    if (typeof severity !== 'string' || !SEVERITIES.has(severity)) {
-      return { ok: false, reason: `observation ${index}: bad severity` };
     }
     // Citation lists are never a rejection reason: the model's token budget is
     // the real size bound, and a thorough response legitimately cites every
     // occurrence (a wall clicked 22 times has 22 relevant lines). Dedupe and
-    // keep membership-valid ids; everything downstream uses only the first.
+    // keep membership-valid ids for the observation's atomic evidence row.
     const rawLines = Array.isArray(observation['evidence_lines'])
       ? observation['evidence_lines']
       : [];
@@ -84,11 +72,9 @@ export function validateNarrative(rawText: string, timeline: RenderedTimeline): 
       continue;
     }
     observations.push({
-      id: `${index}-${createHash('sha256').update(`${category}|${what}`).digest('hex').slice(0, 4)}`,
-      category: category as FrictionCategory,
+      id: `${index}-${createHash('sha256').update(what).digest('hex').slice(0, 4)}`,
       what,
       evidenceLines,
-      severity: severity as NarrativeObservation['severity'],
     });
   }
 

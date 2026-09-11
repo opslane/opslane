@@ -108,7 +108,7 @@ export function selectMoments(
   const rank = { low: 0, medium: 1, high: 2 } as const;
   const ordered = narrative.observations
     .map((observation, index) => ({ observation, index }))
-    .sort((left, right) => rank[right.observation.severity] - rank[left.observation.severity]
+    .sort((left, right) => rank[right.observation.severity ?? 'low'] - rank[left.observation.severity ?? 'low']
       || left.index - right.index);
   const moments: number[] = [];
   for (const { observation } of ordered) {
@@ -165,7 +165,7 @@ export async function processFrameVerification(
   }
   const narrative = claimed.narrative;
   const timeline = claimed.timeline;
-  const unverifiedRows = buildSignalRows(timeline, narrative.observations);
+  const unverifiedRows = buildSignalRows(timeline, narrative.observations, job.sessionId, claimed.narrativeId);
   const finalizeFallback = async (
     state: 'failed' | 'unsupported' | 'skipped_budget',
     reason?: string,
@@ -275,6 +275,6 @@ export async function processFrameVerification(
     verification,
     inputTokens: response.inputTokens,
     outputTokens: response.outputTokens,
-    signalRows: buildSignalRows(timeline, gradedObservations(narrative, validated.grades)),
+    signalRows: buildSignalRows(timeline, gradedObservations(narrative, validated.grades), job.sessionId, claimed.narrativeId),
   });
 }

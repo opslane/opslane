@@ -1,6 +1,7 @@
 import pg from 'pg';
+import { deriveNarrativeId } from '../emit.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { closePool, finalizeVerification, type ClaimedJob } from '../../db.js';
+import { claimVerifyingNarrative, closePool, finalizeVerification, type ClaimedJob } from '../../db.js';
 
 const DATABASE_URL = process.env['DATABASE_URL'];
 const describeDb = DATABASE_URL ? describe : describe.skip;
@@ -83,6 +84,16 @@ describeDb('finalizeVerification stores a bounded verification reason', () => {
     await pool.query(`DELETE FROM orgs WHERE id = $1`, [orgId]);
     await pool.end();
     await closePool();
+  });
+
+  it('claims a deterministic identity using the stored version and full timestamp precision', async () => {
+    const createdAt = '2026-09-11 12:34:56.123456+00';
+    await pool.query(
+      `UPDATE session_narratives SET verification_state = 'pending', created_at = $2::timestamptz
+       WHERE session_id = $1`, [sessionId, createdAt],
+    );
+    const claimed = await claimVerifyingNarrative(sessionId, projectId);
+    expect(claimed).toMatchObject({ narrativeId: deriveNarrativeId(sessionId, createdAt, 1) });
   });
 
   it('sanitizes and bounds a huge reason, and a later success clears it', async () => {

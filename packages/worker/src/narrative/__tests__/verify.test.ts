@@ -54,7 +54,7 @@ function dependencies(modelText = gradesJson) {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  dbMock.claimVerifyingNarrative.mockResolvedValue({ promptVersion: 1, narrative, timeline });
+  dbMock.claimVerifyingNarrative.mockResolvedValue({ promptVersion: 1, narrativeId: 'stable-narrative-id', narrative, timeline });
   dbMock.reserveNarrativeBudget.mockResolvedValue(true);
   dbMock.narrativeMonthlySpendExceeded.mockResolvedValue(false);
 });
@@ -92,6 +92,15 @@ describe('verification validation', () => {
 });
 
 describe('processFrameVerification', () => {
+  it('uses the claimed narrative identity when emitting observations', async () => {
+    await processFrameVerification(job, { ...dependencies(), supported: false }, new AbortController().signal);
+    expect(dbMock.finalizeVerification).toHaveBeenCalledWith(job, expect.objectContaining({
+      signalRows: expect.arrayContaining([expect.objectContaining({
+        narrativeId: 'stable-narrative-id', observationId: '0-aaaa',
+      })]),
+    }));
+  });
+
   it.each(['valid', 'invalid', 'truncated'])('ledgers paid %s responses before finalizing', async (outcome) => {
     const deps = dependencies(outcome === 'invalid' ? 'not json' : gradesJson);
     const complete = deps.client as unknown as { complete: ReturnType<typeof vi.fn> };

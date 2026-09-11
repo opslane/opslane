@@ -3807,6 +3807,7 @@ export async function narrativeMonthlySpendExceeded(projectId: string): Promise<
 }
 
 export interface ClaimedNarrativeVerification {
+  narrativeId: string;
   promptVersion: number;
   narrative: unknown;
   timeline: unknown;
@@ -3818,6 +3819,7 @@ export async function claimVerifyingNarrative(
 ): Promise<ClaimedNarrativeVerification | null> {
   const result = await getPool().query<{
     prompt_version: number;
+    created_at: string;
     narrative: unknown;
     timeline: unknown;
   }>(
@@ -3825,12 +3827,18 @@ export async function claimVerifyingNarrative(
      SET verification_state = 'verifying', verification_reason = NULL, updated_at = now()
      WHERE session_id = $1 AND project_id = $2 AND status = 'ok'
        AND verification_state = 'pending'
-     RETURNING prompt_version, narrative, timeline`,
+     RETURNING prompt_version, narrative, timeline, created_at::text AS created_at`,
     [sessionId, projectId],
   );
   const row = result.rows[0];
+  const { deriveNarrativeId } = await import('./narrative/emit.js');
   return row
-    ? { promptVersion: row.prompt_version, narrative: row.narrative, timeline: row.timeline }
+    ? {
+      narrativeId: deriveNarrativeId(sessionId, row.created_at, row.prompt_version),
+      promptVersion: row.prompt_version,
+      narrative: row.narrative,
+      timeline: row.timeline,
+    }
     : null;
 }
 
@@ -3897,7 +3905,8 @@ export async function finalizeVerification(job: ClaimedJob, args: {
     const session = sessionResult.rows[0];
     if (!session) throw new Error(`Session ${args.sessionId} not found`);
     const { writeObservationSignals } = await import('./friction/persist.js');
-    const fingerprints = await writeObservationSignals(client, session, args.signalRows);
+    await writeObservationSignals(client, session, args.signalRows);
+    const fingerprints = args.signalRows.map((row) => row.fingerprint);
     const { runPromotionCheck } = await import('./friction/promotion.js');
     await runPromotionCheck(client, args.projectId, session.environment_id, fingerprints);
     await client.query('COMMIT');
@@ -3915,10 +3924,11 @@ export async function sweepNarratives(): Promise<{ reEnqueued: number; failed: n
     session_id: string;
     project_id: string;
     prompt_version: number;
+    created_at: string;
     narrative: unknown;
     timeline: unknown;
   }>(
-    `SELECT session_id, project_id::text, prompt_version, narrative, timeline
+    `SELECT session_id, project_id::text, prompt_version, narrative, timeline, created_at::text AS created_at
      FROM session_narratives
      WHERE status = 'ok' AND verification_state IN ('pending','verifying')
        AND created_at < now() - interval '24 hours'
@@ -3935,11 +3945,15 @@ export async function sweepNarratives(): Promise<{ reEnqueued: number; failed: n
       });
       continue;
     }
+    const { buildSignalRows, deriveNarrativeId } = await import('./narrative/emit.js');
     const finalized = await finalizeExpiredVerification({
       sessionId: row.session_id,
       projectId: row.project_id,
       claimedPromptVersion: row.prompt_version,
-      signalRows: (await import('./narrative/emit.js')).buildSignalRows(timeline, narrative.observations),
+      signalRows: buildSignalRows(
+        timeline, narrative.observations, row.session_id,
+        deriveNarrativeId(row.session_id, row.created_at, row.prompt_version),
+      ),
     });
     if (finalized) failed += 1;
   }
@@ -4050,7 +4064,8 @@ async function finalizeExpiredVerification(args: {
     const session = sessionResult.rows[0];
     if (!session) throw new Error(`Session ${args.sessionId} not found`);
     const { writeObservationSignals } = await import('./friction/persist.js');
-    const fingerprints = await writeObservationSignals(client, session, args.signalRows);
+    await writeObservationSignals(client, session, args.signalRows);
+    const fingerprints = args.signalRows.map((row) => row.fingerprint);
     const { runPromotionCheck } = await import('./friction/promotion.js');
     await runPromotionCheck(client, args.projectId, session.environment_id, fingerprints);
     await client.query('COMMIT');

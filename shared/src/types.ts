@@ -345,10 +345,11 @@ export type FrictionCategory =
 
 export interface NarrativeObservation {
   id: string;
-  category: FrictionCategory;
   what: string;
   evidenceLines: string[];
-  severity: 'low' | 'medium' | 'high';
+  /** Retained on stored v2 narratives. New observations omit classification. */
+  category?: FrictionCategory;
+  severity?: 'low' | 'medium' | 'high';
 }
 
 export interface SessionNarrative {
