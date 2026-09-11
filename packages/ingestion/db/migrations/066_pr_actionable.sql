@@ -98,6 +98,7 @@ DECLARE
   was_class TEXT := NULL;
   is_class TEXT;
 BEGIN
+  IF NEW.ticket_id IS NOT NULL THEN RETURN NEW; END IF;
   -- OLD is unassigned for INSERT triggers.
   IF TG_OP = 'UPDATE' THEN
     was_class := error_groups_action_class(OLD.status::text, OLD.candidate_diff, OLD.pr_url);
@@ -154,9 +155,12 @@ END $$;
 -- the lifecycle function has already held the columns, so new_since is not NULL.
 CREATE OR REPLACE FUNCTION error_groups_pending_action_guard() RETURNS trigger AS $$
 DECLARE
-  was_class TEXT := error_groups_action_class(OLD.status::text, OLD.candidate_diff, OLD.pr_url);
-  is_class TEXT := error_groups_action_class(NEW.status::text, NEW.candidate_diff, NEW.pr_url);
+  was_class TEXT;
+  is_class TEXT;
 BEGIN
+  IF NEW.ticket_id IS NOT NULL THEN RETURN NEW; END IF;
+  was_class := error_groups_action_class(OLD.status::text, OLD.candidate_diff, OLD.pr_url);
+  is_class := error_groups_action_class(NEW.status::text, NEW.candidate_diff, NEW.pr_url);
   SELECT * INTO NEW.actionable_since, NEW.snoozed_until
     FROM error_groups_hold_pending_action(was_class, is_class,
       NEW.actionable_since, NEW.snoozed_until, OLD.actionable_since, OLD.snoozed_until);
@@ -202,7 +206,7 @@ END $$;
 UPDATE error_groups
    SET actionable_since = COALESCE(updated_at, now())
  WHERE status IN ('pr_created','pr_draft')
-   AND actionable_since IS NULL;
+   AND actionable_since IS NULL AND ticket_id IS NULL;
 
 -- Repair rows that left the extended set while no rule covered them. The status
 -- list is spelled out rather than calling error_groups_action_class: the call
@@ -213,7 +217,8 @@ UPDATE error_groups
 UPDATE error_groups
    SET actionable_since = NULL, snoozed_until = NULL
  WHERE status NOT IN ('awaiting_approval','needs_human','pr_created','pr_draft')
-   AND (actionable_since IS NOT NULL OR snoozed_until IS NOT NULL);
+   AND (actionable_since IS NOT NULL OR snoozed_until IS NOT NULL)
+   AND ticket_id IS NULL;
 
 CREATE INDEX IF NOT EXISTS idx_error_groups_actionable_cards
   ON error_groups (project_id, actionable_since)

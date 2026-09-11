@@ -154,6 +154,36 @@ func TestMigration074FreshInstallAndPopulatedReplay(t *testing.T) {
 	if count := investigateJobCount(t, pool, groupID); count != 0 {
 		t.Errorf("069 added %d investigation jobs during full replay", count)
 	}
+
+	// Ticket publication, not the legacy status classifier, owns its waiting age.
+	exec(`UPDATE error_groups SET status='queued',
+		actionable_since='2026-01-01 00:00:00.123456+00',
+		snoozed_until='2026-01-02 00:00:00.123456+00' WHERE id=$1`, groupID)
+	assertTicketStamp := func() {
+		t.Helper()
+		var preserved bool
+		if err := pool.QueryRow(ctx, `SELECT
+			coalesce(actionable_since='2026-01-01 00:00:00.123456+00'::timestamptz
+			AND snoozed_until='2026-01-02 00:00:00.123456+00'::timestamptz,false)
+			FROM error_groups WHERE id=$1`, groupID).Scan(&preserved); err != nil {
+			t.Fatal(err)
+		}
+		if !preserved {
+			t.Fatal("legacy incident lifecycle changed ticket publication stamps")
+		}
+	}
+	assertTicketStamp()
+	applyKnownProblemMigrations(t, dsn)
+	assertTicketStamp()
+	// Explicit un-snooze must remain available on ticket-managed incidents.
+	exec(`UPDATE error_groups SET snoozed_until=NULL WHERE id=$1`, groupID)
+	var unsnoozed bool
+	if err := pool.QueryRow(ctx, `SELECT snoozed_until IS NULL FROM error_groups WHERE id=$1`, groupID).Scan(&unsnoozed); err != nil {
+		t.Fatal(err)
+	}
+	if !unsnoozed {
+		t.Fatal("legacy guard prevented ticket un-snooze")
+	}
 }
 
 func knownProblemRows(t *testing.T, pool *pgxpool.Pool, tables []string) map[string]string {

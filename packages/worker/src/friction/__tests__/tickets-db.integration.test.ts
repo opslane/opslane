@@ -1,0 +1,635 @@
+import { randomUUID } from 'node:crypto';
+import pg from 'pg';
+import { afterAll, beforeAll, beforeEach, afterEach, describe, expect, it } from 'vitest';
+import * as store from '../tickets-db.js';
+import { EMBEDDING_DIMS, EMBEDDING_MODEL } from '../../embeddings.js';
+
+const describeDb = process.env['DATABASE_URL'] ? describe : describe.skip;
+describeDb('ticket store', () => {
+  let pool: pg.Pool;
+  let db: pg.PoolClient;
+  let scope: store.TicketScope;
+  beforeAll(async () => {
+    pool = new pg.Pool({ connectionString: process.env['DATABASE_URL'] });
+    db = await pool.connect();
+  });
+  afterAll(async () => {
+    db.release();
+    await pool.end();
+  });
+  beforeEach(async () => {
+    await db.query('BEGIN');
+    const org = await db.query(`INSERT INTO orgs(name) VALUES ('ticket-store-test') RETURNING id`);
+    const p = await db.query(
+      `INSERT INTO projects(org_id,name,github_repo,default_branch) VALUES ($1,'tickets','test/repo','main') RETURNING id`,
+      [org.rows[0].id],
+    );
+    const e = await db.query(
+      `INSERT INTO environments(project_id,name) VALUES ($1,'production') RETURNING id`,
+      [p.rows[0].id],
+    );
+    scope = { projectId: p.rows[0].id, environmentId: e.rows[0].id };
+  });
+  afterEach(async () => {
+    await db.query('ROLLBACK');
+  });
+  const ticket = () =>
+    store.createTicket(db, {
+      ...scope,
+      name: 'Save fails',
+      control: 'Save',
+      what_happened: 'Spinner never stops',
+      kind: 'defect',
+    });
+  async function recording(user: string | null = null, age = 0) {
+    const sessionId = randomUUID();
+    await db.query(
+      `INSERT INTO sessions(id,project_id,environment_id,started_at,end_user_id) VALUES ($1,$2,$3,now()-$4*interval '1 day',$5)`,
+      [sessionId, scope.projectId, scope.environmentId, age, user],
+    );
+    const s = await db.query(
+      `INSERT INTO friction_signals(session_id,project_id,environment_id,signal_type,fingerprint,page_url_normalized,occurred_at,rule_version) VALUES($1,$2,$3,'narrative',$4,'/save',now()-$5*interval '1 day',1) RETURNING id,occurred_at::text`,
+      [sessionId, scope.projectId, scope.environmentId, randomUUID(), age],
+    );
+    return {
+      sessionId,
+      endUserId: user,
+      signalIds: [s.rows[0].id as string],
+      occurredAt: s.rows[0].occurred_at as string,
+      screen: '/save',
+      source: 'cheap' as const,
+    };
+  }
+  async function user(account = 'account') {
+    const r = await db.query(
+      `INSERT INTO end_users(project_id,external_user_id,external_account_id,account_name) VALUES($1,$2,$3,$3) RETURNING id`,
+      [scope.projectId, randomUUID(), account],
+    );
+    return r.rows[0].id as string;
+  }
+  async function matches(
+    t: store.TicketRow,
+    n: number,
+    users: (string | null)[] = [null],
+    age = 0,
+  ) {
+    const result = [];
+    for (let i = 0; i < n; i++) {
+      const r = await recording(users[i % users.length]!, age);
+      await store.recordMatch(db, { ticket: t, ...r });
+      result.push(r);
+    }
+    return result;
+  }
+  async function checked(t: store.TicketRow, outcomes: store.CheckResult['outcome'][], age = 0) {
+    const rs = await matches(t, outcomes.length, [await user(), await user('other')], age);
+    const b = (await store.selectBatch(db, t, randomUUID()))!;
+    for (const [i, r] of rs.entries())
+      await store.stageCheck(db, b.id, {
+        ...r,
+        outcome: outcomes[i]!,
+        model: 'test',
+        framesOk: true,
+        costToUser: i === 0 ? 'annoyance' : 'lost_time',
+      });
+    await store.finalizeBatch(db, t, b.id);
+    return rs;
+  }
+  it('counts a recording once, allocates strict arrivals from locked state, pins retention and keeps observation refs', async () => {
+    const t = await ticket();
+    const r = await recording();
+    expect((await store.recordMatch(db, { ticket: t, ...r })).newRecording).toBe(true);
+    expect((await store.recordMatch(db, { ticket: t, ...r })).newRecording).toBe(false);
+    const extra = await db.query(
+      `INSERT INTO friction_signals(session_id,project_id,environment_id,signal_type,fingerprint,page_url_normalized,occurred_at,rule_version) VALUES($1,$2,$3,'narrative',$4,'/other',now(),1) RETURNING id`,
+      [r.sessionId, scope.projectId, scope.environmentId, randomUUID()],
+    );
+    await store.recordMatch(db, {
+      ticket: t,
+      ...r,
+      screen: '/other',
+      signalIds: [extra.rows[0].id],
+    });
+    await matches(t, 2);
+    const row = (
+      await db.query(
+        `SELECT matched_count,next_arrival_number::text,screens_proposed FROM friction_tickets WHERE id=$1`,
+        [t.id],
+      )
+    ).rows[0];
+    expect(row).toEqual({
+      matched_count: 3,
+      next_arrival_number: '3',
+      screens_proposed: ['/other', '/save'],
+    });
+    expect(
+      (
+        await db.query(
+          `SELECT arrival_number::text FROM friction_ticket_matches WHERE ticket_id=$1 ORDER BY arrival_number`,
+          [t.id],
+        )
+      ).rows.map((r) => r.arrival_number),
+    ).toEqual(['1', '2', '3']);
+    expect(
+      (
+        await db.query(
+          `SELECT count(*)::int AS n FROM friction_ticket_match_observations WHERE ticket_id=$1 AND session_id=$2`,
+          [t.id, r.sessionId],
+        )
+      ).rows[0].n,
+    ).toBe(2);
+    expect(
+      (
+        await db.query(
+          `SELECT retain_until=started_at+interval '90 days' AS pinned FROM sessions WHERE id=$1`,
+          [r.sessionId],
+        )
+      ).rows[0].pinned,
+    ).toBe(true);
+    expect(t.next_arrival_number).toBe(0n);
+  });
+  it('reserves once and cannot replace a committed decision', async () => {
+    const r = await recording();
+    const t = await ticket();
+    expect(await store.reserveDecision(db, r.signalIds[0]!, scope)).toEqual({ reserved: true });
+    expect((await store.reserveDecision(db, r.signalIds[0]!, scope)).reserved).toBe(false);
+    expect(
+      await store.commitDecision(db, r.signalIds[0]!, {
+        decision: 'created',
+        ticketId: t.id,
+        decidedBy: 'strong',
+      }),
+    ).toBe(true);
+    expect(
+      await store.commitDecision(db, r.signalIds[0]!, {
+        decision: 'not_a_problem',
+        decidedBy: 'cheap',
+      }),
+    ).toBe(false);
+    expect((await store.reserveDecision(db, r.signalIds[0]!, scope)).existing?.ticket_id).toBe(
+      t.id,
+    );
+    const other = await recording();
+    await store.reserveDecision(db, other.signalIds[0]!, scope);
+    await db.query(
+      `UPDATE friction_observation_decisions SET decided_at=now()-interval '1 day' WHERE signal_id=$1`,
+      other.signalIds,
+    );
+    await db.query(
+      `INSERT INTO error_group_jobs(project_id,session_id,job_type,status,lease_expires_at) VALUES($1,$2,'friction_match','claimed',now()+interval '5 minutes')`,
+      [scope.projectId, other.sessionId],
+    );
+    expect((await store.reserveDecision(db, other.signalIds[0]!, scope)).reserved).toBe(true);
+    expect(
+      (await store.reserveDecision(db, r.signalIds[0]!, { ...scope, environmentId: randomUUID() }))
+        .reserved,
+    ).toBe(false);
+  });
+  it('selects oldest recordings round-robin by identity and persists immutable selection boundaries', async () => {
+    const t = await ticket();
+    const a = await matches(t, 3, [await user()]);
+    const b = await matches(t, 2, [await user()]);
+    const batch = (await store.selectBatch(db, t, randomUUID()))!;
+    expect(batch.manifest.map((m) => m.sessionId)).toEqual([
+      a[0]!.sessionId,
+      b[0]!.sessionId,
+      a[1]!.sessionId,
+      b[1]!.sessionId,
+      a[2]!.sessionId,
+    ]);
+    expect(batch.arrival_boundary_at_select).toBe(0n);
+    expect(
+      (await db.query(`SELECT arrival_boundary::text FROM friction_tickets WHERE id=$1`, [t.id]))
+        .rows[0].arrival_boundary,
+    ).toBe('5');
+    expect(batch.status_at_select).toBe('tracking');
+  });
+  it('uses 30 only on the first batch above 50 matches, otherwise 10', async () => {
+    const t = await ticket();
+    await matches(t, 51);
+    const first = (await store.selectBatch(db, t, randomUUID()))!;
+    expect(first.manifest).toHaveLength(30);
+    expect(first.batchId).toBe(first.id);
+    expect(first.sessionIds).toHaveLength(30);
+    expect(
+      (await db.query('SELECT arrival_boundary::text FROM friction_tickets WHERE id=$1', [t.id]))
+        .rows[0].arrival_boundary,
+    ).toBe('51');
+    await store.discardBatch(db, first.id);
+    expect((await store.selectBatch(db, t, randomUUID()))!.manifest).toHaveLength(10);
+  });
+  it('promotes only finalized non-unavailable checks exactly once, and excludes checked recordings', async () => {
+    const t = await ticket();
+    const rs = await matches(t, 4);
+    const b = (await store.selectBatch(db, t, randomUUID()))!;
+    for (const [i, r] of rs.entries())
+      await store.stageCheck(db, b.id, {
+        ...r,
+        outcome: (['confirmed', 'refuted', 'inconclusive', 'unavailable'] as const)[i]!,
+        model: 'test',
+      });
+    expect((await store.cohortStats(db, t)).counted).toBe(0);
+    const f = await store.finalizeBatch(db, t, b.id);
+    expect(f.evidenceVersion).toBe(1);
+    expect(f.stats).toMatchObject({ counted: 3, confirmed: 1, refuted: 1, inconclusive: 1 });
+    expect((await store.finalizeBatch(db, t, b.id)).evidenceVersion).toBe(1);
+    expect(await store.selectBatch(db, t, randomUUID())).toBeNull();
+    await db.query(
+      `UPDATE friction_unavailable_retries SET retry_at=now()-interval '1 minute' WHERE ticket_id=$1`,
+      [t.id],
+    );
+    expect(
+      (await store.selectBatch(db, t, randomUUID()))!.manifest.map((m) => m.sessionId),
+    ).toEqual([rs[3]!.sessionId]);
+  });
+  it('increments unavailable retries only for a new staged attempt and makes the third permanent', async () => {
+    const t = await ticket();
+    const [r] = await matches(t, 1);
+    for (let i = 1; i <= 3; i++) {
+      const b = (await store.selectBatch(db, t, randomUUID()))!;
+      const check = { ...r!, outcome: 'unavailable' as const, model: 'test' };
+      await store.stageCheck(db, b.id, check);
+      await store.stageCheck(db, b.id, check);
+      const retry = (
+        await db.query(
+          `SELECT *,round(extract(epoch from retry_at-now())/3600)::int AS hours FROM friction_unavailable_retries WHERE ticket_id=$1`,
+          [t.id],
+        )
+      ).rows[0];
+      expect(retry.attempts).toBe(i);
+      expect(retry.hours).toBe([1, 6, 24][i - 1]);
+      expect(retry.permanent).toBe(i === 3);
+      await store.finalizeBatch(db, t, b.id);
+      await db.query(
+        `UPDATE friction_unavailable_retries SET retry_at=now()-interval '1 minute' WHERE ticket_id=$1`,
+        [t.id],
+      );
+    }
+    expect(await store.selectBatch(db, t, randomUUID())).toBeNull();
+  });
+  it('retains discarded attempts without evidence and allows the recording to be selected again', async () => {
+    const t = await ticket();
+    const [r] = await matches(t, 1);
+    const b = (await store.selectBatch(db, t, randomUUID()))!;
+    await store.stageCheck(db, b.id, { ...r!, outcome: 'confirmed', model: 'test' });
+    await store.discardBatch(db, b.id);
+    expect((await store.cohortStats(db, t)).counted).toBe(0);
+    expect(
+      (
+        await db.query(`SELECT count(*)::int AS n FROM friction_check_attempts WHERE batch_id=$1`, [
+          b.id,
+        ])
+      ).rows[0].n,
+    ).toBe(1);
+    expect((await store.selectBatch(db, t, randomUUID()))!.manifest[0]!.sessionId).toBe(
+      r!.sessionId,
+    );
+    expect(
+      (await db.query(`SELECT reconcile_needed FROM friction_tickets WHERE id=$1`, [t.id])).rows[0]
+        .reconcile_needed,
+    ).toBe(true);
+  });
+  it('counts all finalized cohort recordings, including older than seven days, but excludes the fixed prefix', async () => {
+    const t = await ticket();
+    await checked(t, ['confirmed', 'confirmed', 'refuted'], 8);
+    expect(await store.cohortStats(db, t)).toMatchObject({
+      counted: 3,
+      confirmed: 2,
+      confirmedUsers: 2,
+      identityKnown: true,
+    });
+    await db.query(
+      `UPDATE friction_tickets SET cohort_cutoff=now()-interval '7 days' WHERE id=$1`,
+      [t.id],
+    );
+    expect((await store.cohortStats(db, t)).counted).toBe(0);
+  });
+  it('uses only finalized confirmed exact observation evidence within the window', async () => {
+    const t = await ticket();
+    const old = await checked(t, ['confirmed'], 8);
+    const fresh = await checked(t, ['confirmed', 'confirmed', 'refuted']);
+    const added = await db.query(
+      `INSERT INTO friction_signals(session_id,project_id,environment_id,signal_type,fingerprint,page_url_normalized,occurred_at,rule_version) VALUES($1,$2,$3,'narrative',$4,'/save',now(),1) RETURNING id`,
+      [fresh[0]!.sessionId, scope.projectId, scope.environmentId, randomUUID()],
+    );
+    await store.recordMatch(db, { ticket: t, ...fresh[0]!, signalIds: [added.rows[0].id] });
+    const staged = await matches(t, 1);
+    const b = (await store.selectBatch(db, t, randomUUID()))!;
+    await store.stageCheck(db, b.id, { ...staged[0]!, outcome: 'confirmed', model: 'test' });
+    const e = await store.verifiedEvidence(db, t);
+    expect(e.sessions).toBe(2);
+    expect(e.users).toBe(2);
+    expect(e.accounts).toEqual(['account', 'other']);
+    expect(e.signalIds.sort()).toEqual(
+      fresh
+        .slice(0, 2)
+        .flatMap((r) => r.signalIds)
+        .sort(),
+    );
+    expect(e.sessionIds).not.toContain(old[0]!.sessionId);
+    expect(e.representative).not.toBeNull();
+    await db.query(
+      `UPDATE friction_tickets SET cohort_cutoff=now()+interval '1 second' WHERE id=$1`,
+      [t.id],
+    );
+    expect((await store.verifiedEvidence(db, t)).sessions).toBe(0);
+  });
+  it('publishes distinct generations, preserves old memberships, and unpublishes jobs and attempts', async () => {
+    const t = await ticket();
+    const rs = await checked(t, ['confirmed', 'confirmed', 'confirmed']);
+    const stats = await store.cohortStats(db, t);
+    const first = await store.activateGeneration(db, t, stats, 'Click Save');
+    const second = await store.activateGeneration(db, t, stats, 'Click Save again');
+    expect(second.generation).toBe(2);
+    expect(second.errorGroupId).not.toBe(first.errorGroupId);
+    const groups = (
+      await db.query(
+        `SELECT id,fingerprint,status,actionable_since FROM error_groups WHERE ticket_id=$1 ORDER BY publication_generation`,
+        [t.id],
+      )
+    ).rows;
+    expect(groups[0].status).toBe('archived');
+    expect(groups[1].actionable_since).not.toBeNull();
+    expect(groups[0].fingerprint).not.toBe(groups[1].fingerprint);
+    expect(
+      (
+        await db.query(
+          `SELECT count(*)::int AS n FROM friction_incident_evidence WHERE ticket_id=$1`,
+          [t.id],
+        )
+      ).rows[0].n,
+    ).toBe(6);
+    expect(
+      (
+        await db.query(
+          `SELECT DISTINCT incident_id FROM friction_signals WHERE id=ANY($1::uuid[])`,
+          [rs.flatMap((r) => r.signalIds)],
+        )
+      ).rows,
+    ).toEqual([{ incident_id: second.errorGroupId }]);
+    const job = (
+      await db.query(
+        `SELECT source_id,publication_generation FROM error_group_jobs WHERE error_group_id=$1`,
+        [second.errorGroupId],
+      )
+    ).rows[0];
+    expect(job).toEqual({ source_id: second.errorGroupId, publication_generation: 2 });
+    await db.query(
+      `INSERT INTO friction_fix_attempts(ticket_id,error_group_id,generation,status) VALUES($1,$2,2,'active')`,
+      [t.id, second.errorGroupId],
+    );
+    await store.unpublish(db, t);
+    expect(
+      (await db.query(`SELECT status FROM friction_fix_attempts WHERE ticket_id=$1`, [t.id]))
+        .rows[0].status,
+    ).toBe('superseded');
+    expect(
+      (
+        await db.query(`SELECT status FROM error_group_jobs WHERE error_group_id=$1`, [
+          second.errorGroupId,
+        ])
+      ).rows[0].status,
+    ).toBe('failed');
+  });
+  it('folds matches and decisions with fresh target arrivals but never copies checks', async () => {
+    const source = await ticket();
+    const target = await ticket();
+    await checked(target, ['confirmed', 'confirmed', 'confirmed']);
+    await store.activateGeneration(db, target, await store.cohortStats(db, target), 'Save');
+    const rs = await checked(source, ['confirmed', 'confirmed', 'confirmed']);
+    await store.reserveDecision(db, rs[0]!.signalIds[0]!, scope);
+    await store.commitDecision(db, rs[0]!.signalIds[0]!, {
+      decision: 'created',
+      ticketId: source.id,
+      decidedBy: 'strong',
+    });
+    await store.foldInto(db, source, target);
+    expect((await store.cohortStats(db, target)).counted).toBe(3);
+    expect(
+      (
+        await db.query(
+          `SELECT matched_count,next_arrival_number::text FROM friction_tickets WHERE id=$1`,
+          [target.id],
+        )
+      ).rows[0],
+    ).toEqual({ matched_count: 6, next_arrival_number: '6' });
+    expect(
+      (await db.query(`SELECT status,merged_into FROM friction_tickets WHERE id=$1`, [source.id]))
+        .rows[0],
+    ).toEqual({ status: 'merged', merged_into: target.id });
+    expect(
+      (
+        await db.query(
+          `SELECT ticket_id,decided_by FROM friction_observation_decisions WHERE signal_id=$1`,
+          rs[0]!.signalIds,
+        )
+      ).rows[0],
+    ).toEqual({ ticket_id: target.id, decided_by: 'fold' });
+    expect((await store.verifiedEvidence(db, target)).signalIds.sort()).not.toEqual(
+      rs.flatMap((r) => r.signalIds).sort(),
+    );
+  });
+  it('keeps resolved generations published', async () => {
+    const t = await ticket();
+    await checked(t, ['confirmed', 'confirmed', 'confirmed']);
+    const g = await store.activateGeneration(db, t, await store.cohortStats(db, t), 'Save');
+    await db.query(`UPDATE error_groups SET fix_substate='resolved' WHERE id=$1`, [g.errorGroupId]);
+    await store.unpublish(db, t);
+    expect(
+      (await db.query(`SELECT status FROM friction_tickets WHERE id=$1`, [t.id])).rows[0].status,
+    ).toBe('published');
+  });
+  it('preserves the claimed fold job lease while triggering target confirmation', async () => {
+    const source = await ticket();
+    const target = await ticket();
+    await checked(target, ['confirmed', 'confirmed', 'confirmed']);
+    await store.activateGeneration(db, target, await store.cohortStats(db, target), 'Save');
+    await matches(source, 10);
+    const job = await db.query(
+      `INSERT INTO error_group_jobs(project_id,ticket_id,job_type,status,worker_id,lease_expires_at)
+      VALUES($1,$2,'friction_confirm','claimed','test-worker',now()+interval '5 minutes') RETURNING id`,
+      [scope.projectId, source.id],
+    );
+    expect((await store.foldInto(db, source, target)).confirmNeeded).toBe(true);
+    expect(
+      (
+        await db.query(`SELECT status,worker_id FROM error_group_jobs WHERE id=$1`, [
+          job.rows[0].id,
+        ])
+      ).rows[0],
+    ).toEqual({ status: 'claimed', worker_id: 'test-worker' });
+    expect(
+      (
+        await db.query(
+          `SELECT status FROM error_group_jobs WHERE ticket_id=$1 AND job_type='friction_confirm'`,
+          [target.id],
+        )
+      ).rows,
+    ).toEqual([{ status: 'pending' }]);
+    expect(
+      (
+        await db.query(
+          `SELECT evidence_version,reconcile_needed FROM friction_tickets WHERE id=$1`,
+          [target.id],
+        )
+      ).rows[0],
+    ).toEqual({ evidence_version: 2, reconcile_needed: true });
+  });
+  it('publishes the complete confirmed cohort and preserves its cutoff', async () => {
+    const t = await ticket();
+    const rs = await checked(t, ['confirmed', 'confirmed', 'confirmed'], 8);
+    await db.query(
+      `UPDATE friction_tickets SET fixed_at=now()-interval '10 days',cohort_cutoff=now()-interval '10 days' WHERE id=$1`,
+      [t.id],
+    );
+    expect((await store.verifiedEvidence(db, t)).sessions).toBe(0);
+    const generation = await store.activateGeneration(
+      db,
+      t,
+      await store.cohortStats(db, t),
+      'Save',
+    );
+    expect(
+      (
+        await db.query(
+          `SELECT signal_id FROM friction_incident_evidence WHERE error_group_id=$1 ORDER BY signal_id`,
+          [generation.errorGroupId],
+        )
+      ).rows.map((r) => r.signal_id),
+    ).toEqual(rs.flatMap((r) => r.signalIds).sort());
+    expect(
+      (
+        await db.query(
+          `SELECT fixed_at IS NULL AS cleared,cohort_cutoff=now()-interval '10 days' AS kept FROM friction_tickets WHERE id=$1`,
+          [t.id],
+        )
+      ).rows[0],
+    ).toEqual({ cleared: true, kept: true });
+  });
+  it('rejects observations outside the immutable batch manifest and keeps discarded batches closed', async () => {
+    const t = await ticket();
+    const [r] = await matches(t, 1);
+    const b = (await store.selectBatch(db, t, randomUUID()))!;
+    expect(
+      await store.stageCheck(db, b.id, {
+        ...r!,
+        signalIds: [randomUUID()],
+        outcome: 'confirmed',
+        model: 'test',
+      }),
+    ).toBe(false);
+    expect(
+      await store.stageCheck(db, b.id, {
+        ...r!,
+        sessionId: randomUUID(),
+        outcome: 'confirmed',
+        model: 'test',
+      }),
+    ).toBe(false);
+    await store.discardBatch(db, b.id);
+    expect(await store.stageCheck(db, b.id, { ...r!, outcome: 'confirmed', model: 'test' })).toBe(
+      false,
+    );
+    expect((await store.finalizeBatch(db, t, b.id)).finalized).toBe(false);
+  });
+  it('retains microsecond precision when filtering the fixed cohort', async () => {
+    const t = await ticket();
+    const rs = await checked(t, ['confirmed', 'confirmed']);
+    await db.query(
+      `UPDATE friction_tickets SET cohort_cutoff='2026-01-01 00:00:00.123456+00' WHERE id=$1`,
+      [t.id],
+    );
+    await db.query(
+      `UPDATE friction_ticket_matches SET occurred_at='2026-01-01 00:00:00.123456+00' WHERE ticket_id=$1 AND session_id=$2`,
+      [t.id, rs[0]!.sessionId],
+    );
+    await db.query(
+      `UPDATE friction_ticket_matches SET occurred_at='2026-01-01 00:00:00.123457+00' WHERE ticket_id=$1 AND session_id=$2`,
+      [t.id, rs[1]!.sessionId],
+    );
+    expect((await store.cohortStats(db, t)).counted).toBe(1);
+    expect((await store.verifiedEvidence(db, t, { days: null })).signalIds).toEqual(
+      rs[1]!.signalIds,
+    );
+  });
+  it('shortlists scoped live tickets and searches only matching embedding models deterministically', async () => {
+    const vector = Array.from({ length: EMBEDDING_DIMS }, (_, i) => (i === 0 ? 1 : 0));
+    const t = await store.createTicket(
+      db,
+      { ...scope, name: 'Save', control: 'Save', what_happened: 'Fails', kind: 'defect' },
+      vector,
+    );
+    await db.query(`UPDATE friction_tickets SET screens_confirmed=ARRAY['/save'] WHERE id=$1`, [
+      t.id,
+    ]);
+    const wrong = await store.createTicket(
+      db,
+      { ...scope, name: 'Other', control: 'Other', what_happened: 'Other', kind: 'ux_insight' },
+      vector,
+    );
+    await db.query(`UPDATE friction_tickets SET embedding_model='other' WHERE id=$1`, [wrong.id]);
+    expect(t.embedding_model).toBe(EMBEDDING_MODEL);
+    expect(
+      (await store.nearestTickets(db, scope, vector, 10, ['tracking'])).map((r) => r.id),
+    ).toEqual([t.id]);
+    expect((await store.shortlistTickets(db, scope, ['/save'], null)).map((r) => r.id)).toContain(
+      t.id,
+    );
+    await db.query(`UPDATE friction_tickets SET status='archived' WHERE id=$1`, [t.id]);
+    expect(
+      await store.nearestTickets(db, scope, vector, 10, ['tracking', 'archived', 'merged']),
+    ).toEqual([]);
+    expect(
+      (await store.shortlistTickets(db, scope, ['/save'], vector)).map((r) => r.id),
+    ).not.toContain(t.id);
+    expect(
+      await store.shortlistTickets(
+        db,
+        { ...scope, environmentId: randomUUID() },
+        ['/save'],
+        vector,
+      ),
+    ).toEqual([]);
+  });
+});
+
+describe('ticket publication bar', () => {
+  const stats = (
+    counted: number,
+    confirmed: number,
+    confirmedUsers = 2,
+    identityKnown = true,
+  ): store.CohortStats => ({
+    counted,
+    confirmed,
+    confirmedUsers,
+    identityKnown,
+    refuted: counted - confirmed,
+    inconclusive: 0,
+  });
+  it('passes at forty percent with three confirmations and diverse known identities', () => {
+    expect(store.evaluateBar(stats(7, 3), { status: 'tracking', fixSubstate: null })).toBe(
+      'passes',
+    );
+    expect(
+      store.evaluateBar(stats(7, 3, 0, false), { status: 'tracking', fixSubstate: null }),
+    ).toBe('passes');
+    expect(store.evaluateBar(stats(7, 3, 1), { status: 'tracking', fixSubstate: null })).toBe(
+      'undecided',
+    );
+  });
+  it('uses the lower failure bar only for published unresolved tickets', () => {
+    expect(store.evaluateBar(stats(16, 4), { status: 'published', fixSubstate: 'none' })).toBe(
+      'undecided',
+    );
+    expect(store.evaluateBar(stats(15, 3), { status: 'published', fixSubstate: 'none' })).toBe(
+      'fails',
+    );
+    expect(store.evaluateBar(stats(15, 3), { status: 'published', fixSubstate: 'resolved' })).toBe(
+      'undecided',
+    );
+    expect(store.evaluateBar(stats(3, 2), { status: 'published', fixSubstate: 'none' })).toBe(
+      'fails',
+    );
+  });
+});
