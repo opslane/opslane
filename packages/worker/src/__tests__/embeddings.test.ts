@@ -27,6 +27,17 @@ function response(inputs: string[], usage = inputs.length * 2): Response {
   });
 }
 
+function erroredResponse(): Response {
+  return new Response(new ReadableStream({
+    start(controller) {
+      controller.error(new TypeError('transport reset while reading body'));
+    },
+  }), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  });
+}
+
 afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllEnvs();
@@ -98,6 +109,30 @@ describe('embedTexts', () => {
 
     await expect(embedTexts(['7'])).resolves.toMatchObject({ model: EMBEDDING_MODEL });
     expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('retries transport failures while reading a successful response body', async () => {
+    vi.stubEnv('OPENAI_API_KEY', 'test-key');
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(erroredResponse())
+      .mockResolvedValueOnce(erroredResponse())
+      .mockResolvedValueOnce(response(['7']));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(embedTexts(['7'])).resolves.toMatchObject({ model: EMBEDDING_MODEL });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('does not retry malformed JSON from a successful response', async () => {
+    vi.stubEnv('OPENAI_API_KEY', 'test-key');
+    const fetchMock = vi.fn().mockResolvedValue(new Response('{not json', {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(embedTexts(['7'])).rejects.toBeInstanceOf(EmbeddingsUnavailable);
+    expect(fetchMock).toHaveBeenCalledOnce();
   });
 
   it('does not retry other HTTP failures or expose the response body', async () => {

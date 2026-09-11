@@ -76,8 +76,11 @@ async function embedBatch(texts: string[], apiKey: string, meter?: Meter | null)
       let payload: unknown;
       try {
         payload = await response.json();
-      } catch {
-        throw new EmbeddingsUnavailable('Embedding response was invalid');
+      } catch (error: unknown) {
+        if (error instanceof SyntaxError) {
+          throw new EmbeddingsUnavailable('Embedding response was invalid');
+        }
+        throw error;
       }
       recordUsage(payload, meter);
       return vectorsFromResponse(payload, texts.length);
