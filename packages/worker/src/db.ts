@@ -410,6 +410,7 @@ export async function recordInvestigatedCommit(lease: JobLease, commit: string):
 
 export type UsagePhase =
   | 'investigation'
+  | 'embeddings'
   | 'fix'
   | 'judge'
   | 'product_context'

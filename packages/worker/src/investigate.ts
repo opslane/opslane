@@ -55,6 +55,7 @@ const MAX_SESSION_CONTEXT = 2000;
 const MAX_INVESTIGATION_BRIEF = 1000;
 
 export const MODEL_PRICING: Record<string, { input: number; output: number; cacheWrite: number; cacheRead: number }> = {
+  'text-embedding-3-small': { input: 0.02, output: 0, cacheWrite: 0, cacheRead: 0 },
   'claude-sonnet-4-6': { input: 3, output: 15, cacheWrite: 3.75, cacheRead: 0.30 },
   // Sonnet 5's introductory rate, $2/$10, runs through 2026-08-31. List is
   // $3/$15. Every eval cost figure is computed from this table, so the list
