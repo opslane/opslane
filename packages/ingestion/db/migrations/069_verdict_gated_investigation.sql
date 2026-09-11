@@ -1,5 +1,7 @@
 -- 069_verdict_gated_investigation.sql
 BEGIN;
+-- Fresh installs reach this file before 074 creates tickets and adds the FK.
+ALTER TABLE error_groups ADD COLUMN IF NOT EXISTS ticket_id UUID;
 -- The runner replays every file on every boot with no ledger and no global
 -- lock; concurrent ingestion boots must not double-insert backfill jobs.
 SELECT pg_advisory_xact_lock(hashtext('069_verdict_gated_investigation'));
@@ -11,14 +13,14 @@ SELECT pg_advisory_xact_lock(hashtext('069_verdict_gated_investigation'));
 -- while still queued, the re-run is a no-op UPDATE and the job guard holds.
 UPDATE error_groups
 SET status = 'queued', updated_at = now()
-WHERE kind = 'friction' AND status = 'awaiting_approval'
+WHERE kind = 'friction' AND status = 'awaiting_approval' AND ticket_id IS NULL
   AND root_cause IS NULL
   AND NULLIF(btrim(COALESCE(candidate_diff, '')), '') IS NULL;
 
 INSERT INTO error_group_jobs (error_group_id, project_id, job_type, status, triggered_by)
 SELECT eg.id, eg.project_id, 'investigate', 'pending', 'auto'
 FROM error_groups eg
-WHERE eg.kind = 'friction' AND eg.status = 'queued'
+WHERE eg.kind = 'friction' AND eg.status = 'queued' AND eg.ticket_id IS NULL
   AND eg.root_cause IS NULL
   AND NOT EXISTS (
     SELECT 1 FROM error_group_jobs j

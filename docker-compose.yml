@@ -33,7 +33,7 @@ services:
       MINIO_BUCKET: opslane-replays
 
   postgres:
-    image: postgres:16
+    image: pgvector/pgvector:pg16
     environment:
       POSTGRES_USER: opslane
       POSTGRES_PASSWORD: opslane_dev
@@ -183,7 +183,7 @@ services:
     stop_grace_period: 30s
 
   migrate:
-    image: postgres:16
+    image: pgvector/pgvector:pg16
     restart: "no"
     depends_on:
       postgres:
