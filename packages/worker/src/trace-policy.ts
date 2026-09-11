@@ -15,6 +15,10 @@ export const TRACE_POLICY = {
   stack_resolve: OFF,
   ci_watch: OFF,
   score_sync: OFF,
+  friction_pr_event: OFF,
+  friction_match: FULL,
+  friction_confirm: FULL,
+  friction_reconcile: FULL,
   error_fix: FULL,
   investigate: FULL,
   // score_sync loads a fix job's trace_url, so fix must remain fully traced.

@@ -35,20 +35,23 @@ export function ticketText(ticket: EmbeddableTicket): string {
 export async function embedTexts(
   texts: string[],
   meter?: Meter | null,
+  signal?: AbortSignal,
 ): Promise<{ vectors: number[][]; model: string }> {
+  signal?.throwIfAborted();
   const apiKey = process.env['OPENAI_API_KEY'];
   if (!apiKey) throw new EmbeddingsUnavailable('OpenAI embeddings are not configured');
 
   const vectors: number[][] = [];
   for (let start = 0; start < texts.length; start += BATCH_SIZE) {
     const batch = texts.slice(start, start + BATCH_SIZE);
-    vectors.push(...await embedBatch(batch, apiKey, meter));
+    vectors.push(...await embedBatch(batch, apiKey, meter, signal));
   }
   return { vectors, model: EMBEDDING_MODEL };
 }
 
-async function embedBatch(texts: string[], apiKey: string, meter?: Meter | null): Promise<number[][]> {
+async function embedBatch(texts: string[], apiKey: string, meter?: Meter | null, signal?: AbortSignal): Promise<number[][]> {
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
+    signal?.throwIfAborted();
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
     try {
@@ -64,7 +67,7 @@ async function embedBatch(texts: string[], apiKey: string, meter?: Meter | null)
           dimensions: EMBEDDING_DIMS,
           encoding_format: 'float',
         }),
-        signal: controller.signal,
+        signal: signal ? AbortSignal.any([signal, controller.signal]) : controller.signal,
       });
 
       if (!response.ok) {
@@ -85,6 +88,7 @@ async function embedBatch(texts: string[], apiKey: string, meter?: Meter | null)
       recordUsage(payload, meter);
       return vectorsFromResponse(payload, texts.length);
     } catch (error: unknown) {
+      signal?.throwIfAborted();
       if (error instanceof EmbeddingsUnavailable) throw error;
       if (attempt === MAX_ATTEMPTS) {
         throw new EmbeddingsUnavailable('Embedding request failed after retries');

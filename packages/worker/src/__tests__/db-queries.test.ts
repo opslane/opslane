@@ -316,8 +316,8 @@ describe('claimJob friction scheduling fields', () => {
       .toBeLessThan(claimSql.indexOf("WHEN job_type <> 'session_analysis' THEN 2"));
     expect(claimSql).toContain("AND job_type = 'session_analysis'");
     expect(claimSql).toContain('< $3');
-    // Caps default to 2 analysis, 2 narrative, and 1 frame-verification job.
-    expect(mockQuery.mock.calls[2][1]).toEqual(['worker-1', 30, 2, 2, 1]);
+    // Fleet caps: analysis 2, narrative 2, frames 1, matching 2, confirmation 1.
+    expect(mockQuery.mock.calls[2][1]).toEqual(['worker-1', 30, 2, 2, 1, 2, 1]);
     expect(mockQuery.mock.calls[3][0]).toBe('COMMIT');
     expect(mockClient.release).toHaveBeenCalled();
   });
@@ -328,7 +328,20 @@ describe('claimJob friction scheduling fields', () => {
     mockQuery.mockResolvedValueOnce({ rows: [] });
     mockQuery.mockResolvedValueOnce({}); // COMMIT
     await claimJob('worker-1', 30_000, 0);
-    expect(mockQuery.mock.calls[2][1]).toEqual(['worker-1', 30, 0, 2, 1]);
+    expect(mockQuery.mock.calls[2][1]).toEqual(['worker-1', 30, 0, 2, 1, 2, 1]);
+  });
+});
+
+describe('friction admission kill switches', () => {
+  it('passes explicit zero match and confirmation caps, including the reconcile publication guard', async () => {
+    mockQuery.mockReset();
+    mockQuery.mockResolvedValueOnce({});
+    mockQuery.mockResolvedValueOnce({});
+    mockQuery.mockResolvedValueOnce({rows:[]});
+    mockQuery.mockResolvedValueOnce({});
+    await claimJob('worker',30_000,2,2,1,0,0);
+    expect(mockQuery.mock.calls[2][1]).toEqual(['worker',30,2,2,1,0,0]);
+    expect(mockQuery.mock.calls[2][0]).toContain("job_type <> 'friction_reconcile' OR $7 > 0");
   });
 });
 

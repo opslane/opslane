@@ -97,7 +97,26 @@ describeDb('finalizeVerification stores a bounded verification reason', () => {
     expect(claimed).toMatchObject({ narrativeId: deriveNarrativeId(sessionId, createdAt, 1) });
   });
 
+  it('rolls back both verification and the match handoff when evidence cannot be written', async () => {
+    await resetToVerifying();
+    const count = await pool.query(`SELECT count(*)::int AS n FROM error_group_jobs WHERE project_id=$1 AND job_type='friction_match'`,[projectId]);
+    await expect(finalizeVerification(job, {
+      sessionId,projectId,state:'failed',claimedPromptVersion:1,verifyPromptVersion:1,
+      signalRows:[{signalType:'narrative',observationId:'o1',narrativeId:'bad-uuid',evidenceLines:['L1'],
+        fingerprint:null as unknown as string,elementSelector:null,pageUrlNormalized:'/',occurredAts:[1],occurrenceCount:1,what:'Error shown'}],
+    })).rejects.toThrow();
+    expect((await pool.query('SELECT verification_state FROM session_narratives WHERE session_id=$1',[sessionId])).rows[0].verification_state).toBe('verifying');
+    expect((await pool.query(`SELECT count(*)::int AS n FROM error_group_jobs WHERE project_id=$1 AND job_type='friction_match'`,[projectId])).rows).toEqual(count.rows);
+  });
+
+  it('atomically hands finalized narratives to matching with no legacy promotion', async () => {
+    await resetToVerifying();
+    await finalizeVerification(job,{sessionId,projectId,state:'unsupported',claimedPromptVersion:1,verifyPromptVersion:1,signalRows:[]});
+    expect((await pool.query(`SELECT job_type FROM error_group_jobs WHERE project_id=$1 AND job_type='friction_match'`,[projectId])).rows).toEqual([{job_type:'friction_match'}]);
+  });
+
   it('sanitizes and bounds a huge reason, and a later success clears it', async () => {
+    await resetToVerifying();
     // Chromium and provider failures arrive with control characters and
     // kilobytes of path noise; neither may reach the column or a UI.
     const noisy = `chromium\u0000 crashed\u0007: SIGTRAP\u2028${'x'.repeat(2_000)}`;

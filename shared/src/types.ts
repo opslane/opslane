@@ -552,7 +552,7 @@ export interface Account {
   last_seen: string;
 }
 
-export type JobType = 'error_fix' | 'investigate' | 'fix' | 'session_analysis' | 'session_narrate' | 'session_verify_frames' | 'ci_watch' | 'route_map' | 'product_context' | 'issue_inquiry' | 'digest_write' | 'score_sync' | 'stack_resolve';
+export type JobType = 'friction_match' | 'friction_confirm' | 'friction_reconcile' | 'friction_pr_event' | 'error_fix' | 'investigate' | 'fix' | 'session_analysis' | 'session_narrate' | 'session_verify_frames' | 'ci_watch' | 'route_map' | 'product_context' | 'issue_inquiry' | 'digest_write' | 'score_sync' | 'stack_resolve';
 
 export type PRPosture = 'verified_only' | 'draft_when_unverified';
 

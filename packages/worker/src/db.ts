@@ -411,6 +411,8 @@ export async function recordInvestigatedCommit(lease: JobLease, commit: string):
 export type UsagePhase =
   | 'investigation'
   | 'embeddings'
+  | 'friction_match'
+  | 'friction_first_look'
   | 'fix'
   | 'judge'
   | 'product_context'
@@ -523,6 +525,10 @@ export interface ClaimedJob {
   leaseGeneration: string;
   triggeredBy: 'auto' | 'human' | null;
   sessionId: string | null;
+  ticketId?: string | null;
+  batchId?: string | null;
+  publicationGeneration?: number | null;
+  fixAttemptId?: string | null;
   /** Effective routing platform persisted on durable fix jobs. */
   platform?: Platform | null;
   payload?: unknown;
@@ -617,6 +623,8 @@ export async function claimJob(
   sessionAnalysisCap: number = sessionAnalysisCapFromEnv(),
   narrativeCap: number = concurrentCapFromEnv(process.env['NARRATIVE_MAX_CONCURRENT'], 2),
   framesCap: number = concurrentCapFromEnv(process.env['FRAMES_MAX_CONCURRENT'], 1),
+  frictionMatchCap: number = concurrentCapFromEnv(process.env['FRICTION_MATCH_MAX_CONCURRENT'], 2),
+  frictionConfirmCap: number = concurrentCapFromEnv(process.env['FRICTION_CONFIRM_MAX_CONCURRENT'], 1),
 ): Promise<ClaimedJob | null> {
   const client = await getPool().connect();
   let result: pg.QueryResult<{
@@ -639,6 +647,10 @@ export async function claimJob(
     session_id: string | null;
     platform: string | null;
     payload: unknown;
+    ticket_id: string | null;
+    batch_id: string | null;
+    publication_generation: number | null;
+    fix_attempt_id: string | null;
   }>;
   try {
     await client.query('BEGIN');
@@ -660,7 +672,7 @@ export async function claimJob(
          -- Claim only job types this worker can dispatch. New types stay
          -- pending until a handler ships and joins this list.
 		 AND job_type IN ('session_analysis','session_narrate','session_verify_frames','ci_watch','route_map','product_context','issue_inquiry','digest_write',
-                          'score_sync','stack_resolve','fix','investigate','error_fix')
+                          'score_sync','stack_resolve','fix','investigate','error_fix','friction_match')
          AND (job_type <> 'session_analysis'
               OR (SELECT COUNT(*) FROM error_group_jobs
                    WHERE status = 'claimed'
@@ -676,6 +688,16 @@ export async function claimJob(
                    WHERE status = 'claimed'
                      AND job_type = 'session_verify_frames'
                      AND lease_expires_at > now()) < $5)
+         AND (job_type <> 'friction_match'
+              OR (SELECT COUNT(*) FROM error_group_jobs
+                   WHERE status = 'claimed' AND job_type = 'friction_match'
+                     AND lease_expires_at > now()) < $6)
+         AND (job_type <> 'friction_confirm'
+              OR (SELECT COUNT(*) FROM error_group_jobs
+                   WHERE status = 'claimed' AND job_type = 'friction_confirm'
+                     AND lease_expires_at > now()) < $7)
+         -- Publication reconciliation shares the confirmation kill switch.
+         AND (job_type <> 'friction_reconcile' OR $7 > 0)
        ORDER BY CASE
          WHEN job_type = 'error_fix' THEN 0
          WHEN job_type = 'session_analysis'
@@ -696,8 +718,8 @@ export async function claimJob(
      RETURNING id, error_group_id, event_id, episode_id, input_version, run_id,
                source_id, source_job_id, project_id, job_type, attempts, max_attempts, guidance,
                worker_id, lease_generation::text AS lease_generation,
-               triggered_by, session_id, platform, payload`,
-      [workerId, leaseDurationMs / 1000, sessionAnalysisCap, narrativeCap, framesCap]
+               triggered_by, session_id, platform, payload, ticket_id, batch_id, publication_generation, fix_attempt_id`,
+      [workerId, leaseDurationMs / 1000, sessionAnalysisCap, narrativeCap, framesCap, frictionMatchCap, frictionConfirmCap]
     );
     await client.query('COMMIT');
   } catch (err) {
@@ -721,6 +743,10 @@ export async function claimJob(
     sourceId: row.source_id,
     sourceJobId: row.source_job_id,
     projectId: row.project_id,
+    ticketId: row.ticket_id,
+    batchId: row.batch_id,
+    publicationGeneration: row.publication_generation,
+    fixAttemptId: row.fix_attempt_id,
     jobType: row.job_type,
     attempts: row.attempts,
     maxAttempts: row.max_attempts,
@@ -3624,6 +3650,39 @@ export async function enqueueSessionAnalysisForBudgetRetry(
   );
 }
 
+/** Insert using the caller's transaction; active-job partial indexes arbitrate races. */
+export async function enqueueJobTx(
+  client: pg.PoolClient,
+  jobType: JobType,
+  projectId: string,
+  options: {
+    sessionId?: string;
+    ticketId?: string;
+    batchId?: string;
+    publicationGeneration?: number;
+    fixAttemptId?: string;
+    availableAt?: string | Date;
+    errorGroupId?: string;
+    sourceId?: string;
+    payload?: unknown;
+  } = {},
+): Promise<void> {
+  await client.query(
+    `INSERT INTO error_group_jobs
+      (project_id,job_type,session_id,ticket_id,batch_id,publication_generation,fix_attempt_id,
+       available_at,error_group_id,source_id,payload)
+     VALUES($1,$2,$3,$4,$5,$6,$7,COALESCE($8::timestamptz,now()),$9,$10,$11::jsonb)
+     ON CONFLICT DO NOTHING`,
+    [
+      projectId, jobType, options.sessionId ?? null, options.ticketId ?? null,
+      options.batchId ?? null, options.publicationGeneration ?? null,
+      options.fixAttemptId ?? null, options.availableAt ?? null,
+      options.errorGroupId ?? null, options.sourceId ?? null,
+      options.payload === undefined ? null : JSON.stringify(options.payload),
+    ],
+  );
+}
+
 export async function enqueueJob(
   jobType: Extract<JobType, 'session_narrate' | 'session_verify_frames'>,
   projectId: string,
@@ -3908,9 +3967,7 @@ export async function finalizeVerification(job: ClaimedJob, args: {
     if (!session) throw new Error(`Session ${args.sessionId} not found`);
     const { writeObservationSignals } = await import('./friction/persist.js');
     await writeObservationSignals(client, session, args.signalRows);
-    const fingerprints = args.signalRows.map((row) => row.fingerprint);
-    const { runPromotionCheck } = await import('./friction/promotion.js');
-    await runPromotionCheck(client, args.projectId, session.environment_id, fingerprints);
+    await enqueueJobTx(client, 'friction_match', args.projectId, { sessionId: args.sessionId });
     await client.query('COMMIT');
   } catch (error: unknown) {
     await client.query('ROLLBACK').catch(() => {});
@@ -3921,7 +3978,7 @@ export async function finalizeVerification(job: ClaimedJob, args: {
 }
 
 export async function sweepNarratives(): Promise<{ reEnqueued: number; failed: number }> {
-  const modelConfigured = Boolean(process.env['NARRATIVE_API_KEY'] ?? process.env['ANTHROPIC_API_KEY']);
+  const modelConfigured = Boolean(process.env['NARRATIVE_API_KEY'] || process.env['ANTHROPIC_API_KEY']);
   const stale = await getPool().query<{
     session_id: string;
     project_id: string;
@@ -4069,9 +4126,7 @@ async function finalizeExpiredVerification(args: {
     if (!session) throw new Error(`Session ${args.sessionId} not found`);
     const { writeObservationSignals } = await import('./friction/persist.js');
     await writeObservationSignals(client, session, args.signalRows);
-    const fingerprints = args.signalRows.map((row) => row.fingerprint);
-    const { runPromotionCheck } = await import('./friction/promotion.js');
-    await runPromotionCheck(client, args.projectId, session.environment_id, fingerprints);
+    await enqueueJobTx(client, 'friction_match', args.projectId, { sessionId: args.sessionId });
     await client.query('COMMIT');
     return true;
   } catch (error: unknown) {

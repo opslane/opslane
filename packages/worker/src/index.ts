@@ -1,3 +1,4 @@
+import { frictionMatchDepsFromEnv, processFrictionMatch } from './friction/match-job.js';
 import crypto from 'node:crypto';
 import http from 'node:http';
 import type { ClaimedJob, DeadLetterCountRow, DeadLetterCounts, ErrorEventData, QueueDepthRow } from './db.js';
@@ -350,6 +351,12 @@ export async function processJobInner(job: ClaimedJob, signal: AbortSignal): Pro
     project_id: job.projectId,
     attempt: job.attempts + 1,
   });
+
+  if (job.jobType === 'friction_match') {
+    if (!job.sessionId) throw new Error(`Job ${job.id} missing session_id`);
+    await processFrictionMatch(job as ClaimedJob & { sessionId: string }, frictionMatchDepsFromEnv(), signal);
+    return;
+  }
 
   if (job.jobType === 'session_analysis') {
     if (!job.sessionId) throw new Error(`Job ${job.id} missing session_id`);

@@ -51,6 +51,19 @@ describe('embedTexts', () => {
     await expect(embedTexts(['one'])).rejects.toBeInstanceOf(EmbeddingsUnavailable);
   });
 
+  it('aborts provider requests without retrying cancellation as an outage', async () => {
+    vi.stubEnv('OPENAI_API_KEY','test-key');
+    const controller = new AbortController();
+    const fetchMock = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      controller.abort(new Error('job cancelled'));
+      init?.signal?.throwIfAborted();
+      return response(['1']);
+    });
+    vi.stubGlobal('fetch',fetchMock);
+    await expect(embedTexts(['1'],null,controller.signal)).rejects.toThrow('job cancelled');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it('batches at 100 and restores provider-indexed vectors to input order', async () => {
     vi.stubEnv('OPENAI_API_KEY', 'test-key');
     const texts = Array.from({ length: 201 }, (_, index) => String(index));

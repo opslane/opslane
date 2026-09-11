@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import type pg from 'pg';
+import { enqueueJobTx } from '../db.js';
 import { EMBEDDING_DIMS, EMBEDDING_MODEL } from '../embeddings.js';
 
 export type TicketDb = Pick<pg.Pool, 'query'> | Pick<pg.PoolClient, 'query'>;
@@ -157,6 +158,31 @@ async function lockTicket(db: TicketDb, ticket: TicketRow): Promise<TicketRow> {
   if (!r.rows[0]) throw new Error('Ticket outside scope or missing');
   return decodeTicket(r.rows[0]);
 }
+/** Resolve a model snapshot through folds while holding the current ticket lock. */
+export async function resolveMatchTicket(
+  dbtx: pg.PoolClient,
+  scope: TicketScope,
+  id: string,
+): Promise<TicketRow> {
+  const seen = new Set<string>();
+  while (!seen.has(id)) {
+    seen.add(id);
+    const result = await dbtx.query<RawTicket>(
+      `SELECT ${ticketColumns} FROM friction_tickets t WHERE id=$1 AND project_id=$2 AND environment_id=$3 FOR UPDATE`,
+      [id, scope.projectId, scope.environmentId],
+    );
+    const row = result.rows[0];
+    if (!row || row.status === 'archived')
+      throw new Error(
+        'Match target missing, archived, or outside scope; retry lookup',
+      );
+    if (row.status !== 'merged') return decodeTicket(row);
+    if (!row.merged_into) break;
+    id = row.merged_into;
+  }
+  throw new Error('Invalid match target fold chain');
+}
+
 export async function createTicket(
   dbtx: pg.PoolClient,
   t: NewTicket,
@@ -646,11 +672,12 @@ export async function activateGeneration(
     fixed_at=NULL,updated_at=now() WHERE id=$1`,
     [t.id, generation, steps, screens],
   );
-  await dbtx.query(
-    `INSERT INTO error_group_jobs(error_group_id,source_id,project_id,job_type,status,ticket_id,publication_generation)
-    VALUES($1,$1,$2,'investigate','pending',$3,$4)`,
-    [errorGroupId, t.project_id, t.id, generation],
-  );
+  await enqueueJobTx(dbtx, 'investigate', t.project_id, {
+    errorGroupId,
+    sourceId: errorGroupId,
+    ticketId: t.id,
+    publicationGeneration: generation,
+  });
   return { errorGroupId, generation };
 }
 export async function unpublish(dbtx: pg.PoolClient, ticket: TicketRow): Promise<void> {
@@ -738,10 +765,8 @@ export async function foldInto(
       ? updated.matched_count >= 3
       : updated.next_arrival_number - updated.arrival_boundary >= 10n;
   if (confirmNeeded)
-    await dbtx.query(
-      `INSERT INTO error_group_jobs(project_id,ticket_id,job_type,status)
-    VALUES($1,$2,'friction_confirm','pending') ON CONFLICT DO NOTHING`,
-      [t.project_id, t.id],
-    );
+    await enqueueJobTx(dbtx, 'friction_confirm', t.project_id, {
+      ticketId: t.id,
+    });
   return { confirmNeeded };
 }

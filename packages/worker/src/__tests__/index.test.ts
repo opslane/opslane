@@ -182,6 +182,7 @@ vi.mock('../friction/facts.js', () => ({
   classifyActivity: vi.fn(() => 'unknown'),
 }));
 vi.mock('../facts/persist.js', () => ({ replaceSessionFacts: vi.fn() }));
+vi.mock('../friction/match-job.js', () => ({processFrictionMatch:vi.fn(),frictionMatchDepsFromEnv:vi.fn(() => ({cheap:{modelName:'cheap'},strong:{modelName:'strong'}}))}));
 vi.mock('../narrative/client.js', () => ({ narrativeClientFromEnv: vi.fn(() => null) }));
 vi.mock('../narrative/job.js', () => ({ processNarration: vi.fn() }));
 vi.mock('../narrative/frames/capture.js', () => ({ captureFrames: vi.fn() }));
@@ -1439,6 +1440,14 @@ describe('friction worker path', () => {
       makeJob(),
     );
     expect(db.updateGroupAndCreateFixJob).not.toHaveBeenCalled();
+  });
+
+  it('dispatches friction matching with session scope and cancellation', async () => {
+    const { processFrictionMatch } = await import('../friction/match-job.js');
+    const job = {...makeJob(),jobType:'friction_match' as const,errorGroupId:null,sessionId:'session-1'};
+    const signal = new AbortController().signal;
+    await processJobInner(job,signal);
+    expect(processFrictionMatch).toHaveBeenCalledWith(job,{cheap:{modelName:'cheap'},strong:{modelName:'strong'}},signal);
   });
 
   it('refuses an auto friction fix under ask-first while preserving confidence', async () => {
