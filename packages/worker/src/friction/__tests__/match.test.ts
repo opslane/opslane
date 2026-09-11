@@ -161,6 +161,29 @@ describe('matchObservations', () => {
     expect(call.user).not.toContain('matched_count');
   });
 
+  it('preserves every observation and candidate after a maximum-size timeline', async () => {
+    const fixture = setup(result(JSON.stringify({ decisions: [
+      { kind: 'matched', observation_id: 'obs-1', ticket_id: 'ticket-1' },
+      { kind: 'draft', observation_id: 'obs-2', draft: { name: 'n', control: 'c', steps: 's' } },
+    ] })));
+    fixture.input.timelineText = 'x'.repeat(65_536);
+    fixture.input.candidates.push(ticket('ticket-2', {
+      name: 'Checkout submit stalls',
+      control: 'Checkout submit button',
+      what_happened: 'Submitting checkout never completes',
+    }));
+
+    await expect(matchObservations(fixture.client, fixture.input, { add: fixture.add }))
+      .resolves.toHaveProperty('decisions');
+
+    const call = fixture.complete.mock.calls[0]?.[0] as { user: string };
+    for (const value of ['obs-1', 'obs-2', 'ticket-1', 'ticket-2', 'Checkout submit stalls']) {
+      expect(call.user).toContain(value);
+    }
+    expect(call.user).toContain('OBSERVATIONS_START');
+    expect(call.user).toContain('CANDIDATES_START');
+  });
+
   it('returns no decisions without calling or billing the model when observations are empty', async () => {
     const fixture = setup(result('unused'));
     const matched = await matchObservations(fixture.client, { ...fixture.input, observations: [] }, { add: fixture.add });

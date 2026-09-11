@@ -148,24 +148,28 @@ export async function matchObservations(
 ): Promise<MatchObservationsResult> {
   if (input.observations.length === 0) return { decisions: [] };
 
-  const promptData = {
-    projectName: input.projectName,
-    screens: input.screens,
-    timeline: input.timelineText,
-    observations: input.observations.map(({ id, what }) => ({ id, what })),
-    candidates: input.candidates.map((candidate) => ({
-      id: candidate.id,
-      name: candidate.name,
-      control: candidate.control,
-      whatHappened: candidate.what_happened,
-      steps: candidate.steps,
-      screensConfirmed: candidate.screens_confirmed,
-      screensProposed: candidate.screens_proposed,
-    })),
-  };
+  const observations = input.observations.map(({ id, what }) => ({ id, what }));
+  const candidates = input.candidates.map((candidate) => ({
+    id: candidate.id,
+    name: candidate.name,
+    control: candidate.control,
+    whatHappened: candidate.what_happened,
+    steps: candidate.steps,
+    screensConfirmed: candidate.screens_confirmed,
+    screensProposed: candidate.screens_proposed,
+  }));
+  const unbounded = Number.MAX_SAFE_INTEGER;
+  const block = (name: string, value: string, max = unbounded): string =>
+    `${name}_START\n<untrusted_data>\n${fenced(value, max)}\n</untrusted_data>\n${name}_END`;
   const response = await client.complete({
     system: MATCH_SYSTEM_PROMPT,
-    user: `<untrusted_data>\n${fenced(JSON.stringify(promptData), 64_000)}\n</untrusted_data>`,
+    user: [
+      block('PROJECT', input.projectName),
+      block('SCREENS', JSON.stringify(input.screens)),
+      block('TIMELINE', input.timelineText, 65_536),
+      block('OBSERVATIONS', JSON.stringify(observations)),
+      block('CANDIDATES', JSON.stringify(candidates)),
+    ].join('\n'),
   });
   meter.add(client.modelName, {
     input: response.inputTokens,
