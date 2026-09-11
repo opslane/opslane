@@ -1,7 +1,7 @@
 import pg from 'pg';
 import { deriveNarrativeId } from '../emit.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { claimVerifyingNarrative, closePool, finalizeVerification, type ClaimedJob } from '../../db.js';
+import { claimVerifyingNarrative, closePool, finalizeVerification, sweepNarratives, type ClaimedJob } from '../../db.js';
 
 const DATABASE_URL = process.env['DATABASE_URL'];
 const describeDb = DATABASE_URL ? describe : describe.skip;
@@ -79,6 +79,7 @@ describeDb('finalizeVerification stores a bounded verification reason', () => {
     await pool.query(`DELETE FROM error_group_jobs WHERE project_id = $1`, [projectId]);
     await pool.query(`DELETE FROM session_narratives WHERE session_id = $1`, [sessionId]);
     await pool.query(`DELETE FROM sessions WHERE id = $1`, [sessionId]);
+    await pool.query(`DELETE FROM error_groups WHERE project_id = $1`, [projectId]);
     await pool.query(`DELETE FROM environments WHERE id = $1`, [environmentId]);
     await pool.query(`DELETE FROM projects WHERE id = $1`, [projectId]);
     await pool.query(`DELETE FROM orgs WHERE id = $1`, [orgId]);
@@ -127,5 +128,44 @@ describeDb('finalizeVerification stores a bounded verification reason', () => {
       signalRows: [],
     });
     expect(await storedReason()).toBeNull();
+  });
+
+  it('drops absence claims when the stale verification sweep emits unverified observations', async () => {
+    await pool.query(
+      `UPDATE session_narratives
+       SET narrative = $2::jsonb, timeline = $3::jsonb,
+           verification_state = 'pending', verification = NULL,
+           created_at = now() - interval '25 hours'
+       WHERE session_id = $1`,
+      [
+        sessionId,
+        JSON.stringify({
+          userGoal: 'Submit', narrative: 'The user submitted.', notable: true,
+          observations: [
+            { id: 'absence', what: 'Clicking submit does nothing', evidenceLines: ['L1'] },
+            { id: 'positive', what: 'A validation message appeared', evidenceLines: ['L2'] },
+          ],
+        }),
+        JSON.stringify({ startTs: 1_000, lines: [
+          { t: 'click', s: 'button', r: '/form', a: 1_000 },
+          { t: 'validation', s: '.error', r: '/form', a: 2_000 },
+        ] }),
+      ],
+    );
+    const oldNarrativeKey = process.env['NARRATIVE_API_KEY'];
+    const oldAnthropicKey = process.env['ANTHROPIC_API_KEY'];
+    delete process.env['NARRATIVE_API_KEY'];
+    delete process.env['ANTHROPIC_API_KEY'];
+    try {
+      await sweepNarratives();
+    } finally {
+      if (oldNarrativeKey !== undefined) process.env['NARRATIVE_API_KEY'] = oldNarrativeKey;
+      if (oldAnthropicKey !== undefined) process.env['ANTHROPIC_API_KEY'] = oldAnthropicKey;
+    }
+    const emitted = await pool.query<{ observation_id: string }>(
+      `SELECT observation_id FROM friction_signals WHERE session_id = $1 ORDER BY observation_id`,
+      [sessionId],
+    );
+    expect(emitted.rows.map((row) => row.observation_id)).toEqual(['positive']);
   });
 });

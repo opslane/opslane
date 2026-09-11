@@ -13,6 +13,7 @@ import type { NarrativeClient, NarrativeModelResult } from './client.js';
 import { extractJsonObject } from './client.js';
 import { buildSignalRows, type CompactTimeline } from './emit.js';
 import type { CapturedFrame } from './frames/capture.js';
+import { claimsAbsence } from '../friction/absence.js';
 
 export const VERIFY_PROMPT_VERSION = 1;
 const GRADES: ReadonlySet<string> = new Set(['confirmed', 'corrected', 'refuted', 'inconclusive']);
@@ -105,10 +106,10 @@ export function selectMoments(
   narrative: SessionNarrative,
   timeline: CompactTimeline,
 ): number[] {
-  const rank = { low: 0, medium: 1, high: 2 } as const;
   const ordered = narrative.observations
     .map((observation, index) => ({ observation, index }))
-    .sort((left, right) => rank[right.observation.severity ?? 'low'] - rank[left.observation.severity ?? 'low']
+    .sort((left, right) => right.observation.evidenceLines.length - left.observation.evidenceLines.length
+      || firstEvidenceIndex(left.observation) - firstEvidenceIndex(right.observation)
       || left.index - right.index);
   const moments: number[] = [];
   for (const { observation } of ordered) {
@@ -122,6 +123,11 @@ export function selectMoments(
     if (moments.length === 3) break;
   }
   return moments;
+}
+
+function firstEvidenceIndex(observation: NarrativeObservation): number {
+  const index = Number(observation.evidenceLines[0]?.slice(1));
+  return Number.isFinite(index) ? index : Number.POSITIVE_INFINITY;
 }
 
 export function buildVerifyPrompt(): string {
@@ -138,17 +144,23 @@ Grade EVERY observation:
 Output JSON only: {"grades":[{"observationId":"...","grade":"confirmed|corrected|refuted|inconclusive","reason":"one sentence","replacementWhat":"only for corrected"}]}`;
 }
 
-function gradedObservations(
+export function gradedObservations(
   narrative: SessionNarrative,
   grades: FrameVerification['grades'],
+  options: { framesOk: boolean },
 ): NarrativeObservation[] {
+  if (!options.framesOk) {
+    return narrative.observations.filter((observation) => !claimsAbsence(observation.what));
+  }
   const byId = new Map(grades.map((grade) => [grade.observationId, grade]));
   return narrative.observations.flatMap((observation) => {
     const grade = byId.get(observation.id);
-    if (!grade || grade.grade === 'refuted') return [];
+    if (!grade || grade.grade === 'refuted' || grade.grade === 'inconclusive') return [];
+    const what = grade.grade === 'corrected' ? grade.replacementWhat! : observation.what;
+    if (grade.grade === 'corrected' && claimsAbsence(what)) return [];
     return [{
       ...observation,
-      what: grade.grade === 'corrected' ? grade.replacementWhat! : observation.what,
+      what,
     }];
   });
 }
@@ -165,7 +177,12 @@ export async function processFrameVerification(
   }
   const narrative = claimed.narrative;
   const timeline = claimed.timeline;
-  const unverifiedRows = buildSignalRows(timeline, narrative.observations, job.sessionId, claimed.narrativeId);
+  const unverifiedRows = buildSignalRows(
+    timeline,
+    gradedObservations(narrative, [], { framesOk: false }),
+    job.sessionId,
+    claimed.narrativeId,
+  );
   const finalizeFallback = async (
     state: 'failed' | 'unsupported' | 'skipped_budget',
     reason?: string,
@@ -211,6 +228,19 @@ export async function processFrameVerification(
       error: reason,
     });
     await finalizeFallback('failed', `frame capture failed: ${reason}`);
+    return;
+  }
+
+  if (captureResult.assetsMissing || captureResult.frames.length === 0) {
+    const reason = captureResult.assetsMissing
+      ? 'frame capture missing replay assets'
+      : 'frame capture returned no frames';
+    logger.warn('Frame capture unusable; emitting unverified observations', {
+      job_id: job.id,
+      session_id: job.sessionId,
+      reason,
+    });
+    await finalizeFallback('failed', reason);
     return;
   }
 
@@ -275,6 +305,11 @@ export async function processFrameVerification(
     verification,
     inputTokens: response.inputTokens,
     outputTokens: response.outputTokens,
-    signalRows: buildSignalRows(timeline, gradedObservations(narrative, validated.grades), job.sessionId, claimed.narrativeId),
+    signalRows: buildSignalRows(
+      timeline,
+      gradedObservations(narrative, validated.grades, { framesOk: true }),
+      job.sessionId,
+      claimed.narrativeId,
+    ),
   });
 }

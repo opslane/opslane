@@ -17,6 +17,7 @@ import {
   releaseUnfinishedGeneration,
 } from './friction/dead-letter.js';
 import { canonicalPattern } from './friction/urlnorm.js';
+import { claimsAbsence } from './friction/absence.js';
 import type { Platform } from './platform.js';
 import type { DerivedDecision } from './classify.js';
 import type { RouteMapRow } from './route-map.js';
@@ -3951,7 +3952,9 @@ export async function sweepNarratives(): Promise<{ reEnqueued: number; failed: n
       projectId: row.project_id,
       claimedPromptVersion: row.prompt_version,
       signalRows: buildSignalRows(
-        timeline, narrative.observations, row.session_id,
+        timeline,
+        narrative.observations.filter((observation) => !claimsAbsence(observation.what)),
+        row.session_id,
         deriveNarrativeId(row.session_id, row.created_at, row.prompt_version),
       ),
     });
