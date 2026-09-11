@@ -70,7 +70,7 @@ function duration(): string {
 		  <ul v-if="sessionNarrative.observations.length" class="mt-4 space-y-3">
 			<li v-for="observation in sessionNarrative.observations" :key="observation.id" class="rounded-md border border-border p-3">
 			  <div class="flex flex-wrap gap-2 text-xs">
-				<span class="rounded bg-surface-raised px-2 py-1 capitalize text-muted" v-text="observation.severity"></span>
+				<span v-if="observation.severity" class="rounded bg-surface-raised px-2 py-1 capitalize text-muted" v-text="observation.severity"></span>
 				<span v-if="observation.grade" class="rounded bg-surface-raised px-2 py-1 capitalize text-muted" v-text="observation.grade"></span>
 			  </div>
 			  <p v-if="observation.grade === 'corrected' && observation.replacementWhat" class="mt-2 text-sm">

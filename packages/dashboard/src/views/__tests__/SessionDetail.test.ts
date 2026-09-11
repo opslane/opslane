@@ -103,6 +103,25 @@ describe('SessionDetail duration', () => {
 		wrapper.unmount();
 	});
 
+	it('renders v3 observations without an empty severity badge and preserves legacy badges', async () => {
+		api.getSessionNarrative.mockResolvedValue({
+			userGoal: 'Save an asset', narrative: 'The page shows a validation error.', notable: true,
+			observations: [
+				{ id: 'v3', what: 'An error appears beside the save button.', evidenceLines: ['L2'] },
+				{ id: 'v3-graded', what: 'The form shows a success message.', evidenceLines: ['L3'], grade: 'confirmed' },
+				{ id: 'v2', category: 'validation_confusion', what: 'The messages conflict.', severity: 'high', evidenceLines: ['L3'] },
+			],
+		});
+		const wrapper = mountView(12);
+		await flushPromises();
+		const observations = wrapper.findAll('[aria-label="Session narrative"] li');
+		expect(observations[0]!.text()).toBe('An error appears beside the save button.');
+		expect(observations[0]!.findAll('span')).toHaveLength(0);
+		expect(observations[1]!.findAll('span').map((badge) => badge.text())).toEqual(['confirmed']);
+		expect(observations[2]!.findAll('span').map((badge) => badge.text())).toEqual(['high']);
+		wrapper.unmount();
+	});
+
 	it('explains why observations are ungraded when frame verification failed', async () => {
 		api.getSessionNarrative.mockResolvedValue({
 			userGoal: 'Save an asset', narrative: 'The user could not tell whether saving worked.', notable: true,

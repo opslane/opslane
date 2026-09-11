@@ -333,9 +333,9 @@ export interface SessionDetail extends SessionSummary {
 
 export interface SessionNarrativeObservation {
   id: string;
-  category: string;
+  category?: string;
   what: string;
-  severity: 'low' | 'medium' | 'high';
+  severity?: 'low' | 'medium' | 'high';
   evidenceLines: string[];
   grade?: 'confirmed' | 'corrected' | 'refuted' | 'inconclusive';
   replacementWhat?: string;
