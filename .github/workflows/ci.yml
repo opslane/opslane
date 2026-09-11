@@ -99,7 +99,7 @@ jobs:
     timeout-minutes: 15
     services:
       postgres:
-        image: postgres:16@sha256:ab47a724d0e37131ac950b98ff2beeb3fdb3bfcc592d73c6cc4b4e7626649671
+        image: pgvector/pgvector:pg16@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b
         env:
           POSTGRES_USER: opslane
           POSTGRES_PASSWORD: opslane_dev
@@ -215,7 +215,7 @@ jobs:
     timeout-minutes: 20
     services:
       postgres:
-        image: postgres:16@sha256:ab47a724d0e37131ac950b98ff2beeb3fdb3bfcc592d73c6cc4b4e7626649671
+        image: pgvector/pgvector:pg16@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b
         env:
           POSTGRES_USER: opslane
           POSTGRES_PASSWORD: opslane_dev
