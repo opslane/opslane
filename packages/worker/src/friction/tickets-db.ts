@@ -503,7 +503,6 @@ export function evaluateBar(
 interface EvidenceRow {
   session_id: string;
   end_user_id: string | null;
-  external_account_id: string | null;
   account_name: string | null;
   signal_ids: string[];
   note: string;
@@ -519,7 +518,7 @@ async function evidenceRows(
   window: EvidenceWindow,
 ): Promise<EvidenceRow[]> {
   const r = await db.query<EvidenceRow>(
-    `SELECT m.session_id,m.end_user_id,u.external_account_id,u.account_name,
+    `SELECT m.session_id,m.end_user_id,u.account_name,
     verified.signal_ids,verified.screens,a.note,a.cost_to_user
     FROM friction_tickets t JOIN friction_ticket_matches m ON m.ticket_id=t.id
     JOIN friction_checks c USING(ticket_id,session_id)
@@ -534,7 +533,7 @@ async function evidenceRows(
     ) verified
     WHERE t.id=$1 AND t.project_id=$2 AND t.environment_id=$3 AND c.outcome='confirmed'
       AND(t.cohort_cutoff IS NULL OR m.occurred_at>t.cohort_cutoff)
-      AND($4::int IS NULL OR m.occurred_at>=now()-$4*interval '1 day')
+      AND($4::int IS NULL OR (m.occurred_at>=now()-$4*interval '1 day' AND m.occurred_at<=now()))
     ORDER BY CASE a.cost_to_user WHEN 'none' THEN 0 WHEN 'annoyance' THEN 1 WHEN 'lost_time' THEN 2 WHEN 'abandoned_task' THEN 3 ELSE 0 END,
       m.arrival_number,m.session_id`,
     [ticket.id, ticket.project_id, ticket.environment_id, window.days],
@@ -551,11 +550,7 @@ function summarizeEvidence(rows: EvidenceRow[]): VerifiedEvidence {
     users: new Set(rows.flatMap((r) => (r.end_user_id ? [r.end_user_id] : []))).size,
     sessions: rows.length,
     accounts: [
-      ...new Set(
-        rows.flatMap((r) =>
-          r.external_account_id ? [r.account_name ?? r.external_account_id] : [],
-        ),
-      ),
+      ...new Set(rows.flatMap((r) => (r.account_name?.trim() ? [r.account_name] : []))),
     ].sort(),
     sessionIds: rows.map((r) => r.session_id),
     signalIds: [...new Set(rows.flatMap((r) => r.signal_ids))].sort(),

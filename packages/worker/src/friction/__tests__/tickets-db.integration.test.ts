@@ -334,6 +334,37 @@ describeDb('ticket store', () => {
     );
     expect((await store.verifiedEvidence(db, t)).sessions).toBe(0);
   });
+  it('lists nonblank account names without requiring or exposing account IDs', async () => {
+    const t = await ticket();
+    const [nameOnly] = await checked(t, ['confirmed']);
+    const [idOnly] = await checked(t, ['confirmed']);
+    const [blankName] = await checked(t, ['confirmed']);
+    await db.query(
+      `UPDATE end_users SET external_account_id=NULL,account_name='Acme' WHERE id=$1`,
+      [nameOnly!.endUserId],
+    );
+    await db.query(
+      `UPDATE end_users SET external_account_id='private-account-id',account_name=NULL WHERE id=$1`,
+      [idOnly!.endUserId],
+    );
+    await db.query(
+      `UPDATE end_users SET external_account_id='blank-name-account',account_name='   ' WHERE id=$1`,
+      [blankName!.endUserId],
+    );
+    expect((await store.verifiedEvidence(db, t)).accounts).toEqual(['Acme']);
+  });
+  it('excludes future recordings from the display window while keeping the full cohort unbounded', async () => {
+    const t = await ticket();
+    const [present] = await checked(t, ['confirmed']);
+    const [future] = await checked(t, ['confirmed'], -1);
+    const recent = await store.verifiedEvidence(db, t);
+    expect(recent.sessionIds).toEqual([present!.sessionId]);
+    expect(recent.signalIds).toEqual(present!.signalIds);
+    expect((await store.verifiedEvidence(db, t, { days: null })).sessionIds).toContain(
+      future!.sessionId,
+    );
+    expect((await store.cohortStats(db, t)).counted).toBe(2);
+  });
   it('publishes distinct generations, preserves old memberships, and unpublishes jobs and attempts', async () => {
     const t = await ticket();
     const rs = await checked(t, ['confirmed', 'confirmed', 'confirmed']);
