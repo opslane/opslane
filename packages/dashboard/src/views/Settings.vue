@@ -27,7 +27,7 @@ import {
   type CreatedAPIKey,
   type BillingFeature,
   type BillingSummary,
-	APIError,
+  APIError,
 } from '../api';
 import type { AuthMembership, GitHubConfig, GitHubAppStatus } from '../types/api';
 import { formatDate, GITHUB_PR_URL_OPTIONS, safeUrl } from '../utils';
@@ -695,9 +695,9 @@ async function loadGitHubAppStatus(): Promise<void> {
 }
 
 async function onRepoLoadError(err: unknown): Promise<void> {
-	if (err instanceof APIError && err.code === 'github_installation_gone') {
-		await loadGitHubAppStatus();
-	}
+  if (err instanceof APIError && err.code === 'github_installation_gone') {
+    await loadGitHubAppStatus();
+  }
 }
 
 async function handleConnectGithub(): Promise<void> {
@@ -705,19 +705,19 @@ async function handleConnectGithub(): Promise<void> {
   if (!pid || !selectedRepo.value) return;
   connectingGithub.value = true;
   githubError.value = '';
-	githubAddRepoUrl.value = '';
+  githubAddRepoUrl.value = '';
   try {
-		githubConfig.value = await setGitHubConfig(pid, {
-			github_repo: selectedRepo.value,
-		});
-		window.dispatchEvent(new Event('opslane-integrations-changed'));
+    githubConfig.value = await setGitHubConfig(pid, {
+      github_repo: selectedRepo.value,
+    });
+    window.dispatchEvent(new Event('opslane-integrations-changed'));
     selectedRepo.value = '';
   } catch (err: unknown) {
     githubError.value = err instanceof Error ? err.message : 'Failed to connect GitHub';
-		githubAddRepoUrl.value = err instanceof APIError ? (err.details.add_repo_url ?? '') : '';
-		if (err instanceof APIError && err.code === 'github_installation_gone') {
-			await loadGitHubAppStatus();
-		}
+    githubAddRepoUrl.value = err instanceof APIError ? (err.details.add_repo_url ?? '') : '';
+    if (err instanceof APIError && err.code === 'github_installation_gone') {
+      await loadGitHubAppStatus();
+    }
   } finally {
     connectingGithub.value = false;
   }
@@ -728,9 +728,9 @@ async function handleDisconnectGithub(): Promise<void> {
   if (!pid) return;
   disconnectingGithub.value = true;
   try {
-		await deleteGitHubConfig(pid);
-		githubConfig.value = null;
-		window.dispatchEvent(new Event('opslane-integrations-changed'));
+    await deleteGitHubConfig(pid);
+    githubConfig.value = null;
+    window.dispatchEvent(new Event('opslane-integrations-changed'));
   } catch {
     // Non-fatal
   } finally {
@@ -871,10 +871,10 @@ async function handleDisconnectGithub(): Promise<void> {
               <span class="text-sm text-muted">Repository:</span>
               <span class="text-sm text-text font-mono" v-text="githubConfig.github_repo"></span>
             </div>
-			<p v-if="!githubConfig.repo_access" class="text-sm text-warning">
-				Opslane lost access to <code v-text="githubConfig.github_repo"></code> on GitHub.
-				<a v-if="safeUrl(githubConfig.add_repo_url, GITHUB_PR_URL_OPTIONS)" :href="safeUrl(githubConfig.add_repo_url, GITHUB_PR_URL_OPTIONS)" target="_blank" rel="noopener" class="text-accent hover:underline" data-testid="github-repo-access-link">Add the repository on GitHub</a>
-			</p>
+      <p v-if="!githubConfig.repo_access" role="alert" class="text-sm text-warning">
+        Opslane lost access to <code v-text="githubConfig.github_repo"></code> on GitHub.
+        <a v-if="safeUrl(githubConfig.add_repo_url, GITHUB_PR_URL_OPTIONS)" :href="safeUrl(githubConfig.add_repo_url, GITHUB_PR_URL_OPTIONS)" target="_blank" rel="noopener noreferrer" class="text-accent underline" data-testid="github-repo-access-link">Add the repository on GitHub</a>
+      </p>
             <Button variant="dangerSubtle" size="sm" @click="handleDisconnectGithub" :disabled="disconnectingGithub">
               {{ disconnectingGithub ? 'Disconnecting...' : 'Disconnect repo' }}
             </Button>
@@ -884,10 +884,10 @@ async function handleDisconnectGithub(): Promise<void> {
           <div v-else class="space-y-3">
             <div>
               <label class="block text-sm font-medium text-muted mb-1">Repository</label>
-				<RepoSelector v-model="selectedRepo" @load-error="onRepoLoadError" />
+        <RepoSelector v-model="selectedRepo" @load-error="onRepoLoadError" />
             </div>
             <div v-if="githubError" class="text-sm text-danger" v-text="githubError"></div>
-			<a v-if="safeUrl(githubAddRepoUrl, GITHUB_PR_URL_OPTIONS)" :href="safeUrl(githubAddRepoUrl, GITHUB_PR_URL_OPTIONS)" target="_blank" rel="noopener" class="text-sm text-accent hover:underline" data-testid="github-add-repo-link">Add the repository on GitHub</a>
+      <a v-if="safeUrl(githubAddRepoUrl, GITHUB_PR_URL_OPTIONS)" :href="safeUrl(githubAddRepoUrl, GITHUB_PR_URL_OPTIONS)" target="_blank" rel="noopener noreferrer" class="block text-sm text-accent underline" data-testid="github-add-repo-link">Add the repository on GitHub</a>
             <Button variant="primary" @click="handleConnectGithub" :disabled="connectingGithub || !selectedRepo">
               {{ connectingGithub ? 'Connecting...' : 'Connect repository' }}
             </Button>

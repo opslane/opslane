@@ -547,3 +547,70 @@ func TestHandleWebhook_UnknownInstallationIsIgnored(t *testing.T) {
 		assertWebhookStatus(t, response, "ignored")
 	}
 }
+
+func TestHandleWebhook_InstallationDeletedClearsLegacyPointerWithoutRow(t *testing.T) {
+	pool := webhookTestPool(t)
+	queries := db.New(pool)
+	ctx := context.Background()
+	org, err := queries.CreateOrg(ctx, "legacy-"+uuid.NewString())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = pool.Exec(context.Background(), `DELETE FROM orgs WHERE id = $1`, org.ID) })
+	legacyID := time.Now().UnixNano()
+	if err := queries.SetOrgGitHubInstallation(ctx, org.ID, legacyID); err != nil {
+		t.Fatal(err)
+	}
+	deps := &Dependencies{Queries: queries}
+	t.Setenv("GITHUB_WEBHOOK_SECRET", "receipt-test-secret")
+	body := []byte(fmt.Sprintf(`{"action":"deleted","installation":{"id":%d}}`, legacyID))
+	r := sendSignedGitHubEvent(t, deps, body, "l-"+uuid.NewString(), "installation")
+	if r.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", r.Code, r.Body.String())
+	}
+	assertWebhookStatus(t, r, "applied")
+	if pointer, _ := queries.GetOrgGitHubInstallation(ctx, org.ID); pointer != 0 {
+		t.Fatalf("legacy pointer must be cleared: %d", pointer)
+	}
+}
+
+func TestHandleWebhook_InstallationMalformedBodies(t *testing.T) {
+	pool := webhookTestPool(t)
+	deps := &Dependencies{Queries: db.New(pool)}
+	t.Setenv("GITHUB_WEBHOOK_SECRET", "receipt-test-secret")
+	for _, tc := range []struct{ event, body string }{
+		{"installation", `{"action":"deleted"}`},
+		{"installation", `not json`},
+		{"installation_repositories", `{"action":"added"}`},
+		{"installation_repositories", `not json`},
+	} {
+		r := sendSignedGitHubEvent(t, deps, []byte(tc.body), "m-"+uuid.NewString(), tc.event)
+		if r.Code != http.StatusBadRequest {
+			t.Fatalf("%s %q: status=%d body=%s", tc.event, tc.body, r.Code, r.Body.String())
+		}
+	}
+}
+
+func TestHandleWebhook_PermissionsWithReposReplacesAndSuspendClearsPointer(t *testing.T) {
+	pool := webhookTestPool(t)
+	queries := db.New(pool)
+	orgID, installationID := seedWebhookInstallation(t, queries, `["acme/web"]`)
+	deps := &Dependencies{Queries: queries}
+	t.Setenv("GITHUB_WEBHOOK_SECRET", "receipt-test-secret")
+	ctx := context.Background()
+	body := []byte(fmt.Sprintf(`{"action":"new_permissions_accepted","installation":{"id":%d,"repository_selection":"selected"},"repositories":[{"full_name":"acme/only"}]}`, installationID))
+	assertWebhookStatus(t, sendSignedGitHubEvent(t, deps, body, "p-"+uuid.NewString(), "installation"), "applied")
+	if got := webhookRepos(t, queries, installationID); got != `["acme/only"]` {
+		t.Fatalf("permissions event with repositories must replace the list: %s", got)
+	}
+	suspend := []byte(fmt.Sprintf(`{"action":"suspend","installation":{"id":%d}}`, installationID))
+	assertWebhookStatus(t, sendSignedGitHubEvent(t, deps, suspend, "s-"+uuid.NewString(), "installation"), "applied")
+	if pointer, _ := queries.GetOrgGitHubInstallation(ctx, orgID); pointer != 0 {
+		t.Fatalf("suspend must clear the org pointer so the worker stops minting from it: %d", pointer)
+	}
+	unsuspend := []byte(fmt.Sprintf(`{"action":"unsuspend","installation":{"id":%d}}`, installationID))
+	assertWebhookStatus(t, sendSignedGitHubEvent(t, deps, unsuspend, "u-"+uuid.NewString(), "installation"), "applied")
+	if pointer, _ := queries.GetOrgGitHubInstallation(ctx, orgID); pointer != installationID {
+		t.Fatalf("unsuspend must restore the pointer: %d", pointer)
+	}
+}

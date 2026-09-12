@@ -318,6 +318,38 @@ type InstallationInfo struct {
 	HTMLURL string `json:"html_url"`
 }
 
+// AppInfo is the App identity GitHub reports for an App JWT.
+type AppInfo struct {
+	ID   int64  `json:"id"`
+	Slug string `json:"slug"`
+}
+
+// GetApp returns the App the JWT authenticates as (GET /app). Callers use it
+// to tell "this installation is gone" from "these credentials belong to a
+// different App", since both answer 404 on the installation endpoints.
+func GetApp(appJWT string) (*AppInfo, error) {
+	req, err := http.NewRequest("GET", githubAPIBase+"/app", nil)
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+appJWT)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("get app: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return nil, fmt.Errorf("GitHub API error (status %d): %s", resp.StatusCode, string(body))
+	}
+	var info AppInfo
+	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
+		return nil, fmt.Errorf("decode response: %w", err)
+	}
+	return &info, nil
+}
+
 // VerifyInstallation checks that an installation_id belongs to this GitHub App
 // by calling GET /app/installations/{id} with the App JWT.
 // Returns the installation info if valid, or an error if not found / unauthorized.

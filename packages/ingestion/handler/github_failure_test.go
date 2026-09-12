@@ -18,7 +18,7 @@ func TestClassifyGitHubError(t *testing.T) {
 		code   string
 	}{
 		{fmt.Errorf("wrap: %w", gh.ErrInstallationGone), http.StatusConflict, "github_installation_gone"},
-		{fmt.Errorf("wrap: %w", gh.ErrInstallationSuspended), http.StatusConflict, "github_installation_gone"},
+		{fmt.Errorf("wrap: %w", gh.ErrInstallationSuspended), http.StatusConflict, "github_installation_suspended"},
 		{errors.New("dial tcp: i/o timeout"), http.StatusServiceUnavailable, "github_unreachable"},
 		{errors.New("GitHub API error (status 502): upstream"), http.StatusServiceUnavailable, "github_unreachable"},
 	}

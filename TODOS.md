@@ -322,3 +322,11 @@ review made the value overridable, which is the prerequisite; the docs and a Min
 CORS/origin story are the remaining work. Note MinIO must also be reachable from the
 browser, which interacts with the loopback bind added at the same time
 (`OPSLANE_INFRA_BIND_ADDR`).
+
+## GitHub installation webhooks: durability and ordering
+
+**What:** `installation` and `installation_repositories` events are applied state-based with no delivery receipt, so a redelivered or late event can rewind a newer state (a late `suspend` after `unsuspend`, a redelivered `created` after later `added` events), and an event for an installation Opslane has not mapped yet is acknowledged and dropped even though GitHub does not redeliver on its own. Store `X-GitHub-Delivery` for these events, order by the payload's timestamp, and retain unknown-installation events until the OAuth callback binds the ID. Also handle `repository.renamed`/`transferred` so the cached repo list follows renames.
+
+**Why:** the self-healing PR (2026-09-12) made the record current on first use and on webhooks; the remaining gap is ordering under retries. The on-use path re-checks GitHub, so the damage of a stale webhook is a wrong `github_installed` until the next attach.
+
+**Depends on / blocked by:** nothing. The worker's repo lookup (`packages/worker/src/db.ts`, `i.repos ? p.github_repo`) is case-sensitive while ingestion's coverage check is not; align it when touching this.
