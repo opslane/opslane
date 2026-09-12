@@ -1086,8 +1086,24 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string, s
 				// Same rule as the stamp above: live eligibility when the live
 				// rows loaded, and an un-compacted receipt when they did not.
 				live, haveLive := actionableByGroup[candidate.ErrorGroupID]
-				receiptItems = append(receiptItems, receiptForUnifiedFallback(candidate,
-					liveFallbackReason(live, haveLive && actionableErr == nil, receiptReasons[identity])))
+				fallbackReason := liveFallbackReason(live, haveLive && actionableErr == nil, receiptReasons[identity])
+				item := receiptForUnifiedFallback(candidate, fallbackReason)
+				if candidate.TicketID != "" {
+					// The ticket gate above requires live evidence. Rebuild
+					// its receipt from that evidence even after cache/ledger
+					// degradation, rather than reviving frozen cause prose.
+					liveItems, mapErr := toReceiptItems([]actionableCandidate{live})
+					if mapErr != nil {
+						accounted[identity] = "deferred"
+						excludedReasons[identity] = reasonNotPublishable
+						delete(renderModes, identity)
+						continue
+					}
+					item = liveItems[0]
+					item.FallbackReason = fallbackReason
+					item.SessionURL = notify.BuildSessionURL(os.Getenv("DASHBOARD_URL"), live.TicketFacts.RepresentativeSessionID, 0)
+				}
+				receiptItems = append(receiptItems, item)
 				receipted[candidate.ErrorGroupID] = true
 			}
 			accounted[identity] = "included"
@@ -1181,24 +1197,6 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string, s
 		}
 		unifiedSavepointOpen = false
 	}
-	for identity, reason := range excludedReasons {
-		if _, err := tx.Exec(ctx, `UPDATE digest_run_candidate_evaluations
-			SET outcome='excluded',primary_reason_code=$3,phase='validation',
-			    render_mode=NULL,
-			    details=details || jsonb_build_object('validation_exclusion',$3::text)
-			WHERE digest_run_id=$1 AND error_group_id=$2`, runID, identity, reason); err != nil {
-			return fmt.Errorf("store digest validation exclusion for %s: %w", identity, err)
-		}
-	}
-	deliveredGenerated := make(map[string]bool, len(generated))
-	for _, card := range generated {
-		deliveredGenerated[card.IncidentID] = true
-	}
-	deliveredReceipts := make(map[string]bool, len(receiptItems))
-	for _, item := range receiptItems {
-		deliveredReceipts[item.IncidentID] = true
-	}
-
 	schemaVersion := 4
 	fresh := run.Mode == UnifiedCardsOn
 	for _, candidate := range candidates {
@@ -1216,35 +1214,78 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string, s
 		}
 	}
 	if fresh {
-		actionURL := func(group, ticket string, generation int) (string, error) {
+		actionURL := func(group, ticket string, generation int, action string, authored bool) (string, error) {
 			frozen := byIdentity[group]
 			live, ok := actionableByGroup[group]
 			facts := live.TicketFacts
-			if !ok || facts == nil || !facts.OnCard() || facts.TicketID != ticket || facts.Generation != generation || facts.EvidenceVersion != frozen.EvidenceVersion || facts.Steps != frozen.Steps || ticketDigestAction(facts.FixSubstate) != frozen.ValidAction || live.Title != frozen.Title || live.RootCause != frozen.RootCause {
+			if !ok || facts == nil || !facts.OnCard() || facts.TicketID != ticket || facts.Generation != generation || facts.EvidenceVersion != frozen.EvidenceVersion || ticketDigestAction(facts.FixSubstate) != action {
+				return "", unifiedCandidateChangedError{identity: group}
+			}
+			// Authored prose must still match the freeze. Mechanical receipts
+			// were rebuilt from this live state, so refreshed prose is valid.
+			if authored && (facts.Steps != frozen.Steps || action != frozen.ValidAction || live.Title != frozen.Title || live.RootCause != frozen.RootCause) {
 				return "", unifiedCandidateChangedError{identity: group}
 			}
 			// Attempt lineage is mechanical action state. A fix can complete
 			// during authoring without changing any of the authored facts.
 			return ticketFixActionURL(os.Getenv("DASHBOARD_URL"), run.ProjectID, group, ticket, generation, facts.LatestAttemptID, secret, time.Now())
 		}
-		for i := range generated {
-			card := &generated[i]
+		excludeStaleAction := func(identity string, actionErr error) bool {
+			var changed unifiedCandidateChangedError
+			if !errors.As(actionErr, &changed) {
+				return false
+			}
+			accounted[identity] = "deferred"
+			excludedReasons[identity] = reasonNotPublishable
+			delete(renderModes, identity)
+			return true
+		}
+		keptGenerated := generated[:0]
+		for _, card := range generated {
 			if card.TicketID != "" && card.Action == "Create fix PR" {
-				card.ActionURL, err = actionURL(card.IncidentID, card.TicketID, card.Generation)
+				card.ActionURL, err = actionURL(card.IncidentID, card.TicketID, card.Generation, card.Action, true)
 				if err != nil {
+					if excludeStaleAction(card.IncidentID, err) {
+						continue
+					}
 					return err
 				}
 			}
+			keptGenerated = append(keptGenerated, card)
 		}
-		for i := range receiptItems {
-			item := &receiptItems[i]
+		generated = keptGenerated
+		keptReceipts := receiptItems[:0]
+		for _, item := range receiptItems {
 			if item.TicketID != "" && item.Action == "Create fix PR" {
-				item.ActionURL, err = actionURL(item.IncidentID, item.TicketID, item.Generation)
+				item.ActionURL, err = actionURL(item.IncidentID, item.TicketID, item.Generation, item.Action, false)
 				if err != nil {
+					if excludeStaleAction(item.IncidentID, err) {
+						continue
+					}
 					return err
 				}
 			}
+			keptReceipts = append(keptReceipts, item)
 		}
+		receiptItems = keptReceipts
+	}
+
+	for identity, reason := range excludedReasons {
+		if _, err := tx.Exec(ctx, `UPDATE digest_run_candidate_evaluations
+			SET outcome='excluded',primary_reason_code=$3,phase='validation',
+			    render_mode=NULL,
+			    details=details || jsonb_build_object('validation_exclusion',$3::text)
+			WHERE digest_run_id=$1 AND error_group_id=$2`, runID, identity, reason); err != nil {
+			return fmt.Errorf("store digest validation exclusion for %s: %w", identity, err)
+		}
+	}
+	deliveredGenerated := make(map[string]bool, len(generated))
+	for _, card := range generated {
+		deliveredGenerated[card.IncidentID] = true
+	}
+	deliveredReceipts := make(map[string]bool, len(receiptItems))
+	for _, item := range receiptItems {
+		deliveredReceipts[item.IncidentID] = true
 	}
 
 	eventPayload := notify.EventPayload{

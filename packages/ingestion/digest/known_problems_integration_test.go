@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/opslane/opslane/packages/ingestion/auth"
 	ingestiondb "github.com/opslane/opslane/packages/ingestion/db"
@@ -202,6 +203,15 @@ func TestKnownProblemDigestFreezeValidateAndMergedFooter(t *testing.T) {
 }
 
 func TestTicketDigestSignsLatestAttemptAfterAuthoringCycle(t *testing.T) {
+	testTicketDigestActionAfterAuthoringCycle(t, "authored")
+}
+func TestTicketDigestDeferredChangedCauseUsesLiveReceipt(t *testing.T) {
+	testTicketDigestActionAfterAuthoringCycle(t, "deferred_changed_cause")
+}
+func TestTicketDigestStaleActionDoesNotFailOtherCards(t *testing.T) {
+	testTicketDigestActionAfterAuthoringCycle(t, "stale_action")
+}
+func testTicketDigestActionAfterAuthoringCycle(t *testing.T, mode string) {
 	pool := knownProblemPool(t)
 	ctx := context.Background()
 	q := ingestiondb.New(pool)
@@ -245,14 +255,18 @@ func TestTicketDigestSignsLatestAttemptAfterAuthoringCycle(t *testing.T) {
 	}
 	run(`UPDATE error_groups SET explained_signal_ids=(SELECT jsonb_agg(signal_id::text) FROM friction_ticket_match_observations WHERE ticket_id=$2) WHERE id=$1`, group, ticket)
 	seedDestination(t, pool, project.ID, []string{"digest.daily"})
+	unrelated := insert(`INSERT INTO error_groups(project_id,environment_id,fingerprint,title,kind,status,first_seen,last_seen)VALUES($1,$2,'unrelated','Other checkout issue','error','needs_human',now(),now())RETURNING id`, project.ID, env)
 	runID, candidates, err := FreezeCandidates(ctx, pool, project.ID, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(candidates) != 1 || candidates[0].LatestAttemptID != "" || candidates[0].ValidAction != "Create fix PR" {
+	if len(candidates) != 2 {
 		t.Fatalf("frozen candidates=%+v", candidates)
 	}
-	frozen := candidates[0]
+	frozen := candidateByGroup(t, candidates, group)
+	if frozen.LatestAttemptID != "" || frozen.ValidAction != "Create fix PR" {
+		t.Fatalf("ticket=%+v", frozen)
+	}
 	// A real fix is admitted and fails while the writer holds the frozen facts.
 	job, err := q.TriggerFixJob(ctx, project.ID, group, "")
 	if err != nil {
@@ -262,7 +276,25 @@ func TestTicketDigestSignsLatestAttemptAfterAuthoringCycle(t *testing.T) {
 	run(`UPDATE friction_fix_attempts SET status='failed' WHERE id=$1`, latest)
 	run(`UPDATE error_group_jobs SET status='completed' WHERE id=$1`, job)
 	run(`UPDATE error_groups SET status='needs_human',fix_substate='none',terminal_fix_job_id=$2 WHERE id=$1`, group, job)
-	payload, err := json.Marshal(writtenDigestPayload{Included: []writtenDigestCard{{ErrorGroupID: group, Title: "Save stalls", Copy: "Save ignores clicks.", Steps: frozen.Steps, Why: frozen.RootCause}}})
+	written := writtenDigestPayload{Included: []writtenDigestCard{{ErrorGroupID: group, Title: "Save stalls", Copy: "Save ignores clicks.", Steps: frozen.Steps, Why: frozen.RootCause}}}
+	changedCause := "The handler drops the save request."
+	if mode == "deferred_changed_cause" {
+		run(`UPDATE error_groups SET root_cause=$2 WHERE id=$1`, group, changedCause)
+		written = writtenDigestPayload{Deferred: []deferredDigestItem{{ErrorGroupID: group, Reason: "card check: invalid prose"}}}
+	}
+	if mode == "stale_action" {
+		original := loadActionableCandidatesForValidation
+		loadActionableCandidatesForValidation = func(ctx context.Context, tx pgx.Tx, projectID string, status actionableStatusSet) ([]actionableCandidate, error) {
+			if projectID == project.ID {
+				if _, err := tx.Exec(ctx, `UPDATE error_groups SET root_cause=$2 WHERE id=$1`, group, changedCause); err != nil {
+					return nil, err
+				}
+			}
+			return original(ctx, tx, projectID, status)
+		}
+		t.Cleanup(func() { loadActionableCandidatesForValidation = original })
+	}
+	payload, err := json.Marshal(written)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -273,10 +305,45 @@ func TestTicketDigestSignsLatestAttemptAfterAuthoringCycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	published := renderedEvent(t, pool, runID)
-	if len(published.Digest.GeneratedCards) != 1 {
-		t.Fatalf("authored card was lost: %+v", published.Digest)
+	hasUnrelated := false
+	for _, receipt := range published.Digest.ReceiptItems {
+		if receipt.IncidentID == unrelated {
+			hasUnrelated = true
+		}
 	}
-	link, err := url.Parse(published.Digest.GeneratedCards[0].ActionURL)
+	if !hasUnrelated {
+		t.Fatalf("unrelated receipt was lost: %+v", published.Digest)
+	}
+	if mode == "stale_action" {
+		if len(published.Digest.GeneratedCards) != 0 || len(published.Digest.ReceiptItems) != 1 {
+			t.Fatalf("stale action was published: %+v", published.Digest)
+		}
+		var outcome string
+		if err := pool.QueryRow(ctx, `SELECT outcome FROM digest_run_candidate_evaluations WHERE digest_run_id=$1 AND error_group_id=$2`, runID, group).Scan(&outcome); err != nil || outcome != "excluded" {
+			t.Fatalf("stale action ledger=%q err=%v", outcome, err)
+		}
+		return
+	}
+	var actionURL string
+	if mode == "deferred_changed_cause" {
+		if len(published.Digest.GeneratedCards) != 0 || len(published.Digest.ReceiptItems) != 2 {
+			t.Fatalf("live receipt was lost: %+v", published.Digest)
+		}
+		for _, receipt := range published.Digest.ReceiptItems {
+			if receipt.IncidentID == group {
+				if receipt.RootCauseExcerpt != changedCause || receipt.Action != "Create fix PR" {
+					t.Fatalf("stale receipt=%+v", receipt)
+				}
+				actionURL = receipt.ActionURL
+			}
+		}
+	} else {
+		if len(published.Digest.GeneratedCards) != 1 {
+			t.Fatalf("authored card was lost: %+v", published.Digest)
+		}
+		actionURL = published.Digest.GeneratedCards[0].ActionURL
+	}
+	link, err := url.Parse(actionURL)
 	if err != nil {
 		t.Fatal(err)
 	}
