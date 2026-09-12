@@ -110,6 +110,43 @@ describe('confirmation read', () => {
     ).toHaveProperty('invalid');
     expect(meter.add).toHaveBeenCalledOnce();
   });
+  it.each([
+    { outcome: ['confirmed'] },
+    { outcome: { value: 'confirmed' } },
+    { costToUser: ['lost_time'] },
+    { costToUser: { value: 'lost_time' } },
+    {
+      outcome: ['confirmed'],
+      costToUser: ['lost_time'],
+      evidenceLines: [],
+      signalIds: [],
+    },
+  ])(
+    'rejects non-string enum fields before accepting evidence: %j',
+    async (malformed) => {
+      const client = {
+        modelName: 'test',
+        complete: vi
+          .fn()
+          .mockResolvedValue(response({ ...valid, ...malformed })),
+      };
+      const meter = { add: vi.fn() };
+      expect(
+        await confirmRead(
+          client,
+          {
+            ticket,
+            timelineText: 'L1: Click Save',
+            frames: [frame],
+            framesOk: true,
+            signals: [{ id: 's1', what: 'Error' }],
+          },
+          meter,
+        ),
+      ).toHaveProperty('invalid');
+      expect(meter.add).toHaveBeenCalledOnce();
+    },
+  );
   it('rejects duplicate IDs, absent line citations, empty confirmed evidence', async () => {
     for (const bad of [
       { ...valid, signalIds: ['s1', 's1'] },

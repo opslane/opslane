@@ -112,17 +112,17 @@ export async function confirmRead(
   const ids = new Set(input.signals.map((s) => s.id));
   if (
     !raw ||
-    !['confirmed', 'refuted', 'inconclusive'].includes(
-      String(raw['outcome']),
-    ) ||
+    typeof raw['outcome'] !== 'string' ||
+    !['confirmed', 'refuted', 'inconclusive'].includes(raw['outcome']) ||
     !strings(raw['evidenceLines']) ||
     raw['evidenceLines'].some((l) => !lines.has(l)) ||
     !strings(raw['signalIds']) ||
     raw['signalIds'].some((id) => !ids.has(id)) ||
     typeof raw['note'] !== 'string' ||
     !raw['note'].trim() ||
+    typeof raw['costToUser'] !== 'string' ||
     !['none', 'annoyance', 'lost_time', 'abandoned_task'].includes(
-      String(raw['costToUser']),
+      raw['costToUser'],
     ) ||
     (raw['outcome'] === 'confirmed' &&
       (!raw['signalIds'].length || !raw['evidenceLines'].length)) ||

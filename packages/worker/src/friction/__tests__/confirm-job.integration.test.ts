@@ -741,6 +741,56 @@ describeDb('confirmation job', () => {
       ).rows,
     ).toEqual([{ status: 'discarded' }]);
   });
+  it('retries malformed enum arrays and stages only the validated replacement', async () => {
+    const t = await ticket();
+    await matches(t, 3);
+    const job = await claim(t);
+    const dependencies = deps([]);
+    const complete = dependencies.client.complete;
+    let calls = 0;
+    dependencies.client.complete = async (args) => {
+      calls++;
+      if (calls === 1)
+        return {
+          text: JSON.stringify({
+            outcome: ['confirmed'],
+            costToUser: ['lost_time'],
+            evidenceLines: [],
+            signalIds: [],
+            note: 'Unsupported confirmation',
+          }),
+          inputTokens: 10,
+          outputTokens: 5,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          stopReason: 'end_turn',
+        };
+      return complete(args);
+    };
+    await expect(
+      processFrictionConfirm(job, dependencies, new AbortController().signal),
+    ).rejects.toMatchObject({ name: 'JobCompletedInTransaction' });
+    expect(calls).toBe(4);
+    expect((await store.cohortStats(pool, t)).confirmed).toBe(3);
+    expect(
+      (
+        await pool.query(
+          'SELECT note FROM friction_check_attempts WHERE ticket_id=$1',
+          [t.id],
+        )
+      ).rows,
+    ).toEqual(
+      Array.from({ length: 3 }, () => ({ note: 'Click Save; error appears.' })),
+    );
+    expect(
+      (
+        await pool.query(
+          'SELECT input_tokens::int FROM job_usage WHERE job_id=$1',
+          [job.id],
+        )
+      ).rows,
+    ).toEqual([{ input_tokens: 40 }]);
+  });
   it('meters invalid attempts but never stages them and propagates cancellation', async () => {
     const t = await ticket();
     await matches(t, 3);
