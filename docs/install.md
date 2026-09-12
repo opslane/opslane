@@ -53,8 +53,9 @@ import App from './App';
 
 init({
   apiKey: 'opslane_pk_...',
-  environment: 'development',
-  endpoint: 'https://your-opslane-instance.example.com', // https://app.opslane.com for hosted Opslane
+  environment: import.meta.env.VITE_OPSLANE_ENVIRONMENT ?? 'development',
+  // Self-hosting? Add endpoint: 'https://your-opslane-instance.example.com'.
+  // Hosted Opslane needs no endpoint: the SDK defaults to https://app.opslane.com.
 });
 
 // After sign-in.
@@ -78,8 +79,9 @@ import App from './App.vue';
 
 init({
   apiKey: 'opslane_pk_...',
-  environment: 'development',
-  endpoint: 'https://your-opslane-instance.example.com', // https://app.opslane.com for hosted Opslane
+  environment: import.meta.env.VITE_OPSLANE_ENVIRONMENT ?? 'development',
+  // Self-hosting? Add endpoint: 'https://your-opslane-instance.example.com'.
+  // Hosted Opslane needs no endpoint: the SDK defaults to https://app.opslane.com.
 });
 
 setUser({ id: currentUser.id, email: currentUser.email });
@@ -135,8 +137,9 @@ import { init, setUser } from '@opslane/sdk';
 
 init({
   apiKey: 'opslane_pk_...',
-  environment: 'development',
-  endpoint: 'https://your-opslane-instance.example.com', // https://app.opslane.com for hosted Opslane
+  environment: import.meta.env.VITE_OPSLANE_ENVIRONMENT ?? 'development',
+  // Self-hosting? Add endpoint: 'https://your-opslane-instance.example.com'.
+  // Hosted Opslane needs no endpoint: the SDK defaults to https://app.opslane.com.
 });
 
 setUser({ id: 'user-123' });

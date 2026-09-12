@@ -78,7 +78,7 @@ opslane_progress install_sdk running ""
 
 ## 4. Install the SDK
 
-Install `@opslane/sdk` with the repo's package manager. Write `ingest_key` from `.opslane-setup/approve.json` into the framework's public env var in a gitignored env file without echoing it, using a script that replaces that variable if present and otherwise appends it. Preserve other variables, add the env file to `.gitignore`, and never print its contents. Use `NEXT_PUBLIC_OPSLANE_API_KEY` for Next.js. Tell the user the production value is the same variable, with `environment` set to `production` in their deploy.
+Install `@opslane/sdk` with the repo's package manager. Write `ingest_key` from `.opslane-setup/approve.json` into the framework's public env var in a gitignored env file without echoing it, using a script that replaces that variable if present and otherwise appends it. Preserve other variables, add the env file to `.gitignore`, and never print its contents. Write `VITE_OPSLANE_ENVIRONMENT=development` (Next.js: `NEXT_PUBLIC_OPSLANE_ENVIRONMENT=development`) into the same file. Use `NEXT_PUBLIC_OPSLANE_API_KEY` for the key on Next.js. Tell the user their deploy sets the same two variables, with the environment one set to `production`. The SDK already defaults to `https://app.opslane.com`, so no `endpoint` is needed outside the Next.js tunnel.
 
 **Next.js**: tunnel through your own origin so CSPs and ad blockers do not drop events. In `next.config.*` add `async rewrites() { return [{ source: '/opslane/:path*', destination: 'https://app.opslane.com/:path*' }]; }`. The SDK sends requests with `credentials: 'omit'`, so no application cookie rides along; if the app also has a `middleware.ts`, make sure it does not add `Authorization` or `Cookie` headers to `/opslane/*`. Create `app/opslane-provider.tsx`:
 
@@ -102,7 +102,7 @@ Wrap `{children}` in `app/layout.tsx` with it. The explicit throw matters: `init
 
 ```ts
 import { init, opslaneVuePlugin } from '@opslane/sdk';
-init({ apiKey: import.meta.env.VITE_OPSLANE_API_KEY, endpoint: 'https://app.opslane.com', environment: 'development' });
+init({ apiKey: import.meta.env.VITE_OPSLANE_API_KEY, environment: import.meta.env.VITE_OPSLANE_ENVIRONMENT ?? 'development' });
 app.use(opslaneVuePlugin);
 ```
 

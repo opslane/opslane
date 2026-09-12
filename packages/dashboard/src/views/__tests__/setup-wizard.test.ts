@@ -82,8 +82,11 @@ describe('SetupWizard', () => {
       label: 'onboarding', expires_at: null, scope: 'ingest',
     });
     expect(wrapper.text()).toContain('opslane_pk_resume');
-    // The snippet always carries an explicit endpoint (the SDK default is not trusted).
+    // A non-hosted origin (jsdom's) still names the endpoint; the hosted origin
+    // would omit it because the SDK defaults to it. Environment reads the build env.
     expect(wrapper.text()).toContain(`endpoint: '${window.location.origin}'`);
+    expect(wrapper.text()).toContain("environment: import.meta.env.VITE_OPSLANE_ENVIRONMENT ?? 'development'");
+    expect(wrapper.text()).not.toContain("environment: 'development',");
     expect(localStorage.getItem('opslane_project_id')).toBe('p1');
     expect(api.onboardingSetup).not.toHaveBeenCalled();
     wrapper.unmount();

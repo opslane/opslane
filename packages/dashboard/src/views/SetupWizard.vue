@@ -133,16 +133,28 @@ const pollTimer = ref<ReturnType<typeof setInterval>>();
 const keyError = ref('');
 const keyLoading = ref(false);
 
-// Always emit the endpoint. The dashboard is served by the ingestion service,
-// so window.location.origin is the correct ingest endpoint everywhere --
-// including hosted. Omitting it on hosted left users on the SDK's baked-in
-// default, which pointed at a hostname never wired to an origin (the CORS
-// failure every hosted onboarding hit).
+// The dashboard is served by the ingestion service, so window.location.origin
+// is the ingest endpoint. The SDK's own default is the hosted origin, so the
+// snippet names an endpoint only when this deployment is not the hosted one.
+const SDK_DEFAULT_ENDPOINT = 'https://app.opslane.com';
 const endpointLine = computed(() => (
-  `\n  endpoint: '${window.location.origin}',`
+  window.location.origin === SDK_DEFAULT_ENDPOINT ? '' : `\n  endpoint: '${window.location.origin}',`
 ));
+// environment comes from the build's public env so the same snippet serves
+// development and production; the fallback keeps local runs out of the
+// project's default (production) environment.
+const environmentLine = computed(() => {
+  switch (framework.value) {
+    case 'nextjs':
+      return `\n  environment: process.env.NEXT_PUBLIC_OPSLANE_ENVIRONMENT ?? 'development',`;
+    case 'other':
+      return `\n  environment: 'development', // set from your build environment in production`;
+    default:
+      return `\n  environment: import.meta.env.VITE_OPSLANE_ENVIRONMENT ?? 'development',`;
+  }
+});
 const initSnippet = computed(() => {
-  const common = `init({\n  apiKey: '${apiKey.value}',\n  environment: 'development',${endpointLine.value}\n});`;
+  const common = `init({\n  apiKey: '${apiKey.value}',${environmentLine.value}${endpointLine.value}\n});`;
   switch (framework.value) {
     case 'vue':
       return `import { createApp } from 'vue';\nimport { init, opslaneVuePlugin } from '@opslane/sdk';\nimport App from './App.vue';\n\n${common}\n\ncreateApp(App).use(opslaneVuePlugin).mount('#app');`;
