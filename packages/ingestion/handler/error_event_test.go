@@ -1602,3 +1602,71 @@ func TestDebugMetaPersistsMaxCodeFileAndValidCommit(t *testing.T) {
 		t.Fatalf("zero-matched delta = %d, want 1", delta)
 	}
 }
+
+func TestGetSampleEventEndpointDisplaysResolvedFramesWithRawFallback(t *testing.T) {
+	deps, pool := testDeps(t)
+	orgID, projectID, _, rawKey := seedTenant(t, deps.Queries)
+	t.Cleanup(func() { cleanupTenantHandler(t, pool, orgID) })
+	deps.JWTSecret = []byte(authTestJWTSecret)
+	posted := postErrorPayload(t, deps, rawKey, `{"timestamp":"2026-09-12T00:00:00Z","error":{"type":"Error","message":"source-map proof","stack":"Error: source-map proof\n    at x (https://example.test/assets/a.js:1:99)\n    at external (https://example.test/vendor.js:8:9)"},"breadcrumbs":[],"context":{}}`)
+	eventID := posted["event_id"]
+	groupID := materializeCapturedEvent(t, pool, projectID, eventID)
+	token, err := auth.SignAccessToken(deps.JWTSecret, "sample-user", orgID, "sample@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	getStack := func() string {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/projects/"+projectID+"/incidents/"+groupID+"/sample-event", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		rec := httptest.NewRecorder()
+		handler.NewRouter(deps).ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("sample: %d %s", rec.Code, rec.Body.String())
+		}
+		var sample struct {
+			Error struct {
+				Stack string `json:"stack"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &sample); err != nil {
+			t.Fatal(err)
+		}
+		return sample.Error.Stack
+	}
+	raw := getStack()
+	if !strings.Contains(raw, "assets/a.js:1:99") {
+		t.Fatalf("raw fallback missing: %s", raw)
+	}
+	seed := func(owner, status, envelope string) {
+		t.Helper()
+		if _, err := pool.Exec(context.Background(), `INSERT INTO error_event_resolutions (project_id,event_id,status,envelope,resolver_version) VALUES ($1,$2,$3,$4::jsonb,2) ON CONFLICT(project_id,event_id) DO UPDATE SET status=EXCLUDED.status,envelope=EXCLUDED.envelope`, owner, eventID, status, envelope); err != nil {
+			t.Fatal(err)
+		}
+	}
+	otherOrg, otherProject, _, _ := seedTenant(t, deps.Queries)
+	t.Cleanup(func() { cleanupTenantHandler(t, pool, otherOrg) })
+	seed(otherProject, "resolved", `{"version":2,"frames":[{"original_file":"other-tenant-secret.ts","original_function":"private","original_line":42}]}`)
+	if got := getStack(); got != raw {
+		t.Fatalf("cross-project resolution changed stack: %s", got)
+	}
+	for _, test := range []struct{ status, envelope string }{
+		{"pending", `{"version":2,"frames":[{"original_file":"not-ready.ts","original_line":3}]}`},
+		{"resolved", `{"version":2,"frames":"invalid"}`},
+		{"resolved", `{"version":3,"frames":[{"original_file":"unknown-version.ts","original_line":3}]}`},
+		{"resolved", `{"version":2,"frames":[{"original_file":"","original_line":0}]}`},
+	} {
+		seed(projectID, test.status, test.envelope)
+		if got := getStack(); got != raw {
+			t.Fatalf("unusable resolution must retain raw stack: %s", got)
+		}
+	}
+	seed(projectID, "resolved", `{"version":2,"frames":[{"original_file":"src/App.vue","original_function":"trigger","original_line":5,"generated":{"line":1,"column":99}},{"original_file":"app/opslane-provider.tsx","original_function":"ghp_frame_secret123","original_line":11,"generated":{"line":1,"column":120}},{"original_file":"","original_function":"external","original_line":0,"generated":{"line":8,"column":9}}]}`)
+	got := getStack()
+	if !strings.Contains(got, "src/App.vue:5") || !strings.Contains(got, "app/opslane-provider.tsx:11") || !strings.Contains(got, raw) {
+		t.Fatalf("resolved frames and raw context missing: %s", got)
+	}
+	if strings.Contains(got, "ghp_frame_secret123") || strings.Contains(got, "other-tenant-secret") {
+		t.Fatalf("resolved stack leaked unredacted or foreign data: %s", got)
+	}
+}

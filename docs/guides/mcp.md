@@ -10,6 +10,8 @@ description: Connect Claude Code or Codex to Opslane and work on issues from you
 
 Opslane has a remote Model Context Protocol (MCP) server. It lets a coding agent read your latest daily summary, open an issue with its evidence, and link the pull request that fixes it.
 
+The [agent setup runbook](https://docs.opslane.com/INSTALL.md) offers to configure this connection during SDK onboarding. It stores the key in a private environment file and uses an environment reference in your agent configuration. Follow the manual steps below to connect later.
+
 The server accepts `POST /mcp` at your Opslane address. For hosted Opslane, that is `https://app.opslane.com/mcp`. It provides five tools:
 
 | Tool | What it does |
@@ -36,8 +38,10 @@ For Claude Code, add the server from the terminal:
 
 ```bash
 claude mcp add --transport http opslane https://app.opslane.com/mcp \
-  --header "Authorization: Bearer ${OPSLANE_API_KEY}"
+  --header 'Authorization: Bearer ${OPSLANE_API_KEY}'
 ```
+
+The single quotes preserve the [environment reference](https://code.claude.com/docs/en/mcp#environment-variable-expansion-in-mcp-json) for Claude Code to read when it connects. Start the agent from a shell where `OPSLANE_API_KEY` is exported.
 
 To share the server address with your team, commit this `.mcp.json`. Each person still supplies their own key through the environment:
 
@@ -53,7 +57,7 @@ To share the server address with your team, commit this `.mcp.json`. Each person
 }
 ```
 
-For Codex, add the server to `~/.codex/config.toml`:
+For Codex, [configure the bearer-token environment variable](https://developers.openai.com/codex/mcp) by adding the server to `~/.codex/config.toml`:
 
 ```toml
 [mcp_servers.opslane]

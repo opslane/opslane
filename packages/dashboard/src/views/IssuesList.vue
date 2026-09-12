@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import AgentPasteBox from '../components/AgentPasteBox.vue';
 import { computed, ref, onMounted, onUnmounted } from 'vue';
 import type { Incident, IncidentFilters, ErrorGroupStatus } from '../types/api';
 import { listIncidents } from '../api';
@@ -265,12 +266,7 @@ onUnmounted(() => stopPolling());
         title="No issues yet"
         description="Events will appear once your SDK starts reporting errors."
       >
-        <router-link
-          to="/setup"
-          class="inline-flex min-h-10 items-center bg-accent px-4 py-2 text-sm font-semibold text-on-accent hover:bg-accent-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2"
-        >
-          Setup guide
-        </router-link>
+        <AgentPasteBox />
         <button
           v-if="!viewingArchived"
           type="button"

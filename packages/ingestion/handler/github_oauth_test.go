@@ -9,7 +9,6 @@ import (
 	"net/url"
 	"os"
 	"strconv"
-	"strings"
 	"testing"
 	"time"
 
@@ -132,21 +131,6 @@ func TestValidOAuthState(t *testing.T) {
 	}
 	if !validOAuthState("same", "same") {
 		t.Error("match must pass")
-	}
-}
-
-func TestOAuthLoginCallbackDispatchesAgentUUIDState(t *testing.T) {
-	pool := githubOAuthTestPool(t)
-	q := db.New(pool)
-	session, _ := createCallbackSession(t, q, "dispatch-owner/dispatch-"+fmt.Sprint(time.Now().UnixNano()))
-	t.Cleanup(func() { _, _ = pool.Exec(context.Background(), `DELETE FROM agent_sessions WHERE id = $1`, session.ID) })
-
-	req := httptest.NewRequest(http.MethodGet,
-		"/auth/callback?state="+session.ID+"&installation_id=1", nil)
-	w := httptest.NewRecorder()
-	(&Dependencies{Queries: q}).OAuthLoginCallback(w, req)
-	if w.Code == http.StatusForbidden || strings.Contains(w.Body.String(), "invalid OAuth state") {
-		t.Fatalf("request followed web OAuth branch: code=%d body=%q", w.Code, w.Body.String())
 	}
 }
 

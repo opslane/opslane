@@ -108,11 +108,27 @@
         {
           "language": "bash",
           "classification": "config-template"
+        },
+        {
+          "language": "ts",
+          "classification": "config-template"
+        },
+        {
+          "language": "json",
+          "classification": "config-template"
+        },
+        {
+          "language": "bash",
+          "classification": "config-template"
         }
       ]
     },
     "docs/install.md": {
       "fences": [
+        {
+          "language": "text",
+          "classification": "illustrative"
+        },
         {
           "language": "bash",
           "classification": "illustrative"
@@ -126,12 +142,20 @@
           "classification": "fragment"
         },
         {
+          "language": "ts",
+          "classification": "fragment"
+        },
+        {
           "language": "tsx",
           "classification": "fragment"
         },
         {
           "language": "ts",
           "classification": "fragment"
+        },
+        {
+          "language": "text",
+          "classification": "config-template"
         },
         {
           "language": "bash",

@@ -10,12 +10,13 @@ import { fileURLToPath } from 'node:url';
 const pkgDir = join(dirname(fileURLToPath(import.meta.url)), '..');
 const pkg = JSON.parse(readFileSync(join(pkgDir, 'package.json'), 'utf8'));
 
-const required = new Set(['README.md', 'LICENSE']);
+const required = new Set(['README.md', 'LICENSE', 'THIRD_PARTY_NOTICES.md']);
 for (const entry of Object.values(pkg.exports ?? {})) {
   for (const target of Object.values(entry)) {
     required.add(target.replace(/^\.\//, ''));
   }
 }
+for (const target of Object.values(pkg.bin ?? {})) required.add(target);
 if (pkg.main) required.add(pkg.main.replace(/^\.\//, ''));
 if (pkg.types) required.add(pkg.types.replace(/^\.\//, ''));
 
@@ -46,6 +47,8 @@ while (pending.length > 0) {
       pending.push(path);
       continue;
     }
+    // The post-build command is Node-only; browser/Vite entries remain portable.
+    if (path === join(distDir, 'sourcemaps-cli.js')) continue;
     if (NODE_BUILTIN_IMPORT.test(readFileSync(path, 'utf8'))) {
       console.error(`✗ ${path} contains a Node built-in import`);
       process.exit(1);
@@ -53,4 +56,4 @@ while (pending.length > 0) {
   }
 }
 
-console.log(`✓ ${pkg.name} tarball contains README, LICENSE, and all ${required.size - 2} declared entry files (${packed.size} files total)`);
+console.log(`✓ ${pkg.name} tarball contains README, LICENSE, and all ${required.size - 3} declared entry files (${packed.size} files total)`);

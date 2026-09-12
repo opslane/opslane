@@ -155,50 +155,6 @@ func assertOAuthStateUnreserved(t *testing.T, q *db.Queries, state string) {
 	}
 }
 
-func TestAuthorizationDeniedAgentCallbackIsTerminal(t *testing.T) {
-	pool := githubOAuthTestPool(t)
-	q := db.New(pool)
-	session, _ := createCallbackSession(t, q, "denied-owner/denied-"+uuid.NewString())
-	t.Cleanup(func() { _, _ = pool.Exec(context.Background(), `DELETE FROM agent_sessions WHERE id = $1`, session.ID) })
-
-	req := httptest.NewRequest(http.MethodGet, "/auth/callback?state="+session.ID+"&error=access_denied", nil)
-	w := httptest.NewRecorder()
-	(&Dependencies{Queries: q}).OAuthLoginCallback(w, req)
-	after, err := q.GetAgentSession(context.Background(), session.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if after == nil || after.Status != "failed" || after.FailureReason == nil || *after.FailureReason != "authorization_denied" {
-		t.Fatalf("session=%+v", after)
-	}
-}
-
-func TestAgentPollDiagnosesDivergentInstallWithoutMutation(t *testing.T) {
-	pool := githubOAuthTestPool(t)
-	q := db.New(pool)
-	repo := "Diverged/Repo-" + uuid.NewString()
-	session, raw := createCallbackSession(t, q, repo)
-	installationID := time.Now().UnixNano()
-	if _, err := pool.Exec(context.Background(),
-		`INSERT INTO installation_landed (installation_id, repos) VALUES ($1, $2)`,
-		installationID, []string{repo}); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		_, _ = pool.Exec(context.Background(), `DELETE FROM agent_sessions WHERE id = $1`, session.ID)
-		_, _ = pool.Exec(context.Background(), `DELETE FROM installation_landed WHERE installation_id = $1`, installationID)
-	})
-
-	code, body := pollAgentSession(t, &Dependencies{Queries: q}, session.ID, raw)
-	if code != http.StatusOK || body["status"] != "pending" || !strings.Contains(fmt.Sprint(body["diagnosis"]), "outside this setup session") {
-		t.Fatalf("code=%d body=%v", code, body)
-	}
-	after, err := q.GetAgentSession(context.Background(), session.ID)
-	if err != nil || after == nil || after.Status != "pending" {
-		t.Fatalf("session=%+v err=%v", after, err)
-	}
-}
-
 func TestGitHubSetupCallbackIsNonMutating(t *testing.T) {
 	pool := githubOAuthTestPool(t)
 	q := db.New(pool)

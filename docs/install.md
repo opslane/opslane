@@ -11,6 +11,18 @@ description: Install the browser SDK in React, Vue, or vanilla JavaScript, ident
 
 The SDK sends your app's errors and session recordings to Opslane. Setup is one install command, one `init` call, and one `setUser` call.
 
+## Let your agent do it
+
+Paste this into your coding agent:
+
+```text
+Set up https://docs.opslane.com/INSTALL.md
+```
+
+Your agent installs the SDK, verifies an error from your app, and configures source-map uploads. You approve the project in your browser and choose whether to connect GitHub, Slack, CI secrets, and MCP.
+
+For manual setup, follow the steps below.
+
 Before you start, you need an ingest key for your project. The SDK accepts only keys beginning with `opslane_pk_`. See [API keys](guides/api-keys.md).
 
 The onboarding wizard puts this key directly in its setup snippet so you can send a test event immediately. The key ships in your bundle; move it to an environment variable before committing.
@@ -41,8 +53,9 @@ import App from './App';
 
 init({
   apiKey: 'opslane_pk_...',
-  environment: 'development',
-  endpoint: 'https://your-opslane-instance.example.com', // https://app.opslane.com for hosted Opslane
+  environment: import.meta.env.VITE_OPSLANE_ENVIRONMENT ?? 'development',
+  // Self-hosting? Add endpoint: 'https://your-opslane-instance.example.com'.
+  // Hosted Opslane needs no endpoint: the SDK defaults to https://app.opslane.com.
 });
 
 // After sign-in.
@@ -66,8 +79,9 @@ import App from './App.vue';
 
 init({
   apiKey: 'opslane_pk_...',
-  environment: 'development',
-  endpoint: 'https://your-opslane-instance.example.com', // https://app.opslane.com for hosted Opslane
+  environment: import.meta.env.VITE_OPSLANE_ENVIRONMENT ?? 'development',
+  // Self-hosting? Add endpoint: 'https://your-opslane-instance.example.com'.
+  // Hosted Opslane needs no endpoint: the SDK defaults to https://app.opslane.com.
 });
 
 setUser({ id: currentUser.id, email: currentUser.email });
@@ -79,7 +93,20 @@ The plugin hooks `app.config.errorHandler`, keeping any handler you already regi
 
 ### Next.js
 
-Initialize Opslane in a client component so the browser-only error handlers are installed after hydration. Create `app/opslane-provider.tsx`:
+Initialize Opslane in a client component after hydration. Route SDK requests through your app so a Content-Security-Policy allowing `connect-src 'self'` covers them and ad blockers are less likely to drop them. Add this rewrite to `next.config.*`, preserving any existing rewrites:
+
+```ts
+async rewrites() {
+  return [{
+    source: '/opslane/api/v1/:path*',
+    destination: 'https://app.opslane.com/api/v1/:path*',
+  }];
+}
+```
+
+For a self-hosted deployment, replace the destination origin with your Opslane address. SDK requests omit browser credentials. If you have middleware, ensure it does not add `Authorization` or `Cookie` headers to `/opslane/*`.
+
+Set `NEXT_PUBLIC_OPSLANE_API_KEY` in your gitignored `.env.local`, then create `app/opslane-provider.tsx`:
 
 ```tsx
 'use client';
@@ -88,10 +115,12 @@ import { init } from '@opslane/sdk';
 
 export function OpslaneProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
+    const apiKey = process.env.NEXT_PUBLIC_OPSLANE_API_KEY;
+    if (!apiKey) throw new Error('NEXT_PUBLIC_OPSLANE_API_KEY is not set: add it to .env.local and restart the dev server');
     init({
-      apiKey: 'opslane_pk_...',
-      environment: 'development',
-      endpoint: 'https://your-opslane-instance.example.com', // https://app.opslane.com for hosted Opslane
+      apiKey,
+      endpoint: '/opslane',
+      environment: process.env.NEXT_PUBLIC_OPSLANE_ENVIRONMENT ?? 'development',
     });
   }, []);
   return <>{children}</>;
@@ -108,8 +137,9 @@ import { init, setUser } from '@opslane/sdk';
 
 init({
   apiKey: 'opslane_pk_...',
-  environment: 'development',
-  endpoint: 'https://your-opslane-instance.example.com', // https://app.opslane.com for hosted Opslane
+  environment: import.meta.env.VITE_OPSLANE_ENVIRONMENT ?? 'development',
+  // Self-hosting? Add endpoint: 'https://your-opslane-instance.example.com'.
+  // Hosted Opslane needs no endpoint: the SDK defaults to https://app.opslane.com.
 });
 
 setUser({ id: 'user-123' });
@@ -120,6 +150,16 @@ setUser({ id: 'user-123' });
 Every independently built bundle that calls `init()` must also call `setUser()` after authentication: the main app, embeds, iframe apps, and portal or extension panels each need their own call.
 
 A bundle that skips `setUser` reports every user as anonymous. Anonymous sessions can still contribute to error impact, but Opslane cannot connect repeat activity to the same person or account, and anonymous activity cannot start a standalone session-recording issue. The dashboard flags this with **No user identification**. When it names one bundle or application, check its entry point.
+
+## Content-Security-Policy
+
+If your app sends directly to hosted Opslane, include its origin in your existing policy:
+
+```text
+connect-src 'self' https://app.opslane.com;
+```
+
+Preserve other origins your app needs. For self-hosting, use your own Opslane origin. The Next.js tunnel above only needs `'self'`. Replay uploads also need the storage origin returned by your deployment; a blocked request appears in the browser console.
 
 ## Set the environment
 
@@ -155,7 +195,7 @@ Throw real `Error` objects rather than strings. A string throw arrives with no s
 
 ## Upload source maps
 
-Production stacks point at minified bundles until you upload source maps. For Vite, add the `opslane()` plugin and set `OPSLANE_SOURCEMAP_KEY`; see [source maps](guides/source-maps.md). Only Vite has a first-party upload integration today.
+Production stacks point at minified bundles until you upload source maps. For Vite, add the `opslane()` plugin and set `OPSLANE_SOURCEMAP_KEY`; see [source maps](guides/source-maps.md). For Next.js and other bundlers, run `opslane-sourcemaps` after the production build, as described in the same guide.
 
 ## Serve cross-origin scripts correctly
 

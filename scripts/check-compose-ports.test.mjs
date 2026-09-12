@@ -11,11 +11,11 @@ import { checkComposePorts } from './check-compose-ports.mjs';
 
 const GOOD = `services:
   minio:
-    image: minio/minio
+    image: quay.io/minio/minio
     ports:
       - "\${OPSLANE_INFRA_BIND_ADDR:-127.0.0.1}:\${OPSLANE_MINIO_HOST_PORT:-9012}:9000"
   minio-setup:
-    image: minio/mc
+    image: quay.io/minio/mc
     entrypoint: ["/minio-setup.sh"]
   ingestion:
     image: busybox

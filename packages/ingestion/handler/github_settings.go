@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -43,89 +44,13 @@ func (d *Dependencies) SetGitHubConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate repo format
-	parts := strings.Split(req.GithubRepo, "/")
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		writeJSONError(w, http.StatusBadRequest, "github_repo must be in owner/repo format")
+	if d.GitHubAppSlug == "" && d.cloudAuthEnabled() && !auth.RoleSatisfies(RoleFromCtx(r.Context()), "admin") {
+		writeJSONError(w, http.StatusForbidden, "organization admin required")
 		return
 	}
-
-	orgID := OrgIDFromCtx(r.Context())
-	var fullName, defaultBranch string
-	if d.GitHubAppSlug == "" {
-		// PAT mode exercises the instance-wide GITHUB_TOKEN. Unlike the App
-		// branch there is no per-org installation binding, so gate it the way
-		// the other integration mutations are gated: cloud requires an org
-		// admin; self-hosted single-tenant (no cloud auth) stays open.
-		if d.cloudAuthEnabled() && !auth.RoleSatisfies(RoleFromCtx(r.Context()), "admin") {
-			writeJSONError(w, http.StatusForbidden, "organization admin required")
-			return
-		}
-		token := strings.TrimSpace(os.Getenv("GITHUB_TOKEN"))
-		if token == "" {
-			writeJSONError(w, http.StatusBadRequest, "configure GITHUB_TOKEN or install the GitHub App")
-			return
-		}
-		repo, repoErr := gh.GetRepo(token, parts[0], parts[1])
-		if errors.Is(repoErr, gh.ErrRepoNotFound) {
-			writeJSONError(w, http.StatusBadRequest,
-				fmt.Sprintf("%s is not reachable with the configured GITHUB_TOKEN", req.GithubRepo))
-			return
-		}
-		if repoErr != nil {
-			writeJSONError(w, http.StatusBadGateway, "could not reach GitHub, please retry")
-			return
-		}
-		fullName, defaultBranch = repo.FullName, repo.DefaultBranch
-	} else {
-		installationID, err := d.Queries.GetOrgGitHubInstallation(r.Context(), orgID)
-		if err != nil {
-			writeJSONError(w, http.StatusInternalServerError, "failed to load GitHub installation")
-			return
-		}
-		if installationID == 0 {
-			writeJSONError(w, http.StatusBadRequest, "GitHub App not installed for this organization")
-			return
-		}
-		appJWT, err := gh.GenerateAppJWT(d.GitHubAppID, d.GitHubAppPrivateKey)
-		if err != nil {
-			writeJSONError(w, http.StatusInternalServerError, "internal error")
-			return
-		}
-		installationToken, err := gh.GetInstallationToken(appJWT, installationID)
-		if err != nil {
-			writeJSONError(w, http.StatusBadGateway, "could not reach GitHub, please retry")
-			return
-		}
-		repos, err := gh.ListInstallationRepos(installationToken.Token)
-		if err != nil {
-			writeJSONError(w, http.StatusBadGateway, "could not reach GitHub, please retry")
-			return
-		}
-		var matched *gh.Repo
-		for i := range repos {
-			if strings.EqualFold(repos[i].FullName, req.GithubRepo) {
-				matched = &repos[i]
-				break
-			}
-		}
-		if matched == nil {
-			writeJSONError(w, http.StatusBadRequest, fmt.Sprintf(
-				"the Opslane GitHub App is not installed on %s — install it, then retry",
-				req.GithubRepo,
-			))
-			return
-		}
-		fullName, defaultBranch = matched.FullName, matched.DefaultBranch
-	}
-	if err := d.Queries.SetProjectGitHubConfig(
-		r.Context(),
-		orgID,
-		projectID,
-		fullName,
-		defaultBranch,
-	); err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "failed to save GitHub config")
+	fullName, code, msg := d.attachGitHubRepo(r.Context(), OrgIDFromCtx(r.Context()), projectID, req.GithubRepo)
+	if code != 0 {
+		writeJSONError(w, code, msg)
 		return
 	}
 
@@ -176,4 +101,74 @@ func (d *Dependencies) DeleteGitHubConfig(w http.ResponseWriter, r *http.Request
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+}
+
+// attachGitHubRepo verifies repository access before storing its canonical name.
+func (d *Dependencies) attachGitHubRepo(ctx context.Context, orgID, projectID, repoName string) (canonical string, status int, msg string) {
+	// Validate repo format
+	parts := strings.Split(repoName, "/")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", http.StatusBadRequest, "github_repo must be in owner/repo format"
+	}
+
+	var fullName, defaultBranch string
+	if d.GitHubAppSlug == "" {
+		token := strings.TrimSpace(os.Getenv("GITHUB_TOKEN"))
+		if token == "" {
+			return "", http.StatusBadRequest, "configure GITHUB_TOKEN or install the GitHub App"
+		}
+		repo, repoErr := gh.GetRepo(token, parts[0], parts[1])
+		if errors.Is(repoErr, gh.ErrRepoNotFound) {
+			return "", http.StatusBadRequest, fmt.Sprintf("%s is not reachable with the configured GITHUB_TOKEN", repoName)
+		}
+		if repoErr != nil {
+			return "", http.StatusBadGateway, "could not reach GitHub, please retry"
+		}
+		fullName, defaultBranch = repo.FullName, repo.DefaultBranch
+	} else {
+		installationID, err := d.Queries.GetOrgGitHubInstallation(ctx, orgID)
+		if err != nil {
+			return "", http.StatusInternalServerError, "failed to load GitHub installation"
+		}
+		if installationID == 0 {
+			return "", http.StatusBadRequest, "GitHub App not installed for this organization"
+		}
+		appJWT, err := gh.GenerateAppJWT(d.GitHubAppID, d.GitHubAppPrivateKey)
+		if err != nil {
+			return "", http.StatusInternalServerError, "internal error"
+		}
+		installationToken, err := gh.GetInstallationToken(appJWT, installationID)
+		if err != nil {
+			return "", http.StatusBadGateway, "could not reach GitHub, please retry"
+		}
+		repos, err := gh.ListInstallationRepos(installationToken.Token)
+		if err != nil {
+			return "", http.StatusBadGateway, "could not reach GitHub, please retry"
+		}
+		var matched *gh.Repo
+		for i := range repos {
+			if strings.EqualFold(repos[i].FullName, repoName) {
+				matched = &repos[i]
+				break
+			}
+		}
+		if matched == nil {
+			return "", http.StatusBadRequest, fmt.Sprintf(
+				"the Opslane GitHub App is not installed on %s — install it, then retry",
+				repoName,
+			)
+		}
+		fullName, defaultBranch = matched.FullName, matched.DefaultBranch
+	}
+	if err := d.Queries.SetProjectGitHubConfig(
+		ctx,
+		orgID,
+		projectID,
+		fullName,
+		defaultBranch,
+	); err != nil {
+		return "", http.StatusInternalServerError, "failed to save GitHub config"
+	}
+
+	return fullName, 0, ""
 }

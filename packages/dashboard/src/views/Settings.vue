@@ -36,6 +36,7 @@ import RepoSelector from '../components/RepoSelector.vue';
 import InvitationsPanel from '../components/InvitationsPanel.vue';
 import ModalSurface from '../components/ui/ModalSurface.vue';
 import Button from '../components/ui/Button.vue';
+import StatusLabel from '../components/ui/StatusLabel.vue';
 import TextInput from '../components/ui/TextInput.vue';
 import TabList from '../components/ui/TabList.vue';
 import {
@@ -80,7 +81,7 @@ function selectSettingsTab(value: string): void {
 
 // Project tab
 const projects = ref<Project[]>([]);
-const selectedProjectId = ref(localStorage.getItem('opslane_project_id') ?? '');
+const selectedProjectId = ref('');
 const loadingProjects = ref(true);
 const showNewProjectForm = ref(false);
 const newProjectName = ref('');
@@ -167,6 +168,7 @@ const apiKeys = ref<ManagedAPIKey[]>([]);
 const loadingAPIKeys = ref(false);
 const apiKeyError = ref('');
 const apiKeyLabel = ref('');
+const apiKeyScope = ref<'api' | 'sourcemaps'>('api');
 const apiKeyExpiry = ref('');
 const creatingAPIKey = ref(false);
 const revokingAPIKeyID = ref('');
@@ -261,25 +263,38 @@ onMounted(async () => {
     }).catch(() => {}),
   ]);
   authLoaded.value = true;
-  const requestedTab = route.query.tab;
-  if (
-    typeof requestedTab === 'string'
-    && settingsTabs.value.some((tab) => tab.id === requestedTab)
-  ) {
-    selectSettingsTab(requestedTab);
-  }
   try {
     projects.value = await listProjects();
+    const requestedProjectId = route.query.project_id;
+    const requestedProject = typeof requestedProjectId === 'string'
+      ? projects.value.find((project) => project.id === requestedProjectId)
+      : undefined;
+    const cachedProject = projects.value.find((project) => project.id === localStorage.getItem('opslane_project_id'));
+    const activeProject = requestedProject ?? cachedProject ?? projects.value[0];
+    if (activeProject) {
+      selectedProjectId.value = activeProject.id;
+      if (activeProject.id !== localStorage.getItem('opslane_project_id')) {
+        applyProjectSelection(localStorage, activeProject);
+      } else {
+        localStorage.setItem('opslane_project_name', activeProject.name);
+      }
+    }
     // Load GitHub App status + per-project config
     loadGitHubAppStatus();
     if (selectedProjectId.value) {
       loadGitHubConfig(selectedProjectId.value);
     }
   } catch {
-    // The active project remains available from local storage; project-scoped
-    // requests below will surface their own failures.
+    // Keep project actions unavailable until the organization project list loads.
   } finally {
     loadingProjects.value = false;
+  }
+  const requestedTab = route.query.tab;
+  if (
+    typeof requestedTab === 'string'
+    && settingsTabs.value.some((tab) => tab.id === requestedTab)
+  ) {
+    selectSettingsTab(requestedTab);
   }
 });
 
@@ -509,7 +524,7 @@ function optionStats(value: Project['friction_autonomy']): string {
 
 function switchTab(tab: SettingsTab): void {
   activeTab.value = tab;
-  const pid = selectedProjectId.value || localStorage.getItem('opslane_project_id') || '';
+  const pid = selectedProjectId.value;
   if (tab === 'environments' && environments.value.length === 0 && pid) {
     loadEnvironments(pid);
   }
@@ -561,7 +576,7 @@ async function handleCreateAPIKey(): Promise<void> {
   apiKeyError.value = '';
   try {
     const expiresAt = apiKeyExpiry.value ? new Date(apiKeyExpiry.value).toISOString() : null;
-    createdAPIKey.value = await createAPIKey(projectId, { label, expires_at: expiresAt });
+    createdAPIKey.value = await createAPIKey(projectId, { label, expires_at: expiresAt, scope: apiKeyScope.value });
     apiKeyAcknowledged.value = false;
     apiKeyLabel.value = '';
     apiKeyExpiry.value = '';
@@ -678,7 +693,7 @@ async function loadGitHubAppStatus(): Promise<void> {
 }
 
 async function handleConnectGithub(): Promise<void> {
-  const pid = selectedProjectId.value || localStorage.getItem('opslane_project_id') || '';
+  const pid = selectedProjectId.value;
   if (!pid || !selectedRepo.value) return;
   connectingGithub.value = true;
   githubError.value = '';
@@ -696,7 +711,7 @@ async function handleConnectGithub(): Promise<void> {
 }
 
 async function handleDisconnectGithub(): Promise<void> {
-  const pid = selectedProjectId.value || localStorage.getItem('opslane_project_id') || '';
+  const pid = selectedProjectId.value;
   if (!pid) return;
   disconnectingGithub.value = true;
   try {
@@ -1040,16 +1055,23 @@ async function handleDisconnectGithub(): Promise<void> {
     <!-- API Keys tab -->
     <div v-if="activeTab === 'api-keys' && canProvision" id="settings-api-keys-panel" role="tabpanel" aria-labelledby="settings-api-keys-tab" tabindex="0" class="space-y-6">
       <div>
-        <h3 class="text-sm font-medium text-text">Remote MCP API keys</h3>
+        <h3 class="text-sm font-medium text-text">API keys</h3>
         <p class="mt-1 text-sm text-muted">
-          Secret, project-scoped credentials for Claude Code, Codex, and other server-side clients.
-          Never put an <code>opslane_ak_</code> key in browser code.
+          Manage browser ingest, remote MCP, and source-map upload keys for this project.
+          Keep API and source-map keys in server-side clients or CI; they never go in browser code.
         </p>
       </div>
 
-      <form id="api-key-create-form" class="space-y-3 rounded-lg border border-border bg-surface p-4" @submit.prevent="handleCreateAPIKey">
+      <form id="api-key-create-form" data-testid="api-key-create" class="space-y-3 rounded-lg border border-border bg-surface p-4" @submit.prevent="handleCreateAPIKey">
         <h4 class="text-sm font-medium text-text">Create key</h4>
-        <TextInput id="api-key-label" v-model="apiKeyLabel" label="Label" name="api-key-label" maxlength="100" placeholder="Claude Code on work laptop" required />
+        <TextInput id="api-key-label" data-testid="api-key-label" v-model="apiKeyLabel" label="Label" name="api-key-label" maxlength="100" placeholder="Claude Code on work laptop" required />
+        <label class="block text-sm font-medium text-muted" for="api-key-scope">
+          Scope
+          <select id="api-key-scope" v-model="apiKeyScope" data-testid="api-key-scope" class="mt-1 block w-full rounded-md border border-border bg-surface-subtle pl-3 pr-8 py-2 text-sm text-text">
+            <option value="api">Remote MCP</option>
+            <option value="sourcemaps">Source-map upload, for CI</option>
+          </select>
+        </label>
         <label class="block text-sm font-medium text-muted" for="api-key-expiry">
           Expires (optional)
           <input
@@ -1059,19 +1081,21 @@ async function handleDisconnectGithub(): Promise<void> {
             class="mt-1 block w-full rounded-md border border-border bg-surface-subtle px-3 py-2 text-sm text-text focus:border-accent focus:ring-1 focus:ring-accent"
           />
         </label>
-        <Button variant="primary" type="submit" :disabled="creatingAPIKey || !apiKeyLabel.trim()">
+        <Button variant="primary" type="submit" :disabled="creatingAPIKey || !selectedProjectId || !apiKeyLabel.trim()">
           {{ creatingAPIKey ? 'Creating...' : 'Create secret API key' }}
         </Button>
       </form>
 
       <section v-if="createdAPIKey" class="rounded-lg border border-warning/40 bg-warning/10 p-4" aria-live="polite">
         <h4 class="text-sm font-semibold text-text">Save this key now</h4>
-        <p class="mt-1 text-xs text-muted">It is shown only once. Configure your MCP client with <code>{{ mcpEndpoint }}</code> and this bearer token.</p>
+        <p class="mt-1 text-xs text-muted">It is shown only once.</p>
+        <p v-if="createdAPIKey.scope === 'sourcemaps'" class="mt-1 text-xs text-muted">Set this as <code>OPSLANE_SOURCEMAP_KEY</code> in your CI. It never goes in the browser.</p>
+        <p v-else class="mt-1 text-xs text-muted">Configure your MCP client with <code>{{ mcpEndpoint }}</code> and this bearer token.</p>
         <div class="relative mt-3 break-all rounded-md bg-surface-subtle p-3 pr-12 font-mono text-sm text-text">
           <span v-text="createdAPIKey.token"></span>
           <div class="absolute right-2 top-2"><CopyButton :text="createdAPIKey.token" /></div>
         </div>
-        <p class="mt-3 font-mono text-xs text-muted">OPSLANE_API_KEY=&lt;paste the key above&gt;</p>
+        <p v-if="createdAPIKey.scope === 'api'" class="mt-3 font-mono text-xs text-muted">OPSLANE_API_KEY=&lt;paste the key above&gt;</p>
         <label class="mt-3 flex items-start gap-2 text-sm text-muted">
           <input id="api-key-acknowledged" v-model="apiKeyAcknowledged" type="checkbox" class="mt-0.5" />
           <span>I have copied and stored this key securely.</span>
@@ -1081,12 +1105,12 @@ async function handleDisconnectGithub(): Promise<void> {
 
       <p v-if="apiKeyError" role="alert" class="text-sm text-danger" v-text="apiKeyError"></p>
       <div v-if="loadingAPIKeys" class="text-sm text-muted">Loading API keys...</div>
-      <div v-else-if="apiKeys.length === 0" class="rounded-lg border border-border bg-surface p-4 text-sm text-muted">No remote MCP API keys yet.</div>
+      <div v-else-if="apiKeys.length === 0" class="rounded-lg border border-border bg-surface p-4 text-sm text-muted">No API keys yet.</div>
       <ul v-else class="space-y-2">
         <li v-for="key in apiKeys" :key="key.key_id" class="rounded-lg border border-border bg-surface p-4">
           <div class="flex items-start justify-between gap-4">
             <div class="min-w-0">
-              <div class="text-sm font-medium text-text" v-text="key.label"></div>
+              <div class="flex items-center gap-2 text-sm font-medium text-text"><span v-text="key.label"></span><StatusLabel>{{ key.scope }}</StatusLabel></div>
               <div class="mt-1 break-all font-mono text-xs text-muted" v-text="key.redacted"></div>
               <div class="mt-2 text-xs text-faint">
                 Created {{ formatDate(key.created_at) }} · Expires {{ displayExpiry(key.expires_at) }} · {{ key.status }}

@@ -146,6 +146,7 @@ async function sendSessionRegistration(sessionID: string): Promise<boolean> {
     const user = getCurrentUser();
     const response = await sdkFetch(`${config.endpoint}/api/v1/sessions/init`, {
       method: 'POST',
+      credentials: 'omit',
       headers: { 'Content-Type': 'application/json', 'X-API-Key': config.apiKey },
       body: JSON.stringify({
         session_id: sessionID,

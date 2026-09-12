@@ -371,13 +371,43 @@ func (q *Queries) CreateAPIKey(
 	return minted, record, nil
 }
 
+// CreateSourcemapKey mints an upload credential scoped to the requested tenant.
+func (q *Queries) CreateSourcemapKey(
+	ctx context.Context,
+	orgID, projectID, label, createdByUserID, endpoint string,
+) (*MintedProjectKey, *APIKeyRecord, error) {
+	minted, err := NewProjectKey(ScopeSourcemaps, endpoint)
+	if err != nil {
+		return nil, nil, err
+	}
+	record := &APIKeyRecord{}
+	err = q.pool.QueryRow(ctx, `
+		INSERT INTO project_api_keys
+		  (key_id, project_id, scope, token_prefix, secret_hash, label,
+		   created_by_user_id, expires_at)
+		SELECT $3, p.id, $7, $8, $4, $5, $6, NULL
+		FROM projects p
+		WHERE p.id = $2 AND p.org_id = $1
+		RETURNING id, key_id, scope, label, created_by_user_id, created_at,
+		          expires_at, revoked_at, revoked_by_user_id`,
+		orgID, projectID, minted.KeyID, minted.SecretHash, label,
+		createdByUserID, minted.Scope, minted.TokenPrefix,
+	).Scan(&minted.ID, &record.KeyID, &record.Scope, &record.Label,
+		&record.CreatedBy, &record.CreatedAt, &record.ExpiresAt,
+		&record.RevokedAt, &record.RevokedBy)
+	if err != nil {
+		return nil, nil, fmt.Errorf("create sourcemaps key: %w", err)
+	}
+	return minted, record, nil
+}
+
 func (q *Queries) ListAPIKeys(ctx context.Context, orgID, projectID string) ([]APIKeyRecord, error) {
 	rows, err := q.pool.Query(ctx, `
 		SELECT k.key_id, k.scope, k.label, k.created_by_user_id, k.created_at,
 		       k.expires_at, k.revoked_at, k.revoked_by_user_id
 		FROM project_api_keys k
 		JOIN projects p ON p.id = k.project_id AND p.org_id = $1
-		WHERE k.project_id = $2 AND k.scope IN ('api', 'ingest')
+		WHERE k.project_id = $2 AND k.scope IN ('api', 'ingest', 'sourcemaps')
 		ORDER BY k.created_at DESC, k.id DESC`, orgID, projectID)
 	if err != nil {
 		return nil, fmt.Errorf("list api keys: %w", err)
@@ -409,7 +439,7 @@ func (q *Queries) RevokeAPIKey(
 		    revoked_by_user_id = COALESCE(k.revoked_by_user_id, $4)
 		FROM projects p
 		WHERE p.id = k.project_id AND p.org_id = $1
-		  AND k.project_id = $2 AND k.key_id = $3 AND k.scope IN ('api', 'ingest')`,
+		  AND k.project_id = $2 AND k.key_id = $3 AND k.scope IN ('api', 'ingest', 'sourcemaps')`,
 		orgID, projectID, keyID, revokedByUserID)
 	if err != nil {
 		return false, fmt.Errorf("revoke api key: %w", err)
