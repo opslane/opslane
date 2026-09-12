@@ -109,7 +109,12 @@ func (d *Dependencies) AgentApprove(w http.ResponseWriter, r *http.Request) {
 		ProjectName       string  `json:"project_name"`
 		ExistingProjectID *string `json:"existing_project_id"`
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16))
+	if err := decoder.Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		writeJSONError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		writeJSONError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}

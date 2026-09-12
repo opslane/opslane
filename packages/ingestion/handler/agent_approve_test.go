@@ -129,6 +129,9 @@ func TestAgentApprove_CreateThenPollDeliversBundle(t *testing.T) {
 
 func TestAgentApprove_BodyValidation(t *testing.T) {
 	a := newApproveRig(t)
+	if code, _ := a.do(t, http.MethodPost, "/api/v1/agent/approve/"+a.pollID, `{} {}`, true); code != http.StatusBadRequest {
+		t.Fatalf("trailing JSON: %d", code)
+	}
 	if code, _ := a.do(t, http.MethodPost, "/api/v1/agent/approve/"+a.pollID, `{not json`, true); code != http.StatusBadRequest {
 		t.Fatalf("malformed: %d", code)
 	}
