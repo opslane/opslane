@@ -117,18 +117,34 @@ interface SourceMappingDirective {
 function sourceMappingDirectives(code: string): SourceMappingDirective[] {
   if (!code.includes('sourceMappingURL')) return [];
   const directives: SourceMappingDirective[] = [];
-  const tokens = tokenizer(code, {
-    ecmaVersion: 'latest',
-    // Comment discovery must accept sloppy scripts as well as ESM tokens.
-    sourceType: 'script',
-    onComment(_block, text, start, end) {
-      const match = /^[@#][ \t]*sourceMappingURL[ \t]*=[ \t]*(\S+)[ \t]*$/.exec(text);
-      if (match) directives.push({ start, end, url: match[1] });
-    },
-  });
-  // Lexing distinguishes comments from regexes and template/string contents
-  // without requiring the emitted chunk to be a complete program.
-  while (tokens.getToken().type.label !== 'eof') { /* Consume comment callbacks. */ }
+  try {
+    const tokens = tokenizer(code, {
+      ecmaVersion: 'latest',
+      // Comment discovery must accept sloppy scripts as well as ESM tokens.
+      sourceType: 'script',
+      onComment(_block, text, start, end) {
+        const match = /^[@#][ \t]*sourceMappingURL[ \t]*=[ \t]*(\S+)[ \t]*$/.exec(text);
+        if (match) directives.push({ start, end, url: match[1] });
+      },
+    });
+    // Lexing distinguishes comments from regexes and template/string contents
+    // without requiring the emitted chunk to be a complete program.
+    while (tokens.getToken().type.label !== 'eof') { /* Consume comment callbacks. */ }
+    return directives;
+  } catch {
+    // Syntax acorn cannot lex still gets the conventional trailing directive.
+    return trailingDirectives(code);
+  }
+}
+
+const TRAILING_DIRECTIVE = /(?:^|\n)(\/\/[@#][ \t]*sourceMappingURL[ \t]*=[ \t]*(\S+)[ \t]*)(?=\r?\n|$)/g;
+
+function trailingDirectives(code: string): SourceMappingDirective[] {
+  const directives: SourceMappingDirective[] = [];
+  for (const match of code.matchAll(TRAILING_DIRECTIVE)) {
+    const start = match.index + match[0].length - match[1].length;
+    directives.push({ start, end: start + match[1].length, url: match[2] });
+  }
   return directives;
 }
 

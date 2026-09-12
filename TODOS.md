@@ -179,18 +179,6 @@ It was deliberately left alone by the issue-list polish plan, which is scoped da
 
 **Depends on / blocked by:** Nothing.
 
-## Revisit member-level onboarding provisioning in cloud
-
-**What:** `POST /api/v1/onboard/provision` is admin-gated in cloud (`RequireRoleIfCloud("admin")`, `packages/ingestion/handler/routes.go:113`). Decide deliberately whether org members should be able to self-provision.
-
-**Why:** The milestone 0.5 plan (docs/plans/2026-07-22-milestone-0.5-account-provisioning.md, line 24) settled the opposite — "no admin gate, login + org membership only" — to enable bottom-up adoption (any teammate tries Opslane without pinging an admin). Commit e365003 reversed that as a security hardening with no written rationale; the integration test now asserts member→403. If bottom-up adoption becomes the growth motion, this gate silently blocks it.
-
-**Pros:** members can adopt Opslane solo; matches the original product decision. **Cons:** provisioning mints/rotates a production key — member-level access widens that surface; sibling key routes are admin-gated.
-
-**Context:** Found during the 2026-07-24 /plan-eng-review of Phase 2 (onboarding-10x). The removed CLI surfaced a typed `NotAuthorizedError` with "ask an org admin" remediation, so the failure was at least honest. Self-hosted OSS is unaffected (`RequireRoleIfCloud` is transparent there). Re-decide with real cloud data on who actually provisions projects (the CLI entry point for this route was removed 2026-08-23; the dashboard uses `/api/v1/onboarding/setup`).
-
-**Depends on / blocked by:** cloud usage data; a product call, not an eng task.
-
 ## SDK: recover from a 409 on /sessions/init instead of never reporting
 
 **What:** When the browser SDK holds a stored session identity from a previous project (localStorage on the same origin) and the app is re-onboarded to a NEW project, `POST /api/v1/sessions/init` returns 409 repeatedly and the SDK never reaches `app_reporting`. It should treat 409 as "discard stored identity, start a fresh session."

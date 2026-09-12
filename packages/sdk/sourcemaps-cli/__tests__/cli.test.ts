@@ -192,7 +192,7 @@ describe('post-build safety and formats', () => {
     expect((await readFile(mapPath)).equals(Buffer.from(bytes))).toBe(true);
   });
 
-  it.each(['https://evil.test/maps.js.map', '../../../outside.map', 'data:application/json;base64,e30='])('refuses map target %s', async target => {
+  it.each(['https://evil.test/maps.js.map', '../../../outside.map'])('refuses map target %s', async target => {
     const path = join(dir, 'chunks/a/main.js');
     const code = `a();\n//# sourceMappingURL=${target}\n`;
     await writeFile(path, code);
@@ -200,6 +200,19 @@ describe('post-build safety and formats', () => {
     const result = await run({ fetchImpl });
     expect(result.uploaded).toBe(1);
     expect(result.failed).toHaveLength(3);
+    expect(await readFile(path, 'utf8')).toBe(code);
+  });
+
+  it('skips an inline data: map without failing the build', async () => {
+    const path = join(dir, 'chunks/a/main.js');
+    const code = 'a();\n//# sourceMappingURL=data:application/json;base64,e30=\n';
+    await writeFile(path, code);
+    const { fetchImpl } = recorder(() => 201);
+    const result = await run({ fetchImpl });
+    expect(result.uploaded).toBe(1);
+    // The fixture's own two broken artifacts still fail; the inline-map file is not among them.
+    expect(result.failed.map(failure => failure.fileName)).not.toContain('chunks/a/main.js');
+    expect(result.failed).toHaveLength(2);
     expect(await readFile(path, 'utf8')).toBe(code);
   });
 

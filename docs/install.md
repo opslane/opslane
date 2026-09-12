@@ -98,8 +98,8 @@ Initialize Opslane in a client component after hydration. Route SDK requests thr
 ```ts
 async rewrites() {
   return [{
-    source: '/opslane/:path*',
-    destination: 'https://app.opslane.com/:path*',
+    source: '/opslane/api/v1/:path*',
+    destination: 'https://app.opslane.com/api/v1/:path*',
   }];
 }
 ```

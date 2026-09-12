@@ -4074,6 +4074,21 @@ func (q *Queries) HasEvents(ctx context.Context, projectID string) (bool, error)
 }
 
 // LatestErrorGroupID returns the most recently active error group, or nil.
+// HasEventsSince reports whether the project received any event at or after
+// the given time. Agent sessions use it so attaching to an existing project
+// does not satisfy the first-event proof with history.
+func (q *Queries) HasEventsSince(ctx context.Context, projectID string, since time.Time) (bool, error) {
+	var exists bool
+	err := q.pool.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM error_events WHERE project_id = $1 AND created_at >= $2)`,
+		projectID, since,
+	).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("has events since: %w", err)
+	}
+	return exists, nil
+}
+
 func (q *Queries) LatestErrorGroupID(ctx context.Context, projectID string) (*string, error) {
 	var id string
 	err := q.pool.QueryRow(ctx,
@@ -4392,7 +4407,17 @@ func (q *Queries) GetAgentSession(ctx context.Context, sessionID string) (*Agent
 	return &s, nil
 }
 
-// ExpireAgentSessions marks all pending sessions past their expiry as expired.
+// AgentKeyDeliveryWindow is how long after the first key delivery a poll can
+// still return the sealed bundle. It covers an agent that lost the response,
+// then the bundle is purged so a leaked poll token stops yielding live keys.
+const AgentKeyDeliveryWindow = 15 * time.Minute
+
+// agentSessionRetention is how long terminal sessions stay on disk.
+const agentSessionRetention = 7 * 24 * time.Hour
+
+// ExpireAgentSessions marks all pending sessions past their expiry as expired,
+// purges sealed key bundles past their delivery window, and deletes terminal
+// sessions past retention.
 // Called periodically by the cleanup goroutine.
 func (q *Queries) ExpireAgentSessions(ctx context.Context) (int64, error) {
 	tag, err := q.pool.Exec(ctx,
@@ -4404,10 +4429,20 @@ func (q *Queries) ExpireAgentSessions(ctx context.Context) (int64, error) {
 	}
 	if _, err := q.pool.Exec(ctx,
 		`UPDATE agent_sessions SET api_key_sealed = NULL
-		 WHERE status IN ('completed', 'provisioned', 'key_ok', 'app_reporting')
-		   AND expires_at <= now() AND api_key_sealed IS NOT NULL`,
+		 WHERE api_key_sealed IS NOT NULL
+		   AND (expires_at <= now()
+		        OR status IN ('failed', 'expired')
+		        OR key_claimed_at <= now() - $1::interval)`,
+		AgentKeyDeliveryWindow.String(),
 	); err != nil {
 		return 0, fmt.Errorf("purge sealed agent keys: %w", err)
+	}
+	if _, err := q.pool.Exec(ctx,
+		`DELETE FROM agent_sessions
+		 WHERE expires_at <= now() - $1::interval`,
+		agentSessionRetention.String(),
+	); err != nil {
+		return 0, fmt.Errorf("delete stale agent sessions: %w", err)
 	}
 	return tag.RowsAffected(), nil
 }

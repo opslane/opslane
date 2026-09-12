@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { stampCodeAndMap, unstamp, DEBUG_ID_TRAILER, stripSourceMappingURLDirectives } from '../build/stamp';
+import { stampCodeAndMap, unstamp, DEBUG_ID_TRAILER, stripSourceMappingURLDirectives, getSourceMappingURL } from '../build/stamp';
 
 const code = 'console.log("hi");\n//# sourceMappingURL=app.js.map\n';
 const map = JSON.stringify({ version: 3, file: 'app.js', sources: ['../src/app.ts'], names: [], mappings: 'AAAA' });
@@ -101,5 +101,14 @@ describe('source-map directive comments', () => {
       String.raw`const e = /[/*]# sourceMappingURL=regex-class.map/;`,
     ].join('\n');
     expect(stripSourceMappingURLDirectives(code)).toBe(code);
+  });
+
+  it('falls back to the trailing directive when the chunk cannot be lexed', () => {
+    // A lone `}` is a syntax error for the tokenizer; the directive must still be found and stripped.
+    const code = '}\nvar a = 1;\n//# sourceMappingURL=main.js.map\n';
+    expect(getSourceMappingURL(code)).toBe('main.js.map');
+    const stripped = stripSourceMappingURLDirectives(code);
+    expect(stripped).not.toContain('sourceMappingURL');
+    expect(stripped.split('\n').length).toBe(code.split('\n').length);
   });
 });

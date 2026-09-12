@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -76,6 +77,17 @@ func (a approveRig) do(t *testing.T, method, path, body string, cookie bool) (in
 	rec := httptest.NewRecorder()
 	a.r.ServeHTTP(rec, req)
 	return rec.Code, decodeBody(t, rec)
+}
+
+// fire sends a request without touching t, for use from goroutines.
+func (a approveRig) fire(method, path, body string, cookie bool) int {
+	req := agentRequest(method, path, body, a.ip)
+	if cookie {
+		req.AddCookie(a.cookie)
+	}
+	rec := httptest.NewRecorder()
+	a.r.ServeHTTP(rec, req)
+	return rec.Code
 }
 
 func (a approveRig) poll(t *testing.T, query string) (int, map[string]any) {
@@ -209,9 +221,66 @@ func TestAgentPoll_RejectsLegacyAndIncompleteKeyBundles(t *testing.T) {
 		if _, err := a.deps.Queries.Pool().Exec(context.Background(), `UPDATE agent_sessions SET api_key_sealed=$2 WHERE id=$1`, a.pollID, sealed); err != nil {
 			t.Fatal(err)
 		}
-		if code, body := a.poll(t, ""); code != http.StatusInternalServerError || body["ingest_key"] != nil {
-			t.Fatalf("legacy payload delivered: %d %v", code, body)
+		code, body := a.poll(t, "")
+		if code != http.StatusOK || body["ingest_key"] != nil || !strings.Contains(fmt.Sprint(body["message"]), "delivery window closed") {
+			t.Fatalf("legacy payload must read as a closed window: %d %v", code, body)
 		}
+	}
+}
+
+func TestAgentPoll_KeyDeliveryWindowClosesAfterFirstClaim(t *testing.T) {
+	a := newApproveRig(t)
+	a.do(t, http.MethodPost, "/api/v1/agent/approve/"+a.pollID, `{"existing_project_id":"`+a.project+`"}`, true)
+	if code, body := a.poll(t, ""); code != http.StatusOK || body["ingest_key"] == nil {
+		t.Fatalf("first claim: %d %v", code, body)
+	}
+	// Re-polling inside the window still delivers, for an agent that lost the response.
+	if code, body := a.poll(t, ""); code != http.StatusOK || body["ingest_key"] == nil {
+		t.Fatalf("re-claim inside window: %d %v", code, body)
+	}
+	if _, err := a.deps.Queries.Pool().Exec(context.Background(),
+		`UPDATE agent_sessions SET key_claimed_at = now() - interval '16 minutes' WHERE id = $1`, a.pollID); err != nil {
+		t.Fatal(err)
+	}
+	code, body := a.poll(t, "")
+	if code != http.StatusOK || body["ingest_key"] != nil || body["approved"] != true {
+		t.Fatalf("after window: %d %v", code, body)
+	}
+	if _, err := a.deps.Queries.ExpireAgentSessions(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := a.deps.Queries.GetAgentSession(context.Background(), a.pollID)
+	if err != nil || stored.APIKeySealed != nil {
+		t.Fatalf("sweep must purge the sealed bundle past the window: %v %v", stored, err)
+	}
+}
+
+func TestAgentApprove_ExpiredSessionIsGone(t *testing.T) {
+	a := newApproveRig(t)
+	if _, err := a.deps.Queries.Pool().Exec(context.Background(),
+		`UPDATE agent_sessions SET expires_at = now() - interval '1 second' WHERE id = $1`, a.pollID); err != nil {
+		t.Fatal(err)
+	}
+	if code, body := a.do(t, http.MethodPost, "/api/v1/agent/approve/"+a.pollID, `{}`, true); code != http.StatusGone {
+		t.Fatalf("approve after expiry: %d %v", code, body)
+	}
+	stored, err := a.deps.Queries.GetAgentSession(context.Background(), a.pollID)
+	if err != nil || stored.Status != "pending" || stored.APIKeySealed != nil {
+		t.Fatalf("expired approve must not provision: %v %v", stored, err)
+	}
+}
+
+func TestAgentSessionSweep_DeletesStaleRows(t *testing.T) {
+	a := newApproveRig(t)
+	if _, err := a.deps.Queries.Pool().Exec(context.Background(),
+		`UPDATE agent_sessions SET status = 'expired', expires_at = now() - interval '8 days' WHERE id = $1`, a.pollID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.deps.Queries.ExpireAgentSessions(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if stored, err := a.deps.Queries.GetAgentSession(context.Background(), a.pollID); err != nil || stored != nil {
+		t.Fatalf("stale session should be deleted: %v %v", stored, err)
 	}
 }
 

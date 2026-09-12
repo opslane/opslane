@@ -4,12 +4,10 @@ import (
 	"context"
 	"crypto/hmac"
 	"encoding/json"
-	"fmt"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/opslane/opslane/packages/ingestion/auth"
 	"github.com/opslane/opslane/packages/ingestion/db"
-	gh "github.com/opslane/opslane/packages/ingestion/github"
 	"log/slog"
 	"net/http"
 	"regexp"
@@ -44,10 +42,9 @@ func (d *Dependencies) AgentSetup(w http.ResponseWriter, r *http.Request) {
 
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<16)
 	var req struct {
-		ProjectName   string `json:"project_name"`
-		AgentName     string `json:"agent_name"`
-		GitRemote     string `json:"git_remote"`
-		FrameworkHint string `json:"framework_hint"`
+		ProjectName string `json:"project_name"`
+		AgentName   string `json:"agent_name"`
+		GitRemote   string `json:"git_remote"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid request body")
@@ -135,6 +132,11 @@ func (d *Dependencies) AgentPoll(w http.ResponseWriter, r *http.Request) {
 
 	wait := parseWait(r.URL.Query().Get("wait"))
 	untilEvent := r.URL.Query().Get("until") == "event"
+	if wait > 0 && !agentWaiters.acquire(sessionID) {
+		wait = 0 // too many holders on this session: answer now
+	} else if wait > 0 {
+		defer agentWaiters.release(sessionID)
+	}
 	deadline := time.Now().Add(time.Duration(wait) * time.Second)
 	for {
 		session, err := d.Queries.GetAgentSession(r.Context(), sessionID)
@@ -201,7 +203,9 @@ func (d *Dependencies) writeAgentPollResponse(w http.ResponseWriter, r *http.Req
 		if session.OrgID != nil {
 			resp["org_id"] = *session.OrgID
 		}
-		if session.APIKeySealed == nil {
+		windowClosed := session.APIKeySealed == nil ||
+			(session.KeyClaimedAt != nil && time.Since(*session.KeyClaimedAt) > db.AgentKeyDeliveryWindow)
+		if windowClosed {
 			resp["message"] = "key delivery window closed; ask the user to run setup again"
 		} else {
 			opened, openErr := auth.OpenAgentKey(pollToken, session.ID, *session.APIKeySealed)
@@ -212,15 +216,18 @@ func (d *Dependencies) writeAgentPollResponse(w http.ResponseWriter, r *http.Req
 			}
 			var bundle db.AgentKeyBundle
 			if err := json.Unmarshal([]byte(opened), &bundle); err != nil || bundle.IngestKey == "" || bundle.APIKey == "" || bundle.SourcemapKey == "" {
-				slog.Error("agent poll: sealed payload is not a key bundle", "session_id", session.ID)
-				agentJSON(w, http.StatusInternalServerError, map[string]any{"status": "internal_error", "message": "internal error"})
-				return
-			}
-			resp["ingest_key"] = bundle.IngestKey
-			resp["api_key"] = bundle.APIKey
-			resp["sourcemap_key"] = bundle.SourcemapKey
-			if err := d.Queries.MarkAgentKeyDelivered(r.Context(), session.ID); err != nil {
-				slog.Warn("agent poll: mark delivered", "error", err)
+				// A session sealed by the retired CLI path holds a raw key,
+				// not a bundle. Its keys are unrecoverable here; report the
+				// window closed rather than a server error.
+				slog.Warn("agent poll: sealed payload is not a key bundle", "session_id", session.ID)
+				resp["message"] = "key delivery window closed; ask the user to run setup again"
+			} else {
+				resp["ingest_key"] = bundle.IngestKey
+				resp["api_key"] = bundle.APIKey
+				resp["sourcemap_key"] = bundle.SourcemapKey
+				if err := d.Queries.MarkAgentKeyDelivered(r.Context(), session.ID); err != nil {
+					slog.Warn("agent poll: mark delivered", "error", err)
+				}
 			}
 		}
 		if !time.Now().Before(session.ExpiresAt) {
@@ -289,24 +296,6 @@ func (d *Dependencies) publicOrigin(r *http.Request) string {
 	}
 	return backendOrigin(r)
 }
-func pickVerifiedEmail(userToken string) (string, bool, error) {
-	emails, err := gh.GetUserEmails(userToken)
-	if err != nil {
-		return "", false, fmt.Errorf("fetch user emails: %w", err)
-	}
-	for _, email := range emails {
-		if email.Primary && email.Verified {
-			return email.Email, true, nil
-		}
-	}
-	for _, email := range emails {
-		if email.Verified {
-			return email.Email, true, nil
-		}
-	}
-	return "", false, nil
-}
-
 func containsInstallation(ids []int64, id int64) bool {
 	for _, candidate := range ids {
 		if candidate == id {

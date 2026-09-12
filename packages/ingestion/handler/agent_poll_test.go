@@ -59,7 +59,7 @@ func TestAgentPoll_PendingLongPollReturnsOnApproval(t *testing.T) {
 	}
 	go func() {
 		time.Sleep(1500 * time.Millisecond)
-		a.do(t, http.MethodPost, "/api/v1/agent/approve/"+a.pollID, `{"existing_project_id":"`+a.project+`"}`, true)
+		a.fire(http.MethodPost, "/api/v1/agent/approve/"+a.pollID, `{"existing_project_id":"`+a.project+`"}`, true)
 	}()
 	code, out, took = timedPoll(t, a, "?wait=10")
 	if code != http.StatusOK || out["approved"] != true {
@@ -92,6 +92,13 @@ func TestAgentPoll_PendingLongPollReturnsOnApproval(t *testing.T) {
 
 func TestAgentPoll_UntilEventHoldsThenFlips(t *testing.T) {
 	a := newApproveRig(t)
+	// History on the attached project predates the session and must not count.
+	if _, err := a.deps.Queries.Pool().Exec(context.Background(),
+		`INSERT INTO error_events (project_id, environment_id, "timestamp", platform, error_type, error_message, stack_trace_raw, created_at)
+		 SELECT $1, default_environment_id, now() - interval '1 day', 'javascript', 'TypeError', 'old', 'at a (b.js:1:1)', now() - interval '1 day'
+		 FROM projects WHERE id = $1`, a.project); err != nil {
+		t.Fatal(err)
+	}
 	a.do(t, http.MethodPost, "/api/v1/agent/approve/"+a.pollID, `{"existing_project_id":"`+a.project+`"}`, true)
 	code, out, took := timedPoll(t, a, "?wait=2&until=event")
 	if code != http.StatusOK || out["has_events"] != false || took < 1900*time.Millisecond {
@@ -114,7 +121,7 @@ func TestAgentPoll_DenyAndExpiryDuringWaitReturnPromptly(t *testing.T) {
 	a := newApproveRig(t)
 	go func() {
 		time.Sleep(1200 * time.Millisecond)
-		a.do(t, http.MethodPost, "/api/v1/agent/approve/"+a.pollID+"/deny", ``, true)
+		a.fire(http.MethodPost, "/api/v1/agent/approve/"+a.pollID+"/deny", ``, true)
 	}()
 	code, out, took := timedPoll(t, a, "?wait=10")
 	if code != http.StatusOK || out["status"] != "failed" || took > 4*time.Second {

@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"reflect"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -147,26 +148,36 @@ func (d *Dependencies) AgentSessionState(w http.ResponseWriter, r *http.Request)
 		writeJSONError(w, http.StatusBadRequest, "until must be event, github, slack, or change")
 		return
 	}
+	if wait > 0 && !agentWaiters.acquire(s.ID) {
+		// Too many holders on one session: answer now instead of stacking
+		// per-second fact queries. The runbook only ever holds one wait.
+		wait = 0
+	} else if wait > 0 {
+		defer agentWaiters.release(s.ID)
+	}
 	deadline := time.Now().Add(time.Duration(wait) * time.Second)
 	var first *agentFacts
 	for {
-		f := d.agentSessionFacts(r, s)
-		if first == nil {
-			snapshot := f
-			first = &snapshot
-		}
+		// Between ticks only the gating fact is read; the full set is
+		// evaluated once for the response.
 		done := true
 		switch until {
 		case "event":
-			done = f.HasEvents
+			done, _ = d.Queries.HasEventsSince(r.Context(), *s.ProjectID, s.CreatedAt)
 		case "github":
-			done = f.GitHubConnected
+			done = d.agentSessionFacts(r, s).GitHubConnected
 		case "slack":
-			done = f.SlackConnected
+			done, _ = d.Queries.HasEnabledSlackDestination(r.Context(), *s.ProjectID)
 		case "change":
+			f := d.agentSessionFacts(r, s)
+			if first == nil {
+				snapshot := f
+				first = &snapshot
+			}
 			done = !reflect.DeepEqual(f, *first)
 		}
 		if done || wait == 0 || time.Now().After(deadline) {
+			f := d.agentSessionFacts(r, s)
 			resp := map[string]any{
 				"status": s.Status, "project_id": *s.ProjectID, "dashboard_url": d.publicOrigin(r) + "/?project_id=" + *s.ProjectID,
 				"expires_at": s.ExpiresAt.UTC().Format(time.RFC3339),
@@ -189,6 +200,37 @@ func (d *Dependencies) AgentSessionState(w http.ResponseWriter, r *http.Request)
 			return
 		}
 	}
+}
+
+// sessionWaiters caps concurrent long-polls per session so one leaked or
+// looping client cannot multiply per-second fact queries.
+type sessionWaiters struct {
+	mu    sync.Mutex
+	count map[string]int
+}
+
+const maxWaitersPerSession = 2
+
+var agentWaiters = &sessionWaiters{count: map[string]int{}}
+
+func (s *sessionWaiters) acquire(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.count[id] >= maxWaitersPerSession {
+		return false
+	}
+	s.count[id]++
+	return true
+}
+
+func (s *sessionWaiters) release(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.count[id] <= 1 {
+		delete(s.count, id)
+		return
+	}
+	s.count[id]--
 }
 
 // POST /api/v1/agent/poll/{sessionID}/github  {"repo":"owner/repo"}
@@ -306,7 +348,7 @@ func (d *Dependencies) AgentSessionComplete(w http.ResponseWriter, r *http.Reque
 		agentJSON(w, http.StatusOK, map[string]any{"onboarding_complete": true})
 		return
 	}
-	has, err := d.Queries.HasEvents(r.Context(), *s.ProjectID)
+	has, err := d.Queries.HasEventsSince(r.Context(), *s.ProjectID, s.CreatedAt)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "failed to check events")
 		return

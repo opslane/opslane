@@ -45,7 +45,9 @@ func (d *Dependencies) agentSessionFacts(r *http.Request, s *db.AgentSession) ag
 	projectID, orgID := *s.ProjectID, *s.OrgID
 	f.IssuesURL = origin + "/?project_id=" + projectID
 	f.GitHubConnectURL = origin + "/settings?project_id=" + projectID + "#github"
-	if has, err := d.Queries.HasEvents(ctx, projectID); err == nil {
+	// Events count only from when the session started, so attaching an
+	// existing project with history does not pass the first-event proof.
+	if has, err := d.Queries.HasEventsSince(ctx, projectID, s.CreatedAt); err == nil {
 		f.HasEvents = has
 	}
 	if f.HasEvents {

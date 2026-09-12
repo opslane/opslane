@@ -151,6 +151,9 @@ func (d *Dependencies) AgentApprove(w http.ResponseWriter, r *http.Request) {
 		},
 	})
 	switch {
+	case errors.Is(err, db.ErrAgentSessionExpired):
+		writeJSONError(w, http.StatusGone, "this setup session has expired; ask the agent to run setup again")
+		return
 	case errors.Is(err, db.ErrAgentSessionNotPending):
 		writeJSONError(w, http.StatusConflict, "this setup session is no longer pending")
 		return

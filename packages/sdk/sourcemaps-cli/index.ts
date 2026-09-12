@@ -61,6 +61,8 @@ async function mapFor(root: string, jsPath: string, code: string, retainedMaps: 
   const target = getSourceMappingURL(code);
   let candidate = target ? resolve(dirname(jsPath), target) : jsPath + '.map';
   let name = fileName(root, candidate);
+  // An inline map has nothing on disk to stamp or upload; leave the file alone.
+  if (target && /^data:/i.test(target)) return null;
   if (target && (/^[a-z][a-z0-9+.-]*:/i.test(target) || isAbsolute(target) || /^[A-Za-z]:[\\/]/.test(target))) {
     return { fileName: name, error: 'sourceMappingURL points outside the build directory' };
   }
@@ -200,7 +202,7 @@ export async function runSourcemapsCli(opts: CliOptions): Promise<CliSummary> {
     if (failed.has(artifact.fileName)) { log(`kept ${artifact.fileName}: upload failed`); continue; }
     try {
       await writeFile(artifact.jsPath, stripSourceMappingURLDirectives(artifact.code));
-      if (!opts.keepMaps) { await rm(artifact.mapPath); summary.removed++; }
+      if (!opts.keepMaps) { await rm(artifact.mapPath, { force: true }); summary.removed++; }
     } catch (error) { fail(artifact.fileName, messageOf(error)); }
   }
   // Next/Turbopack can emit private maps without a discoverable JS pair,

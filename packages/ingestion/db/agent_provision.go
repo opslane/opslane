@@ -12,6 +12,7 @@ import (
 
 var (
 	ErrAgentSessionNotPending = errors.New("agent session is not pending")
+	ErrAgentSessionExpired    = errors.New("agent session has expired")
 	ErrAgentProjectNotInOrg   = errors.New("project does not belong to the approving org")
 )
 
@@ -57,7 +58,10 @@ func (q *Queries) ApproveAgentSession(ctx context.Context, in AgentApproveInput)
 		}
 		return nil, fmt.Errorf("lock agent session: %w", err)
 	}
-	if status != "pending" || time.Now().After(expiresAt) {
+	if time.Now().After(expiresAt) {
+		return nil, ErrAgentSessionExpired
+	}
+	if status != "pending" {
 		return nil, ErrAgentSessionNotPending
 	}
 
@@ -111,7 +115,7 @@ func (q *Queries) ApproveAgentSession(ctx context.Context, in AgentApproveInput)
 		`UPDATE agent_sessions
 		 SET status = 'provisioned', org_id = $2, project_id = $3, api_key_sealed = $4,
 		     project_name = $5, provisioned_by_user_id = $6
-		 WHERE id = $1 AND status = 'pending'`,
+		 WHERE id = $1 AND status = 'pending' AND expires_at > now()`,
 		in.SessionID, in.OrgID, project.ID, sealed, project.Name, in.UserID)
 	if err != nil {
 		return nil, fmt.Errorf("approve agent session: %w", err)

@@ -86,7 +86,8 @@ function stopPolling(): void {
   if (timer) { clearInterval(timer); timer = null; }
 }
 function startPolling(): void {
-  if (!timer) timer = setInterval(() => { void refresh(); }, 3000);
+  // A hidden tab holds its last state; polling resumes on the next visible tick.
+  if (!timer) timer = setInterval(() => { if (!document.hidden) void refresh(); }, 3000);
 }
 
 function applyInfo(next: AgentApproveInfo): void {
@@ -222,13 +223,16 @@ async function deny(): Promise<void> {
         <h1 class="text-lg font-medium text-text">Approve agent setup</h1>
         <p class="mt-3 text-sm text-muted">
           <strong class="text-text">{{ info?.agent_name || 'A coding agent' }}</strong>
-          wants to set up Opslane<span v-if="info?.git_remote"> for <code>{{ info?.git_remote }}</code></span>. It will do the steps below and stop only for what it cannot do alone.
+          wants to set up Opslane<span v-if="info?.git_remote"> for <code class="break-all">{{ info?.git_remote }}</code></span>. It will do the steps below and stop only for what it cannot do alone.
+        </p>
+        <p class="mt-2 text-xs text-muted" data-testid="agent-approve-warning">
+          Anyone can send this link. Approve only if you started this setup yourself a moment ago; approving hands the agent keys for the project you pick.
         </p>
 
         <fieldset class="mt-6 space-y-3" :disabled="phase === 'working'">
           <legend class="text-xs font-medium text-muted">Project</legend>
           <label class="flex items-start gap-3 rounded border border-border p-3">
-            <input type="radio" value="__new__" v-model="choice" class="mt-1" />
+            <input type="radio" name="agent-project" value="__new__" v-model="choice" class="mt-1" />
             <span class="flex-1">
               <span class="block text-sm text-text">Create a new project</span>
               <input
@@ -242,7 +246,7 @@ async function deny(): Promise<void> {
             </span>
           </label>
           <label v-for="p in info?.projects ?? []" :key="p.id" class="flex items-start gap-3 rounded border border-border p-3">
-            <input type="radio" :value="p.id" v-model="choice" class="mt-1" />
+            <input type="radio" name="agent-project" :value="p.id" v-model="choice" class="mt-1" />
             <span class="flex-1">
               <span class="block text-sm text-text">Use <strong>{{ p.name }}</strong></span>
               <span v-if="p.github_repo" class="block text-xs text-muted">{{ p.github_repo }}<span v-if="p.id === info?.suggested_project_id"> · matches this repo</span></span>
