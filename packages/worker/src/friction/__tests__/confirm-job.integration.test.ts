@@ -355,6 +355,99 @@ describeDb('confirmation job', () => {
       worker.release();
     }
   });
+  it('cancels a delivery reservation waiting behind retirement without locking its lease first', async () => {
+    const t = await publish(await ticket());
+    const incident = (await store.liveIncident(pool, t))!;
+    const attempt = (
+      await pool.query(
+        `INSERT INTO friction_fix_attempts(ticket_id,error_group_id,generation,status) VALUES($1,$2,1,'active') RETURNING id`,
+        [t.id, incident.id],
+      )
+    ).rows[0];
+    await pool.query(
+      `UPDATE error_groups SET fix_substate='fixing',status='fixing' WHERE id=$1`,
+      [incident.id],
+    );
+    const row = (
+      await pool.query(
+        `INSERT INTO error_group_jobs(project_id,ticket_id,error_group_id,fix_attempt_id,publication_generation,job_type,status,worker_id,lease_generation,lease_expires_at) VALUES($1,$2,$3,$4,1,'fix','claimed','delivery-cancel',1,now()+interval '5 minutes') RETURNING id`,
+        [projectId, t.id, incident.id, attempt.id],
+      )
+    ).rows[0];
+    const lease = {
+      id: row.id,
+      workerId: 'delivery-cancel',
+      leaseGeneration: '1',
+      projectId,
+      errorGroupId: incident.id,
+      sessionId: null,
+    };
+    const owner = await pool.connect();
+    let running: Promise<unknown> | undefined;
+    try {
+      await owner.query('BEGIN');
+      await store.lockPublication(owner, environmentId);
+      await store.getTicket(owner, projectId, t.id, true);
+      const pid = (await owner.query('SELECT pg_backend_pid() AS pid')).rows[0]
+        .pid;
+      running = db
+        .reserveDelivery(
+          incident.id,
+          projectId,
+          {
+            operationKey: `fix:${attempt.id}`,
+            branchName: 'fix/save',
+            posture: 'ready',
+            diffHash: 'hash',
+            candidateDiff: 'diff',
+          },
+          lease,
+        )
+        .then(
+          (value) => value,
+          (error) => error,
+        );
+      let blocked = false;
+      for (let i = 0; i < 100; i++) {
+        blocked = (
+          await pool.query(
+            'SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))) blocked',
+            [pid],
+          )
+        ).rows[0].blocked;
+        if (blocked) break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(blocked).toBe(true);
+      await owner.query(
+        'SELECT id FROM error_group_jobs WHERE id=$1 FOR UPDATE NOWAIT',
+        [lease.id],
+      );
+      await store.unpublish(owner, t);
+      await owner.query('COMMIT');
+      expect(await running).toMatchObject({ name: 'LeaseLostError' });
+      expect(
+        (
+          await pool.query(
+            'SELECT status FROM friction_fix_attempts WHERE id=$1',
+            [attempt.id],
+          )
+        ).rows[0].status,
+      ).toBe('superseded');
+      expect(
+        (
+          await pool.query(
+            'SELECT 1 FROM delivery_reservations WHERE error_group_id=$1',
+            [incident.id],
+          )
+        ).rows,
+      ).toEqual([]);
+    } finally {
+      await owner.query('ROLLBACK');
+      await running;
+      owner.release();
+    }
+  });
   it('retries a changed fold target without another batch, preserving the unresolved marker', async () => {
     const source = await publish(await ticket());
     await embed(source);

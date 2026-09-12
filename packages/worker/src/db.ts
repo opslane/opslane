@@ -1743,6 +1743,7 @@ export async function reserveDelivery(
   const client = await getPool().connect();
   try {
     await client.query('BEGIN');
+    await lockJobPublications(client, [lease.id]);
     const owned = await client.query(
       `SELECT id FROM error_group_jobs
        WHERE id = $1 AND worker_id = $2 AND lease_generation = $3::bigint
