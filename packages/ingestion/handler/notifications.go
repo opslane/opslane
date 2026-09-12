@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -169,36 +170,12 @@ func (d *Dependencies) CreateNotificationDestinationEndpoint(w http.ResponseWrit
 		return
 	}
 
-	// Notification endpoints are Slack-only today. The stored destination type
-	// is also the encryption AAD; adding a type requires type-specific config
-	// validation and a migration widening the database CHECK.
-	destinationType := "slack"
-	destinationID := uuid.NewString()
-	configJSON, err := json.Marshal(notificationConfig{WebhookURL: request.WebhookURL})
+	created, err := d.createSlackDestination(r.Context(), OrgIDFromCtx(r.Context()), projectID, request)
 	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "failed to encode notification configuration")
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	sealed, err := d.ConfigCipher.Seal(configJSON, notify.ConfigAAD(destinationID, projectID, destinationType))
-	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "failed to encrypt notification configuration")
-		return
-	}
-	created, err := d.Queries.CreateNotificationDestination(r.Context(), OrgIDFromCtx(r.Context()), projectID, db.NotificationDestination{
-		ID:                destinationID,
-		ProjectID:         projectID,
-		Type:              destinationType,
-		Name:              request.Name,
-		ConfigEncrypted:   sealed,
-		ConfigFingerprint: notify.FingerprintURL(request.WebhookURL),
-		EventTypes:        request.EventTypes,
-		DeliveryPolicy:    request.DeliveryPolicy,
-		Enabled:           request.Enabled == nil || *request.Enabled,
-	})
-	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "failed to create notification destination")
-		return
-	}
+
 	writeJSON(w, http.StatusCreated, notificationDestinationResponse(*created))
 }
 
@@ -333,14 +310,9 @@ func (d *Dependencies) TestNotificationDestinationEndpoint(w http.ResponseWriter
 		writeJSONError(w, http.StatusInternalServerError, "failed to load notification destination")
 		return
 	}
-	plaintext, err := d.ConfigCipher.Open(destination.ConfigEncrypted, notify.ConfigAAD(destination.ID, projectID, destination.Type))
+	config, err := d.openNotificationConfig(destination)
 	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "failed to decrypt notification configuration")
-		return
-	}
-	var config notificationConfig
-	if err := json.Unmarshal(plaintext, &config); err != nil || config.WebhookURL == "" {
-		writeJSONError(w, http.StatusInternalServerError, "invalid notification configuration")
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, notificationRequestLimit)
@@ -362,13 +334,7 @@ func (d *Dependencies) TestNotificationDestinationEndpoint(w http.ResponseWriter
 	var payload notify.EventPayload
 	switch request.EventType {
 	case "", "issue.created":
-		payload = notify.EventPayload{
-			Version:     1,
-			EventType:   "issue.created",
-			Issue:       &notify.IssueRef{ID: "test", Title: "Test notification from Opslane", FirstSeen: time.Now().UTC().Format(time.RFC3339)},
-			Project:     notify.ProjectRef{ID: projectID, Name: "Opslane"},
-			Environment: "test",
-		}
+		payload = notificationIssueTestPayload(projectID)
 	case "digest.daily":
 		if d.DigestBuilder == nil {
 			writeJSONError(w, http.StatusServiceUnavailable, "digest unavailable")
@@ -427,4 +393,94 @@ func validNotificationEventTypes(eventTypes []string) bool {
 		}
 	}
 	return true
+}
+
+// createSlackDestination seals validated configuration before storing it.
+func (d *Dependencies) createSlackDestination(ctx context.Context, orgID, projectID string, request createNotificationDestinationRequest) (*db.NotificationDestination, error) {
+	// Notification endpoints are Slack-only today. The stored destination type
+	// is also the encryption AAD; adding a type requires type-specific config
+	// validation and a migration widening the database CHECK.
+	destinationType := "slack"
+	destinationID := uuid.NewString()
+	configJSON, err := json.Marshal(notificationConfig{WebhookURL: request.WebhookURL})
+	if err != nil {
+		return nil, errors.New("failed to encode notification configuration")
+	}
+	sealed, err := d.ConfigCipher.Seal(configJSON, notify.ConfigAAD(destinationID, projectID, destinationType))
+	if err != nil {
+		return nil, errors.New("failed to encrypt notification configuration")
+	}
+	created, err := d.Queries.CreateNotificationDestination(ctx, orgID, projectID, db.NotificationDestination{
+		ID:                destinationID,
+		ProjectID:         projectID,
+		Type:              destinationType,
+		Name:              request.Name,
+		ConfigEncrypted:   sealed,
+		ConfigFingerprint: notify.FingerprintURL(request.WebhookURL),
+		EventTypes:        request.EventTypes,
+		DeliveryPolicy:    request.DeliveryPolicy,
+		Enabled:           request.Enabled == nil || *request.Enabled,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create notification destination: %w", err)
+	}
+	return created, nil
+}
+
+func (d *Dependencies) openNotificationConfig(destination *db.NotificationDestination) (notificationConfig, error) {
+	plaintext, err := d.ConfigCipher.Open(destination.ConfigEncrypted, notify.ConfigAAD(destination.ID, destination.ProjectID, destination.Type))
+	if err != nil {
+		return notificationConfig{}, errors.New("failed to decrypt notification configuration")
+	}
+	var config notificationConfig
+	if err := json.Unmarshal(plaintext, &config); err != nil || config.WebhookURL == "" {
+		return notificationConfig{}, errors.New("invalid notification configuration")
+	}
+	return config, nil
+}
+
+func notificationIssueTestPayload(projectID string) notify.EventPayload {
+	return notify.EventPayload{
+		Version:     1,
+		EventType:   "issue.created",
+		Issue:       &notify.IssueRef{ID: "test", Title: "Test notification from Opslane", FirstSeen: time.Now().UTC().Format(time.RFC3339)},
+		Project:     notify.ProjectRef{ID: projectID, Name: "Opslane"},
+		Environment: "test",
+	}
+}
+
+var (
+	errSlackValidation  = errors.New("slack validation")
+	errSlackUnavailable = errors.New("notifications are not configured")
+)
+
+// createTestEnableSlack enables delivery only after the test message succeeds.
+func (d *Dependencies) createTestEnableSlack(ctx context.Context, orgID, projectID, webhookURL string) (destID string, ok bool, errMsg, classification string, err error) {
+	if d.ConfigCipher == nil || d.NotifySender == nil {
+		return "", false, "", "", errSlackUnavailable
+	}
+	if err := notify.ValidateSlackWebhookURL(webhookURL, d.NotifyExtraHosts); err != nil {
+		return "", false, "", "", fmt.Errorf("%w: %s", errSlackValidation, err)
+	}
+	enabled := false
+	destination, err := d.createSlackDestination(ctx, orgID, projectID, createNotificationDestinationRequest{
+		Name: "Slack (agent setup)", WebhookURL: webhookURL, Enabled: &enabled, EventTypes: []string{"issue.created", "digest.daily"}, DeliveryPolicy: "post_triage",
+	})
+	if err != nil {
+		return "", false, "", "", err
+	}
+	config, err := d.openNotificationConfig(destination)
+	if err != nil {
+		return "", false, "", "", err
+	}
+	outcome := d.NotifySender.Send(ctx, destination.Type, config.WebhookURL, notificationIssueTestPayload(projectID))
+	if outcome.Class != "delivered" {
+		_ = d.Queries.DeleteNotificationDestination(ctx, orgID, projectID, destination.ID)
+		return "", false, outcome.Reason, outcome.Class, nil
+	}
+	enabled = true
+	if err := d.Queries.UpdateNotificationDestination(ctx, orgID, projectID, destination.ID, nil, nil, nil, &enabled, nil, nil); err != nil {
+		return "", false, "", "", err
+	}
+	return destination.ID, true, "", "", nil
 }

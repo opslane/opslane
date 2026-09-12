@@ -29,6 +29,7 @@ func agentJSON(w http.ResponseWriter, code int, body map[string]any) {
 }
 
 func (d *Dependencies) AgentSetup(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	ip := clientIP(r)
 	if !agentSetupLimiter.allow(ip) {
 		slog.Warn("agent setup rate limit exceeded", "ip", ip)
@@ -102,6 +103,7 @@ func (d *Dependencies) AgentSetup(w http.ResponseWriter, r *http.Request) {
 	})
 }
 func (d *Dependencies) AgentPoll(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	ip := clientIP(r)
 	if !agentPollLimiter.allow(ip) {
 		w.Header().Set("Retry-After", "60")
@@ -188,6 +190,7 @@ func (d *Dependencies) writeAgentPollResponse(w http.ResponseWriter, r *http.Req
 		}
 		if session.ProjectID != nil {
 			resp["project_id"] = *session.ProjectID
+			resp["dashboard_url"] = d.publicOrigin(r) + "/?project_id=" + *session.ProjectID
 		}
 		if session.OrgID != nil {
 			resp["org_id"] = *session.OrgID

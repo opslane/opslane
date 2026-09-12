@@ -43,13 +43,14 @@ func (d *Dependencies) agentSessionFacts(r *http.Request, s *db.AgentSession) ag
 		return f
 	}
 	projectID, orgID := *s.ProjectID, *s.OrgID
-	f.IssuesURL = origin + "/?project=" + projectID
+	f.IssuesURL = origin + "/?project_id=" + projectID
+	f.GitHubConnectURL = origin + "/settings?project_id=" + projectID + "#github"
 	if has, err := d.Queries.HasEvents(ctx, projectID); err == nil {
 		f.HasEvents = has
 	}
 	if f.HasEvents {
 		if latest, err := d.Queries.LatestErrorGroupID(ctx, projectID); err == nil && latest != nil {
-			u := origin + "/issues/" + *latest
+			u := origin + "/issues/" + *latest + "?project_id=" + projectID
 			f.LatestErrorGroupURL = &u
 		}
 	}

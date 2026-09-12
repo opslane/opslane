@@ -91,6 +91,7 @@ func (d *Dependencies) AgentApproveInfo(w http.ResponseWriter, r *http.Request) 
 	resp["projects"] = list
 	resp["suggested_project_id"] = suggested
 	if session.OrgID != nil && session.ProjectID != nil {
+		resp["project_id"] = *session.ProjectID
 		resp["facts"] = d.agentSessionFacts(r, session)
 	}
 	writeJSON(w, http.StatusOK, resp)

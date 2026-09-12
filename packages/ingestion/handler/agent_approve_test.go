@@ -147,6 +147,9 @@ func TestAgentApprove_AttachExistingAndDeny(t *testing.T) {
 	if code != http.StatusOK || out["project_id"] != a.project {
 		t.Fatalf("attach: %d %v", code, out)
 	}
+	if code, info := a.do(t, http.MethodGet, "/api/v1/agent/approve/"+a.pollID, "", true); code != http.StatusOK || info["project_id"] != a.project {
+		t.Fatalf("bound info: %d %v", code, info)
+	}
 	b := newApproveRig(t)
 	if code, _ := b.do(t, http.MethodPost, "/api/v1/agent/approve/"+b.pollID+"/deny", ``, true); code != http.StatusOK {
 		t.Fatalf("deny: %d", code)

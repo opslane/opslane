@@ -76,6 +76,15 @@ func TestAgentPoll_PendingLongPollReturnsOnApproval(t *testing.T) {
 	if out["has_events"] != false || out["github_connected"] != false || out["slack_connected"] != false || out["sourcemaps_uploaded"] != false {
 		t.Fatalf("fresh facts should all be false: %v", out)
 	}
+	for field, want := range map[string]string{
+		"issues_url":         "https://app.example.test/?project_id=" + a.project,
+		"dashboard_url":      "https://app.example.test/?project_id=" + a.project,
+		"github_connect_url": "https://app.example.test/settings?project_id=" + a.project + "#github",
+	} {
+		if out[field] != want {
+			t.Fatalf("%s=%v want %s", field, out[field], want)
+		}
+	}
 	if u, _ := out["github_connect_url"].(string); !strings.HasPrefix(u, "https://app.example.test/settings") {
 		t.Fatalf("github_connect_url must be an Opslane page: %v", out["github_connect_url"])
 	}
@@ -93,7 +102,7 @@ func TestAgentPoll_UntilEventHoldsThenFlips(t *testing.T) {
 	if code != http.StatusOK || out["has_events"] != true {
 		t.Fatalf("after event: %d %v", code, out)
 	}
-	if u, _ := out["latest_error_group_url"].(string); u != "https://app.example.test/issues/"+groupID {
+	if u, _ := out["latest_error_group_url"].(string); u != "https://app.example.test/issues/"+groupID+"?project_id="+a.project {
 		t.Fatalf("latest_error_group_url %v", out["latest_error_group_url"])
 	}
 	if next, _ := out["next"].(string); !strings.Contains(next, "Remove the test button") {
