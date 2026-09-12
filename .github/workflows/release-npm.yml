@@ -78,3 +78,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NPM_CONFIG_PROVENANCE: 'true'
+          # Trusted publishing has failed with a bare ENEEDAUTH since the repo
+          # rename; verbose shows the OIDC exchange request and its status.
+          NPM_CONFIG_LOGLEVEL: verbose
