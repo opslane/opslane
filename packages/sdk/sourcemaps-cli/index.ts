@@ -1,4 +1,4 @@
-import { readFile, writeFile, readdir, rm, realpath, stat } from 'node:fs/promises';
+import { readFile, writeFile, readdir, rm, realpath, stat, lstat } from 'node:fs/promises';
 import { join, dirname, resolve, relative, sep, isAbsolute } from 'node:path';
 import { stampCodeAndMap, stripSourceMappingURLDirectives, getSourceMappingURL, DEBUG_ID_TRAILER } from '../src/build/stamp';
 import { computeDebugId } from '../src/build/debug-id';
@@ -26,6 +26,7 @@ export interface CliSummary {
 
 const MAX_MAP_BYTES = 32 << 20;
 const JS_FILE = /\.(m|c)?js$/;
+const BUILD_MAP_FILE = /\.(?:[mc]?js|css)\.map$/;
 const FORMATS = new Set(['es', 'iife', 'umd', 'cjs', 'system']);
 const USAGE = 'usage: opslane-sourcemaps <build-dir> [--format es|iife|umd|cjs|system] [--project-root <dir>] [--keep-maps] [--dry-run] [--require-key]';
 const MISSING_KEY = 'opslane-sourcemaps: OPSLANE_SOURCEMAP_KEY not set, skipping (maps left untouched)';
@@ -201,6 +202,27 @@ export async function runSourcemapsCli(opts: CliOptions): Promise<CliSummary> {
       await writeFile(artifact.jsPath, stripSourceMappingURLDirectives(artifact.code));
       if (!opts.keepMaps) { await rm(artifact.mapPath); summary.removed++; }
     } catch (error) { fail(artifact.fileName, messageOf(error)); }
+  }
+  // Next/Turbopack can emit private maps without a discoverable JS pair,
+  // including renamed polyfills and CSS. Remove those only after a clean run;
+  // every failed artifact and its maps must remain available for retry.
+  if (!opts.keepMaps && summary.failed.length === 0) {
+    for (const path of files.filter(path => BUILD_MAP_FILE.test(path))) {
+      try {
+        const entry = await lstat(path);
+        if (!entry.isFile()) throw new Error('residual map is no longer a regular file');
+        const real = await realpath(path);
+        if (!insideRoot(root, real)) throw new Error('residual map resolves outside the build directory');
+        await rm(path);
+        summary.removed++;
+        log(`removed residual map ${fileName(root, path)}`);
+      } catch (error) {
+        // Successfully uploaded maps were already removed above.
+        if (isObject(error) && error.code === 'ENOENT') continue;
+        fail(fileName(root, path), `residual map cleanup failed: ${messageOf(error)}`);
+        break;
+      }
+    }
   }
   for (const failure of summary.failed) log(`${failure.fileName}: ${failure.reason}`);
   log(`opslane-sourcemaps: stamped ${summary.stamped}, uploaded ${summary.uploaded}, removed ${summary.removed}, skipped ${summary.skipped}, failed ${summary.failed.length}`);
