@@ -157,6 +157,31 @@ describe('SDK Config', () => {
       .toThrow('endpoint must be a valid http(s) URL');
   });
 
+  it('resolves same-origin paths and removes trailing slashes', () => {
+    loadConfig({ apiKey: TEST_PK, endpoint: '/opslane/' });
+    expect(getConfig().endpoint).toBe(`${window.location.origin}/opslane`);
+  });
+
+  it('requires a browser origin for path endpoints', () => {
+    vi.stubGlobal('location', undefined);
+    try {
+      expect(() => loadConfig({ apiKey: TEST_PK, endpoint: '/opslane' }))
+        .toThrow('endpoint path requires a browser origin');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('rejects an opaque browser origin', () => {
+    vi.stubGlobal('location', { origin: 'null' });
+    try {
+      expect(() => loadConfig({ apiKey: TEST_PK, endpoint: '/opslane' }))
+        .toThrow('endpoint path requires a browser origin');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('should accept the default endpoint and explicit http(s) endpoints', () => {
     expect(() => loadConfig({ apiKey: TEST_PK })).not.toThrow();
     expect(() => loadConfig({ endpoint: 'http://localhost:8080', apiKey: TEST_PK })).not.toThrow();

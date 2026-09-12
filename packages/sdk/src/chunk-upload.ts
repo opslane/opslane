@@ -43,6 +43,7 @@ async function sendChunk(
     `${config.endpoint}/api/v1/sessions/${encodeURIComponent(sessionID)}/chunks/${seq}?has_full_snapshot=${flag}`,
     {
       method: 'POST',
+      credentials: 'omit',
       headers: { 'Content-Type': 'application/gzip', 'X-API-Key': config.apiKey },
       body: compressed as Uint8Array<ArrayBuffer>,
       keepalive,
