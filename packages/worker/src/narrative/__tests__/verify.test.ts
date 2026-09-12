@@ -230,12 +230,6 @@ describe('processFrameVerification', () => {
       deps.capture.mockRejectedValue(new Error('capture failed'));
       return deps;
     }],
-    ['missing assets', (deps: ReturnType<typeof dependencies>) => {
-      deps.capture.mockResolvedValue({ frames: [{
-        offsetMs: 5_000, pair: 'a' as const, png: Buffer.from('png'), modelPng: Buffer.from('small-png'),
-      }], assetsMissing: true });
-      return deps;
-    }],
     ['empty frames', (deps: ReturnType<typeof dependencies>) => {
       deps.capture.mockResolvedValue({ frames: [], assetsMissing: false });
       return deps;
@@ -256,9 +250,23 @@ describe('processFrameVerification', () => {
     await processFrameVerification(job, deps, new AbortController().signal);
     const rows = dbMock.finalizeVerification.mock.calls[0]?.[1].signalRows;
     expect(rows.map((row: { observationId: string }) => row.observationId)).toEqual(['positive']);
-    if (_name === 'missing assets' || _name === 'empty frames') {
+    if (_name === 'empty frames') {
       expect((deps.client as unknown as { complete: ReturnType<typeof vi.fn> }).complete).not.toHaveBeenCalled();
     }
+  });
+
+  it('still grades with frames when the replay aborted external assets', async () => {
+    // Real apps load stylesheets, fonts and images from other origins; the
+    // replay aborts them and renders the DOM without them. That is not a
+    // failed capture.
+    const deps = dependencies();
+    deps.capture.mockResolvedValue({ frames: [
+      { offsetMs: 5_000, pair: 'a' as const, png: Buffer.from('png'), modelPng: Buffer.from('small-png') },
+      { offsetMs: 5_000, pair: 'b' as const, png: Buffer.from('png2'), modelPng: Buffer.from('small-png2') },
+    ], assetsMissing: true });
+    await processFrameVerification(job, deps, new AbortController().signal);
+    expect((deps.client as unknown as { complete: ReturnType<typeof vi.fn> }).complete).toHaveBeenCalled();
+    expect(dbMock.finalizeVerification.mock.calls[0]![1].state).toBe('ok');
   });
 
   it('stores the failure reason on fallback', async () => {

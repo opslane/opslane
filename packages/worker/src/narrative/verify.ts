@@ -231,10 +231,17 @@ export async function processFrameVerification(
     return;
   }
 
-  if (captureResult.assetsMissing || captureResult.frames.length === 0) {
-    const reason = captureResult.assetsMissing
-      ? 'frame capture missing replay assets'
-      : 'frame capture returned no frames';
+  if (captureResult.assetsMissing) {
+    // Real apps reference stylesheets, fonts and images on other origins; the
+    // replay aborts those and renders the DOM without them. The frames are still
+    // the recorded screen, so they stay usable. Only an empty capture is fatal.
+    logger.warn('Frame capture rendered without external assets', {
+      job_id: job.id,
+      session_id: job.sessionId,
+    });
+  }
+  if (captureResult.frames.length === 0) {
+    const reason = 'frame capture returned no frames';
     logger.warn('Frame capture unusable; emitting unverified observations', {
       job_id: job.id,
       session_id: job.sessionId,

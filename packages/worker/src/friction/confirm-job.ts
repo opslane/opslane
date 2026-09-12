@@ -397,7 +397,7 @@ export async function processFrictionConfirm(
         },
         timelineText: recording?.timelineText ?? '',
         frames: frames.frames,
-        framesOk: !frames.assetsMissing && frames.frames.length > 0,
+        framesOk: frames.frames.length > 0, // external assets are aborted by design; the DOM still renders
         signals,
       };
       result = await confirmRead(client, input, meter);
