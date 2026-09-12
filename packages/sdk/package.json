@@ -28,10 +28,16 @@
     "./build/debug-id": {
       "types": "./dist/debug-id.d.ts",
       "import": "./dist/build/debug-id.js"
+    },
+    "./sourcemaps-cli": {
+      "types": "./dist/sourcemaps-cli.d.ts",
+      "import": "./dist/sourcemaps-cli.js"
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "bin",
+    "THIRD_PARTY_NOTICES.md"
   ],
   "scripts": {
     "build": "vite build",
@@ -41,10 +47,10 @@
     "prepublishOnly": "vite build && node scripts/check-package.mjs"
   },
   "dependencies": {
-    "rrweb": "2.1.1"
+    "rrweb": "2.1.1",
+    "@jridgewell/trace-mapping": "^0.3.31"
   },
   "devDependencies": {
-    "@jridgewell/trace-mapping": "^0.3.31",
     "@opslane/shared": "workspace:*",
     "@playwright/test": "^1.62.1",
     "@rrweb/types": "2.1.1",
@@ -81,5 +87,8 @@
     "vite": {
       "optional": true
     }
+  },
+  "bin": {
+    "opslane-sourcemaps": "bin/opslane-sourcemaps.mjs"
   }
 }

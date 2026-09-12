@@ -12,5 +12,5 @@
     "jsx": "react-jsx",
     "types": ["vitest/globals"]
   },
-  "include": ["src", "vite-plugin"]
+  "include": ["src", "vite-plugin", "sourcemaps-cli"]
 }

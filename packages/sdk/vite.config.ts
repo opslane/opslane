@@ -17,19 +17,21 @@ export default defineConfig({
         index: resolve(__dirname, 'src/index.ts'),
         react: resolve(__dirname, 'src/react.tsx'),
         'vite-plugin': resolve(__dirname, 'vite-plugin/index.ts'),
+        'sourcemaps-cli': resolve(__dirname, 'sourcemaps-cli/main.ts'),
         'build/debug-id': resolve(__dirname, 'src/build/debug-id.ts'),
       },
       formats: ['es'],
     },
     rollupOptions: {
-      external: ['vue', 'react', 'react-dom', 'react/jsx-runtime', 'vite'],
+      external: [/^node:/, 'vue', 'react', 'react-dom', 'react/jsx-runtime', 'vite'],
     },
     sourcemap: false,
     outDir: 'dist',
   },
   plugins: [
     dts({
-      include: ['src/**/*.ts', 'src/**/*.tsx', 'vite-plugin/**/*.ts'],
+      include: ['src/**/*.ts', 'src/**/*.tsx', 'vite-plugin/**/*.ts', 'sourcemaps-cli/**/*.ts'],
+      exclude: ['**/__tests__/**'],
       // Bundle types into flat per-entry .d.ts files so type-only imports
       // from the private @opslane/shared package are inlined — without this,
       // the published tarball's types are unresolvable for npm consumers.
