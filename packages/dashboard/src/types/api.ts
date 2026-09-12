@@ -59,7 +59,7 @@ export interface OrgInvitation {
 
 export interface ManagedAPIKey {
   key_id: string;
-	scope: 'api' | 'ingest';
+	scope: 'api' | 'ingest' | 'sourcemaps';
   label: string;
   status: 'active' | 'revoked';
   redacted: string;
@@ -74,7 +74,7 @@ export interface CreatedAPIKey {
   key_id: string;
   token: string;
   label: string;
-	scope: 'api' | 'ingest';
+	scope: 'api' | 'ingest' | 'sourcemaps';
   expires_at: string | null;
 }
 

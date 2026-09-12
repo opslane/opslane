@@ -492,7 +492,7 @@ export function listAPIKeys(projectId: string): Promise<ManagedAPIKey[]> {
 
 export function createAPIKey(
 	projectId: string,
-	input: { label: string; expires_at: string | null; scope?: 'api' | 'ingest' },
+	input: { label: string; expires_at: string | null; scope?: 'api' | 'ingest' | 'sourcemaps' },
 ): Promise<CreatedAPIKey> {
   return postJSON<CreatedAPIKey>(`/projects/${projectId}/api-keys`, input);
 }

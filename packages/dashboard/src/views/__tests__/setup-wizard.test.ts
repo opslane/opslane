@@ -57,13 +57,25 @@ describe('SetupWizard', () => {
     api.updateProject.mockResolvedValue({ id: 'p1' });
   });
 
+  it('offers agent setup before a projectless user creates a project', async () => {
+    api.listProjects.mockResolvedValue([]);
+    const wrapper = mount(SetupWizard, { global: { stubs: { RouterLink: true } } });
+    await flushPromises();
+    expect(wrapper.get('[data-testid="agent-paste-line"]').text()).toBe('Set up https://docs.opslane.com/INSTALL.md');
+    expect(wrapper.text()).toContain('Create your project below.');
+    expect(wrapper.text()).not.toContain('The snippet is below.');
+    expect(wrapper.find('#project-name').exists()).toBe(true);
+    expect(api.onboardingSetup).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
   it('resumes at the server-derived step, restores localStorage, and mints a key', async () => {
     api.getOnboardingState.mockResolvedValue({ ...baseState, next_step: 'install_sdk', project_id: 'p1' });
     api.createAPIKey.mockResolvedValue({
       key_id: 'k1', token: 'opslane_pk_resume', label: 'onboarding', scope: 'ingest', expires_at: null,
     });
     api.getEventStatus.mockResolvedValue({ has_events: false, latest_error_group_id: null });
-    const wrapper = mount(SetupWizard);
+    const wrapper = mount(SetupWizard, { global: { stubs: { RouterLink: true } } });
     await flushPromises();
     expect(wrapper.text()).toContain('Install the SDK');
     expect(api.createAPIKey).toHaveBeenCalledWith('p1', {
@@ -84,7 +96,7 @@ describe('SetupWizard', () => {
     });
     api.getEventStatus.mockResolvedValueOnce({ has_events: false, latest_error_group_id: null });
     api.getEventStatus.mockResolvedValue({ has_events: true, latest_error_group_id: 'g1' });
-    const wrapper = mount(SetupWizard);
+    const wrapper = mount(SetupWizard, { global: { stubs: { RouterLink: true } } });
     await flushPromises();
     expect(wrapper.find('[data-testid="sdk-continue"]').exists()).toBe(false);
     await vi.advanceTimersByTimeAsync(6001);
@@ -107,7 +119,7 @@ describe('SetupWizard', () => {
     api.testNotificationDestination.mockResolvedValue({ ok: true, classification: 'delivered', status_code: 200 });
     api.updateNotificationDestination.mockResolvedValue({ id: 'd1', enabled: true });
     api.completeOnboarding.mockResolvedValue({ onboarding_complete: true });
-    const wrapper = mount(SetupWizard);
+    const wrapper = mount(SetupWizard, { global: { stubs: { RouterLink: true } } });
     await flushPromises();
     await wrapper.get('#slack-webhook-url').setValue('https://hooks.slack.com/services/T0/B0/x');
     await wrapper.get('[data-testid="slack-connect"]').trigger('submit');
@@ -127,7 +139,7 @@ describe('SetupWizard', () => {
     });
     api.createNotificationDestination.mockResolvedValue({ id: 'd1', enabled: false });
     api.testNotificationDestination.mockResolvedValue({ ok: false, classification: 'http_404', status_code: 404 });
-    const wrapper = mount(SetupWizard);
+    const wrapper = mount(SetupWizard, { global: { stubs: { RouterLink: true } } });
     await flushPromises();
     await wrapper.get('#slack-webhook-url').setValue('https://hooks.slack.com/services/T0/B0/x');
     await wrapper.get('[data-testid="slack-connect"]').trigger('submit');
@@ -141,7 +153,7 @@ describe('SetupWizard', () => {
     api.getOnboardingState.mockResolvedValue({
       ...baseState, next_step: 'connect_github', project_id: 'p1', has_events: true,
     });
-    const wrapper = mount(SetupWizard);
+    const wrapper = mount(SetupWizard, { global: { stubs: { RouterLink: true } } });
     await flushPromises();
     expect(wrapper.text()).not.toContain('Check again');
     expect(wrapper.text()).not.toContain('Waiting for GitHub');
@@ -160,7 +172,7 @@ describe('SetupWizard', () => {
     api.getOnboardingState.mockResolvedValue({
       ...baseState, next_step: 'connect_github', project_id: 'p1', has_events: true,
     });
-    const wrapper = mount(SetupWizard);
+    const wrapper = mount(SetupWizard, { global: { stubs: { RouterLink: true } } });
     await flushPromises();
     api.getGitHubAppStatus.mockResolvedValue({
       installed: true, installation_id: 7, install_url: null,
@@ -178,7 +190,7 @@ describe('SetupWizard', () => {
     api.getOnboardingState.mockResolvedValue({
       ...baseState, next_step: 'connect_github', project_id: 'p1', has_events: true,
     });
-    const wrapper = mount(SetupWizard);
+    const wrapper = mount(SetupWizard, { global: { stubs: { RouterLink: true } } });
     await flushPromises();
     await wrapper.get('[data-testid="github-install"]').trigger('click');
     api.getGitHubAppStatus.mockRejectedValue(new Error('network blip'));
@@ -194,7 +206,7 @@ describe('SetupWizard', () => {
       ...baseState, next_step: 'connect_github', project_id: 'p1', has_events: true,
     });
     api.getGitHubAppStatus.mockRejectedValueOnce(new Error('boom'));
-    const wrapper = mount(SetupWizard);
+    const wrapper = mount(SetupWizard, { global: { stubs: { RouterLink: true } } });
     await flushPromises();
     expect(wrapper.find('[data-testid="github-install"]').exists()).toBe(false);
     expect(wrapper.text()).toContain("Couldn't reach GitHub status");
@@ -209,7 +221,7 @@ describe('SetupWizard', () => {
       ...baseState, next_step: 'connect_github', project_id: 'p1', has_events: true,
     });
     api.completeOnboarding.mockRejectedValue(new Error('server exploded'));
-    const wrapper = mount(SetupWizard);
+    const wrapper = mount(SetupWizard, { global: { stubs: { RouterLink: true } } });
     await flushPromises();
     await wrapper.get('[data-testid="defer-github"]').trigger('click');
     await flushPromises();
@@ -224,7 +236,7 @@ describe('SetupWizard', () => {
     api.getOnboardingState.mockResolvedValue({
       ...baseState, onboarding_complete: true, next_step: 'done', project_id: 'p1',
     });
-    const wrapper = mount(SetupWizard);
+    const wrapper = mount(SetupWizard, { global: { stubs: { RouterLink: true } } });
     await flushPromises();
     expect(localStorage.getItem('opslane_project_id')).toBe('p1');
     expect(routerPush).toHaveBeenCalledWith('/');
@@ -237,7 +249,7 @@ describe('SetupWizard', () => {
       github_connected: true, slack_connected: true,
     });
     api.completeOnboarding.mockResolvedValue({ onboarding_complete: true });
-    const wrapper = mount(SetupWizard);
+    const wrapper = mount(SetupWizard, { global: { stubs: { RouterLink: true } } });
     await flushPromises();
     expect(api.completeOnboarding).toHaveBeenCalled();
     wrapper.unmount();
@@ -245,7 +257,7 @@ describe('SetupWizard', () => {
 
   it('stops cloud members before mutation controls', async () => {
     api.getMe.mockResolvedValue({ active_role: 'member' });
-    const wrapper = mount(SetupWizard);
+    const wrapper = mount(SetupWizard, { global: { stubs: { RouterLink: true } } });
     await flushPromises();
     expect(wrapper.text()).toContain('Ask an organization admin');
     expect(api.getOnboardingState).not.toHaveBeenCalled();

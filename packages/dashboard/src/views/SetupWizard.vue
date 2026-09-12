@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import AgentPasteBox from '../components/AgentPasteBox.vue';
 import { computed, onMounted, onUnmounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import {
@@ -433,6 +434,9 @@ onUnmounted(() => {
           <div v-if="error" class="mb-4 rounded-md border border-danger/30 bg-danger/10 p-3 text-sm text-danger" v-text="error"></div>
 
           <section v-if="step === 'create_project'">
+            <AgentPasteBox variant="wizard" class="mb-6">
+              <template #manual>Prefer to do it by hand? Create your project below.</template>
+            </AgentPasteBox>
             <h1 class="text-2xl font-semibold text-text">Create your project</h1>
             <p class="mt-2 text-sm text-muted">Name the app you want Opslane to monitor.</p>
             <form class="mt-6 space-y-4" @submit.prevent="submitProject">
@@ -464,6 +468,7 @@ onUnmounted(() => {
             </div>
             <p v-else-if="keyLoading || !apiKey" class="mt-6 text-sm text-muted">Creating a browser ingest key…</p>
             <div v-else class="mt-6 space-y-5">
+              <AgentPasteBox variant="wizard" />
               <CodeBlock :code="installSnippet" />
               <div class="flex flex-wrap gap-2" role="tablist" aria-label="Framework">
                 <button

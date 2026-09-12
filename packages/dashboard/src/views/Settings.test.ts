@@ -312,13 +312,34 @@ describe('MCP API key management', () => {
     await wrapper.get('#api-key-create-form').trigger('submit');
     await flushPromises();
 
-    expect(createAPIKey).toHaveBeenCalledWith(project.id, { label: 'Codex', expires_at: null });
+    expect(createAPIKey).toHaveBeenCalledWith(project.id, { label: 'Codex', expires_at: null, scope: 'api' });
     expect(wrapper.text()).toContain('opslane_ak_bbbbbbbbbbbbbbbbbbbbbbbbbb_SECRET');
     const done = wrapper.findAll('button').find((button) => button.text() === 'Done');
     expect(done?.attributes('disabled')).toBeDefined();
     await wrapper.get('#api-key-acknowledged').setValue(true);
     await done!.trigger('click');
     expect(wrapper.text()).not.toContain('opslane_ak_bbbbbbbbbbbbbbbbbbbbbbbbbb_SECRET');
+    wrapper.unmount();
+  });
+
+  it('lists key scopes and can mint a sourcemaps key', async () => {
+    vi.mocked(listAPIKeys).mockResolvedValue([
+      { key_id: 'k1', scope: 'api', label: 'mcp', status: 'active', redacted: 'opslane_ak_k1_…', created_by: null, created_at: '2030-01-01T00:00:00Z', last_used_at: null, expires_at: null, revoked_at: null },
+      { key_id: 'k2', scope: 'sourcemaps', label: 'ci', status: 'active', redacted: 'opslane_sk_k2_…', created_by: null, created_at: '2030-01-01T00:00:00Z', last_used_at: null, expires_at: null, revoked_at: null },
+    ]);
+    vi.mocked(createAPIKey).mockResolvedValue({ key_id: 'k3', token: 'opslane_sk_new', label: 'ci2', scope: 'sourcemaps', expires_at: null });
+    const wrapper = await mountSettings('admin');
+    await wrapper.get('#settings-api-keys-tab').trigger('click');
+    await flushPromises();
+    expect(wrapper.text()).toContain('sourcemaps');
+    await wrapper.get('[data-testid="api-key-scope"]').setValue('sourcemaps');
+    await wrapper.get('[data-testid="api-key-label"]').setValue('ci2');
+    await wrapper.get('[data-testid="api-key-create"]').trigger('submit');
+    await flushPromises();
+    expect(createAPIKey).toHaveBeenCalledWith(expect.any(String), { label: 'ci2', expires_at: null, scope: 'sourcemaps' });
+    expect(wrapper.text()).toContain('OPSLANE_SOURCEMAP_KEY');
+    expect(wrapper.text()).not.toContain('Configure your MCP client');
+    expect(wrapper.text()).not.toContain('OPSLANE_API_KEY=');
     wrapper.unmount();
   });
 
