@@ -13,12 +13,12 @@ func TestKnownProblemsDigestSingleListAndOneButton(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, expected := range []string{"2 users · 4 sessions this week", "Create fix PR", "Merged this week", "Open payment and click Pay.", "Why:"} {
+	for _, expected := range []string{"2 users · 4 sessions this week", "Create fix PR", "Merged this week", "Why:"} {
 		if !strings.Contains(string(body), expected) {
 			t.Errorf("missing %q: %s", expected, body)
 		}
 	}
-	for _, bad := range []string{"Needs you", "Needs a decision", "Session intelligence", "visits", "recovered"} {
+	for _, bad := range []string{"Needs you", "Needs a decision", "Session intelligence", "visits", "recovered", "Open payment and click Pay."} {
 		if strings.Contains(string(body), bad) {
 			t.Errorf("legacy %q: %s", bad, body)
 		}

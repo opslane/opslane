@@ -155,5 +155,6 @@ describe('writer prompt', () => {
   it('forbids evidence provenance in customer copy', () => {
     expect(DIGEST_SYSTEM_PROMPT).toMatch(/never repeat line ids such as L23/);
     expect(DIGEST_SYSTEM_PROMPT).toMatch(/never mention timelines, screenshots, frames/);
+    expect(DIGEST_SYSTEM_PROMPT).toMatch(/Do not write a steps field/);
   });
 });

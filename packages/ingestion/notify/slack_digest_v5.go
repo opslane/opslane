@@ -44,9 +44,6 @@ func formatSlackDigestV5(payload EventPayload) ([]byte, string, error) {
 			blocks = append(blocks, map[string]any{"type": "divider"})
 		}
 		text := "*" + cleanProse(c.Title, 80) + "*\n" + cleanProse(c.Copy, 300)
-		if c.Steps != "" {
-			text += "\n" + cleanProse(c.Steps, 600)
-		}
 		if c.Why != "" && (c.TicketID == "" || c.Coverage >= .5) {
 			text += "\nWhy: " + cleanProse(c.Why, 300)
 		}
