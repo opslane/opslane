@@ -92,11 +92,18 @@ func (d *Dependencies) optionalGitHubConnected(r *http.Request, orgID string, re
 	if d.GitHubAppSlug == "" {
 		return repoAttached
 	}
-	installationID, err := d.Queries.GetOrgGitHubInstallation(r.Context(), orgID)
+	active, err := d.Queries.OrgHasActiveGitHubInstallation(r.Context(), orgID)
 	if err != nil {
 		return true
 	}
-	return installationID > 0 && repoAttached
+	if !active || !repoAttached {
+		return false
+	}
+	covered, err := d.Queries.RepoCoveredByActiveInstallation(r.Context(), orgID, *repo)
+	if err != nil {
+		return true
+	}
+	return covered
 }
 
 // OnboardingState returns the server-derived wizard state.

@@ -62,7 +62,7 @@ func (d *Dependencies) startOAuthEmailVerification(w http.ResponseWriter, r *htt
 	preventAuthResponseCaching(w)
 	if pending == nil || strings.TrimSpace(pending.PendingAuthenticationToken) == "" {
 		slog.Error("OAuth provider returned an email-verification challenge without a pending token")
-		writeJSONError(w, http.StatusBadGateway, "authentication failed")
+		writeGitHubFailure(w, &githubFailure{Status: http.StatusServiceUnavailable, Code: "identity_provider_unreachable", Message: "authentication failed"})
 		return
 	}
 	store := d.verificationStore()
@@ -210,6 +210,10 @@ func (d *Dependencies) OAuthVerifyEmail(w http.ResponseWriter, r *http.Request) 
 	if err != nil {
 		slog.Error("identity verified but OAuth completion failed", "error", err)
 		clearOAuthVerificationCookie(w, r)
+		if errors.Is(err, errGitHubUpstream) {
+			writeGitHubFailure(w, &githubFailure{Status: http.StatusServiceUnavailable, Code: "github_unreachable", Message: "could not load GitHub installation; retry the installation"})
+			return
+		}
 		writeJSONError(w, http.StatusInternalServerError, "email verified, but session could not be created; sign in again")
 		return
 	}

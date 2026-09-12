@@ -230,7 +230,8 @@ func TestOAuthCallbackChallengeFailureModes(t *testing.T) {
 		wantStatus  int
 		wantBody    string
 	}{
-		{name: "ordinary exchange failure", target: "/auth/callback?code=x&state=s", exchangeErr: errors.New("provider down"), wantStatus: http.StatusBadGateway, wantBody: "authentication failed"},
+		{name: "ordinary exchange failure", target: "/auth/callback?code=x&state=s", exchangeErr: errors.New("provider down"), wantStatus: http.StatusServiceUnavailable, wantBody: "authentication failed"},
+		{name: "empty pending token", target: "/auth/callback?code=x&state=s", exchangeErr: &auth.PendingVerificationError{}, wantStatus: http.StatusServiceUnavailable, wantBody: "authentication failed"},
 		{name: "install context rejected", target: "/auth/callback?code=x&state=s&setup_action=install", exchangeErr: &auth.PendingVerificationError{PendingAuthenticationToken: "pat"}, wantStatus: http.StatusConflict, wantBody: "sign in again"},
 		{name: "continuation write failure", target: "/auth/callback?code=x&state=s", exchangeErr: &auth.PendingVerificationError{PendingAuthenticationToken: "pat"}, storeErr: errors.New("write failed"), wantStatus: http.StatusServiceUnavailable, wantBody: "sign in again"},
 	}

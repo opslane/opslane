@@ -123,3 +123,48 @@ func TestOnboardingSetupIdempotency(t *testing.T) {
 		t.Fatalf("onboarded org: got %d, want 409", fourth.Code)
 	}
 }
+
+func TestOnboardingState_GitHubConnectedRequiresRepoCoverage(t *testing.T) {
+	deps, pool := testDeps(t)
+	deps.JWTSecret = []byte(authTestJWTSecret)
+	deps.AuthProvider = cloudAuthStub{}
+	deps.GitHubAppSlug = "opslane-test"
+	router := handler.NewRouterWithPool(deps, pool)
+	orgID, cred := seedTenantNoProject(t, deps.Queries)
+	t.Cleanup(func() { cleanupTenantHandler(t, pool, orgID) })
+
+	setup := onboardingHTTP(t, router, http.MethodPost, "/api/v1/onboarding/setup", cred,
+		`{"project_name":"web","github_repo":"acme/web"}`)
+	if setup.Code != http.StatusCreated {
+		t.Fatalf("setup: got %d body=%s", setup.Code, setup.Body.String())
+	}
+
+	installationID := time.Now().UnixNano()
+	if _, err := pool.Exec(context.Background(),
+		`INSERT INTO github_app_installations (installation_id, github_org_name, github_org_id, org_id, repos)
+		 VALUES ($1, 'acme', 1, $2, '["acme/other"]')`, installationID, orgID); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM github_app_installations WHERE installation_id = $1`, installationID)
+	})
+	if err := deps.Queries.SetOrgGitHubInstallation(context.Background(), orgID, installationID); err != nil {
+		t.Fatal(err)
+	}
+
+	stateResponse := onboardingHTTP(t, router, http.MethodGet, "/api/v1/onboarding/state", cred, "")
+	var state onboardingStateResponse
+	mustDecodeOnboarding(t, stateResponse.Body, &state)
+	if stateResponse.Code != http.StatusOK || state.GitHubConnected {
+		t.Fatalf("uncovered repo state: got %d %+v", stateResponse.Code, state)
+	}
+
+	if _, err := deps.Queries.AddGitHubInstallationRepos(context.Background(), installationID, []string{"acme/web"}); err != nil {
+		t.Fatal(err)
+	}
+	stateResponse = onboardingHTTP(t, router, http.MethodGet, "/api/v1/onboarding/state", cred, "")
+	mustDecodeOnboarding(t, stateResponse.Body, &state)
+	if stateResponse.Code != http.StatusOK || !state.GitHubConnected {
+		t.Fatalf("covered repo state: got %d %+v", stateResponse.Code, state)
+	}
+}
