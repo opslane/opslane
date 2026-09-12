@@ -1432,6 +1432,8 @@ func (d *Dependencies) LinkIncidentPR(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, db.ErrPRRepoMismatch):
 			writeJSONError(w, http.StatusUnprocessableEntity,
 				"that pull request is not in this project's repository")
+		case errors.Is(err, db.ErrTicketLegacyAction):
+			writeJSONError(w, http.StatusConflict, err.Error())
 		case errors.Is(err, db.ErrPRAlreadyLinked):
 			writeJSONError(w, http.StatusConflict,
 				"incident already has a pull request, or is resolved, archived, or merged")
@@ -1453,7 +1455,9 @@ func (d *Dependencies) ResolveIncident(w http.ResponseWriter, r *http.Request) {
 
 	incidentID := chi.URLParam(r, "incidentID")
 	if err := d.Queries.ResolveErrorGroup(r.Context(), projectID, incidentID); err != nil {
-		if strings.Contains(err.Error(), "no matching row") {
+		if errors.Is(err, db.ErrTicketLegacyAction) {
+			writeJSONError(w, http.StatusConflict, err.Error())
+		} else if strings.Contains(err.Error(), "no matching row") {
 			writeJSONError(w, http.StatusConflict, "incident is archived or not found")
 		} else {
 			writeJSONError(w, http.StatusInternalServerError, "failed to resolve incident")

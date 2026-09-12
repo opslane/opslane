@@ -1214,21 +1214,19 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string, s
 		}
 	}
 	if fresh {
-		actionURL := func(group, ticket string, generation int, action string, authored bool) (string, error) {
+		currentAction := func(group, ticket string, generation int, action string, authored bool) (actionableCandidate, error) {
 			frozen := byIdentity[group]
 			live, ok := actionableByGroup[group]
 			facts := live.TicketFacts
 			if !ok || facts == nil || !facts.OnCard() || facts.TicketID != ticket || facts.Generation != generation || facts.EvidenceVersion != frozen.EvidenceVersion || ticketDigestAction(facts.FixSubstate) != action {
-				return "", unifiedCandidateChangedError{identity: group}
+				return actionableCandidate{}, unifiedCandidateChangedError{identity: group}
 			}
 			// Authored prose must still match the freeze. Mechanical receipts
 			// were rebuilt from this live state, so refreshed prose is valid.
 			if authored && (facts.Steps != frozen.Steps || action != frozen.ValidAction || live.Title != frozen.Title || live.RootCause != frozen.RootCause) {
-				return "", unifiedCandidateChangedError{identity: group}
+				return actionableCandidate{}, unifiedCandidateChangedError{identity: group}
 			}
-			// Attempt lineage is mechanical action state. A fix can complete
-			// during authoring without changing any of the authored facts.
-			return ticketFixActionURL(os.Getenv("DASHBOARD_URL"), run.ProjectID, group, ticket, generation, facts.LatestAttemptID, secret, time.Now())
+			return live, nil
 		}
 		excludeStaleAction := func(identity string, actionErr error) bool {
 			var changed unifiedCandidateChangedError
@@ -1242,13 +1240,27 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string, s
 		}
 		keptGenerated := generated[:0]
 		for _, card := range generated {
-			if card.TicketID != "" && card.Action == "Create fix PR" {
-				card.ActionURL, err = actionURL(card.IncidentID, card.TicketID, card.Generation, card.Action, true)
+			if card.TicketID != "" {
+				var live actionableCandidate
+				live, err = currentAction(card.IncidentID, card.TicketID, card.Generation, card.Action, true)
 				if err != nil {
 					if excludeStaleAction(card.IncidentID, err) {
 						continue
 					}
 					return err
+				}
+				if card.Action == "Create fix PR" {
+					// Attempt lineage is mechanical action state. A fix can complete
+					// during authoring without changing any of the authored facts.
+					card.ActionURL, err = ticketFixActionURL(os.Getenv("DASHBOARD_URL"), run.ProjectID, card.IncidentID, card.TicketID, card.Generation, live.TicketFacts.LatestAttemptID, secret, time.Now())
+					if err != nil {
+						return err
+					}
+				} else if card.Action == "Review PR" {
+					// The PR link is mechanical lifecycle state and may change while
+					// the authored prose is being validated.
+					card.PRURL = live.PRURL
+					card.PRNumber = prNumber(live.PRURL)
 				}
 			}
 			keptGenerated = append(keptGenerated, card)
@@ -1256,13 +1268,22 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string, s
 		generated = keptGenerated
 		keptReceipts := receiptItems[:0]
 		for _, item := range receiptItems {
-			if item.TicketID != "" && item.Action == "Create fix PR" {
-				item.ActionURL, err = actionURL(item.IncidentID, item.TicketID, item.Generation, item.Action, false)
+			if item.TicketID != "" {
+				var live actionableCandidate
+				live, err = currentAction(item.IncidentID, item.TicketID, item.Generation, item.Action, false)
 				if err != nil {
 					if excludeStaleAction(item.IncidentID, err) {
 						continue
 					}
 					return err
+				}
+				if item.Action == "Create fix PR" {
+					item.ActionURL, err = ticketFixActionURL(os.Getenv("DASHBOARD_URL"), run.ProjectID, item.IncidentID, item.TicketID, item.Generation, live.TicketFacts.LatestAttemptID, secret, time.Now())
+					if err != nil {
+						return err
+					}
+				} else if item.Action == "Review PR" {
+					item.PRURL = live.PRURL
 				}
 			}
 			keptReceipts = append(keptReceipts, item)

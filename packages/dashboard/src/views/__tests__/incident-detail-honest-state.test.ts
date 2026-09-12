@@ -79,6 +79,21 @@ describe('IncidentDetail honest state', () => {
     expect(wrapper.findAll('button').some(button => button.text() === 'Unarchive')).toBe(true);
     wrapper.unmount();
   });
+  it('hides manual resolution for known problems while retaining archive and legacy resolve', async () => {
+    api.getIncident.mockResolvedValue({ ...base, kind: 'friction', ticket_id: 't1', status: 'awaiting_approval',
+      fix_substate: 'none', investigation_status: 'done', cause_coverage: 0.5 });
+    let wrapper = mountView();
+    await flushPromises();
+    expect(wrapper.findAll('button').some(button => button.text() === 'Resolve')).toBe(false);
+    expect(wrapper.findAll('button').some(button => button.text() === 'Archive')).toBe(true);
+    wrapper.unmount();
+    api.getIncident.mockResolvedValue(base);
+    wrapper = mountView();
+    await flushPromises();
+    expect(wrapper.findAll('button').some(button => button.text() === 'Resolve')).toBe(true);
+    wrapper.unmount();
+  });
+
   it('requests reinvestigation when a ticket cause lacks current coverage', async () => {
     const ticket = { ...base, kind: 'friction', status: 'awaiting_approval', ticket_id: 't1',
       fix_substate: 'none', investigation_status: 'done', cause_coverage: 0.25 };

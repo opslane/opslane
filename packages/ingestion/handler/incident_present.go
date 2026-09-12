@@ -139,6 +139,7 @@ func (d *Dependencies) presentMCPIncident(
 		}
 	}
 	incidentView := mcpformat.MCPIncident{
+		TicketID:               incident.TicketID,
 		ID:                     incident.ID,
 		Kind:                   incident.Kind,
 		Title:                  incident.Title,

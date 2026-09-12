@@ -211,6 +211,11 @@ func TestTicketDigestDeferredChangedCauseUsesLiveReceipt(t *testing.T) {
 func TestTicketDigestStaleActionDoesNotFailOtherCards(t *testing.T) {
 	testTicketDigestActionAfterAuthoringCycle(t, "stale_action")
 }
+func TestTicketDigestFencesEveryActionBeforePublication(t *testing.T) {
+	for _, mode := range []string{"fixing_resolved", "pr_resolved", "pr_unpublished", "pr_unchanged", "pr_replaced"} {
+		t.Run(mode, func(t *testing.T) { testTicketDigestActionAfterAuthoringCycle(t, mode) })
+	}
+}
 func testTicketDigestActionAfterAuthoringCycle(t *testing.T, mode string) {
 	pool := knownProblemPool(t)
 	ctx := context.Background()
@@ -254,6 +259,14 @@ func testTicketDigestActionAfterAuthoringCycle(t *testing.T, mode string) {
 		run(`INSERT INTO friction_checks(ticket_id,session_id,attempt_id,outcome)VALUES($1,$2,$3,'confirmed')`, ticket, session, check)
 	}
 	run(`UPDATE error_groups SET explained_signal_ids=(SELECT jsonb_agg(signal_id::text) FROM friction_ticket_match_observations WHERE ticket_id=$2) WHERE id=$1`, group, ticket)
+	wantAction := "Create fix PR"
+	if strings.HasPrefix(mode, "fixing_") {
+		run(`UPDATE error_groups SET status='fixing',fix_substate='fixing' WHERE id=$1`, group)
+		wantAction = "Fix in progress"
+	} else if strings.HasPrefix(mode, "pr_") {
+		run(`UPDATE error_groups SET status='pr_created',fix_substate='pr_open',pr_url='https://github.com/acme/shop/pull/7',pr_number=7 WHERE id=$1`, group)
+		wantAction = "Review PR"
+	}
 	seedDestination(t, pool, project.ID, []string{"digest.daily"})
 	unrelated := insert(`INSERT INTO error_groups(project_id,environment_id,fingerprint,title,kind,status,first_seen,last_seen)VALUES($1,$2,'unrelated','Other checkout issue','error','needs_human',now(),now())RETURNING id`, project.ID, env)
 	runID, candidates, err := FreezeCandidates(ctx, pool, project.ID, time.Now())
@@ -264,29 +277,44 @@ func testTicketDigestActionAfterAuthoringCycle(t *testing.T, mode string) {
 		t.Fatalf("frozen candidates=%+v", candidates)
 	}
 	frozen := candidateByGroup(t, candidates, group)
-	if frozen.LatestAttemptID != "" || frozen.ValidAction != "Create fix PR" {
+	if frozen.LatestAttemptID != "" || frozen.ValidAction != wantAction {
 		t.Fatalf("ticket=%+v", frozen)
 	}
-	// A real fix is admitted and fails while the writer holds the frozen facts.
-	job, err := q.TriggerFixJob(ctx, project.ID, group, "")
-	if err != nil {
-		t.Fatal(err)
+	latest := ""
+	if wantAction == "Create fix PR" {
+		// A real fix is admitted and fails while the writer holds frozen facts.
+		job, err := q.TriggerFixJob(ctx, project.ID, group, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		latest = insert(`SELECT fix_attempt_id FROM error_group_jobs WHERE id=$1`, job)
+		run(`UPDATE friction_fix_attempts SET status='failed' WHERE id=$1`, latest)
+		run(`UPDATE error_group_jobs SET status='completed' WHERE id=$1`, job)
+		run(`UPDATE error_groups SET status='needs_human',fix_substate='none',terminal_fix_job_id=$2 WHERE id=$1`, group, job)
 	}
-	latest := insert(`SELECT fix_attempt_id FROM error_group_jobs WHERE id=$1`, job)
-	run(`UPDATE friction_fix_attempts SET status='failed' WHERE id=$1`, latest)
-	run(`UPDATE error_group_jobs SET status='completed' WHERE id=$1`, job)
-	run(`UPDATE error_groups SET status='needs_human',fix_substate='none',terminal_fix_job_id=$2 WHERE id=$1`, group, job)
 	written := writtenDigestPayload{Included: []writtenDigestCard{{ErrorGroupID: group, Title: "Save stalls", Copy: "Save ignores clicks.", Steps: frozen.Steps, Why: frozen.RootCause}}}
 	changedCause := "The handler drops the save request."
 	if mode == "deferred_changed_cause" {
 		run(`UPDATE error_groups SET root_cause=$2 WHERE id=$1`, group, changedCause)
 		written = writtenDigestPayload{Deferred: []deferredDigestItem{{ErrorGroupID: group, Reason: "card check: invalid prose"}}}
 	}
-	if mode == "stale_action" {
+	stale := mode == "stale_action" || mode == "fixing_resolved" || mode == "pr_resolved" || mode == "pr_unpublished"
+	if stale || mode == "pr_replaced" {
 		original := loadActionableCandidatesForValidation
 		loadActionableCandidatesForValidation = func(ctx context.Context, tx pgx.Tx, projectID string, status actionableStatusSet) ([]actionableCandidate, error) {
 			if projectID == project.ID {
-				if _, err := tx.Exec(ctx, `UPDATE error_groups SET root_cause=$2 WHERE id=$1`, group, changedCause); err != nil {
+				var err error
+				switch mode {
+				case "fixing_resolved", "pr_resolved":
+					_, err = tx.Exec(ctx, `UPDATE error_groups SET status='resolved',fix_substate='resolved' WHERE id=$1`, group)
+				case "pr_unpublished":
+					_, err = tx.Exec(ctx, `UPDATE friction_tickets SET status='unpublished' WHERE id=$1`, ticket)
+				case "pr_replaced":
+					_, err = tx.Exec(ctx, `UPDATE error_groups SET pr_url='https://github.com/acme/shop/pull/8',pr_number=8 WHERE id=$1`, group)
+				default:
+					_, err = tx.Exec(ctx, `UPDATE error_groups SET root_cause=$2 WHERE id=$1`, group, changedCause)
+				}
+				if err != nil {
 					return nil, err
 				}
 			}
@@ -300,6 +328,10 @@ func testTicketDigestActionAfterAuthoringCycle(t *testing.T, mode string) {
 	}
 	run(`UPDATE digest_runs SET status='written',writer_payload=$2 WHERE id=$1`, runID, payload)
 	secret := []byte("digest-cycle-intent-secret-at-least-32-bytes")
+	if mode == "pr_unchanged" || mode == "pr_replaced" {
+		// Reviewing a PR requires no fix intent and must retain its existing URL.
+		secret = nil
+	}
 	t.Setenv("DASHBOARD_URL", "https://app.example")
 	if err := ValidateAndPublish(ctx, pool, runID, secret); err != nil {
 		t.Fatal(err)
@@ -314,13 +346,23 @@ func testTicketDigestActionAfterAuthoringCycle(t *testing.T, mode string) {
 	if !hasUnrelated {
 		t.Fatalf("unrelated receipt was lost: %+v", published.Digest)
 	}
-	if mode == "stale_action" {
+	if stale {
 		if len(published.Digest.GeneratedCards) != 0 || len(published.Digest.ReceiptItems) != 1 {
 			t.Fatalf("stale action was published: %+v", published.Digest)
 		}
 		var outcome string
 		if err := pool.QueryRow(ctx, `SELECT outcome FROM digest_run_candidate_evaluations WHERE digest_run_id=$1 AND error_group_id=$2`, runID, group).Scan(&outcome); err != nil || outcome != "excluded" {
 			t.Fatalf("stale action ledger=%q err=%v", outcome, err)
+		}
+		return
+	}
+	if mode == "pr_unchanged" || mode == "pr_replaced" {
+		wantPRURL := "https://github.com/acme/shop/pull/7"
+		if mode == "pr_replaced" {
+			wantPRURL = "https://github.com/acme/shop/pull/8"
+		}
+		if len(published.Digest.GeneratedCards) != 1 || published.Digest.GeneratedCards[0].Action != "Review PR" || published.Digest.GeneratedCards[0].PRURL != wantPRURL || published.Digest.GeneratedCards[0].PRNumber != prNumber(wantPRURL) {
+			t.Fatalf("current PR card was changed: %+v", published.Digest)
 		}
 		return
 	}

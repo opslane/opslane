@@ -176,6 +176,8 @@ func (d *Dependencies) registerMCPTools(server *mcpsdk.Server) {
 				return errorToolResult("Issue not found for this project."), nil, nil
 			case errors.Is(err, db.ErrPRRepoMismatch):
 				return errorToolResult("That pull request is not in this project's repository."), nil, nil
+			case errors.Is(err, db.ErrTicketLegacyAction):
+				return errorToolResult(err.Error()), nil, nil
 			case errors.Is(err, db.ErrPRAlreadyLinked):
 				return errorToolResult("The issue already has a pull request, or is resolved, archived, or merged."), nil, nil
 			default:

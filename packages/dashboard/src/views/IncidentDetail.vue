@@ -383,7 +383,7 @@ onMounted(async () => {
       <!-- Actions -->
       <div class="flex items-center gap-2">
         <Button
-          v-if="incident.status !== 'resolved' && incident.status !== 'archived'"
+          v-if="!incident.ticket_id && incident.status !== 'resolved' && incident.status !== 'archived'"
           variant="primary"
           :disabled="actionLoading"
           @click="doAction('resolve')"
