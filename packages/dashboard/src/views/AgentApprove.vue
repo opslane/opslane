@@ -46,9 +46,10 @@ export function deriveChecklist(info: AgentApproveInfo) {
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
-import { approveAgentSession, denyAgentSession, getAgentApproveInfo } from '../api';
+import { approveAgentSession, denyAgentSession, getAgentApproveInfo, getMe } from '../api';
 import Button from '../components/ui/Button.vue';
 import { safeUrl } from '../utils';
+import { applyProjectSelection } from '../components/project-switcher';
 
 type Phase = 'loading' | 'choose' | 'working' | 'progress' | 'denied' | 'error';
 
@@ -61,12 +62,24 @@ const choice = ref<string>('__new__');
 const projectName = ref('');
 const phase = ref<Phase>('loading');
 const message = ref('');
+const boundProjectId = ref('');
+const navigationMessage = ref('');
+const navigating = ref(false);
+const pendingDestination = ref('');
+let mounted = true;
 let timer: ReturnType<typeof setInterval> | null = null;
 let generation = 0;          // bumped on unmount and on terminal states; stale responses are discarded
 let inFlight = false;        // one refresh at a time
 
 const checklist = computed(() => (info.value ? deriveChecklist(info.value) : []));
-const latestIssue = computed(() => safeUrl(info.value?.facts?.latest_error_group_url ?? undefined));
+const latestIssue = computed(() => {
+  const safe = safeUrl(info.value?.facts?.latest_error_group_url ?? undefined);
+  if (!safe || !boundProjectId.value) return undefined;
+  const url = new URL(safe);
+  url.searchParams.set('project_id', boundProjectId.value);
+  return url.href;
+});
+const dashboardPath = computed(() => `/?project_id=${encodeURIComponent(boundProjectId.value)}`);
 const TERMINAL = new Set(['failed', 'expired', 'completed']);
 
 function stopPolling(): void {
@@ -78,6 +91,7 @@ function startPolling(): void {
 
 function applyInfo(next: AgentApproveInfo): void {
   info.value = next;
+  if (next.project_id) boundProjectId.value = next.project_id;
   switch (next.status) {
     case 'pending':
       if (phase.value === 'loading') {
@@ -127,7 +141,37 @@ onMounted(async () => {
   sessionStorage.removeItem('opslane_post_auth_path');
   await refresh();
 });
-onBeforeUnmount(() => { stopPolling(); generation++; });
+onBeforeUnmount(() => { mounted = false; stopPolling(); generation++; });
+
+async function openDestination(destination: string): Promise<void> {
+  if (navigating.value || !boundProjectId.value) return;
+  const url = new URL(destination, window.location.origin);
+  url.searchParams.set('project_id', boundProjectId.value);
+  // Keep the exact error route while the agent finishes. The normal router
+  // guard still applies; only the authenticated server response updates its cache.
+  pendingDestination.value = `${url.pathname}${url.search}${url.hash}`;
+  navigating.value = true;
+  navigationMessage.value = '';
+  try {
+    const me = await getMe();
+    if (!mounted) return;
+    if (!me.onboarding_complete) {
+      localStorage.removeItem('opslane_onboarding_complete');
+      navigationMessage.value = 'Your agent is still finishing setup. Stay here, then check again to open this page.';
+      return;
+    }
+    localStorage.setItem('opslane_onboarding_complete', '1');
+    const name = info.value?.projects.find((project) => project.id === boundProjectId.value)?.name
+      ?? info.value?.project_name ?? '';
+    applyProjectSelection(localStorage, { id: boundProjectId.value, name });
+    await router.push(pendingDestination.value);
+  } catch (err: unknown) {
+    if (!mounted) return;
+    navigationMessage.value = err instanceof Error ? err.message : 'Could not check setup status. Try again.';
+  } finally {
+    if (mounted) navigating.value = false;
+  }
+}
 
 function beginAction(): number {
   stopPolling();
@@ -148,7 +192,7 @@ async function approve(): Promise<void> {
     const body = choice.value === '__new__' ? { project_name: projectName.value.trim() } : { existing_project_id: choice.value };
     const approved = await approveAgentSession(sessionId, body);
     if (gen !== generation) return;
-    if (info.value) applyInfo({ ...info.value, status: 'provisioned', project_name: approved.project_name });
+    if (info.value) applyInfo({ ...info.value, status: 'provisioned', project_id: approved.project_id, project_name: approved.project_name });
     await refresh();
   } catch (err: unknown) {
     if (gen !== generation) return;
@@ -245,8 +289,12 @@ async function deny(): Promise<void> {
           </span>
         </li>
       </ol>
-      <a v-if="phase === 'progress' && latestIssue" :href="latestIssue" class="mt-6 inline-block text-sm text-accent hover:underline" data-testid="agent-latest-issue">Open the test error</a>
-      <Button v-if="phase === 'progress'" variant="secondary" class="mt-6" @click="router.push('/')">Open dashboard</Button>
+      <a v-if="phase === 'progress' && latestIssue" :href="latestIssue" @click.prevent="openDestination(latestIssue)" class="mt-6 inline-block text-sm text-accent hover:underline" data-testid="agent-latest-issue">Open the test error</a>
+      <Button v-if="phase === 'progress'" variant="secondary" class="mt-6" data-testid="agent-dashboard" :disabled="navigating || !boundProjectId" @click="openDestination(dashboardPath)">Open dashboard</Button>
+      <div v-if="navigationMessage" class="mt-4" role="status">
+        <p class="text-sm text-muted">{{ navigationMessage }}</p>
+        <Button class="mt-2" variant="secondary" :disabled="navigating" data-testid="agent-navigation-retry" @click="openDestination(pendingDestination)">Check again</Button>
+      </div>
     </div>
   </div>
 </template>

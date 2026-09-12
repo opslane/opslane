@@ -5,6 +5,7 @@ import type { AgentApproveInfo, AgentFacts } from '../../types/api';
 
 const api = vi.hoisted(() => ({
   getAgentApproveInfo: vi.fn(),
+  getMe: vi.fn(),
   approveAgentSession: vi.fn(),
   denyAgentSession: vi.fn(),
 }));
@@ -36,7 +37,7 @@ function pending(overrides: Partial<AgentApproveInfo> = {}): AgentApproveInfo {
 const statuses = (w: ReturnType<typeof mount>) => w.findAll('[data-testid^="step-"]').map((r) => r.attributes('data-status'));
 
 describe('AgentApprove', () => {
-  beforeEach(() => { vi.resetAllMocks(); sessionStorage.clear(); });
+  beforeEach(() => { vi.resetAllMocks(); sessionStorage.clear(); localStorage.clear(); });
   afterEach(() => { vi.useRealTimers(); });
 
   it('shows the whole checklist before approval, preselects the matching project, and approves as attach', async () => {
@@ -143,7 +144,7 @@ describe('AgentApprove', () => {
   });
 
   it('renders agent notes as text and rejects unsafe issue links', async () => {
-    api.getAgentApproveInfo.mockResolvedValue(pending({ status: 'completed', facts: {
+    api.getAgentApproveInfo.mockResolvedValue(pending({ status: 'completed', project_id: 'p-old', facts: {
       ...emptyFacts, latest_error_group_url: 'javascript:alert(1)',
       steps: { mcp: { status: 'failed', note: '<img src=x onerror=alert(1)>', updated_at: '' } },
     } }));
@@ -175,7 +176,7 @@ describe('AgentApprove', () => {
     await vi.advanceTimersByTimeAsync(3100);
     await flushPromises();
     expect(statuses(w)).toEqual(['done', 'done', 'done', 'pending', 'pending', 'pending', 'skipped']);
-    expect(w.find('[data-testid="agent-latest-issue"]').attributes('href')).toBe('http://x/issues/g1');
+    expect(w.find('[data-testid="agent-latest-issue"]').attributes('href')).toBe('http://x/issues/g1?project_id=p-old');
     await vi.advanceTimersByTimeAsync(3100);
     await flushPromises();
     expect(w.text()).toContain('expired');
@@ -183,6 +184,88 @@ describe('AgentApprove', () => {
     await vi.advanceTimersByTimeAsync(6500);
     expect(api.getAgentApproveInfo.mock.calls.length).toBe(calls); // polling stopped on a terminal state
     w.unmount();
+  });
+
+  it.each(['approve', 'revisit'])('opens project B dashboard after %s while project A was selected', async (mode) => {
+    localStorage.setItem('opslane_project_id', 'p-a');
+    localStorage.setItem('opslane_environment_id', 'env-a');
+    api.getMe.mockResolvedValue({ onboarding_complete: true });
+    const projects = [{ id: 'p-a', name: 'A', github_repo: null }, { id: 'p-b', name: 'B', github_repo: 'acme/web' }];
+    const approved = pending({ status: 'provisioned', project_id: 'p-b', project_name: 'B', projects, facts: emptyFacts });
+    if (mode === 'approve') {
+      api.getAgentApproveInfo.mockResolvedValueOnce(pending({ projects, suggested_project_id: 'p-b' })).mockResolvedValue(approved);
+      api.approveAgentSession.mockResolvedValue({ status: 'provisioned', project_id: 'p-b', project_name: 'B' });
+    } else {
+      api.getAgentApproveInfo.mockResolvedValue(approved);
+    }
+    const w = mount(AgentApprove, { global: { stubs: { RouterLink: true } } });
+    await flushPromises();
+    if (mode === 'approve') {
+      await w.get('[data-testid="agent-approve-button"]').trigger('click');
+      await flushPromises();
+    }
+    expect(localStorage.getItem('opslane_project_id')).toBe('p-a');
+    await w.get('[data-testid="agent-dashboard"]').trigger('click');
+    await flushPromises();
+    expect(api.getMe).toHaveBeenCalledTimes(1);
+    expect(routerPush).toHaveBeenCalledWith('/?project_id=p-b');
+    expect(localStorage.getItem('opslane_project_id')).toBe('p-b');
+    expect(localStorage.getItem('opslane_environment_id')).toBeNull();
+    w.unmount();
+  });
+
+  it('refreshes a fresh account completion cache before opening the exact test error in B', async () => {
+    localStorage.setItem('opslane_project_id', 'p-a');
+    api.getAgentApproveInfo.mockResolvedValue(pending({ status: 'completed', project_id: 'p-b', facts: {
+      ...emptyFacts, has_events: true, latest_error_group_url: 'http://x/issues/g-b?project_id=p-b#evidence',
+    } }));
+    let finishCheck: (value: { onboarding_complete: boolean }) => void = () => undefined;
+    api.getMe.mockImplementation(() => new Promise((resolve) => { finishCheck = resolve; }));
+    const w = mount(AgentApprove, { global: { stubs: { RouterLink: true } } });
+    await flushPromises();
+    await w.get('[data-testid="agent-latest-issue"]').trigger('click');
+    expect(routerPush).not.toHaveBeenCalled();
+    expect(localStorage.getItem('opslane_onboarding_complete')).toBeNull();
+    finishCheck({ onboarding_complete: true });
+    await flushPromises();
+    expect(localStorage.getItem('opslane_onboarding_complete')).toBe('1');
+    expect(routerPush).toHaveBeenCalledWith('/issues/g-b?project_id=p-b#evidence');
+    expect(localStorage.getItem('opslane_project_id')).toBe('p-b');
+    w.unmount();
+  });
+
+  it('preserves the error destination while setup is pending, then rechecks before opening it', async () => {
+    localStorage.setItem('opslane_onboarding_complete', '1');
+    api.getAgentApproveInfo.mockResolvedValue(pending({ status: 'app_reporting', project_id: 'p-b', facts: {
+      ...emptyFacts, has_events: true, latest_error_group_url: 'http://x/issues/g-b',
+    } }));
+    api.getMe.mockResolvedValueOnce({ onboarding_complete: false }).mockResolvedValue({ onboarding_complete: true });
+    const w = mount(AgentApprove, { global: { stubs: { RouterLink: true } } });
+    await flushPromises();
+    await w.get('[data-testid="agent-latest-issue"]').trigger('click');
+    await flushPromises();
+    expect(routerPush).not.toHaveBeenCalled();
+    expect(localStorage.getItem('opslane_onboarding_complete')).toBeNull();
+    expect(w.text()).toContain('Your agent is still finishing setup');
+    await w.get('[data-testid="agent-navigation-retry"]').trigger('click');
+    await flushPromises();
+    expect(api.getMe).toHaveBeenCalledTimes(2);
+    expect(routerPush).toHaveBeenCalledWith('/issues/g-b?project_id=p-b');
+    w.unmount();
+  });
+
+  it('does not navigate or update caches when the status check finishes after unmount', async () => {
+    api.getAgentApproveInfo.mockResolvedValue(pending({ status: 'completed', project_id: 'p-b' }));
+    let finishCheck: (value: { onboarding_complete: boolean }) => void = () => undefined;
+    api.getMe.mockImplementation(() => new Promise((resolve) => { finishCheck = resolve; }));
+    const w = mount(AgentApprove, { global: { stubs: { RouterLink: true } } });
+    await flushPromises();
+    await w.get('[data-testid="agent-dashboard"]').trigger('click');
+    w.unmount();
+    finishCheck({ onboarding_complete: true });
+    await flushPromises();
+    expect(routerPush).not.toHaveBeenCalled();
+    expect(localStorage.getItem('opslane_onboarding_complete')).toBeNull();
   });
 
   it.each(['failed', 'expired', 'completed'] as const)('stops picker polling on %s', async (status) => {

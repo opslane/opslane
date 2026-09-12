@@ -541,6 +541,6 @@ export interface AgentFacts {
 }
 export type AgentSessionStatus = 'pending' | 'provisioned' | 'key_ok' | 'app_reporting' | 'completed' | 'failed' | 'expired';
 export interface AgentApproveInfo {
-  status: AgentSessionStatus; agent_name?: string; project_name?: string; git_remote?: string; expires_at: string;
+  status: AgentSessionStatus; project_id?: string; agent_name?: string; project_name?: string; git_remote?: string; expires_at: string;
   projects: AgentApproveProject[]; suggested_project_id: string | null; facts?: AgentFacts;
 }
