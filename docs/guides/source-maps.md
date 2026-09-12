@@ -3,8 +3,10 @@ covers:
   - packages/ingestion/cmd/mint-key/**
   - packages/ingestion/handler/sourcemap_upload.go
   - packages/sdk/vite-plugin/**
+  - packages/sdk/sourcemaps-cli/**
+  - packages/sdk/src/build/**
   - packages/worker/src/resolve-stack.ts
-description: Upload Vite source maps so production stack traces point at your source.
+description: Upload source maps from Vite, Next.js, and other bundlers so production stack traces point at your source.
 ---
 
 # Source maps
@@ -38,7 +40,9 @@ The key is a **secret**. Never prefix it with `VITE_` or `NEXT_PUBLIC_`, and nev
 
 ## Get a source-map key
 
-Create one from the Opslane server container. It can upload source maps and nothing else:
+Open **Settings → API keys**, choose the **sourcemaps** scope, and create a key. Copy its one-time value into your build environment as `OPSLANE_SOURCEMAP_KEY`. Keys are listed and revocable in Settings; creating a new key leaves existing keys active.
+
+Self-hosted operators can also create one from the Opslane server container:
 
 ```bash
 docker exec <ingestion-container> mint-key \
@@ -49,7 +53,45 @@ docker exec <ingestion-container> mint-key \
 
 It prints the project's name and repo, so you can check it is the right one, then the key once. To revoke a key later, run the SQL the command prints. Creating a new key never revokes old ones.
 
-Only Vite has a first-party integration today.
+## Next.js and other bundlers
+
+For Next.js, enable browser source maps only when the upload key is present in the build environment:
+
+```ts
+// next.config.ts
+export default {
+  productionBrowserSourceMaps: Boolean(process.env.OPSLANE_SOURCEMAP_KEY),
+};
+```
+
+Update your package's build script:
+
+```json
+{
+  "scripts": {
+    "build": "next build && opslane-sourcemaps .next/static"
+  }
+}
+```
+
+The command finds JavaScript files with adjacent `.map` files, stamps matching debug IDs into both, uploads the maps, and removes them after a successful upload. It accepts regular and indexed source maps, including Turbopack output. Run it before serving or deploying the build.
+
+For another bundler, generate source maps when `OPSLANE_SOURCEMAP_KEY` is set, then run:
+
+```bash
+opslane-sourcemaps <build-dir> --format es
+```
+
+Use `--format es` for ES modules. The default is `iife`, suitable for Next.js browser chunks. `--keep-maps` retains maps after upload for local debugging; do not publish those files unless you intend to expose their source.
+
+Without a key, both the Vite plugin and command skip uploads. The Next.js configuration above also skips map generation, so deferring the secret does not expose source files. Configure other bundlers the same way.
+
+| Exit code | Meaning |
+| --- | --- |
+| `0` | Upload succeeded, or skipped because the key is absent |
+| `1` | Invalid input, invalid key, or stamping failed |
+| `2` | Upload failed; maps remain for retry |
+
 
 ## A note on privacy
 

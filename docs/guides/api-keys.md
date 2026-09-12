@@ -19,7 +19,7 @@ A project has three kinds of keys. The server enforces what each can do.
 
 The ingest and source-map keys cannot read your data. The MCP key can read a project's issues and link pull requests, which is why it is a secret you keep out of client code.
 
-**Settings → API keys** lists both ingest and MCP keys with masked values. Project admins can revoke either kind there. The API response's `scope` field is `ingest` for browser keys and `api` for MCP keys.
+**Settings → API keys** lists ingest, source-map, and MCP keys with masked values. Project admins can create and revoke all three kinds there. The API response's `scope` field is `ingest` for browser keys, `sourcemaps` for source-map keys, and `api` for MCP keys.
 
 ## The ingest key
 
@@ -39,7 +39,7 @@ The source-map key is a secret for CI. It carries its upload destination, so the
 OPSLANE_SOURCEMAP_KEY=opslane_sk_...
 ```
 
-Never give it a `VITE_`-style public prefix; that bundles the secret into the browser. The [source maps guide](source-maps.md) covers the Vite plugin that uses it.
+Never give it a `VITE_`-style public prefix; that bundles the secret into the browser. The [source maps guide](source-maps.md) covers the Vite plugin and the post-build command for Next.js and other bundlers.
 
 ## The MCP key
 
