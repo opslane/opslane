@@ -46,3 +46,12 @@ Existing writers: `writeJSONError` emits `{"error": "<human message>"}` and `wri
 ## Hosted rollout note
 
 The hosted GitHub App must subscribe to the **Installation** and **Installation repositories** events in its GitHub App settings, or R2 never fires. This is a manual step in the GitHub App configuration, recorded in the plan's final task.
+
+## Grill decisions (2026-09-12, after two Codex rounds)
+
+- **G1.** The agent prints the session's own install link (`/agent/github/{id}`); the page asks the human to sign in first, mints the install state for them, and sends them to GitHub. Supersedes decision 15 of the onboarding grill ("Settings page plus Install button, no deep link").
+- **G2.** The pull-request step asks "Create a new branch and open a PR?", commits with `git commit --only` on the setup's own files, and never refuses because the user had something staged.
+- **G3.** `github_connected` requires the repo to be listed by an active installation. A GitHub-side removal shows "lost access" with the add-repo link; Opslane never clears project config on a GitHub-side change (Disconnect in Settings remains the explicit way).
+- **G4.** Migration 076 drops the `agent_session_steps.step` CHECK; the Go allowlist is the only gate for step names.
+- **G5.** When the App already covers the repo, the agent attaches without asking and announces it with the undo location; it stops only for install, reinstall, or add-repo, and every stop offers "later".
+- **G6.** Completing an install stays admin-only in cloud; the install page tells a member to hand the link to an admin, and the agent records the step as skipped for that reason.

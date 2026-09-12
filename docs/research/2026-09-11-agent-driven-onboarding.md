@@ -265,3 +265,16 @@ Scratch fixtures, private setup material, and raw proof logs are under `/tmp/onb
 - [ ] Publish the SDK, server, dashboard, and docs together.
 - [ ] Confirm hosted INSTALL.md and SKILL.md serve identical raw content.
 - [ ] In the separate opslane.com repository, add a “Paste into your agent” box containing `Set up https://docs.opslane.com/INSTALL.md`, a copy button, agent logos, and a manual fallback linking to `https://docs.opslane.com/install/`. Merge it the same day. The release is not complete until that box is live.
+
+### Decisions 19–24 (2026-09-12, GitHub self-healing grill)
+
+| # | Decision | Supersedes |
+|---|---|---|
+| 19 | The agent prints the session's own GitHub install link (`/agent/github/{id}`); sign-in is its first step, then it mints the install state and bounces to GitHub. | Decision 15 (Settings page, no deep link). |
+| 20 | The runbook ends by asking "Create a new branch and open a PR?" and commits with `git commit --only` on the setup's own files; a dirty index never blocks it. | new |
+| 21 | `github_connected` requires the repo to be listed by an active installation; GitHub-side removal shows "lost access" and never clears project config. | new |
+| 22 | Migration 076 drops the step CHECK; the Go allowlist is the only gate for step names. | 075's "CHECK is the source of truth". |
+| 23 | The agent attaches the repo without asking when the App already covers it; it stops only for install, reinstall, or add-repo, each offering "later". | Step 6's "now or later" question in every case. |
+| 24 | Completing an install stays admin-only in cloud; members are told to hand the link to an admin. | new |
+
+Spec: `docs/superpowers/specs/2026-09-12-github-self-healing-design.md`. Plan: `docs/superpowers/plans/2026-09-12-github-self-healing.md` (revision 4).

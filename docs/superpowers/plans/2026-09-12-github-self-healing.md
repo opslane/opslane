@@ -10,7 +10,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-12-github-self-healing-design.md`
 
-**Revision:** 3 (Codex round 1: 24 findings; round 2: 21 findings; see the change log at the end).
+**Revision:** 4 (Codex round 1: 24 findings; round 2: 21 findings; grill decisions G1–G6; see the change log at the end).
 
 ## Global Constraints
 
@@ -23,6 +23,7 @@
 - Runbook secrets rules stand: never commit the env file or `.opslane-setup/`, never put a token in a command argument (spec R6).
 - Docs tables are checked against source on every `pnpm test` (`docs:check`); `docs/reference/http-routes.md` must describe any changed status.
 - Database tests use a disposable database (`DATABASE_URL` exported); the shared verify database has live sweepers that steal job leases.
+- Grill decisions (2026-09-12, after Codex): G1 the agent prints the session's own install link and sign-in is its first step (supersedes grill-2 decision 15); G2 the PR step commits with `--only`, never aborts on a dirty index, and asks "Create a new branch and open a PR?"; G3 `github_connected` requires the repo to be in an active installation's repo list, config is never cleared by GitHub-side changes; G4 migration 076 drops the step CHECK, the Go allowlist is the only gate; G5 the agent attaches without asking when no human action is needed; G6 completing an install stays admin-only in cloud, members are told to hand the link to an admin.
 
 ---
 
@@ -34,7 +35,7 @@
 | `packages/ingestion/github/app_test.go` | Client tests (existing `roundTripperFunc`, package-level `httpClient` swap). |
 | `packages/ingestion/db/installations.go` | Installation writes: `PersistInstallation` (now un-suspends on conflict); new `RetireGitHubInstallation`, `SetGitHubInstallationSuspended`, `ReplaceGitHubInstallationRepos`, `AddGitHubInstallationRepos`, `RemoveGitHubInstallationRepos`. |
 | `packages/ingestion/db/installations_test.go` | New. Tests for the writes above (`package db_test`, `testPool`). |
-| `packages/ingestion/db/migrations/076_agent_step_pull_request.sql` | New. Widens the `agent_session_steps.step` CHECK to include `pull_request`. |
+| `packages/ingestion/db/migrations/076_agent_step_pull_request.sql` | New. Drops the `agent_session_steps.step` CHECK; the Go allowlist is the only gate (G4). |
 | `packages/ingestion/db/agent_steps.go` | `AgentStepNames` gains `pull_request`. |
 | `packages/ingestion/handler/github_failure.go` | New. `githubFailure` type, classification of client errors, `writeGitHubFailure`. |
 | `packages/ingestion/handler/github_failure_test.go` | New. Classification table test. |
@@ -43,6 +44,9 @@
 | `packages/ingestion/handler/github_oauth.go` | `ListGitHubRepos` and `GetGitHubAppStatus` self-heal and use the writer; callbacks answer 503, never 502. |
 | `packages/ingestion/handler/oauth_verify_test.go` | 502 expectation becomes 503. |
 | `packages/ingestion/handler/agent_session_routes.go` | `AgentSessionGitHub` uses the writer; progress accepts `pull_request`. |
+| `packages/ingestion/handler/agent_github_install.go` | New. `POST /api/v1/agent/github/{sessionID}/install-url`: mints the GitHub install link for the session's org (admin in cloud). |
+| `packages/ingestion/handler/agent_facts.go` | `github_connected` requires repo coverage; adds `github_repo_access` and `github_install_url`. |
+| `packages/dashboard/src/views/AgentGitHubInstall.vue`, `router.ts`, `route-project.ts` | New SPA route `/agent/github/:id` that parks for sign-in, then bounces to GitHub. |
 | `packages/ingestion/handler/webhook.go` | `installation` and `installation_repositories` branches. |
 | `packages/ingestion/handler/webhook_test.go` | New webhook branch tests via `sendSignedGitHubEvent`. |
 | `packages/dashboard/src/api.ts` | `APIError` parses `code` and extra fields; non-JSON bodies collapse to one line. |
@@ -1290,7 +1294,273 @@ git commit -m "fix(github): repo list, app status, and callbacks answer 503 or a
 
 ---
 
-### Task 6: `installation` and `installation_repositories` webhooks
+### Task 6: Agent install link and repo-access facts
+
+**Files:**
+- Create: `packages/ingestion/handler/agent_github_install.go`, `packages/ingestion/handler/agent_github_install_test.go`
+- Modify: `packages/ingestion/handler/routes.go:73-75` (register next to the approve routes), `packages/ingestion/handler/agent_facts.go:36-80`, `packages/ingestion/handler/agent_facts_test.go`, `packages/ingestion/db/queries.go` (one new query next to `OrgHasActiveGitHubInstallation`), `packages/ingestion/handler/github_settings.go:65` (`GetGitHubConfig` gains `repo_access` and `add_repo_url`)
+- Create: `packages/dashboard/src/views/AgentGitHubInstall.vue`, `packages/dashboard/src/views/__tests__/agent-github-install.test.ts`
+- Modify: `packages/dashboard/src/router.ts:21,47`, `packages/dashboard/src/route-project.ts:1`, `packages/dashboard/src/api.ts` (one new call), `packages/dashboard/src/types/api.ts`
+
+**Interfaces:**
+- Consumes: Task 3 writer; Task 4 `githubTokenFailure`; `generateOAuthState` (`github_oauth.go:685`), `StoreOAuthLoginStateForOrg` (`queries.go:3513`), the `__auth_state` cookie shape from `GetGitHubAppStatus` (`github_oauth.go:752-760`).
+- Produces:
+  - `func (q *Queries) RepoCoveredByActiveInstallation(ctx context.Context, orgID, repo string) (bool, error)` — `SELECT EXISTS(SELECT 1 FROM github_app_installations WHERE org_id = $1 AND NOT suspended AND repos ? $2)`.
+  - Facts: `github_connected` = installed AND repo attached AND covered (app mode; PAT mode unchanged). New `github_repo_access bool` (false when a repo is attached but not covered). New `github_install_url string` = `publicOrigin + "/agent/github/" + session.ID`, set only when `d.GitHubAppSlug != ""`.
+  - `POST /api/v1/agent/github/{sessionID}/install-url` (cookie auth, `RequireRoleIfCloud("admin")`): 200 `{"install_url": "https://github.com/apps/<slug>/installations/new?state=…"}` and a `Set-Cookie: __auth_state=…; Path=/auth; Max-Age=1800`; state stored for the session's org and the calling user, 30 minutes. 404 unknown session; 403 `{"code":"foreign_org"}` when the session belongs to another org; 409 `{"code":"session_not_provisioned"}` when the session has no org yet; 410 when expired; 400 `{"code":"github_app_not_configured"}` in PAT mode.
+  - `GET /api/v1/projects/{projectID}/github` adds `repo_access: bool` and, when false, `add_repo_url` (the installation's `html_url`, one GitHub call only on that path).
+  - SPA route `/agent/github/:id` (name `agent-github-install`), parked for sign-in like `agent-approve`, exempt from the project guard.
+
+- [ ] **Step 1: Write the failing Go tests**
+
+`packages/ingestion/handler/agent_facts_test.go`: read the existing tests for how a session with an attached repo and an installation row is seeded, then add:
+
+```go
+func TestAgentFacts_ConnectedRequiresRepoCoverage(t *testing.T) {
+	// Seed: org with an active installation whose repos = ["acme/other"], project github_repo = "acme/web".
+	// Expect: github_installed true, github_repo_access false, github_connected false.
+	// Then add "acme/web" via q.AddGitHubInstallationRepos and expect github_repo_access true, github_connected true.
+	// Expect github_install_url == origin + "/agent/github/" + session.ID when GitHubAppSlug != "", and absent when it is "".
+}
+```
+
+Fill the body using the file's existing seeding helpers (grep `func seed` in that file); the assertions above are the contract.
+
+Create `packages/ingestion/handler/agent_github_install_test.go`:
+
+```go
+package handler_test
+
+import (
+	"context"
+	"net/http"
+	"strings"
+	"testing"
+)
+
+func TestAgentGitHubInstallURL_MintsStateForApprover(t *testing.T) {
+	a := approvedRig(t) // provisioned session, cookie for the approving admin, deps.GitHubAppSlug set by the rig or set it here
+	a.deps.GitHubAppSlug = "opslane-test"
+	code, body := a.do(t, http.MethodPost, "/api/v1/agent/github/"+a.pollID+"/install-url", ``, true)
+	url, _ := body["install_url"].(string)
+	if code != http.StatusOK || !strings.HasPrefix(url, "https://github.com/apps/opslane-test/installations/new?state=") {
+		t.Fatalf("code=%d body=%v", code, body)
+	}
+	// The state is stored for the session's org and this user.
+	var storedOrg string
+	if err := a.deps.Queries.Pool().QueryRow(context.Background(),
+		`SELECT target_org_id::text FROM oauth_login_states ORDER BY expires_at DESC LIMIT 1`).Scan(&storedOrg); err != nil || storedOrg != a.orgID {
+		t.Fatalf("state org=%q err=%v", storedOrg, err)
+	}
+}
+
+func TestAgentGitHubInstallURL_Gates(t *testing.T) {
+	a := newApproveRig(t) // pending: no org yet
+	a.deps.GitHubAppSlug = "opslane-test"
+	if code, body := a.do(t, http.MethodPost, "/api/v1/agent/github/"+a.pollID+"/install-url", ``, true); code != http.StatusConflict || body["code"] != "session_not_provisioned" {
+		t.Fatalf("pending session: %d %v", code, body)
+	}
+	if code, _ := a.do(t, http.MethodPost, "/api/v1/agent/github/"+a.pollID+"/install-url", ``, false); code != http.StatusUnauthorized {
+		t.Fatalf("no cookie: %d", code)
+	}
+	b := approvedRig(t)
+	b.deps.GitHubAppSlug = ""
+	if code, body := b.do(t, http.MethodPost, "/api/v1/agent/github/"+b.pollID+"/install-url", ``, true); code != http.StatusBadRequest || body["code"] != "github_app_not_configured" {
+		t.Fatalf("pat mode: %d %v", code, body)
+	}
+}
+```
+
+The rig helpers (`approvedRig`, `newApproveRig`, `do`) live in `agent_approve_test.go`; check whether that file is `package handler` or `package handler_test` and match it. The foreign-org case follows `TestAgentApprove_ForeignProjectAndForeignOrgInfo`: reuse its second-org cookie and expect 403. Add the `rec.Header().Get("Set-Cookie")` contains `__auth_state=` assertion to the first test.
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `cd packages/ingestion && go test ./handler -run 'TestAgentFacts_ConnectedRequiresRepoCoverage|TestAgentGitHubInstallURL' -v`
+Expected: 404 from the router for the new route; facts test fails on `github_connected`.
+
+- [ ] **Step 3: Implement**
+
+`queries.go`, next to `OrgHasActiveGitHubInstallation`:
+
+```go
+// RepoCoveredByActiveInstallation reports whether some unsuspended
+// installation of the org lists the repo. github_connected requires it, so a
+// repo removed on GitHub reads as disconnected without touching project config.
+func (q *Queries) RepoCoveredByActiveInstallation(ctx context.Context, orgID, repo string) (bool, error) {
+	var ok bool
+	err := q.pool.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM github_app_installations WHERE org_id = $1 AND NOT suspended AND repos ? $2)`,
+		orgID, repo).Scan(&ok)
+	return ok, err
+}
+```
+
+`agent_facts.go`: add fields `GitHubRepoAccess bool \`json:"github_repo_access"\`` and `GitHubInstallURL string \`json:"github_install_url,omitempty"\``. In the app-mode branch:
+
+```go
+	if f.GitHubMode == "app" {
+		f.GitHubInstallURL = origin + "/agent/github/" + s.ID
+		if ok, err := d.Queries.OrgHasActiveGitHubInstallation(ctx, orgID); err == nil && ok {
+			f.GitHubInstalled = true
+		}
+		if repoAttached {
+			if ok, err := d.Queries.RepoCoveredByActiveInstallation(ctx, orgID, *f.GitHubRepo); err == nil {
+				f.GitHubRepoAccess = ok
+			}
+		}
+		f.GitHubConnected = f.GitHubInstalled && repoAttached && f.GitHubRepoAccess
+	} else {
+		f.GitHubInstalled = strings.TrimSpace(os.Getenv("GITHUB_TOKEN")) != ""
+		f.GitHubRepoAccess = repoAttached
+		f.GitHubConnected = repoAttached
+	}
+```
+
+Create `packages/ingestion/handler/agent_github_install.go`:
+
+```go
+package handler
+
+import (
+	"fmt"
+	"net/http"
+	"net/url"
+	"time"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
+
+	"github.com/opslane/opslane/packages/ingestion/auth"
+)
+
+// AgentGitHubInstallURL mints the GitHub App install link for an agent
+// session's org. The human reaches this through the SPA page the agent
+// printed, already signed in, so the state and cookie the callback checks
+// are set the same way Settings sets them.
+//
+// POST /api/v1/agent/github/{sessionID}/install-url
+func (d *Dependencies) AgentGitHubInstallURL(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	sessionID := chi.URLParam(r, "sessionID")
+	if _, err := uuid.Parse(sessionID); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid session ID")
+		return
+	}
+	session, err := d.Queries.GetAgentSession(r.Context(), sessionID)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	if session == nil {
+		writeJSONError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	if time.Now().After(session.ExpiresAt) || session.Status == "expired" || session.Status == "failed" {
+		writeJSONErrorCode(w, http.StatusGone, "this setup session has ended; ask the agent to run setup again", "session_ended")
+		return
+	}
+	if session.OrgID == nil {
+		writeJSONErrorCode(w, http.StatusConflict, "approve the setup first", "session_not_provisioned")
+		return
+	}
+	if *session.OrgID != OrgIDFromCtx(r.Context()) {
+		writeJSONErrorCode(w, http.StatusForbidden, "this setup belongs to another organization", "foreign_org")
+		return
+	}
+	if d.GitHubAppSlug == "" {
+		writeJSONErrorCode(w, http.StatusBadRequest, "this Opslane has no GitHub App; connect a repository from Settings with a token", "github_app_not_configured")
+		return
+	}
+	state, err := generateOAuthState(d.JWTSecret)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	if err := d.Queries.StoreOAuthLoginStateForOrg(r.Context(), auth.HashToken(state), *session.OrgID, UserIDFromCtx(r.Context()), time.Now().Add(30*time.Minute)); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	isSecure := r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https"
+	http.SetCookie(w, &http.Cookie{
+		Name: "__auth_state", Value: state, Path: "/auth", MaxAge: 1800,
+		HttpOnly: true, Secure: isSecure, SameSite: http.SameSiteLaxMode,
+	})
+	writeJSON(w, http.StatusOK, map[string]string{
+		"install_url": fmt.Sprintf("https://github.com/apps/%s/installations/new?state=%s", d.GitHubAppSlug, url.QueryEscape(state)),
+	})
+}
+```
+
+`routes.go`, next to the approve routes:
+
+```go
+	r.With(deps.AuthenticateUserSession, deps.RequireRoleIfCloud("admin")).Post("/api/v1/agent/github/{sessionID}/install-url", deps.AgentGitHubInstallURL)
+```
+
+`GetGitHubConfig` (`github_settings.go:65`): after loading the repo, in app mode compute `repo_access` with `RepoCoveredByActiveInstallation`; when false and an installation is active, call `gh.VerifyInstallation` for `html_url` and add `add_repo_url`. Add both fields to the response struct (`RepoAccess bool \`json:"repo_access"\``, `AddRepoURL string \`json:"add_repo_url,omitempty"\``).
+
+Dashboard: `router.ts` adds `{ path: '/agent/github/:id', name: 'agent-github-install', component: AgentGitHubInstall }` and includes `'agent-github-install'` in the parked-path condition at line 47; `route-project.ts` adds it to `PROJECT_EXEMPT_ROUTES`. `api.ts` adds `agentGitHubInstallUrl(sessionId: string): Promise<{ install_url: string }>` (POST). `AgentGitHubInstall.vue`:
+
+```vue
+<script setup lang="ts">
+import { onMounted, ref } from 'vue';
+import { useRoute } from 'vue-router';
+import { agentGitHubInstallUrl, APIError } from '../api';
+import { GITHUB_PR_URL_OPTIONS, safeUrl } from '../utils';
+
+const route = useRoute();
+const message = ref('Taking you to GitHub…');
+const needsAdmin = ref(false);
+const pageUrl = window.location.href;
+
+onMounted(async () => {
+  try {
+    const { install_url } = await agentGitHubInstallUrl(String(route.params.id));
+    const target = safeUrl(install_url, GITHUB_PR_URL_OPTIONS);
+    if (!target) { message.value = 'Opslane returned an unexpected install link.'; return; }
+    window.location.assign(target);
+  } catch (err) {
+    if (err instanceof APIError && err.status === 403 && err.code !== 'foreign_org') {
+      needsAdmin.value = true;
+      message.value = 'Installing the GitHub App needs an organization admin. Send them this link:';
+      return;
+    }
+    message.value = err instanceof Error ? err.message : 'Could not start the GitHub installation.';
+  }
+});
+</script>
+
+<template>
+  <div class="min-h-screen flex items-center justify-center bg-background px-4">
+    <div class="max-w-lg w-full rounded-lg border border-border bg-surface p-8" data-testid="agent-github-install">
+      <p class="text-sm text-text" v-text="message"></p>
+      <code v-if="needsAdmin" class="mt-3 block break-all text-xs text-muted" data-testid="agent-github-install-link">{{ pageUrl }}</code>
+    </div>
+  </div>
+</template>
+```
+
+`RequireRoleIfCloud("admin")` answers a member with 403 and no `code`, which is what the page treats as "needs an admin"; `foreign_org` stays an error line.
+
+Settings and SetupWizard: when `GET …/github` returns `connected` with `repo_access: false`, show "Opslane lost access to `<repo>` on GitHub." with the add-repo link (`safeUrl(add_repo_url, GITHUB_PR_URL_OPTIONS)`, `data-testid="github-repo-access-link"`). Task 9 adds the tests for that rendering alongside its other Settings tests.
+
+Dashboard test `agent-github-install.test.ts`: mock `../api` (with the mock `APIError` class from Task 9's convention), stub `window.location.assign`, mount with a router stub providing `params.id`; assert the assign call with the returned URL; then reject with a 403 without code and assert the admin message and the page URL are rendered; then reject with 403 `foreign_org` and assert no link.
+
+- [ ] **Step 4: Run the tests**
+
+Run: `cd packages/ingestion && go vet ./handler && go test ./handler -run 'TestAgentFacts|TestAgentGitHubInstallURL|TestGetGitHubConfig' -count=1 && cd ../dashboard && pnpm exec vitest run src/views/__tests__/agent-github-install.test.ts && pnpm exec vue-tsc --noEmit`
+Expected: all green.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add packages/ingestion/handler/agent_github_install.go packages/ingestion/handler/agent_github_install_test.go packages/ingestion/handler/routes.go packages/ingestion/handler/agent_facts.go packages/ingestion/handler/agent_facts_test.go packages/ingestion/db/queries.go packages/ingestion/handler/github_settings.go packages/dashboard/src/views/AgentGitHubInstall.vue packages/dashboard/src/views/__tests__/agent-github-install.test.ts packages/dashboard/src/router.ts packages/dashboard/src/route-project.ts packages/dashboard/src/api.ts packages/dashboard/src/types/api.ts
+git commit -m "feat(onboarding): agent-printed GitHub install link and repo-access facts"
+```
+
+---
+
+### Task 7: `installation` and `installation_repositories` webhooks
 
 **Files:**
 - Modify: `packages/ingestion/handler/webhook.go:60-85`
@@ -1298,7 +1568,7 @@ git commit -m "fix(github): repo list, app status, and callbacks answer 503 or a
 - Modify: `docs/guides/github-app.md:41` (events list)
 
 **Interfaces:**
-- Consumes: Task 2 helpers; `d.Queries.GetGitHubAppInstallationByID` (existing; returns `nil, nil` when the row is absent, `queries.go:4565`).
+- Consumes: Task 2 helpers (`ReactivateGitHubInstallation` for `unsuspend`); `d.Queries.GetGitHubAppInstallationByID` (existing; returns `nil, nil` when the row is absent, `queries.go:4565`).
 - Produces: `func (d *Dependencies) handleInstallationWebhook(w http.ResponseWriter, r *http.Request, body []byte)` and `handleInstallationRepositoriesWebhook(...)`. Both answer `{"status":"applied","action":...}` for a known installation, `{"status":"ignored","reason":"unknown_installation"}` for an unmapped one, and `{"status":"ignored","action":...}` for actions outside the handled set.
 
 - [ ] **Step 1: Write the failing tests**
@@ -1646,7 +1916,7 @@ git commit -m "feat(github): apply installation and installation_repositories we
 
 ---
 
-### Task 7: Progress step `pull_request`
+### Task 8: Progress step `pull_request`
 
 **Files:**
 - Create: `packages/ingestion/db/migrations/076_agent_step_pull_request.sql`
@@ -1655,11 +1925,11 @@ git commit -m "feat(github): apply installation and installation_repositories we
 - Test: `packages/ingestion/db/agent_steps_test.go` (`TestAgentSteps_UpsertListAndEnum`), `packages/ingestion/handler/agent_session_routes_test.go` (`TestAgentSessionRoutes_ProgressAndState`), `packages/dashboard/src/views/__tests__/agent-approve.test.ts`
 
 **Interfaces:**
-- Produces: step name `pull_request`, agent-reported (accepts `running`, `done`, `failed`, `skipped`), label "Open a pull request", ordered after `mcp`. Migration 076 widens the CHECK constraint; this task therefore ships a migration and the release checklist says so.
+- Produces: step name `pull_request`, agent-reported (accepts `running`, `done`, `failed`, `skipped`), label "Open a pull request", ordered after `mcp`. Migration 076 drops the step CHECK constraint (G4): the Go allowlist in `AgentSessionProgress` is the only gate from now on, so future steps are a Go-only change.
 
 - [ ] **Step 1: Write the failing tests**
 
-`agent_steps_test.go`: in `TestAgentSteps_UpsertListAndEnum`, after the existing upserts add an upsert of `pull_request` with status `done` and assert it lists last; keep the existing "unknown step" CHECK assertion.
+`agent_steps_test.go`: in `TestAgentSteps_UpsertListAndEnum`, after the existing upserts add an upsert of `pull_request` with status `done` and assert it lists last. Delete the "unknown step" CHECK assertion (the database no longer enforces names); the handler-level rejection is already covered by `TestAgentSessionRoutes_ProgressAndState` (`unknown step` → 400).
 
 `agent_session_routes_test.go`, in `TestAgentSessionRoutes_ProgressAndState` after the `sourcemaps` call:
 
@@ -1686,20 +1956,20 @@ Run: `cd packages/dashboard && pnpm exec vitest run src/views/__tests__/agent-ap
 Create `packages/ingestion/db/migrations/076_agent_step_pull_request.sql`:
 
 ```sql
--- The agent now finishes by opening a pull request and reports it as a step.
--- Postgres cannot ALTER a CHECK in place; drop and recreate under a stable name.
+-- Step names are validated by the ingestion handler's allowlist
+-- (handler/agent_session_routes.go). The inline CHECK from 075 made every
+-- new step a migration; drop it so pull_request and later steps are Go-only.
 ALTER TABLE agent_session_steps DROP CONSTRAINT IF EXISTS agent_session_steps_step_check;
-ALTER TABLE agent_session_steps ADD CONSTRAINT agent_session_steps_step_check
-  CHECK (step IN ('install_sdk','first_event','github','slack','sourcemaps','mcp','pull_request'));
 ```
 
-(`agent_session_steps_step_check` is the name Postgres auto-assigns to the inline CHECK in 075; confirm with `\d agent_session_steps` on a migrated database before relying on it. If the name differs, drop by the observed name.)
+(`agent_session_steps_step_check` is the name Postgres auto-assigns to the inline CHECK in 075; confirm with `\d agent_session_steps` on a migrated database. If the name differs, drop by the observed name. `IF EXISTS` keeps the file idempotent.)
 
 `agent_steps.go`:
 
 ```go
-// AgentStepNames is the fixed checklist in display order. Migration 076's
-// CHECK constraint is the source of truth; keep them equal.
+// AgentStepNames is the fixed checklist in display order and, since
+// migration 076 dropped the CHECK, the only source of truth for step names;
+// AgentSessionProgress rejects anything else before the write.
 var AgentStepNames = []string{"install_sdk", "first_event", "github", "slack", "sourcemaps", "mcp", "pull_request"}
 ```
 
@@ -1738,7 +2008,7 @@ git commit -m "feat(onboarding): record and show the pull_request step"
 
 ---
 
-### Task 8: Dashboard reads the new error shape
+### Task 9: Dashboard reads the new error shape
 
 **Files:**
 - Modify: `packages/dashboard/src/api.ts:80-118` (`APIError`, `fetchWithAuth`)
@@ -1908,7 +2178,7 @@ Reset `githubAddRepoUrl.value = ''` wherever `githubError.value = ''` is reset. 
 
 Both view test files mock the whole API module (`Settings.test.ts:23` with `vi.mock('../api', ...)`, `setup-wizard.test.ts:24` with `vi.mock('../../api', () => api)`), so the views' `import { APIError } from '../api'` resolves to the mock. Add to each mock factory one `APIError` class with the same constructor shape (`status, message, code?, details?`) and, in `Settings.test.ts`, a `listGitHubRepos: vi.fn().mockResolvedValue([])` so an installed `RepoSelector` can mount. Construct every rejected value in those tests with the mock's `APIError`, never the real one.
 
-Add a Settings test (in `packages/dashboard/src/views/Settings.test.ts`, following its existing mocking style): mock the connect call `api.ts` exposes for `PUT /projects/{id}/github` to reject with `new APIError(400, 'cannot see acme/web', 'repo_not_in_installation', { add_repo_url: 'https://github.com/settings/installations/7' })`, click connect, and assert `[data-testid="github-add-repo-link"]` has that href; then reject with `new APIError(400, 'x', 'repo_not_in_installation', { add_repo_url: 'https://evil.test/x' })` and assert the link is absent; then reject with `new APIError(409, 'gone', 'github_installation_gone')` and assert the status loader was called again. Add the mirror of the first and third cases to `setup-wizard.test.ts` against `attachRepo`.
+Add a Settings test (in `packages/dashboard/src/views/Settings.test.ts`, following its existing mocking style): mock the connect call `api.ts` exposes for `PUT /projects/{id}/github` to reject with `new APIError(400, 'cannot see acme/web', 'repo_not_in_installation', { add_repo_url: 'https://github.com/settings/installations/7' })`, click connect, and assert `[data-testid="github-add-repo-link"]` has that href; then reject with `new APIError(400, 'x', 'repo_not_in_installation', { add_repo_url: 'https://evil.test/x' })` and assert the link is absent; then reject with `new APIError(409, 'gone', 'github_installation_gone')` and assert the status loader was called again. Add the mirror of the first and third cases to `setup-wizard.test.ts` against `attachRepo`. Also mock `GET …/github` to resolve `{ connected: true, github_repo: 'acme/web', repo_access: false, add_repo_url: 'https://github.com/settings/installations/7' }` and assert the "lost access" line and `[data-testid="github-repo-access-link"]` render (Task 6 added the fields).
 
 - [ ] **Step 4: Run the tests**
 
@@ -1924,14 +2194,14 @@ git commit -m "fix(dashboard): typed API errors, add-repo link, gone-installatio
 
 ---
 
-### Task 9: Runbook: preflight snapshot, GitHub step, honesty, pull request, recorded finish
+### Task 10: Runbook: preflight snapshot, GitHub step, honesty, pull request, recorded finish
 
 **Files:**
 - Modify: `docs-site/public/INSTALL.md` (rules list, step 2, step 6, new step 10, Finish → 11), then copy to `docs-site/public/SKILL.md`
 - Modify: `docs/reference/http-routes.md` rows for `POST /api/v1/agent/poll/{sessionID}/github`, `PUT /api/v1/projects/{projectID}/github`, `GET /api/v1/github/repos`, `POST /api/v1/github/webhook`
 
 **Interfaces:**
-- Consumes: codes from Tasks 3–5; step `pull_request` from Task 7. `opslane_field <file> <name>` reads `.opslane-setup/<file>.json`; `opslane_post` writes the response to `.opslane-setup/last.json`, so `opslane_field last <name>` reads the latest response.
+- Consumes: codes from Tasks 3–6; step `pull_request` from Task 8; `github_install_url` and `github_repo_access` from Task 6. `opslane_field <file> <name>` reads `.opslane-setup/<file>.json`; `opslane_post` writes the response to `.opslane-setup/last.json`, so `opslane_field last <name>` reads the latest response.
 
 - [ ] **Step 1: Rules**
 
@@ -1977,12 +2247,12 @@ Replace the whole `## 6. STOP: GitHub (optional)` section with:
 ````markdown
 ## 6. STOP: GitHub (optional)
 
-Read `github_connected`, `github_installed`, `github_repo`, and `github_connect_url` from the state.
+Read `github_connected`, `github_installed`, `github_repo`, `github_repo_access`, `github_install_url`, and `github_connect_url` from the state.
 
 - `github_connected` True: nothing to do; go to step 7.
-- Otherwise ask once: "Connect GitHub so Opslane can open fix PRs for `<owner/repo>`? (now / later)". On later: `opslane_progress github skipped "later"` and go to step 7.
+- Otherwise run the attach loop below right away, without asking: attaching a repository the App can already see needs no human action and is undone from Settings. The human is asked only when the loop pauses for something only they can do.
 
-On now, define this once (it must stay defined with the other helpers) and call it. It returns a word on stdout and never exits the shell:
+Define this once (it must stay defined with the other helpers) and call it. It returns a word on stdout and never exits the shell:
 
 ```bash
 opslane_attach_github() {   # usage: opslane_attach_github owner/repo  → attached | pause_add_repo | pause_install | pause_reinstall | failed
@@ -2009,15 +2279,15 @@ result=$(opslane_attach_github "<owner/repo>")
 echo "$result"
 ```
 
-Act on the word, then re-run the two `result=` lines after the human answers (at most three human rounds; on the fourth pause, `opslane_progress github failed "<last pause reason>"` and go to step 7):
+Act on the word. Every pause is a question with a "later" option; on later, `opslane_progress github skipped "later"` and go to step 7. After the human says they are done, re-run the two `result=` lines (at most three human rounds; on the fourth pause, `opslane_progress github failed "<last pause reason>"` and go to step 7):
 
-- `attached`: read the state once more; only if `github_connected` is True say "GitHub is connected to `<owner/repo>`." Go to step 7.
-- `pause_add_repo`: STOP and say: "Opslane's GitHub App cannot see `<owner/repo>`. Open `<add_repo_url from .opslane-setup/last.json; if it is empty, refresh the state with opslane_state '' and use its github_connect_url>`, add the repository under Repository access, save, then tell me." Wait, then re-run.
-- `pause_install`: STOP and say: "Install the Opslane GitHub App for `<owner/repo>` at `<github_connect_url>`, then tell me." Wait, then re-run.
-- `pause_reinstall`: STOP and say: "The GitHub App installation Opslane knew about was removed on GitHub. Install it again at `<github_connect_url>`, then tell me." Wait, then re-run.
+- `attached`: read the state once more; only if `github_connected` is True say "Connected GitHub to `<owner/repo>` (undo in Settings)." Go to step 7.
+- `pause_add_repo`: STOP and say: "Opslane's GitHub App cannot see `<owner/repo>`. Open `<add_repo_url>`, add the repository under Repository access, save, then tell me. Or say later." Wait, then re-run.
+- `pause_install`: STOP and say: "Opslane needs its GitHub App on `<owner/repo>`. Open `<github_install_url>`, sign in to Opslane if it asks, pick the repository on GitHub, then tell me. Or say later." Wait, then re-run.
+- `pause_reinstall`: STOP and say: "The GitHub App installation Opslane knew about was removed on GitHub. Open `<github_install_url>`, sign in to Opslane if it asks, install it again for `<owner/repo>`, then tell me. Or say later." Wait, then re-run.
 - `failed`: show the recorded note and go to step 7.
 
-Read the URLs with `opslane_field last add_repo_url` (400 responses) and `opslane_field last github_connect_url` (400 `github_not_installed` and 409 responses); `opslane_field state github_connect_url` after a fresh `opslane_state ''` is the fallback. None of them is a secret.
+URLs: `add_repo_url` comes from `opslane_field last add_repo_url` (400 responses). `github_install_url` comes from the state (`opslane_state ''` then `opslane_field state github_install_url`); it is one fixed link per session that first asks the human to sign in to Opslane, then sends them to GitHub. If it is empty (an Opslane without a GitHub App), use `github_connect_url` from the same state instead. If the page says an organization admin is needed, tell the user to send that link to an admin and offer "later". None of these URLs is a secret.
 ````
 
 - [ ] **Step 4: Add step 10 (pull request) and renumber Finish to 11**
@@ -2027,9 +2297,9 @@ Insert before the Finish section:
 ````markdown
 ## 10. STOP: Open a pull request
 
-Say: "I'll commit the Opslane setup on a branch and open a pull request. OK?" Wait for yes. On no, or if this directory is not a git repository with an `origin` remote: `opslane_progress pull_request skipped "<why>"` and go to step 11.
+Ask: "Create a new branch and open a PR?" Wait for yes. On no, or if this directory is not a git repository with an `origin` remote: `opslane_progress pull_request skipped "<why>"` and go to step 11.
 
-Stage only files this runbook created or changed: the package manifest and lockfile, the init snippet or provider component, `next.config.*` or `vite.config.*`, the build script, `.gitignore`, and the file where the test button was removed. Never stage the env file or `.opslane-setup/`. A file that already appeared in `.opslane-setup/pre-status.txt` had the user's own uncommitted changes before setup: do not stage it, list it, and ask the user to commit it themselves. If the index already holds staged changes of the user's own, do not commit at all: `git commit --only` still writes only the named paths, but a dirty index is a sign the user is mid-work.
+Commit only files this runbook created or changed: the package manifest and lockfile, the init snippet or provider component, `next.config.*` or `vite.config.*`, the build script, `.gitignore`, and the file where the test button was removed. Never stage the env file or `.opslane-setup/`. A file that already appeared in `.opslane-setup/pre-status.txt` had the user's own uncommitted changes before setup: do not stage it, list it, and ask the user to commit it themselves. `git commit --only -- <files>` writes exactly the named paths and leaves anything the user had staged untouched; if the index had staged changes, say "I left your staged changes alone" once.
 
 ```bash
 pr_fail() { opslane_progress pull_request failed "$1"; echo "$1"; }
@@ -2044,8 +2314,8 @@ for f in "${files[@]}"; do
 done
 [ "${#skip[@]}" -gt 0 ] && printf 'Not staged (had your own changes before setup): %s\n' "${skip[@]}"
 pushed=0
-if ! git diff --cached --quiet; then pr_fail "the index already has staged changes; commit or unstage them first"
-elif [ "${#stage[@]}" -eq 0 ]; then pr_fail "nothing safe to stage"
+git diff --cached --quiet || echo "I left your staged changes alone."
+if [ "${#stage[@]}" -eq 0 ]; then pr_fail "nothing safe to stage"
 elif git checkout -b "$branch" \
      && git add -- "${stage[@]}" \
      && git commit --only -- "${stage[@]}" -m "Add Opslane error monitoring" -m "Installs @opslane/sdk, initializes it with the public ingest key from the environment, and uploads source maps on production builds. Set VITE_OPSLANE_API_KEY (or NEXT_PUBLIC_OPSLANE_API_KEY) and the environment variable in the deploy." \
@@ -2128,7 +2398,7 @@ git commit -m "docs(runbook): resumable GitHub step, honest summary, and a pull 
 
 ---
 
-### Task 10: Full gate, live smoke, and hosted App checklist
+### Task 11: Full gate, live smoke, and hosted App checklist
 
 **Files:**
 - No code. Verification and release notes.
@@ -2159,12 +2429,13 @@ App-mode token failures are covered by the handler tests with a fake GitHub clie
 3. Send a signed `installation` `deleted` event for that ID: headers `X-GitHub-Event: installation`, `X-GitHub-Delivery: <uuid>`, `X-Hub-Signature-256: sha256=<hex HMAC-SHA256 of the body with smoke-secret>`; expect `{"status":"applied"}`.
 4. Read `state`: `github_installed: false`; read `orgs.github_installation_id`: NULL; the row is suspended.
 5. Send `installation_repositories` `added` (header `X-GitHub-Event: installation_repositories`) for the same ID with one repo: the row still exists (suspended), so it is known; expect `applied` and the repo appended. Send the same for an unknown ID and expect `ignored`. Then send `installation` `unsuspend` for the retired ID and confirm `state` reads `github_installed: true` again.
+6. With the stack's `GITHUB_APP_SLUG` set (compose defaults it to `defender-dev`), `POST /api/v1/agent/github/{id}/install-url` with the approver cookie: expect 200, an `install_url` starting `https://github.com/apps/defender-dev/installations/new?state=`, and a `__auth_state` cookie. Open `/agent/github/{id}` in a browser without a session cookie and confirm it parks and redirects to sign-in.
 
 Record the transcript under `.verify/runs/<id>/evidence/`.
 
 - [ ] **Step 3: Hosted App configuration (manual, before deploy)**
 
-In the hosted GitHub App settings (GitHub → Settings → Developer settings → GitHub Apps → Opslane → Permissions & events), subscribe to **Installation** and **Installation repositories**. Without this, Task 6 never receives events in prod. Note it in the PR body's release checklist.
+In the hosted GitHub App settings (GitHub → Settings → Developer settings → GitHub Apps → Opslane → Permissions & events), subscribe to **Installation** and **Installation repositories**. Without this, Task 7 never receives events in prod. Note it in the PR body's release checklist.
 
 - [ ] **Step 4: PR**
 
@@ -2177,3 +2448,5 @@ Open the PR with the release checklist: migration 076 applies on ingestion boot 
 **Revision 2 (Codex round 1, 24 findings):** migration 076 and `AgentStepNames` for `pull_request` (1); every exact dashboard sequence updated plus a `pull_request` assertion (2); `PersistInstallation` un-suspends on conflict with a reconnect test (3); `RetireGitHubInstallation` is one transaction, org-scoped for on-use healing, and clears a legacy pointer without a rich row; retirement failure answers 500 (4); `GetGitHubAppStatus` reads active installations (5); `ListGitHubRepos` no-installation branch is typed (6); `RepoSelector` emits `load-error`, Settings and SetupWizard reload status (7); combined-install upstream errors become 503 via `errGitHubUpstream`, callback `VerifyInstallation` splits gone from unreachable (8); generic provider callback gets a provider-neutral 503 and its test moves (9); webhook branches decide known/unknown by lookup, switch on every action, and log unknown IDs (10); API error test follows the localStorage-stub + dynamic-import pattern (11); GitHub waits are pauses that keep `.opslane-setup/`, with a three-round cap (12); every capture ends in `|| true`, curl failures read `000`, `retry_after` defaults (13); the finish step captures a recorded summary before deleting state (14); step 10 stages only files absent from the preflight snapshot (15); an existing `opslane-setup` branch is never reused and every git/gh command records failure (16); compare URL derived from the remote, PR URL captured from `gh` (17); gate uses explicit `if rg`, verbose Go output with a skip count, and storage variables (18); smoke exercises the webhook path with a real session and signed events (19); repo adds dedupe input (20); two-tries rule yields to step loops and `attached` is explicit (21); add-repo link passes `GITHUB_PR_URL_OPTIONS` with a rejection test (22); route doc names `PUT /api/v1/projects/{projectID}/github` and the webhook delivery-id caveat (23); `TargetType` dropped (24).
 
 **Revision 3 (Codex round 2, 21 findings):** `ReactivateGitHubInstallation` restores the org pointer so an `unsuspend` after a retire reconnects (A1); the install callback's token failure self-heals with the login state's target org (A2); `ListUserInstallations` is wrapped in `errGitHubUpstream` (A3); `oauth_verify.go:65` gets the provider-neutral 503 and a test row (A4); `"strings"` import named for the OAuth test file (A5); the second `completeOAuthIdentity` writer in `oauth_verify.go` is in scope and staged (A6); retire uses two statements instead of `''::uuid` (A7); gate runs `go test` alone and checks its own exit, then greps the log (B1); step 10 aborts on a dirty index and commits with `--only` (B2); staging uses arrays and quoted expansions (B3); the preflight snapshot precedes the `.gitignore` edit (B4); every pre-existing capture in steps 3, 5, 6 and `opslane_progress` gets `|| true`, with a grep that proves it (B5); step 11 requires a 200 state read and a non-empty summary before `complete` (B6); `pause_add_repo` falls back to `state.json` for `github_connect_url` (B7); view test mocks gain `APIError` and `listGitHubRepos` (B8); smoke commands carry `X-GitHub-Event` and `X-GitHub-Delivery` (B9); compare URL comes from a strict parse of three GitHub remote forms and the remote is never printed (B10); SetupWizard's `attachRepo` handles both codes with tests (B11); notes are whitespace-collapsed in the summary (B12); `opslane_progress` diagnostics go to stderr (B13); migration reapply uses `scripts/check-migration-reapply.sh` (B14).
+
+**Revision 4 (grill decisions G1–G6):** new Task 6: the state carries `github_install_url` (a fixed `/agent/github/{id}` link that parks for sign-in, mints the install state for the approver, and bounces to GitHub), `github_repo_access`, and `github_connected` now requires repo coverage (G1, G3, G6); the runbook attaches without asking when no human action is needed and prints the install link on install/reinstall pauses, every pause offering "later" (G5, G1); migration 076 only drops the step CHECK (G4); the PR step asks "Create a new branch and open a PR?", never aborts on a dirty index, and commits with `--only` (G2). Tasks renumbered 6→7 … 10→11.
