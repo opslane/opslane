@@ -2026,11 +2026,27 @@ export async function getProjectGitHubInstallation(projectId: string): Promise<{
   githubRepo: string | null;
 } | null> {
   const pool = getPool();
+  // An org can hold several app installations (one per GitHub org it
+  // connects), but orgs.github_installation_id remembers only the newest.
+  // Minting a token from that column for a repo the newest installation
+  // cannot see turns every clone into "Repository not found". Resolve by
+  // repo membership first; the org column remains the fallback for rows
+  // that predate per-installation repo lists.
   const { rows } = await pool.query<{
     github_installation_id: number | null;
     github_repo: string | null;
   }>(
-    `SELECT o.github_installation_id, p.github_repo
+    `SELECT COALESCE(
+              (SELECT i.installation_id
+                 FROM github_app_installations i
+                WHERE i.org_id = p.org_id
+                  AND NOT i.suspended
+                  AND i.repos ? p.github_repo
+                ORDER BY i.created_at DESC
+                LIMIT 1),
+              o.github_installation_id
+            ) AS github_installation_id,
+            p.github_repo
      FROM projects p
      JOIN orgs o ON o.id = p.org_id
      WHERE p.id = $1`,

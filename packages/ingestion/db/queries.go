@@ -2434,7 +2434,17 @@ func loadDraftBranchCleanup(ctx context.Context, tx pgx.Tx, groupID string) (str
 	var branch string
 	var installationID *int64
 	err := tx.QueryRow(ctx,
-		`SELECT r.branch_name, o.github_installation_id
+		`SELECT r.branch_name,
+		        COALESCE(
+		          (SELECT i.installation_id
+		             FROM github_app_installations i
+		            WHERE i.org_id = p.org_id
+		              AND NOT i.suspended
+		              AND i.repos ? p.github_repo
+		            ORDER BY i.created_at DESC
+		            LIMIT 1),
+		          o.github_installation_id
+		        ) AS github_installation_id
 		 FROM delivery_reservations r
 		 JOIN projects p ON p.id = r.project_id
 		 JOIN orgs o ON o.id = p.org_id
@@ -2501,7 +2511,17 @@ func (q *Queries) ProcessPRWebhook(ctx context.Context, githubRepo string, prNum
 	var installationID *int64
 	err = tx.QueryRow(ctx,
 		`SELECT eg.id, eg.project_id, eg.kind, eg.status, eg.pr_fix_job_id,
-		        r.branch_name, o.github_installation_id
+		        r.branch_name,
+		        COALESCE(
+		          (SELECT i.installation_id
+		             FROM github_app_installations i
+		            WHERE i.org_id = p.org_id
+		              AND NOT i.suspended
+		              AND i.repos ? p.github_repo
+		            ORDER BY i.created_at DESC
+		            LIMIT 1),
+		          o.github_installation_id
+		        ) AS github_installation_id
 		 FROM error_groups eg
 		 JOIN projects p ON eg.project_id = p.id
 		 JOIN orgs o ON o.id = p.org_id

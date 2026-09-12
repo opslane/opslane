@@ -27,6 +27,7 @@ import {
   setSessionAnalysisStatus,
   claimJob,
   resolveEvidenceEventId,
+  getProjectGitHubInstallation,
   listUnmappedPatterns,
   listProductContextPatterns,
   MAX_ROUTE_PATTERN_BYTES,
@@ -583,6 +584,27 @@ describe('getProject', () => {
     const project = await getProject('p1');
     expect(project?.github_repo).toBe('org/repo');
     expect(mockQuery.mock.calls[0][0]).toContain('friction_autonomy');
+  });
+});
+
+describe('getProjectGitHubInstallation', () => {
+  beforeEach(() => mockQuery.mockReset());
+
+  it('resolves the installation covering the repo, not the org column alone', async () => {
+    mockQuery.mockResolvedValueOnce({
+      rows: [{ github_installation_id: 111, github_repo: 'org/repo' }],
+    });
+    const install = await getProjectGitHubInstallation('p1');
+    expect(install).toEqual({ installationId: 111, githubRepo: 'org/repo' });
+    const sql = mockQuery.mock.calls[0][0] as string;
+    // The org column remembers only the newest installation; a token minted
+    // from it for a repo that installation cannot see clones as "Repository
+    // not found". Repo membership must decide, with the column as fallback.
+    expect(sql).toContain('github_app_installations');
+    expect(sql).toContain('i.repos ? p.github_repo');
+    expect(sql).toContain('NOT i.suspended');
+    expect(sql).toContain('COALESCE');
+    expect(mockQuery.mock.calls[0][1]).toEqual(['p1']);
   });
 });
 
