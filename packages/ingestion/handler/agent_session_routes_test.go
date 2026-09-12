@@ -238,3 +238,34 @@ func TestAgentSessionRoutes_SlackCreateDisabledTestEnable(t *testing.T) {
 		t.Fatalf("bad webhook url must be 400, got %d", code)
 	}
 }
+
+func TestAgentSessionRoutes_AllActionsRejectOtherTokensAndExpiredSessions(t *testing.T) {
+	a := approvedRig(t)
+	b := approvedRig(t)
+	routes := []struct{ method, sub, body string }{
+		{http.MethodGet, "state", ""},
+		{http.MethodPost, "github", `{"repo":"acme/web"}`},
+		{http.MethodPost, "slack", `{"webhook_url":"https://hooks.slack.com/services/test"}`},
+		{http.MethodPost, "progress", `{"step":"mcp","status":"done"}`},
+		{http.MethodPost, "complete", ""},
+	}
+	for _, route := range routes {
+		req := agentRequest(route.method, "/api/v1/agent/poll/"+a.pollID+"/"+route.sub, route.body, a.ip)
+		req.Header.Set("X-Opslane-Poll-Token", b.token)
+		rec := httptest.NewRecorder()
+		a.r.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNotFound || rec.Header().Get("Cache-Control") != "no-store" {
+			t.Fatalf("other session token %s: %d %s", route.sub, rec.Code, rec.Body.String())
+		}
+	}
+	expireSession(a)
+	for _, route := range routes {
+		req := agentRequest(route.method, "/api/v1/agent/poll/"+a.pollID+"/"+route.sub, route.body, a.ip)
+		req.Header.Set("X-Opslane-Poll-Token", a.token)
+		rec := httptest.NewRecorder()
+		a.r.ServeHTTP(rec, req)
+		if rec.Code != http.StatusGone || rec.Header().Get("Cache-Control") != "no-store" {
+			t.Fatalf("expired %s: %d %s", route.sub, rec.Code, rec.Body.String())
+		}
+	}
+}

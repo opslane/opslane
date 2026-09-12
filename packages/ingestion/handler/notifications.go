@@ -422,7 +422,7 @@ func (d *Dependencies) createSlackDestination(ctx context.Context, orgID, projec
 		Enabled:           request.Enabled == nil || *request.Enabled,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to create notification destination: %w", err)
+		return nil, errors.New("failed to create notification destination")
 	}
 	return created, nil
 }

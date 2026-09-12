@@ -4313,7 +4313,7 @@ func (q *Queries) GetProjectGitHubConfig(ctx context.Context, orgID, projectID s
 
 // === Agent sessions ===
 
-// AgentSession represents a CLI-initiated auth session for agent-first onboarding.
+// AgentSession represents a setup session approved through the dashboard.
 type AgentSession struct {
 	ID             string
 	RepoURL        string
@@ -4345,7 +4345,7 @@ type CreateAgentSessionParams struct {
 }
 
 // CreateAgentSession creates a pending agent session. Multiple pending
-// sessions per repo are allowed; provisioning serializes canonical repo writes.
+// sessions per repo are allowed; approval serializes writes per session.
 func (q *Queries) CreateAgentSession(ctx context.Context, p CreateAgentSessionParams) (*AgentSession, error) {
 	var s AgentSession
 	err := q.pool.QueryRow(ctx,
@@ -4459,10 +4459,6 @@ func (q *Queries) MarkAgentSessionAuthClicked(ctx context.Context, sessionID str
 	}
 	return nil
 }
-
-// FindProjectByRepoURL returns the project for a given repo URL (owner/repo format).
-// Used by the agent setup flow to detect returning users.
-// Returns nil if no project matches.
 
 // === GitHub App installations ===
 

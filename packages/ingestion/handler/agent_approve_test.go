@@ -190,3 +190,24 @@ func TestAgentPoll_ExpiredAfterApprovalIsGone(t *testing.T) {
 		t.Fatalf("expired provisioned session must be 410 with no keys: %d %v", code, poll)
 	}
 }
+
+func TestAgentPoll_RejectsLegacyAndIncompleteKeyBundles(t *testing.T) {
+	a := newApproveRig(t)
+	a.do(t, http.MethodPost, "/api/v1/agent/approve/"+a.pollID, `{"existing_project_id":"`+a.project+`"}`, true)
+	session, err := a.deps.Queries.GetAgentSession(context.Background(), a.pollID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, payload := range []string{"legacy_raw_key", `{"ingest_key":"legacy_ingest"}`} {
+		sealed, err := auth.SealAgentKey(*session.AgentKeyPub, a.pollID, payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := a.deps.Queries.Pool().Exec(context.Background(), `UPDATE agent_sessions SET api_key_sealed=$2 WHERE id=$1`, a.pollID, sealed); err != nil {
+			t.Fatal(err)
+		}
+		if code, body := a.poll(t, ""); code != http.StatusInternalServerError || body["ingest_key"] != nil {
+			t.Fatalf("legacy payload delivered: %d %v", code, body)
+		}
+	}
+}

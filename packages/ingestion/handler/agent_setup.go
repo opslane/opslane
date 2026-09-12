@@ -205,7 +205,7 @@ func (d *Dependencies) writeAgentPollResponse(w http.ResponseWriter, r *http.Req
 				return
 			}
 			var bundle db.AgentKeyBundle
-			if err := json.Unmarshal([]byte(opened), &bundle); err != nil || bundle.IngestKey == "" {
+			if err := json.Unmarshal([]byte(opened), &bundle); err != nil || bundle.IngestKey == "" || bundle.APIKey == "" || bundle.SourcemapKey == "" {
 				slog.Error("agent poll: sealed payload is not a key bundle", "session_id", session.ID)
 				agentJSON(w, http.StatusInternalServerError, map[string]any{"status": "internal_error", "message": "internal error"})
 				return

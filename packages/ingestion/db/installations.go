@@ -142,7 +142,3 @@ func installationOrgID(ctx context.Context, tx pgx.Tx, installationID int64) (st
 	}
 	return orgID, nil
 }
-
-// FindRecentInstallationLandedByRepo returns the most recent audit row for a
-// canonical repository. Audit evidence is diagnostic only and never mutates a
-// pending agent session.
