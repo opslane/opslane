@@ -129,15 +129,6 @@ func (d *Dependencies) redirectToProvider(w http.ResponseWriter, r *http.Request
 
 // OAuthLoginCallback completes either the browser login or the durable CLI bridge.
 func (d *Dependencies) OAuthLoginCallback(w http.ResponseWriter, r *http.Request) {
-	// OAuth-during-install sends all GitHub App installs to this shared
-	// callback. UUID state belongs to an agent session; browser state is HMAC
-	// hex and continues through the ordinary login path.
-	if state := r.URL.Query().Get("state"); state != "" {
-		if _, err := uuid.Parse(state); err == nil {
-			d.AgentAuthCallback(w, r)
-			return
-		}
-	}
 	if r.URL.Query().Get("setup_action") == "install" && r.URL.Query().Get("installation_id") != "" {
 		d.gitHubInstallCallback(w, r)
 		return

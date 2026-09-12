@@ -4463,24 +4463,6 @@ func (q *Queries) MarkAgentSessionAuthClicked(ctx context.Context, sessionID str
 // FindProjectByRepoURL returns the project for a given repo URL (owner/repo format).
 // Used by the agent setup flow to detect returning users.
 // Returns nil if no project matches.
-func (q *Queries) FindProjectByRepoURL(ctx context.Context, repoURL string) (*Project, error) {
-	var p Project
-	err := q.pool.QueryRow(ctx,
-		`SELECT id, org_id, name, github_repo, default_branch, friction_autonomy, pr_posture, default_environment_id, digest_timezone, created_at
-		 FROM projects
-		 WHERE github_repo = $1
-		 ORDER BY created_at ASC
-		 LIMIT 1`,
-		repoURL,
-	).Scan(&p.ID, &p.OrgID, &p.Name, &p.GithubRepo, &p.DefaultBranch, &p.FrictionAutonomy, &p.PrPosture, &p.DefaultEnvironmentID, &p.DigestTimezone, &p.CreatedAt)
-	if err == pgx.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("find project by repo url: %w", err)
-	}
-	return &p, nil
-}
 
 // === GitHub App installations ===
 

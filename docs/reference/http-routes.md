@@ -71,7 +71,6 @@ The automated-setup callback requires `code`, `installation_id`, and UUID `state
 | POST | `/api/v1/billing/portal` | Billing-enabled deployments: open the active org's billing portal (admin on cloud) |
 | GET | `/api/v1/admin/overview` | Operator-only cross-tenant monitoring overview, including best-effort progress through automated repository setup (404 unless allowlisted) |
 | GET | `/api/v1/admin/jobs` | Operator-only recent jobs (404 unless allowlisted) |
-| POST | `/api/v1/onboard/provision` | Create an organization and project for a repository, then store the one-time API key for the setup client to retrieve |
 | POST | `/api/v1/onboarding/setup` | Create or resume the first project and return a fresh ingest key |
 | GET | `/api/v1/onboarding/state` | Read server-derived onboarding facts and the next step |
 | POST | `/api/v1/onboarding/complete` | Mark onboarding complete after the project receives its first event; GitHub and Slack are optional (admin on cloud) |

@@ -146,21 +146,3 @@ func installationOrgID(ctx context.Context, tx pgx.Tx, installationID int64) (st
 // FindRecentInstallationLandedByRepo returns the most recent audit row for a
 // canonical repository. Audit evidence is diagnostic only and never mutates a
 // pending agent session.
-func (q *Queries) FindRecentInstallationLandedByRepo(ctx context.Context, repo string) (int64, *string, error) {
-	var installationID int64
-	var orgID *string
-	err := q.pool.QueryRow(ctx,
-		`SELECT installation_id, org_id
-		 FROM installation_landed
-		 WHERE EXISTS (SELECT 1 FROM unnest(repos) AS landed_repo WHERE lower(landed_repo) = lower($1))
-		   AND landed_at > now() - interval '24 hours'
-		 ORDER BY landed_at DESC
-		 LIMIT 1`, repo).Scan(&installationID, &orgID)
-	if err == pgx.ErrNoRows {
-		return 0, nil, nil
-	}
-	if err != nil {
-		return 0, nil, fmt.Errorf("find recent landed installation: %w", err)
-	}
-	return installationID, orgID, nil
-}
