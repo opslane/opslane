@@ -3,7 +3,7 @@ description: Every registered HTTP route with its authentication mode.
 ---
 # HTTP routes
 
-All routes registered by the Opslane API (`packages/ingestion/handler/routes.go`). Auth column legend: **none** (public), **poll token** (`X-Opslane-Poll-Token` for one automated repository setup), **SDK** (`X-API-Key` project-scoped public ingest key; rate-limited per project, and origin-gated on browser requests), and **session** (signed-in dashboard session).
+All routes registered by the Opslane API (`packages/ingestion/handler/routes.go`). Auth column legend: **none** (public), **poll token** (`X-Opslane-Poll-Token` for one agent setup session), **SDK** (`X-API-Key` project-scoped public ingest key; rate-limited per project, and origin-gated on browser requests), and **session** (signed-in dashboard session).
 
 These are curated tables, not a stability contract. The API is early-stage and may change. The [drift check](../../scripts/check-docs-drift.mjs) fails the repository test gate (`pnpm test`, which CI runs) if this page and `routes.go` disagree.
 
@@ -27,14 +27,26 @@ These are curated tables, not a stability contract. The API is early-stage and m
 | GET | `/auth/github/callback` | none | Compatibility callback alias for existing GitHub App configurations |
 | GET+POST | `/oauth/authorize` | none | Begin an authorization request using PKCE |
 | POST | `/oauth/token` | none | Exchange a PKCE authorization code for a session token |
-| POST | `/api/v1/agent/setup` | none | Start automated repository setup |
-| GET | `/api/v1/agent/poll/{sessionID}` | poll token (`X-Opslane-Poll-Token`) | Check automated repository setup status |
-| GET | `/agent/auth/{sessionID}` | none | Browser authentication for automated repository setup |
-| GET | `/agent/auth/callback` | none | Authentication callback for automated repository setup |
+| POST | `/api/v1/agent/setup` | none | Register a two-hour setup session with `project_name`, optional `agent_name` and `git_remote`; return the approval link and poll token |
+| GET | `/api/v1/agent/poll/{sessionID}` | poll token | Read approval status, approved keys, and server facts; `wait=0..30` long-polls approval, or the first event with `until=event` |
+| GET | `/agent/auth/{sessionID}` | none | Redirect to the dashboard approval page; expired links return 410 |
 | POST | `/api/v1/github/webhook` | HMAC | Receive GitHub pull-request and default-branch push events; requires `X-GitHub-Delivery` (400 without it). Push events refresh Opslane's understanding of your pages and user actions. |
 | POST | `/mcp` | MCP key in `Authorization: Bearer ...` | Call the remote MCP tools for one project |
 
-The automated-setup callback requires `code`, `installation_id`, and UUID `state`. It returns final failures to the setup client as machine-readable reasons when the client checks status. `/auth/callback` sends GitHub App installs with a UUID `state` to automated setup and handles other states through the existing browser login and installation process.
+Agent setup uses normal dashboard sign-in and an explicit approval. Approval creates or attaches a project and seals ingest, MCP, and source-map keys to the session. GitHub is an optional later integration. The agent uses only `X-Opslane-Poll-Token` for polling and session actions; expired sessions return 410 before facts or keys. Agent responses use `Cache-Control: no-store`.
+
+## Agent approval and session actions
+
+| Method | Path | Auth | Purpose |
+| --- | --- | --- | --- |
+| GET | `/api/v1/agent/approve/{sessionID}` | session | Read proposed setup, available projects, suggested match, and bound project progress |
+| POST | `/api/v1/agent/approve/{sessionID}` | session; admin on cloud | Approve a new project or `existing_project_id` owned by the active organization |
+| POST | `/api/v1/agent/approve/{sessionID}/deny` | session; admin on cloud | Decline a pending setup |
+| GET | `/api/v1/agent/poll/{sessionID}/state` | poll token | Read server facts and reported progress; `wait=0..30`, `until=event`, `github`, `slack`, or `change` (default) |
+| POST | `/api/v1/agent/poll/{sessionID}/github` | poll token | Validate and attach `{repo}` through the organization's installation or server PAT |
+| POST | `/api/v1/agent/poll/{sessionID}/slack` | poll token | Store an encrypted webhook disabled, test delivery, then enable; failed tests remove the disabled destination |
+| POST | `/api/v1/agent/poll/{sessionID}/progress` | poll token | Report SDK/MCP progress or failed/skipped diagnostics for server-derived steps |
+| POST | `/api/v1/agent/poll/{sessionID}/complete` | poll token | Complete onboarding after a first event, or return 422 with `missing: ["first_event"]`; already-onboarded orgs succeed |
 
 ## SDK (X-API-Key)
 
@@ -81,9 +93,9 @@ The automated-setup callback requires `code`, `installation_id`, and UUID `state
 | GET | `/api/v1/projects/{projectID}/environments` | List all environments, or only environments that contain issues with `used_by=incidents` or sessions with `used_by=sessions` |
 | GET | `/api/v1/projects/{projectID}/event-count` | Return `has_events` and the nullable `latest_error_group_id` |
 | GET | `/api/v1/projects/{projectID}/digest/latest` | Latest delivered daily summary, or an empty summary when none has been delivered |
-| POST | `/api/v1/projects/{projectID}/api-keys` | Create an MCP key or, with `scope: "ingest"`, a browser ingest key; the secret is returned once (admin) |
-| GET | `/api/v1/projects/{projectID}/api-keys` | List the project's MCP and ingest keys without showing their secrets (admin) |
-| DELETE | `/api/v1/projects/{projectID}/api-keys/{keyID}` | Revoke an MCP or ingest key (admin) |
+| POST | `/api/v1/projects/{projectID}/api-keys` | Create an `api` (MCP), `ingest`, or `sourcemaps` key; secret returned once; only `api` accepts expiry (admin) |
+| GET | `/api/v1/projects/{projectID}/api-keys` | List the project's MCP, ingest, and sourcemaps keys without showing their secrets (admin) |
+| DELETE | `/api/v1/projects/{projectID}/api-keys/{keyID}` | Revoke an MCP, ingest, or sourcemaps key (admin) |
 | GET | `/api/v1/projects/{projectID}/incidents` | List issues |
 | GET | `/api/v1/projects/{projectID}/incidents/{incidentID}` | Issue detail |
 | GET | `/api/v1/projects/{projectID}/incidents/{incidentID}/evidence` | Saved stack frames, failed requests, links to recordings, and available supporting data for the current issue |
