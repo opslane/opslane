@@ -235,7 +235,7 @@ export interface Incident {
   recordings?: IncidentRecording[];
   root_cause?: string;
   suggested_mitigation?: string;
-  investigation_readiness?: 'eligible' | 'ineligible' | 'pending';
+  investigation_readiness?: 'eligible' | 'cause_only' | 'ineligible' | 'pending';
   /** Model-authored technical report; render only under an investigation-output label. */
   agent_task_brief?: string;
   merged_at?: string;

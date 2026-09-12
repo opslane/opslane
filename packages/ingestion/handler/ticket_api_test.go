@@ -163,3 +163,132 @@ func TestTicketFixIntentRequiresAuthenticatedMatchingScope(t *testing.T) {
 		})
 	}
 }
+
+// An insight is never fixable: readiness stays ineligible even with a finished
+// investigation, and a fix request is refused (grilling decision Q1).
+func TestTicketInsightIsNeverFixable(t *testing.T) {
+	router, q, pool := authTestRouter(t)
+	org, project, environment, _ := seedTenant(t, q)
+	t.Cleanup(func() { cleanupTenantHandler(t, pool, org) })
+	ctx := context.Background()
+	var ticket, group string
+	if err := pool.QueryRow(ctx, `INSERT INTO friction_tickets(project_id,environment_id,name,control,what_happened,kind,status,live_generation)
+		VALUES($1,$2,'Export needs many clicks','Export','Export needed repeated clicks','ux_insight','published',1) RETURNING id`, project, environment).Scan(&ticket); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `INSERT INTO error_groups(project_id,fingerprint,title,first_seen,last_seen,kind,status,ticket_id,publication_generation,fix_substate,investigation_status,root_cause,occurrence_count,affected_users_count)
+		VALUES($1,$2,'Export needs many clicks',now(),now(),'friction','awaiting_approval',$3,1,'none','done','The export button offers no bulk action.',5,5) RETURNING id`, project, "ticket|"+ticket, ticket).Scan(&group); err != nil {
+		t.Fatal(err)
+	}
+	var job string
+	if err := pool.QueryRow(ctx, `INSERT INTO error_group_jobs(project_id,error_group_id,job_type,status,ticket_id,publication_generation,source_id)
+		VALUES($1,$2,'investigate','completed',$3,1,$2) RETURNING id`, project, group, ticket).Scan(&job); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO diagnosis_decisions(error_group_id,project_id,job_id,outcome,decision_reason,diagnosis,model,prompt_version,basis,confidence)
+		VALUES($1,$2,$3,'code_fix','The export button offers no bulk action.','{"agentTaskBrief":"Add a bulk export action."}'::jsonb,'test','friction-ticket-v1','friction_classify','high')`, group, project, job); err != nil {
+		t.Fatal(err)
+	}
+	// One confirmed recording whose signal the cause explains, so coverage is 1
+	// and only the kind can keep this incident from being fixable.
+	confirmJob := ""
+	if err := pool.QueryRow(ctx, `INSERT INTO error_group_jobs(project_id,error_group_id,job_type,status,ticket_id,publication_generation,source_id)
+		VALUES($1,$2,'friction_confirm','completed',$3,1,$2) RETURNING id`, project, group, ticket).Scan(&confirmJob); err != nil {
+		t.Fatal(err)
+	}
+	batch := ""
+	if err := pool.QueryRow(ctx, `INSERT INTO friction_confirm_batches(ticket_id,job_id,manifest,arrival_boundary_at_select,live_generation_at_select,status_at_select,status)
+		VALUES($1,$2,'[]',0,1,'published','finalized') RETURNING id`, ticket, confirmJob).Scan(&batch); err != nil {
+		t.Fatal(err)
+	}
+	endUser, session := "", "insight-"+ticket
+	if err := pool.QueryRow(ctx, `INSERT INTO end_users(project_id,external_user_id) VALUES($1,$2) RETURNING id`, project, session).Scan(&endUser); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO sessions(id,project_id,environment_id,end_user_id,started_at) VALUES($1,$2,$3,$4,now())`, session, project, environment, endUser); err != nil {
+		t.Fatal(err)
+	}
+	signal := ""
+	if err := pool.QueryRow(ctx, `INSERT INTO friction_signals(session_id,project_id,environment_id,rule_version,signal_type,fingerprint,page_url_normalized,occurred_at,observation_id,narrative_id)
+		VALUES($1,$2,$3,3,'narrative',$1,'/export',now(),'o','n') RETURNING id`, session, project, environment).Scan(&signal); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO friction_ticket_matches(ticket_id,session_id,project_id,environment_id,arrival_number,source,occurred_at,end_user_id)
+		VALUES($1,$2,$3,$4,1,'strong',now(),$5)`, ticket, session, project, environment, endUser); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO friction_ticket_match_observations(ticket_id,session_id,signal_id) VALUES($1,$2,$3)`, ticket, session, signal); err != nil {
+		t.Fatal(err)
+	}
+	attempt := ""
+	if err := pool.QueryRow(ctx, `INSERT INTO friction_check_attempts(batch_id,ticket_id,session_id,outcome,signal_ids,note,cost_to_user,model)
+		VALUES($1,$2,$3,'confirmed',jsonb_build_array($4::text),'Clicked export repeatedly','annoyance','test') RETURNING id`, batch, ticket, session, signal).Scan(&attempt); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO friction_checks(ticket_id,session_id,attempt_id,outcome) VALUES($1,$2,$3,'confirmed')`, ticket, session, attempt); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE error_groups SET explained_signal_ids=jsonb_build_array($2::text) WHERE id=$1`, group, signal); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if _, err := pool.Exec(ctx, `ALTER TABLE diagnosis_decisions DISABLE TRIGGER diagnosis_decisions_immutable_row`); err != nil {
+			t.Error(err)
+			return
+		}
+		for _, sql := range []string{
+			`DELETE FROM diagnosis_decisions WHERE project_id=$1`,
+			`DELETE FROM friction_checks WHERE ticket_id IN (SELECT id FROM friction_tickets WHERE project_id=$1)`,
+			`DELETE FROM friction_check_attempts WHERE ticket_id IN (SELECT id FROM friction_tickets WHERE project_id=$1)`,
+			`DELETE FROM friction_confirm_batches WHERE ticket_id IN (SELECT id FROM friction_tickets WHERE project_id=$1)`,
+			`DELETE FROM friction_ticket_match_observations WHERE ticket_id IN (SELECT id FROM friction_tickets WHERE project_id=$1)`,
+			`DELETE FROM friction_ticket_matches WHERE project_id=$1`,
+			`DELETE FROM friction_signals WHERE project_id=$1`,
+			`DELETE FROM sessions WHERE project_id=$1`,
+			`DELETE FROM end_users WHERE project_id=$1`,
+		} {
+			if _, err := pool.Exec(ctx, sql, project); err != nil {
+				t.Error(err)
+			}
+		}
+		if _, err := pool.Exec(ctx, `ALTER TABLE diagnosis_decisions ENABLE TRIGGER diagnosis_decisions_immutable_row`); err != nil {
+			t.Error(err)
+		}
+	})
+	token, err := auth.SignAccessToken([]byte(authTestJWTSecret), "insight-user", org, "insight@example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := "/api/v1/projects/" + project + "/incidents/" + group
+	request := func(method, suffix string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(method, path+suffix, strings.NewReader(`{}`))
+		r.Header.Set("Authorization", "Bearer "+token)
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, r)
+		return w
+	}
+	w := request(http.MethodGet, "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("read=%d %s", w.Code, w.Body.String())
+	}
+	var incident struct {
+		InvestigationReadiness *string `json:"investigation_readiness"`
+		RootCause              *string `json:"root_cause"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &incident); err != nil {
+		t.Fatal(err)
+	}
+	if incident.InvestigationReadiness == nil || *incident.InvestigationReadiness != "cause_only" || incident.RootCause == nil {
+		t.Fatalf("insight shows its cause but is never fix-eligible: %+v", incident)
+	}
+	if w := request(http.MethodPost, "/fix"); w.Code != http.StatusConflict {
+		t.Fatalf("insight fix=%d %s", w.Code, w.Body.String())
+	}
+	// The only investigate job is the completed one seeded above (it anchors the
+	// diagnosis_decisions foreign key). The refused fix queued nothing at all.
+	var fixJobs, investigateJobs int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FILTER (WHERE job_type='fix'),count(*) FILTER (WHERE job_type='investigate')
+		FROM error_group_jobs WHERE error_group_id=$1`, group).Scan(&fixJobs, &investigateJobs); err != nil || fixJobs != 0 || investigateJobs != 1 {
+		t.Fatalf("insight fix request queued %d fix and %d investigate jobs (err=%v)", fixJobs, investigateJobs, err)
+	}
+}

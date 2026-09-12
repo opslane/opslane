@@ -13,6 +13,7 @@ import (
 // evidence rather than the investigation's historical coverage.
 type TicketIncidentState struct {
 	TicketID            string
+	Kind                string
 	Generation          int
 	FixSubstate         string
 	InvestigationStatus string
@@ -32,7 +33,7 @@ type ticketQuerier interface {
 
 func ticketIncidentState(ctx context.Context, q ticketQuerier, projectID, groupID string) (*TicketIncidentState, error) {
 	var s TicketIncidentState
-	err := q.QueryRow(ctx, `SELECT t.id,g.publication_generation,g.fix_substate,g.investigation_status,
+	err := q.QueryRow(ctx, `SELECT t.id,t.kind,g.publication_generation,g.fix_substate,g.investigation_status,
 		coverage.value,t.status,g.status,t.live_generation,coalesce(nullif(btrim(g.root_cause),''),''),coalesce(d.brief,''),d.job_id,d.diagnosis
 		FROM error_groups g JOIN friction_tickets t ON t.id=g.ticket_id AND t.project_id=g.project_id
 		LEFT JOIN LATERAL (
@@ -56,7 +57,7 @@ func ticketIncidentState(ctx context.Context, q ticketQuerier, projectID, groupI
 		    AND (t.cohort_cutoff IS NULL OR m.occurred_at>t.cohort_cutoff)
 		 ) verified
 		) coverage
-		WHERE g.id=$1 AND g.project_id=$2`, groupID, projectID).Scan(&s.TicketID, &s.Generation, &s.FixSubstate, &s.InvestigationStatus,
+		WHERE g.id=$1 AND g.project_id=$2`, groupID, projectID).Scan(&s.TicketID, &s.Kind, &s.Generation, &s.FixSubstate, &s.InvestigationStatus,
 		&s.CauseCoverage, &s.TicketStatus, &s.GroupStatus, &s.LiveGeneration, &s.Cause, &s.Brief, &s.SourceJobID, &s.Diagnosis)
 	if err == pgx.ErrNoRows {
 		return nil, nil
@@ -123,6 +124,11 @@ func (q *Queries) requestTicketFix(ctx context.Context, projectID, groupID, guid
 	s, err := lockTicketIncident(ctx, tx, projectID, groupID)
 	if err != nil {
 		return "", err
+	}
+	// Fixes are for defects. An insight is investigated for its dashboard page
+	// only and never becomes a PR (grilling decision Q1, 2026-09-12).
+	if s.Kind != "defect" {
+		return "", ErrNotInvestigated
 	}
 	if len(expected) > 0 {
 		want := expected[0]

@@ -46,7 +46,13 @@ func (d *Dependencies) presentIncident(
 			}
 			if state.TicketStatus == "published" && state.GroupStatus != "archived" && state.Generation == state.LiveGeneration &&
 				state.InvestigationStatus == "done" && state.CauseCoverage >= 0.5 && state.Cause != "" && state.Brief != "" {
+				// A found cause is shown for every kind. Only a defect may be
+				// fixed; an insight's page says "cause_only" and offers no button.
+				// The kind itself is never sent to the client.
 				readiness = "eligible"
+				if state.Kind != "defect" {
+					readiness = "cause_only"
+				}
 				incident.RootCause = &state.Cause
 				incident.AgentTaskBrief = &state.Brief
 			} else {

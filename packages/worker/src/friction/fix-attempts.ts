@@ -41,7 +41,15 @@ export async function transaction<T>(
 }
 export type FixRequest =
   | { status: 'created'; attemptId: string; jobId: string }
-  | { status: 'not_ready' | 'stale' | 'outstanding' | 'cap' | 'disabled' };
+  | {
+      status:
+        | 'not_ready'
+        | 'not_fixable'
+        | 'stale'
+        | 'outstanding'
+        | 'cap'
+        | 'disabled';
+    };
 export async function requestFix(
   tx: pg.PoolClient,
   projectId: string,
@@ -62,6 +70,9 @@ export async function requestFix(
     ticket.live_generation !== generation
   )
     return { status: 'stale' };
+  // Fixes are for defects. An insight's investigation only feeds its dashboard
+  // page; it never becomes a PR by click or by autonomy (grilling decision Q1).
+  if (ticket.kind !== 'defect') return { status: 'not_fixable' };
   const r = await tx.query<{
     id: string;
     fix_substate: string;
@@ -112,19 +123,8 @@ export async function requestFix(
     !brief.trim() ||
     causeCoverage(group.explained_signal_ids ?? [], confirmed.signalIds) < 0.5
   ) {
-    if (requestedBy === 'human') {
-      await db.enqueueJobTx(tx, 'investigate', projectId, {
-        errorGroupId: group.id,
-        sourceId: group.id,
-        ticketId,
-        publicationGeneration: generation,
-        triggeredBy: 'human',
-      });
-      await tx.query(
-        `UPDATE error_groups SET investigation_status='pending',updated_at=now() WHERE id=$1`,
-        [group.id],
-      );
-    }
+    // Nothing is queued on refusal: reinvestigation follows new verified
+    // evidence only, never a click (commit eb7d509 did the same on the Go side).
     return { status: 'not_ready' };
   }
   if (requestedBy === 'auto') {
@@ -330,6 +330,7 @@ export async function assertFixAttemptCurrent(
     const a = r.rows[0];
     if (
       !ticket ||
+      ticket.kind !== 'defect' ||
       ticket.status !== 'published' ||
       ticket.live_generation !== job.publicationGeneration ||
       a?.status !== 'active'

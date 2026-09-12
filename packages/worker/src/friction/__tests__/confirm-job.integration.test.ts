@@ -932,6 +932,109 @@ describeDb('confirmation job', () => {
     ).toBe('archived');
   });
 
+  async function insightTicket() {
+    const tx = await pool.connect();
+    try {
+      return await store.createTicket(tx, {
+        projectId,
+        environmentId,
+        name: 'Export needs many clicks',
+        control: 'Export',
+        what_happened: 'Export required repeated clicks',
+        kind: 'ux_insight',
+        steps: 'Unverified draft',
+      });
+    } finally {
+      tx.release();
+    }
+  }
+  /** Like matches(), but every recording belongs to its own identified user. */
+  async function identifiedMatches(t: store.TicketRow, count: number) {
+    const tx = await pool.connect();
+    try {
+      for (let i = 0; i < count; i++) {
+        const sessionId = randomUUID();
+        await tx.query('BEGIN');
+        const endUserId = (
+          await tx.query(
+            `INSERT INTO end_users(project_id,external_user_id) VALUES($1,$2) RETURNING id`,
+            [projectId, `user-${sessionId}`],
+          )
+        ).rows[0].id as string;
+        await tx.query(
+          `INSERT INTO sessions(id,project_id,environment_id,end_user_id,started_at) VALUES($1,$2,$3,$4,now())`,
+          [sessionId, projectId, environmentId, endUserId],
+        );
+        const signalId = (
+          await tx.query(
+            `INSERT INTO friction_signals(session_id,project_id,environment_id,end_user_id,signal_type,fingerprint,page_url_normalized,occurred_at,rule_version) VALUES($1,$2,$3,$4,'narrative',$5,'/export',now(),1) RETURNING id`,
+            [sessionId, projectId, environmentId, endUserId, randomUUID()],
+          )
+        ).rows[0].id as string;
+        await store.recordMatch(tx, {
+          ticket: t,
+          sessionId,
+          endUserId,
+          signalIds: [signalId],
+          source: 'cheap',
+          occurredAt: new Date().toISOString(),
+          screen: '/export',
+        });
+        await tx.query('COMMIT');
+      }
+    } finally {
+      tx.release();
+    }
+  }
+  const investigateJobs = async (t: store.TicketRow) =>
+    (
+      await pool.query<{ generation: number; status: string }>(
+        `SELECT publication_generation AS generation, status FROM error_group_jobs WHERE ticket_id=$1 AND job_type='investigate' ORDER BY created_at`,
+        [t.id],
+      )
+    ).rows;
+
+  it('refuses a fix for an insight even with a finished investigation, on every path', async () => {
+    const t = await insightTicket();
+    await identifiedMatches(t, 3);
+    await expect(
+      processFrictionConfirm(await claim(t), deps([]), new AbortController().signal),
+    ).rejects.toMatchObject({ name: 'JobCompletedInTransaction' });
+    await pool.query(
+      `UPDATE error_groups SET investigation_status='done', root_cause='The export button offers no bulk action.',
+       explained_signal_ids=(SELECT jsonb_agg(signal_id) FROM friction_incident_evidence WHERE ticket_id=$1) WHERE ticket_id=$1`,
+      [t.id],
+    );
+    for (const requestedBy of ['human', 'auto'] as const) {
+      await expect(transaction((tx) => requestFix(tx, projectId, t.id, 1, requestedBy))).resolves.toEqual({ status: 'not_fixable' });
+    }
+    expect(
+      (await pool.query(`SELECT count(*)::int AS n FROM error_group_jobs WHERE ticket_id=$1 AND job_type IN ('fix','investigate')`, [t.id])).rows[0].n,
+    ).toBe(0);
+  });
+
+  it('rejects a queued fix job for an insight before any provider write', async () => {
+    const t = await insightTicket();
+    await identifiedMatches(t, 3);
+    await expect(
+      processFrictionConfirm(await claim(t), deps([]), new AbortController().signal),
+    ).rejects.toMatchObject({ name: 'JobCompletedInTransaction' });
+    const group = (await pool.query(`SELECT id FROM error_groups WHERE ticket_id=$1`, [t.id])).rows[0].id as string;
+    const attempt = (await pool.query(
+      `INSERT INTO friction_fix_attempts(ticket_id,error_group_id,generation,status,requested_by) VALUES($1,$2,1,'active','auto') RETURNING id`,
+      [t.id, group],
+    )).rows[0].id as string;
+    await pool.query(`UPDATE error_groups SET fix_substate='fixing' WHERE id=$1`, [group]);
+    const jobId = (await pool.query(
+      `INSERT INTO error_group_jobs(project_id,error_group_id,job_type,status,ticket_id,publication_generation,fix_attempt_id,source_id,worker_id,lease_generation,lease_expires_at)
+       VALUES($1,$2,'fix','claimed',$3,1,$4,$2,'fix-test',1,now()+interval '5 minutes') RETURNING id`,
+      [projectId, group, t.id, attempt],
+    )).rows[0].id as string;
+    await expect(
+      assertFixAttemptCurrent({ id: jobId, projectId, ticketId: t.id, publicationGeneration: 1, errorGroupId: group, fixAttemptId: attempt, workerId: 'fix-test', leaseGeneration: '1', jobType: 'fix', attempts: 0 } as never),
+    ).rejects.toThrow(/Stale ticket fix attempt/);
+  });
+
   async function deliveryFixture(
     requestedBy: 'human' | 'auto' = 'human',
   ): Promise<TicketInvestigateJob & { fixAttemptId: string }> {

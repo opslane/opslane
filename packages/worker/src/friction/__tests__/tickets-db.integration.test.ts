@@ -314,8 +314,8 @@ describeDb('ticket store', () => {
     ).toBe(3);
   });
 
-  it('authorizes half-covered UX causes, caps automatic PRs, and resolves only the current attempt', async () => {
-    const t = await ticket('ux_insight');
+  it('authorizes half-covered causes, caps automatic PRs, and resolves only the current attempt', async () => {
+    const t = await ticket('defect');
     const rs = await checked(t, [
       'confirmed',
       'confirmed',
@@ -430,7 +430,7 @@ describeDb('ticket store', () => {
     ).toBeTruthy();
   });
 
-  it('a failed investigation queues reinvestigation before refusing a manual fix', async () => {
+  it('a failed investigation refuses a manual fix without queueing reinvestigation', async () => {
     const t = await ticket();
     await checked(t, ['confirmed', 'confirmed', 'confirmed']);
     const p = await store.activateGeneration(
@@ -458,7 +458,7 @@ describeDb('ticket store', () => {
           [p.errorGroupId],
         )
       ).rowCount,
-    ).toBe(1);
+    ).toBe(0);
   });
 
   it('counts a recording once, allocates strict arrivals from locked state, pins retention and keeps observation refs', async () => {

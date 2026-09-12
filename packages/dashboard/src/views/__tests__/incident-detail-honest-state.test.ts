@@ -118,6 +118,17 @@ describe('IncidentDetail honest state', () => {
     wrapper.unmount();
   });
 
+  it('shows the cause without a fix button when readiness is cause_only', async () => {
+    api.getIncident.mockResolvedValue({ ...base, kind: 'friction', status: 'awaiting_approval', ticket_id: 't1',
+      fix_substate: 'none', investigation_status: 'done', cause_coverage: 1, investigation_readiness: 'cause_only',
+      root_cause: 'The export button offers no bulk action.' });
+    const wrapper = mountView();
+    await flushPromises();
+    expect(wrapper.text()).toContain('The export button offers no bulk action.');
+    expect(wrapper.text()).not.toContain('Create fix PR');
+    wrapper.unmount();
+  });
+
   it('keeps legacy absent-row incidents rendering as before', async () => {
     api.getIncident.mockResolvedValue(base);
     const wrapper = mountView();

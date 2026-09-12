@@ -52,7 +52,7 @@ func seedTicketFixWithCount(t *testing.T, recordings int) ticketFixFixture {
 	}
 	environment := insert(`INSERT INTO environments(project_id,name) VALUES($1,'ticket-production') RETURNING id`, project)
 	ticket := insert(`INSERT INTO friction_tickets(project_id,environment_id,name,control,what_happened,kind,status,live_generation,evidence_version)
-		VALUES($1,$2,'Payment stalls','Pay','Payment stalls','ux_insight','published',1,1) RETURNING id`, project, environment)
+		VALUES($1,$2,'Payment stalls','Pay','Payment stalls','defect','published',1,1) RETURNING id`, project, environment)
 	group := insert(`INSERT INTO error_groups(project_id,fingerprint,title,first_seen,last_seen,kind,status,ticket_id,publication_generation,fix_substate,investigation_status,root_cause,evidence_version_used)
 		VALUES($1,$2,'Payment stalls',now(),now(),'friction','awaiting_approval',$3,1,'none','done','The payment handler stalls',1) RETURNING id`, project, "ticket|"+ticket+"|1", ticket)
 	job := insert(`INSERT INTO error_group_jobs(project_id,error_group_id,job_type,status,ticket_id,publication_generation,source_id)
