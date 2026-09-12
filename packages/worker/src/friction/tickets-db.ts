@@ -101,7 +101,7 @@ export interface CheckResult {
   note?: string;
   costToUser?: 'none' | 'annoyance' | 'lost_time' | 'abandoned_task' | null;
   framesOk?: boolean;
-  frameManifest?: unknown[];
+  frameManifest?: unknown[]; // {offsetMs,pair,assetsMissing?}[]
   model: string;
 }
 export interface FinalizedBatch {
@@ -855,6 +855,13 @@ export async function getBatch(
       }
     : null;
 }
+/** Retrieval floor for publish-gate duplicate candidates. Recall is cheap here
+ * because the one-fix question is the precision gate: a production replay saw
+ * two tickets for one bug sit at 0.775, under the 0.80 the spike chose. */
+export function foldMinSimilarity(): number {
+  const raw = Number(process.env['FRICTION_FOLD_MIN_SIMILARITY'] ?? '0.75');
+  return Number.isFinite(raw) && raw > 0 && raw <= 1 ? raw : 0.75;
+}
 export async function publishedNeighbors(
   db: TicketDb,
   ticket: TicketRow,
@@ -866,13 +873,14 @@ export async function publishedNeighbors(
     FROM friction_tickets t JOIN error_groups g ON g.ticket_id=t.id AND g.publication_generation=t.live_generation
     WHERE t.project_id=$1 AND t.environment_id=$2 AND t.id<>$3 AND t.status='published' AND g.status<>'archived'
       AND g.fix_substate IS DISTINCT FROM 'resolved' AND t.embedding_model=$5 AND t.embedding IS NOT NULL
-      AND 1-(t.embedding <=> $4::vector)>=0.80 ORDER BY similarity DESC,t.id`,
+      AND 1-(t.embedding <=> $4::vector)>=$6 ORDER BY similarity DESC,t.id LIMIT 10`,
     [
       ticket.project_id,
       ticket.environment_id,
       ticket.id,
       vectorValue(ticket.embedding),
       EMBEDDING_MODEL,
+      foldMinSimilarity(),
     ],
   );
   return r.rows.map((r) => ({ ...decodeTicket(r), similarity: r.similarity }));
@@ -981,4 +989,16 @@ export async function reserveConfirmationBudget(
     reserved: Boolean(r.rowCount),
     nextWindow: window.rows[0]!.next_window,
   };
+}
+
+/** One row per one-fix question asked at the publish gate. Audit only: it
+ * never changes a decision, it lets a later reader see why two cards exist. */
+export async function recordGateDecision(
+  db: TicketDb,
+  d: { ticketId: string; batchId: string | null; candidateId: string; similarity: number; oneFix: boolean; reason: string; model: string },
+): Promise<void> {
+  await db.query(
+    `INSERT INTO friction_gate_decisions(ticket_id,batch_id,candidate_id,similarity,one_fix,reason,model) VALUES($1,$2,$3,$4,$5,$6,$7)`,
+    [d.ticketId, d.batchId, d.candidateId, d.similarity, d.oneFix, d.reason, d.model],
+  );
 }

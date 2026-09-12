@@ -1230,6 +1230,49 @@ describeDb('confirmation job', () => {
       ).rows,
     ).toEqual([]);
   });
+  it('reads and publishes when the replay rendered without external assets', async () => {
+    // Real apps load cross-origin CSS/fonts/images; the replay aborts them and
+    // reports assetsMissing. That is a degraded capture, not a failed one: a
+    // production replay where it was fatal produced zero confirmations.
+    const t = await ticket();
+    await matches(t, 3);
+    const dependencies = deps([]);
+    dependencies.capture = async () => ({
+      frames: [{ offsetMs: 0, pair: 'a', png: Buffer.from('png'), modelPng: Buffer.from('png') }],
+      assetsMissing: true,
+    });
+    await expect(
+      processFrictionConfirm(await claim(t), dependencies, new AbortController().signal),
+    ).rejects.toMatchObject({ name: 'JobCompletedInTransaction' });
+    expect(await store.cohortStats(pool, t)).toMatchObject({ counted: 3, confirmed: 3 });
+    expect((await store.getTicket(pool, projectId, t.id))!.status).toBe('published');
+    expect(
+      (await pool.query(`SELECT frames_ok, frame_manifest->0->>'assetsMissing' AS degraded FROM friction_check_attempts WHERE ticket_id=$1`, [t.id])).rows,
+    ).toEqual(Array.from({ length: 3 }, () => ({ frames_ok: true, degraded: 'true' })));
+  });
+  it('reserves budget only for reads whose capture produced frames', async () => {
+    const t = await ticket();
+    await matches(t, 3);
+    const dependencies = deps([]);
+    dependencies.dailyCap = 1;
+    let captures = 0;
+    dependencies.capture = async () => {
+      captures += 1;
+      if (captures === 1) throw new Error('Replay unavailable');
+      return { frames: [{ offsetMs: 0, pair: 'a', png: Buffer.from('png'), modelPng: Buffer.from('png') }], assetsMissing: false };
+    };
+    // First member: capture fails, staged unavailable, no budget. Second: read
+    // with the single unit. Third: budget exhausted, job rescheduled.
+    await expect(
+      processFrictionConfirm(await claim(t), dependencies, new AbortController().signal),
+    ).rejects.toMatchObject({ name: 'JobRescheduledError' });
+    expect(
+      (await pool.query('SELECT used FROM friction_confirmation_budget WHERE project_id=$1', [projectId])).rows,
+    ).toEqual([{ used: 1 }]);
+    expect(
+      (await pool.query(`SELECT outcome FROM friction_check_attempts WHERE ticket_id=$1 ORDER BY outcome`, [t.id])).rows,
+    ).toEqual([{ outcome: 'confirmed' }, { outcome: 'unavailable' }]);
+  });
   it('stages unavailable capture failures and schedules only the due retry', async () => {
     const t = await ticket();
     await matches(t, 3);
@@ -1480,6 +1523,9 @@ describeDb('confirmation job', () => {
       status: 'merged',
       merged_into: target.id,
     });
+    expect(
+      (await pool.query(`SELECT candidate_id, one_fix, reason FROM friction_gate_decisions WHERE ticket_id=$1`, [source.id])).rows,
+    ).toEqual([{ candidate_id: target.id, one_fix: true, reason: 'Same handler' }]);
     expect(
       (await store.getTicket(pool, projectId, target.id))!.matched_count,
     ).toBe(6);

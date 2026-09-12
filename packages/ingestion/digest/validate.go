@@ -167,6 +167,11 @@ func ValidateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string, s
 // message may never carry them; validation fails closed when a writer leaks one.
 var internalVocabulary = regexp.MustCompile(`(?i)(^|[^a-z0-9_])(needs_human|verified_fix|report_ready|do_not_pursue|unable_to_establish_cause)($|[^a-z0-9_])`)
 
+// provenanceVocabulary matches the confirmer's evidence language when it leaks
+// into customer prose: timeline line ids (L23, L29-L38) and the names of the
+// verification material. A production replay shipped both in card copy.
+var provenanceVocabulary = regexp.MustCompile(`(?i)\bL\d+(?:\s*[-\x{2013}]\s*L?\d+)?\b|\b(?:timelines?|screenshots?|frames?)\b`)
+
 // \p{Nd}, not \d: Go's \d is ASCII-only, so full-width or Arabic-Indic digits
 // ("４０００ users") would sail past the grounding scan entirely. Any decimal
 // digit in any script is scanned; non-ASCII digit runs can never match the
@@ -297,6 +302,10 @@ func checkUnifiedWrittenCard(
 	if internalVocabulary.MatchString(card.Title) || internalVocabulary.MatchString(card.Copy) ||
 		internalVocabulary.MatchString(card.Why) || internalVocabulary.MatchString(card.Action) || internalVocabulary.MatchString(card.Steps) {
 		return card, "", fmt.Errorf("internal vocabulary in card for %s", identity)
+	}
+	if provenanceVocabulary.MatchString(card.Title) || provenanceVocabulary.MatchString(card.Copy) ||
+		provenanceVocabulary.MatchString(card.Why) || provenanceVocabulary.MatchString(card.Steps) {
+		return card, "", fmt.Errorf("evidence provenance language in card for %s", identity)
 	}
 	if len([]rune(strings.TrimSpace(card.Title))) > 80 || len([]rune(card.Copy)) > 300 ||
 		len([]rune(card.Why)) > 300 || len([]rune(card.Action)) > 300 || len([]rune(card.Steps)) > 600 {

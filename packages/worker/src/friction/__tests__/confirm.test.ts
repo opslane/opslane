@@ -65,6 +65,50 @@ describe('confirmation read', () => {
       ),
     ).toHaveProperty('invalid');
   });
+  it('rejects a note that leaks line ids or verification material, keeps citations in evidenceLines', async () => {
+    const meter = { add: vi.fn() };
+    for (const note of [
+      'Timeline and screenshots confirm the repetitive multi-step edit cycle (L23-24).',
+      'User edited the Loanee field (L29-L38: click field, select, click checkmark).',
+      'The frames show the button did nothing after the click.',
+      'At line 12 the user clicked Save.',
+    ]) {
+      const client = {
+        modelName: 'test',
+        complete: vi.fn().mockResolvedValue({
+          text: JSON.stringify({ outcome: 'confirmed', evidenceLines: ['L1'], signalIds: ['s1'], note, costToUser: 'lost_time' }),
+          inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, stopReason: 'end_turn',
+        }),
+      };
+      expect(
+        await confirmRead(client, { ticket, timelineText: 'L1: Click', frames: [frame], framesOk: true, signals: [{ id: 's1', what: 'Error' }] }, meter),
+      ).toHaveProperty('invalid');
+    }
+    const plain = {
+      modelName: 'test',
+      complete: vi.fn().mockResolvedValue({
+        text: JSON.stringify({ outcome: 'confirmed', evidenceLines: ['L1'], signalIds: ['s1'], note: 'The user clicked Save and the form stayed unchanged with no message.', costToUser: 'lost_time' }),
+        inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, stopReason: 'end_turn',
+      }),
+    };
+    expect(
+      await confirmRead(plain, { ticket, timelineText: 'L1: Click', frames: [frame], framesOk: true, signals: [{ id: 's1', what: 'Error' }] }, meter),
+    ).toMatchObject({ outcome: 'confirmed', evidenceLines: ['L1'] });
+  });
+  it('tells the model when the replay rendered without external assets, and still reads', async () => {
+    const meter = { add: vi.fn() };
+    const client = {
+      modelName: 'test',
+      complete: vi.fn().mockResolvedValue({
+        text: JSON.stringify({ outcome: 'refuted', evidenceLines: ['L1'], signalIds: [], note: 'The save completed and the list updated.', costToUser: 'none' }),
+        inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, stopReason: 'end_turn',
+      }),
+    };
+    const result = await confirmRead(client, { ticket, timelineText: 'L1: Click', frames: [frame], framesOk: true, assetsMissing: true, signals: [] }, meter);
+    expect(result).toMatchObject({ outcome: 'refuted' });
+    const call = client.complete.mock.calls[0]![0] as { system: string };
+    expect(call.system).toMatch(/external stylesheets, fonts or images/);
+  });
   it('treats missing assets and empty frames as unavailable without billing a model', async () => {
     const client = { modelName: 'test', complete: vi.fn() };
     for (const [framesOk, frames] of [

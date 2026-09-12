@@ -279,6 +279,18 @@ CREATE TABLE IF NOT EXISTS friction_pr_events (
 
 ALTER TABLE friction_fix_attempts ADD COLUMN IF NOT EXISTS delivery_reserved_at TIMESTAMPTZ;
 ALTER TABLE error_group_jobs ADD COLUMN IF NOT EXISTS investigation_execution BIGINT;
+CREATE TABLE IF NOT EXISTS friction_gate_decisions (            -- audit of every one-fix question at the publish gate
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  ticket_id     UUID NOT NULL REFERENCES friction_tickets(id) ON DELETE CASCADE,
+  batch_id      UUID,
+  candidate_id  UUID NOT NULL REFERENCES friction_tickets(id) ON DELETE CASCADE,
+  similarity    DOUBLE PRECISION NOT NULL,
+  one_fix       BOOLEAN NOT NULL,
+  reason        TEXT NOT NULL,
+  model         TEXT NOT NULL,
+  decided_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_friction_gate_decisions_ticket ON friction_gate_decisions (ticket_id, decided_at);
 CREATE TABLE IF NOT EXISTS friction_fix_failures (
   job_id UUID PRIMARY KEY REFERENCES error_group_jobs(id),
   fix_attempt_id UUID NOT NULL REFERENCES friction_fix_attempts(id),

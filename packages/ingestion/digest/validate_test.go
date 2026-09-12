@@ -254,6 +254,16 @@ func TestValidateRejectsUnsupportedOccurrenceAndTitleVocabulary(t *testing.T) {
 			return fmt.Sprintf(`{"included":[{"errorGroupId":%q,"title":%q,"copy":"Checkout is blocked before payment.","action":%q,"label":%q}],"deferred":[]}`,
 				candidate.ErrorGroupID, strings.Repeat("x", 81), candidate.ValidAction, candidate.Label)
 		}},
+		// Confirmer evidence language reached customers in a production replay:
+		// line ids and the names of the verification material are provenance.
+		{"copy provenance line ids", func(candidate Candidate) string {
+			return fmt.Sprintf(`{"included":[{"errorGroupId":%q,"title":"Checkout is blocked","copy":"User clicked Update (L23-24) and the form stayed unchanged.","action":%q,"label":%q}],"deferred":[]}`,
+				candidate.ErrorGroupID, candidate.ValidAction, candidate.Label)
+		}},
+		{"steps provenance screenshots", func(candidate Candidate) string {
+			return fmt.Sprintf(`{"included":[{"errorGroupId":%q,"title":"Checkout is blocked","copy":"Checkout is blocked before payment.","steps":"Timeline and screenshots confirm the repeated edit cycle.","action":%q,"label":%q}],"deferred":[]}`,
+				candidate.ErrorGroupID, candidate.ValidAction, candidate.Label)
+		}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

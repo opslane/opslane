@@ -132,6 +132,17 @@ export async function prepareConfirmationTransition(
       result = await judgeOneFix(client, ticket, neighbor, meter);
     if ('invalid' in result)
       throw new Error(`One-fix classification invalid: ${result.invalid}`);
+    // Every one-fix answer is kept as a fact so a duplicate card can be traced
+    // to the question that let it through, not guessed at afterwards.
+    await store.recordGateDecision(database, {
+      ticketId: ticket.id,
+      batchId,
+      candidateId: neighbor.id,
+      similarity: neighbor.similarity,
+      oneFix: result.oneFix,
+      reason: result.reason,
+      model: client.modelName,
+    });
     if (result.oneFix) {
       plan.targetId = neighbor.id;
       break;
@@ -352,13 +363,6 @@ export async function processFrictionConfirm(
       if (staged.has(member.sessionId)) continue;
       await check();
       if (!(await store.batchIntact(pool, batch))) break;
-      const budget = await transaction(job, signal, (tx) =>
-        store.reserveConfirmationBudget(tx, job.projectId, deps.dailyCap),
-      );
-      if (!budget.reserved) {
-        await db.rescheduleJob(job, budget.nextWindow);
-        throw new db.JobRescheduledError(job.id);
-      }
       let result: ConfirmResult;
       let frames: Awaited<ReturnType<typeof captureFrames>> = {
         frames: [],
@@ -381,6 +385,19 @@ export async function processFrictionConfirm(
         signal.throwIfAborted();
         if (error instanceof db.LeaseLostError) throw error;
       }
+      // The daily budget counts strong-model reads. A capture that produced no
+      // frames is staged as unavailable without a model call, so it must not
+      // consume a unit; reserving before capture let 94 unavailable attempts
+      // exhaust a day's budget in a production replay.
+      if (frames.frames.length > 0) {
+        const budget = await transaction(job, signal, (tx) =>
+          store.reserveConfirmationBudget(tx, job.projectId, deps.dailyCap),
+        );
+        if (!budget.reserved) {
+          await db.rescheduleJob(job, budget.nextWindow);
+          throw new db.JobRescheduledError(job.id);
+        }
+      }
       const signals = (
         await pool.query<{ id: string; what: string }>(
           `SELECT f.id,coalesce(f.observation_text,'') AS what FROM friction_signals f
@@ -398,6 +415,7 @@ export async function processFrictionConfirm(
         timelineText: recording?.timelineText ?? '',
         frames: frames.frames,
         framesOk: frames.frames.length > 0, // external assets are aborted by design; the DOM still renders
+        assetsMissing: frames.assetsMissing,
         signals,
       };
       result = await confirmRead(client, input, meter);
@@ -416,6 +434,7 @@ export async function processFrictionConfirm(
           frameManifest: frames.frames.map(({ offsetMs, pair }) => ({
             offsetMs,
             pair,
+            ...(frames.assetsMissing ? { assetsMissing: true } : {}),
           })),
           model: client.modelName,
         });
