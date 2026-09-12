@@ -10,7 +10,7 @@ const api = vi.hoisted(() => {
     APIError,
     archiveIncident: vi.fn(), getIncident: vi.fn(), getReplay: vi.fn(), getSampleEvent: vi.fn(),
     getSession: vi.fn(), getSessionChunk: vi.fn(), listAffectedUsers: vi.fn(), resolveIncident: vi.fn(),
-    triggerFix: vi.fn(), unarchiveIncident: vi.fn(),
+    triggerFix: vi.fn(), reinvestigateIncident: vi.fn(), unarchiveIncident: vi.fn(),
   };
 });
 vi.mock('../../api', () => api);
@@ -36,6 +36,36 @@ beforeEach(() => {
 });
 
 describe('IncidentDetail honest state', () => {
+  it('requests reinvestigation when a ticket cause lacks current coverage', async () => {
+    const ticket = { ...base, kind: 'friction', status: 'awaiting_approval', ticket_id: 't1',
+      fix_substate: 'none', investigation_status: 'done', cause_coverage: 0.25 };
+    api.getIncident.mockResolvedValueOnce(ticket).mockResolvedValue({ ...ticket, investigation_status: 'pending' });
+    api.reinvestigateIncident.mockResolvedValue({ job_id: 'j1' });
+    const wrapper = mountView();
+    await flushPromises();
+    expect(wrapper.text()).not.toContain('Create fix PR');
+    await wrapper.findAll('button').find(button => button.text() === 'Reinvestigate')!.trigger('click');
+    await flushPromises();
+    expect(api.reinvestigateIncident).toHaveBeenCalledWith('p1', 'i1');
+    expect(wrapper.text()).toContain('Investigation pending.');
+    wrapper.unmount();
+  });
+
+  it('offers a fix for a ticket at half coverage and hides it while a PR is open', async () => {
+    const ticket = { ...base, kind: 'friction', status: 'awaiting_approval', ticket_id: 't1',
+      fix_substate: 'none', investigation_status: 'done', investigation_readiness: 'eligible', cause_coverage: 0.5 };
+    api.getIncident.mockResolvedValue(ticket);
+    let wrapper = mountView();
+    await flushPromises();
+    expect(wrapper.text()).toContain('Create fix PR');
+    wrapper.unmount();
+    api.getIncident.mockResolvedValue({ ...ticket, fix_substate: 'pr_open' });
+    wrapper = mountView();
+    await flushPromises();
+    expect(wrapper.text()).not.toContain('Create fix PR');
+    wrapper.unmount();
+  });
+
   it('shows honest copy and no stored garbage when readiness is ineligible', async () => {
     api.getIncident.mockResolvedValue({ ...base, investigation_readiness: 'ineligible' });
     const wrapper = mountView();

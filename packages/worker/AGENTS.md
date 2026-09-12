@@ -44,3 +44,5 @@ The worker polls Postgres and owns investigation, fix verification, lease handli
 - Run `pnpm --filter @opslane/worker build` and `pnpm --filter @opslane/worker test`.
 - For worker pipeline behavior, also run the live smoke described in the root `AGENTS.md` and confirm the expected terminal state.
 - Build the worker Compose image after Dockerfile changes.
+
+- `FRICTION_MAX_OPEN_FIX_PRS` defaults to 5 per project. Automatic delivery reserves its slot under the project lock; manual requests are exempt. Ticket fixes and PR callbacks must match the live generation and attempt.

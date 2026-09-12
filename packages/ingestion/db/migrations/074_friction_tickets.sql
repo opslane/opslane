@@ -213,4 +213,51 @@ UPDATE projects SET friction_autonomy = 'auto_fix' WHERE friction_autonomy = 'au
 ALTER TABLE projects DROP CONSTRAINT IF EXISTS projects_friction_autonomy_check;
 ALTER TABLE projects ADD CONSTRAINT projects_friction_autonomy_check
   CHECK (friction_autonomy IN ('ask_first','auto_fix'));
+
+-- Ticket investigation and delivery history survive publication changes.
+ALTER TABLE error_groups ADD COLUMN IF NOT EXISTS investigation_execution BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE error_groups ADD COLUMN IF NOT EXISTS investigation_result_execution BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE friction_fix_attempts ADD COLUMN IF NOT EXISTS pr_number INT;
+ALTER TABLE friction_fix_attempts ADD COLUMN IF NOT EXISTS github_repo TEXT;
+ALTER TABLE friction_fix_attempts ADD COLUMN IF NOT EXISTS requested_by TEXT NOT NULL DEFAULT 'human' CHECK (requested_by IN ('human','auto'));
+CREATE INDEX IF NOT EXISTS idx_friction_fix_attempt_pr ON friction_fix_attempts(github_repo,pr_number) WHERE pr_number IS NOT NULL;
+CREATE TABLE IF NOT EXISTS friction_investigation_results (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  ticket_id UUID NOT NULL REFERENCES friction_tickets(id) ON DELETE CASCADE,
+  error_group_id UUID NOT NULL REFERENCES error_groups(id),
+  generation INT NOT NULL,
+  execution BIGINT NOT NULL,
+  evidence_version INT NOT NULL,
+  job_id UUID NOT NULL REFERENCES error_group_jobs(id),
+  result JSONB NOT NULL,
+  applied BOOLEAN NOT NULL DEFAULT false,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE(error_group_id,execution)
+);
+CREATE TABLE IF NOT EXISTS friction_pr_events (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  ticket_id UUID NOT NULL REFERENCES friction_tickets(id) ON DELETE CASCADE,
+  error_group_id UUID NOT NULL REFERENCES error_groups(id),
+  fix_attempt_id UUID NOT NULL REFERENCES friction_fix_attempts(id),
+  generation INT NOT NULL,
+  event TEXT NOT NULL CHECK (event IN ('opened','closed','merged','orphan')),
+  delivery_id TEXT NOT NULL UNIQUE,
+  pr_url TEXT,
+  pr_number INT,
+  github_repo TEXT,
+  occurred_at TIMESTAMPTZ NOT NULL,
+  applied BOOLEAN NOT NULL DEFAULT false,
+  processed_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+ALTER TABLE friction_fix_attempts ADD COLUMN IF NOT EXISTS delivery_reserved_at TIMESTAMPTZ;
+ALTER TABLE error_group_jobs ADD COLUMN IF NOT EXISTS investigation_execution BIGINT;
+CREATE TABLE IF NOT EXISTS friction_fix_failures (
+  job_id UUID PRIMARY KEY REFERENCES error_group_jobs(id),
+  fix_attempt_id UUID NOT NULL REFERENCES friction_fix_attempts(id),
+  reason TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+ALTER TABLE error_group_jobs ADD COLUMN IF NOT EXISTS investigation_evidence_version INT;
 COMMIT;

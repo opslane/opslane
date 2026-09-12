@@ -1,13 +1,33 @@
 import { randomUUID } from 'node:crypto';
-import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
+import {
+  afterAll,
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vitest';
 import * as db from '../../db.js';
 import * as store from '../tickets-db.js';
+import {
+  requestFix,
+  transaction,
+  assertFixAttemptCurrent,
+  recordAttemptPr,
+} from '../fix-attempts.js';
+import {
+  processTicketInvestigation,
+  beginInvestigation,
+  type TicketInvestigateJob,
+} from '../investigate-ticket.js';
 import {
   processFrictionConfirm,
   prepareConfirmationTransition,
   applyConfirmationTransition,
   type ConfirmJobDeps,
 } from '../confirm-job.js';
+import { purgeDiagnosisDecisions } from '../../__tests__/purge-diagnosis-decisions.js';
 import { purgeJobUsage } from '../../__tests__/purge-job-usage.js';
 const describeDb = process.env['DATABASE_URL'] ? describe : describe.skip;
 describeDb('confirmation job', () => {
@@ -35,6 +55,7 @@ describeDb('confirmation job', () => {
     ).rows[0].id;
   });
   afterEach(async () => {
+    vi.unstubAllEnvs();
     await purgeJobUsage(
       pool,
       (
@@ -44,6 +65,19 @@ describeDb('confirmation job', () => {
         )
       ).rows.map((r) => r.id),
     );
+    await pool.query(
+      `DELETE FROM friction_pr_events WHERE ticket_id IN(SELECT id FROM friction_tickets WHERE project_id=$1)`,
+      [projectId],
+    );
+    await pool.query(
+      `DELETE FROM friction_fix_failures WHERE job_id IN(SELECT id FROM error_group_jobs WHERE project_id=$1)`,
+      [projectId],
+    );
+    await pool.query(
+      `DELETE FROM friction_investigation_results WHERE ticket_id IN(SELECT id FROM friction_tickets WHERE project_id=$1)`,
+      [projectId],
+    );
+    await purgeDiagnosisDecisions(pool, projectId);
     await pool.query('DELETE FROM error_group_jobs WHERE project_id=$1', [
       projectId,
     ]);
@@ -185,6 +219,197 @@ describeDb('confirmation job', () => {
       dailyCap: 200,
     };
   }
+  it('runs the ticket investigator on confirmed input, serializes fix requests, and keeps stale delivery as an orphan', async () => {
+    const t = await ticket();
+    const recordings = await matches(t, 4);
+    await expect(
+      processFrictionConfirm(
+        await claim(t),
+        deps(['confirmed', 'confirmed', 'confirmed', 'refuted']),
+        new AbortController().signal,
+      ),
+    ).rejects.toMatchObject({ name: 'JobCompletedInTransaction' });
+    const j = (
+      await pool.query(
+        `UPDATE error_group_jobs SET status='claimed',worker_id='ticket-test',lease_generation=1,lease_expires_at=now()+interval '5 minutes' WHERE ticket_id=$1 AND job_type='investigate' RETURNING id,error_group_id`,
+        [t.id],
+      )
+    ).rows[0];
+    const job = {
+      id: j.id,
+      projectId,
+      ticketId: t.id,
+      errorGroupId: j.error_group_id,
+      publicationGeneration: 1,
+      workerId: 'ticket-test',
+      leaseGeneration: '1',
+      sessionId: null,
+    } as TicketInvestigateJob;
+    let supplied: string[] = [];
+    await expect(
+      processTicketInvestigation(
+        job,
+        (await db.getErrorGroup(j.error_group_id, projectId))!,
+        new AbortController().signal,
+        {
+          apiKey: 'test',
+          checkout: async () => ({
+            reader: {
+              readFile: async () => '',
+              grep: async () => '',
+              list: async () => '',
+              exists: async () => [],
+            },
+            tree: 'src/save.ts',
+            headSha: 'abc',
+            close: async () => {},
+          }),
+          investigate: async (_key, input) => {
+            supplied = input.confirmedSignalIds!;
+            return {
+              status: 'verdict',
+              investigatedCommit: 'abc',
+              costUsd: 0,
+              usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+              verdict: {
+                codeCause: true,
+                confidence: 'high',
+                reason: 'The save handler drops input.',
+                explains: supplied.slice(0, 2),
+                doesNotExplain: supplied.slice(2),
+                evidence: [
+                  {
+                    path: 'src/save.ts',
+                    detail: 'Drops input',
+                    symptomLink: 'Data lost',
+                  },
+                ],
+                agentTaskBrief: 'Preserve input.',
+              },
+            };
+          },
+        },
+      ),
+    ).rejects.toMatchObject({ name: 'JobCompletedInTransaction' });
+    expect(supplied.sort()).toEqual(
+      recordings
+        .slice(0, 3)
+        .map((r) => r.signalId)
+        .sort(),
+    );
+    const requests = await Promise.all([
+      transaction((tx) => requestFix(tx, projectId, t.id, 1, 'human')),
+      transaction((tx) => requestFix(tx, projectId, t.id, 1, 'human')),
+    ]);
+    expect(requests.map((r) => r.status).sort()).toEqual([
+      'created',
+      'outstanding',
+    ]);
+    const first = requests.find((r) => r.status === 'created');
+    if (first?.status !== 'created') throw new Error('Missing fix');
+    await pool.query(
+      `UPDATE error_group_jobs SET status='claimed',worker_id='ticket-test',lease_generation=1,lease_expires_at=now()+interval '5 minutes' WHERE id=$1`,
+      [first.jobId],
+    );
+    const fixJob = { ...job, id: first.jobId, fixAttemptId: first.attemptId };
+    await pool.query(
+      `UPDATE projects SET friction_autonomy='auto_fix' WHERE id=$1`,
+      [projectId],
+    );
+    await pool.query(
+      `UPDATE friction_fix_attempts SET requested_by='auto' WHERE id=$1`,
+      [first.attemptId],
+    );
+    vi.stubEnv('FRICTION_MAX_OPEN_FIX_PRS', '0');
+    await expect(assertFixAttemptCurrent(fixJob, true)).rejects.toThrow('cap');
+    vi.stubEnv('FRICTION_MAX_OPEN_FIX_PRS', '1');
+    await assertFixAttemptCurrent(fixJob, true);
+    await transaction(async (tx) => {
+      await store.unpublish(tx, (await store.getTicket(tx, projectId, t.id))!);
+    });
+    await expect(assertFixAttemptCurrent(fixJob, true)).rejects.toThrow();
+    expect(
+      await recordAttemptPr(
+        fixJob,
+        'test/repo',
+        'https://github.com/test/repo/pull/3',
+        3,
+      ),
+    ).toBe(false);
+    expect(
+      (
+        await pool.query(
+          `SELECT event,applied FROM friction_pr_events WHERE fix_attempt_id=$1`,
+          [first.attemptId],
+        )
+      ).rows,
+    ).toEqual([{ event: 'orphan', applied: false }]);
+    expect(
+      (
+        await pool.query(`SELECT status FROM error_groups WHERE id=$1`, [
+          job.errorGroupId,
+        ])
+      ).rows[0].status,
+    ).toBe('archived');
+  });
+
+  it('dead-lettered ticket investigation fails without changing the fix workflow', async () => {
+    const t = await ticket();
+    await matches(t, 3);
+    await expect(
+      processFrictionConfirm(
+        await claim(t),
+        deps(['confirmed', 'confirmed', 'confirmed']),
+        new AbortController().signal,
+      ),
+    ).rejects.toMatchObject({ name: 'JobCompletedInTransaction' });
+    const row = (
+      await pool.query(
+        `UPDATE error_group_jobs SET status='claimed',worker_id='failure-test',lease_generation=1,lease_expires_at=now()+interval '5 minutes' WHERE ticket_id=$1 AND job_type='investigate' RETURNING id,error_group_id`,
+        [t.id],
+      )
+    ).rows[0];
+    const job = {
+      id: row.id,
+      projectId,
+      ticketId: t.id,
+      errorGroupId: row.error_group_id,
+      publicationGeneration: 1,
+      workerId: 'failure-test',
+      leaseGeneration: '1',
+      sessionId: null,
+    } as TicketInvestigateJob;
+    await transaction((tx) => beginInvestigation(tx, job));
+    expect(
+      await db.failJob(
+        job.id,
+        job.workerId,
+        job.leaseGeneration,
+        'Model unavailable',
+        { exhaust: true },
+      ),
+    ).toBe(true);
+    expect(
+      (
+        await pool.query(
+          `SELECT investigation_status,fix_substate FROM error_groups WHERE id=$1`,
+          [job.errorGroupId],
+        )
+      ).rows[0],
+    ).toEqual({ investigation_status: 'failed', fix_substate: 'none' });
+    expect(
+      (await store.getTicket(pool, projectId, t.id))?.reinvestigate_needed,
+    ).toBe(true);
+    expect(
+      (
+        await pool.query(
+          `SELECT result->>'status' AS status FROM friction_investigation_results WHERE job_id=$1`,
+          [job.id],
+        )
+      ).rows,
+    ).toEqual([{ status: 'failed' }]);
+  });
+
   it('publishes three of four checks with exactly verified evidence and a generation-stamped investigation', async () => {
     const t = await ticket();
     const recordings = await matches(t, 4);

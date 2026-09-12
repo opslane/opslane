@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/opslane/opslane/packages/ingestion/db"
 	gh "github.com/opslane/opslane/packages/ingestion/github"
 )
 
@@ -23,6 +24,7 @@ type pullRequestEvent struct {
 		Number   int        `json:"number"`
 		Merged   bool       `json:"merged"`
 		ClosedAt *time.Time `json:"closed_at"`
+		HTMLURL  string     `json:"html_url"`
 	} `json:"pull_request"`
 	Repository struct {
 		FullName string `json:"full_name"`
@@ -91,8 +93,7 @@ func (d *Dependencies) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Only handle "closed" action
-	if event.Action != "closed" {
+	if event.Action != "closed" && event.Action != "opened" && event.Action != "reopened" {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "ignored", "action": event.Action})
 		return
@@ -104,14 +105,22 @@ func (d *Dependencies) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 	if event.PullRequest.ClosedAt != nil {
 		occurredAt = *event.PullRequest.ClosedAt
 	}
-	action := "closed"
-	if event.PullRequest.Merged {
+	action := "opened"
+	if event.Action == "closed" {
+		action = "closed"
+	}
+	if event.Action == "closed" && event.PullRequest.Merged {
 		action = "merged"
 	}
 
-	result, err := d.Queries.ProcessPRWebhook(
-		r.Context(), repo, prNumber, event.PullRequest.Merged, deliveryID, occurredAt,
-	)
+	var result db.PRWebhookResult
+	if action == "opened" {
+		result, err = d.Queries.ProcessTicketPRWebhook(r.Context(), db.TicketPRWebhook{
+			Repository: repo, Number: prNumber, Event: action, DeliveryID: deliveryID, URL: event.PullRequest.HTMLURL, OccurredAt: occurredAt,
+		})
+	} else {
+		result, err = d.Queries.ProcessPRWebhook(r.Context(), repo, prNumber, event.PullRequest.Merged, deliveryID, occurredAt)
+	}
 	if err != nil {
 		slog.Error("webhook: process PR event failed", "repo", repo, "pr", prNumber, "error", err)
 		writeJSONError(w, http.StatusInternalServerError, "failed to process pull_request event")

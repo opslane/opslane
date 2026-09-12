@@ -2076,6 +2076,16 @@ func (q *Queries) GetLatestJobTraceURL(ctx context.Context, projectID, errorGrou
 // fix-triggerable state to 'fixing' and creates a human-triggered fix job.
 // Returns the new job ID or an error. Tenant-scoped.
 func (q *Queries) TriggerFixJob(ctx context.Context, projectID, groupID, guidance string) (string, error) {
+	var ticketID *string
+	if err := q.pool.QueryRow(ctx, `SELECT ticket_id FROM error_groups WHERE id=$1 AND project_id=$2`, groupID, projectID).Scan(&ticketID); err != nil {
+		if err == pgx.ErrNoRows {
+			return "", ErrNotInvestigated
+		}
+		return "", err
+	}
+	if ticketID != nil {
+		return q.requestTicketFix(ctx, projectID, groupID, guidance)
+	}
 	tx, err := q.pool.Begin(ctx)
 	if err != nil {
 		return "", fmt.Errorf("begin tx: %w", err)
@@ -2465,6 +2475,13 @@ func loadDraftBranchCleanup(ctx context.Context, tx pgx.Tx, groupID string) (str
 // is unique in practice. If multiple projects share the same repo, one arbitrary
 // match is used; revisit this for multi-project-per-repo support.
 func (q *Queries) ProcessPRWebhook(ctx context.Context, githubRepo string, prNumber int, merged bool, deliveryID string, occurredAt time.Time) (PRWebhookResult, error) {
+	event := "closed"
+	if merged {
+		event = "merged"
+	}
+	if result, err := q.ProcessTicketPRWebhook(ctx, TicketPRWebhook{Repository: githubRepo, Number: prNumber, Event: event, DeliveryID: deliveryID, OccurredAt: occurredAt}); err != nil || result.GroupID != "" {
+		return result, err
+	}
 	tx, err := q.pool.Begin(ctx)
 	if err != nil {
 		return PRWebhookResult{}, fmt.Errorf("begin PR webhook transaction: %w", err)
@@ -2506,6 +2523,7 @@ func (q *Queries) ProcessPRWebhook(ctx context.Context, githubRepo string, prNum
 		   ON r.error_group_id = eg.id AND r.project_id = eg.project_id
 		 WHERE p.github_repo = $1
 		   AND eg.pr_number = $2
+		   AND eg.ticket_id IS NULL
 		   AND eg.status IN ('pr_created', 'pr_draft')
 		 FOR UPDATE OF eg`,
 		githubRepo, prNumber,
@@ -2671,6 +2689,7 @@ func recoverReopenedMerge(ctx context.Context, tx pgx.Tx, githubRepo string, prN
 		 JOIN error_groups eg ON o.error_group_id = eg.id
 		 JOIN projects p ON eg.project_id = p.id
 		 WHERE p.github_repo = $1
+		   AND eg.ticket_id IS NULL
 		   AND o.pr_number = $2
 		 ORDER BY o.occurred_at DESC, o.created_at DESC
 		 LIMIT 1

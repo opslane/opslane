@@ -241,8 +241,8 @@ describe('friction and session queries', () => {
   it('loads live friction signals with incident and tenant scope', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [] });
     await getFrictionSignalsForGroup('g1', 'p1');
-    expect(mockQuery.mock.calls[0][0]).toContain('incident_id = $1 AND project_id = $2');
-    expect(mockQuery.mock.calls[0][1]).toEqual(['g1', 'p1']);
+    expect(mockQuery.mock.calls[0][0]).toContain('project_id = $2');
+    expect(mockQuery.mock.calls[0][1]).toEqual(['g1', 'p1', null]);
   });
 
   it('loads only scrubbed chunks in sequence order', async () => {

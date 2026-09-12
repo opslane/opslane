@@ -187,6 +187,11 @@ export interface Incident {
   id: string;
   project_id: string;
   kind: 'error' | 'friction';
+  ticket_id?: string;
+  publication_generation?: number;
+  fix_substate?: 'none' | 'fixing' | 'pr_open' | 'resolved';
+  investigation_status?: 'pending' | 'done' | 'failed';
+  cause_coverage?: number;
   platform?: string | null;
   /** Present only on kind='friction': friction identity is environment-scoped. */
   environment_id?: string;

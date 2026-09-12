@@ -1,7 +1,27 @@
 import { randomUUID } from 'node:crypto';
 import pg from 'pg';
-import { afterAll, beforeAll, beforeEach, afterEach, describe, expect, it } from 'vitest';
+import {
+  afterAll,
+  beforeAll,
+  beforeEach,
+  afterEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vitest';
 import * as store from '../tickets-db.js';
+import {
+  beginInvestigation,
+  finishInvestigation,
+  type TicketInvestigateJob,
+} from '../investigate-ticket.js';
+import {
+  causeCoverage,
+  requestFix,
+  applyPrEvent,
+  attemptFailed,
+} from '../fix-attempts.js';
 import { EMBEDDING_DIMS, EMBEDDING_MODEL } from '../../embeddings.js';
 
 const describeDb = process.env['DATABASE_URL'] ? describe : describe.skip;
@@ -31,15 +51,16 @@ describeDb('ticket store', () => {
     scope = { projectId: p.rows[0].id, environmentId: e.rows[0].id };
   });
   afterEach(async () => {
+    vi.unstubAllEnvs();
     await db.query('ROLLBACK');
   });
-  const ticket = () =>
+  const ticket = (kind: 'defect' | 'ux_insight' = 'defect') =>
     store.createTicket(db, {
       ...scope,
       name: 'Save fails',
       control: 'Save',
       what_happened: 'Spinner never stops',
-      kind: 'defect',
+      kind,
     });
   async function recording(user: string | null = null, age = 0) {
     const sessionId = randomUUID();
@@ -95,6 +116,256 @@ describeDb('ticket store', () => {
     await store.finalizeBatch(db, t, b.id);
     return rs;
   }
+  it('fences investigation executions, records stale results, and preserves an active fix', async () => {
+    const t = await ticket();
+    const rs = await checked(t, [
+      'confirmed',
+      'confirmed',
+      'confirmed',
+      'confirmed',
+    ]);
+    const p = await store.activateGeneration(
+      db,
+      t,
+      await store.cohortStats(db, t),
+      'Save',
+    );
+    const row = (
+      await db.query(
+        `UPDATE error_group_jobs SET status='claimed',worker_id='test',lease_generation=1,lease_expires_at=now()+interval '5 minutes' WHERE error_group_id=$1 RETURNING id`,
+        [p.errorGroupId],
+      )
+    ).rows[0];
+    const job = {
+      id: row.id,
+      projectId: scope.projectId,
+      ticketId: t.id,
+      errorGroupId: p.errorGroupId,
+      publicationGeneration: p.generation,
+      workerId: 'test',
+      leaseGeneration: '1',
+      sessionId: null,
+    } as TicketInvestigateJob;
+    const first = (await beginInvestigation(db, job))!;
+    const second = (await beginInvestigation(db, job))!;
+    expect(BigInt(second.execution)).toBeGreaterThan(BigInt(first.execution));
+    const result = {
+      status: 'verdict' as const,
+      investigatedCommit: 'abc',
+      usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+      costUsd: 0,
+      verdict: {
+        codeCause: true,
+        confidence: 'high' as const,
+        reason: 'The save handler drops input.',
+        explains: rs.slice(0, 2).flatMap((r) => r.signalIds),
+        doesNotExplain: rs.slice(2).flatMap((r) => r.signalIds),
+        evidence: [
+          {
+            path: 'src/save.ts',
+            detail: 'Drops input',
+            symptomLink: 'Data lost',
+          },
+        ],
+        agentTaskBrief: 'Preserve input in the save handler.',
+      },
+    };
+    expect(await finishInvestigation(db, job, first, result)).toBe(false);
+    await db.query(
+      `UPDATE error_groups SET fix_substate='fixing',status='fixing' WHERE id=$1`,
+      [p.errorGroupId],
+    );
+    expect(await finishInvestigation(db, job, second, result)).toBe(true);
+    expect(
+      (
+        await store.liveIncident(
+          db,
+          (await store.getTicket(db, scope.projectId, t.id))!,
+        )
+      )?.fix_substate,
+    ).toBe('fixing');
+    expect(
+      (
+        await db.query(
+          `SELECT investigation_status,status FROM error_groups WHERE id=$1`,
+          [p.errorGroupId],
+        )
+      ).rows[0],
+    ).toEqual({ investigation_status: 'done', status: 'fixing' });
+    expect(
+      (
+        await db.query(
+          `SELECT applied FROM friction_investigation_results WHERE error_group_id=$1 ORDER BY execution`,
+          [p.errorGroupId],
+        )
+      ).rows,
+    ).toEqual([{ applied: false }, { applied: true }]);
+    const third = {
+      ...second,
+      execution: String(BigInt(second.execution) + 1n),
+    };
+    await db.query(
+      `UPDATE friction_tickets SET live_generation=live_generation+1 WHERE id=$1`,
+      [t.id],
+    );
+    expect(await finishInvestigation(db, job, third, result)).toBe(false);
+    expect(
+      (
+        await db.query(
+          `SELECT count(*)::int n FROM friction_investigation_results WHERE error_group_id=$1`,
+          [p.errorGroupId],
+        )
+      ).rows[0].n,
+    ).toBe(3);
+  });
+
+  it('authorizes half-covered UX causes, caps automatic PRs, and resolves only the current attempt', async () => {
+    const t = await ticket('ux_insight');
+    const rs = await checked(t, [
+      'confirmed',
+      'confirmed',
+      'confirmed',
+      'confirmed',
+    ]);
+    const publication = await store.activateGeneration(
+      db,
+      t,
+      await store.cohortStats(db, t),
+      'Save',
+    );
+    const current = (await store.getTicket(db, scope.projectId, t.id))!;
+    const ids = rs.flatMap((r) => r.signalIds);
+    expect(causeCoverage(ids.slice(0, 2), ids)).toBe(0.5);
+    await db.query(
+      `UPDATE error_groups SET investigation_status='done',root_cause='Save handler drops input',explained_signal_ids=$2::jsonb WHERE id=$1`,
+      [publication.errorGroupId, JSON.stringify(ids.slice(0, 2))],
+    );
+    await db.query(
+      `INSERT INTO diagnosis_decisions(error_group_id,project_id,outcome,decision_reason,diagnosis,model,prompt_version,basis,confidence) VALUES($1,$2,'code_fix','Save loses input','{"agentTaskBrief":"Preserve input"}','test','test','friction_classify','high')`,
+      [publication.errorGroupId, scope.projectId],
+    );
+    await db.query(
+      `UPDATE projects SET friction_autonomy='auto_fix' WHERE id=$1`,
+      [scope.projectId],
+    );
+    vi.stubEnv('FRICTION_MAX_OPEN_FIX_PRS', '0');
+    expect(
+      (
+        await requestFix(
+          db,
+          scope.projectId,
+          t.id,
+          publication.generation,
+          'auto',
+        )
+      ).status,
+    ).toBe('cap');
+    const first = await requestFix(
+      db,
+      scope.projectId,
+      t.id,
+      publication.generation,
+      'human',
+    );
+    expect(first.status).toBe('created');
+    expect(
+      (
+        await requestFix(
+          db,
+          scope.projectId,
+          t.id,
+          publication.generation,
+          'human',
+        )
+      ).status,
+    ).toBe('outstanding');
+    if (first.status !== 'created') throw new Error('Expected attempt');
+    await attemptFailed(
+      db,
+      first.jobId,
+      scope.projectId,
+      'Verification failed',
+    );
+    expect((await store.liveIncident(db, current))?.fix_substate).toBe('none');
+    await db.query(
+      `UPDATE error_group_jobs SET status='completed' WHERE id=$1`,
+      [first.jobId],
+    );
+    const retry = await requestFix(
+      db,
+      scope.projectId,
+      t.id,
+      publication.generation,
+      'human',
+    );
+    if (retry.status !== 'created') throw new Error('Expected retry');
+    const event = {
+      ticketId: t.id,
+      errorGroupId: publication.errorGroupId,
+      generation: publication.generation,
+      attemptId: retry.attemptId,
+      event: 'merged' as const,
+      deliveryId: randomUUID(),
+      occurredAt: new Date().toISOString(),
+    };
+    expect(
+      await applyPrEvent(db, scope.projectId, { ...event, generation: 0 }),
+    ).toBe(false);
+    expect(
+      await applyPrEvent(db, scope.projectId, {
+        ...event,
+        attemptId: first.attemptId,
+        deliveryId: randomUUID(),
+      }),
+    ).toBe(false);
+    expect((await store.liveIncident(db, current))?.fix_substate).toBe(
+      'fixing',
+    );
+    expect(
+      await applyPrEvent(db, scope.projectId, {
+        ...event,
+        deliveryId: randomUUID(),
+      }),
+    ).toBe(true);
+    expect((await store.liveIncident(db, current))?.fix_substate).toBe(
+      'resolved',
+    );
+    expect(
+      (await store.getTicket(db, scope.projectId, t.id))?.fixed_at,
+    ).toBeTruthy();
+  });
+
+  it('a failed investigation queues reinvestigation before refusing a manual fix', async () => {
+    const t = await ticket();
+    await checked(t, ['confirmed', 'confirmed', 'confirmed']);
+    const p = await store.activateGeneration(
+      db,
+      t,
+      await store.cohortStats(db, t),
+      'Save',
+    );
+    await db.query(
+      `UPDATE error_group_jobs SET status='completed' WHERE error_group_id=$1`,
+      [p.errorGroupId],
+    );
+    await db.query(
+      `UPDATE error_groups SET investigation_status='failed' WHERE id=$1`,
+      [p.errorGroupId],
+    );
+    expect(
+      (await requestFix(db, scope.projectId, t.id, p.generation, 'human'))
+        .status,
+    ).toBe('not_ready');
+    expect(
+      (
+        await db.query(
+          `SELECT id FROM error_group_jobs WHERE error_group_id=$1 AND job_type='investigate' AND status='pending'`,
+          [p.errorGroupId],
+        )
+      ).rowCount,
+    ).toBe(1);
+  });
+
   it('counts a recording once, allocates strict arrivals from locked state, pins retention and keeps observation refs', async () => {
     const t = await ticket();
     const r = await recording();
@@ -179,10 +450,16 @@ describeDb('ticket store', () => {
       `INSERT INTO error_group_jobs(project_id,session_id,job_type,status,lease_expires_at) VALUES($1,$2,'friction_match','claimed',now()+interval '5 minutes')`,
       [scope.projectId, other.sessionId],
     );
-    expect((await store.reserveDecision(db, other.signalIds[0]!, scope)).reserved).toBe(true);
     expect(
-      (await store.reserveDecision(db, r.signalIds[0]!, { ...scope, environmentId: randomUUID() }))
-        .reserved,
+      (await store.reserveDecision(db, other.signalIds[0]!, scope)).reserved,
+    ).toBe(true);
+    expect(
+      (
+        await store.reserveDecision(db, r.signalIds[0]!, {
+          ...scope,
+          environmentId: randomUUID(),
+        })
+      ).reserved,
     ).toBe(false);
   });
   it('selects oldest recordings round-robin by identity and persists immutable selection boundaries', async () => {
@@ -281,12 +558,16 @@ describeDb('ticket store', () => {
         ])
       ).rows[0].n,
     ).toBe(1);
-    expect((await store.selectBatch(db, t, randomUUID()))!.manifest[0]!.sessionId).toBe(
-      r!.sessionId,
-    );
     expect(
-      (await db.query(`SELECT reconcile_needed FROM friction_tickets WHERE id=$1`, [t.id])).rows[0]
-        .reconcile_needed,
+      (await store.selectBatch(db, t, randomUUID()))!.manifest[0]!.sessionId,
+    ).toBe(r!.sessionId);
+    expect(
+      (
+        await db.query(
+          `SELECT reconcile_needed FROM friction_tickets WHERE id=$1`,
+          [t.id],
+        )
+      ).rows[0].reconcile_needed,
     ).toBe(true);
   });
   it('counts all finalized cohort recordings, including older than seven days, but excludes the fixed prefix', async () => {
@@ -584,7 +865,9 @@ describeDb('ticket store', () => {
     );
   });
   it('shortlists scoped live tickets and searches only matching embedding models deterministically', async () => {
-    const vector = Array.from({ length: EMBEDDING_DIMS }, (_, i) => (i === 0 ? 1 : 0));
+    const vector = Array.from({ length: EMBEDDING_DIMS }, (_, i) =>
+      i === 0 ? 1 : 0,
+    );
     const t = await store.createTicket(
       db,
       { ...scope, name: 'Save', control: 'Save', what_happened: 'Fails', kind: 'defect' },
@@ -603,10 +886,15 @@ describeDb('ticket store', () => {
     expect(
       (await store.nearestTickets(db, scope, vector, 10, ['tracking'])).map((r) => r.id),
     ).toEqual([t.id]);
-    expect((await store.shortlistTickets(db, scope, ['/save'], null)).map((r) => r.id)).toContain(
-      t.id,
+    expect(
+      (await store.shortlistTickets(db, scope, ['/save'], null)).map(
+        (r) => r.id,
+      ),
+    ).toContain(t.id);
+    await db.query(
+      `UPDATE friction_tickets SET status='archived' WHERE id=$1`,
+      [t.id],
     );
-    await db.query(`UPDATE friction_tickets SET status='archived' WHERE id=$1`, [t.id]);
     expect(
       await store.nearestTickets(db, scope, vector, 10, ['tracking', 'archived', 'merged']),
     ).toEqual([]);
@@ -639,15 +927,21 @@ describe('ticket publication bar', () => {
     inconclusive: 0,
   });
   it('passes at forty percent with three confirmations and diverse known identities', () => {
-    expect(store.evaluateBar(stats(7, 3), { status: 'tracking', fixSubstate: null })).toBe(
-      'passes',
-    );
     expect(
-      store.evaluateBar(stats(7, 3, 0, false), { status: 'tracking', fixSubstate: null }),
+      store.evaluateBar(stats(7, 3), { status: 'tracking', fixSubstate: null }),
     ).toBe('passes');
-    expect(store.evaluateBar(stats(7, 3, 1), { status: 'tracking', fixSubstate: null })).toBe(
-      'undecided',
-    );
+    expect(
+      store.evaluateBar(stats(7, 3, 0, false), {
+        status: 'tracking',
+        fixSubstate: null,
+      }),
+    ).toBe('passes');
+    expect(
+      store.evaluateBar(stats(7, 3, 1), {
+        status: 'tracking',
+        fixSubstate: null,
+      }),
+    ).toBe('undecided');
   });
   it('uses the lower failure bar only for published unresolved tickets', () => {
     expect(store.evaluateBar(stats(16, 4), { status: 'published', fixSubstate: 'none' })).toBe(

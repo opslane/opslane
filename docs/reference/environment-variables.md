@@ -117,6 +117,7 @@ The Opslane server reads **only** the `REPLAY_STORE_*` names; `MINIO_*` names ap
 | `FRICTION_FIRST_LOOK_MODEL` | no (`claude-sonnet-5`) | Strong review model for newly reported problems. |
 | `FRICTION_MATCH_MAX_CONCURRENT` | no (2) | Fleet-wide cap on running `friction_match` jobs. `0` pauses new matches. |
 | `FRICTION_CONFIRM_MODEL` | no (`claude-sonnet-5`) | Model for checking known problems against recordings and screenshots and deciding whether one fix covers two problems. |
+| `FRICTION_MAX_OPEN_FIX_PRS` | no (5) | Maximum open fix PRs per project for automatic fixes. Manual requests remain available. |
 | `FRICTION_CONFIRM_DAILY_CAP` | no (2000) | Maximum recording checks per project per UTC day across all workers. Retries count again; finished checks resume without using more budget. `0` pauses checks until the limit is raised. |
 | `FRICTION_CONFIRM_MAX_CONCURRENT` | no (1) | Fleet-wide cap on running `friction_confirm` jobs. `0` pauses confirmation and publication reconciliation. |
 | `NARRATIVE_API_KEY` | when session narratives are enabled | Model API key for session narratives and frame verification. Falls back to `ANTHROPIC_API_KEY`. Without either key, narrative reservations remain pending. |

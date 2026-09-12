@@ -2,7 +2,7 @@
 import { computed, defineAsyncComponent, ref, onMounted, onUnmounted, watch } from 'vue';
 import { useRoute } from 'vue-router';
 import type { Incident, AffectedUser, SampleEvent } from '../types/api';
-import { APIError, getIncident, getSampleEvent, getReplay, listAffectedUsers, triggerFix, resolveIncident, archiveIncident, unarchiveIncident, type ReplayRecording } from '../api';
+import { APIError, getIncident, getSampleEvent, getReplay, listAffectedUsers, triggerFix, reinvestigateIncident, resolveIncident, archiveIncident, unarchiveIncident, type ReplayRecording } from '../api';
 import { getProjectId, safeUrl, formatDate, formatAbsolute } from '../utils';
 import { kindBadge, fixControlsVisible } from '../components/incident-kind';
 import EvidenceWell from '../components/evidence/EvidenceWell.vue';
@@ -42,6 +42,21 @@ const causeHidden = computed(() =>
   incident.value?.investigation_readiness === 'ineligible'
   || incident.value?.investigation_readiness === 'pending',
 );
+const fixAvailable = computed(() => {
+  const current = incident.value;
+  if (!current) return false;
+  if (!current.ticket_id) return fixControlsVisible(current.kind, current.status);
+  return current.status !== 'archived' && current.fix_substate === 'none'
+    && current.investigation_status === 'done' && current.investigation_readiness === 'eligible'
+    && (current.cause_coverage ?? 0) >= 0.5;
+});
+const reinvestigationAvailable = computed(() => {
+  const current = incident.value;
+  return current?.ticket_id && current.status !== 'archived' && current.fix_substate !== 'resolved'
+    && current.investigation_status !== 'pending'
+    && (current.investigation_status !== 'done' || current.investigation_readiness === 'ineligible'
+      || (current.cause_coverage ?? 0) < 0.5);
+});
 const loading = ref(true);
 const error = ref<string | null>(null);
 const projectId = ref('');
@@ -149,8 +164,24 @@ async function handleTriggerFix() {
   fixTimedOut.value = false;
   try {
     await triggerFix(projectId.value, incidentId, guidance.value || undefined);
-    incident.value = { ...incident.value, status: 'fixing' };
+    incident.value = { ...incident.value, status: 'fixing',
+      ...(incident.value.ticket_id ? { fix_substate: 'fixing' as const } : {}),
+    };
     startFixPolling();
+  } catch (e: unknown) {
+    fixError.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    fixLoading.value = false;
+  }
+}
+
+async function handleReinvestigate() {
+  if (fixLoading.value || !incident.value) return;
+  fixLoading.value = true;
+  fixError.value = null;
+  try {
+    await reinvestigateIncident(projectId.value, incidentId);
+    incident.value = await getIncident(projectId.value, incidentId);
   } catch (e: unknown) {
     fixError.value = e instanceof Error ? e.message : String(e);
   } finally {
@@ -643,14 +674,22 @@ onMounted(async () => {
           </div>
         </div>
 
-        <!-- Fix trigger: errors when investigated; friction only when a human
-             approval is awaited (awaiting_approval). Insight, candidates, and
-             unchecked diagnostics never render fix controls. -->
+        <div v-if="reinvestigationAvailable" class="p-4 bg-surface border border-border rounded-lg space-y-3">
+          <p class="text-sm text-muted">A cause must explain at least half of the current verified evidence before a fix can start.</p>
+          <Button :busy="fixLoading" variant="primary" @click="handleReinvestigate">Reinvestigate</Button>
+          <p v-if="fixError" class="text-sm text-danger" v-text="fixError"></p>
+        </div>
+        <p v-else-if="incident.ticket_id && incident.investigation_status === 'pending'" class="text-sm text-muted">
+          Investigation pending.
+        </p>
         <div
-          v-if="fixControlsVisible(incident.kind, incident.status)"
+          v-if="fixAvailable"
           class="p-4 bg-surface border border-border rounded-lg space-y-3"
         >
-          <p v-if="incident.status === 'awaiting_approval'" class="text-xs text-muted">
+          <p v-if="incident.ticket_id" class="text-xs text-muted">
+            The cause explains the verified evidence. Create a pull request for the fix when you are ready.
+          </p>
+          <p v-else-if="incident.status === 'awaiting_approval'" class="text-xs text-muted">
             This friction fix has a code cause and is waiting for your approval.
             It will open a <strong>Suggestion</strong> PR — repo tests must pass,
             but the friction itself is not re-verified.
@@ -673,7 +712,7 @@ onMounted(async () => {
               @click="handleTriggerFix"
             >
               <span v-if="fixLoading">Triggering...</span>
-              <span v-else>{{ incident.status === 'awaiting_approval' ? 'Generate fix' : 'Find Fix' }}</span>
+              <span v-else>{{ incident.ticket_id ? 'Create fix PR' : incident.status === 'awaiting_approval' ? 'Generate fix' : 'Find Fix' }}</span>
             </Button>
             <p
               v-if="fixError"

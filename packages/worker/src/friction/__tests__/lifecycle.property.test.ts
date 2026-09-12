@@ -1,3 +1,4 @@
+import { causeCoverage, fixEventCurrent } from '../fix-attempts.js';
 import fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
 import {
@@ -333,5 +334,70 @@ describe('randomized confirmation histories', () => {
         fixSubstate: 'resolved',
       }),
     ).toBe('undecided');
+  });
+});
+
+describe('randomized cause and PR histories', () => {
+  it('stale generations and retired attempts never apply a PR transition', () => {
+    fc.assert(
+      fc.property(
+        fc.integer({ min: 1, max: 100000 }),
+        fc.integer({ min: 1, max: 100 }),
+        fc.constantFrom('opened', 'closed', 'merged'),
+        (generation, offset, event) => {
+          const live = {
+            ticketStatus: 'published',
+            liveGeneration: generation,
+            generation,
+            attemptGeneration: generation,
+            groupStatus: 'fixing',
+            fixSubstate: 'fixing',
+            attemptStatus: 'active',
+            event,
+          };
+          expect(fixEventCurrent(live)).toBe(true);
+          expect(
+            fixEventCurrent({ ...live, generation: generation - offset }),
+          ).toBe(false);
+          expect(
+            fixEventCurrent({
+              ...live,
+              attemptGeneration: generation - offset,
+            }),
+          ).toBe(false);
+          for (const attemptStatus of [
+            'failed',
+            'closed',
+            'merged',
+            'superseded',
+          ])
+            expect(fixEventCurrent({ ...live, attemptStatus })).toBe(false);
+          expect(fixEventCurrent({ ...live, fixSubstate: 'resolved' })).toBe(
+            false,
+          );
+        },
+      ),
+      { numRuns: 300 },
+    );
+  });
+  it('new unexplained confirmed behavior removes cause eligibility at the half boundary', () => {
+    fc.assert(
+      fc.property(fc.integer({ min: 1, max: 100 }), (n) => {
+        const explained = Array.from({ length: n }, (_, i) => `explained-${i}`);
+        const other = Array.from({ length: n }, (_, i) => `new-${i}`);
+        expect(
+          causeCoverage([...explained, ...explained], [...explained, ...other]),
+        ).toBe(0.5);
+        expect(
+          causeCoverage(explained, [
+            ...explained,
+            ...other,
+            'one-more-confirmed',
+          ]),
+        ).toBeLessThan(0.5);
+        expect(causeCoverage(explained, other)).toBe(0);
+      }),
+      { numRuns: 300 },
+    );
   });
 });

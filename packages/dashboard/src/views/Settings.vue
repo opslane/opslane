@@ -99,17 +99,12 @@ const autonomyOptions = [
   {
     value: 'ask_first',
     label: 'Ask first (default)',
-    description: 'Friction fixes wait in awaiting-approval until you click Generate fix.',
+    description: 'Create a fix PR when you are ready, after the problem has a verified cause.',
   },
   {
     value: 'auto_fix',
     label: 'Auto-fix',
-    description: 'High-confidence, code-caused friction goes straight to a Suggestion PR.',
-  },
-  {
-    value: 'auto_fix_ux',
-    label: 'Auto-fix incl. UX suggestions',
-    description: 'Same as auto-fix today; reserved for UX-suggestion fixes when they ship.',
+    description: 'Automatically create fix PRs for verified problems, including usability improvements.',
   },
 ] as const;
 
@@ -502,8 +497,6 @@ function optionStats(value: Project['friction_autonomy']): string {
       // Attempts, not delivered PRs: a job can park or dead-end before a PR.
       // The merged/closed splits count auto-triggered PRs only.
       return `${stats.generated_auto} auto fix attempts · ${stats.prs_merged_auto} merged · ${stats.prs_closed_auto} closed without merge`;
-    case 'auto_fix_ux':
-      return 'Shares the auto-fix path today — activity is counted under Auto-fix';
   }
 }
 

@@ -62,6 +62,7 @@ function verdict(overrides: Record<string, unknown> = {}) {
     reason: 'The save button has no click handler.',
     remediation: 'Wire the save action.',
     evidence: [{ path: 'src/App.vue', detail: 'button has no handler', symptomLink: 'clicks do nothing' }],
+    explains: [], does_not_explain: [],
     agent_task_brief: '## Symptom\nSave does nothing.\n## Change\nWire the click handler.',
     ...overrides,
   });
@@ -81,6 +82,18 @@ afterEach(async () => {
 });
 
 describe('investigateFriction', () => {
+  it.each([
+    { explains: ['a'], does_not_explain: ['a', 'b'] },
+    { explains: ['a'], does_not_explain: [] },
+  ])('rejects an incomplete or overlapping confirmed partition', async (partition) => {
+    mockMessagesCreate
+      .mockResolvedValueOnce(response([tool('read_file', { path: 'src/App.vue' })]))
+      .mockResolvedValueOnce(response([verdict(partition)]));
+    expect(await investigateFriction('key', { ...input(), confirmedSignalIds: ['a', 'b'] })).toMatchObject({
+      status: 'incomplete', reason: expect.stringContaining('partition'),
+    });
+  });
+
   it('returns a validated verdict with evidence, usage and cost', async () => {
     mockMessagesCreate
       .mockResolvedValueOnce(response([tool('read_file', { path: 'src/App.vue' })]))

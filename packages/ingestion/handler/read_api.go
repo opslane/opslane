@@ -47,6 +47,11 @@ type incidentJSON struct {
 	Title                  string                    `json:"title"`
 	Status                 string                    `json:"status"`
 	Kind                   string                    `json:"kind"`
+	TicketID               *string                   `json:"ticket_id,omitempty"`
+	PublicationGeneration  *int                      `json:"publication_generation,omitempty"`
+	FixSubstate            *string                   `json:"fix_substate,omitempty"`
+	InvestigationStatus    *string                   `json:"investigation_status,omitempty"`
+	CauseCoverage          *float64                  `json:"cause_coverage,omitempty"`
 	Platform               *string                   `json:"platform,omitempty"`
 	EnvironmentID          *string                   `json:"environment_id,omitempty"`
 	AdjudicationStatus     *string                   `json:"adjudication_status,omitempty"`
@@ -1071,10 +1076,10 @@ func (d *Dependencies) UpdateProjectEndpoint(w http.ResponseWriter, r *http.Requ
 
 	if req.FrictionAutonomy != nil {
 		switch *req.FrictionAutonomy {
-		case "ask_first", "auto_fix", "auto_fix_ux":
+		case "ask_first", "auto_fix":
 		default:
 			writeJSONError(w, http.StatusBadRequest,
-				"friction_autonomy must be one of ask_first, auto_fix, auto_fix_ux")
+				"friction_autonomy must be one of ask_first, auto_fix")
 			return
 		}
 	}
@@ -1305,6 +1310,26 @@ func (d *Dependencies) TriggerFix(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"job_id": jobID})
+}
+
+// ReinvestigateIncident requests a new ticket diagnosis without changing a fix.
+func (d *Dependencies) ReinvestigateIncident(w http.ResponseWriter, r *http.Request) {
+	projectID := chi.URLParam(r, "projectID")
+	if !d.verifyProjectAccess(w, r, projectID) {
+		return
+	}
+	jobID, err := d.Queries.ReinvestigateTicket(r.Context(), projectID, chi.URLParam(r, "incidentID"))
+	if errors.Is(err, db.ErrNotInvestigated) {
+		writeJSONError(w, http.StatusConflict, "incident has no live problem to investigate")
+		return
+	}
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "failed to request investigation")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	_ = json.NewEncoder(w).Encode(map[string]string{"job_id": jobID})
 }
 
 // RequestIssueReview asks the inquiry stage to take another look at the

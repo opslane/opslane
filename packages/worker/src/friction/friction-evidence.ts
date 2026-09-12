@@ -14,8 +14,9 @@ export interface FrictionEvidence {
 export async function gatherFrictionEvidence(
   groupId: string,
   projectId: string,
+  confirmedSignalIds?: string[],
 ): Promise<FrictionEvidence | null> {
-  const signals = await db.getFrictionSignalsForGroup(groupId, projectId);
+  const signals = await db.getFrictionSignalsForGroup(groupId, projectId, confirmedSignalIds);
   if (signals.length === 0) return null;
 
   const lines: string[] = [];

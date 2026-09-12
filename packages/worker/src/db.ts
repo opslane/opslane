@@ -1,3 +1,4 @@
+import { attemptFailed } from './friction/fix-attempts.js';
 import pg from 'pg';
 import type {
   CandidateDisposition,
@@ -673,7 +674,7 @@ export async function claimJob(
          -- Claim only job types this worker can dispatch. New types stay
          -- pending until a handler ships and joins this list.
 		 AND job_type IN ('session_analysis','session_narrate','session_verify_frames','ci_watch','route_map','product_context','issue_inquiry','digest_write',
-                          'score_sync','stack_resolve','fix','investigate','error_fix','friction_match','friction_confirm')
+                          'score_sync','stack_resolve','fix','investigate','error_fix','friction_match','friction_confirm','friction_pr_event')
          AND (job_type <> 'session_analysis'
               OR (SELECT COUNT(*) FROM error_group_jobs
                    WHERE status = 'claimed'
@@ -1036,6 +1037,7 @@ export async function failJob(
       // not keep the in-flight adjudication slot. Same transaction as the flip.
       await releaseUnfinishedGeneration(client, jobId, row.project_id);
     }
+    if (row?.status === 'dead_letter') await attemptFailed(client, jobId, row.project_id, error);
     await client.query('COMMIT');
     if (row) emitDeadLetterUsageEvents(jobId, row, error);
     if (row && row.status === 'dead_letter' && row.job_type === 'investigate' && row.error_group_id) {
@@ -1057,7 +1059,7 @@ function logDeadLetteredInvestigation(
   projectId: string,
   jobId: string,
 ): void {
-  logger.info('Investigation dead-lettered; group stays in analyzing for requeue', {
+  logger.info('Investigation dead-lettered; lifecycle retained for requeue', {
     error_group_id: errorGroupId,
     project_id: projectId,
     job_id: jobId,
@@ -1144,6 +1146,7 @@ export async function requeueStaleJobs(): Promise<number> {
     // owning generation to unchecked, upsert the diagnostic, and mark the
     // session failed — atomically with the job flip (issue #56).
     for (const row of rows) {
+      if (row.status === 'dead_letter') await attemptFailed(client, row.id, row.project_id, row.last_error);
       if (row.status === 'dead_letter' && row.job_type === 'session_analysis') {
         await reconcileDeadLetteredSessionAnalysis(client, row.id, row.project_id);
         if (row.session_id) {
@@ -1600,6 +1603,15 @@ export async function updateGroupStatus(
     : '';
   try {
     await client.query('BEGIN');
+    if (status === 'needs_human' && terminalJobId) {
+      if (lease) {
+        const owned = await client.query(`SELECT id FROM error_group_jobs WHERE id=$1 AND worker_id=$2 AND lease_generation=$3::bigint AND status='claimed' AND lease_expires_at>clock_timestamp() FOR UPDATE`,[lease.id,lease.workerId,lease.leaseGeneration]);
+        if (!owned.rowCount) throw new LeaseLostError(lease.id);
+      }
+      if (await attemptFailed(client,terminalJobId,projectId,fields?.reason?.reason_message ?? 'Fix failed')) {
+        await client.query('COMMIT'); return;
+      }
+    }
     const payload = isTriageTerminalStatus(status)
       ? await loadTriagedPayload(client, errorGroupId, projectId, status, reason?.reason_code ?? null)
       : {};
@@ -1731,6 +1743,16 @@ export async function reserveDelivery(
       [lease.id, lease.workerId, lease.leaseGeneration, projectId, errorGroupId],
     );
     if ((owned.rowCount ?? 0) === 0) throw new LeaseLostError(lease.id);
+
+    const ticketJob=await client.query<{ticket_id:string;fix_attempt_id:string;publication_generation:number}>(`SELECT ticket_id,fix_attempt_id,publication_generation FROM error_group_jobs WHERE id=$1 AND ticket_id IS NOT NULL`,[lease.id]);
+    if(ticketJob.rows[0]) {
+      const j=ticketJob.rows[0];
+      await client.query(`SELECT id FROM projects WHERE id=$1 FOR UPDATE`,[projectId]);
+      const current=await client.query(`SELECT t.id FROM friction_tickets t JOIN error_groups g ON g.ticket_id=t.id JOIN friction_fix_attempts a ON a.error_group_id=g.id
+        WHERE t.id=$1 AND t.project_id=$2 AND t.status='published' AND t.live_generation=$3 AND g.id=$4 AND g.publication_generation=$3 AND g.status<>'archived' AND g.fix_substate='fixing' AND a.id=$5 AND a.status='active' FOR UPDATE OF t,g,a`,[j.ticket_id,projectId,j.publication_generation,errorGroupId,j.fix_attempt_id]);
+      if(!current.rowCount || input.operationKey!==`fix:${j.fix_attempt_id}`) throw new Error('Stale ticket delivery reservation');
+      await client.query(`DELETE FROM delivery_reservations WHERE error_group_id=$1 AND project_id=$2 AND operation_key<>$3`,[errorGroupId,projectId,input.operationKey]);
+    }
 
     const existing = await client.query<{
       operation_key: string;
@@ -2269,7 +2291,7 @@ export async function getErrorEvent(eventId: string, projectId: string): Promise
   return rows[0] ?? null;
 }
 
-export type FrictionAutonomy = 'ask_first' | 'auto_fix' | 'auto_fix_ux';
+export type FrictionAutonomy = 'ask_first' | 'auto_fix';
 
 export interface ProjectData {
   id: string;
@@ -3440,6 +3462,7 @@ export interface FrictionSignalRow {
 export async function getFrictionSignalsForGroup(
   errorGroupId: string,
   projectId: string,
+  confirmedSignalIds?: string[],
 ): Promise<FrictionSignalRow[]> {
   const db = getPool();
   const { rows } = await db.query<FrictionSignalRow>(
@@ -3447,10 +3470,10 @@ export async function getFrictionSignalsForGroup(
             page_url_normalized, occurred_at, occurrence_count, rule_version,
             observation_text, severity
      FROM friction_signals
-     WHERE incident_id = $1 AND project_id = $2
-       AND superseded_by IS NULL AND retracted_at IS NULL
+     WHERE project_id = $2 AND (($3::uuid[] IS NOT NULL AND id=ANY($3::uuid[]))
+       OR ($3::uuid[] IS NULL AND incident_id=$1 AND superseded_by IS NULL AND retracted_at IS NULL))
      ORDER BY occurred_at ASC`,
-    [errorGroupId, projectId],
+    [errorGroupId, projectId, confirmedSignalIds ?? null],
   );
   return rows;
 }
@@ -3673,22 +3696,27 @@ export async function enqueueJobTx(
     errorGroupId?: string;
     sourceId?: string;
     payload?: unknown;
+    triggeredBy?: 'auto'|'human';
+    guidance?: string;
+    sourceJobId?: string;
   } = {},
-): Promise<void> {
-  await client.query(
+): Promise<string | null> {
+  const result = await client.query<{id:string}>(
     `INSERT INTO error_group_jobs
       (project_id,job_type,session_id,ticket_id,batch_id,publication_generation,fix_attempt_id,
-       available_at,error_group_id,source_id,payload)
-     VALUES($1,$2,$3,$4,$5,$6,$7,COALESCE($8::timestamptz,now()),$9,$10,$11::jsonb)
-     ON CONFLICT DO NOTHING`,
+       available_at,error_group_id,source_id,payload,triggered_by,guidance,source_job_id)
+     VALUES($1,$2,$3,$4,$5,$6,$7,COALESCE($8::timestamptz,now()),$9,$10,$11::jsonb,$12,$13,$14)
+     ON CONFLICT DO NOTHING RETURNING id`,
     [
       projectId, jobType, options.sessionId ?? null, options.ticketId ?? null,
       options.batchId ?? null, options.publicationGeneration ?? null,
       options.fixAttemptId ?? null, options.availableAt ?? null,
       options.errorGroupId ?? null, options.sourceId ?? null,
       options.payload === undefined ? null : JSON.stringify(options.payload),
+      options.triggeredBy ?? null, options.guidance ?? null, options.sourceJobId ?? null,
     ],
   );
+  return result.rows[0]?.id ?? null;
 }
 
 export async function enqueueJob(

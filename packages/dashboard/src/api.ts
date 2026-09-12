@@ -150,7 +150,7 @@ export interface Project {
   id: string;
   name: string;
   github_repo: string | null;
-  friction_autonomy: 'ask_first' | 'auto_fix' | 'auto_fix_ux';
+  friction_autonomy: 'ask_first' | 'auto_fix';
   pr_posture: 'verified_only' | 'draft_when_unverified';
   default_environment_id: string | null;
   action_scope_enabled: boolean;
@@ -716,6 +716,10 @@ export function triggerFix(
     `/projects/${projectId}/incidents/${incidentId}/fix`,
     guidance ? { guidance } : {}
   );
+}
+
+export function reinvestigateIncident(projectId: string, incidentId: string): Promise<{ job_id: string }> {
+  return postJSON<{ job_id: string }>(`/projects/${projectId}/incidents/${incidentId}/reinvestigate`, {});
 }
 
 export function listAccounts(

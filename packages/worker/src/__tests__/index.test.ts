@@ -1331,7 +1331,7 @@ describe('friction worker path', () => {
     vi.mocked(investigateFriction).mockResolvedValue({
       status: 'verdict', investigatedCommit: 'abc123', costUsd: 0.1,
       usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
-      verdict: { codeCause: true, confidence: 'high', reason: 'save handler is disconnected', remediation: 'wire the handler', evidence: [], agentTaskBrief: 'wire it' },
+      verdict: { explains: [], doesNotExplain: [], codeCause: true, confidence: 'high', reason: 'save handler is disconnected', remediation: 'wire the handler', evidence: [], agentTaskBrief: 'wire it' },
     });
 
     await processInvestigateJob(makeJob(), new AbortController().signal);
@@ -1346,7 +1346,7 @@ describe('friction worker path', () => {
     );
   });
 
-  it.each(['auto_fix', 'auto_fix_ux'] as const)(
+  it.each(['auto_fix'] as const)(
     'auto-triggers a high-confidence friction fix under %s autonomy', async (frictionAutonomy) => {
       mockGetProject.mockResolvedValue({
         id: 'proj-1', name: 'app', github_repo: 'org/app', default_branch: 'main', friction_autonomy: frictionAutonomy,
@@ -1354,7 +1354,7 @@ describe('friction worker path', () => {
       vi.mocked(investigateFriction).mockResolvedValue({
         status: 'verdict', investigatedCommit: 'abc123', costUsd: 0.1,
         usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
-        verdict: { codeCause: true, confidence: 'high', reason: 'save handler is disconnected', remediation: 'wire the handler', evidence: [], agentTaskBrief: 'wire it' },
+        verdict: { explains: [], doesNotExplain: [], codeCause: true, confidence: 'high', reason: 'save handler is disconnected', remediation: 'wire the handler', evidence: [], agentTaskBrief: 'wire it' },
       });
       vi.mocked(db.updateGroupAndCreateFixJob).mockResolvedValue({ created: true, fixJobId: 'fix-job-1' });
 
@@ -1379,7 +1379,7 @@ describe('friction worker path', () => {
       vi.mocked(investigateFriction).mockResolvedValueOnce({
         status: 'verdict', investigatedCommit: 'abc123', costUsd: 0.1,
         usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
-        verdict: { codeCause: true, confidence, reason: 'save handler is disconnected', remediation: 'wire the handler', evidence: [], agentTaskBrief: 'wire it' },
+        verdict: { explains: [], doesNotExplain: [], codeCause: true, confidence, reason: 'save handler is disconnected', remediation: 'wire the handler', evidence: [], agentTaskBrief: 'wire it' },
       });
       await processInvestigateJob(makeJob(), new AbortController().signal);
     }
@@ -1401,7 +1401,7 @@ describe('friction worker path', () => {
     vi.mocked(investigateFriction).mockResolvedValue({
       status: 'verdict', investigatedCommit: 'abc123', costUsd: 0.1,
       usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
-      verdict: { codeCause: true, confidence: 'high', reason: 'save handler is disconnected', remediation: 'wire the handler', evidence: [], agentTaskBrief: 'wire it' },
+      verdict: { explains: [], doesNotExplain: [], codeCause: true, confidence: 'high', reason: 'save handler is disconnected', remediation: 'wire the handler', evidence: [], agentTaskBrief: 'wire it' },
     });
 
     await processInvestigateJob(makeJob(), new AbortController().signal);
@@ -1422,6 +1422,7 @@ describe('friction worker path', () => {
       status: 'verdict', investigatedCommit: 'abc123', costUsd: 0.1,
       usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
       verdict: {
+        explains: [], doesNotExplain: [],
         codeCause: false,
         confidence: 'high',
         reason: 'Users expect the support email to be clickable; product decision, not a code defect',

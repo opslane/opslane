@@ -30,6 +30,30 @@ func (d *Dependencies) presentIncident(
 		return nil, group, err
 	}
 	incident := toIncidentJSON(*group)
+	if group.Kind == "friction" {
+		state, err := d.Queries.GetTicketIncidentState(ctx, projectID, incidentID)
+		if err != nil {
+			return nil, group, err
+		}
+		if state != nil {
+			incident.TicketID, incident.PublicationGeneration = &state.TicketID, &state.Generation
+			incident.FixSubstate, incident.InvestigationStatus = &state.FixSubstate, &state.InvestigationStatus
+			incident.CauseCoverage = &state.CauseCoverage
+			readiness := "ineligible"
+			if state.InvestigationStatus == "pending" {
+				readiness = "pending"
+			}
+			if state.TicketStatus == "published" && state.GroupStatus != "archived" && state.Generation == state.LiveGeneration &&
+				state.InvestigationStatus == "done" && state.CauseCoverage >= 0.5 && state.Cause != "" && state.Brief != "" {
+				readiness = "eligible"
+				incident.RootCause = &state.Cause
+				incident.AgentTaskBrief = &state.Brief
+			} else {
+				incident.RootCause, incident.SuggestedMitigation = nil, nil
+			}
+			group.InvestigationReadiness, incident.InvestigationReadiness = &readiness, &readiness
+		}
+	}
 	if pipeline, err := d.Queries.IssuePipelineRecords(ctx, projectID, []string{incidentID}); err == nil {
 		attachPipelineState(&incident, pipeline[incidentID])
 	}
