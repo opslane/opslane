@@ -207,3 +207,23 @@ func TestGitHubInstallationRepoWrites(t *testing.T) {
 		t.Fatalf("unsuspend: %v %v", ok, err)
 	}
 }
+
+func TestRepoCoveredByActiveInstallation_IsCaseInsensitive(t *testing.T) {
+	q := db.New(testPool(t))
+	ctx := context.Background()
+	orgID, installationID := seedInstallation(t, q, []string{"Acme/Web"})
+	for _, name := range []string{"acme/web", "ACME/WEB", "Acme/Web"} {
+		if ok, err := q.RepoCoveredByActiveInstallation(ctx, orgID, name); err != nil || !ok {
+			t.Fatalf("%s must be covered: ok=%v err=%v", name, ok, err)
+		}
+	}
+	if ok, _ := q.RepoCoveredByActiveInstallation(ctx, orgID, "acme/other"); ok {
+		t.Fatal("unlisted repo must not be covered")
+	}
+	if _, err := q.SetGitHubInstallationSuspended(ctx, installationID, true); err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := q.RepoCoveredByActiveInstallation(ctx, orgID, "acme/web"); ok {
+		t.Fatal("a suspended installation covers nothing")
+	}
+}

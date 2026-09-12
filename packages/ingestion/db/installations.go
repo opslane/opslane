@@ -27,6 +27,9 @@ type PersistInstallationParams struct {
 	GitHubOrgID    int64
 	OrgID          string
 	Repos          []InstallationRepo
+	// HTMLURL is GitHub's settings page for the installation; empty keeps
+	// whatever the row already has.
+	HTMLURL string
 }
 
 // PersistInstallation writes the rich installation mapping, the legacy org
@@ -62,16 +65,17 @@ func (q *Queries) PersistInstallation(ctx context.Context, tx pgx.Tx, params Per
 	}
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO github_app_installations
-		 (installation_id, github_org_name, github_org_id, org_id, repos)
-		 VALUES ($1, $2, $3, $4, $5)
+		 (installation_id, github_org_name, github_org_id, org_id, repos, html_url)
+		 VALUES ($1, $2, $3, $4, $5, $6)
 		 ON CONFLICT (installation_id) DO UPDATE
 		 SET github_org_name = EXCLUDED.github_org_name,
 		     github_org_id = EXCLUDED.github_org_id,
 		     repos = EXCLUDED.repos,
+		     html_url = CASE WHEN EXCLUDED.html_url <> '' THEN EXCLUDED.html_url ELSE github_app_installations.html_url END,
 		     suspended = false,
 		     updated_at = now()`,
 		params.InstallationID, params.GitHubOrgName, params.GitHubOrgID,
-		params.OrgID, reposJSON); err != nil {
+		params.OrgID, reposJSON, params.HTMLURL); err != nil {
 		return fmt.Errorf("upsert GitHub App installation: %w", err)
 	}
 	if _, err := tx.Exec(ctx,
@@ -155,9 +159,19 @@ func (q *Queries) RetireGitHubInstallation(ctx context.Context, installationID i
 		return false, fmt.Errorf("begin retire installation: %w", err)
 	}
 	defer tx.Rollback(ctx)
-	rowTag, err := tx.Exec(ctx,
-		`UPDATE github_app_installations SET suspended = true, updated_at = now()
-		 WHERE installation_id = $1 AND NOT suspended`, installationID)
+	// The rich row is scoped to the org on the on-use path (orgID set) so a
+	// caller can only ever retire an installation mapped to their own org;
+	// signed webhooks pass "" and may retire any mapped row.
+	var rowTag pgconn.CommandTag
+	if orgID == "" {
+		rowTag, err = tx.Exec(ctx,
+			`UPDATE github_app_installations SET suspended = true, updated_at = now()
+			 WHERE installation_id = $1 AND NOT suspended`, installationID)
+	} else {
+		rowTag, err = tx.Exec(ctx,
+			`UPDATE github_app_installations SET suspended = true, updated_at = now()
+			 WHERE installation_id = $1 AND org_id = $2 AND NOT suspended`, installationID, orgID)
+	}
 	if err != nil {
 		return false, fmt.Errorf("retire github installation: %w", err)
 	}
@@ -278,6 +292,42 @@ func (q *Queries) RemoveGitHubInstallationRepos(ctx context.Context, installatio
 		return false, fmt.Errorf("remove github installation repos: %w", err)
 	}
 	return tag.RowsAffected() == 1, nil
+}
+
+// GetGitHubInstallationHTMLURL reads the stored settings page for an
+// installation the org owns; "" when unknown.
+func (q *Queries) GetGitHubInstallationHTMLURL(ctx context.Context, orgID string, installationID int64) (string, error) {
+	var u string
+	err := q.pool.QueryRow(ctx,
+		`SELECT html_url FROM github_app_installations WHERE installation_id = $1 AND org_id = $2`,
+		installationID, orgID).Scan(&u)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("get github installation html_url: %w", err)
+	}
+	return u, nil
+}
+
+// SetGitHubInstallationHTMLURL fills the settings page for a row persisted
+// before the column existed.
+func (q *Queries) SetGitHubInstallationHTMLURL(ctx context.Context, installationID int64, htmlURL string) error {
+	_, err := q.pool.Exec(ctx,
+		`UPDATE github_app_installations SET html_url = $2, updated_at = now() WHERE installation_id = $1 AND html_url = ''`,
+		installationID, htmlURL)
+	if err != nil {
+		return fmt.Errorf("set github installation html_url: %w", err)
+	}
+	return nil
+}
+
+// AnyOrgPointsAtInstallation reports whether a legacy org pointer names the
+// installation even when no rich row exists.
+func (q *Queries) AnyOrgPointsAtInstallation(ctx context.Context, installationID int64) (bool, error) {
+	var ok bool
+	err := q.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM orgs WHERE github_installation_id = $1)`, installationID).Scan(&ok)
+	return ok, err
 }
 
 func dedupeRepoNames(names []string) []string {

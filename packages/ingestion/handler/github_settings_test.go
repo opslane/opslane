@@ -246,7 +246,13 @@ func githubGoneOrMissingClient(installationID int64, tokenStatus int, reposJSON,
 			return &http.Response{StatusCode: status, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
 		}
 		switch {
+		case req.Method == http.MethodGet && req.URL.Path == "/app":
+			// The fixture's GitHubAppID is "1": credentials confirmed.
+			return respond(http.StatusOK, `{"id":1,"slug":"opslane-test"}`)
 		case req.Method == http.MethodPost && req.URL.Path == fmt.Sprintf("/app/installations/%d/access_tokens", installationID):
+			if tokenStatus == http.StatusForbidden {
+				return respond(tokenStatus, `{"message":"This installation has been suspended"}`)
+			}
 			if tokenStatus != http.StatusCreated {
 				return respond(tokenStatus, `{"message":"Not Found"}`)
 			}
@@ -350,5 +356,99 @@ func TestGetGitHubConfigReportsLostRepoAccess(t *testing.T) {
 	deps.GetGitHubConfig(recorder, newSetGitHubConfigRequest(orgID, projectID, ""))
 	if !strings.Contains(recorder.Body.String(), `"repo_access":true`) || strings.Contains(recorder.Body.String(), "add_repo_url") {
 		t.Fatalf("covered body=%s", recorder.Body.String())
+	}
+}
+
+// wrongAppClient answers the token call with 404 but GET /app with a different
+// App id: the credentials, not the installation, are wrong.
+func wrongAppClient(installationID int64) *http.Client {
+	return &http.Client{Transport: handlerRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		respond := func(status int, body string) (*http.Response, error) {
+			return &http.Response{StatusCode: status, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
+		}
+		switch {
+		case req.Method == http.MethodGet && req.URL.Path == "/app":
+			return respond(http.StatusOK, `{"id":999,"slug":"someone-elses-app"}`)
+		case req.Method == http.MethodPost && req.URL.Path == fmt.Sprintf("/app/installations/%d/access_tokens", installationID):
+			return respond(http.StatusNotFound, `{"message":"Not Found"}`)
+		default:
+			return respond(http.StatusNotFound, `{}`)
+		}
+	})}
+}
+
+func TestSetGitHubConfigDoesNotRetireWhenAppCredentialsAreWrong(t *testing.T) {
+	deps, q, orgID, projectID, installationID := setGitHubConfigFixture(t)
+	ctx := context.Background()
+	if _, err := q.Pool().Exec(ctx,
+		`INSERT INTO github_app_installations (installation_id, github_org_name, github_org_id, org_id, repos)
+		 VALUES ($1, 'acme', 1, $2, '["owner/repo"]')`, installationID, orgID); err != nil {
+		t.Fatal(err)
+	}
+	restore := gh.OverrideHTTPClientForTests(wrongAppClient(installationID))
+	defer restore()
+	recorder := httptest.NewRecorder()
+	deps.SetGitHubConfig(recorder, newSetGitHubConfigRequest(orgID, projectID, "owner/repo"))
+	if recorder.Code != http.StatusServiceUnavailable || !strings.Contains(recorder.Body.String(), `"code":"github_unreachable"`) {
+		t.Fatalf("wrong credentials must not read as a gone installation: code=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if pointer, _ := q.GetOrgGitHubInstallation(ctx, orgID); pointer != installationID {
+		t.Fatalf("org pointer must survive a credential problem: %d", pointer)
+	}
+	if active, _ := q.OrgHasActiveGitHubInstallation(ctx, orgID); !active {
+		t.Fatal("installation must stay active when credentials are unconfirmed")
+	}
+}
+
+func TestSetGitHubConfigSuspendedInstallationIsItsOwnCode(t *testing.T) {
+	deps, q, orgID, projectID, installationID := setGitHubConfigFixture(t)
+	ctx := context.Background()
+	if _, err := q.Pool().Exec(ctx,
+		`INSERT INTO github_app_installations (installation_id, github_org_name, github_org_id, org_id, repos)
+		 VALUES ($1, 'acme', 1, $2, '["owner/repo"]')`, installationID, orgID); err != nil {
+		t.Fatal(err)
+	}
+	restore := gh.OverrideHTTPClientForTests(githubGoneOrMissingClient(installationID, http.StatusForbidden, `{"repositories":[]}`, ""))
+	defer restore()
+	recorder := httptest.NewRecorder()
+	deps.SetGitHubConfig(recorder, newSetGitHubConfigRequest(orgID, projectID, "owner/repo"))
+	if recorder.Code != http.StatusConflict || !strings.Contains(recorder.Body.String(), `"code":"github_installation_suspended"`) {
+		t.Fatalf("code=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if active, _ := q.OrgHasActiveGitHubInstallation(ctx, orgID); active {
+		t.Fatal("suspended installation must read inactive")
+	}
+}
+
+func TestSetGitHubConfigCannotRetireAnotherOrgsInstallation(t *testing.T) {
+	deps, q, orgID, projectID, installationID := setGitHubConfigFixture(t)
+	ctx := context.Background()
+	other, err := q.CreateOrg(ctx, "other-"+uuid.NewString())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = q.Pool().Exec(context.Background(), `DELETE FROM github_app_installations WHERE org_id = $1`, other.ID)
+		_, _ = q.Pool().Exec(context.Background(), `DELETE FROM orgs WHERE id = $1`, other.ID)
+	})
+	// The fixture org's pointer names an installation whose rich row belongs to another org.
+	if _, err := q.Pool().Exec(ctx,
+		`INSERT INTO github_app_installations (installation_id, github_org_name, github_org_id, org_id, repos)
+		 VALUES ($1, 'other', 2, $2, '["owner/repo"]')`, installationID, other.ID); err != nil {
+		t.Fatal(err)
+	}
+	restore := gh.OverrideHTTPClientForTests(githubGoneOrMissingClient(installationID, http.StatusNotFound, `{"repositories":[]}`, ""))
+	defer restore()
+	recorder := httptest.NewRecorder()
+	deps.SetGitHubConfig(recorder, newSetGitHubConfigRequest(orgID, projectID, "owner/repo"))
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("code=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var suspended bool
+	if err := q.Pool().QueryRow(ctx, `SELECT suspended FROM github_app_installations WHERE installation_id = $1`, installationID).Scan(&suspended); err != nil || suspended {
+		t.Fatalf("another org's rich row must not be suspended by this org's on-use retire: suspended=%v err=%v", suspended, err)
+	}
+	if pointer, _ := q.GetOrgGitHubInstallation(ctx, orgID); pointer != 0 {
+		t.Fatalf("this org's own pointer must still be cleared: %d", pointer)
 	}
 }

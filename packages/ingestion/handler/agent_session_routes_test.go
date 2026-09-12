@@ -69,6 +69,10 @@ func TestAgentSessionRoutes_ProgressAndState(t *testing.T) {
 	if code, _ := sessionCall(t, a, http.MethodPost, "progress", `{"step":"pull_request","status":"done","note":"https://github.com/acme/web/pull/12"}`, a.token); code != http.StatusNoContent {
 		t.Fatalf("pull_request progress: %d", code)
 	}
+	// Migration 076 dropped the database CHECK; the handler allowlist is the only gate.
+	if code, out := sessionCall(t, a, http.MethodPost, "progress", `{"step":"bogus","status":"done"}`, a.token); code != http.StatusBadRequest || out["error"] != "unknown step" {
+		t.Fatalf("unknown step must be refused: %d %v", code, out)
+	}
 	if code, _ := sessionCall(t, a, http.MethodPost, "progress", `{"step":"mcp","status":"nope"}`, a.token); code != http.StatusBadRequest {
 		t.Fatalf("bad status: %d", code)
 	}

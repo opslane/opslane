@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -105,9 +106,7 @@ func (d *Dependencies) GetGitHubConfig(w http.ResponseWriter, r *http.Request) {
 				installationID, idErr := d.Queries.GetOrgGitHubInstallation(r.Context(), orgID)
 				appJWT, jwtErr := gh.GenerateAppJWT(d.GitHubAppID, d.GitHubAppPrivateKey)
 				if idErr == nil && jwtErr == nil {
-					if info, infoErr := gh.VerifyInstallation(appJWT, installationID); infoErr == nil {
-						resp.AddRepoURL = info.HTMLURL
-					}
+					resp.AddRepoURL = d.installationAddRepoURL(r.Context(), orgID, installationID, appJWT)
 				}
 			}
 		}
@@ -145,11 +144,11 @@ func (d *Dependencies) attachGitHubRepo(ctx context.Context, orgID, projectID, r
 	if d.GitHubAppSlug == "" {
 		token := strings.TrimSpace(os.Getenv("GITHUB_TOKEN"))
 		if token == "" {
-			return "", &githubFailure{Status: http.StatusBadRequest, Code: "github_not_installed", Message: "configure GITHUB_TOKEN or install the GitHub App", Extra: map[string]string{"github_connect_url": connectURL}}
+			return "", &githubFailure{Status: http.StatusBadRequest, Code: codeGitHubNotInstalled, Message: "configure GITHUB_TOKEN or install the GitHub App", Extra: map[string]string{"github_connect_url": connectURL}}
 		}
 		repo, repoErr := gh.GetRepo(token, parts[0], parts[1])
 		if errors.Is(repoErr, gh.ErrRepoNotFound) {
-			return "", &githubFailure{Status: http.StatusBadRequest, Code: "repo_not_in_installation", Message: fmt.Sprintf("%s is not reachable with the configured GITHUB_TOKEN", repoName)}
+			return "", &githubFailure{Status: http.StatusBadRequest, Code: codeRepoNotInInstallation, Message: fmt.Sprintf("%s is not reachable with the configured GITHUB_TOKEN", repoName)}
 		}
 		if repoErr != nil {
 			return "", classifyGitHubError(repoErr)
@@ -161,7 +160,7 @@ func (d *Dependencies) attachGitHubRepo(ctx context.Context, orgID, projectID, r
 			return "", &githubFailure{Status: http.StatusInternalServerError, Code: "internal_error", Message: "failed to load GitHub installation"}
 		}
 		if installationID == 0 {
-			return "", &githubFailure{Status: http.StatusBadRequest, Code: "github_not_installed", Message: "GitHub App not installed for this organization", Extra: map[string]string{"github_connect_url": connectURL}}
+			return "", &githubFailure{Status: http.StatusBadRequest, Code: codeGitHubNotInstalled, Message: "GitHub App not installed for this organization", Extra: map[string]string{"github_connect_url": connectURL}}
 		}
 		appJWT, err := gh.GenerateAppJWT(d.GitHubAppID, d.GitHubAppPrivateKey)
 		if err != nil {
@@ -189,8 +188,8 @@ func (d *Dependencies) attachGitHubRepo(ctx context.Context, orgID, projectID, r
 				Message: fmt.Sprintf("the Opslane GitHub App cannot see %s; add it to the installation's repository access, then retry", repoName),
 				Extra:   map[string]string{},
 			}
-			if info, infoErr := gh.VerifyInstallation(appJWT, installationID); infoErr == nil && info.HTMLURL != "" {
-				failure.Extra["add_repo_url"] = info.HTMLURL
+			if u := d.installationAddRepoURL(ctx, orgID, installationID, appJWT); u != "" {
+				failure.Extra["add_repo_url"] = u
 			}
 			return "", failure
 		}
@@ -213,14 +212,54 @@ func (d *Dependencies) attachGitHubRepo(ctx context.Context, orgID, projectID, r
 // reconnect. A failed retirement returns 500 because the record remains stale.
 func (d *Dependencies) githubTokenFailure(ctx context.Context, err error, installationID int64, orgID, connectURL string) *githubFailure {
 	failure := classifyGitHubError(err)
-	if failure.Code != "github_installation_gone" {
+	if failure.Code != codeGitHubInstallationGone && failure.Code != codeGitHubInstallationSuspended {
 		return failure
 	}
+	// GitHub answers 404 on an installation both when it is gone and when the
+	// App JWT belongs to a different App (rotated key, wrong GITHUB_APP_ID).
+	// Only the first may retire records; a credential mistake must not clear
+	// every org's installation on ordinary read traffic.
+	if !d.appCredentialsConfirmed() {
+		slog.Error("github: refusing to retire installation because the App credentials could not be confirmed", "installation_id", installationID, "org_id", orgID, "cause", err)
+		return githubUnreachable("GitHub could not confirm this Opslane's App credentials; not touching the installation record. Retry later.")
+	}
 	if _, retireErr := d.Queries.RetireGitHubInstallation(ctx, installationID, orgID); retireErr != nil {
-		slog.Error("github: retire gone installation", "error", retireErr, "installation_id", installationID, "org_id", orgID)
+		slog.Error("github: retire installation", "error", retireErr, "installation_id", installationID, "org_id", orgID)
 		return &githubFailure{Status: http.StatusInternalServerError, Code: "internal_error", Message: "failed to update GitHub installation record"}
 	}
-	slog.Warn("github: retired installation GitHub no longer honours", "installation_id", installationID, "org_id", orgID, "cause", err)
+	slog.Warn("github: retired installation GitHub no longer honours", "code", failure.Code, "installation_id", installationID, "org_id", orgID, "cause", err)
 	failure.Extra = map[string]string{"github_connect_url": connectURL}
 	return failure
+}
+
+// appCredentialsConfirmed reports whether GET /app with our JWT names the App
+// this deployment is configured for.
+func (d *Dependencies) appCredentialsConfirmed() bool {
+	appJWT, err := gh.GenerateAppJWT(d.GitHubAppID, d.GitHubAppPrivateKey)
+	if err != nil {
+		return false
+	}
+	app, err := gh.GetApp(appJWT)
+	if err != nil {
+		return false
+	}
+	return strconv.FormatInt(app.ID, 10) == strings.TrimSpace(d.GitHubAppID)
+}
+
+// installationAddRepoURL returns the GitHub page where a human edits the
+// installation's repository access. It is stored at install time; a row
+// persisted before that column existed is filled in once from GitHub.
+func (d *Dependencies) installationAddRepoURL(ctx context.Context, orgID string, installationID int64, appJWT string) string {
+	stored, err := d.Queries.GetGitHubInstallationHTMLURL(ctx, orgID, installationID)
+	if err == nil && stored != "" {
+		return stored
+	}
+	info, err := gh.VerifyInstallation(appJWT, installationID)
+	if err != nil || info.HTMLURL == "" {
+		return ""
+	}
+	if err := d.Queries.SetGitHubInstallationHTMLURL(ctx, installationID, info.HTMLURL); err != nil {
+		slog.Warn("github: store installation html_url", "error", err, "installation_id", installationID)
+	}
+	return info.HTMLURL
 }

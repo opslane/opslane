@@ -223,7 +223,7 @@ func (d *Dependencies) OAuthLoginCallback(w http.ResponseWriter, r *http.Request
 			return
 		}
 		slog.Warn("identity provider code exchange failed", "provider", d.provider().Name(), "error", err)
-		writeGitHubFailure(w, &githubFailure{Status: http.StatusServiceUnavailable, Code: "identity_provider_unreachable", Message: "authentication failed"})
+		writeGitHubFailure(w, &githubFailure{Status: http.StatusServiceUnavailable, Code: codeIdentityProviderUnreachable, Message: "authentication failed"})
 		return
 	}
 
@@ -231,7 +231,7 @@ func (d *Dependencies) OAuthLoginCallback(w http.ResponseWriter, r *http.Request
 	if err != nil {
 		if errors.Is(err, errGitHubUpstream) {
 			slog.Warn("OAuth install: GitHub upstream failure", "error", err)
-			writeGitHubFailure(w, &githubFailure{Status: http.StatusServiceUnavailable, Code: "github_unreachable", Message: "could not load GitHub installation; retry the installation"})
+			writeGitHubFailure(w, githubUnreachable("could not load GitHub installation; retry the installation"))
 			return
 		}
 		slog.Error("OAuth login completion failed", "error", err)
@@ -330,13 +330,13 @@ func (d *Dependencies) gitHubInstallCallback(w http.ResponseWriter, r *http.Requ
 	if err != nil {
 		release()
 		slog.Warn("GitHub install code exchange failed", "error", err)
-		writeGitHubFailure(w, &githubFailure{Status: http.StatusServiceUnavailable, Code: "github_unreachable", Message: "GitHub authorization failed"})
+		writeGitHubFailure(w, githubUnreachable("GitHub authorization failed"))
 		return
 	}
 	userInstalls, err := gh.ListUserInstallations(userToken.AccessToken)
 	if err != nil {
 		release()
-		writeGitHubFailure(w, &githubFailure{Status: http.StatusServiceUnavailable, Code: "github_unreachable", Message: "could not verify GitHub installation ownership"})
+		writeGitHubFailure(w, githubUnreachable("could not verify GitHub installation ownership"))
 		return
 	}
 	if !containsInstallation(userInstalls, installationID) {
@@ -354,7 +354,7 @@ func (d *Dependencies) gitHubInstallCallback(w http.ResponseWriter, r *http.Requ
 	if err != nil {
 		release()
 		if errors.Is(err, gh.ErrInstallationGone) {
-			writeJSONError(w, http.StatusBadRequest, "invalid or unauthorized installation")
+			writeGitHubFailure(w, &githubFailure{Status: http.StatusBadRequest, Code: "invalid_installation", Message: "invalid or unauthorized installation"})
 			return
 		}
 		writeGitHubFailure(w, classifyGitHubError(err))
@@ -391,6 +391,7 @@ func (d *Dependencies) gitHubInstallCallback(w http.ResponseWriter, r *http.Requ
 		GitHubOrgID:    installInfo.Account.ID,
 		OrgID:          *reservation.TargetOrgID,
 		Repos:          installationRepos,
+		HTMLURL:        installInfo.HTMLURL,
 	}); err != nil {
 		if errors.Is(err, db.ErrInstallationOrgConflict) {
 			writeJSONError(w, http.StatusConflict, "installation is already mapped to another organization")
@@ -677,6 +678,7 @@ func (d *Dependencies) applyCombinedGitHubInstallationContext(ctx context.Contex
 		GitHubOrgID:    installInfo.Account.ID,
 		OrgID:          orgID,
 		Repos:          installationRepos,
+		HTMLURL:        installInfo.HTMLURL,
 	}); err != nil {
 		return err
 	}
@@ -814,7 +816,7 @@ func (d *Dependencies) ListGitHubRepos(w http.ResponseWriter, r *http.Request) {
 	}
 	connectURL := d.publicOrigin(r) + "/settings#github"
 	if installationID == 0 {
-		writeGitHubFailure(w, &githubFailure{Status: http.StatusBadRequest, Code: "github_not_installed", Message: "GitHub App not installed", Extra: map[string]string{"github_connect_url": connectURL}})
+		writeGitHubFailure(w, &githubFailure{Status: http.StatusBadRequest, Code: codeGitHubNotInstalled, Message: "GitHub App not installed", Extra: map[string]string{"github_connect_url": connectURL}})
 		return
 	}
 

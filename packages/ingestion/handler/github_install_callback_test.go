@@ -133,6 +133,8 @@ func TestWebInstallCallbackRetiresGoneInstallation(t *testing.T) {
 			return response(http.StatusOK, `{"access_token":"user-token"}`)
 		case req.URL.Path == "/user/installations":
 			return response(http.StatusOK, fmt.Sprintf(`{"installations":[{"id":%d}]}`, installationID))
+		case req.Method == http.MethodGet && req.URL.Path == "/app":
+			return response(http.StatusOK, `{"id":1,"slug":"opslane-test"}`)
 		case req.Method == http.MethodGet && req.URL.Path == fmt.Sprintf("/app/installations/%d", installationID):
 			return response(http.StatusOK, fmt.Sprintf(`{"id":%d,"account":{"login":"acme","id":1}}`, installationID))
 		case req.Method == http.MethodPost && req.URL.Path == fmt.Sprintf("/app/installations/%d/access_tokens", installationID):

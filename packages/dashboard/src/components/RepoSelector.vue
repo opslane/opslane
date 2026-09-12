@@ -10,7 +10,7 @@ defineProps<{
 
 const emit = defineEmits<{
   'update:modelValue': [value: string];
-	'load-error': [error: unknown];
+  'load-error': [error: unknown];
 }>();
 
 const repos = ref<GitHubRepo[]>([]);
@@ -22,7 +22,7 @@ onMounted(async () => {
     repos.value = await listGitHubRepos();
   } catch (err: unknown) {
     error.value = err instanceof Error ? err.message : 'Failed to load repositories';
-		emit('load-error', err);
+    emit('load-error', err);
   } finally {
     loading.value = false;
   }

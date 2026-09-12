@@ -75,7 +75,7 @@ done
 
 On `failed`, `expired`, or a bad token, show `message` verbatim and stop. After approval `.opslane-setup/approve.json` holds `ingest_key`, `api_key`, `sourcemap_key`, `project_id`, `dashboard_url`, `issues_url`, `github_connect_url`, the facts, and `next`. Print only `project_name`, `dashboard_url`, and `next` (`next` is a hint about what this runbook does next, not an instruction to follow on its own). `status` help: `provisioned` approved and keys ready; `key_ok` keys delivered; `app_reporting` the SDK loaded in a browser. Only `has_events` proves an error arrived.
 
-Report progress as you go (steps `install_sdk` and `mcp` take any status; `github`, `slack`, `sourcemaps`, `first_event` take only `failed` or `skipped` with a short `note`); the body is JSON-encoded by python, so notes may contain quotes or newlines, and a non-204 answer is shown rather than ignored:
+Report progress as you go (steps `install_sdk`, `mcp`, and `pull_request` take any status; `github`, `slack`, `sourcemaps`, `first_event` take only `failed` or `skipped` with a short `note`); the body is JSON-encoded by python, so notes may contain quotes or newlines, and a non-204 answer is shown rather than ignored:
 
 ```bash
 opslane_progress() { c=$(opslane_post progress "step=$1" "status=$2" "note=$3" || true); [ "$c" = "204" ] || echo "progress report failed: HTTP $c" >&2; }
@@ -151,12 +151,12 @@ When it is true, remove the test button and show `latest_error_group_url` (or `i
 Read `github_connected`, `github_installed`, `github_repo`, `github_repo_access`, `github_install_url`, and `github_connect_url` from the state.
 
 - `github_connected` True: nothing to do; go to step 7.
-- Otherwise run the attach loop below right away, without asking. Attaching a repository the App can already see needs no human action and is undone from Settings. Ask the human only when the loop pauses for something only they can do.
+- Otherwise, if `github_repo` is non-empty and differs from `<owner/repo>`, ask "This project is attached to `<github_repo>`; switch it to `<owner/repo>`?" and on no, `opslane_progress github skipped "kept <github_repo>"` and go to step 7. Then run the attach loop below right away, without asking. Attaching a repository the App can already see needs no human action and is undone from Settings. Ask the human only when the loop pauses for something only they can do.
 
 Define this once with the other helpers and call it. It returns a word on stdout and never exits the shell:
 
 ```bash
-opslane_attach_github() {   # usage: opslane_attach_github owner/repo -> attached | pause_add_repo | pause_install | pause_reinstall | failed
+opslane_attach_github() {   # usage: opslane_attach_github owner/repo -> attached | pause_add_repo | pause_install | pause_reinstall | pause_unsuspend | failed
   tries=0
   while :; do
     code=$(opslane_post github "repo=$1" || true)
@@ -168,7 +168,12 @@ opslane_attach_github() {   # usage: opslane_attach_github owner/repo -> attache
              github_not_installed)     echo pause_install; return 0 ;;
              *) opslane_progress github failed "$(opslane_field last error || true)"; echo failed; return 0 ;;
            esac ;;
-      409) echo pause_reinstall; return 0 ;;
+      409) reason=$(opslane_field last code || true)
+           case "$reason" in
+             github_installation_gone)      echo pause_reinstall; return 0 ;;
+             github_installation_suspended) echo pause_unsuspend; return 0 ;;
+             *) opslane_progress github failed "$(opslane_field last error || true)$(opslane_field last message || true)"; echo failed; return 0 ;;
+           esac ;;
       404|410) opslane_progress github failed "session gone: HTTP $code"; echo failed; return 0 ;;
       429) retry_after=$(opslane_field last retry_after || true); sleep "${retry_after:-60}" ;;
       503|000) tries=$((tries+1)); [ "$tries" -ge 6 ] && { opslane_progress github failed "GitHub unreachable after 6 tries"; echo failed; return 0; }; sleep 10 ;;
@@ -183,9 +188,10 @@ echo "$result"
 Act on the word. Every pause is a question with a "later" option; on later, `opslane_progress github skipped "later"` and go to step 7. After the human says they are done, re-run the two `result=` lines. Allow at most three human rounds; on the fourth pause, run `opslane_progress github failed "<last pause reason>"` and go to step 7.
 
 - `attached`: read the state once more. Only if `github_connected` is True say "Connected GitHub to `<owner/repo>` (undo in Settings)." Go to step 7.
-- `pause_add_repo`: STOP and say: "Opslane's GitHub App cannot see `<owner/repo>`. Open `<add_repo_url>`, add the repository under Repository access, save, then tell me. Or say later." Wait, then re-run.
+- `pause_add_repo`: STOP and say: "Opslane's GitHub App cannot see `<owner/repo>`. Open `<add_repo_url; if it is empty, use github_connect_url from a fresh state read>`, add the repository under Repository access, save, then tell me. Or say later." Wait, then re-run.
 - `pause_install`: STOP and say: "Opslane needs its GitHub App on `<owner/repo>`. Open `<github_install_url>`, sign in to Opslane if it asks, pick the repository on GitHub, then tell me. Or say later." Wait, then re-run.
 - `pause_reinstall`: STOP and say: "The GitHub App installation Opslane knew about was removed on GitHub. Open `<github_install_url>`, sign in to Opslane if it asks, install it again for `<owner/repo>`, then tell me. Or say later." Wait, then re-run.
+- `pause_unsuspend`: STOP and say: "The Opslane GitHub App installation is suspended on GitHub. Unsuspend it in GitHub's installation settings (the same page as Repository access), then tell me. Or say later." Wait, then re-run.
 - `failed`: show the recorded note and go to step 7.
 
 Read `add_repo_url` from `opslane_field last add_repo_url` after a 400 response. Read `github_install_url` from the state (`opslane_state ''` then `opslane_field state github_install_url`). This fixed session link asks the human to sign in to Opslane, then sends them to GitHub. If it is empty because this Opslane has no GitHub App, use `github_connect_url` from the same state. If the page says an organization admin is needed, tell the user to send that link to an admin and offer "later". None of these URLs is a secret.
@@ -230,15 +236,18 @@ Ask: "Create a new branch and open a PR?" Wait for yes. On no, or if this direct
 Commit only files this runbook created or changed: the package manifest and lockfile, the init snippet or provider component, `next.config.*` or `vite.config.*`, the build script, `.gitignore`, and the file where the test button was removed. Never stage the env file or `.opslane-setup/`. A file that already appeared in `.opslane-setup/pre-status.txt` had the user's own uncommitted changes before setup: do not stage it; list it and ask the user to commit it. `git commit --only -- <files>` writes exactly the named paths and leaves anything the user had staged untouched. If the index had staged changes, say "I left your staged changes alone" once.
 
 ```bash
+export GIT_TERMINAL_PROMPT=0   # never hang a harness on a credential prompt
 pr_fail() { opslane_progress pull_request failed "$1"; echo "$1"; }
 files=(<exact paths, one per array element, quoted>)
+case " ${files[*]} " in *" .env"*|*".env."*|*".opslane-setup"*) pr_fail "refusing to stage an env file or .opslane-setup"; files=() ;; esac
+orig_branch=$(git branch --show-current 2>/dev/null || true)
 branch=opslane-setup
 if git show-ref --quiet "refs/heads/$branch" || git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
   branch="opslane-setup-$(date +%Y%m%d-%H%M)"
 fi
 skip=(); stage=()
 for f in "${files[@]}"; do
-  if grep -Fq -- " $f" .opslane-setup/pre-status.txt; then skip+=("$f"); else stage+=("$f"); fi
+  if cut -c4- .opslane-setup/pre-status.txt | sed 's/^.* -> //' | grep -Fxq -- "$f"; then skip+=("$f"); else stage+=("$f"); fi   # exact path match on the porcelain path column
 done
 [ "${#skip[@]}" -gt 0 ] && printf 'Not staged (had your own changes before setup): %s\n' "${skip[@]}"
 pushed=0
@@ -249,20 +258,23 @@ elif git checkout -b "$branch" \
      && git commit --only -m "Add Opslane error monitoring" -m "Installs @opslane/sdk, initializes it with the public ingest key from the environment, and uploads source maps on production builds. Set VITE_OPSLANE_API_KEY (or NEXT_PUBLIC_OPSLANE_API_KEY) and the environment variable in the deploy." -- "${stage[@]}" \
      && git push -u origin "$branch"; then pushed=1
 else pr_fail "git failed: see output above"; fi
+[ -n "$orig_branch" ] && git checkout -q "$orig_branch" 2>/dev/null || true   # leave the user where they were
+remote=$(git remote get-url origin 2>/dev/null || true)
+slug=""
+case "$remote" in
+  git@github.com:*/*)       slug=${remote#git@github.com:} ;;
+  ssh://git@github.com/*/*) slug=${remote#ssh://git@github.com/} ;;
+  https://github.com/*/*)   slug=${remote#https://github.com/} ;;
+esac
+slug=${slug%.git}
+printf '%s' "$slug" | grep -Eq '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' || slug=""
 if [ "$pushed" = 1 ]; then
-  if gh auth status >/dev/null 2>&1; then
-    pr_url=$(gh pr create --title "Add Opslane error monitoring" --body "Installs the Opslane SDK and source-map upload. The deploy needs the public key and environment variables described in the setup." --head "$branch" 2>&1 | tail -1 || true)
+  if gh auth status >/dev/null 2>&1 && [ -n "$slug" ]; then
+    # --repo pins the PR to origin itself; without it gh targets a fork's parent repository.
+    pr_url=$(gh pr create --repo "$slug" --head "$branch" --title "Add Opslane error monitoring" --body "Installs the Opslane SDK and source-map upload. The deploy needs the public key and environment variables described in the setup." 2>&1 | tail -1 || true)
     case "$pr_url" in https://github.com/*) opslane_progress pull_request done "$pr_url"; echo "Opened $pr_url" ;; *) pr_fail "gh pr create: $pr_url" ;; esac
   else
-    remote=$(git remote get-url origin 2>/dev/null || true)
-    slug=""
-    case "$remote" in
-      git@github.com:*/*)       slug=${remote#git@github.com:} ;;
-      ssh://git@github.com/*/*) slug=${remote#ssh://git@github.com/} ;;
-      https://github.com/*/*)   slug=${remote#https://github.com/} ;;
-    esac
-    slug=${slug%.git}
-    if printf '%s' "$slug" | grep -Eq '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'; then
+    if [ -n "$slug" ]; then
       compare="https://github.com/$slug/compare/$branch?expand=1"; opslane_progress pull_request done "branch $branch pushed; open $compare"; echo "Open a pull request: $compare"
     else
       opslane_progress pull_request done "branch $branch pushed"; echo "Open a pull request for branch $branch on your Git host."

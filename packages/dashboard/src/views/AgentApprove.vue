@@ -9,7 +9,7 @@ const STEP_LABELS: Record<AgentStepName, string> = {
   slack: 'Slack digest connected',
   sourcemaps: 'Source maps uploading',
   mcp: 'Agent connected to Opslane',
-	pull_request: 'Open a pull request',
+  pull_request: 'Open a pull request',
 };
 const STEP_ORDER: AgentStepName[] = ['approve', 'install_sdk', 'first_event', 'github', 'slack', 'sourcemaps', 'mcp', 'pull_request'];
 
@@ -49,7 +49,7 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { approveAgentSession, denyAgentSession, getAgentApproveInfo, getMe } from '../api';
 import Button from '../components/ui/Button.vue';
-import { safeUrl } from '../utils';
+import { GITHUB_PR_URL_OPTIONS, safeUrl } from '../utils';
 import { applyProjectSelection } from '../components/project-switcher';
 
 type Phase = 'loading' | 'choose' | 'working' | 'progress' | 'denied' | 'error';
@@ -290,7 +290,8 @@ async function deny(): Promise<void> {
           <span class="flex-1">
             <span class="sr-only">{{ item.status }}: </span>
             <span class="text-text" :class="{ 'line-through text-muted': item.status === 'skipped' }">{{ item.label }}</span>
-            <span v-if="item.note" class="block text-xs text-muted">{{ item.note }}</span>
+            <a v-if="item.note && safeUrl(item.note, GITHUB_PR_URL_OPTIONS)" :href="safeUrl(item.note, GITHUB_PR_URL_OPTIONS)" target="_blank" rel="noopener noreferrer" class="block text-xs text-accent underline break-all">{{ item.note }}</a>
+            <span v-else-if="item.note" class="block text-xs text-muted">{{ item.note }}</span>
           </span>
         </li>
       </ol>

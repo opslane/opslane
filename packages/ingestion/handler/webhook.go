@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -52,7 +53,8 @@ type webhookRepo struct {
 type installationEvent struct {
 	Action       string `json:"action"`
 	Installation struct {
-		ID int64 `json:"id"`
+		ID                  int64  `json:"id"`
+		RepositorySelection string `json:"repository_selection"` // "all" or "selected"
 	} `json:"installation"`
 	Repositories        []webhookRepo `json:"repositories"`
 	RepositoriesAdded   []webhookRepo `json:"repositories_added"`
@@ -70,7 +72,10 @@ func repoNames(repos []webhookRepo) []string {
 }
 
 // HandleWebhook handles POST /api/v1/github/webhook.
-// Verifies the GitHub HMAC-SHA256 signature and processes pull_request and push events.
+// Verifies the GitHub HMAC-SHA256 signature and processes pull_request and
+// push events (which require X-GitHub-Delivery) plus installation and
+// installation_repositories events (state-based, applied without a delivery
+// receipt so a redelivery reapplies the same state).
 func (d *Dependencies) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 	secret := os.Getenv("GITHUB_WEBHOOK_SECRET")
 	if secret == "" {
@@ -79,8 +84,10 @@ func (d *Dependencies) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Read body (limit to 1MB — webhook payloads are typically small)
-	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	// Read body. GitHub caps webhook payloads at 25 MB; an installation
+	// event for an account with many repositories can exceed the old 1 MB
+	// cap, and a truncated body can never pass signature verification.
+	body, err := io.ReadAll(io.LimitReader(r.Body, 25<<20))
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, "failed to read request body")
 		return
@@ -103,8 +110,7 @@ func (d *Dependencies) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 		d.handleInstallationRepositoriesWebhook(w, r, body)
 		return
 	default:
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"status": "ignored", "event": eventType})
+		webhookJSON(w, map[string]string{"status": "ignored", "event": eventType})
 		return
 	}
 
@@ -268,12 +274,43 @@ func webhookJSON(w http.ResponseWriter, value map[string]string) {
 	_ = json.NewEncoder(w).Encode(value)
 }
 
+// knownInstallation is true for a rich row or, for orgs that predate rich
+// rows, a legacy org pointer; either way Opslane mapped it to an org.
 func (d *Dependencies) knownInstallation(ctx context.Context, installationID int64) (bool, error) {
 	installation, err := d.Queries.GetGitHubAppInstallationByID(ctx, installationID)
 	if err != nil {
 		return false, err
 	}
-	return installation != nil, nil
+	if installation != nil {
+		return true, nil
+	}
+	return d.Queries.AnyOrgPointsAtInstallation(ctx, installationID)
+}
+
+// refreshInstallationRepos replaces the repo list from GitHub. Used when the
+// event says "all repositories", whose payload carries no list.
+func (d *Dependencies) refreshInstallationRepos(ctx context.Context, installationID int64) error {
+	if d.GitHubAppID == "" || len(d.GitHubAppPrivateKey) == 0 {
+		return fmt.Errorf("GitHub App not configured")
+	}
+	appJWT, err := gh.GenerateAppJWT(d.GitHubAppID, d.GitHubAppPrivateKey)
+	if err != nil {
+		return err
+	}
+	token, err := gh.GetInstallationToken(appJWT, installationID)
+	if err != nil {
+		return err
+	}
+	repos, err := gh.ListInstallationRepos(token.Token)
+	if err != nil {
+		return err
+	}
+	names := make([]string, 0, len(repos))
+	for _, repo := range repos {
+		names = append(names, repo.FullName)
+	}
+	_, err = d.Queries.ReplaceGitHubInstallationRepos(ctx, installationID, names)
+	return err
 }
 
 func (d *Dependencies) handleInstallationWebhook(w http.ResponseWriter, r *http.Request, body []byte) {
@@ -305,13 +342,18 @@ func (d *Dependencies) handleInstallationWebhook(w http.ResponseWriter, r *http.
 	case "deleted":
 		_, err = d.Queries.RetireGitHubInstallation(ctx, installationID, "")
 	case "suspend":
-		_, err = d.Queries.SetGitHubInstallationSuspended(ctx, installationID, true)
+		// Same shape as a retire: the worker must stop minting from this
+		// installation too, and unsuspend restores the pointer.
+		_, err = d.Queries.RetireGitHubInstallation(ctx, installationID, "")
 	case "unsuspend":
 		_, err = d.Queries.ReactivateGitHubInstallation(ctx, installationID)
-	case "created":
-		_, err = d.Queries.ReplaceGitHubInstallationRepos(ctx, installationID, repoNames(event.Repositories))
-	case "new_permissions_accepted":
-		if names := repoNames(event.Repositories); len(names) > 0 {
+	case "created", "new_permissions_accepted":
+		if event.Installation.RepositorySelection == "all" {
+			// The payload carries no list for "all repositories"; ask GitHub.
+			if refreshErr := d.refreshInstallationRepos(ctx, installationID); refreshErr != nil {
+				slog.Warn("webhook: could not refresh repos for an all-repositories installation", "installation_id", installationID, "error", refreshErr)
+			}
+		} else if names := repoNames(event.Repositories); len(names) > 0 || event.Action == "created" {
 			_, err = d.Queries.ReplaceGitHubInstallationRepos(ctx, installationID, names)
 		}
 	}

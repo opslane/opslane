@@ -4583,7 +4583,10 @@ func (q *Queries) OrgHasActiveGitHubInstallation(ctx context.Context, orgID stri
 func (q *Queries) RepoCoveredByActiveInstallation(ctx context.Context, orgID, repo string) (bool, error) {
 	var ok bool
 	err := q.pool.QueryRow(ctx,
-		`SELECT EXISTS(SELECT 1 FROM github_app_installations WHERE org_id = $1 AND NOT suspended AND repos ? $2)`,
+		// GitHub repository names are case-insensitive; compare like PersistInstallation does.
+		`SELECT EXISTS(
+		   SELECT 1 FROM github_app_installations i, jsonb_array_elements_text(i.repos) AS r(name)
+		   WHERE i.org_id = $1 AND NOT i.suspended AND lower(r.name) = lower($2))`,
 		orgID, repo).Scan(&ok)
 	return ok, err
 }
