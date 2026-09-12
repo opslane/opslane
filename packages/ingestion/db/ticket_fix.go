@@ -141,7 +141,16 @@ func (q *Queries) ReinvestigateTicket(ctx context.Context, projectID, groupID st
 	return id, nil
 }
 
-func (q *Queries) requestTicketFix(ctx context.Context, projectID, groupID, guidance string) (string, error) {
+// TicketFixExpectation binds a signed digest action to the attempt lineage it
+// displayed. The comparison runs under the same locks as fix admission.
+type TicketFixExpectation struct {
+	TicketID        string
+	Generation      int
+	LatestAttemptID string
+	ExpiresAt       int64
+}
+
+func (q *Queries) requestTicketFix(ctx context.Context, projectID, groupID, guidance string, expected ...TicketFixExpectation) (string, error) {
 	tx, err := q.pool.Begin(ctx)
 	if err != nil {
 		return "", err
@@ -151,6 +160,18 @@ func (q *Queries) requestTicketFix(ctx context.Context, projectID, groupID, guid
 	if err != nil {
 		return "", err
 	}
+	if len(expected) > 0 {
+		want := expected[0]
+		var latest string
+		if err = tx.QueryRow(ctx, `SELECT coalesce((SELECT id::text FROM friction_fix_attempts
+   WHERE ticket_id=$1 AND generation=$2 ORDER BY created_at DESC,id DESC LIMIT 1),'')`, s.TicketID, s.Generation).Scan(&latest); err != nil {
+			return "", err
+		}
+		if want.TicketID != s.TicketID || want.Generation != s.Generation || want.LatestAttemptID != latest || want.ExpiresAt <= time.Now().Unix() {
+			return "", ErrNotInvestigated
+		}
+	}
+
 	var outstanding bool
 	if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM friction_fix_attempts WHERE ticket_id=$1 AND generation=$2 AND status IN ('active','pr_open'))
 		OR EXISTS(SELECT 1 FROM error_group_jobs WHERE error_group_id=$3 AND project_id=$4 AND job_type='fix' AND status IN ('pending','claimed'))`, s.TicketID, s.Generation, groupID, projectID).Scan(&outstanding); err != nil {

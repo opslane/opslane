@@ -2075,7 +2075,7 @@ func (q *Queries) GetLatestJobTraceURL(ctx context.Context, projectID, errorGrou
 // TriggerFixJob atomically transitions an incident from its kind-specific
 // fix-triggerable state to 'fixing' and creates a human-triggered fix job.
 // Returns the new job ID or an error. Tenant-scoped.
-func (q *Queries) TriggerFixJob(ctx context.Context, projectID, groupID, guidance string) (string, error) {
+func (q *Queries) TriggerFixJob(ctx context.Context, projectID, groupID, guidance string, expected ...TicketFixExpectation) (string, error) {
 	var ticketID *string
 	if err := q.pool.QueryRow(ctx, `SELECT ticket_id FROM error_groups WHERE id=$1 AND project_id=$2`, groupID, projectID).Scan(&ticketID); err != nil {
 		if err == pgx.ErrNoRows {
@@ -2084,7 +2084,10 @@ func (q *Queries) TriggerFixJob(ctx context.Context, projectID, groupID, guidanc
 		return "", err
 	}
 	if ticketID != nil {
-		return q.requestTicketFix(ctx, projectID, groupID, guidance)
+		return q.requestTicketFix(ctx, projectID, groupID, guidance, expected...)
+	}
+	if len(expected) > 0 {
+		return "", ErrNotInvestigated
 	}
 	tx, err := q.pool.Begin(ctx)
 	if err != nil {

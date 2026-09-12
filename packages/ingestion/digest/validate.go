@@ -18,6 +18,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	ingestiondb "github.com/opslane/opslane/packages/ingestion/db"
 	"github.com/opslane/opslane/packages/ingestion/narrative"
 	"github.com/opslane/opslane/packages/ingestion/notify"
 )
@@ -33,6 +34,7 @@ type writtenDigestCard struct {
 	Title              string   `json:"title,omitempty"`
 	Copy               string   `json:"copy"`
 	Why                string   `json:"why,omitempty"`
+	Steps              string   `json:"steps,omitempty"`
 	Action             string   `json:"action"`
 	Label              string   `json:"label"`
 	ClaimedUsers       *int     `json:"claimedUsers,omitempty"`
@@ -140,12 +142,18 @@ func capDigestDelivery(
 // loadActionableCandidatesForValidation is the validator's live reload of the
 // actionable set. It is a variable so a test can inject the infrastructure
 // failure this degrade path exists for; production always uses the real query.
-var loadActionableCandidatesForValidation = loadActionableCandidates
+var loadActionableCandidatesForValidation = func(ctx context.Context, tx pgx.Tx, projectID string, status actionableStatusSet) ([]actionableCandidate, error) {
+	return loadActionableCandidates(ctx, tx, projectID, status)
+}
 
 // ValidateAndPublish rechecks model output against the immutable snapshots and
 // publishes the run, its receipts, outbox event and deliveries atomically.
-func ValidateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string) error {
-	err := validateAndPublish(ctx, pool, runID)
+func ValidateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string, secret ...[]byte) error {
+	key := []byte(os.Getenv("JWT_SECRET"))
+	if len(secret) > 0 {
+		key = secret[0]
+	}
+	err := validateAndPublish(ctx, pool, runID, key)
 	if err != nil {
 		// Validation and transactional failures leave no publication side effects.
 		// Marking failed separately lets the scheduler re-enqueue the same frozen run.
@@ -252,6 +260,10 @@ func checkUnifiedWrittenCard(
 	card.Title = stripInvisible(card.Title)
 	card.Copy = stripInvisible(card.Copy)
 	card.Why = stripInvisible(card.Why)
+	card.Steps = stripInvisible(card.Steps)
+	if candidate.PromptVersion >= 7 && card.Steps == "" {
+		card.Steps = stripInvisible(candidate.Steps)
+	}
 	card.Action = stripInvisible(card.Action)
 	// The instruction line has exactly one correct value, so the model does not
 	// own it: overwrite rather than compare. Demoting a good card over wording
@@ -283,11 +295,11 @@ func checkUnifiedWrittenCard(
 		return card, "", fmt.Errorf("cause sentence for %s has no stored cause to answer to", identity)
 	}
 	if internalVocabulary.MatchString(card.Title) || internalVocabulary.MatchString(card.Copy) ||
-		internalVocabulary.MatchString(card.Why) || internalVocabulary.MatchString(card.Action) {
+		internalVocabulary.MatchString(card.Why) || internalVocabulary.MatchString(card.Action) || internalVocabulary.MatchString(card.Steps) {
 		return card, "", fmt.Errorf("internal vocabulary in card for %s", identity)
 	}
 	if len([]rune(strings.TrimSpace(card.Title))) > 80 || len([]rune(card.Copy)) > 300 ||
-		len([]rune(card.Why)) > 300 || len([]rune(card.Action)) > 300 {
+		len([]rune(card.Why)) > 300 || len([]rune(card.Action)) > 300 || len([]rune(card.Steps)) > 600 {
 		return card, "", fmt.Errorf("card length exceeded for %s", identity)
 	}
 	// Copy and action are digit-free. The renderer prints the measured scale
@@ -296,8 +308,11 @@ func checkUnifiedWrittenCard(
 	// day its facts moved. The action is state-stamped and has no number to
 	// state at all. The why sentence is exempt and grounds below: a cause can
 	// legitimately name a timeout or a status code.
-	if containsDigit(card.Copy) || containsDigit(card.Action) {
+	if candidate.PromptVersion < 7 && (containsDigit(card.Copy) || containsDigit(card.Action)) {
 		return card, "", fmt.Errorf("authored copy/action contains a numeric glyph for %s", identity)
+	}
+	if candidate.PromptVersion >= 7 {
+		card.Label = candidate.Label
 	}
 	if card.Label != candidate.Label {
 		return card, "", fmt.Errorf("unsupported label for %s", identity)
@@ -352,7 +367,7 @@ func checkUnifiedWrittenCard(
 	renderMode := "authored"
 	if candidate.CachedCard != nil {
 		cached := candidate.CachedCard
-		if card.Title != cached.Title || card.Copy != cached.Copy || card.Why != cached.Why ||
+		if card.Title != cached.Title || card.Copy != cached.Copy || card.Why != cached.Why || card.Steps != cached.Steps ||
 			card.Action != cached.Action || cached.Fingerprint != candidate.Fingerprint {
 			return card, "", fmt.Errorf("cached card for %s changed in transit", identity)
 		}
@@ -369,6 +384,22 @@ func checkUnifiedWrittenCard(
 }
 
 func candidateStillUnified(ctx context.Context, tx pgx.Tx, projectID string, frozen Candidate) (bool, error) {
+	if frozen.TicketID != "" {
+		facts, err := ingestiondb.LoadTicketDigestFacts(ctx, tx, projectID, frozen.ErrorGroupID, time.Now())
+		if err != nil {
+			return false, unifiedInfrastructureError{err}
+		}
+		if facts == nil || !facts.OnCard() || facts.TicketID != frozen.TicketID || facts.Generation != frozen.Generation || facts.EvidenceVersion != frozen.EvidenceVersion || facts.Steps != frozen.Steps || ticketDigestAction(facts.FixSubstate) != frozen.ValidAction {
+			return false, nil
+		}
+		var cause, title string
+		var snooze *time.Time
+		if err := tx.QueryRow(ctx, `SELECT coalesce(root_cause,''),title,snoozed_until FROM error_groups WHERE id=$1 AND project_id=$2`, frozen.ErrorGroupID, projectID).Scan(&cause, &title, &snooze); err != nil {
+			return false, unifiedInfrastructureError{err}
+		}
+		return cause == frozen.RootCause && title == frozen.Title && (snooze == nil || !snooze.After(time.Now())), nil
+	}
+
 	actionable := frozen.SpellStartedAt != nil
 	if !actionable {
 		if err := candidateStillPublishable(ctx, tx, projectID, frozen); err != nil {
@@ -503,27 +534,27 @@ func cacheValidatedCard(ctx context.Context, tx pgx.Tx, run validationRun, candi
 		return card, "", unifiedInfrastructureError{fmt.Errorf("retire stale digest card cache for %s: %w", candidate.ErrorGroupID, err)}
 	}
 	command, err := tx.Exec(ctx, `INSERT INTO digest_card_copy
-		(error_group_id,spell_started_at,input_fingerprint,title,copy,why,action,model,prompt_version)
-		SELECT $1,$2,$3,$4,$5,NULLIF($6,''),$7,'digest-writer',$8
+		(error_group_id,spell_started_at,input_fingerprint,title,copy,why,action,model,prompt_version,steps)
+		SELECT $1,$2,$3,$4,$5,NULLIF($6,''),$7,'digest-writer',$8,NULLIF($10,'')
 		FROM error_groups g WHERE g.id=$1 AND g.project_id=$9
 		ON CONFLICT (error_group_id,spell_started_at) WHERE invalidated_at IS NULL DO NOTHING`,
 		candidate.ErrorGroupID, *candidate.SpellStartedAt, candidate.Fingerprint,
 		strings.TrimSpace(card.Title), strings.TrimSpace(card.Copy), strings.TrimSpace(card.Why),
-		strings.TrimSpace(card.Action), digestPromptVersion, run.ProjectID)
+		strings.TrimSpace(card.Action), digestPromptVersion, run.ProjectID, strings.TrimSpace(card.Steps))
 	if err != nil {
 		return card, "", unifiedInfrastructureError{fmt.Errorf("cache validated digest card for %s: %w", candidate.ErrorGroupID, err)}
 	}
 	if command.RowsAffected() == 0 {
-		var winner, title, copy, why, action string
-		if err := tx.QueryRow(ctx, `SELECT c.input_fingerprint,c.title,c.copy,COALESCE(c.why,''),c.action
+		var winner, title, copy, why, action, steps string
+		if err := tx.QueryRow(ctx, `SELECT c.input_fingerprint,c.title,c.copy,COALESCE(c.why,''),c.action,COALESCE(c.steps,'')
 			FROM digest_card_copy c JOIN error_groups g ON g.id=c.error_group_id
 			WHERE g.project_id=$1 AND c.error_group_id=$2 AND c.spell_started_at=$3
 			  AND c.invalidated_at IS NULL`, run.ProjectID, candidate.ErrorGroupID,
-			*candidate.SpellStartedAt).Scan(&winner, &title, &copy, &why, &action); err != nil {
+			*candidate.SpellStartedAt).Scan(&winner, &title, &copy, &why, &action, &steps); err != nil {
 			return card, "", unifiedInfrastructureError{fmt.Errorf("load digest cache winner for %s: %w", candidate.ErrorGroupID, err)}
 		}
 		if winner == candidate.Fingerprint {
-			card.Title, card.Copy, card.Why, card.Action = title, copy, why, action
+			card.Title, card.Copy, card.Why, card.Action, card.Steps = title, copy, why, action, steps
 			return card, "cached", nil
 		} else {
 			slog.Warn("digest cache conflict", "diagnostic", "cache_conflict",
@@ -534,7 +565,7 @@ func cacheValidatedCard(ctx context.Context, tx pgx.Tx, run validationRun, candi
 	return card, "authored", nil
 }
 
-func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string) error {
+func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string, secret []byte) error {
 	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return fmt.Errorf("begin digest publication: %w", err)
@@ -638,7 +669,7 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string) e
 				slog.Warn("unified digest card fell back to receipt", "run_id", runID,
 					"error_group_id", candidate.ErrorGroupID, "mode", run.Mode, "error", validationErr)
 				var changedError unifiedCandidateChangedError
-				if candidate.SpellStartedAt == nil && errors.As(validationErr, &changedError) {
+				if (candidate.SpellStartedAt == nil || candidate.TicketID != "") && errors.As(validationErr, &changedError) {
 					accounted[identity] = "deferred"
 					excludedReasons[identity] = reasonNotPublishable
 					delete(renderModes, identity)
@@ -653,6 +684,7 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string) e
 			replayURL := notify.BuildSessionURL(os.Getenv("DASHBOARD_URL"), candidate.ReplaySessionID, candidate.ReplayAnchorMs)
 			generated = append(generated, notify.GeneratedDigestCard{
 				EpisodeID: candidate.EpisodeID, IncidentID: candidate.ErrorGroupID, Kind: candidate.Kind,
+				TicketID: candidate.TicketID, Generation: candidate.Generation, Steps: strings.TrimSpace(card.Steps), VerifiedUsers: candidate.VerifiedUsers, VerifiedSessions: candidate.VerifiedSessions, Coverage: candidate.Coverage,
 				Title: strings.TrimSpace(card.Title), Label: candidate.Label, Outcome: candidate.Outcome,
 				Copy: strings.TrimSpace(card.Copy), Why: strings.TrimSpace(card.Why),
 				Action:        strings.TrimSpace(card.Action),
@@ -877,7 +909,7 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string) e
 				// and its receipt is mechanical, built from the live row below.
 				live, ok := actionableByGroup[frozen.ErrorGroupID]
 				snoozed := ok && live.SnoozedUntil != nil && live.SnoozedUntil.After(actionableEvaluatedAt)
-				if !ok || snoozed || live.ActionableSince == nil {
+				if !ok || snoozed || live.ActionableSince == nil || (frozen.TicketID != "" && (live.TicketFacts == nil || !live.TicketFacts.OnCard() || live.TicketFacts.Generation != frozen.Generation || live.TicketFacts.EvidenceVersion != frozen.EvidenceVersion)) {
 					accounted[identity] = "deferred"
 					delete(renderModes, identity)
 					reason := reasonNotPublishable
@@ -909,6 +941,10 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string) e
 		dashboardURL := os.Getenv("DASHBOARD_URL")
 		for i := range actionableEval.Included {
 			candidate := &actionableEval.Included[i]
+			if candidate.TicketFacts != nil {
+				candidate.SessionURL = notify.BuildSessionURL(dashboardURL, candidate.TicketFacts.RepresentativeSessionID, 0)
+				continue
+			}
 			if _, err := tx.Exec(ctx, `SAVEPOINT actionable_replay_lookup`); err != nil {
 				slog.Warn("actionable digest replay enrichment abandoned; receipts publish without links",
 					"project_id", run.ProjectID, "error", err)
@@ -1011,6 +1047,16 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string) e
 		}
 		for _, candidate := range candidates {
 			identity := candidateIdentity(candidate)
+			if candidate.TicketID != "" {
+				live, ok := actionableByGroup[candidate.ErrorGroupID]
+				if actionableErr != nil || !ok || live.TicketFacts == nil || !live.TicketFacts.OnCard() || live.TicketFacts.Generation != candidate.Generation || live.TicketFacts.EvidenceVersion != candidate.EvidenceVersion {
+					accounted[identity] = "deferred"
+					delete(renderModes, identity)
+					excludedReasons[identity] = reasonNotPublishable
+					continue
+				}
+			}
+
 			// With no live state the liveness gate cannot be evaluated, and
 			// judging it against an empty map would drop every frozen incident:
 			// a delivery alert over an empty digest. The frozen snapshot carries
@@ -1153,6 +1199,46 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string) e
 		deliveredReceipts[item.IncidentID] = true
 	}
 
+	schemaVersion := 4
+	fresh := run.Mode == UnifiedCardsOn
+	for _, candidate := range candidates {
+		if candidate.PromptVersion < 7 {
+			fresh = false
+		}
+	}
+	var merged []notify.DigestPRMerged
+	if fresh {
+		schemaVersion = 5
+		var err error
+		merged, err = mergedThisWeek(ctx, tx, run.ProjectID, run.WindowTo)
+		if err != nil {
+			return fmt.Errorf("load merged this week: %w", err)
+		}
+	}
+	if fresh {
+		actionURL := func(group, ticket string, generation int, latest string) (string, error) {
+			return ticketFixActionURL(os.Getenv("DASHBOARD_URL"), run.ProjectID, group, ticket, generation, latest, secret, time.Now())
+		}
+		for i := range generated {
+			card := &generated[i]
+			if card.TicketID != "" && card.Action == "Create fix PR" {
+				card.ActionURL, err = actionURL(card.IncidentID, card.TicketID, card.Generation, byIdentity[card.IncidentID].LatestAttemptID)
+				if err != nil {
+					return err
+				}
+			}
+		}
+		for i := range receiptItems {
+			item := &receiptItems[i]
+			if item.TicketID != "" && item.Action == "Create fix PR" {
+				item.ActionURL, err = actionURL(item.IncidentID, item.TicketID, item.Generation, item.LatestAttemptID)
+				if err != nil {
+					return err
+				}
+			}
+		}
+	}
+
 	eventPayload := notify.EventPayload{
 		Version: 1, EventType: "digest.daily", RunID: runID,
 		Project:      notify.ProjectRef{ID: run.ProjectID, Name: run.ProjectName},
@@ -1163,7 +1249,8 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string) e
 				From: run.WindowFrom.UTC().Format(time.RFC3339Nano),
 				To:   run.WindowTo.UTC().Format(time.RFC3339Nano),
 			},
-			SchemaVersion:   4,
+			SchemaVersion:   schemaVersion,
+			MergedThisWeek:  merged,
 			Timezone:        run.Timezone,
 			GeneratedCards:  generated,
 			OverflowCount:   overflowCount,
@@ -1296,7 +1383,7 @@ func receiptForUnifiedFallback(candidate Candidate, fallbackReason string) notif
 	// its state is: the two constructors must emit the same item for one
 	// incident.
 	item := notify.ReceiptItem{
-		Kind: candidate.Kind, IncidentID: candidate.ErrorGroupID,
+		Kind: candidate.Kind, IncidentID: candidate.ErrorGroupID, AffectedUsers: candidate.AffectedUsers,
 		Title:           narrative.SanitizeExcerpt(candidate.Title, excerptMax),
 		OccurrenceCount: int64(candidate.OccurrenceCount), ReceiptState: state,
 		PRURL: candidate.PRURL, HasSavedDiff: candidate.HasSavedDiff,
@@ -1304,6 +1391,19 @@ func receiptForUnifiedFallback(candidate Candidate, fallbackReason string) notif
 		ActionableSince:       candidate.SpellStartedAt,
 	}
 	item.FallbackReason = fallbackReason
+	if candidate.TicketID != "" {
+		item.Copy = narrative.SanitizeExcerpt(candidate.RepresentativeNote, excerptMax)
+		item.TicketID = candidate.TicketID
+		item.Generation = candidate.Generation
+		item.LatestAttemptID = candidate.LatestAttemptID
+		item.Steps = candidate.Steps
+		item.VerifiedUsers = candidate.VerifiedUsers
+		item.VerifiedSessions = candidate.VerifiedSessions
+		item.Coverage = candidate.Coverage
+		item.Accounts = candidate.Accounts
+		item.Action = candidate.ValidAction
+		item.SessionURL = notify.BuildSessionURL(os.Getenv("DASHBOARD_URL"), candidate.RepresentativeSessionID, 0)
+	}
 	if candidate.HasValidatedDiagnosis {
 		item.RootCauseExcerpt = narrative.SanitizeExcerpt(candidate.RootCause, excerptMax)
 		item.MitigationExcerpt = narrative.SanitizeExcerpt(candidate.Mitigation, excerptMax)
@@ -1365,6 +1465,9 @@ func equalStringSet(left, right []string) bool {
 }
 
 func firstUngroundedNumber(card writtenDigestCard, candidate Candidate) (string, bool) {
+	if candidate.PromptVersion >= 7 {
+		return firstUngroundedV7Number(card, candidate)
+	}
 	allowed := map[string]struct{}{
 		strconv.Itoa(candidate.AffectedUsers):   {},
 		strconv.Itoa(candidate.OccurrenceCount): {},

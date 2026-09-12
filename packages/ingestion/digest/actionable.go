@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	ingestiondb "github.com/opslane/opslane/packages/ingestion/db"
 	"github.com/opslane/opslane/packages/ingestion/narrative"
 	"github.com/opslane/opslane/packages/ingestion/notify"
 )
@@ -113,6 +114,7 @@ const onCardStatusSQL actionableStatusSet = `('awaiting_approval','needs_human',
 const actionableReceiptCap = 5
 
 type actionableCandidate struct {
+	TicketFacts           *ingestiondb.TicketDigestFacts
 	GroupID               string
 	Kind                  string
 	Status                string
@@ -158,7 +160,7 @@ type evaluation struct {
 
 // loadActionableCandidates reads the incidents awaiting a human. statusSQL is
 // the caller's status set: m1ActionableStatusSQL in OFF, onCardStatusSQL in ON.
-func loadActionableCandidates(ctx context.Context, tx pgx.Tx, projectID string, statusSQL actionableStatusSet) ([]actionableCandidate, error) {
+func loadActionableCandidates(ctx context.Context, tx pgx.Tx, projectID string, statusSQL actionableStatusSet, evaluatedAt ...time.Time) ([]actionableCandidate, error) {
 	query := `
 		SELECT g.id::text,g.kind,g.status::text,g.title,g.occurrence_count::bigint,
 		       COALESCE(g.impact_class,''),g.impact_visits,g.impact_visits_recovered,
@@ -208,7 +210,7 @@ func loadActionableCandidates(ctx context.Context, tx pgx.Tx, projectID string, 
 		  FROM error_groups g
 		  LEFT JOIN LATERAL (` + diagnosisValidationLateralSQL + `) d ON true
 		 WHERE g.project_id=$1
-		   AND g.status IN ` + string(statusSQL) + `
+		   AND ((g.ticket_id IS NULL AND g.status IN ` + string(statusSQL) + `) OR (g.ticket_id IS NOT NULL AND g.status <> 'archived'))
 		 ORDER BY g.actionable_since NULLS LAST,g.id`
 	rows, err := tx.Query(ctx, query, projectID)
 	if err != nil {
@@ -238,6 +240,33 @@ func loadActionableCandidates(ctx context.Context, tx pgx.Tx, projectID string, 
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("read actionable digest candidates: %w", err)
+	}
+	rows.Close()
+	at := time.Now()
+	if len(evaluatedAt) > 0 {
+		at = evaluatedAt[0]
+	}
+	for i := range candidates {
+		if candidates[i].Kind != "friction" {
+			continue
+		}
+		facts, err := ingestiondb.LoadTicketDigestFacts(ctx, tx, projectID, candidates[i].GroupID, at)
+		if err != nil {
+			return nil, err
+		}
+		if facts != nil {
+			c := &candidates[i]
+			c.TicketFacts = facts
+			c.OccurrenceCount = int64(len(facts.SignalIDs))
+			c.AffectedUsers = facts.VerifiedUsers
+			c.Accounts = facts.Accounts
+			c.SessionCount = facts.VerifiedSessions
+			c.IdentifiedCount = facts.VerifiedUsers
+			c.ObservationQuote = facts.RepresentativeNote
+			c.ImpactVisits = nil
+			c.ImpactRecovered = nil
+			c.ImpactClass = ""
+		}
 	}
 	return candidates, nil
 }
@@ -291,6 +320,9 @@ func fixAttemptedSQL(groupAlias string) string {
 }
 
 func actionablePublishable(candidate actionableCandidate) bool {
+	if candidate.TicketFacts != nil {
+		return candidate.TicketFacts.OnCard()
+	}
 	return onCardEligible(candidate.Status, candidate.PRURL, candidate.RootCause,
 		candidate.HasSavedDiff, candidate.HasValidatedDiagnosis, candidate.FixAttempted)
 }
@@ -402,12 +434,12 @@ func toReceiptItems(candidates []actionableCandidate) ([]notify.ReceiptItem, err
 			return nil, fmt.Errorf("unsupported actionable kind %q", candidate.Kind)
 		}
 		switch candidate.Status {
-		case "awaiting_approval", "needs_human", "pr_created", "pr_draft":
+		case "awaiting_approval", "needs_human", "pr_created", "pr_draft", "fixing":
 		default:
 			return nil, fmt.Errorf("unsupported actionable status %q", candidate.Status)
 		}
 		item := notify.ReceiptItem{
-			Kind: candidate.Kind, IncidentID: candidate.GroupID,
+			Kind: candidate.Kind, IncidentID: candidate.GroupID, AffectedUsers: candidate.AffectedUsers,
 			Title:           narrative.SanitizeExcerpt(candidate.Title, excerptMax),
 			OccurrenceCount: candidate.OccurrenceCount, ImpactClass: candidate.ImpactClass,
 			ImpactVisits: candidate.ImpactVisits, ImpactRecovered: candidate.ImpactRecovered,
@@ -415,6 +447,19 @@ func toReceiptItems(candidates []actionableCandidate) ([]notify.ReceiptItem, err
 			PRURL:        candidate.PRURL, SessionURL: candidate.SessionURL, HasSavedDiff: candidate.HasSavedDiff,
 			HasValidatedDiagnosis: candidate.HasValidatedDiagnosis,
 			ActionableSince:       candidate.ActionableSince,
+		}
+		if f := candidate.TicketFacts; f != nil {
+			item.Copy = narrative.SanitizeExcerpt(f.RepresentativeNote, excerptMax)
+			item.TicketID = f.TicketID
+			item.Generation = f.Generation
+			item.LatestAttemptID = f.LatestAttemptID
+			item.Steps = f.Steps
+			item.VerifiedUsers = f.VerifiedUsers
+			item.VerifiedSessions = f.VerifiedSessions
+			item.Accounts = f.Accounts
+			item.Coverage = f.Coverage
+			item.Action = ticketDigestAction(f.FixSubstate)
+			item.RootCauseExcerpt = narrative.SanitizeExcerpt(candidate.RootCause, excerptMax)
 		}
 		if candidate.HasValidatedDiagnosis {
 			item.RootCauseExcerpt = narrative.SanitizeExcerpt(candidate.RootCause, excerptMax)

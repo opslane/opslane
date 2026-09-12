@@ -115,7 +115,7 @@ async function requestReview() {
       </a>
       <StatusLabel v-else :tone="status.tone" :label="status.label" />
       <span aria-hidden="true">·</span>
-      <span>{{ incident.affected_users_count.toLocaleString() }} users</span>
+      <span>{{ (incident.verified_users ?? incident.affected_users_count).toLocaleString() }} users</span>
       <span aria-hidden="true">·</span>
       <span data-testid="age">{{ formatCompactAge(incident.first_seen) }}</span>
     </div>
@@ -178,10 +178,11 @@ async function requestReview() {
       <StatusLabel v-else :tone="status.tone" :label="status.label" />
     </td>
     <td class="hidden px-4 py-4 text-right text-sm tabular-nums text-muted sm:table-cell">
-      {{ incident.occurrence_count.toLocaleString() }}
+      <span v-if="incident.ticket_id" title="Verified sessions this week">{{ (incident.verified_sessions ?? 0).toLocaleString() }} sessions</span>
+      <span v-else>{{ incident.occurrence_count.toLocaleString() }}</span>
     </td>
     <td class="hidden px-4 py-4 text-right text-sm tabular-nums text-muted lg:table-cell">
-      {{ incident.affected_users_count.toLocaleString() }}
+      {{ (incident.verified_users ?? incident.affected_users_count).toLocaleString() }}
     </td>
     <td class="hidden px-4 py-4 text-right text-sm tabular-nums text-muted lg:table-cell" data-testid="age">
       {{ formatCompactAge(incident.first_seen) }}

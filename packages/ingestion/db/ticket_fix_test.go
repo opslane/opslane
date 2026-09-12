@@ -237,3 +237,42 @@ func TestTicketPRWebhookUsesWorkerLockOrder(t *testing.T) {
 		t.Fatalf("worker lock=%v webhook=%v", lockErr, receiptErr)
 	}
 }
+
+func TestTicketFixIntentFencesLineageAndReplay(t *testing.T) {
+	f := seedTicketFix(t)
+	ctx := context.Background()
+	expected := db.TicketFixExpectation{TicketID: f.ticket, Generation: 1, ExpiresAt: time.Now().Add(time.Hour).Unix()}
+	for _, bad := range []db.TicketFixExpectation{
+		{TicketID: f.ticket, Generation: 2, ExpiresAt: expected.ExpiresAt},
+		{TicketID: f.ticket, Generation: 1, LatestAttemptID: "older", ExpiresAt: expected.ExpiresAt},
+		{TicketID: f.ticket, Generation: 1, ExpiresAt: time.Now().Add(-time.Second).Unix()},
+		{TicketID: "other", Generation: 1, ExpiresAt: expected.ExpiresAt},
+	} {
+		if _, err := f.q.TriggerFixJob(ctx, f.project, f.group, "", bad); !errors.Is(err, db.ErrNotInvestigated) {
+			t.Fatalf("accepted stale intent %+v: %v", bad, err)
+		}
+	}
+	job, err := f.q.TriggerFixJob(ctx, f.project, f.group, "", expected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = f.q.Pool().Exec(ctx, `UPDATE friction_fix_attempts SET status='failed' WHERE ticket_id=$1`, f.ticket); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = f.q.Pool().Exec(ctx, `UPDATE error_group_jobs SET status='failed' WHERE id=$1`, job); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = f.q.Pool().Exec(ctx, `UPDATE error_groups SET status='awaiting_approval',fix_substate='none' WHERE id=$1`, f.group); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = f.q.TriggerFixJob(ctx, f.project, f.group, "", expected); !errors.Is(err, db.ErrNotInvestigated) {
+		t.Fatalf("replayed consumed intent: %v", err)
+	}
+	// A fresh page can authorize the new attempt, while the delivered link cannot.
+	if err = f.q.Pool().QueryRow(ctx, `SELECT id FROM friction_fix_attempts WHERE ticket_id=$1`, f.ticket).Scan(&expected.LatestAttemptID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = f.q.TriggerFixJob(ctx, f.project, f.group, "", expected); err != nil {
+		t.Fatalf("fresh intent rejected: %v", err)
+	}
+}

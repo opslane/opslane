@@ -18,6 +18,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/opslane/opslane/packages/ingestion/auth"
 	"github.com/opslane/opslane/packages/ingestion/db"
 	"github.com/opslane/opslane/packages/ingestion/masking"
 	"github.com/opslane/opslane/packages/ingestion/narrative"
@@ -41,6 +42,8 @@ func parseGitHubPR(raw string) (repo string, number int, ok bool) {
 // incidentJSON is the JSON representation of an incident, matching the
 // Incident type in shared/src/types.ts. Fields use snake_case.
 type incidentJSON struct {
+	VerifiedUsers          *int                      `json:"verified_users,omitempty"`
+	VerifiedSessions       *int                      `json:"verified_sessions,omitempty"`
 	ID                     string                    `json:"id"`
 	ProjectID              string                    `json:"project_id"`
 	Fingerprint            string                    `json:"fingerprint"`
@@ -562,6 +565,10 @@ func (d *Dependencies) ListIncidents(w http.ResponseWriter, r *http.Request) {
 	for _, g := range groups {
 		incident := toIncidentJSON(g)
 		attachPipelineState(&incident, pipeline[g.ID])
+		if err := d.attachTicketFacts(r.Context(), projectID, &incident); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "failed to load verified ticket evidence")
+			return
+		}
 		incidents = append(incidents, incident)
 	}
 	// Pending observations have no canonical issue yet and therefore cannot be
@@ -1282,6 +1289,7 @@ func (d *Dependencies) TriggerFix(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<16)
 	var req struct {
 		Guidance string `json:"guidance"`
+		Intent   string `json:"intent"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
 		writeJSONError(w, http.StatusBadRequest, "invalid request body")
@@ -1297,8 +1305,17 @@ func (d *Dependencies) TriggerFix(w http.ResponseWriter, r *http.Request) {
 	// Strip null bytes and control characters from guidance
 	guidance := sanitizeGuidance(req.Guidance)
 
-	// Atomically transition status and create fix job
-	jobID, err := d.Queries.TriggerFixJob(r.Context(), projectID, incidentID, guidance)
+	var expected []db.TicketFixExpectation
+	if req.Intent != "" {
+		intent, err := auth.VerifyTicketFixIntent(d.JWTSecret, req.Intent, time.Now())
+		if err != nil || intent.ProjectID != projectID || intent.IncidentID != incidentID {
+			writeJSONError(w, http.StatusConflict, "fix link has expired or no longer matches this issue")
+			return
+		}
+		expected = append(expected, db.TicketFixExpectation{TicketID: intent.TicketID, Generation: intent.Generation, LatestAttemptID: intent.LatestAttemptID, ExpiresAt: intent.ExpiresAt})
+	}
+	// Atomically transition status and create fix job.
+	jobID, err := d.Queries.TriggerFixJob(r.Context(), projectID, incidentID, guidance, expected...)
 	if err != nil {
 		if errors.Is(err, db.ErrNotInvestigated) {
 			writeJSONError(w, http.StatusConflict, "incident is not in a fix-triggerable state")
@@ -1379,6 +1396,10 @@ func (d *Dependencies) respondWithIncident(w http.ResponseWriter, r *http.Reques
 	// must carry the same detail-only surfaces GET does or the receipt and
 	// recordings sections vanish after resolve/archive/unarchive.
 	d.attachReceiptAndRecordings(r.Context(), projectID, incidentID, *group, &inc)
+	if err := d.attachTicketFacts(r.Context(), projectID, &inc); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "failed to load verified ticket evidence")
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(inc)
 }

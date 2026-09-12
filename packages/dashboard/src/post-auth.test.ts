@@ -43,6 +43,15 @@ describe('completePostAuth', () => {
     expect(push).toHaveBeenCalledWith('/invite/accept?token=1');
   });
 
+  it('restores onboarding before returning to a signed digest action', async () => {
+    api.getMe.mockResolvedValue({ onboarding_complete: true });
+    sessionStorage.setItem('opslane_post_auth_path', '/issues/i1?project_id=p1&fixIntent=signed');
+    const push = vi.fn().mockResolvedValue(undefined);
+    await completePostAuth({ push });
+    expect(localStorage.getItem('opslane_onboarding_complete')).toBe('1');
+    expect(push).toHaveBeenCalledWith('/issues/i1?project_id=p1&fixIntent=signed');
+  });
+
   it('stores the first project before navigating home', async () => {
 	api.getMe.mockResolvedValue({ onboarding_complete: true });
     api.listProjects.mockResolvedValue([{ id: 'project_1', name: 'Production' }]);

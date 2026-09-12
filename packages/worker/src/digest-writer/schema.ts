@@ -7,6 +7,7 @@ export const DIGEST_TITLE_MAX = 80;
 /** Copy/action cap; the renderer truncates at 300 runes, so anything longer
  * would be validated in full and then cut with its meaning changed. */
 export const DIGEST_TEXT_MAX = 300;
+export const DIGEST_STEPS_MAX = 600;
 
 export interface DigestCard {
   /** Incident identity for current snapshots. During the rolling transition,
@@ -22,7 +23,9 @@ export interface DigestCard {
    * Required of a diagnosed incident by the Go validator; absent on a card
    * whose incident has no stored cause, and on pre-v5 replayed payloads. */
   why?: string;
-  action: string;
+  /** Legacy stored payloads only; v7 actions are rendered by Go. */
+  action?: string;
+  steps?: string;
   label: DigestLabel;
   claimedUsers?: number;
   claimedOccurrences?: number;
@@ -54,7 +57,7 @@ export const DIGEST_PAYLOAD_SCHEMA = {
       type: 'array',
       items: {
         type: 'object',
-        required: ['title', 'copy', 'action'],
+        required: ['title', 'copy'],
         anyOf: [{ required: ['errorGroupId'] }, { required: ['episodeId'] }],
         properties: {
           errorGroupId: { type: 'string', minLength: 1 },
@@ -62,16 +65,7 @@ export const DIGEST_PAYLOAD_SCHEMA = {
           title: { type: 'string', minLength: 1 },
           copy: { type: 'string', minLength: 1 },
           why: { type: 'string', minLength: 1 },
-          action: { type: 'string', minLength: 1 },
-          claimedUsers: { type: 'integer' },
-          claimedOccurrences: { type: 'integer' },
-          accounts: { type: 'array', items: { type: 'string', minLength: 1 } },
-          prUrl: { type: 'string', minLength: 1 },
-          frictionCategory: { type: 'string', minLength: 1 },
-          route: { type: 'string' },
-          sessionCount: { type: 'integer', minimum: 0 },
-          identifiedCount: { type: 'integer', minimum: 0 },
-          observationQuote: { type: 'string', minLength: 1 },
+          steps: { type: 'string', minLength: 1, maxLength: DIGEST_STEPS_MAX },
         },
         additionalProperties: false,
       },
@@ -190,7 +184,7 @@ function identity(value: Record<string, unknown>, label: string): { errorGroupId
 /** label is absent from the model schema, but present when replaying a payload
  * already grounded and stored by the writer. */
 const CARD_KEYS: ReadonlySet<string> = new Set([
-  'errorGroupId', 'episodeId', 'title', 'copy', 'why', 'action',
+  'errorGroupId', 'episodeId', 'title', 'copy', 'why', 'action', 'steps',
   'claimedUsers', 'claimedOccurrences', 'accounts', 'prUrl', 'label',
   'frictionCategory', 'route', 'sessionCount', 'identifiedCount', 'observationQuote',
 ]);
@@ -241,7 +235,11 @@ export function parseDigestPayload(raw: unknown): ParsedDigestPayload {
     }
     const copy = text(card['copy'], `included[${index}].copy`);
     const why = card['why'] === undefined ? undefined : text(card['why'], `included[${index}].why`);
-    const action = text(card['action'], `included[${index}].action`);
+    const action = card['action'] === undefined ? undefined : text(card['action'], `included[${index}].action`);
+    const steps = card['steps'] === undefined ? undefined : text(card['steps'], `included[${index}].steps`);
+    if (steps !== undefined && [...steps].length > DIGEST_STEPS_MAX) {
+      throw new Error(`included[${index}].steps must be at most ${DIGEST_STEPS_MAX} characters`);
+    }
     if (title !== undefined) {
       // Length caps apply to writer-authored (titled) cards only; legacy
       // replayed payloads keep render-time truncation.
@@ -251,7 +249,7 @@ export function parseDigestPayload(raw: unknown): ParsedDigestPayload {
       if (why !== undefined && [...why].length > DIGEST_TEXT_MAX) {
         throw new Error(`included[${index}].why must be at most ${DIGEST_TEXT_MAX} characters`);
       }
-      if ([...action].length > DIGEST_TEXT_MAX) {
+      if (action !== undefined && [...action].length > DIGEST_TEXT_MAX) {
         throw new Error(`included[${index}].action must be at most ${DIGEST_TEXT_MAX} characters`);
       }
     }
@@ -260,7 +258,8 @@ export function parseDigestPayload(raw: unknown): ParsedDigestPayload {
       ...(title === undefined ? {} : { title }),
       copy,
       ...(why === undefined ? {} : { why }),
-      action,
+      ...(action === undefined ? {} : { action }),
+      ...(steps === undefined ? {} : { steps }),
       ...(typeof card['claimedUsers'] === 'number' ? { claimedUsers: card['claimedUsers'] } : {}),
       ...(typeof card['claimedOccurrences'] === 'number' ? { claimedOccurrences: card['claimedOccurrences'] } : {}),
       ...(Array.isArray(card['accounts']) ? { accounts: card['accounts'].map((account) => String(account).trim()) } : {}),

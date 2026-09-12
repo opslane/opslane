@@ -176,9 +176,8 @@ func TestValidateRepeatsActionableItemUntilHumanActs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(slackBody), "waiting on you since") || !strings.Contains(string(slackBody), "Watch recording") ||
-		!strings.Contains(string(slackBody), "(12 days)") {
-		t.Fatalf("first Slack digest omitted actionable age: %s", slackBody)
+	if !strings.Contains(string(slackBody), "|Replay>") || !strings.Contains(string(slackBody), "Review issue") || strings.Contains(string(slackBody), "Needs you") {
+		t.Fatalf("digest omitted its action or recording link: %s", slackBody)
 	}
 
 	if _, err := pool.Exec(ctx, `UPDATE error_groups SET snoozed_until=$2 WHERE id=$1`, groupID, now.Add(48*time.Hour)); err != nil {

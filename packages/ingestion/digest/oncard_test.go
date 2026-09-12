@@ -561,8 +561,8 @@ func neverEligibleRendersReceipt(t *testing.T, kind, status string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(body), "Also waiting") {
-		t.Fatalf("never-eligible receipt did not render compactly: %s", body)
+	if !strings.Contains(string(body), "Dead checkout control") || strings.Contains(string(body), "Also waiting") {
+		t.Fatalf("receipt did not use the single card template: %s", body)
 	}
 	if strings.Contains(string(body), "Fix attempt failed") || strings.Contains(string(body), "recording impact unavailable") {
 		t.Fatalf("never-eligible receipt still rendered its full card: %s", body)

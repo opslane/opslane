@@ -157,13 +157,14 @@ let fixPollCount = 0;
 const fixTimedOut = ref(false);
 const MAX_FIX_POLLS = 60; // 5 minutes at 5s intervals
 
-async function handleTriggerFix() {
+async function handleTriggerFix(intent?: string) {
   if (fixLoading.value || !incident.value) return;
   fixLoading.value = true;
   fixError.value = null;
   fixTimedOut.value = false;
   try {
-    await triggerFix(projectId.value, incidentId, guidance.value || undefined);
+    if (intent) await triggerFix(projectId.value, incidentId, guidance.value || undefined, intent);
+    else await triggerFix(projectId.value, incidentId, guidance.value || undefined);
     incident.value = { ...incident.value, status: 'fixing',
       ...(incident.value.ticket_id ? { fix_substate: 'fixing' as const } : {}),
     };
@@ -264,6 +265,15 @@ onMounted(async () => {
 
   try {
     incident.value = await getIncident(projectId.value, incidentId);
+    const actionURL = new URL(window.location.href);
+    const intent = actionURL.searchParams.get('fixIntent');
+    if (intent) {
+      // Remove before submitting: refresh and remount must never replay an
+      // action, including after a network failure. The server verifies scope.
+      actionURL.searchParams.delete('fixIntent');
+      window.history.replaceState(window.history.state, '', actionURL.pathname + actionURL.search + actionURL.hash);
+      await handleTriggerFix(intent);
+    }
     if (incident.value.kind === 'error') {
       void loadSampleEvent();
     }
@@ -282,6 +292,7 @@ onMounted(async () => {
 
 <template>
   <div class="incident-case mx-auto w-full max-w-[1180px] [container-type:inline-size]">
+    <p v-if="fixError" role="alert" class="mb-3 text-sm text-danger" v-text="fixError"></p>
     <router-link to="/" class="inline-flex min-h-10 items-center text-sm font-medium text-accent hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">
       &larr; Back to issues
     </router-link>
@@ -343,15 +354,18 @@ onMounted(async () => {
           no impact counts and cannot be fixed automatically.
         </div>
         <div class="mt-2 flex flex-wrap gap-4 text-sm text-muted">
-          <span>{{ incident.occurrence_count }} occurrences</span>
-          <span>{{ incident.affected_users_count }} users affected</span>
+          <span v-if="incident.ticket_id">{{ incident.verified_users ?? 0 }} users · {{ incident.verified_sessions ?? 0 }} sessions this week</span>
+          <template v-else>
+            <span>{{ incident.occurrence_count }} occurrences</span>
+            <span>{{ incident.affected_users_count }} users affected</span>
+          </template>
           <span>First seen {{ formatDate(incident.first_seen) }}</span>
           <span>Last seen {{ formatDate(incident.last_seen) }}</span>
           <span v-if="incident.confidence" class="text-faint">
             {{ incident.confidence }} confidence
           </span>
         </div>
-        <div v-if="incident.environments?.length" class="mt-3 flex flex-wrap items-center gap-2">
+        <div v-if="!incident.ticket_id && incident.environments?.length" class="mt-3 flex flex-wrap items-center gap-2">
           <span class="text-xs font-medium uppercase tracking-wide text-muted">Environments</span>
           <span
             v-for="environment in incident.environments"
@@ -405,11 +419,12 @@ onMounted(async () => {
             Overview
           </button>
           <button
+            v-if="!incident.ticket_id"
             class="text-sm font-medium transition-colors"
             :class="activeTab === 'affected-users' ? 'border-b-2 border-accent px-3 py-2 text-text' : 'border-b-2 border-transparent px-3 py-2 text-muted hover:text-text'"
             @click="switchTab('affected-users')"
           >
-            Affected Users ({{ incident.affected_users_count }})
+            Affected Users ({{ incident.verified_users ?? incident.affected_users_count }})
           </button>
         </nav>
       </div>
@@ -709,7 +724,7 @@ onMounted(async () => {
             <Button
               :busy="fixLoading"
               variant="primary"
-              @click="handleTriggerFix"
+              @click="handleTriggerFix()"
             >
               <span v-if="fixLoading">Triggering...</span>
               <span v-else>{{ incident.ticket_id ? 'Create fix PR' : incident.status === 'awaiting_approval' ? 'Generate fix' : 'Find Fix' }}</span>

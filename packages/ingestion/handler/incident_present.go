@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/opslane/opslane/packages/ingestion/db"
 	mcpformat "github.com/opslane/opslane/packages/ingestion/mcp"
@@ -56,6 +57,9 @@ func (d *Dependencies) presentIncident(
 	}
 	if pipeline, err := d.Queries.IssuePipelineRecords(ctx, projectID, []string{incidentID}); err == nil {
 		attachPipelineState(&incident, pipeline[incidentID])
+	}
+	if err := d.attachTicketFacts(ctx, projectID, &incident); err != nil {
+		return nil, group, err
 	}
 	return &incident, group, nil
 }
@@ -201,4 +205,37 @@ func toMCPEvidence(evidence db.IssueEvidenceResult) (*mcpformat.IssueEvidence, e
 		})
 	}
 	return result, nil
+}
+
+// attachTicketFacts keeps ticket list and detail counts on the same verified
+// seven-day projection as the digest, including zero-evidence responses.
+func (d *Dependencies) attachTicketFacts(ctx context.Context, projectID string, inc *incidentJSON) error {
+	if inc.Kind != "friction" {
+		return nil
+	}
+	f, err := db.LoadTicketDigestFacts(ctx, d.Queries.Pool(), projectID, inc.ID, time.Now())
+	if err != nil {
+		return err
+	}
+	if f == nil {
+		return nil
+	}
+	inc.TicketID = &f.TicketID
+	inc.PublicationGeneration = &f.Generation
+	inc.FixSubstate = &f.FixSubstate
+	inc.InvestigationStatus = &f.InvestigationStatus
+	inc.CauseCoverage = &f.Coverage
+	inc.VerifiedUsers = &f.VerifiedUsers
+	inc.VerifiedSessions = &f.VerifiedSessions
+	inc.AffectedUsersCount = f.VerifiedUsers
+	inc.OccurrenceCount = len(f.SignalIDs)
+	inc.ImpactClass = nil
+	inc.ImpactVisits = nil
+	inc.ImpactRecovered = nil
+	inc.Story = fmt.Sprintf("%d users · %d sessions this week", f.VerifiedUsers, f.VerifiedSessions)
+	if !f.OnCard() {
+		inc.RootCause = nil
+		inc.SuggestedMitigation = nil
+	}
+	return nil
 }

@@ -166,7 +166,7 @@ func main() {
 	}()
 	notifySender := notify.NewSender(0, notifyExtraHosts)
 	digestSweeper := digest.New(pool, queries.DashboardURL)
-	digestScheduler := digest.NewScheduler(pool)
+	digestScheduler := digest.NewScheduler(pool, []byte(jwtSecret))
 	deps, err := handler.NewDependencies(&handler.Dependencies{
 		Queries:               queries,
 		MinIO:                 minioClient,

@@ -286,4 +286,6 @@ CREATE TABLE IF NOT EXISTS friction_fix_failures (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 ALTER TABLE error_group_jobs ADD COLUMN IF NOT EXISTS investigation_evidence_version INT;
+ALTER TABLE digest_card_copy ADD COLUMN IF NOT EXISTS steps TEXT;
+
 COMMIT;

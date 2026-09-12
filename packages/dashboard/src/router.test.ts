@@ -51,3 +51,14 @@ describe('onboarding guard', () => {
 		localStorage.clear();
 	});
 });
+
+
+describe('digest action login', () => {
+  it('preserves the project and signed intent through login', async () => {
+    localStorage.clear(); sessionStorage.clear();
+    await appRouter.push('/issues/i1?project_id=p1&fixIntent=signed');
+    expect(appRouter.currentRoute.value.name).toBe('login');
+    expect(sessionStorage.getItem('opslane_post_auth_path')).toBe('/issues/i1?project_id=p1&fixIntent=signed');
+    sessionStorage.clear();
+  });
+});

@@ -216,6 +216,8 @@ export interface Incident {
   last_seen: string;
   occurrence_count: number;
   affected_users_count: number;
+  verified_users?: number;
+  verified_sessions?: number;
   priority_score?: number;
   priority_inputs?: PriorityInputs;
   priority_scored_at?: string;

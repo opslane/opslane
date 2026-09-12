@@ -36,6 +36,37 @@ beforeEach(() => {
 });
 
 describe('IncidentDetail honest state', () => {
+  it('consumes the signed fix intent once and renders verified weekly counts', async () => {
+    window.history.replaceState({}, '', '/issues/i1?project_id=p1&fixIntent=signed.intent');
+    api.getIncident.mockResolvedValue({ ...base, kind: 'friction', ticket_id: 't1', status: 'awaiting_approval',
+      fix_substate: 'none', investigation_status: 'done', investigation_readiness: 'eligible', cause_coverage: 0.5,
+      occurrence_count: 999, affected_users_count: 999, verified_users: 2, verified_sessions: 4 });
+    api.triggerFix.mockResolvedValue({ job_id: 'j1' });
+    let wrapper = mountView();
+    await flushPromises();
+    expect(api.triggerFix).toHaveBeenCalledExactlyOnceWith('p1', 'i1', undefined, 'signed.intent');
+    expect(window.location.search).toBe('?project_id=p1');
+    expect(wrapper.text()).toContain('2 users · 4 sessions this week');
+    expect(wrapper.text()).not.toContain('999 occurrences');
+    wrapper.unmount();
+    wrapper = mountView();
+    await flushPromises();
+    expect(api.triggerFix).toHaveBeenCalledTimes(1);
+    wrapper.unmount();
+  });
+
+  it('shows a rejected signed action without retrying it', async () => {
+    window.history.replaceState({}, '', '/issues/i1?project_id=p1&fixIntent=expired');
+    api.getIncident.mockResolvedValue({ ...base, ticket_id: 't1', status: 'archived' });
+    api.triggerFix.mockRejectedValue(new Error('Fix link expired'));
+    const wrapper = mountView();
+    await flushPromises();
+    expect(wrapper.text()).toContain('Fix link expired');
+    expect(window.location.search).not.toContain('fixIntent');
+    expect(api.triggerFix).toHaveBeenCalledTimes(1);
+    wrapper.unmount();
+  });
+
   it('keeps archived tickets permanent while retaining legacy unarchive', async () => {
     api.getIncident.mockResolvedValue({ ...base, kind: 'friction', status: 'archived', ticket_id: 't1' });
     let wrapper = mountView();

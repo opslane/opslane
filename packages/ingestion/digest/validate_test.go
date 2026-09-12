@@ -188,7 +188,7 @@ func TestValidateRejectsCandidateSupersededAfterFreeze(t *testing.T) {
 	}
 }
 
-func TestValidatePublishesSchemaV4GroundedCard(t *testing.T) {
+func TestValidatePublishesSchemaV5GroundedCard(t *testing.T) {
 	pool := testPool(t)
 	ctx := context.Background()
 	now := time.Now().UTC().Truncate(time.Second)
@@ -223,7 +223,7 @@ func TestValidatePublishesSchemaV4GroundedCard(t *testing.T) {
 		t.Fatal(err)
 	}
 	published := renderedEvent(t, pool, runID)
-	if published.Digest == nil || published.Digest.SchemaVersion != 4 || len(published.Digest.GeneratedCards) != 1 {
+	if published.Digest == nil || published.Digest.SchemaVersion != 5 || len(published.Digest.GeneratedCards) != 1 {
 		t.Fatalf("published digest: %+v", published.Digest)
 	}
 	card := published.Digest.GeneratedCards[0]
@@ -288,7 +288,7 @@ func TestValidateGroundsNumbersInCardTitles(t *testing.T) {
 		assertFellBackToReceipt(t, pool, runID, candidate.ErrorGroupID)
 	})
 
-	t.Run("grounded in a frozen fact", func(t *testing.T) {
+	t.Run("customer count rejected even when present in a frozen fact", func(t *testing.T) {
 		pool := testPool(t)
 		var frozen Candidate
 		runID, _, candidate := seedWrittenFreezeRun(t, pool, func(candidate Candidate) string {
@@ -301,10 +301,7 @@ func TestValidateGroundsNumbersInCardTitles(t *testing.T) {
 		if err := ValidateAndPublish(context.Background(), pool, runID); err != nil {
 			t.Fatalf("grounded frozen number rejected: %v", err)
 		}
-		cards := renderedEvent(t, pool, runID).Digest.GeneratedCards
-		if len(cards) != 1 || cards[0].IncidentID != candidate.ErrorGroupID {
-			t.Fatalf("grounded card did not ship: %+v", cards)
-		}
+		assertFellBackToReceipt(t, pool, runID, candidate.ErrorGroupID)
 	})
 }
 

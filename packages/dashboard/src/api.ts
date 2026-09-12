@@ -710,11 +710,12 @@ export function listAffectedUsers(
 export function triggerFix(
   projectId: string,
   incidentId: string,
-  guidance?: string
+  guidance?: string,
+  intent?: string
 ): Promise<{ job_id: string }> {
   return postJSON<{ job_id: string }>(
     `/projects/${projectId}/incidents/${incidentId}/fix`,
-    guidance ? { guidance } : {}
+    { ...(guidance ? { guidance } : {}), ...(intent ? { intent } : {}) }
   );
 }
 

@@ -6,6 +6,7 @@ package notify
 // about what a digest contains. Slack's per-version renderers are a delivery
 // compatibility surface and stay independent.
 type DigestView struct {
+	MergedThisWeek  []DigestPRMerged
 	Date            string
 	Cards           []GeneratedDigestCard
 	Receipts        []ReceiptItem
@@ -33,7 +34,7 @@ func (v DigestView) Empty() bool {
 		return false
 	}
 	return len(v.Cards) == 0 && len(v.Receipts) == 0 && v.DeliveryAlert == "" &&
-		v.ReceiptOverflow == 0 && v.OverflowCount == 0
+		v.ReceiptOverflow == 0 && v.OverflowCount == 0 && len(v.MergedThisWeek) == 0
 }
 
 // BuildDigestView maps every stored digest version into the shared view.
@@ -41,7 +42,7 @@ func BuildDigestView(digest *DigestPayload) DigestView {
 	if digest == nil {
 		return DigestView{}
 	}
-	view := DigestView{Date: digest.Date, SchemaVersion: digest.SchemaVersion}
+	view := DigestView{Date: digest.Date, SchemaVersion: digest.SchemaVersion, MergedThisWeek: digest.MergedThisWeek}
 	// Version mapping mirrors the Slack renderer switch (slack_digest.go):
 	// v4 carries cards + receipts; v3 carried cards; v2 carried receipts;
 	// v1 (schema_version 0/1) has neither and is reported as Legacy.
@@ -70,6 +71,9 @@ func BuildDigestView(digest *DigestPayload) DigestView {
 // narrative line) cannot appear in the MCP tool or the read API. Without
 // this the view would reintroduce the divergence it exists to remove.
 func renderableReceiptItems(digest *DigestPayload) []ReceiptItem {
+	if digest.SchemaVersion >= 5 {
+		return digest.ReceiptItems
+	}
 	renderable := renderableDigestReceipts(digest)
 	if len(renderable) == 0 {
 		return nil

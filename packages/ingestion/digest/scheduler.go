@@ -16,12 +16,13 @@ import (
 const schedulerAdvisoryLockKey int64 = 0x64696765737433
 
 type Scheduler struct {
-	pool *pgxpool.Pool
-	now  func() time.Time
+	pool   *pgxpool.Pool
+	secret [][]byte
+	now    func() time.Time
 }
 
-func NewScheduler(pool *pgxpool.Pool) *Scheduler {
-	return &Scheduler{pool: pool, now: func() time.Time { return time.Now().UTC() }}
+func NewScheduler(pool *pgxpool.Pool, secret ...[]byte) *Scheduler {
+	return &Scheduler{pool: pool, secret: secret, now: func() time.Time { return time.Now().UTC() }}
 }
 
 type scheduledProject struct {
@@ -84,7 +85,7 @@ func (s *Scheduler) Tick(ctx context.Context) error {
 				slog.Error("digest writer enqueue failed", "project_id", project.id, "run_id", runID, "error", err)
 			}
 		case "written", "validated":
-			if err := ValidateAndPublish(ctx, s.pool, runID); err != nil {
+			if err := ValidateAndPublish(ctx, s.pool, runID, s.secret...); err != nil {
 				slog.Error("digest publication failed", "project_id", project.id, "run_id", runID, "error", err)
 			}
 		}
