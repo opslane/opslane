@@ -8,6 +8,7 @@ import (
 	"log/slog"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 var ErrInstallationOrgConflict = errors.New("installation is already mapped to another organization")
@@ -67,6 +68,7 @@ func (q *Queries) PersistInstallation(ctx context.Context, tx pgx.Tx, params Per
 		 SET github_org_name = EXCLUDED.github_org_name,
 		     github_org_id = EXCLUDED.github_org_id,
 		     repos = EXCLUDED.repos,
+		     suspended = false,
 		     updated_at = now()`,
 		params.InstallationID, params.GitHubOrgName, params.GitHubOrgID,
 		params.OrgID, reposJSON); err != nil {
@@ -141,4 +143,155 @@ func installationOrgID(ctx context.Context, tx pgx.Tx, installationID int64) (st
 		return "", fmt.Errorf("look up legacy installation organization: %w", err)
 	}
 	return orgID, nil
+}
+
+// RetireGitHubInstallation records that GitHub no longer honours an
+// installation. In one transaction it suspends the rich row, if any, and
+// clears the legacy org pointer where it equals installationID. Returns true
+// when either write changed a row.
+func (q *Queries) RetireGitHubInstallation(ctx context.Context, installationID int64, orgID string) (bool, error) {
+	tx, err := q.pool.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("begin retire installation: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	rowTag, err := tx.Exec(ctx,
+		`UPDATE github_app_installations SET suspended = true, updated_at = now()
+		 WHERE installation_id = $1 AND NOT suspended`, installationID)
+	if err != nil {
+		return false, fmt.Errorf("retire github installation: %w", err)
+	}
+	var orgTag pgconn.CommandTag
+	if orgID == "" {
+		orgTag, err = tx.Exec(ctx,
+			`UPDATE orgs SET github_installation_id = NULL WHERE github_installation_id = $1`, installationID)
+	} else {
+		orgTag, err = tx.Exec(ctx,
+			`UPDATE orgs SET github_installation_id = NULL WHERE github_installation_id = $1 AND id = $2`, installationID, orgID)
+	}
+	if err != nil {
+		return false, fmt.Errorf("clear org github installation: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("commit retire installation: %w", err)
+	}
+	return rowTag.RowsAffected()+orgTag.RowsAffected() > 0, nil
+}
+
+// ReactivateGitHubInstallation unsuspends the row and restores a missing org
+// pointer. It never overwrites a pointer to a different installation.
+func (q *Queries) ReactivateGitHubInstallation(ctx context.Context, installationID int64) (bool, error) {
+	tx, err := q.pool.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("begin reactivate installation: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	var orgID string
+	err = tx.QueryRow(ctx,
+		`UPDATE github_app_installations SET suspended = false, updated_at = now()
+		 WHERE installation_id = $1 RETURNING org_id`, installationID).Scan(&orgID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("reactivate github installation: %w", err)
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE orgs SET github_installation_id = $2 WHERE id = $1 AND github_installation_id IS NULL`,
+		orgID, installationID); err != nil {
+		return false, fmt.Errorf("restore org github installation: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("commit reactivate installation: %w", err)
+	}
+	return true, nil
+}
+
+// SetGitHubInstallationSuspended mirrors GitHub's suspend state.
+func (q *Queries) SetGitHubInstallationSuspended(ctx context.Context, installationID int64, suspended bool) (bool, error) {
+	tag, err := q.pool.Exec(ctx,
+		`UPDATE github_app_installations SET suspended = $2, updated_at = now() WHERE installation_id = $1`,
+		installationID, suspended)
+	if err != nil {
+		return false, fmt.Errorf("set github installation suspended: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+// ReplaceGitHubInstallationRepos overwrites an installation's repository list.
+func (q *Queries) ReplaceGitHubInstallationRepos(ctx context.Context, installationID int64, repos []string) (bool, error) {
+	reposJSON, err := json.Marshal(dedupeRepoNames(repos))
+	if err != nil {
+		return false, fmt.Errorf("encode installation repos: %w", err)
+	}
+	tag, err := q.pool.Exec(ctx,
+		`UPDATE github_app_installations SET repos = $2, updated_at = now() WHERE installation_id = $1`,
+		installationID, reposJSON)
+	if err != nil {
+		return false, fmt.Errorf("replace github installation repos: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+// AddGitHubInstallationRepos appends new names, preserves existing order, and
+// collapses duplicate input names.
+func (q *Queries) AddGitHubInstallationRepos(ctx context.Context, installationID int64, repos []string) (bool, error) {
+	reposJSON, err := json.Marshal(dedupeRepoNames(repos))
+	if err != nil {
+		return false, fmt.Errorf("encode installation repos: %w", err)
+	}
+	tag, err := q.pool.Exec(ctx,
+		`UPDATE github_app_installations i
+		 SET repos = (
+		   SELECT COALESCE(jsonb_agg(name ORDER BY ord), '[]'::jsonb)
+		   FROM (
+		     SELECT name, ord FROM jsonb_array_elements_text(i.repos) WITH ORDINALITY AS e(name, ord)
+		     UNION ALL
+		     SELECT name, 1000000 + ord FROM jsonb_array_elements_text($2::jsonb) WITH ORDINALITY AS n(name, ord)
+		       WHERE NOT i.repos ? name
+		   ) merged
+		 ), updated_at = now()
+		 WHERE i.installation_id = $1`,
+		installationID, reposJSON)
+	if err != nil {
+		return false, fmt.Errorf("add github installation repos: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+// RemoveGitHubInstallationRepos drops names and ignores unknown names.
+func (q *Queries) RemoveGitHubInstallationRepos(ctx context.Context, installationID int64, repos []string) (bool, error) {
+	reposJSON, err := json.Marshal(dedupeRepoNames(repos))
+	if err != nil {
+		return false, fmt.Errorf("encode installation repos: %w", err)
+	}
+	tag, err := q.pool.Exec(ctx,
+		`UPDATE github_app_installations i
+		 SET repos = (
+		   SELECT COALESCE(jsonb_agg(name ORDER BY ord), '[]'::jsonb)
+		   FROM jsonb_array_elements_text(i.repos) WITH ORDINALITY AS e(name, ord)
+		   WHERE NOT ($2::jsonb ? name)
+		 ), updated_at = now()
+		 WHERE i.installation_id = $1`,
+		installationID, reposJSON)
+	if err != nil {
+		return false, fmt.Errorf("remove github installation repos: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+func dedupeRepoNames(names []string) []string {
+	out := make([]string, 0, len(names))
+	seen := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		if name == "" {
+			continue
+		}
+		if _, duplicate := seen[name]; duplicate {
+			continue
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+	}
+	return out
 }
