@@ -37,3 +37,31 @@ func TestTicketDigestGroundsBehaviorNumbersButNeverCustomerCounts(t *testing.T) 
 		}
 	}
 }
+
+func TestTicketDigestDistinguishesCustomerNounPhrasesFromInteractionUnits(t *testing.T) {
+	c := Candidate{PromptVersion: 7, TicketID: "ticket", VerifiedUsers: 1,
+		ConfirmedNotes: []string{"Changing the month requires 3 clicks."}}
+	for _, tc := range []struct {
+		copy   string
+		reject bool
+	}{
+		{"Affected users (3).", true},
+		{"Users impacted: 3.", true},
+		{"Impacted customers (3).", true},
+		{"Sessions impacted = 3.", true},
+		{"3 active users could not save.", true},
+		{"3 unique paying customers could not save.", true},
+		{"(3) affected users could not save.", true},
+		{"It takes 3 clicks for users to save.", false},
+		{"Saving takes 3 clicks per user.", false},
+		{"After 3 clicks, users can save.", false},
+		{"Users need 3 clicks.", false},
+	} {
+		t.Run(tc.copy, func(t *testing.T) {
+			_, reject := firstUngroundedNumber(writtenDigestCard{Copy: tc.copy}, c)
+			if reject != tc.reject {
+				t.Errorf("reject=%v, want %v", reject, tc.reject)
+			}
+		})
+	}
+}

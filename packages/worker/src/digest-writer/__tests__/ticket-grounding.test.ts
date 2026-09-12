@@ -35,6 +35,23 @@ describe('v7 ticket writer', () => {
   it('keeps user behavior numbers distinct from customer counts', () => {
     expect(ground('Users need 3 clicks.').included).toHaveLength(1);
   });
+  it.each([
+    ['Affected users (3).', true],
+    ['Users impacted: 3.', true],
+    ['Impacted customers (3).', true],
+    ['Sessions impacted = 3.', true],
+    ['3 active users could not save.', true],
+    ['3 unique paying customers could not save.', true],
+    ['(3) affected users could not save.', true],
+    ['It takes 3 clicks for users to save.', false],
+    ['Saving takes 3 clicks per user.', false],
+    ['After 3 clicks, users can save.', false],
+    ['Users need 3 clicks.', false],
+  ])('distinguishes customer noun phrases from interaction units: %s', (copy, reject) => {
+    const truth = { ...candidate, verifiedUsers: 1, steps: undefined,
+      confirmedNotes: ['Changing the month requires 3 clicks.'] };
+    expect(ground(copy, {}, truth).included).toHaveLength(reject ? 0 : 1);
+  });
   it('drops model-owned action/count/link fields from the v7 output', () => {
     const result = ground('Changing the month takes six clicks.', { action: 'Invented action', claimedUsers: 99, accounts: ['Wrong'], prUrl: 'https://wrong.test' });
     expect(result.included).toHaveLength(1);

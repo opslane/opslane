@@ -294,12 +294,18 @@ export const CARD_CHECK_REASON_PREFIX = 'card check: ';
 
 // Keep these token and count rules aligned with the Go publication validator.
 const NUMBER_WORDS = 'zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|million|billion';
-const CURRENT_NUMBER = new RegExp(`\\p{Nd}+|\\b(?:${NUMBER_WORDS})\\b`, 'giu');
-const CUSTOMER_COUNT = new RegExp(`(?:\\p{Nd}+|\\b(?:${NUMBER_WORDS})\\b)(?:[\\s-]+[\\p{L}]+){0,3}[\\s-]+(?:users?|people|persons?|sessions?|recordings?|accounts?|customers?|visits?)\\b`, 'iu');
+const NUMBER_PATTERN = `(?:\\p{Nd}+|\\b(?:${NUMBER_WORDS})\\b)`;
+const CUSTOMER_NOUN = '(?:users?|people|persons?|sessions?|recordings?|accounts?|customers?|visits?)\\b';
+const CUSTOMER_MODIFIER = '(?:affected|impacted|active|unique|distinct|identified|anonymous|paying|registered|new|returning|end)';
+const CURRENT_NUMBER = new RegExp(NUMBER_PATTERN, 'giu');
 
-// Keep noun-first labels/copulas separate from behavioral wording such as
-// "Users need 3 clicks", which does not state a customer count.
-const CUSTOMER_COUNT_AFTER = new RegExp(`\\b(?:users?|people|persons?|sessions?|recordings?|accounts?|customers?|visits?)\\b(?:[\\s-]+(?:count|total|affected)){0,2}(?:\\s*[:=–—]\\s*|\\s+(?:(?:is|are|was|were|totals?|totaled|numbered|reached|equals?)\\s+)?)(?:(?:only|exactly|about|approximately|at\\s+least|at\\s+most)\\s+)?(?:\\p{Nd}+|\\b(?:${NUMBER_WORDS})\\b)`, 'iu');
+// Match customer noun phrases, not arbitrary words between a number and a
+// customer noun: "3 clicks for users" describes interactions, not users.
+const CUSTOMER_COUNT = new RegExp(`${NUMBER_PATTERN}\\)?(?:[\\s-]+${CUSTOMER_MODIFIER})*[\\s-]+${CUSTOMER_NOUN}`, 'iu');
+
+// Labels and copulas can put the quantity after its noun, including "users
+// impacted: 3" and "users (3)". Behavioral verbs such as "need" stay separate.
+const CUSTOMER_COUNT_AFTER = new RegExp(`\\b${CUSTOMER_NOUN}(?:[\\s-]+(?:count|total|${CUSTOMER_MODIFIER}))*(?:\\s*[:=–—]\\s*|\\s+(?:(?:is|are|was|were|totals?|totaled|numbered|reached|equals?)\\s+)?)(?:(?:only|exactly|about|approximately|at\\s+least|at\\s+most)\\s+)?(?:${NUMBER_PATTERN}|\\(\\s*${NUMBER_PATTERN}\\s*\\))`, 'iu');
 
 function currentNumbers(value: string): Set<string> {
   return new Set([...normalizeProseNumbers(stripInvisible(value)).matchAll(CURRENT_NUMBER)].map(match => match[0].toLowerCase()));
