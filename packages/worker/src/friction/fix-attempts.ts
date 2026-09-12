@@ -256,12 +256,27 @@ export async function applyPrEvent(
         event.occurredAt,
       ],
     );
+    if (event.event !== 'opened') {
+      await tx.query(
+        `UPDATE delivery_reservations SET state='closed',updated_at=now()
+         WHERE project_id=$1 AND error_group_id=$2 AND operation_key=$3`,
+        [projectId, event.errorGroupId, `fix:${event.attemptId}`],
+      );
+    }
     if (event.event === 'merged')
       await tx.query(
         `UPDATE friction_tickets SET fixed_at=$2,cohort_cutoff=$2,updated_at=now() WHERE id=$1`,
         [ticket.id, event.occurredAt],
       );
-  } else if (event.event === 'orphan') {
+  } else if (
+    event.event === 'orphan' &&
+    s &&
+    (ticket.status !== 'published' ||
+      s.generation !== ticket.live_generation ||
+      s.status === 'archived')
+  ) {
+    // Losing a job lease does not retire its attempt: a newer worker may own
+    // that same attempt. Only retired publication lineage can be superseded.
     await tx.query(
       `UPDATE friction_fix_attempts SET status=CASE WHEN status IN('active','pr_open') THEN 'superseded' ELSE status END,pr_url=coalesce($2,pr_url),pr_number=coalesce($3,pr_number),github_repo=coalesce($4,github_repo),updated_at=now() WHERE id=$1 AND ticket_id=$5`,
       [

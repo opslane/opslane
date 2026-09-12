@@ -220,8 +220,31 @@ func (q *Queries) ProcessTicketPRWebhook(ctx context.Context, event TicketPRWebh
 	var generation int
 	err = tx.QueryRow(ctx, `SELECT a.id,a.ticket_id,a.error_group_id,a.generation,g.project_id,coalesce(a.pr_url,'')
 		FROM friction_fix_attempts a JOIN error_groups g ON g.id=a.error_group_id
-		WHERE a.github_repo=$1 AND a.pr_number=$2 ORDER BY a.created_at,a.id LIMIT 1 FOR UPDATE OF a`, event.Repository, event.Number).
+		WHERE a.github_repo=$1 AND a.pr_number=$2 ORDER BY a.created_at,a.id LIMIT 1`, event.Repository, event.Number).
 		Scan(&attempt, &ticket, &result.GroupID, &generation, &project, &prURL)
+	if err == pgx.ErrNoRows {
+		return PRWebhookResult{}, nil
+	}
+	if err != nil {
+		return result, err
+	}
+	// Match the worker's parent-before-attempt order. Taking the attempt first
+	// would deadlock with its ticket lock when the receipt's foreign keys run.
+	for _, lock := range []struct{ sql, id string }{
+		{`SELECT id FROM projects WHERE id=$1 FOR UPDATE`, project},
+		{`SELECT id FROM friction_tickets WHERE id=$1 FOR UPDATE`, ticket},
+		{`SELECT id FROM error_groups WHERE id=$1 FOR UPDATE`, result.GroupID},
+	} {
+		var id string
+		if err := tx.QueryRow(ctx, lock.sql, lock.id).Scan(&id); err != nil {
+			if err == pgx.ErrNoRows {
+				return PRWebhookResult{}, nil
+			}
+			return result, err
+		}
+	}
+	err = tx.QueryRow(ctx, `SELECT coalesce(pr_url,'') FROM friction_fix_attempts
+		WHERE id=$1 AND ticket_id=$2 AND github_repo=$3 AND pr_number=$4 FOR UPDATE`, attempt, ticket, event.Repository, event.Number).Scan(&prURL)
 	if err == pgx.ErrNoRows {
 		return PRWebhookResult{}, nil
 	}

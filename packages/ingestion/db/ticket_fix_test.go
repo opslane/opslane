@@ -180,3 +180,56 @@ func TestTicketPRWebhookRecordsOldAttemptAndQueuesOnlyOnce(t *testing.T) {
 		t.Fatalf("events=%d error=%v", count, err)
 	}
 }
+
+func TestTicketPRWebhookUsesWorkerLockOrder(t *testing.T) {
+	f := seedTicketFix(t)
+	ctx := context.Background()
+	var attempt string
+	if err := f.q.Pool().QueryRow(ctx, `INSERT INTO friction_fix_attempts(ticket_id,error_group_id,generation,status,pr_number,github_repo)
+		VALUES($1,$2,1,'active',72,'org/repo') RETURNING id`, f.ticket, f.group).Scan(&attempt); err != nil {
+		t.Fatal(err)
+	}
+	worker, err := f.q.Pool().Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer worker.Rollback(ctx)
+	if _, err := worker.Exec(ctx, `SELECT id FROM projects WHERE id=$1 FOR UPDATE`, f.project); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := worker.Exec(ctx, `SELECT id FROM friction_tickets WHERE id=$1 FOR UPDATE`, f.ticket); err != nil {
+		t.Fatal(err)
+	}
+	webhookCtx, cancelWebhook := context.WithTimeout(ctx, 10*time.Second)
+	defer cancelWebhook()
+	received := make(chan error, 1)
+	go func() {
+		_, err := f.q.ProcessPRWebhook(webhookCtx, "org/repo", 72, false, "lock-order-"+attempt, time.Now())
+		received <- err
+	}()
+	// Wait until intake is blocked on the worker, then acquire the worker's
+	// next lock. Intake must not hold that attempt while waiting for its ticket.
+	deadline := time.Now().Add(5 * time.Second)
+	blocked := false
+	for time.Now().Before(deadline) {
+		if err := f.q.Pool().QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity
+			WHERE datname=current_database() AND wait_event_type='Lock' AND pid<>pg_backend_pid())`).Scan(&blocked); err != nil {
+			t.Fatal(err)
+		}
+		if blocked {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !blocked {
+		t.Fatal("webhook did not reach the worker lock")
+	}
+	lockCtx, cancelLock := context.WithTimeout(ctx, 2*time.Second)
+	defer cancelLock()
+	_, lockErr := worker.Exec(lockCtx, `SELECT id FROM friction_fix_attempts WHERE id=$1 FOR UPDATE`, attempt)
+	_ = worker.Rollback(ctx)
+	receiptErr := <-received
+	if lockErr != nil || receiptErr != nil {
+		t.Fatalf("worker lock=%v webhook=%v", lockErr, receiptErr)
+	}
+}

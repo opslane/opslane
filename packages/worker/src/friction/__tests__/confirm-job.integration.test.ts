@@ -15,6 +15,7 @@ import {
   transaction,
   assertFixAttemptCurrent,
   recordAttemptPr,
+  applyPrEvent,
 } from '../fix-attempts.js';
 import {
   processTicketInvestigation,
@@ -352,6 +353,173 @@ describeDb('confirmation job', () => {
       ).rows[0].status,
     ).toBe('archived');
   });
+
+  async function deliveryFixture(
+    requestedBy: 'human' | 'auto' = 'human',
+  ): Promise<TicketInvestigateJob & { fixAttemptId: string }> {
+    const t = await ticket();
+    const recordings = await matches(t, 3);
+    await expect(
+      processFrictionConfirm(
+        await claim(t),
+        deps(['confirmed', 'confirmed', 'confirmed']),
+        new AbortController().signal,
+      ),
+    ).rejects.toMatchObject({ name: 'JobCompletedInTransaction' });
+    const group = (
+      await pool.query(
+        `UPDATE error_groups SET investigation_status='done',root_cause='Save drops input',explained_signal_ids=$2::jsonb WHERE ticket_id=$1 RETURNING id`,
+        [t.id, JSON.stringify(recordings.map((r) => r.signalId))],
+      )
+    ).rows[0];
+    await pool.query(
+      `INSERT INTO diagnosis_decisions(error_group_id,project_id,outcome,decision_reason,diagnosis,model,prompt_version,basis,confidence) VALUES($1,$2,'code_fix','Save drops input','{"agentTaskBrief":"Preserve save input"}','test','test','friction_classify','high')`,
+      [group.id, projectId],
+    );
+    if (requestedBy === 'auto')
+      await pool.query(
+        `UPDATE projects SET friction_autonomy='auto_fix' WHERE id=$1`,
+        [projectId],
+      );
+    const request = await transaction((tx) =>
+      requestFix(tx, projectId, t.id, 1, requestedBy),
+    );
+    if (request.status !== 'created') throw new Error('Expected fix attempt');
+    const job = {
+      id: request.jobId,
+      projectId,
+      ticketId: t.id,
+      errorGroupId: group.id,
+      publicationGeneration: 1,
+      fixAttemptId: request.attemptId,
+      workerId: 'delivery-test',
+      leaseGeneration: '1',
+      sessionId: null,
+    } as TicketInvestigateJob & { fixAttemptId: string };
+    await pool.query(
+      `UPDATE error_group_jobs SET status='claimed',worker_id=$2,lease_generation=1,lease_expires_at=now()+interval '5 minutes' WHERE id=$1`,
+      [job.id, job.workerId],
+    );
+    await db.reserveDelivery(
+      job.errorGroupId,
+      projectId,
+      {
+        operationKey: `fix:${job.fixAttemptId}`,
+        branchName: `opslane/fix-${job.fixAttemptId}`,
+        posture: 'draft',
+        diffHash: 'test',
+        candidateDiff: 'test',
+      },
+      job,
+    );
+    return job;
+  }
+
+  it('uses the ticket PR cap when the legacy draft cap is exhausted', async () => {
+    await pool.query(`UPDATE projects SET draft_pr_cap=0 WHERE id=$1`, [
+      projectId,
+    ]);
+    vi.stubEnv('FRICTION_MAX_OPEN_FIX_PRS', '1');
+    const job = await deliveryFixture('auto');
+    await expect(assertFixAttemptCurrent(job, true)).resolves.toBeUndefined();
+    expect(
+      (
+        await pool.query(
+          `SELECT state FROM delivery_reservations WHERE error_group_id=$1`,
+          [job.errorGroupId],
+        )
+      ).rows,
+    ).toEqual([{ state: 'reserved' }]);
+  });
+
+  it('a reclaimed fix keeps its active attempt and delivery slot when the older worker returns a PR', async () => {
+    const job = await deliveryFixture();
+    await pool.query(
+      `UPDATE projects SET friction_autonomy='auto_fix' WHERE id=$1`,
+      [projectId],
+    );
+    await pool.query(
+      `UPDATE friction_fix_attempts SET requested_by='auto' WHERE id=$1`,
+      [job.fixAttemptId],
+    );
+    await assertFixAttemptCurrent(job, true);
+    await pool.query(
+      `UPDATE error_group_jobs SET worker_id='new-worker',lease_generation=2 WHERE id=$1`,
+      [job.id],
+    );
+    expect(
+      await recordAttemptPr(
+        job,
+        'test/repo',
+        'https://github.com/test/repo/pull/11',
+        11,
+      ),
+    ).toBe(false);
+    expect(
+      (
+        await pool.query(
+          `SELECT status,pr_url,delivery_reserved_at IS NOT NULL AS reserved FROM friction_fix_attempts WHERE id=$1`,
+          [job.fixAttemptId],
+        )
+      ).rows[0],
+    ).toEqual({ status: 'active', pr_url: null, reserved: true });
+    expect(
+      (
+        await pool.query(
+          `SELECT event,applied FROM friction_pr_events WHERE fix_attempt_id=$1`,
+          [job.fixAttemptId],
+        )
+      ).rows,
+    ).toEqual([{ event: 'orphan', applied: false }]);
+    const reclaimed = { ...job, workerId: 'new-worker', leaseGeneration: '2' };
+    await expect(
+      assertFixAttemptCurrent(reclaimed, true),
+    ).resolves.toBeUndefined();
+    expect(
+      await recordAttemptPr(
+        reclaimed,
+        'test/repo',
+        'https://github.com/test/repo/pull/11',
+        11,
+      ),
+    ).toBe(true);
+  });
+
+  it.each(['closed', 'merged'] as const)(
+    'releases a ticket delivery reservation when its current PR is %s',
+    async (event) => {
+      const job = await deliveryFixture();
+      expect(
+        await recordAttemptPr(
+          job,
+          'test/repo',
+          'https://github.com/test/repo/pull/12',
+          12,
+        ),
+      ).toBe(true);
+      expect(
+        await transaction((tx) =>
+          applyPrEvent(tx, projectId, {
+            ticketId: job.ticketId,
+            errorGroupId: job.errorGroupId,
+            attemptId: job.fixAttemptId,
+            generation: 1,
+            event,
+            deliveryId: randomUUID(),
+            occurredAt: new Date().toISOString(),
+          }),
+        ),
+      ).toBe(true);
+      expect(
+        (
+          await pool.query(
+            `SELECT state FROM delivery_reservations WHERE error_group_id=$1`,
+            [job.errorGroupId],
+          )
+        ).rows[0].state,
+      ).toBe('closed');
+    },
+  );
 
   it('dead-lettered ticket investigation fails without changing the fix workflow', async () => {
     const t = await ticket();

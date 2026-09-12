@@ -1795,12 +1795,13 @@ export async function reserveDelivery(
       [projectId],
     );
     if (!project.rows[0]) throw new Error(`Project ${projectId} not found`);
-    if (input.posture === 'draft') {
+    // Ticket delivery uses its own open-PR cap under the project lock.
+    if (input.posture === 'draft' && !ticketJob.rows[0]) {
       const count = await client.query<{ count: string }>(
         `SELECT COUNT(*)::text AS count
-         FROM delivery_reservations
-         WHERE project_id = $1 AND posture = 'draft'
-           AND state IN ('reserved', 'pushed', 'open')`,
+         FROM delivery_reservations r JOIN error_groups g ON g.id=r.error_group_id
+         WHERE r.project_id = $1 AND r.posture = 'draft' AND g.ticket_id IS NULL
+           AND r.state IN ('reserved', 'pushed', 'open')`,
         [projectId],
       );
       if (Number(count.rows[0]?.count ?? 0) >= project.rows[0].draft_pr_cap) {
