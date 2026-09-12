@@ -52,7 +52,7 @@ func TestTicketIncidentActionsAndOpenedWebhook(t *testing.T) {
 		router.ServeHTTP(w, r)
 		return w
 	}
-	if w := request(http.MethodPost, "/reinvestigate", false); w.Code != http.StatusUnauthorized {
+	if w := request(http.MethodPost, "/fix", false); w.Code != http.StatusUnauthorized {
 		t.Fatalf("anonymous action=%d", w.Code)
 	}
 	w := request(http.MethodGet, "", true)
@@ -79,15 +79,12 @@ func TestTicketIncidentActionsAndOpenedWebhook(t *testing.T) {
 	if incident.VerifiedUsers == nil || *incident.VerifiedUsers != 0 || incident.VerifiedSessions == nil || *incident.VerifiedSessions != 0 || incident.OccurrenceCount != 0 || incident.AffectedUsersCount != 0 || incident.ImpactVisits != nil || incident.Story != "0 users · 0 sessions this week" {
 		t.Fatalf("unverified totals leaked: %+v", incident)
 	}
-	if w := request(http.MethodPost, "/reinvestigate", true); w.Code != http.StatusAccepted {
-		t.Fatalf("reinvestigate=%d %s", w.Code, w.Body.String())
-	}
 	if w := request(http.MethodPost, "/fix", true); w.Code != http.StatusConflict {
 		t.Fatalf("unverified fix=%d %s", w.Code, w.Body.String())
 	}
 	var queued int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM error_group_jobs WHERE error_group_id=$1 AND job_type='investigate' AND status='pending'`, group).Scan(&queued); err != nil || queued != 1 {
-		t.Fatalf("queued=%d error=%v", queued, err)
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM error_group_jobs WHERE error_group_id=$1 AND job_type='investigate' AND status='pending'`, group).Scan(&queued); err != nil || queued != 0 {
+		t.Fatalf("a refused fix must not queue an investigation: queued=%d error=%v", queued, err)
 	}
 
 	// The authenticated GitHub event is a durable receipt; the worker applies it.

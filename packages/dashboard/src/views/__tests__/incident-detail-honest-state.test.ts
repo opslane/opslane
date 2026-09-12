@@ -10,7 +10,7 @@ const api = vi.hoisted(() => {
     APIError,
     archiveIncident: vi.fn(), getIncident: vi.fn(), getReplay: vi.fn(), getSampleEvent: vi.fn(),
     getSession: vi.fn(), getSessionChunk: vi.fn(), listAffectedUsers: vi.fn(), resolveIncident: vi.fn(),
-    triggerFix: vi.fn(), reinvestigateIncident: vi.fn(), unarchiveIncident: vi.fn(),
+    triggerFix: vi.fn(), unarchiveIncident: vi.fn(),
   };
 });
 vi.mock('../../api', () => api);
@@ -91,21 +91,6 @@ describe('IncidentDetail honest state', () => {
     wrapper = mountView();
     await flushPromises();
     expect(wrapper.findAll('button').some(button => button.text() === 'Resolve')).toBe(true);
-    wrapper.unmount();
-  });
-
-  it('requests reinvestigation when a ticket cause lacks current coverage', async () => {
-    const ticket = { ...base, kind: 'friction', status: 'awaiting_approval', ticket_id: 't1',
-      fix_substate: 'none', investigation_status: 'done', cause_coverage: 0.25 };
-    api.getIncident.mockResolvedValueOnce(ticket).mockResolvedValue({ ...ticket, investigation_status: 'pending' });
-    api.reinvestigateIncident.mockResolvedValue({ job_id: 'j1' });
-    const wrapper = mountView();
-    await flushPromises();
-    expect(wrapper.text()).not.toContain('Create fix PR');
-    await wrapper.findAll('button').find(button => button.text() === 'Reinvestigate')!.trigger('click');
-    await flushPromises();
-    expect(api.reinvestigateIncident).toHaveBeenCalledWith('p1', 'i1');
-    expect(wrapper.text()).toContain('Investigation pending.');
     wrapper.unmount();
   });
 

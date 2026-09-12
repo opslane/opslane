@@ -1329,26 +1329,6 @@ func (d *Dependencies) TriggerFix(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"job_id": jobID})
 }
 
-// ReinvestigateIncident requests a new ticket diagnosis without changing a fix.
-func (d *Dependencies) ReinvestigateIncident(w http.ResponseWriter, r *http.Request) {
-	projectID := chi.URLParam(r, "projectID")
-	if !d.verifyProjectAccess(w, r, projectID) {
-		return
-	}
-	jobID, err := d.Queries.ReinvestigateTicket(r.Context(), projectID, chi.URLParam(r, "incidentID"))
-	if errors.Is(err, db.ErrNotInvestigated) {
-		writeJSONError(w, http.StatusConflict, "incident has no live problem to investigate")
-		return
-	}
-	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "failed to request investigation")
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusAccepted)
-	_ = json.NewEncoder(w).Encode(map[string]string{"job_id": jobID})
-}
-
 // RequestIssueReview asks the inquiry stage to take another look at the
 // current episode. It does not bypass inquiry or create an investigation.
 func (d *Dependencies) RequestIssueReview(w http.ResponseWriter, r *http.Request) {

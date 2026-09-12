@@ -105,42 +105,6 @@ func lockTicketIncident(ctx context.Context, tx pgx.Tx, projectID, groupID strin
 	return s, nil
 }
 
-func enqueueTicketInvestigation(ctx context.Context, tx pgx.Tx, projectID, groupID string, s *TicketIncidentState) (string, error) {
-	var id string
-	err := tx.QueryRow(ctx, `SELECT id FROM error_group_jobs WHERE error_group_id=$1 AND project_id=$2
-		AND job_type='investigate' AND status IN ('pending','claimed') ORDER BY created_at,id LIMIT 1`, groupID, projectID).Scan(&id)
-	if err == pgx.ErrNoRows {
-		err = tx.QueryRow(ctx, `INSERT INTO error_group_jobs(error_group_id,project_id,job_type,ticket_id,publication_generation,source_id,triggered_by)
-			VALUES($1,$2,'investigate',$3,$4,$1,'human') RETURNING id`, groupID, projectID, s.TicketID, s.Generation).Scan(&id)
-	}
-	if err != nil {
-		return "", err
-	}
-	_, err = tx.Exec(ctx, `UPDATE error_groups SET investigation_status='pending',updated_at=now() WHERE id=$1 AND project_id=$2`, groupID, projectID)
-	return id, err
-}
-
-// ReinvestigateTicket preserves the fix workflow while requesting a new cause.
-func (q *Queries) ReinvestigateTicket(ctx context.Context, projectID, groupID string) (string, error) {
-	tx, err := q.pool.Begin(ctx)
-	if err != nil {
-		return "", err
-	}
-	defer tx.Rollback(ctx)
-	s, err := lockTicketIncident(ctx, tx, projectID, groupID)
-	if err != nil {
-		return "", err
-	}
-	id, err := enqueueTicketInvestigation(ctx, tx, projectID, groupID, s)
-	if err != nil {
-		return "", err
-	}
-	if err = tx.Commit(ctx); err != nil {
-		return "", err
-	}
-	return id, nil
-}
-
 // TicketFixExpectation binds a signed digest action to the attempt lineage it
 // displayed. The comparison runs under the same locks as fix admission.
 type TicketFixExpectation struct {
@@ -180,13 +144,10 @@ func (q *Queries) requestTicketFix(ctx context.Context, projectID, groupID, guid
 	if outstanding {
 		return "", ErrNotInvestigated
 	}
+	// A fix is only reachable once a cause explains at least half of the
+	// verified evidence. Nothing is queued on refusal: reinvestigation is driven
+	// by new verified evidence, never by a click.
 	if s.InvestigationStatus != "done" || s.CauseCoverage < 0.5 || s.Cause == "" || s.Brief == "" {
-		if _, err = enqueueTicketInvestigation(ctx, tx, projectID, groupID, s); err != nil {
-			return "", err
-		}
-		if err = tx.Commit(ctx); err != nil {
-			return "", err
-		}
 		return "", ErrNotInvestigated
 	}
 	var attempt, job string

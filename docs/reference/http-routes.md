@@ -101,7 +101,6 @@ The automated-setup callback requires `code`, `installation_id`, and UUID `state
 | GET | `/api/v1/projects/{projectID}/incidents/{incidentID}/affected-users` | Affected users |
 | GET | `/api/v1/projects/{projectID}/incidents/{incidentID}/sample-event` | Fetch the redacted representative error event for traceback, breadcrumbs, and request context |
 | POST | `/api/v1/projects/{projectID}/incidents/{incidentID}/fix` | Start a fix for an issue that is ready to fix, whether it came from an error or a session recording |
-| POST | `/api/v1/projects/{projectID}/incidents/{incidentID}/reinvestigate` | Request another cause investigation for a live recording-derived issue |
 | POST | `/api/v1/projects/{projectID}/incidents/{incidentID}/review` | Request another short repository review for the current issue; reuses an investigation already in progress |
 | POST | `/api/v1/projects/{projectID}/incidents/{incidentID}/link-pr` | Record a same-repository GitHub pull request without marking the issue resolved |
 | POST | `/api/v1/projects/{projectID}/incidents/{incidentID}/resolve` | Resolve issue |

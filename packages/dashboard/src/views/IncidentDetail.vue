@@ -2,7 +2,7 @@
 import { computed, defineAsyncComponent, ref, onMounted, onUnmounted, watch } from 'vue';
 import { useRoute } from 'vue-router';
 import type { Incident, AffectedUser, SampleEvent } from '../types/api';
-import { APIError, getIncident, getSampleEvent, getReplay, listAffectedUsers, triggerFix, reinvestigateIncident, resolveIncident, archiveIncident, unarchiveIncident, type ReplayRecording } from '../api';
+import { APIError, getIncident, getSampleEvent, getReplay, listAffectedUsers, triggerFix, resolveIncident, archiveIncident, unarchiveIncident, type ReplayRecording } from '../api';
 import { getProjectId, safeUrl, formatDate, formatAbsolute } from '../utils';
 import { kindBadge, fixControlsVisible } from '../components/incident-kind';
 import EvidenceWell from '../components/evidence/EvidenceWell.vue';
@@ -50,7 +50,7 @@ const fixAvailable = computed(() => {
     && current.investigation_status === 'done' && current.investigation_readiness === 'eligible'
     && (current.cause_coverage ?? 0) >= 0.5;
 });
-const reinvestigationAvailable = computed(() => {
+const causeInsufficient = computed(() => {
   const current = incident.value;
   return current?.ticket_id && current.status !== 'archived' && current.fix_substate !== 'resolved'
     && current.investigation_status !== 'pending'
@@ -169,20 +169,6 @@ async function handleTriggerFix(intent?: string) {
       ...(incident.value.ticket_id ? { fix_substate: 'fixing' as const } : {}),
     };
     startFixPolling();
-  } catch (e: unknown) {
-    fixError.value = e instanceof Error ? e.message : String(e);
-  } finally {
-    fixLoading.value = false;
-  }
-}
-
-async function handleReinvestigate() {
-  if (fixLoading.value || !incident.value) return;
-  fixLoading.value = true;
-  fixError.value = null;
-  try {
-    await reinvestigateIncident(projectId.value, incidentId);
-    incident.value = await getIncident(projectId.value, incidentId);
   } catch (e: unknown) {
     fixError.value = e instanceof Error ? e.message : String(e);
   } finally {
@@ -689,11 +675,9 @@ onMounted(async () => {
           </div>
         </div>
 
-        <div v-if="reinvestigationAvailable" class="p-4 bg-surface border border-border rounded-lg space-y-3">
-          <p class="text-sm text-muted">A cause must explain at least half of the current verified evidence before a fix can start.</p>
-          <Button :busy="fixLoading" variant="primary" @click="handleReinvestigate">Reinvestigate</Button>
-          <p v-if="fixError" class="text-sm text-danger" v-text="fixError"></p>
-        </div>
+        <p v-if="causeInsufficient" class="text-sm text-muted">
+          A cause must explain at least half of the current verified evidence before a fix can start. Opslane investigates again on its own when new verified evidence arrives.
+        </p>
         <p v-else-if="incident.ticket_id && incident.investigation_status === 'pending'" class="text-sm text-muted">
           Investigation pending.
         </p>

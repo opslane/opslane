@@ -719,10 +719,6 @@ export function triggerFix(
   );
 }
 
-export function reinvestigateIncident(projectId: string, incidentId: string): Promise<{ job_id: string }> {
-  return postJSON<{ job_id: string }>(`/projects/${projectId}/incidents/${incidentId}/reinvestigate`, {});
-}
-
 export function listAccounts(
   projectId: string,
   query?: string

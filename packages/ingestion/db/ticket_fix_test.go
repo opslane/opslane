@@ -123,7 +123,7 @@ func TestTicketFixUsesCurrentCoverageAndRejectsConcurrentRequests(t *testing.T) 
 	}
 }
 
-func TestTicketNotReadyFixCommitsOneReinvestigation(t *testing.T) {
+func TestTicketNotReadyFixQueuesNothing(t *testing.T) {
 	f := seedTicketFix(t)
 	ctx := context.Background()
 	if _, err := f.q.Pool().Exec(ctx, `UPDATE error_groups SET investigation_status='failed' WHERE id=$1`, f.group); err != nil {
@@ -134,8 +134,10 @@ func TestTicketNotReadyFixCommitsOneReinvestigation(t *testing.T) {
 			t.Fatalf("request error=%v", err)
 		}
 	}
+	// A refused fix is a refusal only: reinvestigation follows new verified
+	// evidence, never a click.
 	var count int
-	if err := f.q.Pool().QueryRow(ctx, `SELECT count(*) FROM error_group_jobs WHERE error_group_id=$1 AND job_type='investigate' AND status='pending' AND ticket_id=$2 AND publication_generation=1`, f.group, f.ticket).Scan(&count); err != nil || count != 1 {
+	if err := f.q.Pool().QueryRow(ctx, `SELECT count(*) FROM error_group_jobs WHERE error_group_id=$1 AND job_type='investigate' AND status='pending' AND ticket_id=$2 AND publication_generation=1`, f.group, f.ticket).Scan(&count); err != nil || count != 0 {
 		t.Fatalf("investigations=%d error=%v", count, err)
 	}
 	var substate string
@@ -152,12 +154,6 @@ func TestTicketFixExcludesOldEvidenceAndStaleGeneration(t *testing.T) {
 	}
 	if _, err := f.q.TriggerFixJob(ctx, f.project, f.group, ""); !errors.Is(err, db.ErrNotInvestigated) {
 		t.Fatalf("old evidence accepted: %v", err)
-	}
-	if _, err := f.q.Pool().Exec(ctx, `UPDATE friction_tickets SET live_generation=2 WHERE id=$1`, f.ticket); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := f.q.ReinvestigateTicket(ctx, f.project, f.group); !errors.Is(err, db.ErrNotInvestigated) {
-		t.Fatalf("stale generation accepted: %v", err)
 	}
 }
 
