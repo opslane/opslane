@@ -1,6 +1,6 @@
 import { readFile, writeFile, readdir, rm, realpath, stat } from 'node:fs/promises';
 import { join, dirname, resolve, relative, sep, isAbsolute } from 'node:path';
-import { stampCodeAndMap, stripSourceMappingURLDirectives, DEBUG_ID_TRAILER } from '../src/build/stamp';
+import { stampCodeAndMap, stripSourceMappingURLDirectives, getSourceMappingURL, DEBUG_ID_TRAILER } from '../src/build/stamp';
 import { computeDebugId } from '../src/build/debug-id';
 import { uploadSourceMaps, type UploadEntry } from '../vite-plugin/upload';
 import { parseSourceMapKey } from '../vite-plugin/sk-key';
@@ -57,9 +57,7 @@ interface MapLocation { mapPath: string; fileName: string }
 type MapLookup = MapLocation | { fileName: string; error: string } | null;
 
 async function mapFor(root: string, jsPath: string, code: string, retainedMaps: Map<string, string[]>): Promise<MapLookup> {
-  const directives = [...code.matchAll(/^[ \t]*(?:\/\/[@#][ \t]*sourceMappingURL[ \t]*=[ \t]*(\S+)|\/\*[@#][ \t]*sourceMappingURL[ \t]*=[ \t]*(\S+?)[ \t]*\*\/)[ \t]*\r?$/gm)];
-  const directive = directives.at(-1);
-  const target = directive?.[1] ?? directive?.[2];
+  const target = getSourceMappingURL(code);
   let candidate = target ? resolve(dirname(jsPath), target) : jsPath + '.map';
   let name = fileName(root, candidate);
   if (target && (/^[a-z][a-z0-9+.-]*:/i.test(target) || isAbsolute(target) || /^[A-Za-z]:[\\/]/.test(target))) {

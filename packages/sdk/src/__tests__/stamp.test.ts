@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { stampCodeAndMap, unstamp, DEBUG_ID_TRAILER } from '../build/stamp';
+import { stampCodeAndMap, unstamp, DEBUG_ID_TRAILER, stripSourceMappingURLDirectives } from '../build/stamp';
 
 const code = 'console.log("hi");\n//# sourceMappingURL=app.js.map\n';
 const map = JSON.stringify({ version: 3, file: 'app.js', sources: ['../src/app.ts'], names: [], mappings: 'AAAA' });
@@ -73,5 +73,33 @@ describe('indexed map validation and resolution', () => {
 
   it('checks the raw byte size before parsing', async () => {
     await expect(stampCodeAndMap({ ...base, format: 'es', maxMapBytes: 1 })).rejects.toThrow('over the limit');
+  });
+});
+
+
+describe('source-map directive comments', () => {
+  it('strips inline comments while preserving every generated position', () => {
+    const code = 'run(); //# sourceMappingURL=../maps/chunk.map\r\n' +
+      'a(); /*# sourceMappingURL=other.map */ b();\n';
+    const stripped = stripSourceMappingURLDirectives(code);
+    expect(stripped).not.toContain('sourceMappingURL');
+    expect(stripped.length).toBe(code.length);
+    expect(stripped.indexOf('b();')).toBe(code.indexOf('b();'));
+    expect(stripped.indexOf('\r\n')).toBe(code.indexOf('\r\n'));
+    expect(stripped).toContain('run();');
+  });
+
+  it('preserves directive lookalikes inside strings, multiline templates, and regex literals', () => {
+    const code = [
+      'const a = "//# sourceMappingURL=string.map";',
+      "const b = '/*# sourceMappingURL=string.map */';",
+      'const c = `template',
+      '//# sourceMappingURL=template.map',
+      '/*# sourceMappingURL=template-block.map */',
+      '`;',
+      String.raw`const d = /\/\/# sourceMappingURL=regex.map/;`,
+      String.raw`const e = /[/*]# sourceMappingURL=regex-class.map/;`,
+    ].join('\n');
+    expect(stripSourceMappingURLDirectives(code)).toBe(code);
   });
 });

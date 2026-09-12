@@ -1,3 +1,4 @@
+import { tokenizer } from 'acorn';
 import { AnyMap, encodedMappings, type SectionedSourceMapInput } from '@jridgewell/trace-mapping';
 import { computeDebugId, DebugIdError } from './debug-id.js';
 import { DEBUG_ID_PLACEHOLDER, REGISTRY_GLOBAL } from './registry-contract.js';
@@ -107,24 +108,44 @@ export function stripMapSuffix(filePath: string): string {
   return filePath.endsWith('.map') ? filePath.slice(0, -4) : filePath;
 }
 
-/**
- * Remove standalone source-map URL directives when maps are private.
- *
- * Each replacement leaves the newline itself in place, so generated line
- * numbers and the sibling map stay aligned. Anchoring to a whole trimmed line
- * avoids corrupting libraries that parse the directive with a regex or carry
- * the text in a string literal.
- */
+interface SourceMappingDirective {
+  start: number;
+  end: number;
+  url: string;
+}
+
+function sourceMappingDirectives(code: string): SourceMappingDirective[] {
+  if (!code.includes('sourceMappingURL')) return [];
+  const directives: SourceMappingDirective[] = [];
+  const tokens = tokenizer(code, {
+    ecmaVersion: 'latest',
+    sourceType: 'module',
+    onComment(_block, text, start, end) {
+      const match = /^[@#][ \t]*sourceMappingURL[ \t]*=[ \t]*(\S+)[ \t]*$/.exec(text);
+      if (match) directives.push({ start, end, url: match[1] });
+    },
+  });
+  // Lexing distinguishes comments from regexes and template/string contents
+  // without requiring the emitted chunk to be a complete program.
+  while (tokens.getToken().type.label !== 'eof') { /* Consume comment callbacks. */ }
+  return directives;
+}
+
+/** The last actual source-map directive wins, including comments after code. */
+export function getSourceMappingURL(code: string): string | undefined {
+  return sourceMappingDirectives(code).at(-1)?.url;
+}
+
+/** Remove directives without moving generated lines or columns. */
 export function stripSourceMappingURLDirectives(code: string): string {
-  return code
-    .replace(
-      /^[ \t]*\/\*[@#][ \t]*sourceMappingURL[ \t]*=[^\r\n]*?\*\/[ \t]*(?=\r?$)/gm,
-      '',
-    )
-    .replace(
-      /^[ \t]*\/\/[@#][ \t]*sourceMappingURL[ \t]*=[^\r\n]*(?=\r?$)/gm,
-      '',
-    );
+  let stripped = '';
+  let offset = 0;
+  for (const directive of sourceMappingDirectives(code)) {
+    stripped += code.slice(offset, directive.start)
+      + code.slice(directive.start, directive.end).replace(/[^\r\n\u2028\u2029]/g, ' ');
+    offset = directive.end;
+  }
+  return stripped + code.slice(offset);
 }
 
 /**

@@ -48,7 +48,8 @@
   },
   "dependencies": {
     "rrweb": "2.1.1",
-    "@jridgewell/trace-mapping": "^0.3.31"
+    "@jridgewell/trace-mapping": "^0.3.31",
+    "acorn": "^8.18.0"
   },
   "devDependencies": {
     "@opslane/shared": "workspace:*",

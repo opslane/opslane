@@ -213,3 +213,37 @@ describe('post-build safety and formats', () => {
     expect(result.failed.find(failure => failure.fileName === 'chunks/a/main.js.map')?.reason).toContain('stale stamp');
   });
 });
+
+describe('inline source-map directives', () => {
+  it.each([false, true])('uses the inline non-sibling map with an unrelated sibling present: %s', async (hasSibling) => {
+    const path = join(dir, 'chunks/b/main.js');
+    await writeFile(path, 'console.log(2); //# sourceMappingURL=../../maps/b.js.map\n');
+    const unrelatedMap = join(dir, 'chunks/b/main.js.map');
+    if (hasSibling) await writeFile(unrelatedMap, 'unrelated invalid map');
+    const { fetchImpl } = recorder(() => 201);
+    const result = await run({ fetchImpl });
+    expect(result).toMatchObject({ stamped: 2, uploaded: 2, removed: 2 });
+    const output = await readFile(path, 'utf8');
+    expect(output).toContain('console.log(2);');
+    expect(output).not.toContain('sourceMappingURL');
+    expect(output).toMatch(/\/\/# debugId=[0-9a-f-]{36}$/);
+    if (hasSibling) expect(await readFile(unrelatedMap, 'utf8')).toBe('unrelated invalid map');
+  });
+
+  it('preserves lookalikes while selecting and stripping the actual inline comment', async () => {
+    const path = join(dir, 'chunks/b/main.js');
+    const lookalikes = [
+      'const a = "//# sourceMappingURL=string.map";',
+      'const b = `template',
+      '//# sourceMappingURL=template.map',
+      '`;',
+      String.raw`const c = /\/\/# sourceMappingURL=regex.map/;`,
+    ].join('\n');
+    await writeFile(path, `${lookalikes}\nconsole.log(2); /*# sourceMappingURL=../../maps/b.js.map */`);
+    const { fetchImpl } = recorder(() => 201);
+    expect(await run({ fetchImpl })).toMatchObject({ stamped: 2, uploaded: 2, removed: 2 });
+    const output = await readFile(path, 'utf8');
+    expect(output).toContain(lookalikes);
+    expect(output).not.toContain('sourceMappingURL=../../maps/b.js.map');
+  });
+});
