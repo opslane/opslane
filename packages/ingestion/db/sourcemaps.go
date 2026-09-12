@@ -107,3 +107,11 @@ func (q *Queries) WakePendingStackResolutions(ctx context.Context, projectID, de
 	}
 	return tag.RowsAffected(), nil
 }
+
+// HasSourcemapUploads reports whether any source map has been stored for the
+// project. It backs the onboarding "sourcemaps" fact.
+func (q *Queries) HasSourcemapUploads(ctx context.Context, projectID string) (bool, error) {
+	var ok bool
+	err := q.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM sourcemap_files WHERE project_id = $1)`, projectID).Scan(&ok)
+	return ok, err
+}

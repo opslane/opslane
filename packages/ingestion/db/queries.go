@@ -4331,9 +4331,13 @@ type AgentSession struct {
 	CreatedAt      time.Time
 	CompletedAt    *time.Time
 	ExpiresAt      time.Time
+	ProjectName    *string
+	GitRemote      *string
 }
 
 type CreateAgentSessionParams struct {
+	ProjectName   *string
+	GitRemote     *string
 	RepoURL       string
 	AgentName     *string
 	PollTokenHash string
@@ -4345,17 +4349,17 @@ type CreateAgentSessionParams struct {
 func (q *Queries) CreateAgentSession(ctx context.Context, p CreateAgentSessionParams) (*AgentSession, error) {
 	var s AgentSession
 	err := q.pool.QueryRow(ctx,
-		`INSERT INTO agent_sessions (repo_url, agent_name, poll_token_hash, agent_key_pub)
-		 VALUES ($1, $2, $3, $4)
+		`INSERT INTO agent_sessions (repo_url, agent_name, poll_token_hash, agent_key_pub, project_name, git_remote)
+		 VALUES ($1, $2, $3, $4, $5, $6)
 		 RETURNING id, repo_url, agent_name, status, org_id, project_id,
 		           installation_id, created_at, completed_at, expires_at,
 		           poll_token_hash, agent_key_pub, api_key_sealed, failure_reason,
-		           auth_clicked_at, key_claimed_at`,
-		p.RepoURL, p.AgentName, p.PollTokenHash, p.AgentKeyPub,
+		           auth_clicked_at, key_claimed_at, project_name, git_remote`,
+		p.RepoURL, p.AgentName, p.PollTokenHash, p.AgentKeyPub, p.ProjectName, p.GitRemote,
 	).Scan(&s.ID, &s.RepoURL, &s.AgentName, &s.Status, &s.OrgID, &s.ProjectID,
 		&s.InstallationID, &s.CreatedAt, &s.CompletedAt, &s.ExpiresAt,
 		&s.PollTokenHash, &s.AgentKeyPub, &s.APIKeySealed, &s.FailureReason,
-		&s.AuthClickedAt, &s.KeyClaimedAt)
+		&s.AuthClickedAt, &s.KeyClaimedAt, &s.ProjectName, &s.GitRemote)
 	if err != nil {
 		return nil, fmt.Errorf("create agent session: %w", err)
 	}
@@ -4369,13 +4373,13 @@ func (q *Queries) GetAgentSession(ctx context.Context, sessionID string) (*Agent
 		`SELECT id, repo_url, agent_name, status, org_id, project_id,
 		        installation_id, created_at, completed_at, expires_at,
 		        poll_token_hash, agent_key_pub, api_key_sealed, failure_reason,
-		        auth_clicked_at, key_claimed_at
+		        auth_clicked_at, key_claimed_at, project_name, git_remote
 		 FROM agent_sessions WHERE id = $1`,
 		sessionID,
 	).Scan(&s.ID, &s.RepoURL, &s.AgentName, &s.Status, &s.OrgID, &s.ProjectID,
 		&s.InstallationID, &s.CreatedAt, &s.CompletedAt, &s.ExpiresAt,
 		&s.PollTokenHash, &s.AgentKeyPub, &s.APIKeySealed, &s.FailureReason,
-		&s.AuthClickedAt, &s.KeyClaimedAt)
+		&s.AuthClickedAt, &s.KeyClaimedAt, &s.ProjectName, &s.GitRemote)
 	if err == pgx.ErrNoRows {
 		return nil, nil
 	}
