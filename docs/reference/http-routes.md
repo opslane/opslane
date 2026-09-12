@@ -30,7 +30,7 @@ These are curated tables, not a stability contract. The API is early-stage and m
 | POST | `/api/v1/agent/setup` | none | Register a two-hour setup session with `project_name`, optional `agent_name` and `git_remote`; return the approval link and poll token |
 | GET | `/api/v1/agent/poll/{sessionID}` | poll token | Read approval status, approved keys, and server facts; `wait=0..30` long-polls approval, or the first event with `until=event` |
 | GET | `/agent/auth/{sessionID}` | none | Redirect to the dashboard approval page; expired links return 410 |
-| POST | `/api/v1/github/webhook` | HMAC | Receive GitHub pull-request and default-branch push events; requires `X-GitHub-Delivery` (400 without it). Push events refresh Opslane's understanding of your pages and user actions. |
+| POST | `/api/v1/github/webhook` | HMAC | Receive GitHub `pull_request` and default-branch `push` events; both require `X-GitHub-Delivery` (400 without it). State-based `installation` and `installation_repositories` events keep installation records current without a delivery ID. |
 | POST | `/mcp` | MCP key in `Authorization: Bearer ...` | Call the remote MCP tools for one project |
 
 Agent setup uses normal dashboard sign-in and an explicit approval. Approval creates or attaches a project and seals ingest, MCP, and source-map keys to the session. GitHub is an optional later integration. The agent uses only `X-Opslane-Poll-Token` for polling and session actions; expired sessions return 410 before facts or keys. Agent responses use `Cache-Control: no-store`.
@@ -42,8 +42,9 @@ Agent setup uses normal dashboard sign-in and an explicit approval. Approval cre
 | GET | `/api/v1/agent/approve/{sessionID}` | session | Read proposed setup, available projects, suggested match, and bound project progress |
 | POST | `/api/v1/agent/approve/{sessionID}` | session; admin on cloud | Approve a new project or `existing_project_id` owned by the active organization |
 | POST | `/api/v1/agent/approve/{sessionID}/deny` | session; admin on cloud | Decline a pending setup |
+| POST | `/api/v1/agent/github/{sessionID}/install-url` | session; admin on cloud | Create a GitHub App installation URL and callback state for the session's organization |
 | GET | `/api/v1/agent/poll/{sessionID}/state` | poll token | Read server facts and reported progress; `wait=0..30`, `until=event`, `github`, `slack`, or `change` (default) |
-| POST | `/api/v1/agent/poll/{sessionID}/github` | poll token | Validate and attach `{repo}` through the organization's installation or server PAT |
+| POST | `/api/v1/agent/poll/{sessionID}/github` | poll token | Validate and attach `{repo}`. Errors include 400 `repo_not_in_installation` with `add_repo_url`, 400 `github_not_installed` with `github_connect_url`, 409 `github_installation_gone` after retirement, and 503 `github_unreachable` with `Retry-After`. |
 | POST | `/api/v1/agent/poll/{sessionID}/slack` | poll token | Store an encrypted webhook disabled, test delivery, then enable; failed tests remove the disabled destination |
 | POST | `/api/v1/agent/poll/{sessionID}/progress` | poll token | Report SDK/MCP progress or failed/skipped diagnostics for server-derived steps |
 | POST | `/api/v1/agent/poll/{sessionID}/complete` | poll token | Complete onboarding after this session's first event, or return 422 with `missing: ["first_event"]`; an already-onboarded org still needs the event |
@@ -123,8 +124,8 @@ Agent setup uses normal dashboard sign-in and an explicit approval. Approval cre
 | GET | `/api/v1/projects/{projectID}/accounts/{accountID}/incidents` | Issues for one account |
 | GET | `/api/v1/github/setup` | GitHub App install callback |
 | GET | `/api/v1/github/status` | GitHub App status |
-| GET | `/api/v1/github/repos` | List installable repos |
-| PUT | `/api/v1/projects/{projectID}/github` | Set project repo config |
+| GET | `/api/v1/github/repos` | List installable repos; returns typed 400/409 installation errors or 503 `github_unreachable` with `Retry-After` |
+| PUT | `/api/v1/projects/{projectID}/github` | Set project repo config; returns 400 `repo_not_in_installation` with `add_repo_url`, 400 `github_not_installed` with `github_connect_url`, 409 `github_installation_gone`, or 503 `github_unreachable` with `Retry-After` |
 | GET | `/api/v1/projects/{projectID}/github` | Get project repo config |
 | DELETE | `/api/v1/projects/{projectID}/github` | Remove project repo config |
 
