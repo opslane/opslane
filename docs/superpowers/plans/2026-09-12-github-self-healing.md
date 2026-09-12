@@ -10,7 +10,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-12-github-self-healing-design.md`
 
-**Revision:** 2 (after Codex round 1: 24 findings applied; see the change log at the end).
+**Revision:** 3 (Codex round 1: 24 findings; round 2: 21 findings; see the change log at the end).
 
 ## Global Constraints
 
@@ -211,6 +211,7 @@ git commit -m "feat(github): classify gone and suspended installations, expose t
 - Produces:
   - `func (q *Queries) RetireGitHubInstallation(ctx context.Context, installationID int64, orgID string) (bool, error)` — in one transaction: sets `suspended = true` on the row if it exists, and nulls `orgs.github_installation_id` where it equals `installationID` (restricted to `orgID` when non-empty, any org when empty). Returns true when either write changed a row. Idempotent.
   - `func (q *Queries) SetGitHubInstallationSuspended(ctx context.Context, installationID int64, suspended bool) (bool, error)` — flips the flag; returns whether a row existed.
+  - `func (q *Queries) ReactivateGitHubInstallation(ctx context.Context, installationID int64) (bool, error)` — in one transaction: `suspended = false` on the row and, when the row's org has no pointer, restores `orgs.github_installation_id` to this installation. Never overwrites a pointer at a different installation. Returns whether the row existed.
   - `func (q *Queries) ReplaceGitHubInstallationRepos(ctx context.Context, installationID int64, repos []string) (bool, error)`
   - `func (q *Queries) AddGitHubInstallationRepos(ctx context.Context, installationID int64, repos []string) (bool, error)` — set union; incoming duplicates collapsed; existing order preserved.
   - `func (q *Queries) RemoveGitHubInstallationRepos(ctx context.Context, installationID int64, repos []string) (bool, error)`
@@ -338,6 +339,43 @@ func TestRetireGitHubInstallation_LeavesOtherPointerAlone(t *testing.T) {
 	}
 }
 
+func TestReactivateGitHubInstallation_RestoresPointerAfterRetire(t *testing.T) {
+	q := db.New(testPool(t))
+	ctx := context.Background()
+	orgID, installationID := seedInstallation(t, q, []string{"acme/web"})
+	if _, err := q.RetireGitHubInstallation(ctx, installationID, ""); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := q.ReactivateGitHubInstallation(ctx, installationID); err != nil || !ok {
+		t.Fatalf("reactivate: %v %v", ok, err)
+	}
+	if active, _ := q.OrgHasActiveGitHubInstallation(ctx, orgID); !active {
+		t.Fatal("reactivated installation must read active, pointer restored")
+	}
+	// A pointer at another installation is left alone.
+	other := installationID + 1
+	if _, err := q.Pool().Exec(ctx,
+		`INSERT INTO github_app_installations (installation_id, github_org_name, github_org_id, org_id, repos)
+		 VALUES ($1, 'acme', 1, $2, '[]')`, other, orgID); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.SetOrgGitHubInstallation(ctx, orgID, other); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.SetGitHubInstallationSuspended(ctx, installationID, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.ReactivateGitHubInstallation(ctx, installationID); err != nil {
+		t.Fatal(err)
+	}
+	if pointer, _ := q.GetOrgGitHubInstallation(ctx, orgID); pointer != other {
+		t.Fatalf("pointer at another installation must survive reactivation: %d", pointer)
+	}
+	if ok, err := q.ReactivateGitHubInstallation(ctx, installationID+99); err != nil || ok {
+		t.Fatalf("unknown reactivate: %v %v", ok, err)
+	}
+}
+
 func TestPersistInstallation_ReconnectUnsuspends(t *testing.T) {
 	q := db.New(testPool(t))
 	ctx := context.Background()
@@ -401,7 +439,7 @@ func TestGitHubInstallationRepoWrites(t *testing.T) {
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cd packages/ingestion && go test ./db -run 'TestRetireGitHubInstallation|TestPersistInstallation_Reconnect|TestGitHubInstallationRepoWrites' -v`
+Run: `cd packages/ingestion && go test ./db -run 'TestRetireGitHubInstallation|TestReactivateGitHubInstallation|TestPersistInstallation_Reconnect|TestGitHubInstallationRepoWrites' -v`
 Expected: compile error `q.RetireGitHubInstallation undefined`.
 
 - [ ] **Step 3: Implement the helpers**
@@ -438,9 +476,16 @@ func (q *Queries) RetireGitHubInstallation(ctx context.Context, installationID i
 	if err != nil {
 		return false, fmt.Errorf("retire github installation: %w", err)
 	}
-	orgTag, err := tx.Exec(ctx,
-		`UPDATE orgs SET github_installation_id = NULL
-		 WHERE github_installation_id = $1 AND ($2 = '' OR id = $2::uuid)`, installationID, orgID)
+	// Two statements rather than one with `($2 = '' OR id = $2::uuid)`:
+	// Postgres may evaluate the cast before the guard and reject ''::uuid.
+	var orgTag pgconn.CommandTag
+	if orgID == "" {
+		orgTag, err = tx.Exec(ctx,
+			`UPDATE orgs SET github_installation_id = NULL WHERE github_installation_id = $1`, installationID)
+	} else {
+		orgTag, err = tx.Exec(ctx,
+			`UPDATE orgs SET github_installation_id = NULL WHERE github_installation_id = $1 AND id = $2`, installationID, orgID)
+	}
 	if err != nil {
 		return false, fmt.Errorf("clear org github installation: %w", err)
 	}
@@ -448,6 +493,36 @@ func (q *Queries) RetireGitHubInstallation(ctx context.Context, installationID i
 		return false, fmt.Errorf("commit retire installation: %w", err)
 	}
 	return rowTag.RowsAffected()+orgTag.RowsAffected() > 0, nil
+}
+
+// ReactivateGitHubInstallation undoes a retire or suspend: the row is
+// unsuspended and, if its org lost its pointer, the pointer comes back.
+// A pointer already at a different installation is never overwritten.
+func (q *Queries) ReactivateGitHubInstallation(ctx context.Context, installationID int64) (bool, error) {
+	tx, err := q.pool.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("begin reactivate installation: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	var orgID string
+	err = tx.QueryRow(ctx,
+		`UPDATE github_app_installations SET suspended = false, updated_at = now()
+		 WHERE installation_id = $1 RETURNING org_id`, installationID).Scan(&orgID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("reactivate github installation: %w", err)
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE orgs SET github_installation_id = $2 WHERE id = $1 AND github_installation_id IS NULL`,
+		orgID, installationID); err != nil {
+		return false, fmt.Errorf("restore org github installation: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("commit reactivate installation: %w", err)
+	}
+	return true, nil
 }
 
 // SetGitHubInstallationSuspended mirrors GitHub's suspend/unsuspend state.
@@ -542,11 +617,11 @@ func dedupeRepoNames(names []string) []string {
 }
 ```
 
-`encoding/json` and `fmt` are already imported in this file.
+`encoding/json` and `fmt` are already imported in this file; add `"errors"`, `"github.com/jackc/pgx/v5"`, and `"github.com/jackc/pgx/v5/pgconn"` (check which of these `installations.go` already imports).
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `cd packages/ingestion && go test ./db -run 'TestRetireGitHubInstallation|TestPersistInstallation|TestGitHubInstallationRepoWrites' -count=1`
+Run: `cd packages/ingestion && go test ./db -run 'TestRetireGitHubInstallation|TestReactivateGitHubInstallation|TestPersistInstallation|TestGitHubInstallationRepoWrites' -count=1`
 Expected: `ok` (the existing `TestPersistInstallation*` tests still pass).
 
 - [ ] **Step 5: Commit**
@@ -991,8 +1066,9 @@ git commit -m "fix(github): retire a gone installation on first use and point th
 ### Task 5: Repo list, app status, and callbacks stop answering 502
 
 **Files:**
-- Modify: `packages/ingestion/handler/github_oauth.go:784-829` (`ListGitHubRepos`), `:725-782` (`GetGitHubAppStatus`), `:326-361` (install callback), `:224` (generic provider callback), `:603-660` (`applyCombinedGitHubInstallationContext`) and its call site at `:443`
-- Test: `packages/ingestion/handler/github_oauth_test.go` (add two tests), `packages/ingestion/handler/oauth_verify_test.go:224` (502 becomes 503), `packages/ingestion/handler/github_install_callback_test.go` (any 502 expectation becomes 503)
+- Modify: `packages/ingestion/handler/github_oauth.go:784-829` (`ListGitHubRepos`), `:725-782` (`GetGitHubAppStatus`), `:326-361` (install callback), `:224-231` (generic provider callback and `completeOAuthIdentity` error write), `:603-660` (`applyCombinedGitHubInstallationContext`)
+- Modify: `packages/ingestion/handler/oauth_verify.go:65` (502 on a missing pending token) and `:209-214` (second `completeOAuthIdentity` error write)
+- Test: `packages/ingestion/handler/github_oauth_test.go` (add two tests; add `"strings"` to its imports), `packages/ingestion/handler/oauth_verify_test.go:224` (502 becomes 503, plus one new row), `packages/ingestion/handler/github_install_callback_test.go` (any 502 expectation becomes 503; add a gone-installation case)
 
 **Interfaces:**
 - Consumes: Task 3 writer, Task 4 `githubTokenFailure`.
@@ -1062,7 +1138,9 @@ func TestGetGitHubAppStatusReflectsSuspension(t *testing.T) {
 
 If `authTestJWTSecret` or `decodeBody` are not visible from this file, they are defined in `agent_approve_test.go` / `agent_setup_test.go` in the same package; reuse them. If `GetGitHubAppStatus` requires `d.Queries.StoreOAuthLoginStateForOrg` to succeed and the fixture lacks a user id, read `GetGitHubAppStatus` and inject a user id into the request context the way `newSetGitHubConfigRequest` injects `ctxOrgID` (`context.WithValue(ctx, ctxUserID, uuid.NewString())`).
 
-In `oauth_verify_test.go` change the "ordinary exchange failure" row of `TestOAuthCallbackChallengeFailureModes` to `wantStatus: http.StatusServiceUnavailable`.
+In `oauth_verify_test.go` change the "ordinary exchange failure" row of `TestOAuthCallbackChallengeFailureModes` to `wantStatus: http.StatusServiceUnavailable`, and add a row for the empty pending token: `exchangeErr: &auth.PendingVerificationError{PendingAuthenticationToken: ""}`, `wantStatus: http.StatusServiceUnavailable`, `wantBody: "authentication failed"` (read the table's existing rows to match how `exchangeErr` is injected).
+
+In `github_install_callback_test.go`, add a case where the fake GitHub client answers 404 for `/app/installations/{id}/access_tokens` after the ownership check passes: expect 409 with `"code":"github_installation_gone"` and the target org's `github_installation_id` cleared. Model it on the existing callback test that reaches the token call; the target org is `*loginState.TargetOrgID` in the handler.
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
@@ -1114,7 +1192,18 @@ Expected: 502 where 409/503 is wanted; `installed` stays true after suspension.
 
 Keep the existing `installationID` read above it (the install URL generation does not depend on it). Note: `OrgHasActiveGitHubInstallation` joins on the rich row, so an org whose pointer predates rich rows reads `installed: false` and is offered the Install button, which re-links it; that is the intended repair path.
 
-Install callback (`:326-361`): replace each `writeJSONError(w, http.StatusBadGateway, "<msg>")` with `writeGitHubFailure(w, &githubFailure{Status: http.StatusServiceUnavailable, Code: "github_unreachable", Message: "<same msg>"})`. For the `VerifyInstallation` error at `:346`, distinguish:
+Install callback (`:326-361`): the `GetInstallationToken` failure at `:352` must self-heal like every other token call, with the org the login state targets (`*loginState.TargetOrgID`, already loaded at `:266-273`):
+
+```go
+	installationToken, err := gh.GetInstallationToken(appJWT, installationID)
+	if err != nil {
+		release()
+		writeGitHubFailure(w, d.githubTokenFailure(r.Context(), err, installationID, *loginState.TargetOrgID, d.publicOrigin(r)+"/settings#github"))
+		return
+	}
+```
+
+The `ListInstallationRepos` failure at `:358` becomes `writeGitHubFailure(w, classifyGitHubError(err))`. The `ListUserInstallations` failure at `:330` becomes `writeGitHubFailure(w, &githubFailure{Status: http.StatusServiceUnavailable, Code: "github_unreachable", Message: "could not verify GitHub installation ownership"})`, and the OAuth exchange failure at `:324` the same with its own message. For the `VerifyInstallation` error at `:346`, distinguish:
 
 ```go
 	installInfo, err := gh.VerifyInstallation(appJWT, installationID)
@@ -1135,6 +1224,8 @@ Generic provider callback (`:224`): this path serves every identity provider, so
 		writeGitHubFailure(w, &githubFailure{Status: http.StatusServiceUnavailable, Code: "identity_provider_unreachable", Message: "authentication failed"})
 ```
 
+`oauth_verify.go:65` (`startOAuthEmailVerification`, empty pending token) gets the identical provider-neutral 503 line in place of its `StatusBadGateway`.
+
 `applyCombinedGitHubInstallationContext` (`:603-660`): add `var errGitHubUpstream = errors.New("github upstream failure")` near the top of the file and wrap the three network calls:
 
 ```go
@@ -1145,7 +1236,16 @@ Generic provider callback (`:224`): this path serves every identity provider, so
 		}
 		return fmt.Errorf("%w: verify installation: %v", errGitHubUpstream, err)
 	}
-	// ... ownership check unchanged ...
+	if identity.AccessToken == "" {
+		return fmt.Errorf("cannot verify installation ownership")
+	}
+	userInstalls, err := gh.ListUserInstallations(identity.AccessToken)
+	if err != nil {
+		return fmt.Errorf("%w: verify installation ownership: %v", errGitHubUpstream, err)
+	}
+	if !containsInstallation(userInstalls, installationID) {
+		return fmt.Errorf("installation does not belong to the authenticated user")
+	}
 	installationToken, err := gh.GetInstallationToken(appJWT, installationID)
 	if err != nil {
 		return fmt.Errorf("%w: get installation token: %v", errGitHubUpstream, err)
@@ -1172,9 +1272,9 @@ The call at `:443` sits inside `completeOAuthIdentity`, which returns the error 
 	}
 ```
 
-`completeOAuthIdentity` is also called from the email-verification continuation; grep for its other callers (`rg -n "completeOAuthIdentity\(" packages/ingestion/handler`) and add the same branch wherever the result is written to an `http.ResponseWriter`.
+`completeOAuthIdentity` is also called from the email-verification continuation in `oauth_verify.go:209-214`; add the same `errors.Is(err, errGitHubUpstream)` branch there, keeping its `clearOAuthVerificationCookie(w, r)` call before the 503 write.
 
-Afterwards: `grep -n StatusBadGateway packages/ingestion/handler/github_oauth.go packages/ingestion/handler/github_settings.go packages/ingestion/handler/agent_session_routes.go` must print nothing.
+Afterwards: `grep -n StatusBadGateway packages/ingestion/handler/github_oauth.go packages/ingestion/handler/github_settings.go packages/ingestion/handler/agent_session_routes.go packages/ingestion/handler/oauth_verify.go` must print nothing.
 
 - [ ] **Step 4: Run the tests**
 
@@ -1184,7 +1284,7 @@ Expected: `ok`. Any callback test that asserted 502 now asserts 503.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add packages/ingestion/handler/github_oauth.go packages/ingestion/handler/github_oauth_test.go packages/ingestion/handler/oauth_verify_test.go packages/ingestion/handler/github_install_callback_test.go
+git add packages/ingestion/handler/github_oauth.go packages/ingestion/handler/github_oauth_test.go packages/ingestion/handler/oauth_verify.go packages/ingestion/handler/oauth_verify_test.go packages/ingestion/handler/github_install_callback_test.go
 git commit -m "fix(github): repo list, app status, and callbacks answer 503 or a typed 4xx, never 502"
 ```
 
@@ -1288,6 +1388,14 @@ func TestHandleWebhook_InstallationSuspendUnsuspendCreatedAndPermissions(t *test
 	assertWebhookStatus(t, send("unsuspend", ""), "applied")
 	if active, _ := queries.OrgHasActiveGitHubInstallation(ctx, orgID); !active {
 		t.Fatal("unsuspended installation must read active again")
+	}
+	// A retire (on-use 404 or a deleted webhook) clears the org pointer; unsuspend must restore it.
+	if _, err := queries.RetireGitHubInstallation(ctx, installationID, ""); err != nil {
+		t.Fatal(err)
+	}
+	assertWebhookStatus(t, send("unsuspend", ""), "applied")
+	if active, _ := queries.OrgHasActiveGitHubInstallation(ctx, orgID); !active {
+		t.Fatal("unsuspend after retire must restore the org pointer")
 	}
 	assertWebhookStatus(t, send("created", `,"repositories":[{"full_name":"acme/api"},{"full_name":"acme/web"}]`), "applied")
 	if got := webhookRepos(t, queries, installationID); got != `["acme/api", "acme/web"]` {
@@ -1458,7 +1566,7 @@ func (d *Dependencies) handleInstallationWebhook(w http.ResponseWriter, r *http.
 	case "suspend":
 		_, err = d.Queries.SetGitHubInstallationSuspended(ctx, id, true)
 	case "unsuspend":
-		_, err = d.Queries.SetGitHubInstallationSuspended(ctx, id, false)
+		_, err = d.Queries.ReactivateGitHubInstallation(ctx, id)
 	case "created":
 		_, err = d.Queries.ReplaceGitHubInstallationRepos(ctx, id, repoNames(event.Repositories))
 	case "new_permissions_accepted":
@@ -1618,8 +1726,8 @@ const STEP_ORDER: AgentStepName[] = ['approve', 'install_sdk', 'first_event', 'g
 
 - [ ] **Step 4: Run the tests**
 
-Run: the commands from Step 2 plus `cd packages/dashboard && pnpm exec vue-tsc --noEmit`, and apply the migration twice to the disposable database to prove idempotency (boot the ingestion binary against it twice, or `psql -f` twice).
-Expected: all pass; second apply is a no-op.
+Run: the commands from Step 2 plus `cd packages/dashboard && pnpm exec vue-tsc --noEmit`, then `DATABASE_URL=<disposable db> scripts/check-migration-reapply.sh` (the ingestion binary does not run migrations; Compose's `migrate` service and this script do).
+Expected: all pass; the reapply check reports 076 as a no-op on the second run.
 
 - [ ] **Step 5: Commit**
 
@@ -1796,9 +1904,11 @@ Reset `githubAddRepoUrl.value = ''` wherever `githubError.value = ''` is reset. 
 <a v-if="safeUrl(githubAddRepoUrl, GITHUB_PR_URL_OPTIONS)" :href="safeUrl(githubAddRepoUrl, GITHUB_PR_URL_OPTIONS)" target="_blank" rel="noopener" class="text-sm text-accent hover:underline" data-testid="github-add-repo-link">Add the repository on GitHub</a>
 ```
 
-`SetupWizard.vue`: the same `@load-error` handler wired to its own status loader (the function that assigns `githubAppStatus.value` around line 249), so a gone installation flips the wizard back to the Install button.
+`SetupWizard.vue`: the same `@load-error` handler wired to its own status loader (the function that assigns `githubAppStatus.value` around line 249), so a gone installation flips the wizard back to the Install button. Its `attachRepo` (`:292-300`) gets the same catch as Settings: on `github_installation_gone` reload status; on `repo_not_in_installation` keep `err.details.add_repo_url` in a `wizardAddRepoUrl` ref and render it next to the wizard's repo error with `safeUrl(..., GITHUB_PR_URL_OPTIONS)` and `data-testid="wizard-add-repo-link"`.
 
-Add a Settings test (in `packages/dashboard/src/views/Settings.test.ts`, following its existing mocking style): mock the connect call `api.ts` exposes for `PUT /projects/{id}/github` to reject with `new APIError(400, 'cannot see acme/web', 'repo_not_in_installation', { add_repo_url: 'https://github.com/settings/installations/7' })`, click connect, and assert `[data-testid="github-add-repo-link"]` has that href; then reject with `new APIError(400, 'x', 'repo_not_in_installation', { add_repo_url: 'https://evil.test/x' })` and assert the link is absent.
+Both view test files mock the whole API module (`Settings.test.ts:23` with `vi.mock('../api', ...)`, `setup-wizard.test.ts:24` with `vi.mock('../../api', () => api)`), so the views' `import { APIError } from '../api'` resolves to the mock. Add to each mock factory one `APIError` class with the same constructor shape (`status, message, code?, details?`) and, in `Settings.test.ts`, a `listGitHubRepos: vi.fn().mockResolvedValue([])` so an installed `RepoSelector` can mount. Construct every rejected value in those tests with the mock's `APIError`, never the real one.
+
+Add a Settings test (in `packages/dashboard/src/views/Settings.test.ts`, following its existing mocking style): mock the connect call `api.ts` exposes for `PUT /projects/{id}/github` to reject with `new APIError(400, 'cannot see acme/web', 'repo_not_in_installation', { add_repo_url: 'https://github.com/settings/installations/7' })`, click connect, and assert `[data-testid="github-add-repo-link"]` has that href; then reject with `new APIError(400, 'x', 'repo_not_in_installation', { add_repo_url: 'https://evil.test/x' })` and assert the link is absent; then reject with `new APIError(409, 'gone', 'github_installation_gone')` and assert the status loader was called again. Add the mirror of the first and third cases to `setup-wizard.test.ts` against `attachRepo`.
 
 - [ ] **Step 4: Run the tests**
 
@@ -1844,12 +1954,20 @@ Change the cleanup bullet to reference step 11:
 - Whenever you stop for good before step 11 returns a 200, run `rm -rf .opslane-setup` first so no keys stay on disk (except a 422 in step 11, which sends you back to step 5 with the files intact).
 ```
 
-- [ ] **Step 2: Preflight snapshot (step 2)**
+- [ ] **Step 2: Preflight snapshot and `bash -e` hardening of the existing helpers**
 
-In step 2, right after `umask 077; mkdir -p .opslane-setup; ...`, add on its own line inside the same code block:
+In step 2, split the first line of the code block so the snapshot is taken before `.gitignore` is touched (otherwise `.gitignore` reads as pre-modified and step 10 refuses to commit the ignore rules setup added):
 
 ```bash
-git status --porcelain > .opslane-setup/pre-status.txt 2>/dev/null || : > .opslane-setup/pre-status.txt   # files already modified before setup; step 10 never stages these
+umask 077; mkdir -p .opslane-setup
+git status --porcelain > .opslane-setup/pre-status.txt 2>/dev/null || : > .opslane-setup/pre-status.txt   # the user's own uncommitted files; step 10 never stages these
+grep -qx '.opslane-setup' .gitignore 2>/dev/null || echo '.opslane-setup' >> .gitignore
+```
+
+Harden every capture that already exists in the runbook, because a harness may run each block under `bash -e` and an early exit leaves keys on disk: in step 3 `code=$(opslane_poll '?wait=30' || true)`; in step 5 `code=$(opslane_state '?wait=30&until=event' || true)`; the step-6 install wait `opslane_state '?wait=30'` loop the same; every `$(opslane_field ...)` inside a `case`/`if` gets `|| true`. Change the `opslane_progress` helper so its diagnostic never lands on stdout (step 6 dispatches on the function's stdout):
+
+```bash
+opslane_progress() { c=$(opslane_post progress "step=$1" "status=$2" "note=$3" || true); [ "$c" = "204" ] || echo "progress report failed: HTTP $c" >&2; }
 ```
 
 - [ ] **Step 3: Rewrite step 6**
@@ -1894,12 +2012,12 @@ echo "$result"
 Act on the word, then re-run the two `result=` lines after the human answers (at most three human rounds; on the fourth pause, `opslane_progress github failed "<last pause reason>"` and go to step 7):
 
 - `attached`: read the state once more; only if `github_connected` is True say "GitHub is connected to `<owner/repo>`." Go to step 7.
-- `pause_add_repo`: STOP and say: "Opslane's GitHub App cannot see `<owner/repo>`. Open `<add_repo_url from .opslane-setup/last.json, or github_connect_url if it is empty>`, add the repository under Repository access, save, then tell me." Wait, then re-run.
+- `pause_add_repo`: STOP and say: "Opslane's GitHub App cannot see `<owner/repo>`. Open `<add_repo_url from .opslane-setup/last.json; if it is empty, refresh the state with opslane_state '' and use its github_connect_url>`, add the repository under Repository access, save, then tell me." Wait, then re-run.
 - `pause_install`: STOP and say: "Install the Opslane GitHub App for `<owner/repo>` at `<github_connect_url>`, then tell me." Wait, then re-run.
 - `pause_reinstall`: STOP and say: "The GitHub App installation Opslane knew about was removed on GitHub. Install it again at `<github_connect_url>`, then tell me." Wait, then re-run.
 - `failed`: show the recorded note and go to step 7.
 
-Read the URLs with `opslane_field last add_repo_url` and `opslane_field last github_connect_url`; they are not secrets.
+Read the URLs with `opslane_field last add_repo_url` (400 responses) and `opslane_field last github_connect_url` (400 `github_not_installed` and 409 responses); `opslane_field state github_connect_url` after a fresh `opslane_state ''` is the fallback. None of them is a secret.
 ````
 
 - [ ] **Step 4: Add step 10 (pull request) and renumber Finish to 11**
@@ -1911,42 +2029,51 @@ Insert before the Finish section:
 
 Say: "I'll commit the Opslane setup on a branch and open a pull request. OK?" Wait for yes. On no, or if this directory is not a git repository with an `origin` remote: `opslane_progress pull_request skipped "<why>"` and go to step 11.
 
-Stage only files this runbook created or changed: the package manifest and lockfile, the init snippet or provider component, `next.config.*` or `vite.config.*`, the build script, `.gitignore`, and the file where the test button was removed. Never stage the env file or `.opslane-setup/`. A file that already appeared in `.opslane-setup/pre-status.txt` had the user's own uncommitted changes before setup: do not stage it, list it, and ask the user to commit it themselves.
+Stage only files this runbook created or changed: the package manifest and lockfile, the init snippet or provider component, `next.config.*` or `vite.config.*`, the build script, `.gitignore`, and the file where the test button was removed. Never stage the env file or `.opslane-setup/`. A file that already appeared in `.opslane-setup/pre-status.txt` had the user's own uncommitted changes before setup: do not stage it, list it, and ask the user to commit it themselves. If the index already holds staged changes of the user's own, do not commit at all: `git commit --only` still writes only the named paths, but a dirty index is a sign the user is mid-work.
 
 ```bash
 pr_fail() { opslane_progress pull_request failed "$1"; echo "$1"; }
+files=(<exact paths, one per array element, quoted>)
 branch=opslane-setup
 if git show-ref --quiet "refs/heads/$branch" || git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
   branch="opslane-setup-$(date +%Y%m%d-%H%M)"   # never reuse a branch that may hold unrelated commits
 fi
-skip=""; stage=""
-for f in <exact paths, space separated>; do
-  if grep -Fq -- " $f" .opslane-setup/pre-status.txt; then skip="$skip $f"; else stage="$stage $f"; fi
+skip=(); stage=()
+for f in "${files[@]}"; do
+  if grep -Fq -- " $f" .opslane-setup/pre-status.txt; then skip+=("$f"); else stage+=("$f"); fi
 done
-[ -n "$skip" ] && echo "Not staged (had your own changes before setup):$skip"
+[ "${#skip[@]}" -gt 0 ] && printf 'Not staged (had your own changes before setup): %s\n' "${skip[@]}"
 pushed=0
-if [ -z "$stage" ]; then pr_fail "nothing safe to stage"; else
-  if git checkout -b "$branch" \
-     && git add -- $stage \
-     && git commit -m "Add Opslane error monitoring" -m "Installs @opslane/sdk, initializes it with the public ingest key from the environment, and uploads source maps on production builds. Set VITE_OPSLANE_API_KEY (or NEXT_PUBLIC_OPSLANE_API_KEY) and the environment variable in the deploy." \
-     && git push -u origin "$branch"; then pushed=1; else pr_fail "git failed: see output above"; fi
-fi
+if ! git diff --cached --quiet; then pr_fail "the index already has staged changes; commit or unstage them first"
+elif [ "${#stage[@]}" -eq 0 ]; then pr_fail "nothing safe to stage"
+elif git checkout -b "$branch" \
+     && git add -- "${stage[@]}" \
+     && git commit --only -- "${stage[@]}" -m "Add Opslane error monitoring" -m "Installs @opslane/sdk, initializes it with the public ingest key from the environment, and uploads source maps on production builds. Set VITE_OPSLANE_API_KEY (or NEXT_PUBLIC_OPSLANE_API_KEY) and the environment variable in the deploy." \
+     && git push -u origin "$branch"; then pushed=1
+else pr_fail "git failed: see output above"; fi
 if [ "$pushed" = 1 ]; then
   if gh auth status >/dev/null 2>&1; then
     pr_url=$(gh pr create --title "Add Opslane error monitoring" --body "Installs the Opslane SDK and source-map upload. The deploy needs the public key and environment variables described in the setup." --head "$branch" 2>&1 | tail -1 || true)
-    case "$pr_url" in https://*) opslane_progress pull_request done "$pr_url"; echo "Opened $pr_url" ;; *) pr_fail "gh pr create: $pr_url" ;; esac
+    case "$pr_url" in https://github.com/*) opslane_progress pull_request done "$pr_url"; echo "Opened $pr_url" ;; *) pr_fail "gh pr create: $pr_url" ;; esac
   else
     remote=$(git remote get-url origin 2>/dev/null || true)
-    slug=$(printf '%s' "$remote" | sed -E 's#^(git@github\.com:|https://github\.com/)##; s#\.git$##')
+    slug=""
     case "$remote" in
-      *github.com*) compare="https://github.com/$slug/compare/$branch?expand=1"; opslane_progress pull_request done "branch $branch pushed; open $compare"; echo "Open a pull request: $compare" ;;
-      *) opslane_progress pull_request done "branch $branch pushed"; echo "Open a pull request for branch $branch on your Git host." ;;
+      git@github.com:*/*)          slug=${remote#git@github.com:} ;;
+      ssh://git@github.com/*/*)    slug=${remote#ssh://git@github.com/} ;;
+      https://github.com/*/*)      slug=${remote#https://github.com/} ;;   # a remote with user:pass@ does not match this pattern and is never echoed
     esac
+    slug=${slug%.git}
+    if printf '%s' "$slug" | grep -Eq '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'; then
+      compare="https://github.com/$slug/compare/$branch?expand=1"; opslane_progress pull_request done "branch $branch pushed; open $compare"; echo "Open a pull request: $compare"
+    else
+      opslane_progress pull_request done "branch $branch pushed"; echo "Open a pull request for branch $branch on your Git host."
+    fi
   fi
 fi
 ```
 
-Never retry a push that was rejected as non-fast-forward; report it. Never force-push.
+Never retry a push that was rejected as non-fast-forward; report it. Never force-push. Never print the remote URL itself.
 ````
 
 Rename `## 10. Finish` to `## 11. Finish` and replace its code block and closing paragraph with:
@@ -1954,17 +2081,19 @@ Rename `## 10. Finish` to `## 11. Finish` and replace its code block and closing
 ````markdown
 ```bash
 code=$(opslane_state '' || true)   # fresh facts and step notes for the summary
-summary=$(python3 - <<'PY'
-import json
+if [ "$code" != "200" ]; then echo "could not read the final state: HTTP $code"; rm -rf .opslane-setup; exit 1; fi
+summary=$(python3 - <<'PY' || true
+import json, re
 s=json.load(open('.opslane-setup/state.json'))
 facts={'github':s.get('github_connected'),'slack':s.get('slack_connected'),'sourcemaps':s.get('sourcemaps_uploaded'),'first_event':s.get('has_events')}
 for step in ['install_sdk','first_event','github','slack','sourcemaps','mcp','pull_request']:
     rec=(s.get('steps') or {}).get(step) or {}
     status='done' if facts.get(step) else rec.get('status','pending')
-    note=rec.get('note','')
+    note=re.sub(r'[\x00-\x1f\x7f]+', ' ', str(rec.get('note',''))).strip()
     print(f"- {step}: {status}" + (f" ({note})" if note else ''))
 PY
 )
+[ -n "$summary" ] || { echo "could not build the summary from state.json"; rm -rf .opslane-setup; exit 1; }
 code=$(opslane_post complete || true)
 case "$code" in
   200) rm -rf .opslane-setup; printf '%s\n' "$summary" ;;
@@ -1989,8 +2118,8 @@ In `docs/reference/http-routes.md`:
 
 - [ ] **Step 6: Run the docs checks and commit**
 
-Run: `pnpm docs:check`. Then extract the `opslane_attach_github` function and the step-10 block into scratch files and run `bash -n` on each; both must parse.
-Expected: green, no syntax errors.
+Run: `pnpm docs:check`. Then extract the `opslane_attach_github` function, the step-10 block, and the step-11 block into scratch files and run `bash -n` on each; all must parse. Finally, grep the runbook for captures without a fallback: `grep -nE '\$\((opslane_(poll|state|post|field)[^)]*)\)' docs-site/public/INSTALL.md | grep -v '|| true'` must print nothing.
+Expected: green, no syntax errors, no unguarded captures.
 
 ```bash
 git add docs-site/public/INSTALL.md docs-site/public/SKILL.md docs/reference/http-routes.md
@@ -2007,14 +2136,15 @@ git commit -m "docs(runbook): resumable GitHub step, honest summary, and a pull 
 - [ ] **Step 1: Repository gate (under `bash -e`, every check is explicit)**
 
 ```bash
-set -e
+set -euo pipefail
 export DATABASE_URL=<disposable db>      # never the shared verify db: its sweepers steal job leases
 export MINIO_ENDPOINT=http://localhost:<minio port> MINIO_ACCESS_KEY=minio MINIO_SECRET_KEY=minio12345 MINIO_BUCKET=opslane-replays
 export REPLAY_STORE_ENDPOINT="$MINIO_ENDPOINT" REPLAY_STORE_PUBLIC_ENDPOINT="$MINIO_ENDPOINT" REPLAY_STORE_ACCESS_KEY=minio REPLAY_STORE_SECRET_KEY=minio12345 REPLAY_STORE_BUCKET=opslane-replays
 pnpm install --frozen-lockfile
 pnpm -r build
 pnpm test
-( cd packages/ingestion && go build ./... && go vet ./... && go test ./... -v 2>&1 | tee /tmp/go-test.log | grep -E '^(ok|FAIL)' )
+( cd packages/ingestion && go build ./... && go vet ./... && go test ./... -v > /tmp/go-test.log 2>&1 )   # the exit status is go test's own
+grep -E '^(ok|FAIL)' /tmp/go-test.log
 skips=$(grep -c -- '--- SKIP' /tmp/go-test.log || true); [ "$skips" = "0" ] || { echo "Go skips: $skips"; exit 1; }
 docker compose config --quiet
 if rg -n StatusBadGateway packages/ingestion/handler/github_*.go packages/ingestion/handler/agent_*.go; then echo "502 still emitted on a GitHub path"; exit 1; fi
@@ -2026,9 +2156,9 @@ App-mode token failures are covered by the handler tests with a fake GitHub clie
 
 1. Register a session (`POST /api/v1/agent/setup`), approve it with a minted HS256 cookie (`JWT_SECRET` from `.verify/verify.env`, the same technique the 2026-09-12 verify run used), and read `state` to confirm `github_installed: false`.
 2. Insert a `github_app_installations` row for that org with an ID GitHub does not know and point `orgs.github_installation_id` at it; read `state` again: `github_installed: true`.
-3. Send a signed `installation` `deleted` event for that ID (HMAC-SHA256 of the body with `smoke-secret`, header `X-Hub-Signature-256: sha256=<hex>`); expect `{"status":"applied"}`.
+3. Send a signed `installation` `deleted` event for that ID: headers `X-GitHub-Event: installation`, `X-GitHub-Delivery: <uuid>`, `X-Hub-Signature-256: sha256=<hex HMAC-SHA256 of the body with smoke-secret>`; expect `{"status":"applied"}`.
 4. Read `state`: `github_installed: false`; read `orgs.github_installation_id`: NULL; the row is suspended.
-5. Send `installation_repositories` `added` for the same ID with one repo: the row still exists (suspended), so it is known; expect `applied` and the repo appended. Send the same for an unknown ID and expect `ignored`.
+5. Send `installation_repositories` `added` (header `X-GitHub-Event: installation_repositories`) for the same ID with one repo: the row still exists (suspended), so it is known; expect `applied` and the repo appended. Send the same for an unknown ID and expect `ignored`. Then send `installation` `unsuspend` for the retired ID and confirm `state` reads `github_installed: true` again.
 
 Record the transcript under `.verify/runs/<id>/evidence/`.
 
@@ -2045,3 +2175,5 @@ Open the PR with the release checklist: migration 076 applies on ingestion boot 
 ## Change log
 
 **Revision 2 (Codex round 1, 24 findings):** migration 076 and `AgentStepNames` for `pull_request` (1); every exact dashboard sequence updated plus a `pull_request` assertion (2); `PersistInstallation` un-suspends on conflict with a reconnect test (3); `RetireGitHubInstallation` is one transaction, org-scoped for on-use healing, and clears a legacy pointer without a rich row; retirement failure answers 500 (4); `GetGitHubAppStatus` reads active installations (5); `ListGitHubRepos` no-installation branch is typed (6); `RepoSelector` emits `load-error`, Settings and SetupWizard reload status (7); combined-install upstream errors become 503 via `errGitHubUpstream`, callback `VerifyInstallation` splits gone from unreachable (8); generic provider callback gets a provider-neutral 503 and its test moves (9); webhook branches decide known/unknown by lookup, switch on every action, and log unknown IDs (10); API error test follows the localStorage-stub + dynamic-import pattern (11); GitHub waits are pauses that keep `.opslane-setup/`, with a three-round cap (12); every capture ends in `|| true`, curl failures read `000`, `retry_after` defaults (13); the finish step captures a recorded summary before deleting state (14); step 10 stages only files absent from the preflight snapshot (15); an existing `opslane-setup` branch is never reused and every git/gh command records failure (16); compare URL derived from the remote, PR URL captured from `gh` (17); gate uses explicit `if rg`, verbose Go output with a skip count, and storage variables (18); smoke exercises the webhook path with a real session and signed events (19); repo adds dedupe input (20); two-tries rule yields to step loops and `attached` is explicit (21); add-repo link passes `GITHUB_PR_URL_OPTIONS` with a rejection test (22); route doc names `PUT /api/v1/projects/{projectID}/github` and the webhook delivery-id caveat (23); `TargetType` dropped (24).
+
+**Revision 3 (Codex round 2, 21 findings):** `ReactivateGitHubInstallation` restores the org pointer so an `unsuspend` after a retire reconnects (A1); the install callback's token failure self-heals with the login state's target org (A2); `ListUserInstallations` is wrapped in `errGitHubUpstream` (A3); `oauth_verify.go:65` gets the provider-neutral 503 and a test row (A4); `"strings"` import named for the OAuth test file (A5); the second `completeOAuthIdentity` writer in `oauth_verify.go` is in scope and staged (A6); retire uses two statements instead of `''::uuid` (A7); gate runs `go test` alone and checks its own exit, then greps the log (B1); step 10 aborts on a dirty index and commits with `--only` (B2); staging uses arrays and quoted expansions (B3); the preflight snapshot precedes the `.gitignore` edit (B4); every pre-existing capture in steps 3, 5, 6 and `opslane_progress` gets `|| true`, with a grep that proves it (B5); step 11 requires a 200 state read and a non-empty summary before `complete` (B6); `pause_add_repo` falls back to `state.json` for `github_connect_url` (B7); view test mocks gain `APIError` and `listGitHubRepos` (B8); smoke commands carry `X-GitHub-Event` and `X-GitHub-Delivery` (B9); compare URL comes from a strict parse of three GitHub remote forms and the remote is never printed (B10); SetupWizard's `attachRepo` handles both codes with tests (B11); notes are whitespace-collapsed in the summary (B12); `opslane_progress` diagnostics go to stderr (B13); migration reapply uses `scripts/check-migration-reapply.sh` (B14).
