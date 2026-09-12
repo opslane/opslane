@@ -23,8 +23,10 @@ type agentFacts struct {
 	IssuesURL           string                   `json:"issues_url"`
 	GitHubConnected     bool                     `json:"github_connected"`
 	GitHubInstalled     bool                     `json:"github_installed"`
+	GitHubRepoAccess    bool                     `json:"github_repo_access"`
 	GitHubMode          string                   `json:"github_mode"`
 	GitHubConnectURL    string                   `json:"github_connect_url"`
+	GitHubInstallURL    string                   `json:"github_install_url,omitempty"`
 	GitHubRepo          *string                  `json:"github_repo"`
 	SlackConnected      bool                     `json:"slack_connected"`
 	SourcemapsUploaded  bool                     `json:"sourcemaps_uploaded"`
@@ -63,13 +65,20 @@ func (d *Dependencies) agentSessionFacts(r *http.Request, s *db.AgentSession) ag
 	}
 	repoAttached := f.GitHubRepo != nil && *f.GitHubRepo != ""
 	if f.GitHubMode == "app" {
+		f.GitHubInstallURL = origin + "/agent/github/" + s.ID
 		if ok, err := d.Queries.OrgHasActiveGitHubInstallation(ctx, orgID); err == nil && ok {
 			f.GitHubInstalled = true
 		}
-		f.GitHubConnected = f.GitHubInstalled && repoAttached
+		if repoAttached {
+			if ok, err := d.Queries.RepoCoveredByActiveInstallation(ctx, orgID, *f.GitHubRepo); err == nil {
+				f.GitHubRepoAccess = ok
+			}
+		}
+		f.GitHubConnected = f.GitHubInstalled && repoAttached && f.GitHubRepoAccess
 	} else {
 		// PAT mode has no install step: a configured token is the installation.
 		f.GitHubInstalled = strings.TrimSpace(os.Getenv("GITHUB_TOKEN")) != ""
+		f.GitHubRepoAccess = repoAttached
 		f.GitHubConnected = repoAttached
 	}
 	if ok, err := d.Queries.HasEnabledSlackDestination(ctx, projectID); err == nil {

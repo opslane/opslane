@@ -66,6 +66,9 @@ func TestAgentSessionRoutes_ProgressAndState(t *testing.T) {
 	if code, _ := sessionCall(t, a, http.MethodPost, "progress", `{"step":"sourcemaps","status":"failed","note":"no CI access"}`, a.token); code != http.StatusNoContent {
 		t.Fatalf("server-derived failure note must be accepted: %d", code)
 	}
+	if code, _ := sessionCall(t, a, http.MethodPost, "progress", `{"step":"pull_request","status":"done","note":"https://github.com/acme/web/pull/12"}`, a.token); code != http.StatusNoContent {
+		t.Fatalf("pull_request progress: %d", code)
+	}
 	if code, _ := sessionCall(t, a, http.MethodPost, "progress", `{"step":"mcp","status":"nope"}`, a.token); code != http.StatusBadRequest {
 		t.Fatalf("bad status: %d", code)
 	}
@@ -81,6 +84,49 @@ func TestAgentSessionRoutes_ProgressAndState(t *testing.T) {
 	sm, _ := steps["sourcemaps"].(map[string]any)
 	if install["status"] != "running" || sm["status"] != "failed" || sm["note"] != "no CI access" {
 		t.Fatalf("steps in state: %v", out["steps"])
+	}
+}
+
+func TestAgentSessionState_ConnectedRequiresRepoCoverage(t *testing.T) {
+	a := approvedRig(t)
+	a.deps.GitHubAppSlug = "opslane-test"
+	ctx := context.Background()
+	installationID := time.Now().UnixNano()
+	if _, err := a.deps.Queries.Pool().Exec(ctx,
+		`INSERT INTO github_app_installations (installation_id, github_org_name, github_org_id, org_id, repos)
+		 VALUES ($1, 'acme', 1, $2, '["acme/other"]')`, installationID, a.orgID); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = a.deps.Queries.Pool().Exec(context.Background(), `DELETE FROM github_app_installations WHERE installation_id = $1`, installationID)
+	})
+	if err := a.deps.Queries.SetOrgGitHubInstallation(ctx, a.orgID, installationID); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.deps.Queries.SetProjectGitHubConfig(ctx, a.orgID, a.project, "acme/web", "main"); err != nil {
+		t.Fatal(err)
+	}
+
+	code, state := sessionCall(t, a, http.MethodGet, "state", "", a.token)
+	if code != http.StatusOK || state["github_installed"] != true || state["github_repo_access"] != false || state["github_connected"] != false {
+		t.Fatalf("uncovered repo state: %d %v", code, state)
+	}
+	wantInstallURL := "https://app.example.test/agent/github/" + a.pollID
+	if state["github_install_url"] != wantInstallURL {
+		t.Fatalf("github_install_url=%v want %s", state["github_install_url"], wantInstallURL)
+	}
+	if _, err := a.deps.Queries.AddGitHubInstallationRepos(ctx, installationID, []string{"acme/web"}); err != nil {
+		t.Fatal(err)
+	}
+	_, state = sessionCall(t, a, http.MethodGet, "state", "", a.token)
+	if state["github_repo_access"] != true || state["github_connected"] != true {
+		t.Fatalf("covered repo state: %v", state)
+	}
+
+	a.deps.GitHubAppSlug = ""
+	_, state = sessionCall(t, a, http.MethodGet, "state", "", a.token)
+	if _, present := state["github_install_url"]; present {
+		t.Fatalf("PAT mode must omit github_install_url: %v", state)
 	}
 }
 

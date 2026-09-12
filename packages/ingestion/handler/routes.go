@@ -73,6 +73,7 @@ func NewRouterWithPool(deps *Dependencies, pool *pgxpool.Pool) *chi.Mux {
 	r.With(deps.AuthenticateUserSession).Get("/api/v1/agent/approve/{sessionID}", deps.AgentApproveInfo)
 	r.With(deps.AuthenticateUserSession, deps.RequireRoleIfCloud("admin")).Post("/api/v1/agent/approve/{sessionID}", deps.AgentApprove)
 	r.With(deps.AuthenticateUserSession, deps.RequireRoleIfCloud("admin")).Post("/api/v1/agent/approve/{sessionID}/deny", deps.AgentDeny)
+	r.With(deps.AuthenticateUserSession, deps.RequireRoleIfCloud("admin")).Post("/api/v1/agent/github/{sessionID}/install-url", deps.AgentGitHubInstallURL)
 
 	r.With(deps.AgentSessionAuth).Get("/api/v1/agent/poll/{sessionID}/state", deps.AgentSessionState)
 	r.With(deps.AgentSessionAuth).Post("/api/v1/agent/poll/{sessionID}/github", deps.AgentSessionGitHub)
