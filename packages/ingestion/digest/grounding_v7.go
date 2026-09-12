@@ -8,20 +8,20 @@ import (
 // Keep these token and count rules aligned with the TypeScript writer.
 const v7NumberPattern = `(?:\p{Nd}+|\b(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|million|billion)\b)`
 const v7CustomerNoun = `(?:users?|people|persons?|sessions?|recordings?|accounts?|customers?|visits?)\b`
-const v7CustomerModifier = `(?:affected|impacted|active|unique|distinct|identified|anonymous|paying|registered|new|returning|end)`
 
 var v7Number = regexp.MustCompile(`(?i)` + v7NumberPattern)
 
-// Match customer noun phrases, not arbitrary words between a number and a
-// customer noun: "3 clicks for users" describes interactions, not users.
-var v7CustomerCount = regexp.MustCompile(`(?i)` + v7NumberPattern + `\)?(?:[\s-]+` + v7CustomerModifier + `)*[\s-]+` + v7CustomerNoun)
+// Remove explicit interaction quantities only from the customer-count scan.
+// The original prose still undergoes evidence-number validation below.
+var v7InteractionQuantity = regexp.MustCompile(`(?i)` + v7NumberPattern + `[\s-]+(?:clicks?|press(?:es)?|taps?|keystrokes?|swipes?|scrolls?|steps?|attempts?|retr(?:y|ies)|times?|milliseconds?|seconds?|minutes?|hours?|days?|weeks?|months?|years?)\b`)
+var v7CustomerCount = regexp.MustCompile(`(?i)` + v7NumberPattern + `\)?(?:[\s-]+[\p{L}]+){0,3}[\s-]+` + v7CustomerNoun)
 
 // Labels and copulas can put the quantity after its noun, including "users
 // impacted: 3" and "users (3)". Behavioral verbs such as "need" stay separate.
-var v7CustomerCountAfter = regexp.MustCompile(`(?i)\b` + v7CustomerNoun + `(?:[\s-]+(?:count|total|` + v7CustomerModifier + `))*(?:\s*[:=–—]\s*|\s+(?:(?:is|are|was|were|totals?|totaled|numbered|reached|equals?)\s+)?)(?:(?:only|exactly|about|approximately|at\s+least|at\s+most)\s+)?(?:` + v7NumberPattern + `|\(\s*` + v7NumberPattern + `\s*\))`)
+var v7CustomerCountAfter = regexp.MustCompile(`(?i)\b` + v7CustomerNoun + `(?:[\s-]+(?:count|total|affected|impacted))*(?:\s*[:=–—]\s*|\s+(?:(?:is|are|was|were|totals?|totaled|numbered|reached|equals?)\s+)?)(?:(?:only|exactly|about|approximately|at\s+least|at\s+most)\s+)?(?:` + v7NumberPattern + `|\(\s*` + v7NumberPattern + `\s*\))`)
 
 func authoredCustomerCount(value string) string {
-	normalized := normalizeProseNumbers(value)
+	normalized := v7InteractionQuantity.ReplaceAllString(normalizeProseNumbers(value), " ")
 	if claim := v7CustomerCount.FindString(normalized); claim != "" {
 		return claim
 	}

@@ -51,11 +51,17 @@ func TestTicketDigestDistinguishesCustomerNounPhrasesFromInteractionUnits(t *tes
 		{"Sessions impacted = 3.", true},
 		{"3 active users could not save.", true},
 		{"3 unique paying customers could not save.", true},
+		{"3 different users could not save.", true},
+		{"3 frustrated users could not save.", true},
+		{"It takes 3 clicks for 3 users to save.", true},
 		{"(3) affected users could not save.", true},
 		{"It takes 3 clicks for users to save.", false},
 		{"Saving takes 3 clicks per user.", false},
 		{"After 3 clicks, users can save.", false},
 		{"Users need 3 clicks.", false},
+		{"It takes 3 presses for customers to save.", false},
+		{"It takes 3 taps for people to save.", false},
+		{"It takes 3 seconds for users to save.", false},
 	} {
 		t.Run(tc.copy, func(t *testing.T) {
 			_, reject := firstUngroundedNumber(writtenDigestCard{Copy: tc.copy}, c)

@@ -296,16 +296,16 @@ export const CARD_CHECK_REASON_PREFIX = 'card check: ';
 const NUMBER_WORDS = 'zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|million|billion';
 const NUMBER_PATTERN = `(?:\\p{Nd}+|\\b(?:${NUMBER_WORDS})\\b)`;
 const CUSTOMER_NOUN = '(?:users?|people|persons?|sessions?|recordings?|accounts?|customers?|visits?)\\b';
-const CUSTOMER_MODIFIER = '(?:affected|impacted|active|unique|distinct|identified|anonymous|paying|registered|new|returning|end)';
 const CURRENT_NUMBER = new RegExp(NUMBER_PATTERN, 'giu');
 
-// Match customer noun phrases, not arbitrary words between a number and a
-// customer noun: "3 clicks for users" describes interactions, not users.
-const CUSTOMER_COUNT = new RegExp(`${NUMBER_PATTERN}\\)?(?:[\\s-]+${CUSTOMER_MODIFIER})*[\\s-]+${CUSTOMER_NOUN}`, 'iu');
+// Remove explicit interaction quantities only from the customer-count scan.
+// The original prose still undergoes evidence-number validation below.
+const INTERACTION_QUANTITY = new RegExp(`${NUMBER_PATTERN}[\\s-]+(?:clicks?|press(?:es)?|taps?|keystrokes?|swipes?|scrolls?|steps?|attempts?|retr(?:y|ies)|times?|milliseconds?|seconds?|minutes?|hours?|days?|weeks?|months?|years?)\\b`, 'giu');
+const CUSTOMER_COUNT = new RegExp(`${NUMBER_PATTERN}\\)?(?:[\\s-]+[\\p{L}]+){0,3}[\\s-]+${CUSTOMER_NOUN}`, 'iu');
 
 // Labels and copulas can put the quantity after its noun, including "users
 // impacted: 3" and "users (3)". Behavioral verbs such as "need" stay separate.
-const CUSTOMER_COUNT_AFTER = new RegExp(`\\b${CUSTOMER_NOUN}(?:[\\s-]+(?:count|total|${CUSTOMER_MODIFIER}))*(?:\\s*[:=–—]\\s*|\\s+(?:(?:is|are|was|were|totals?|totaled|numbered|reached|equals?)\\s+)?)(?:(?:only|exactly|about|approximately|at\\s+least|at\\s+most)\\s+)?(?:${NUMBER_PATTERN}|\\(\\s*${NUMBER_PATTERN}\\s*\\))`, 'iu');
+const CUSTOMER_COUNT_AFTER = new RegExp(`\\b${CUSTOMER_NOUN}(?:[\\s-]+(?:count|total|affected|impacted))*(?:\\s*[:=–—]\\s*|\\s+(?:(?:is|are|was|were|totals?|totaled|numbered|reached|equals?)\\s+)?)(?:(?:only|exactly|about|approximately|at\\s+least|at\\s+most)\\s+)?(?:${NUMBER_PATTERN}|\\(\\s*${NUMBER_PATTERN}\\s*\\))`, 'iu');
 
 function currentNumbers(value: string): Set<string> {
   return new Set([...normalizeProseNumbers(stripInvisible(value)).matchAll(CURRENT_NUMBER)].map(match => match[0].toLowerCase()));
@@ -326,7 +326,8 @@ function groundCurrentCard(
   const source = truth.ticketId ? [...truth.confirmedNotes ?? [], truth.steps ?? ''].join('\n')
     : [...truth.confirmedNotes ?? [], truth.steps ?? '', truth.observationQuote ?? '', truth.summary, truth.rootCause ?? ''].join('\n');
   for (const [field, evidence] of [[title, source], [copy, source], [steps ?? '', source], [why ?? '', cause]] as const) {
-    if (CUSTOMER_COUNT.test(normalizeProseNumbers(field)) || CUSTOMER_COUNT_AFTER.test(normalizeProseNumbers(field))) throw new Error(`authored customer count for ${identity}`);
+    const countProse = normalizeProseNumbers(field).replace(INTERACTION_QUANTITY, ' ');
+    if (CUSTOMER_COUNT.test(countProse) || CUSTOMER_COUNT_AFTER.test(countProse)) throw new Error(`authored customer count for ${identity}`);
     const allowed = currentNumbers(evidence);
     for (const number of currentNumbers(field)) {
       if (!allowed.has(number)) throw new Error(`ungrounded number ${number} in card for ${identity}`);
