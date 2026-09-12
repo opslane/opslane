@@ -297,6 +297,10 @@ const NUMBER_WORDS = 'zero|one|two|three|four|five|six|seven|eight|nine|ten|elev
 const CURRENT_NUMBER = new RegExp(`\\p{Nd}+|\\b(?:${NUMBER_WORDS})\\b`, 'giu');
 const CUSTOMER_COUNT = new RegExp(`(?:\\p{Nd}+|\\b(?:${NUMBER_WORDS})\\b)(?:[\\s-]+[\\p{L}]+){0,3}[\\s-]+(?:users?|people|persons?|sessions?|recordings?|accounts?|customers?|visits?)\\b`, 'iu');
 
+// Keep noun-first labels/copulas separate from behavioral wording such as
+// "Users need 3 clicks", which does not state a customer count.
+const CUSTOMER_COUNT_AFTER = new RegExp(`\\b(?:users?|people|persons?|sessions?|recordings?|accounts?|customers?|visits?)\\b(?:[\\s-]+(?:count|total|affected)){0,2}(?:\\s*[:=–—]\\s*|\\s+(?:(?:is|are|was|were|totals?|totaled|numbered|reached|equals?)\\s+)?)(?:(?:only|exactly|about|approximately|at\\s+least|at\\s+most)\\s+)?(?:\\p{Nd}+|\\b(?:${NUMBER_WORDS})\\b)`, 'iu');
+
 function currentNumbers(value: string): Set<string> {
   return new Set([...normalizeProseNumbers(stripInvisible(value)).matchAll(CURRENT_NUMBER)].map(match => match[0].toLowerCase()));
 }
@@ -316,7 +320,7 @@ function groundCurrentCard(
   const source = truth.ticketId ? [...truth.confirmedNotes ?? [], truth.steps ?? ''].join('\n')
     : [...truth.confirmedNotes ?? [], truth.steps ?? '', truth.observationQuote ?? '', truth.summary, truth.rootCause ?? ''].join('\n');
   for (const [field, evidence] of [[title, source], [copy, source], [steps ?? '', source], [why ?? '', cause]] as const) {
-    if (CUSTOMER_COUNT.test(field)) throw new Error(`authored customer count for ${identity}`);
+    if (CUSTOMER_COUNT.test(normalizeProseNumbers(field)) || CUSTOMER_COUNT_AFTER.test(normalizeProseNumbers(field))) throw new Error(`authored customer count for ${identity}`);
     const allowed = currentNumbers(evidence);
     for (const number of currentNumbers(field)) {
       if (!allowed.has(number)) throw new Error(`ungrounded number ${number} in card for ${identity}`);

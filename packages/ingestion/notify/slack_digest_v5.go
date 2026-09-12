@@ -96,11 +96,14 @@ func formatSlackDigestV5(payload EventPayload) ([]byte, string, error) {
 		blocks = append(blocks, digestContextBlock(fmt.Sprintf("And %d more on the dashboard", overflow)))
 	}
 	if len(d.MergedThisWeek) > 0 {
-		lines := []string{"*Merged this week*"}
-		for _, m := range d.MergedThisWeek {
-			lines = append(lines, "• "+slackDigestLink(m.PRURL, cleanProse(m.Title, 120)))
+		budget := 50 - len(blocks)
+		if d.DeliveryAlert != "" {
+			budget--
 		}
-		blocks = append(blocks, digestSectionBlock(strings.Join(lines, "\n")))
+		if payload.PreviewNote != "" {
+			budget--
+		}
+		blocks = append(blocks, mergedFooterBlocks(d.MergedThisWeek, budget)...)
 	}
 	if d.DeliveryAlert != "" {
 		blocks = append(blocks, digestContextBlock(cleanProse(d.DeliveryAlert, 300)))
@@ -112,4 +115,28 @@ func formatSlackDigestV5(payload EventPayload) ([]byte, string, error) {
 		return nil, "application/json", err
 	}
 	return out.Bytes(), "application/json", nil
+}
+
+// Leave room below Slack's section limit for an explicit overflow line. Links
+// are indivisible: truncating a section can silently lose PRs or cut markup.
+func mergedFooterBlocks(merged []DigestPRMerged, budget int) []map[string]any {
+	if len(merged) == 0 || budget <= 0 {
+		return nil
+	}
+	blocks := []map[string]any{}
+	current := "*Merged this week*"
+	for i, item := range merged {
+		line := "• " + slackDigestLink(item.PRURL, cleanProse(item.Title, 120))
+		if len([]rune(current))+1+len([]rune(line)) > 2800 {
+			if len(blocks)+1 >= budget || len([]rune(line)) > 2800 {
+				current += fmt.Sprintf("\nAnd %d more merged PRs on the dashboard", len(merged)-i)
+				return append(blocks, digestSectionBlock(current))
+			}
+			blocks = append(blocks, digestSectionBlock(current))
+			current = line
+		} else {
+			current += "\n" + line
+		}
+	}
+	return append(blocks, digestSectionBlock(current))
 }

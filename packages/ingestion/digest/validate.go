@@ -1216,13 +1216,21 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string, s
 		}
 	}
 	if fresh {
-		actionURL := func(group, ticket string, generation int, latest string) (string, error) {
-			return ticketFixActionURL(os.Getenv("DASHBOARD_URL"), run.ProjectID, group, ticket, generation, latest, secret, time.Now())
+		actionURL := func(group, ticket string, generation int) (string, error) {
+			frozen := byIdentity[group]
+			live, ok := actionableByGroup[group]
+			facts := live.TicketFacts
+			if !ok || facts == nil || !facts.OnCard() || facts.TicketID != ticket || facts.Generation != generation || facts.EvidenceVersion != frozen.EvidenceVersion || facts.Steps != frozen.Steps || ticketDigestAction(facts.FixSubstate) != frozen.ValidAction || live.Title != frozen.Title || live.RootCause != frozen.RootCause {
+				return "", unifiedCandidateChangedError{identity: group}
+			}
+			// Attempt lineage is mechanical action state. A fix can complete
+			// during authoring without changing any of the authored facts.
+			return ticketFixActionURL(os.Getenv("DASHBOARD_URL"), run.ProjectID, group, ticket, generation, facts.LatestAttemptID, secret, time.Now())
 		}
 		for i := range generated {
 			card := &generated[i]
 			if card.TicketID != "" && card.Action == "Create fix PR" {
-				card.ActionURL, err = actionURL(card.IncidentID, card.TicketID, card.Generation, byIdentity[card.IncidentID].LatestAttemptID)
+				card.ActionURL, err = actionURL(card.IncidentID, card.TicketID, card.Generation)
 				if err != nil {
 					return err
 				}
@@ -1231,7 +1239,7 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string, s
 		for i := range receiptItems {
 			item := &receiptItems[i]
 			if item.TicketID != "" && item.Action == "Create fix PR" {
-				item.ActionURL, err = actionURL(item.IncidentID, item.TicketID, item.Generation, item.LatestAttemptID)
+				item.ActionURL, err = actionURL(item.IncidentID, item.TicketID, item.Generation)
 				if err != nil {
 					return err
 				}

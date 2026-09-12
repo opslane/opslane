@@ -3,10 +3,13 @@ package digest
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/opslane/opslane/packages/ingestion/auth"
 	ingestiondb "github.com/opslane/opslane/packages/ingestion/db"
 	"github.com/opslane/opslane/packages/ingestion/notify"
+	"net/url"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -175,6 +178,7 @@ func TestKnownProblemDigestFreezeValidateAndMergedFooter(t *testing.T) {
 	run(`UPDATE error_groups SET fix_substate='resolved',explained_signal_ids=jsonb_build_array($2::text,$3::text,$4::text,$5::text) WHERE id=$1`, group, ids[0], ids[1], ids[2], ids[3])
 	errorGroup := insert(`INSERT INTO error_groups(project_id,environment_id,fingerprint,title,kind,status,first_seen,last_seen,pr_url,pr_number)VALUES($1,$2,'merged-error','An error fixed','error','merged',now(),now(),'https://github.com/acme/shop/pull/999',999)RETURNING id`, p.ID, env)
 	run(`INSERT INTO pr_outcomes(project_id,error_group_id,pr_number,outcome,github_delivery_id,github_repo,occurred_at)VALUES($1,$2,42,'merged',$2::uuid::text,'acme/shop',now())`, p.ID, errorGroup)
+	run(`INSERT INTO pr_outcomes(project_id,error_group_id,pr_number,outcome,github_delivery_id,github_repo,occurred_at)VALUES($1,$2,43,'merged',$2::uuid::text||'-second','acme/shop',now())`, p.ID, errorGroup)
 	_, cards, err := FreezeCandidates(ctx, pool, p.ID, at.Add(24*time.Hour))
 	if err != nil || len(cards) != 0 {
 		t.Fatalf("resolved cards=%+v error=%v", cards, err)
@@ -184,15 +188,117 @@ func TestKnownProblemDigestFreezeValidateAndMergedFooter(t *testing.T) {
 		t.Fatal(err)
 	}
 	merged, err := mergedThisWeek(ctx, tx, p.ID, time.Now())
-	if err != nil || len(merged) != 2 {
+	if err != nil || len(merged) != 3 {
 		t.Fatalf("merged=%+v error=%v", merged, err)
 	}
-	if merged[0].PRURL != "https://github.com/acme/shop/pull/42" {
+	if merged[0].PRURL != "https://github.com/acme/shop/pull/42" || merged[1].PRURL != "https://github.com/acme/shop/pull/43" {
 		t.Fatalf("error merge linked mutable PR: %+v", merged)
 	}
 	old, err := mergedThisWeek(ctx, tx, p.ID, time.Now().Add(8*24*time.Hour))
 	tx.Rollback(ctx)
 	if err != nil || len(old) != 0 {
 		t.Fatalf("old footer=%+v error=%v", old, err)
+	}
+}
+
+func TestTicketDigestSignsLatestAttemptAfterAuthoringCycle(t *testing.T) {
+	pool := knownProblemPool(t)
+	ctx := context.Background()
+	q := ingestiondb.New(pool)
+	org, err := q.CreateOrg(ctx, "digest-attempt-cycle")
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := "acme/shop"
+	project, err := q.CreateProject(ctx, org.ID, "Shop", &repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	insert := func(sql string, args ...any) string {
+		t.Helper()
+		var id string
+		if err := pool.QueryRow(ctx, sql, args...).Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	run := func(sql string, args ...any) {
+		t.Helper()
+		if _, err := pool.Exec(ctx, sql, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	env := insert(`SELECT id FROM environments WHERE project_id=$1 AND name='production'`, project.ID)
+	ticket := insert(`INSERT INTO friction_tickets(project_id,environment_id,name,control,what_happened,kind,status,live_generation,evidence_version,steps)VALUES($1,$2,'Save stalls','Save','Save stalls','defect','published',1,1,'Click Save.')RETURNING id`, project.ID, env)
+	group := insert(`INSERT INTO error_groups(project_id,environment_id,fingerprint,title,kind,status,first_seen,last_seen,ticket_id,publication_generation,fix_substate,investigation_status,root_cause,actionable_since)VALUES($1,$2,$3,'Save stalls','friction','needs_human',now(),now(),$4,1,'none','done','The handler returns early.',now())RETURNING id`, project.ID, env, "ticket|"+ticket, ticket)
+	sourceJob := insert(`INSERT INTO error_group_jobs(project_id,error_group_id,job_type,status,ticket_id,publication_generation,source_id)VALUES($1,$2,'investigate','completed',$3,1,$2)RETURNING id`, project.ID, group, ticket)
+	run(`INSERT INTO diagnosis_decisions(error_group_id,project_id,job_id,outcome,decision_reason,diagnosis,model,prompt_version)VALUES($1,$2,$3,'code_fix','Fix the handler','{"agentTaskBrief":"Fix the verified Save handler."}','test','7')`, group, project.ID, sourceJob)
+	batch := insert(`INSERT INTO friction_confirm_batches(ticket_id,job_id,manifest,arrival_boundary_at_select,live_generation_at_select,status_at_select,status)VALUES($1,$2,'[]',3,1,'published','finalized')RETURNING id`, ticket, sourceJob)
+	for i := 0; i < 3; i++ {
+		session := fmt.Sprintf("%s-%d", ticket, i)
+		run(`INSERT INTO sessions(id,project_id,environment_id,started_at)VALUES($1,$2,$3,now()-interval '1 hour')`, session, project.ID, env)
+		signal := insert(`INSERT INTO friction_signals(session_id,project_id,environment_id,rule_version,signal_type,fingerprint,page_url_normalized,occurred_at,observation_id,narrative_id)VALUES($1,$2,$3,3,'narrative',$1,'/save',now()-interval '1 hour','o','n')RETURNING id`, session, project.ID, env)
+		run(`INSERT INTO friction_ticket_matches(ticket_id,session_id,project_id,environment_id,arrival_number,source,occurred_at)VALUES($1,$2,$3,$4,$5,'strong',now()-interval '1 hour')`, ticket, session, project.ID, env, i+1)
+		run(`INSERT INTO friction_ticket_match_observations(ticket_id,session_id,signal_id)VALUES($1,$2,$3)`, ticket, session, signal)
+		check := insert(`INSERT INTO friction_check_attempts(batch_id,ticket_id,session_id,outcome,signal_ids,note,model)VALUES($1,$2,$3,'confirmed',jsonb_build_array($4::text),'Save ignores clicks.','test')RETURNING id`, batch, ticket, session, signal)
+		run(`INSERT INTO friction_checks(ticket_id,session_id,attempt_id,outcome)VALUES($1,$2,$3,'confirmed')`, ticket, session, check)
+	}
+	run(`UPDATE error_groups SET explained_signal_ids=(SELECT jsonb_agg(signal_id::text) FROM friction_ticket_match_observations WHERE ticket_id=$2) WHERE id=$1`, group, ticket)
+	seedDestination(t, pool, project.ID, []string{"digest.daily"})
+	runID, candidates, err := FreezeCandidates(ctx, pool, project.ID, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates) != 1 || candidates[0].LatestAttemptID != "" || candidates[0].ValidAction != "Create fix PR" {
+		t.Fatalf("frozen candidates=%+v", candidates)
+	}
+	frozen := candidates[0]
+	// A real fix is admitted and fails while the writer holds the frozen facts.
+	job, err := q.TriggerFixJob(ctx, project.ID, group, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	latest := insert(`SELECT fix_attempt_id FROM error_group_jobs WHERE id=$1`, job)
+	run(`UPDATE friction_fix_attempts SET status='failed' WHERE id=$1`, latest)
+	run(`UPDATE error_group_jobs SET status='completed' WHERE id=$1`, job)
+	run(`UPDATE error_groups SET status='needs_human',fix_substate='none',terminal_fix_job_id=$2 WHERE id=$1`, group, job)
+	payload, err := json.Marshal(writtenDigestPayload{Included: []writtenDigestCard{{ErrorGroupID: group, Title: "Save stalls", Copy: "Save ignores clicks.", Steps: frozen.Steps, Why: frozen.RootCause}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run(`UPDATE digest_runs SET status='written',writer_payload=$2 WHERE id=$1`, runID, payload)
+	secret := []byte("digest-cycle-intent-secret-at-least-32-bytes")
+	t.Setenv("DASHBOARD_URL", "https://app.example")
+	if err := ValidateAndPublish(ctx, pool, runID, secret); err != nil {
+		t.Fatal(err)
+	}
+	published := renderedEvent(t, pool, runID)
+	if len(published.Digest.GeneratedCards) != 1 {
+		t.Fatalf("authored card was lost: %+v", published.Digest)
+	}
+	link, err := url.Parse(published.Digest.GeneratedCards[0].ActionURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims, err := auth.VerifyTicketFixIntent(secret, link.Query().Get("fixIntent"), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claims.LatestAttemptID != latest {
+		t.Fatalf("link latest attempt=%q want %q; frozen=%q", claims.LatestAttemptID, latest, frozen.LatestAttemptID)
+	}
+	body, _, err := notify.FormatSlack(published)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), link.Query().Get("fixIntent")) {
+		t.Fatalf("Slack altered signed intent: %s", body)
+	}
+	expectation := ingestiondb.TicketFixExpectation{TicketID: claims.TicketID, Generation: claims.Generation, LatestAttemptID: claims.LatestAttemptID, ExpiresAt: claims.ExpiresAt}
+	if _, err := q.TriggerFixJob(ctx, project.ID, group, "", expectation); err != nil {
+		t.Fatalf("fresh digest intent was inadmissible: %v", err)
+	}
+	if _, err := q.TriggerFixJob(ctx, project.ID, group, "", expectation); !errors.Is(err, ingestiondb.ErrNotInvestigated) {
+		t.Fatalf("reused digest intent=%v", err)
 	}
 }

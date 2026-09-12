@@ -29,8 +29,11 @@ describe('v7 ticket writer', () => {
     for (const key of ['action', 'claimedUsers', 'accounts', 'prUrl']) expect(result.included[0]).not.toHaveProperty(key);
   });
   it.each(['3 users struggled.', 'six affected users struggled.', '3 sessions were affected.',
-    '３ users struggled.', '99 clicks were needed.', 'Seven clicks were needed.'])('rejects ungrounded or mechanical quantities: %s', copy => {
+    '３ users struggled.', '99 clicks were needed.', 'Seven clicks were needed.', 'Affected users: 3.', 'The number of affected users is 3.', 'Sessions affected = six.'])('rejects ungrounded or mechanical quantities: %s', copy => {
     expect(ground(copy).included).toHaveLength(0);
+  });
+  it('keeps user behavior numbers distinct from customer counts', () => {
+    expect(ground('Users need 3 clicks.').included).toHaveLength(1);
   });
   it('drops model-owned action/count/link fields from the v7 output', () => {
     const result = ground('Changing the month takes six clicks.', { action: 'Invented action', claimedUsers: 99, accounts: ['Wrong'], prUrl: 'https://wrong.test' });

@@ -26,11 +26,11 @@ func TestTicketCandidateGateAndActions(t *testing.T) {
 }
 
 func TestTicketDigestGroundsBehaviorNumbersButNeverCustomerCounts(t *testing.T) {
-	c := Candidate{PromptVersion: 7, TicketID: "ticket", Steps: "Open the six-month view", ConfirmedNotes: []string{"Clicked 3 times in the six-month view"}}
+	c := Candidate{PromptVersion: 7, TicketID: "ticket", Steps: "Open the six-month view", ConfirmedNotes: []string{"Clicked 3 times in the six-month view; three clicks were ignored"}}
 	for _, tc := range []struct {
 		copy   string
 		reject bool
-	}{{"The six-month view ignored 3 clicks.", false}, {"The six-month view affected 3 users.", true}, {"Three users could not finish.", true}, {"The view ignored 4 clicks.", true}, {"The view affected ３ users.", true}} {
+	}{{"The six-month view ignored 3 clicks.", false}, {"The six-month view affected 3 users.", true}, {"Three users could not finish.", true}, {"The view ignored 4 clicks.", true}, {"The view affected ３ users.", true}, {"Affected users: 3.", true}, {"The number of affected users is 3.", true}, {"Sessions affected = three.", true}, {"Users need 3 clicks.", false}} {
 		_, reject := firstUngroundedNumber(writtenDigestCard{Copy: tc.copy}, c)
 		if reject != tc.reject {
 			t.Errorf("%q reject=%v", tc.copy, reject)
