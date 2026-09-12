@@ -4578,6 +4578,16 @@ func (q *Queries) OrgHasActiveGitHubInstallation(ctx context.Context, orgID stri
 	return ok, err
 }
 
+// RepoCoveredByActiveInstallation reports whether an unsuspended installation
+// owned by the organization lists the repository.
+func (q *Queries) RepoCoveredByActiveInstallation(ctx context.Context, orgID, repo string) (bool, error) {
+	var ok bool
+	err := q.pool.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM github_app_installations WHERE org_id = $1 AND NOT suspended AND repos ? $2)`,
+		orgID, repo).Scan(&ok)
+	return ok, err
+}
+
 // HasEnabledSlackDestination includes every Slack subscription, not just digests.
 func (q *Queries) HasEnabledSlackDestination(ctx context.Context, projectID string) (bool, error) {
 	var ok bool

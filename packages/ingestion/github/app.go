@@ -16,6 +16,15 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
+var (
+	// ErrInstallationGone means GitHub no longer has this installation: it was
+	// uninstalled, or recreated under a new ID.
+	ErrInstallationGone = errors.New("github installation no longer exists")
+	// ErrInstallationSuspended means the installation exists but GitHub refuses
+	// tokens for it until it is unsuspended.
+	ErrInstallationSuspended = errors.New("github installation is suspended")
+)
+
 // httpClient is used for all GitHub API calls. Override in tests.
 var httpClient = &http.Client{Timeout: 10 * time.Second}
 
@@ -107,6 +116,12 @@ func GetInstallationToken(appJWT string, installationID int64) (*InstallationTok
 
 	if resp.StatusCode != http.StatusCreated {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		switch {
+		case resp.StatusCode == http.StatusNotFound:
+			return nil, fmt.Errorf("%w: installation %d: %s", ErrInstallationGone, installationID, string(body))
+		case resp.StatusCode == http.StatusForbidden && strings.Contains(strings.ToLower(string(body)), "suspended"):
+			return nil, fmt.Errorf("%w: installation %d: %s", ErrInstallationSuspended, installationID, string(body))
+		}
 		return nil, fmt.Errorf("GitHub API error (status %d): %s", resp.StatusCode, string(body))
 	}
 
@@ -297,6 +312,10 @@ type InstallationInfo struct {
 		Login string `json:"login"`
 		ID    int64  `json:"id"`
 	} `json:"account"`
+	// HTMLURL is the GitHub page where a human edits this installation's
+	// repository access. Users get /settings/installations/{id}; organizations
+	// get /organizations/{login}/settings/installations/{id}.
+	HTMLURL string `json:"html_url"`
 }
 
 // VerifyInstallation checks that an installation_id belongs to this GitHub App
@@ -318,7 +337,7 @@ func VerifyInstallation(appJWT string, installationID int64) (*InstallationInfo,
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNotFound {
-		return nil, fmt.Errorf("installation %d not found for this app", installationID)
+		return nil, fmt.Errorf("%w: installation %d", ErrInstallationGone, installationID)
 	}
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
