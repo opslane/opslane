@@ -143,10 +143,12 @@ Ask for a Slack incoming-webhook URL, or later. A webhook URL is a secret. Put i
 
 ## 8. Source maps
 
-Add the upload to the production build so stack traces resolve to source. Both recipes are safe to ship before the CI secret exists: without `OPSLANE_SOURCEMAP_KEY` the Vite plugin does nothing and `opslane-sourcemaps` prints a skip line and exits 0, and the Next.js config only generates maps when the key is present, so a deferred secret never publishes maps or breaks a build.
+Add the upload to the production build so stack traces resolve to source. Both recipes are safe to ship before the CI secret exists: without `OPSLANE_SOURCEMAP_KEY` the Vite plugin skips uploads and removes the maps it generated, while `opslane-sourcemaps` prints a skip line and exits 0, and the Next.js config only generates maps when the key is present, so a deferred secret never publishes maps or breaks a build.
 - Vite: add `opslane()` from `@opslane/sdk/vite-plugin` to `plugins` (and `worker.plugins`).
 - Next.js: in `next.config.*` set `productionBrowserSourceMaps: Boolean(process.env.OPSLANE_SOURCEMAP_KEY)` and change the build script to `next build && opslane-sourcemaps .next/static`.
 - Other bundlers: emit maps only when the key is set and run `opslane-sourcemaps <build-dir>` after the build (`--format es` for ESM output).
+
+After all uploads succeed, the command also removes remaining JavaScript and CSS source-map files from the build directory. Do not use `--keep-maps` for deployment; any failure must stop the build.
 
 If questions are unavailable, keep the build configuration, report `opslane_progress sourcemaps skipped "CI secret pending"`, and continue without changing CI secrets.
 

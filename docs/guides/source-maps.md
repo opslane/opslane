@@ -82,6 +82,8 @@ For another bundler, generate source maps when `OPSLANE_SOURCEMAP_KEY` is set, t
 opslane-sourcemaps <build-dir> --format es
 ```
 
+After all uploads succeed, default mode also removes remaining `.js.map`, `.mjs.map`, `.cjs.map`, and `.css.map` files under the build directory, including Next.js polyfill and CSS maps. Any failure, `--dry-run`, or `--keep-maps` prevents this extra cleanup.
+
 Use `--format es` for ES modules. The default is `iife`, suitable for Next.js browser chunks. `--keep-maps` retains maps after upload for local debugging; do not publish those files unless you intend to expose their source.
 
 Without a key, both the Vite plugin and command skip uploads. The Next.js configuration above also skips map generation, so deferring the secret does not expose source files. Configure other bundlers the same way.
@@ -89,7 +91,7 @@ Without a key, both the Vite plugin and command skip uploads. The Next.js config
 | Exit code | Meaning |
 | --- | --- |
 | `0` | Upload succeeded, or skipped because the key is absent |
-| `1` | A file could not be stamped or uploaded; failed maps remain for retry |
+| `1` | A file could not be stamped, uploaded, or removed; failed maps remain for retry |
 | `2` | Invalid command arguments or key, or a required key is absent |
 
 
