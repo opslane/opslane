@@ -448,6 +448,136 @@ describeDb('confirmation job', () => {
       owner.release();
     }
   });
+  it.each(['failure', 'reservation', 'status'] as const)(
+    'rejects %s writes when the lease expires while waiting for publication',
+    async (operation) => {
+      const t = await publish(await ticket());
+      const incident = (await store.liveIncident(pool, t))!;
+      const attempt = (
+        await pool.query(
+          `INSERT INTO friction_fix_attempts(ticket_id,error_group_id,generation,status) VALUES($1,$2,1,'active') RETURNING id`,
+          [t.id, incident.id],
+        )
+      ).rows[0];
+      await pool.query(
+        `UPDATE error_groups SET fix_substate='fixing',status='fixing' WHERE id=$1`,
+        [incident.id],
+      );
+      const row = (
+        await pool.query(
+          `INSERT INTO error_group_jobs(project_id,ticket_id,error_group_id,fix_attempt_id,publication_generation,job_type,status,worker_id,lease_generation,lease_expires_at) VALUES($1,$2,$3,$4,1,'fix','claimed','expired-waiter',1,now()+interval '5 minutes') RETURNING id`,
+          [projectId, t.id, incident.id, attempt.id],
+        )
+      ).rows[0];
+      const lease = {
+        id: row.id,
+        projectId,
+        errorGroupId: incident.id,
+        sessionId: null,
+        workerId: 'expired-waiter',
+        leaseGeneration: '1',
+      };
+      const owner = await pool.connect();
+      let running: Promise<unknown> | undefined;
+      try {
+        await owner.query('BEGIN');
+        await store.lockPublication(owner, environmentId);
+        const pid = (await owner.query('SELECT pg_backend_pid() AS pid'))
+          .rows[0].pid;
+        await pool.query(
+          `UPDATE error_group_jobs SET lease_expires_at=clock_timestamp()+interval '1 second' WHERE id=$1`,
+          [lease.id],
+        );
+        const write =
+          operation === 'failure'
+            ? db.failJob(
+                lease.id,
+                lease.workerId,
+                lease.leaseGeneration,
+                'Model failed',
+              )
+            : operation === 'reservation'
+              ? db.reserveDelivery(
+                  incident.id,
+                  projectId,
+                  {
+                    operationKey: `fix:${attempt.id}`,
+                    branchName: 'fix/save',
+                    posture: 'ready',
+                    diffHash: 'hash',
+                    candidateDiff: 'diff',
+                  },
+                  lease,
+                )
+              : db.updateGroupStatus(
+                  incident.id,
+                  projectId,
+                  'awaiting_approval',
+                  undefined,
+                  lease,
+                );
+        running = write.then(
+          (value) => value,
+          (error) => error,
+        );
+        let blockedWhileOwned = false;
+        for (let i = 0; i < 100; i++) {
+          blockedWhileOwned = (
+            await pool.query(
+              `SELECT EXISTS(SELECT 1 FROM pg_stat_activity a,error_group_jobs j WHERE j.id=$2 AND $1=ANY(pg_blocking_pids(a.pid)) AND a.xact_start<j.lease_expires_at) blocked`,
+              [pid, lease.id],
+            )
+          ).rows[0].blocked;
+          if (blockedWhileOwned) break;
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        expect(blockedWhileOwned).toBe(true);
+        let expired = false;
+        for (let i = 0; i < 300; i++) {
+          expired = (
+            await pool.query(
+              'SELECT lease_expires_at<clock_timestamp() expired FROM error_group_jobs WHERE id=$1',
+              [lease.id],
+            )
+          ).rows[0].expired;
+          if (expired) break;
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        expect(expired).toBe(true);
+        await owner.query('COMMIT');
+        const result = await running;
+        if (operation === 'failure') expect(result).toBe(false);
+        else expect(result).toMatchObject({ name: 'LeaseLostError' });
+        expect(
+          (
+            await pool.query(
+              'SELECT status,attempts FROM error_group_jobs WHERE id=$1',
+              [lease.id],
+            )
+          ).rows[0],
+        ).toEqual({ status: 'claimed', attempts: 0 });
+        expect(
+          (
+            await pool.query('SELECT status FROM error_groups WHERE id=$1', [
+              incident.id,
+            ])
+          ).rows[0].status,
+        ).toBe('fixing');
+        expect(
+          (
+            await pool.query(
+              'SELECT 1 FROM delivery_reservations WHERE error_group_id=$1',
+              [incident.id],
+            )
+          ).rows,
+        ).toEqual([]);
+      } finally {
+        await owner.query('ROLLBACK');
+        await running;
+        owner.release();
+      }
+    },
+  );
   it('retries a changed fold target without another batch, preserving the unresolved marker', async () => {
     const source = await publish(await ticket());
     await embed(source);

@@ -1016,7 +1016,7 @@ export async function failJob(
          AND worker_id = $2
          AND lease_generation = $3::bigint
          AND status = 'claimed'
-         AND lease_expires_at > now()
+         AND lease_expires_at > clock_timestamp()
        RETURNING status, job_type, project_id, error_group_id, attempts,
                  dead_letter_class, requeues`,
       [
@@ -1605,7 +1605,7 @@ export async function updateGroupStatus(
            AND project_id = $2
            AND error_group_id = $1
            AND status = 'claimed'
-           AND lease_expires_at > now()
+           AND lease_expires_at > clock_timestamp()
          FOR UPDATE
        ),`
     : '';
@@ -1748,7 +1748,7 @@ export async function reserveDelivery(
       `SELECT id FROM error_group_jobs
        WHERE id = $1 AND worker_id = $2 AND lease_generation = $3::bigint
          AND project_id = $4 AND error_group_id = $5
-         AND status = 'claimed' AND lease_expires_at > now()
+         AND status = 'claimed' AND lease_expires_at > clock_timestamp()
        FOR UPDATE`,
       [lease.id, lease.workerId, lease.leaseGeneration, projectId, errorGroupId],
     );
