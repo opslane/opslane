@@ -79,7 +79,7 @@ func TestKnownProblemDigestFreezeValidateAndMergedFooter(t *testing.T) {
 		}
 	}
 	env := insert(`SELECT id FROM environments WHERE project_id=$1 AND name='production'`, p.ID)
-	ticket := insert(`INSERT INTO friction_tickets(project_id,environment_id,name,control,what_happened,kind,status,live_generation,evidence_version,steps)VALUES($1,$2,'Six-month view stalls','View','Clicks ignored','ux_insight','published',1,4,'Open the six-month view and click Apply.')RETURNING id`, p.ID, env)
+	ticket := insert(`INSERT INTO friction_tickets(project_id,environment_id,name,control,what_happened,kind,status,live_generation,evidence_version,steps)VALUES($1,$2,'Six-month view stalls','View','Clicks ignored','defect','published',1,4,'Open the six-month view and click Apply.')RETURNING id`, p.ID, env)
 	group := insert(`INSERT INTO error_groups(project_id,environment_id,fingerprint,title,kind,status,first_seen,last_seen,ticket_id,publication_generation,fix_substate,investigation_status,root_cause,occurrence_count,affected_users_count,actionable_since)VALUES($1,$2,$3,'Six-month view stalls','friction','fixing',now(),now(),$4,1,'fixing','done','The handler returns early.',999,999,now())RETURNING id`, p.ID, env, "ticket|"+ticket, ticket)
 	job := insert(`INSERT INTO error_group_jobs(error_group_id,project_id,job_type,status,ticket_id,publication_generation,source_id)VALUES($1,$2,'friction_confirm','completed',$3,1,$1)RETURNING id`, group, p.ID, ticket)
 	finalized := insert(`INSERT INTO friction_confirm_batches(ticket_id,job_id,manifest,arrival_boundary_at_select,live_generation_at_select,status_at_select,status)VALUES($1,$2,'[]',7,1,'published','finalized')RETURNING id`, ticket, job)
@@ -131,6 +131,19 @@ func TestKnownProblemDigestFreezeValidateAndMergedFooter(t *testing.T) {
 	if c.Coverage != .5 || c.VerifiedSessions != 4 || c.VerifiedUsers != 4 || strings.Join(c.Accounts, ",") != "Acme,Beta" || c.RepresentativeSessionID != ticket+"-2" || c.ValidAction != "Fix in progress" || c.EvidenceVersion != 4 {
 		t.Fatalf("candidate=%+v", c)
 	}
+	// The same ticket as an insight: a later day's freeze has no candidate for
+	// it while it is still published, investigated and unfixed.
+	run(`UPDATE friction_tickets SET kind='ux_insight' WHERE id=$1`, ticket)
+	_, insightCandidates, err := FreezeCandidates(ctx, pool, p.ID, at.Add(48*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ic := range insightCandidates {
+		if ic.TicketID == ticket {
+			t.Fatalf("insight ticket froze as a candidate: %+v", ic)
+		}
+	}
+	run(`UPDATE friction_tickets SET kind='defect' WHERE id=$1`, ticket)
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		t.Fatal(err)

@@ -349,3 +349,56 @@ func TestLoadActionableCandidatesKeepsEveryLedgerCandidateOnce(t *testing.T) {
 		t.Errorf("multiple-diagnosis candidate was not included exactly once: %+v", evaluation.Included)
 	}
 }
+
+// The digest is for defects a fix can close. An insight ticket is tracked,
+// investigated once enough people hit it, and shown on the dashboard, but it
+// never becomes a card (grilling decision Q1, 2026-09-12).
+func TestLoadActionableCandidatesSkipsInsightTickets(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	fixture := seedDigestFixture(t, pool, now)
+	cleanupActionableDiagnoses(t, pool, fixture.ProjectID)
+
+	groupFor := func(kind string) string {
+		t.Helper()
+		var ticketID, groupID string
+		if err := pool.QueryRow(ctx, `INSERT INTO friction_tickets
+			(project_id,environment_id,name,control,what_happened,kind,status,live_generation,evidence_version)
+			VALUES ($1,$2,$3,'Save','Nothing happened',$4,'published',1,1) RETURNING id::text`,
+			fixture.ProjectID, fixture.EnvID, "ticket-"+kind+"-"+uuid.NewString(), kind).Scan(&ticketID); err != nil {
+			t.Fatal(err)
+		}
+		if err := pool.QueryRow(ctx, `INSERT INTO error_groups
+			(project_id,environment_id,fingerprint,title,kind,status,first_seen,last_seen,
+			 ticket_id,publication_generation,fix_substate,investigation_status,root_cause,actionable_since)
+			VALUES ($1,$2,$3,'candidate','friction','awaiting_approval',$4,$4,$5,1,'none','done','The handler returns early.',$4)
+			RETURNING id::text`,
+			fixture.ProjectID, fixture.EnvID, "ticket-"+uuid.NewString(), now, ticketID).Scan(&groupID); err != nil {
+			t.Fatal(err)
+		}
+		return groupID
+	}
+	defectGroup := groupFor("defect")
+	insightGroup := groupFor("ux_insight")
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx)
+	candidates, err := loadActionableCandidates(ctx, tx, fixture.ProjectID, onCardStatusSQL, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, candidate := range candidates {
+		seen[candidate.GroupID] = true
+	}
+	if !seen[defectGroup] {
+		t.Fatalf("defect ticket group %s missing from candidates", defectGroup)
+	}
+	if seen[insightGroup] {
+		t.Fatalf("insight ticket group %s must not be a digest candidate", insightGroup)
+	}
+}

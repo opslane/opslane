@@ -210,7 +210,11 @@ func loadActionableCandidates(ctx context.Context, tx pgx.Tx, projectID string, 
 		  FROM error_groups g
 		  LEFT JOIN LATERAL (` + diagnosisValidationLateralSQL + `) d ON true
 		 WHERE g.project_id=$1
-		   AND ((g.ticket_id IS NULL AND g.status IN ` + string(statusSQL) + `) OR (g.ticket_id IS NOT NULL AND g.status <> 'archived'))
+		   AND ((g.ticket_id IS NULL AND g.status IN ` + string(statusSQL) + `)
+		     OR (g.ticket_id IS NOT NULL AND g.status <> 'archived'
+		         -- Cards are for defects. Insight tickets stay on the dashboard
+		         -- (grilling decision Q1, 2026-09-12); their kind is immutable.
+		         AND EXISTS (SELECT 1 FROM friction_tickets t WHERE t.id=g.ticket_id AND t.kind='defect')))
 		 ORDER BY g.actionable_since NULLS LAST,g.id`
 	rows, err := tx.Query(ctx, query, projectID)
 	if err != nil {
