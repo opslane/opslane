@@ -3865,8 +3865,11 @@ export async function finishNarrative(job: ClaimedJob, args: {
     ? null
     : Buffer.from(args.rawResponse.replace(CONTROL_CHARACTERS, ''), 'utf8')
       .subarray(0, RAW_RESPONSE_MAX_BYTES).toString('utf8');
-  const result = await getPool().query(
-    `UPDATE session_narratives
+  const client = await getPool().connect();
+  try {
+    await client.query('BEGIN');
+    const result = await client.query(
+      `UPDATE session_narratives
      SET status = $3, narrative = $4::jsonb, timeline = $5::jsonb,
          raw_response = $6, model = $7, input_tokens = $8, output_tokens = $9,
          verification_state = COALESCE($10, verification_state), updated_at = now()
@@ -3878,23 +3881,38 @@ export async function finishNarrative(job: ClaimedJob, args: {
            AND j.project_id = $2
            AND j.session_id IS NOT DISTINCT FROM $1
            AND j.status = 'claimed' AND j.lease_expires_at > now())`,
-    [
-      args.sessionId,
-      args.projectId,
-      args.status,
-      args.narrative === undefined ? null : JSON.stringify(args.narrative),
-      args.timeline === undefined ? null : JSON.stringify(args.timeline),
-      raw,
-      args.model ?? null,
-      args.inputTokens ?? null,
-      args.outputTokens ?? null,
-      args.verificationState ?? null,
-      job.id,
-      job.workerId,
-      job.leaseGeneration,
-    ],
-  );
-  return { written: (result.rowCount ?? 0) > 0 };
+      [
+        args.sessionId,
+        args.projectId,
+        args.status,
+        args.narrative === undefined ? null : JSON.stringify(args.narrative),
+        args.timeline === undefined ? null : JSON.stringify(args.timeline),
+        raw,
+        args.model ?? null,
+        args.inputTokens ?? null,
+        args.outputTokens ?? null,
+        args.verificationState ?? null,
+        job.id,
+        job.workerId,
+        job.leaseGeneration,
+      ],
+    );
+    const written = (result.rowCount ?? 0) > 0;
+    // A narrative with nothing to verify still has to be recorded as
+    // processed, and only the match job writes friction_session_processed.
+    // Queue it here so a crash between finalization and enqueue cannot leave
+    // a recording that the cutover backfill has to rediscover.
+    if (written && args.status === 'ok' && args.verificationState === 'none') {
+      await enqueueJobTx(client, 'friction_match', args.projectId, { sessionId: args.sessionId });
+    }
+    await client.query('COMMIT');
+    return { written };
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 export async function narrativeMonthlySpendExceeded(projectId: string): Promise<boolean> {

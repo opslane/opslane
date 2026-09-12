@@ -120,4 +120,38 @@ describeDb('ticket backfill', () => {
     expect((await pool.query('SELECT narrative_id FROM friction_session_processed WHERE project_id=$1', [projectId])).rows).toEqual([{ narrative_id: deriveNarrativeId(sessionId, createdAt, 2) }]);
     expect(await backfillTickets(pool, options)).toBe(0);
   });
+
+  it('queues the match job for an empty narrative when narration finalizes, so the backfill has nothing to add', async () => {
+    const sessionId = randomUUID();
+    await pool.query('INSERT INTO sessions(id,project_id,environment_id,started_at) VALUES($1,$2,$3,now())', [sessionId, projectId, environmentId]);
+    await pool.query(`INSERT INTO session_narratives(session_id,project_id,environment_id,status,prompt_version,created_at)
+      VALUES($1,$2,$3,'narrating',2,$4)`, [sessionId, projectId, environmentId, createdAt]);
+    const workerId = randomUUID();
+    const jobId = (await pool.query(
+      `INSERT INTO error_group_jobs(project_id,session_id,job_type,status,worker_id,lease_generation,lease_expires_at)
+       VALUES($1,$2,'session_narrate','claimed',$3,1,now()+interval '5 minutes') RETURNING id`,
+      [projectId, sessionId, workerId],
+    )).rows[0].id as string;
+    const job = { id: jobId, projectId, sessionId, workerId, leaseGeneration: '1', jobType: 'session_narrate', errorGroupId: null, payload: null, attempts: 0 } as unknown as db.ClaimedJob;
+    const written = await db.finishNarrative(job, {
+      sessionId, projectId, status: 'ok',
+      narrative: { userGoal: 'browse', narrative: 'Nothing notable happened.', notable: false, observations: [] },
+      timeline: { lines: [] },
+      verificationState: 'none',
+    });
+    expect(written).toEqual({ written: true });
+    const queued = await pool.query(`SELECT status FROM error_group_jobs WHERE project_id=$1 AND session_id=$2 AND job_type='friction_match'`, [projectId, sessionId]);
+    expect(queued.rows).toEqual([{ status: 'pending' }]);
+
+    // Run that job through the production handler: it writes the ledger row
+    // without a model call, and the backfill then has nothing to enqueue.
+    const claimed = await pool.query(`UPDATE error_group_jobs SET status='claimed',worker_id=$2,lease_generation=1,lease_expires_at=now()+interval '5 minutes'
+      WHERE project_id=$1 AND job_type='friction_match' RETURNING id,payload`, [projectId, workerId]);
+    const model = { modelName: 'unused', complete: vi.fn() };
+    await processFrictionMatch({ id: claimed.rows[0].id, payload: claimed.rows[0].payload, projectId, sessionId, workerId, leaseGeneration: '1', errorGroupId: null, eventId: null, sourceId: null, jobType: 'friction_match', attempts: 0, guidance: null, triggeredBy: null }, { cheap: model, strong: model }, new AbortController().signal);
+    await pool.query("UPDATE error_group_jobs SET status='completed' WHERE project_id=$1", [projectId]);
+    expect(model.complete).not.toHaveBeenCalled();
+    expect((await pool.query('SELECT count(*)::int AS n FROM friction_session_processed WHERE project_id=$1 AND session_id=$2', [projectId, sessionId])).rows[0].n).toBe(1);
+    expect(await backfillTickets(pool, options)).toBe(0);
+  });
 });
