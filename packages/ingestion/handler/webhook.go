@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -44,6 +45,30 @@ type pushEvent struct {
 	} `json:"commits"`
 }
 
+type webhookRepo struct {
+	FullName string `json:"full_name"`
+}
+
+type installationEvent struct {
+	Action       string `json:"action"`
+	Installation struct {
+		ID int64 `json:"id"`
+	} `json:"installation"`
+	Repositories        []webhookRepo `json:"repositories"`
+	RepositoriesAdded   []webhookRepo `json:"repositories_added"`
+	RepositoriesRemoved []webhookRepo `json:"repositories_removed"`
+}
+
+func repoNames(repos []webhookRepo) []string {
+	out := make([]string, 0, len(repos))
+	for _, repo := range repos {
+		if repo.FullName != "" {
+			out = append(out, repo.FullName)
+		}
+	}
+	return out
+}
+
 // HandleWebhook handles POST /api/v1/github/webhook.
 // Verifies the GitHub HMAC-SHA256 signature and processes pull_request and push events.
 func (d *Dependencies) HandleWebhook(w http.ResponseWriter, r *http.Request) {
@@ -69,7 +94,15 @@ func (d *Dependencies) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 
 	eventType := r.Header.Get("X-GitHub-Event")
-	if eventType != "pull_request" && eventType != "push" {
+	switch eventType {
+	case "pull_request", "push":
+	case "installation":
+		d.handleInstallationWebhook(w, r, body)
+		return
+	case "installation_repositories":
+		d.handleInstallationRepositoriesWebhook(w, r, body)
+		return
+	default:
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "ignored", "event": eventType})
 		return
@@ -229,6 +262,107 @@ func (d *Dependencies) deleteDraftBranch(repo, branch string, installationID *in
 type githubBranchCleanupError struct{ message string }
 
 func (e *githubBranchCleanupError) Error() string { return e.message }
+
+func webhookJSON(w http.ResponseWriter, value map[string]string) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(value)
+}
+
+func (d *Dependencies) knownInstallation(ctx context.Context, installationID int64) (bool, error) {
+	installation, err := d.Queries.GetGitHubAppInstallationByID(ctx, installationID)
+	if err != nil {
+		return false, err
+	}
+	return installation != nil, nil
+}
+
+func (d *Dependencies) handleInstallationWebhook(w http.ResponseWriter, r *http.Request, body []byte) {
+	var event installationEvent
+	if err := json.Unmarshal(body, &event); err != nil || event.Installation.ID == 0 {
+		writeJSONError(w, http.StatusBadRequest, "invalid JSON payload")
+		return
+	}
+	ctx := r.Context()
+	installationID := event.Installation.ID
+	switch event.Action {
+	case "created", "deleted", "suspend", "unsuspend", "new_permissions_accepted":
+	default:
+		webhookJSON(w, map[string]string{"status": "ignored", "action": event.Action})
+		return
+	}
+	known, err := d.knownInstallation(ctx, installationID)
+	if err != nil {
+		slog.Error("webhook: look up installation", "installation_id", installationID, "error", err)
+		writeJSONError(w, http.StatusInternalServerError, "failed to process installation event")
+		return
+	}
+	if !known {
+		slog.Info("webhook: installation not mapped to an org, ignored", "action", event.Action, "installation_id", installationID)
+		webhookJSON(w, map[string]string{"status": "ignored", "reason": "unknown_installation", "action": event.Action})
+		return
+	}
+	switch event.Action {
+	case "deleted":
+		_, err = d.Queries.RetireGitHubInstallation(ctx, installationID, "")
+	case "suspend":
+		_, err = d.Queries.SetGitHubInstallationSuspended(ctx, installationID, true)
+	case "unsuspend":
+		_, err = d.Queries.ReactivateGitHubInstallation(ctx, installationID)
+	case "created":
+		_, err = d.Queries.ReplaceGitHubInstallationRepos(ctx, installationID, repoNames(event.Repositories))
+	case "new_permissions_accepted":
+		if names := repoNames(event.Repositories); len(names) > 0 {
+			_, err = d.Queries.ReplaceGitHubInstallationRepos(ctx, installationID, names)
+		}
+	}
+	if err != nil {
+		slog.Error("webhook: installation event failed", "action", event.Action, "installation_id", installationID, "error", err)
+		writeJSONError(w, http.StatusInternalServerError, "failed to process installation event")
+		return
+	}
+	slog.Info("webhook: installation updated", "action", event.Action, "installation_id", installationID)
+	webhookJSON(w, map[string]string{"status": "applied", "action": event.Action})
+}
+
+func (d *Dependencies) handleInstallationRepositoriesWebhook(w http.ResponseWriter, r *http.Request, body []byte) {
+	var event installationEvent
+	if err := json.Unmarshal(body, &event); err != nil || event.Installation.ID == 0 {
+		writeJSONError(w, http.StatusBadRequest, "invalid JSON payload")
+		return
+	}
+	ctx := r.Context()
+	installationID := event.Installation.ID
+	if event.Action != "added" && event.Action != "removed" {
+		webhookJSON(w, map[string]string{"status": "ignored", "action": event.Action})
+		return
+	}
+	known, err := d.knownInstallation(ctx, installationID)
+	if err != nil {
+		slog.Error("webhook: look up installation", "installation_id", installationID, "error", err)
+		writeJSONError(w, http.StatusInternalServerError, "failed to process installation_repositories event")
+		return
+	}
+	if !known {
+		slog.Info("webhook: installation not mapped to an org, ignored", "action", event.Action, "installation_id", installationID)
+		webhookJSON(w, map[string]string{"status": "ignored", "reason": "unknown_installation", "action": event.Action})
+		return
+	}
+	if added := repoNames(event.RepositoriesAdded); len(added) > 0 {
+		if _, err := d.Queries.AddGitHubInstallationRepos(ctx, installationID, added); err != nil {
+			slog.Error("webhook: add installation repos failed", "installation_id", installationID, "error", err)
+			writeJSONError(w, http.StatusInternalServerError, "failed to process installation_repositories event")
+			return
+		}
+	}
+	if removed := repoNames(event.RepositoriesRemoved); len(removed) > 0 {
+		if _, err := d.Queries.RemoveGitHubInstallationRepos(ctx, installationID, removed); err != nil {
+			slog.Error("webhook: remove installation repos failed", "installation_id", installationID, "error", err)
+			writeJSONError(w, http.StatusInternalServerError, "failed to process installation_repositories event")
+			return
+		}
+	}
+	webhookJSON(w, map[string]string{"status": "applied", "action": event.Action})
+}
 
 // verifyWebhookSignature validates the X-Hub-Signature-256 header.
 func verifyWebhookSignature(payload []byte, secret, signature string) bool {
