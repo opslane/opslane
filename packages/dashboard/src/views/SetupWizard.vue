@@ -8,6 +8,7 @@ import {
   createNotificationDestination,
   getEventStatus,
   getGitHubAppStatus,
+	getGitHubConfig,
   getMe,
   getOnboardingState,
   listNotificationDestinations,
@@ -17,8 +18,9 @@ import {
   testNotificationDestination,
   updateNotificationDestination,
   updateProject,
+	APIError,
 } from '../api';
-import type { GitHubAppStatus, OnboardingState } from '../types/api';
+import type { GitHubAppStatus, GitHubConfig, OnboardingState } from '../types/api';
 import { GITHUB_PR_URL_OPTIONS, safeUrl } from '../utils';
 import CodeBlock from '../components/CodeBlock.vue';
 import RepoSelector from '../components/RepoSelector.vue';
@@ -238,6 +240,8 @@ const githubAppStatus = ref<GitHubAppStatus | null>(null);
 const patRepo = ref('');
 const selectedRepo = ref('');
 const githubError = ref('');
+const wizardAddRepoUrl = ref('');
+const githubConfig = ref<GitHubConfig | null>(null);
 const githubBusy = ref(false);
 const installHref = computed(() => safeUrl(
   githubAppStatus.value?.install_url ?? '', GITHUB_PR_URL_OPTIONS,
@@ -247,6 +251,9 @@ const githubStatusFailed = ref(false);
 async function loadGitHubStatus(): Promise<void> {
   try {
     githubAppStatus.value = await getGitHubAppStatus();
+		if (githubAppStatus.value.installed && projectId.value) {
+			githubConfig.value = await getGitHubConfig(projectId.value);
+		}
     githubStatusFailed.value = false;
   } catch {
     // Keep the last known status so a transient failure mid-poll doesn't
@@ -254,6 +261,12 @@ async function loadGitHubStatus(): Promise<void> {
     // show, which renders the retry affordance instead of a dead end.
     githubStatusFailed.value = !githubAppStatus.value;
   }
+}
+
+async function onRepoLoadError(err: unknown): Promise<void> {
+	if (err instanceof APIError && err.code === 'github_installation_gone') {
+		await loadGitHubStatus();
+	}
 }
 
 // The App install happens on github.com in another tab and never calls back
@@ -292,6 +305,7 @@ function stopGitHubStatusPolling(): void {
 async function attachRepo(repo: string): Promise<void> {
   if (!repo.trim()) return;
   githubError.value = '';
+	wizardAddRepoUrl.value = '';
   githubBusy.value = true;
   try {
     await setGitHubConfig(projectId.value, { github_repo: repo.trim() });
@@ -300,6 +314,10 @@ async function attachRepo(repo: string): Promise<void> {
     else step.value = 'connect_slack';
   } catch (caught: unknown) {
     githubError.value = caught instanceof Error ? caught.message : 'Could not connect the repository';
+		wizardAddRepoUrl.value = caught instanceof APIError ? (caught.details.add_repo_url ?? '') : '';
+		if (caught instanceof APIError && caught.code === 'github_installation_gone') {
+			await loadGitHubStatus();
+		}
   } finally {
     githubBusy.value = false;
   }
@@ -516,6 +534,7 @@ onUnmounted(() => {
             <h1 class="text-2xl font-semibold text-text">Connect GitHub</h1>
             <p class="mt-2 text-sm text-muted">Connect a repository so Opslane can open verified fix PRs.</p>
             <p v-if="githubError" class="mt-4 text-sm text-danger" v-text="githubError"></p>
+			<a v-if="safeUrl(wizardAddRepoUrl, GITHUB_PR_URL_OPTIONS)" :href="safeUrl(wizardAddRepoUrl, GITHUB_PR_URL_OPTIONS)" target="_blank" rel="noopener" class="mt-2 inline-block text-sm text-accent underline" data-testid="wizard-add-repo-link">Add the repository on GitHub</a>
 
             <form v-if="state?.github_mode === 'pat'" class="mt-6 space-y-4" @submit.prevent="attachRepo(patRepo)">
               <div>
@@ -535,7 +554,11 @@ onUnmounted(() => {
                 @click="startGitHubStatusPolling"
               >Install GitHub App</a>
               <div v-if="githubAppStatus?.installed" class="space-y-3">
-                <RepoSelector v-model="selectedRepo" :disabled="githubBusy" />
+				<p v-if="githubConfig?.connected && !githubConfig.repo_access" class="text-sm text-warning">
+					Opslane lost access to <code v-text="githubConfig.github_repo"></code> on GitHub.
+					<a v-if="safeUrl(githubConfig.add_repo_url, GITHUB_PR_URL_OPTIONS)" :href="safeUrl(githubConfig.add_repo_url, GITHUB_PR_URL_OPTIONS)" target="_blank" rel="noopener" class="text-accent underline" data-testid="github-repo-access-link">Add the repository on GitHub</a>
+				</p>
+				<RepoSelector v-model="selectedRepo" :disabled="githubBusy" @load-error="onRepoLoadError" />
                 <Button variant="primary" class="w-full" :busy="githubBusy" :disabled="!selectedRepo" @click="attachRepo(selectedRepo)">Connect repository</Button>
               </div>
               <p v-else-if="githubStatusFailed" class="text-sm text-danger">

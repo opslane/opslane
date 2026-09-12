@@ -20,7 +20,7 @@ import AgentApprove, { deriveChecklist } from '../AgentApprove.vue';
 
 const emptyFacts: AgentFacts = {
   has_events: false, latest_error_group_url: null, issues_url: 'http://x/', github_connected: false, github_installed: false,
-  github_mode: 'app', github_connect_url: 'http://x/settings#github', github_repo: null, slack_connected: false,
+  github_mode: 'app', github_connect_url: 'http://x/settings#github', github_repo: null, github_repo_access: false, slack_connected: false,
   sourcemaps_uploaded: false, steps: {},
 };
 
@@ -46,7 +46,7 @@ describe('AgentApprove', () => {
     const w = mount(AgentApprove, { global: { stubs: { RouterLink: true } } });
     await flushPromises();
     expect(w.text()).toContain('Claude Code on box');
-    expect(statuses(w)).toEqual(['running', 'pending', 'pending', 'pending', 'pending', 'pending', 'pending']);
+    expect(statuses(w)).toEqual(['running', 'pending', 'pending', 'pending', 'pending', 'pending', 'pending', 'pending']);
     expect(w.find('input[type="radio"]:checked').attributes('value')).toBe('p-old');
     await w.find('[data-testid="agent-approve-button"]').trigger('click');
     await flushPromises();
@@ -172,10 +172,10 @@ describe('AgentApprove', () => {
     await flushPromises();
     await w.find('[data-testid="agent-approve-button"]').trigger('click');
     await flushPromises();
-    expect(statuses(w)).toEqual(['done', 'pending', 'pending', 'pending', 'pending', 'pending', 'pending']);
+    expect(statuses(w)).toEqual(['done', 'pending', 'pending', 'pending', 'pending', 'pending', 'pending', 'pending']);
     await vi.advanceTimersByTimeAsync(3100);
     await flushPromises();
-    expect(statuses(w)).toEqual(['done', 'done', 'done', 'pending', 'pending', 'pending', 'skipped']);
+    expect(statuses(w)).toEqual(['done', 'done', 'done', 'pending', 'pending', 'pending', 'skipped', 'pending']);
     expect(w.find('[data-testid="agent-latest-issue"]').attributes('href')).toBe('http://x/issues/g1?project_id=p-old');
     await vi.advanceTimersByTimeAsync(3100);
     await flushPromises();
@@ -299,9 +299,11 @@ describe('deriveChecklist', () => {
     });
     const list = deriveChecklist(info);
     expect(list.map((s) => `${s.step}:${s.status}`)).toEqual([
-      'approve:done', 'install_sdk:done', 'first_event:done', 'github:done', 'slack:pending', 'sourcemaps:failed', 'mcp:skipped',
-    ]);
-    expect(list.find((s) => s.step === 'sourcemaps')?.note).toBe('no CI access');
+      'approve:done', 'install_sdk:done', 'first_event:done', 'github:done', 'slack:pending', 'sourcemaps:failed', 'mcp:skipped', 'pull_request:pending',
+		]);
+		expect(list.find((s) => s.step === 'sourcemaps')?.note).toBe('no CI access');
+		expect(deriveChecklist({ ...info, facts: { ...info.facts!, steps: { ...info.facts!.steps, pull_request: { status: 'done', note: 'https://github.com/acme/web/pull/12', updated_at: '' } } } })
+			.find((s) => s.step === 'pull_request')).toMatchObject({ status: 'done', note: 'https://github.com/acme/web/pull/12' });
   });
   it('honours a reported first_event failure until the server fact overrides it', () => {
     const reported = pending({ status: 'key_ok', facts: { ...emptyFacts, steps: { install_sdk: { status: 'done', note: '', updated_at: '' }, first_event: { status: 'failed', note: 'CSP blocked', updated_at: '' } } } });

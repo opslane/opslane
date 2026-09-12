@@ -10,22 +10,31 @@ import {
   createAPIKey,
   fetchAuthConfig,
   getBillingSummary,
+	getGitHubAppStatus,
+	getGitHubConfig,
   getMe,
   listAPIKeys,
   listEnvironments,
   listProjects,
   openBillingPortal,
   revokeAPIKey,
+	setGitHubConfig,
   updateProject,
+	APIError,
   type Project,
 } from '../api';
 
 vi.mock('../api', () => ({
+	APIError: class APIError extends Error {
+		constructor(public readonly status: number, message: string, public readonly code?: string, public readonly details: Record<string, string> = {}) { super(message); }
+	},
   createBillingCheckout: vi.fn(),
+	createNotificationDestination: vi.fn(),
   createInvitation: vi.fn(),
   createAPIKey: vi.fn(),
   createProject: vi.fn(),
   deleteGitHubConfig: vi.fn(),
+	deleteNotificationDestination: vi.fn(),
   fetchAuthConfig: vi.fn(),
   getBillingSummary: vi.fn(),
   getFixStats: vi.fn().mockResolvedValue({
@@ -37,12 +46,16 @@ vi.mock('../api', () => ({
   getMe: vi.fn(),
   listEnvironments: vi.fn().mockResolvedValue({ environments: [], rollup_ready: true }),
   listInvitations: vi.fn().mockResolvedValue([]),
+  listGitHubRepos: vi.fn().mockResolvedValue([]),
+	listNotificationDestinations: vi.fn().mockResolvedValue({ destinations: [], can_manage: true }),
   listAPIKeys: vi.fn().mockResolvedValue([]),
   listProjects: vi.fn(),
   openBillingPortal: vi.fn(),
   revokeInvitation: vi.fn(),
   revokeAPIKey: vi.fn(),
   setGitHubConfig: vi.fn(),
+	testNotificationDestination: vi.fn(),
+	updateNotificationDestination: vi.fn(),
   updateProject: vi.fn(),
 }));
 
@@ -108,6 +121,57 @@ async function mountSettings(
   await flushPromises();
   return wrapper;
 }
+
+describe('GitHub settings', () => {
+	beforeEach(() => {
+		localStorage.clear();
+		localStorage.setItem('opslane_project_id', project.id);
+		localStorage.setItem('opslane_project_name', project.name);
+		vi.mocked(getGitHubAppStatus).mockResolvedValue({ installed: true, installation_id: 7, install_url: '' });
+	});
+
+	afterEach(() => {
+		vi.clearAllMocks();
+		localStorage.clear();
+	});
+
+	it('shows GitHub’s repository-access page when a configured repo loses access', async () => {
+		vi.mocked(getGitHubConfig).mockResolvedValue({
+			connected: true,
+			github_repo: 'acme/web',
+			repo_access: false,
+			add_repo_url: 'https://github.com/settings/installations/7',
+		});
+		const wrapper = await mountSettings('admin');
+		await flushPromises();
+		expect(wrapper.text()).toContain('lost access to acme/web');
+		expect(wrapper.get('[data-testid="github-repo-access-link"]').attributes('href')).toBe('https://github.com/settings/installations/7');
+		wrapper.unmount();
+	});
+
+	it('renders a safe add-repo link and reloads status after a gone installation', async () => {
+		vi.mocked(getGitHubConfig).mockResolvedValue({ connected: false, github_repo: '', repo_access: false });
+		vi.mocked(setGitHubConfig).mockRejectedValueOnce(new APIError(400, 'cannot see acme/web', 'repo_not_in_installation', {
+			add_repo_url: 'https://github.com/settings/installations/7',
+		}));
+		const wrapper = await mountSettings('admin');
+		await flushPromises();
+		wrapper.findComponent({ name: 'RepoSelector' }).vm.$emit('update:modelValue', 'acme/web');
+		await wrapper.vm.$nextTick();
+		await wrapper.findAll('button').find((button) => button.text().includes('Connect repository'))!.trigger('click');
+		await flushPromises();
+		expect(wrapper.get('[data-testid="github-add-repo-link"]').attributes('href')).toBe('https://github.com/settings/installations/7');
+
+		vi.mocked(setGitHubConfig).mockRejectedValueOnce(new APIError(409, 'gone', 'github_installation_gone'));
+		wrapper.findComponent({ name: 'RepoSelector' }).vm.$emit('update:modelValue', 'acme/web');
+		await wrapper.vm.$nextTick();
+		const calls = vi.mocked(getGitHubAppStatus).mock.calls.length;
+		await wrapper.findAll('button').find((button) => button.text().includes('Connect repository'))!.trigger('click');
+		await flushPromises();
+		expect(getGitHubAppStatus).toHaveBeenCalledTimes(calls + 1);
+		wrapper.unmount();
+	});
+});
 
 describe('billing settings', () => {
   beforeEach(() => {

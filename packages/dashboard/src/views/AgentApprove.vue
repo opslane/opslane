@@ -9,8 +9,9 @@ const STEP_LABELS: Record<AgentStepName, string> = {
   slack: 'Slack digest connected',
   sourcemaps: 'Source maps uploading',
   mcp: 'Agent connected to Opslane',
+	pull_request: 'Open a pull request',
 };
-const STEP_ORDER: AgentStepName[] = ['approve', 'install_sdk', 'first_event', 'github', 'slack', 'sourcemaps', 'mcp'];
+const STEP_ORDER: AgentStepName[] = ['approve', 'install_sdk', 'first_event', 'github', 'slack', 'sourcemaps', 'mcp', 'pull_request'];
 
 export function deriveChecklist(info: AgentApproveInfo) {
   const facts = info.facts;

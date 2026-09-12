@@ -4,11 +4,15 @@ import { flushPromises, mount } from '@vue/test-utils';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const api = vi.hoisted(() => ({
+	APIError: class APIError extends Error {
+		constructor(public readonly status: number, message: string, public readonly code?: string, public readonly details: Record<string, string> = {}) { super(message); }
+	},
   getMe: vi.fn(),
   getOnboardingState: vi.fn(),
   onboardingSetup: vi.fn(),
   getEventStatus: vi.fn(),
   getGitHubAppStatus: vi.fn(),
+	getGitHubConfig: vi.fn(),
   listGitHubRepos: vi.fn(),
   setGitHubConfig: vi.fn(),
   createAPIKey: vi.fn(),
@@ -54,6 +58,7 @@ describe('SetupWizard', () => {
       install_url: 'https://github.com/apps/x/installations/new',
     });
     api.listGitHubRepos.mockResolvedValue([]);
+		api.getGitHubConfig.mockResolvedValue({ connected: false, github_repo: '', repo_access: false });
     api.updateProject.mockResolvedValue({ id: 'p1' });
   });
 
@@ -170,6 +175,33 @@ describe('SetupWizard', () => {
     await vi.advanceTimersByTimeAsync(12000);
     expect(api.getGitHubAppStatus.mock.calls.length).toBe(callsAtUnmount);
   });
+
+	it('shows lost repository access and add-repo failures with a safe GitHub link', async () => {
+		api.getOnboardingState.mockResolvedValue({
+			...baseState, next_step: 'connect_github', project_id: 'p1', has_events: true,
+		});
+		api.getGitHubAppStatus.mockResolvedValue({ installed: true, installation_id: 7, install_url: '' });
+		api.getGitHubConfig.mockResolvedValue({
+			connected: true,
+			github_repo: 'acme/web',
+			repo_access: false,
+			add_repo_url: 'https://github.com/settings/installations/7',
+		});
+		api.listGitHubRepos.mockResolvedValue([{ full_name: 'acme/web', private: false, default_branch: 'main' }]);
+		api.setGitHubConfig.mockRejectedValue(new api.APIError(400, 'cannot see acme/web', 'repo_not_in_installation', {
+			add_repo_url: 'https://github.com/settings/installations/7',
+		}));
+		const wrapper = mount(SetupWizard, { global: { stubs: { RouterLink: true } } });
+		await flushPromises();
+		expect(wrapper.text()).toContain('lost access to acme/web');
+		expect(wrapper.get('[data-testid="github-repo-access-link"]').attributes('href')).toBe('https://github.com/settings/installations/7');
+		wrapper.findComponent({ name: 'RepoSelector' }).vm.$emit('update:modelValue', 'acme/web');
+		await wrapper.vm.$nextTick();
+		await wrapper.findAll('button').find((button) => button.text().includes('Connect repository'))!.trigger('click');
+		await flushPromises();
+		expect(wrapper.get('[data-testid="wizard-add-repo-link"]').attributes('href')).toBe('https://github.com/settings/installations/7');
+		wrapper.unmount();
+	});
 
   it('stops polling GitHub status once the installation lands', async () => {
     api.getOnboardingState.mockResolvedValue({
