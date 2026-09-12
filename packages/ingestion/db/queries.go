@@ -2785,6 +2785,9 @@ func (q *Queries) ResolveErrorGroup(ctx context.Context, projectID, groupID stri
 // an archive issued from a stale list, would otherwise surface as 409 "incident
 // not found". Ask which case it was before reporting a failure.
 func (q *Queries) ArchiveErrorGroup(ctx context.Context, projectID, groupID string) error {
+	if handled, err := q.archiveTicketGroup(ctx, projectID, groupID); handled || err != nil {
+		return err
+	}
 	ct, err := q.pool.Exec(ctx,
 		`UPDATE error_groups
 		 SET status_before_archive = status,
@@ -2813,6 +2816,13 @@ func (q *Queries) ArchiveErrorGroup(ctx context.Context, projectID, groupID stri
 // UnarchiveErrorGroup restores the pre-archive state. Rows archived before the
 // saved-status column existed fall back to the previous kind-safe behavior.
 func (q *Queries) UnarchiveErrorGroup(ctx context.Context, projectID, groupID string) error {
+	var ticketID *string
+	if err := q.pool.QueryRow(ctx, `SELECT ticket_id FROM error_groups WHERE id=$1 AND project_id=$2`, groupID, projectID).Scan(&ticketID); err != nil && err != pgx.ErrNoRows {
+		return err
+	}
+	if ticketID != nil {
+		return ErrTicketUnarchive
+	}
 	ct, err := q.pool.Exec(ctx,
 		`UPDATE error_groups
 		 SET status = COALESCE(

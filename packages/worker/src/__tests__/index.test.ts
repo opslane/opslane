@@ -182,6 +182,7 @@ vi.mock('../friction/facts.js', () => ({
   classifyActivity: vi.fn(() => 'unknown'),
 }));
 vi.mock('../facts/persist.js', () => ({ replaceSessionFacts: vi.fn() }));
+vi.mock('../friction/reconcile-job.js', () => ({ processFrictionReconcile: vi.fn(), scheduleFrictionReconciliation: vi.fn() }));
 vi.mock('../friction/confirm-job.js', () => ({ processFrictionConfirm: vi.fn(), frictionConfirmDepsFromEnv: vi.fn(() => ({ client: { modelName: 'confirm' }, dailyCap: 2000 })) }));
 vi.mock('../friction/match-job.js', () => ({processFrictionMatch:vi.fn(),frictionMatchDepsFromEnv:vi.fn(() => ({cheap:{modelName:'cheap'},strong:{modelName:'strong'}}))}));
 vi.mock('../narrative/client.js', () => ({ narrativeClientFromEnv: vi.fn(() => null) }));
@@ -1444,6 +1445,13 @@ describe('friction worker path', () => {
     expect(db.updateGroupAndCreateFixJob).not.toHaveBeenCalled();
   });
 
+  it('dispatches reconciliation with ticket scope and cancellation', async () => {
+    const { processFrictionReconcile } = await import('../friction/reconcile-job.js');
+    const job = { ...makeJob(), jobType: 'friction_reconcile' as const, errorGroupId: null, ticketId: 'ticket-1' };
+    const signal = new AbortController().signal;
+    await processJobInner(job, signal);
+    expect(processFrictionReconcile).toHaveBeenCalledWith(job, { client: { modelName: 'confirm' } }, signal);
+  });
   it('dispatches confirmation with ticket scope and cancellation', async () => {
     const { processFrictionConfirm } = await import('../friction/confirm-job.js');
     const job = { ...makeJob(), jobType: 'friction_confirm' as const, errorGroupId: null, ticketId: 'ticket-1' };

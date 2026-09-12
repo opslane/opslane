@@ -1,3 +1,4 @@
+import { processFrictionReconcile, scheduleFrictionReconciliation } from './friction/reconcile-job.js';
 import { processTicketInvestigation, type TicketInvestigateJob } from './friction/investigate-ticket.js';
 import { processPrEventJob } from './friction/pr-events-job.js';
 import { assertFixAttemptCurrent, recordAttemptPr, attemptFailed, transaction as ticketTransaction, lockJob as lockTicketJob } from './friction/fix-attempts.js';
@@ -357,6 +358,12 @@ export async function processJobInner(job: ClaimedJob, signal: AbortSignal): Pro
   });
 
   if (job.jobType === 'friction_pr_event') { await processPrEventJob(job); return; }
+
+  if (job.jobType === 'friction_reconcile') {
+    if (!job.ticketId) throw new Error('Reconciliation job missing ticketId');
+    await processFrictionReconcile(job as ClaimedJob & { ticketId: string }, { client: frictionConfirmDepsFromEnv().client }, signal);
+    return;
+  }
 
   if (job.jobType === 'friction_confirm') {
     if (!job.ticketId) throw new Error(`Job ${job.id} missing ticket_id`);
@@ -1954,6 +1961,12 @@ async function main(): Promise<void> {
       });
   }, REAPER_INTERVAL_MS);
 
+  const frictionReconcileTimer = setInterval(() => {
+    scheduleFrictionReconciliation().catch((err: unknown) => {
+      logger.error('Friction reconciliation scheduler error', { error: err instanceof Error ? err.message : String(err) });
+    });
+  }, 15 * 60_000);
+
   const narrativeSweepTimer = setInterval(() => {
     db.sweepNarratives()
       .then(({ reEnqueued, failed }) => {
@@ -2021,6 +2034,7 @@ async function main(): Promise<void> {
     logger.info('Worker shutting down');
     clearInterval(reaperTimer);
     clearInterval(narrativeSweepTimer);
+    clearInterval(frictionReconcileTimer);
     clearInterval(silenceTimer);
     clearInterval(inactivityTimer);
     clearInterval(queueSampleTimer);

@@ -519,7 +519,7 @@ describeDb('friction match job', () => {
       ).rows,
     ).toEqual([{ ticket_id: target.id }]);
   });
-  it('applies matching and confirmation caps fleet-wide and leaves unimplemented job types pending', async () => {
+  it('applies matching and confirmation caps fleet-wide while admitting lifecycle jobs', async () => {
     const tx = await pool.connect();
     try {
       for (let i = 0; i < 4; i++)
@@ -550,8 +550,8 @@ describeDb('friction match job', () => {
       [projectId],
     );
     expect(future.rows).toEqual([
-      { status: 'pending' },
-      { status: 'pending' },
+      { status: 'claimed' },
+      { status: 'claimed' },
     ]);
   });
 });

@@ -52,6 +52,24 @@ export function confirmationTransition(
   }
   return bar === 'passes' ? 'classify' : 'none';
 }
+export function confirmationSnapshotCurrent(
+  current: store.TicketRow,
+  saved: Pick<
+    store.TicketRow,
+    'status' | 'live_generation' | 'evidence_version' | 'fixed_at'
+  >,
+  savedIncident: store.LiveIncident | null,
+  live: store.LiveIncident | null,
+): boolean {
+  return (
+    current.status === saved.status &&
+    current.live_generation === saved.live_generation &&
+    current.evidence_version === saved.evidence_version &&
+    current.fixed_at === saved.fixed_at &&
+    (live?.fix_substate === 'resolved') ===
+      (savedIncident?.fix_substate === 'resolved')
+  );
+}
 /** Evidence mutations invalidate a batch even when publication stays live. */
 export function confirmationBatchCurrent(
   current: store.TicketRow,
@@ -59,13 +77,16 @@ export function confirmationBatchCurrent(
   plan: TransitionPlan,
   live: store.LiveIncident | null,
 ): boolean {
-  return (
-    current.status === batch.status_at_select &&
-    current.live_generation === batch.live_generation_at_select &&
-    current.evidence_version === batch.evidence_version_at_select &&
-    (live?.fix_substate === 'resolved') ===
-      (plan.incident?.fix_substate === 'resolved') &&
-    current.fixed_at === plan.ticket.fixed_at
+  return confirmationSnapshotCurrent(
+    current,
+    {
+      status: batch.status_at_select,
+      live_generation: batch.live_generation_at_select,
+      evidence_version: batch.evidence_version_at_select,
+      fixed_at: plan.ticket.fixed_at,
+    },
+    plan.incident,
+    live,
   );
 }
 /** No locks: models classify the complete ordered publication snapshot here. */
@@ -240,6 +261,7 @@ async function transaction<T>(
   try {
     await tx.query('BEGIN');
     signal.throwIfAborted();
+    await store.lockTicketPublication(tx, job.projectId, job.ticketId);
     await lockLease(tx, job);
     const result = await action(tx);
     signal.throwIfAborted();
@@ -257,6 +279,10 @@ export async function processFrictionConfirm(
   deps: ConfirmJobDeps,
   signal: AbortSignal,
 ): Promise<void> {
+  if (store.publicationPaused()) {
+    await db.rescheduleJob(job, new Date(Date.now() + 15 * 60_000));
+    throw new db.JobRescheduledError(job.id);
+  }
   const pool = db.getPool();
   const initial = await transaction(job, signal, async (tx) => {
     const ticket = await store.getTicket(tx, job.projectId, job.ticketId, true);
@@ -484,10 +510,9 @@ export function frictionConfirmDepsFromEnv(): ConfirmJobDeps {
     loadRecording: async (sessionId, projectId, signalIds) => {
       const result = await db
         .getPool()
-        .query<{ timeline: CompactTimeline }>(
-          `SELECT n.timeline FROM session_narratives n JOIN sessions s ON s.id=n.session_id AND s.project_id=n.project_id AND s.environment_id=n.environment_id WHERE n.session_id=$1 AND n.project_id=$2 AND n.status='ok'`,
-          [sessionId, projectId],
-        );
+        .query<{
+          timeline: CompactTimeline;
+        }>(`SELECT n.timeline FROM session_narratives n JOIN sessions s ON s.id=n.session_id AND s.project_id=n.project_id AND s.environment_id=n.environment_id WHERE n.session_id=$1 AND n.project_id=$2 AND n.status='ok'`, [sessionId, projectId]);
       const timeline = result.rows[0]?.timeline;
       if (!timeline || !Array.isArray(timeline.lines))
         throw new Error('Recording timeline unavailable');
@@ -497,10 +522,9 @@ export function frictionConfirmDepsFromEnv(): ConfirmJobDeps {
         throw new Error('Recording chunks unavailable or incomplete');
       const anchors = await db
         .getPool()
-        .query<{ evidence_lines: string[] | null }>(
-          `SELECT evidence_lines FROM friction_signals WHERE id=ANY($1::uuid[]) AND session_id=$2 AND project_id=$3 ORDER BY id`,
-          [signalIds, sessionId, projectId],
-        );
+        .query<{
+          evidence_lines: string[] | null;
+        }>(`SELECT evidence_lines FROM friction_signals WHERE id=ANY($1::uuid[]) AND session_id=$2 AND project_id=$3 ORDER BY id`, [signalIds, sessionId, projectId]);
       const cited = anchors.rows.flatMap((row) =>
         (row.evidence_lines ?? []).flatMap((line) => {
           const index = /^L(\d+)$/.exec(line);

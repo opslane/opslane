@@ -36,6 +36,18 @@ beforeEach(() => {
 });
 
 describe('IncidentDetail honest state', () => {
+  it('keeps archived tickets permanent while retaining legacy unarchive', async () => {
+    api.getIncident.mockResolvedValue({ ...base, kind: 'friction', status: 'archived', ticket_id: 't1' });
+    let wrapper = mountView();
+    await flushPromises();
+    expect(wrapper.findAll('button').some(button => button.text() === 'Unarchive')).toBe(false);
+    wrapper.unmount();
+    api.getIncident.mockResolvedValue({ ...base, status: 'archived' });
+    wrapper = mountView();
+    await flushPromises();
+    expect(wrapper.findAll('button').some(button => button.text() === 'Unarchive')).toBe(true);
+    wrapper.unmount();
+  });
   it('requests reinvestigation when a ticket cause lacks current coverage', async () => {
     const ticket = { ...base, kind: 'friction', status: 'awaiting_approval', ticket_id: 't1',
       fix_substate: 'none', investigation_status: 'done', cause_coverage: 0.25 };

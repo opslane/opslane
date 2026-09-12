@@ -341,7 +341,7 @@ describe('friction admission kill switches', () => {
     mockQuery.mockResolvedValueOnce({});
     await claimJob('worker',30_000,2,2,1,0,0);
     expect(mockQuery.mock.calls[2][1]).toEqual(['worker',30,2,2,1,0,0]);
-    expect(mockQuery.mock.calls[2][0]).toContain("job_type <> 'friction_reconcile' OR $7 > 0");
+    expect(mockQuery.mock.calls[2][0]).toContain("job_type NOT IN ('friction_confirm','friction_reconcile') OR ($6 > 0 AND $7 > 0)");
   });
 });
 
@@ -726,13 +726,15 @@ describe('source-map resolution queries', () => {
 describe('requeueStaleJobs — reconcile dead-lettered fix jobs', () => {
   beforeEach(() => {
     mockQuery.mockReset();
-    // requeueStaleJobs now runs in a transaction (BEGIN → UPDATE ... RETURNING
-    // → reconciliation → COMMIT); default every un-mocked call to empty.
+    // The reaper snapshots eligible IDs, locks ticket environments, then mutates
+    // and reconciles the still-eligible jobs in one transaction.
     mockQuery.mockResolvedValue({ rows: [], rowCount: 0 });
   });
 
   it('terminates a dead-lettered fix job group as needs_human (no stuck "fixing")', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 }); // BEGIN
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: 'j1' }] }); // eligible snapshot
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // no ticket environments
     mockQuery.mockResolvedValueOnce({
       rowCount: 1,
       rows: [{ id: 'j1', error_group_id: 'g1', project_id: 'p1', job_type: 'fix', status: 'dead_letter' }],
@@ -761,6 +763,8 @@ describe('requeueStaleJobs — reconcile dead-lettered fix jobs', () => {
 
   it('leaves requeued (non-dead-letter) and non-fix dead-letter jobs alone', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 }); // BEGIN
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: 'j2' },{ id: 'j3' }] }); // eligible snapshot
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // no ticket environments
     mockQuery.mockResolvedValueOnce({
       rowCount: 2,
       rows: [
@@ -780,6 +784,8 @@ describe('requeueStaleJobs — reconcile dead-lettered fix jobs', () => {
 
   it('marks a dead-lettered session analysis as analysis_failed', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 }); // BEGIN
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: 'j4' }] }); // eligible snapshot
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // no ticket environments
     mockQuery.mockResolvedValueOnce({
       rowCount: 1,
       rows: [{

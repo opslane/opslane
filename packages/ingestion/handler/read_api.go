@@ -1452,7 +1452,9 @@ func (d *Dependencies) ArchiveIncident(w http.ResponseWriter, r *http.Request) {
 
 	incidentID := chi.URLParam(r, "incidentID")
 	if err := d.Queries.ArchiveErrorGroup(r.Context(), projectID, incidentID); err != nil {
-		if strings.Contains(err.Error(), "no matching row") {
+		if errors.Is(err, db.ErrTicketGeneration) {
+			writeJSONError(w, http.StatusConflict, "incident is no longer the current publication")
+		} else if strings.Contains(err.Error(), "no matching row") {
 			writeJSONError(w, http.StatusConflict, "incident not found")
 		} else {
 			writeJSONError(w, http.StatusInternalServerError, "failed to archive incident")
@@ -1552,7 +1554,9 @@ func (d *Dependencies) UnarchiveIncident(w http.ResponseWriter, r *http.Request)
 
 	incidentID := chi.URLParam(r, "incidentID")
 	if err := d.Queries.UnarchiveErrorGroup(r.Context(), projectID, incidentID); err != nil {
-		if strings.Contains(err.Error(), "no matching row") {
+		if errors.Is(err, db.ErrTicketUnarchive) {
+			writeJSONError(w, http.StatusConflict, "known problems cannot be unarchived")
+		} else if strings.Contains(err.Error(), "no matching row") {
 			writeJSONError(w, http.StatusConflict, "incident is not archived or not found")
 		} else {
 			writeJSONError(w, http.StatusInternalServerError, "failed to unarchive incident")

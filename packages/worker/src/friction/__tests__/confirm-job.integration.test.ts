@@ -11,6 +11,10 @@ import {
 import * as db from '../../db.js';
 import * as store from '../tickets-db.js';
 import {
+  processFrictionReconcile,
+  scheduleFrictionReconciliation,
+} from '../reconcile-job.js';
+import {
   requestFix,
   transaction,
   assertFixAttemptCurrent,
@@ -104,6 +108,7 @@ describeDb('confirmation job', () => {
     await pool.query('DELETE FROM environments WHERE project_id=$1', [
       projectId,
     ]);
+    await pool.query('DELETE FROM end_users WHERE project_id=$1', [projectId]);
     await pool.query('DELETE FROM projects WHERE id=$1', [projectId]);
     await pool.query('DELETE FROM orgs WHERE id=$1', [orgId]);
   });
@@ -158,18 +163,18 @@ describeDb('confirmation job', () => {
       tx.release();
     }
   }
-  async function claim(t: store.TicketRow) {
+  async function claim(t: store.TicketRow, type = 'friction_confirm') {
     const r = (
       await pool.query(
-        `INSERT INTO error_group_jobs(project_id,ticket_id,job_type,status,worker_id,lease_generation,lease_expires_at) VALUES($1,$2,'friction_confirm','claimed','confirm-test',1,now()+interval '5 minutes') RETURNING id`,
-        [projectId, t.id],
+        `INSERT INTO error_group_jobs(project_id,ticket_id,job_type,status,worker_id,lease_generation,lease_expires_at) VALUES($1,$2,$3,'claimed','confirm-test',1,now()+interval '5 minutes') RETURNING id`,
+        [projectId, t.id, type],
       )
     ).rows[0];
     return {
       id: r.id,
       projectId,
       ticketId: t.id,
-      jobType: 'friction_confirm',
+      jobType: type,
       workerId: 'confirm-test',
       leaseGeneration: '1',
       errorGroupId: null,
@@ -220,6 +225,356 @@ describeDb('confirmation job', () => {
       dailyCap: 200,
     };
   }
+  it('reconciles a discarded batch from finalized evidence without selecting another batch', async () => {
+    const t = await ticket();
+    const rs = await matches(t, 3);
+    await transaction(async (tx) => {
+      const batch = (await store.selectBatch(tx, t, randomUUID()))!;
+      for (const r of rs)
+        await store.stageCheck(tx, batch.id, {
+          sessionId: r.sessionId,
+          signalIds: [r.signalId],
+          outcome: 'confirmed',
+          note: 'Save shows an error.',
+          model: 'test',
+          framesOk: true,
+        });
+      await store.finalizeBatch(tx, t, batch.id);
+      // A saved batch may be discarded after another mutation. Only finalized
+      // evidence can justify publication when the scheduler retries the decision.
+      const saved = (
+        await tx.query(
+          `INSERT INTO friction_confirm_batches(ticket_id,job_id,manifest,arrival_boundary_at_select,live_generation_at_select,status_at_select) VALUES($1,$2,'[]',0,0,'tracking') RETURNING id`,
+          [t.id, randomUUID()],
+        )
+      ).rows[0];
+      await store.discardBatch(tx, saved.id);
+    });
+    const job = await claim(t, 'friction_reconcile');
+    await expect(
+      processFrictionReconcile(
+        job,
+        { client: deps([]).client },
+        new AbortController().signal,
+      ),
+    ).rejects.toMatchObject({ name: 'JobCompletedInTransaction' });
+    expect(await store.getTicket(pool, projectId, t.id)).toMatchObject({
+      status: 'published',
+      live_generation: 1,
+      matched_count: 3,
+      reconcile_needed: false,
+    });
+    expect(
+      (
+        await pool.query(
+          `SELECT job_type,status FROM error_group_jobs WHERE ticket_id=$1 ORDER BY job_type`,
+          [t.id],
+        )
+      ).rows,
+    ).toEqual([
+      { job_type: 'friction_reconcile', status: 'completed' },
+      { job_type: 'investigate', status: 'pending' },
+    ]);
+  });
+  it('schedules a fully checked decision once and pauses queued reconciliation with either kill switch', async () => {
+    const t = await ticket();
+    await pool.query(
+      'UPDATE friction_tickets SET reconcile_needed=true WHERE id=$1',
+      [t.id],
+    );
+    expect(await scheduleFrictionReconciliation()).toBe(1);
+    expect(await scheduleFrictionReconciliation()).toBe(0);
+    vi.stubEnv('FRICTION_CONFIRM_MAX_CONCURRENT', '0');
+    expect(await db.claimJob('reconcile-test', 60_000)).toBeNull();
+    vi.stubEnv('FRICTION_CONFIRM_MAX_CONCURRENT', '1');
+    vi.stubEnv('FRICTION_MATCH_MAX_CONCURRENT', '0');
+    expect(await db.claimJob('reconcile-test', 60_000)).toBeNull();
+    vi.stubEnv('FRICTION_MATCH_MAX_CONCURRENT', '2');
+    expect(await db.claimJob('reconcile-test', 60_000)).toMatchObject({
+      jobType: 'friction_reconcile',
+      ticketId: t.id,
+    });
+  });
+  it('lets retirement cancel a waiting investigator before it holds the job lease row', async () => {
+    const t = await publish(await ticket());
+    const row = (
+      await pool.query(
+        `UPDATE error_group_jobs SET status='claimed',worker_id='cancel-test',lease_generation=1,lease_expires_at=now()+interval '5 minutes' WHERE ticket_id=$1 AND job_type='investigate' RETURNING id,error_group_id`,
+        [t.id],
+      )
+    ).rows[0];
+    const job = {
+      ...(await store.getTicket(pool, projectId, t.id)),
+      id: row.id,
+      projectId,
+      ticketId: t.id,
+      errorGroupId: row.error_group_id,
+      publicationGeneration: 1,
+      workerId: 'cancel-test',
+      leaseGeneration: '1',
+    } as TicketInvestigateJob;
+    const owner = await pool.connect();
+    const worker = await pool.connect();
+    let running: Promise<unknown> | undefined;
+    try {
+      await owner.query('BEGIN');
+      await store.lockPublication(owner, environmentId);
+      await store.getTicket(owner, projectId, t.id, true);
+      await worker.query('BEGIN');
+      const pid = (await worker.query('SELECT pg_backend_pid() AS pid')).rows[0]
+        .pid;
+      running = beginInvestigation(worker, job).then(
+        (value) => value,
+        (error) => error,
+      );
+      for (let i = 0; i < 100; i++) {
+        if (
+          (
+            await pool.query(
+              'SELECT cardinality(pg_blocking_pids($1))>0 blocked',
+              [pid],
+            )
+          ).rows[0].blocked
+        )
+          break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      // NOWAIT proves the waiter did not grab the lease before the environment.
+      await owner.query(
+        'SELECT id FROM error_group_jobs WHERE id=$1 FOR UPDATE NOWAIT',
+        [job.id],
+      );
+      await store.unpublish(owner, t);
+      await owner.query('COMMIT');
+      expect(await running).toMatchObject({ name: 'LeaseLostError' });
+    } finally {
+      await owner.query('ROLLBACK');
+      await running;
+      await worker.query('ROLLBACK');
+      owner.release();
+      worker.release();
+    }
+  });
+  it('retries a changed fold target without another batch, preserving the unresolved marker', async () => {
+    const source = await publish(await ticket());
+    await embed(source);
+    await transaction((tx) => store.unpublish(tx, source));
+    const target = await publish(await ticket());
+    await embed(target);
+    const client = {
+      modelName: 'test',
+      complete: async () => {
+        // This transaction must finish during classification: models own no locks.
+        await transaction(async (tx) => {
+          await store.lockPublication(tx, environmentId);
+          await store.unpublish(tx, target);
+        });
+        return {
+          text: JSON.stringify({ oneFix: true, reason: 'Same Save handler' }),
+          inputTokens: 1,
+          outputTokens: 1,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          stopReason: 'end_turn',
+        };
+      },
+    };
+    await expect(
+      processFrictionReconcile(
+        await claim(source, 'friction_reconcile'),
+        { client },
+        new AbortController().signal,
+      ),
+    ).rejects.toMatchObject({ name: 'JobCompletedInTransaction' });
+    expect(await store.getTicket(pool, projectId, source.id)).toMatchObject({
+      status: 'unpublished',
+      reconcile_needed: true,
+      fold_retries: 1,
+    });
+    expect(await store.nextConfirmationAt(pool, source.id)).toBeNull();
+    await expect(
+      processFrictionReconcile(
+        await claim(source, 'friction_reconcile'),
+        { client: deps([]).client },
+        new AbortController().signal,
+      ),
+    ).rejects.toMatchObject({ name: 'JobCompletedInTransaction' });
+    expect(await store.getTicket(pool, projectId, source.id)).toMatchObject({
+      status: 'published',
+      live_generation: 2,
+      reconcile_needed: false,
+    });
+  });
+  it('fences a stale reconciliation decision after evidence changes during classification', async () => {
+    const source = await publish(await ticket());
+    await embed(source);
+    await transaction((tx) => store.unpublish(tx, source));
+    await embed(await publish(await ticket()));
+    const client = {
+      modelName: 'test',
+      complete: async () => {
+        await pool.query(
+          'UPDATE friction_tickets SET evidence_version=evidence_version+1 WHERE id=$1',
+          [source.id],
+        );
+        return {
+          text: JSON.stringify({ oneFix: false, reason: 'Different handler' }),
+          inputTokens: 1,
+          outputTokens: 1,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          stopReason: 'end_turn',
+        };
+      },
+    };
+    await expect(
+      processFrictionReconcile(
+        await claim(source, 'friction_reconcile'),
+        { client },
+        new AbortController().signal,
+      ),
+    ).rejects.toMatchObject({ name: 'JobCompletedInTransaction' });
+    expect(await store.getTicket(pool, projectId, source.id)).toMatchObject({
+      status: 'unpublished',
+      live_generation: 1,
+      reconcile_needed: true,
+    });
+  });
+  it('serializes first-match admission with an in-flight recording identity change', async () => {
+    const t = await ticket();
+    const users = (
+      await pool.query(
+        `INSERT INTO end_users(project_id,external_user_id) VALUES($1,$2),($1,$3) RETURNING id`,
+        [projectId, randomUUID(), randomUUID()],
+      )
+    ).rows;
+    const sessionId = randomUUID();
+    await pool.query(
+      `INSERT INTO sessions(id,project_id,environment_id,end_user_id,started_at) VALUES($1,$2,$3,$4,now())`,
+      [sessionId, projectId, environmentId, users[0].id],
+    );
+    const signalId = (
+      await pool.query(
+        `INSERT INTO friction_signals(session_id,project_id,environment_id,signal_type,fingerprint,page_url_normalized,occurred_at,rule_version) VALUES($1,$2,$3,'narrative',$4,'/save',now(),1) RETURNING id`,
+        [sessionId, projectId, environmentId, randomUUID()],
+      )
+    ).rows[0].id;
+    const identity = await pool.connect();
+    const admission = await pool.connect();
+    let running: Promise<unknown> | undefined;
+    try {
+      await identity.query('BEGIN');
+      await identity.query('SELECT friction_set_session_identity($1,$2,$3)', [
+        projectId,
+        sessionId,
+        users[1].id,
+      ]);
+      await admission.query('BEGIN');
+      const pid = (await admission.query('SELECT pg_backend_pid() AS pid'))
+        .rows[0].pid;
+      running = store
+        .recordMatch(admission, {
+          ticket: t,
+          sessionId,
+          endUserId: users[0].id,
+          signalIds: [signalId],
+          occurredAt: new Date().toISOString(),
+          screen: '/save',
+          source: 'cheap',
+        })
+        .then(
+          (value) => value,
+          (error) => error,
+        );
+      for (let i = 0; i < 100; i++) {
+        if (
+          (
+            await pool.query(
+              'SELECT cardinality(pg_blocking_pids($1))>0 blocked',
+              [pid],
+            )
+          ).rows[0].blocked
+        )
+          break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      await identity.query('COMMIT');
+      expect(await running).toMatchObject({ newRecording: true });
+      await admission.query('COMMIT');
+      expect(
+        (
+          await pool.query(
+            'SELECT end_user_id FROM friction_ticket_matches WHERE ticket_id=$1',
+            [t.id],
+          )
+        ).rows[0].end_user_id,
+      ).toBe(users[1].id);
+    } finally {
+      await identity.query('ROLLBACK');
+      await running;
+      await admission.query('ROLLBACK');
+      identity.release();
+      admission.release();
+    }
+  });
+  it.each(['unpublish', 'regress'] as const)(
+    'reconciliation applies the %s transition over finalized evidence',
+    async (transition) => {
+      const t = await publish(await ticket());
+      if (transition === 'regress') {
+        await pool.query(
+          `UPDATE friction_tickets SET fixed_at=now(),cohort_cutoff=now() WHERE id=$1`,
+          [t.id],
+        );
+        await pool.query(
+          `UPDATE error_groups SET fix_substate='resolved' WHERE ticket_id=$1`,
+          [t.id],
+        );
+      }
+      const rs = await matches(t, transition === 'regress' ? 3 : 10);
+      await transaction(async (tx) => {
+        const current = (await store.getTicket(tx, projectId, t.id))!;
+        const batch = (await store.selectBatch(tx, current, randomUUID()))!;
+        for (const r of rs)
+          await store.stageCheck(tx, batch.id, {
+            sessionId: r.sessionId,
+            signalIds: [r.signalId],
+            outcome: transition === 'regress' ? 'confirmed' : 'refuted',
+            note: 'Save error returned',
+            model: 'test',
+            framesOk: true,
+          });
+        await store.finalizeBatch(tx, current, batch.id);
+        await tx.query(
+          'UPDATE friction_tickets SET reconcile_needed=true WHERE id=$1',
+          [t.id],
+        );
+      });
+      await expect(
+        processFrictionReconcile(
+          await claim(t, 'friction_reconcile'),
+          { client: deps([]).client },
+          new AbortController().signal,
+        ),
+      ).rejects.toMatchObject({ name: 'JobCompletedInTransaction' });
+      expect(await store.getTicket(pool, projectId, t.id)).toMatchObject({
+        status: transition === 'regress' ? 'published' : 'unpublished',
+        live_generation: transition === 'regress' ? 2 : 1,
+        reconcile_needed: false,
+      });
+      if (transition === 'regress') {
+        const generation = (
+          await pool.query(
+            'SELECT signal_id FROM friction_incident_evidence WHERE ticket_id=$1 AND generation=2',
+            [t.id],
+          )
+        ).rows;
+        expect(generation.map((r) => r.signal_id).sort()).toEqual(
+          rs.map((r) => r.signalId).sort(),
+        );
+      }
+    },
+  );
   it('runs the ticket investigator on confirmed input, serializes fix requests, and keeps stale delivery as an orphan', async () => {
     const t = await ticket();
     const recordings = await matches(t, 4);

@@ -514,13 +514,54 @@ func (q *Queries) SessionsReadyForPurge(ctx context.Context, grace time.Duration
 
 // DeleteMarkedSession removes a session only after its objects are gone.
 func (q *Queries) DeleteMarkedSession(ctx context.Context, sessionID, projectID string) error {
-	_, err := q.pool.Exec(ctx,
+	tx, err := q.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin session purge: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	var environment *string
+	if err := tx.QueryRow(ctx, `SELECT environment_id FROM sessions WHERE id=$1 AND project_id=$2 AND status='deleting'`, sessionID, projectID).Scan(&environment); err != nil {
+		if err == pgx.ErrNoRows {
+			return nil
+		}
+		return fmt.Errorf("read purge scope: %w", err)
+	}
+	if environment != nil {
+		if err := lockFrictionPublication(ctx, tx, *environment); err != nil {
+			return err
+		}
+	}
+	rows, err := tx.Query(ctx, `SELECT t.id FROM friction_tickets t WHERE t.project_id=$2 AND EXISTS(
+		SELECT 1 FROM friction_ticket_matches m WHERE m.ticket_id=t.id AND m.session_id=$1 AND m.project_id=$2)
+		ORDER BY t.id FOR UPDATE`, sessionID, projectID)
+	if err != nil {
+		return fmt.Errorf("lock purge tickets: %w", err)
+	}
+	tickets, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return err
+	}
+	// A cached representative signal uses a restrictive foreign key. Clear it
+	// before the cascade; reconciliation invalidates the remaining presentation.
+	if _, err := tx.Exec(ctx, `UPDATE error_groups SET representative_signal_id=NULL,representative_session_id=NULL
+		WHERE project_id=$2 AND ticket_id=ANY($3::uuid[]) AND (representative_session_id=$1 OR representative_signal_id IN (
+		SELECT id FROM friction_signals WHERE session_id=$1 AND project_id=$2))`, sessionID, projectID, tickets); err != nil {
+		return err
+	}
+	deleted, err := tx.Exec(ctx,
 		`DELETE FROM sessions WHERE id = $1 AND project_id = $2 AND status = 'deleting'`,
 		sessionID, projectID)
 	if err != nil {
 		return fmt.Errorf("delete marked session: %w", err)
 	}
-	return nil
+	if deleted.RowsAffected() != 0 {
+		for _, ticket := range tickets {
+			if _, err := tx.Exec(ctx, `SELECT friction_reconcile_after_delete($1)`, ticket); err != nil {
+				return fmt.Errorf("reconcile purged recording: %w", err)
+			}
+		}
+	}
+	return tx.Commit(ctx)
 }
 
 // ClaimTombstonesForStorageSweep rotates through deleted sessions so a late

@@ -67,6 +67,7 @@ export async function finishInvestigation(
   snapshot: InvestigationSnapshot,
   result: FrictionInvestigationResult,
 ): Promise<boolean> {
+  await store.lockJobPublications(tx, [job.id]);
   const owned = await tx.query(
     `SELECT id FROM error_group_jobs WHERE id=$1 AND project_id=$2 AND worker_id=$3 AND lease_generation=$4::bigint AND status='claimed' AND lease_expires_at>clock_timestamp() FOR UPDATE`,
     [job.id, job.projectId, job.workerId, job.leaseGeneration],

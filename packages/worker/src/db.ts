@@ -1,3 +1,4 @@
+import { lockJobPublications } from './friction/tickets-db.js';
 import { attemptFailed } from './friction/fix-attempts.js';
 import pg from 'pg';
 import type {
@@ -410,6 +411,7 @@ export async function recordInvestigatedCommit(lease: JobLease, commit: string):
 }
 
 export type UsagePhase =
+  | `friction_reconcile:${string}`
   | `friction_confirm:${string}`
   | 'investigation'
   | 'embeddings'
@@ -674,7 +676,7 @@ export async function claimJob(
          -- Claim only job types this worker can dispatch. New types stay
          -- pending until a handler ships and joins this list.
 		 AND job_type IN ('session_analysis','session_narrate','session_verify_frames','ci_watch','route_map','product_context','issue_inquiry','digest_write',
-                          'score_sync','stack_resolve','fix','investigate','error_fix','friction_match','friction_confirm','friction_pr_event')
+                          'score_sync','stack_resolve','fix','investigate','error_fix','friction_match','friction_confirm','friction_reconcile','friction_pr_event')
          AND (job_type <> 'session_analysis'
               OR (SELECT COUNT(*) FROM error_group_jobs
                    WHERE status = 'claimed'
@@ -699,7 +701,7 @@ export async function claimJob(
                    WHERE status = 'claimed' AND job_type = 'friction_confirm'
                      AND lease_expires_at > now()) < $7)
          -- Publication reconciliation shares the confirmation kill switch.
-         AND (job_type <> 'friction_reconcile' OR $7 > 0)
+         AND (job_type NOT IN ('friction_confirm','friction_reconcile') OR ($6 > 0 AND $7 > 0))
        ORDER BY CASE
          WHEN job_type = 'error_fix' THEN 0
          WHEN job_type = 'session_analysis'
@@ -965,6 +967,7 @@ export async function failJob(
   const client = await getPool().connect();
   try {
     await client.query('BEGIN');
+    await lockJobPublications(client, [jobId]);
     const result = await client.query<{
       status: string;
       job_type: JobType;
@@ -1086,6 +1089,11 @@ export async function requeueStaleJobs(): Promise<number> {
   }>;
   try {
     await client.query('BEGIN');
+    // Fix the candidate set before taking publication locks; eligibility is
+    // rechecked below after waiting, so retirement cannot be overwritten.
+    const candidates = await client.query<{ id: string }>(`SELECT id FROM error_group_jobs WHERE status='claimed' AND lease_expires_at<now()`);
+    const candidateIds = candidates.rows.map(row => row.id);
+    await lockJobPublications(client, candidateIds);
     const result = await client.query<{
       id: string;
       error_group_id: string | null;
@@ -1135,10 +1143,10 @@ export async function requeueStaleJobs(): Promise<number> {
              ELSE dead_lettered_at
            END,
            updated_at = now()
-       WHERE status = 'claimed' AND lease_expires_at < now()
+       WHERE id=ANY($3::uuid[]) AND status = 'claimed' AND lease_expires_at < now()
        RETURNING id, error_group_id, session_id, project_id, job_type, status,
                  attempts, dead_letter_class, requeues, last_error`,
-      [RETRY_BACKOFF_BASE_SECONDS, RETRY_BACKOFF_CAP_SECONDS],
+      [RETRY_BACKOFF_BASE_SECONDS, RETRY_BACKOFF_CAP_SECONDS, candidateIds],
     );
     rows = result.rows;
 
@@ -1603,6 +1611,7 @@ export async function updateGroupStatus(
     : '';
   try {
     await client.query('BEGIN');
+    if (terminalJobId) await lockJobPublications(client, [terminalJobId]);
     if (status === 'needs_human' && terminalJobId) {
       if (lease) {
         const owned = await client.query(`SELECT id FROM error_group_jobs WHERE id=$1 AND worker_id=$2 AND lease_generation=$3::bigint AND status='claimed' AND lease_expires_at>clock_timestamp() FOR UPDATE`,[lease.id,lease.workerId,lease.leaseGeneration]);

@@ -104,4 +104,14 @@ func TestTicketIncidentActionsAndOpenedWebhook(t *testing.T) {
 		WHERE e.fix_attempt_id=$1 AND e.event='opened' AND NOT e.applied AND j.job_type='friction_pr_event'`, attempt).Scan(&queued); err != nil || queued != 1 {
 		t.Fatalf("receipt jobs=%d error=%v", queued, err)
 	}
+	if w := request(http.MethodPost, "/archive", true); w.Code != http.StatusOK {
+		t.Fatalf("archive=%d %s", w.Code, w.Body.String())
+	}
+	if w := request(http.MethodPost, "/unarchive", true); w.Code != http.StatusConflict {
+		t.Fatalf("unarchive=%d %s", w.Code, w.Body.String())
+	}
+	var ticketStatus, attemptStatus string
+	if err := pool.QueryRow(ctx, `SELECT t.status,a.status FROM friction_tickets t JOIN friction_fix_attempts a ON a.ticket_id=t.id WHERE a.id=$1`, attempt).Scan(&ticketStatus, &attemptStatus); err != nil || ticketStatus != "archived" || attemptStatus != "superseded" {
+		t.Fatalf("archive state ticket=%s attempt=%s error=%v", ticketStatus, attemptStatus, err)
+	}
 }

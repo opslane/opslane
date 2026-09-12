@@ -297,19 +297,63 @@ export async function commitDecision(
   );
   return Boolean(r.rowCount);
 }
+export function publicationPaused(): boolean {
+  return [
+    'FRICTION_CONFIRM_MAX_CONCURRENT',
+    'FRICTION_MATCH_MAX_CONCURRENT',
+  ].some((key) => {
+    const raw = process.env[key];
+    return raw !== undefined && raw !== '' && Number(raw) === 0;
+  });
+}
+/** Acquire before job/project/ticket/session rows in a ticket mutation. */
+export async function lockPublication(
+  dbtx: pg.PoolClient,
+  environmentId: string,
+): Promise<void> {
+  await dbtx.query(
+    `SELECT pg_advisory_xact_lock(hashtext('friction_publish|'||$1))`,
+    [environmentId],
+  );
+}
+export async function lockTicketPublication(
+  dbtx: pg.PoolClient,
+  projectId: string,
+  ticketId: string,
+): Promise<void> {
+  const result = await dbtx.query<{ environment_id: string }>(
+    'SELECT environment_id FROM friction_tickets WHERE id=$1 AND project_id=$2',
+    [ticketId, projectId],
+  );
+  if (result.rows[0])
+    await lockPublication(dbtx, result.rows[0].environment_id);
+}
+/** Bulk terminal operations lock environments in stable order before job rows. */
+export async function lockJobPublications(
+  dbtx: pg.PoolClient,
+  jobIds: string[],
+): Promise<void> {
+  const environments = await dbtx.query<{ environment_id: string }>(
+    `SELECT DISTINCT t.environment_id FROM error_group_jobs j JOIN friction_tickets t ON t.id=j.ticket_id WHERE j.id=ANY($1::uuid[]) ORDER BY t.environment_id`,
+    [jobIds],
+  );
+  for (const row of environments.rows)
+    await lockPublication(dbtx, row.environment_id);
+}
 export async function recordMatch(
   dbtx: pg.PoolClient,
   input: MatchInput,
 ): Promise<{ newRecording: boolean; arrivalNumber: bigint }> {
+  await lockPublication(dbtx, input.ticket.environment_id);
   const t = await lockTicket(dbtx, input.ticket);
   if (t.status === 'merged' || t.status === 'archived')
     throw new Error('Cannot match a terminal ticket');
-  const valid = await dbtx.query(
-    `SELECT s.id FROM sessions s WHERE id=$1 AND project_id=$2 AND environment_id=$3
-    AND ($4::uuid IS NULL OR EXISTS (SELECT 1 FROM end_users WHERE id=$4 AND project_id=$2))
-    AND NOT EXISTS (SELECT 1 FROM unnest($5::uuid[]) x(id) LEFT JOIN friction_signals f
+  const valid = await dbtx.query<{ end_user_id: string | null }>(
+    `SELECT s.end_user_id FROM sessions s WHERE id=$1 AND project_id=$2 AND environment_id=$3
+    AND (s.end_user_id IS NULL OR EXISTS (SELECT 1 FROM end_users WHERE id=s.end_user_id AND project_id=$2))
+    AND NOT EXISTS (SELECT 1 FROM unnest($4::uuid[]) x(id) LEFT JOIN friction_signals f
       ON f.id=x.id AND f.session_id=s.id AND f.project_id=s.project_id AND f.environment_id=s.environment_id WHERE f.id IS NULL)`,
-    [input.sessionId, t.project_id, t.environment_id, input.endUserId, input.signalIds],
+    [input.sessionId, t.project_id, t.environment_id, input.signalIds],
   );
   if (!valid.rowCount) throw new Error('Match evidence outside ticket scope');
   const r = await dbtx.query<{ arrival_number: string }>(
@@ -321,7 +365,7 @@ export async function recordMatch(
       input.sessionId,
       t.project_id,
       t.environment_id,
-      input.endUserId,
+      valid.rows[0]!.end_user_id,
       (t.next_arrival_number + 1n).toString(),
       input.source,
       input.occurredAt,
@@ -608,7 +652,7 @@ async function retireLiveGeneration(dbtx: pg.PoolClient, t: TicketRow): Promise<
   );
   const ids = groups.rows.map((g) => g.id);
   await dbtx.query(
-    `UPDATE error_group_jobs SET status='failed',last_error='unpublished',updated_at=now()
+    `UPDATE error_group_jobs SET status='failed',last_error='unpublished',lease_expires_at=NULL,updated_at=now()
     WHERE error_group_id=ANY($1::uuid[]) AND status IN('pending','claimed') AND job_type IN('investigate','fix')`,
     [ids],
   );

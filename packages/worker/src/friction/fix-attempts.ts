@@ -15,6 +15,7 @@ export async function lockJob(
   tx: pg.PoolClient,
   job: db.ClaimedJob,
 ): Promise<void> {
+  await store.lockJobPublications(tx, [job.id]);
   const r = await tx.query(
     `SELECT id FROM error_group_jobs WHERE id=$1 AND project_id=$2 AND worker_id=$3
     AND lease_generation=$4::bigint AND status='claimed' AND lease_expires_at>clock_timestamp() FOR UPDATE`,
@@ -49,6 +50,7 @@ export async function requestFix(
   requestedBy: 'human' | 'auto',
   guidance?: string,
 ): Promise<FixRequest> {
+  await store.lockTicketPublication(tx, projectId, ticketId);
   const project = await tx.query<{ friction_autonomy: string }>(
     `SELECT friction_autonomy FROM projects WHERE id=$1 FOR UPDATE`,
     [projectId],
@@ -177,6 +179,7 @@ export async function applyPrEvent(
   projectId: string,
   event: PrEvent,
 ): Promise<boolean> {
+  await store.lockTicketPublication(tx, projectId, event.ticketId);
   await tx.query(`SELECT id FROM projects WHERE id=$1 FOR UPDATE`, [projectId]);
   const ticket = await store.getTicket(tx, projectId, event.ticketId, true);
   if (!ticket) return false;
@@ -365,6 +368,7 @@ export async function recordAttemptPr(
   number: number,
 ): Promise<boolean> {
   return transaction(async (tx) => {
+    await store.lockJobPublications(tx, [job.id]);
     const owned = await tx.query(
       `SELECT id FROM error_group_jobs WHERE id=$1 AND worker_id=$2 AND lease_generation=$3::bigint AND status='claimed' AND lease_expires_at>clock_timestamp() FOR UPDATE`,
       [job.id, job.workerId, job.leaseGeneration],

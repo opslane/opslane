@@ -180,13 +180,16 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_friction_match_pending ON error_group
 CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_friction_reconcile_pending ON error_group_jobs (ticket_id) WHERE job_type = 'friction_reconcile' AND status IN ('pending','claimed');
 
 -- Same-transaction reconcile after a recording is purged (rulebook: Recording deleted; invariant 9).
+-- Callers own the environment publication lock before ticket locks.
 -- Callers MUST invoke this AFTER the session delete has executed in the same transaction, so the counts below exclude the purged recording.
 CREATE OR REPLACE FUNCTION friction_reconcile_after_delete(p_ticket UUID) RETURNS void LANGUAGE plpgsql AS $$
 DECLARE t friction_tickets%ROWTYPE; g error_groups%ROWTYPE; confirmed INT; counted INT; users INT; identity BOOLEAN;
 BEGIN
   SELECT * INTO t FROM friction_tickets WHERE id = p_ticket FOR UPDATE;
   IF NOT FOUND THEN RETURN; END IF;
-  UPDATE friction_tickets SET matched_count = (SELECT count(*) FROM friction_ticket_matches WHERE ticket_id = p_ticket), evidence_version = evidence_version + 1, reconcile_needed = true, updated_at = now() WHERE id = p_ticket;
+  UPDATE friction_tickets SET matched_count = (SELECT count(*) FROM friction_ticket_matches WHERE ticket_id = p_ticket), evidence_version = evidence_version + 1, reconcile_needed = true, steps = NULL, updated_at = now() WHERE id = p_ticket;
+  UPDATE error_groups SET representative_signal_id=NULL,representative_session_id=NULL WHERE ticket_id=p_ticket;
+  UPDATE digest_card_copy SET invalidated_at=now() WHERE error_group_id IN(SELECT id FROM error_groups WHERE ticket_id=p_ticket) AND invalidated_at IS NULL;
   IF t.status <> 'published' THEN RETURN; END IF;
   SELECT * INTO g FROM error_groups WHERE ticket_id = p_ticket AND status <> 'archived';
   IF NOT FOUND OR g.fix_substate = 'resolved' THEN RETURN; END IF;
@@ -199,13 +202,36 @@ BEGIN
   IF confirmed < 3 OR (identity AND users < 2) OR (counted >= 10 AND confirmed::float / counted < 0.25) THEN
     UPDATE error_groups SET status_before_archive = status, status = 'archived', archived_at = now(), updated_at = now() WHERE id = g.id;
     UPDATE friction_tickets SET status = 'unpublished', updated_at = now() WHERE id = p_ticket;
-    UPDATE error_group_jobs SET status = 'failed', last_error = 'unpublished' WHERE error_group_id = g.id AND status IN ('pending','claimed') AND job_type IN ('investigate','fix');
+    UPDATE error_group_jobs SET status = 'failed', last_error = 'unpublished', lease_expires_at=NULL, updated_at=now() WHERE error_group_id = g.id AND status IN ('pending','claimed') AND job_type IN ('investigate','fix');
     UPDATE friction_fix_attempts SET status = 'superseded', updated_at = now() WHERE error_group_id = g.id AND status IN ('active','pr_open');
-    UPDATE digest_card_copy SET invalidated_at = now() WHERE error_group_id = g.id AND invalidated_at IS NULL;
-  ELSE
-    UPDATE digest_card_copy SET invalidated_at = now() WHERE error_group_id = g.id AND invalidated_at IS NULL;
   END IF;
 END $$;
+-- Internal identity/consolidation seam. Call before any row locks; registration
+-- retries intentionally do not change identity. Match, purge and publication use
+-- the same environment lock, so even a recording's first match sees this identity.
+CREATE OR REPLACE FUNCTION friction_set_session_identity(p_project UUID, p_session TEXT, p_user UUID)
+RETURNS void LANGUAGE plpgsql AS $$
+DECLARE env UUID; affected UUID[]; ticket UUID;
+BEGIN
+  SELECT environment_id INTO env FROM sessions WHERE id=p_session AND project_id=p_project;
+  IF NOT FOUND THEN RAISE EXCEPTION 'Session not found in project'; END IF;
+  IF p_user IS NOT NULL AND NOT EXISTS(SELECT 1 FROM end_users WHERE id=p_user AND project_id=p_project) THEN
+    RAISE EXCEPTION 'Identity outside project';
+  END IF;
+  PERFORM pg_advisory_xact_lock(hashtext('friction_publish|'||env));
+  SELECT array_agg(id ORDER BY id) INTO affected FROM (
+    SELECT t.id FROM friction_tickets t WHERE t.project_id=p_project AND EXISTS(
+      SELECT 1 FROM friction_ticket_matches m WHERE m.ticket_id=t.id AND m.session_id=p_session)
+    ORDER BY t.id FOR UPDATE
+  ) locked;
+  UPDATE sessions SET end_user_id=p_user WHERE id=p_session AND project_id=p_project AND end_user_id IS DISTINCT FROM p_user;
+  IF NOT FOUND THEN RETURN; END IF;
+  UPDATE friction_ticket_matches SET end_user_id=p_user WHERE session_id=p_session AND project_id=p_project;
+  FOREACH ticket IN ARRAY coalesce(affected,'{}'::UUID[]) LOOP
+    PERFORM friction_reconcile_after_delete(ticket);
+  END LOOP;
+END $$;
+
 -- The old UX-only autonomy setting now applies to every verified ticket.
 -- Keep the original constraint name so migration 004's guarded replay cannot
 -- reinstall its retired value before this migration runs again.

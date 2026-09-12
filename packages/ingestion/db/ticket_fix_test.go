@@ -18,6 +18,10 @@ type ticketFixFixture struct {
 }
 
 func seedTicketFix(t *testing.T) ticketFixFixture {
+	return seedTicketFixWithCount(t, 4)
+}
+
+func seedTicketFixWithCount(t *testing.T, recordings int) ticketFixFixture {
 	t.Helper()
 	pool, dsn := disposableDB(t, testPool(t))
 	applyKnownProblemMigrations(t, dsn)
@@ -56,7 +60,7 @@ func seedTicketFix(t *testing.T) ticketFixFixture {
 	batch := insert(`INSERT INTO friction_confirm_batches(ticket_id,job_id,manifest,arrival_boundary_at_select,live_generation_at_select,status_at_select,status)
 		VALUES($1,$2,'[]',4,1,'tracking','finalized') RETURNING id`, ticket, job)
 	f := ticketFixFixture{q: q, project: project, ticket: ticket, group: group}
-	for i := 0; i < 4; i++ {
+	for i := 0; i < recordings; i++ {
 		session := fmt.Sprintf("%s-%d", ticket, i)
 		exec(`INSERT INTO sessions(id,project_id,environment_id,started_at) VALUES($1,$2,$3,now()-interval '1 hour')`, session, project, environment)
 		signal := insert(`INSERT INTO friction_signals(session_id,project_id,environment_id,rule_version,signal_type,fingerprint,page_url_normalized,occurred_at,observation_id,narrative_id)

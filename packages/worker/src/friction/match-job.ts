@@ -283,6 +283,7 @@ export async function processFrictionMatch(
     const tx = await pool.connect();
     try {
       await tx.query('BEGIN');
+      await tickets.lockPublication(tx, scope.environmentId);
       await lockLease(tx, job);
       const touched = new Map<string, tickets.TicketRow>();
       // Stable signal ordering avoids competing reservations taking inverted locks.

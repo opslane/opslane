@@ -385,7 +385,7 @@ onMounted(async () => {
           Archive
         </Button>
         <Button
-          v-if="incident.status === 'archived'"
+          v-if="incident.status === 'archived' && !incident.ticket_id"
           variant="primary"
           :disabled="actionLoading"
           @click="doAction('unarchive')"

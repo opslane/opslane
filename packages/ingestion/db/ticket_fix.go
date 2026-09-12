@@ -72,6 +72,12 @@ func (q *Queries) GetTicketIncidentState(ctx context.Context, projectID, groupID
 }
 
 func lockTicketIncident(ctx context.Context, tx pgx.Tx, projectID, groupID string) (*TicketIncidentState, error) {
+	if err := lockTicketPublication(ctx, tx, projectID, groupID); err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, ErrNotInvestigated
+		}
+		return nil, err
+	}
 	var id string
 	if err := tx.QueryRow(ctx, `SELECT id FROM projects WHERE id=$1 FOR UPDATE`, projectID).Scan(&id); err != nil {
 		if err == pgx.ErrNoRows {
@@ -216,12 +222,12 @@ func (q *Queries) ProcessTicketPRWebhook(ctx context.Context, event TicketPRWebh
 	if err != pgx.ErrNoRows {
 		return result, err
 	}
-	var attempt, ticket, project, prURL string
+	var attempt, ticket, project, environment, prURL string
 	var generation int
-	err = tx.QueryRow(ctx, `SELECT a.id,a.ticket_id,a.error_group_id,a.generation,g.project_id,coalesce(a.pr_url,'')
-		FROM friction_fix_attempts a JOIN error_groups g ON g.id=a.error_group_id
+	err = tx.QueryRow(ctx, `SELECT a.id,a.ticket_id,a.error_group_id,a.generation,g.project_id,t.environment_id,coalesce(a.pr_url,'')
+		FROM friction_fix_attempts a JOIN error_groups g ON g.id=a.error_group_id JOIN friction_tickets t ON t.id=a.ticket_id
 		WHERE a.github_repo=$1 AND a.pr_number=$2 ORDER BY a.created_at,a.id LIMIT 1`, event.Repository, event.Number).
-		Scan(&attempt, &ticket, &result.GroupID, &generation, &project, &prURL)
+		Scan(&attempt, &ticket, &result.GroupID, &generation, &project, &environment, &prURL)
 	if err == pgx.ErrNoRows {
 		return PRWebhookResult{}, nil
 	}
@@ -230,6 +236,9 @@ func (q *Queries) ProcessTicketPRWebhook(ctx context.Context, event TicketPRWebh
 	}
 	// Match the worker's parent-before-attempt order. Taking the attempt first
 	// would deadlock with its ticket lock when the receipt's foreign keys run.
+	if err := lockFrictionPublication(ctx, tx, environment); err != nil {
+		return result, err
+	}
 	for _, lock := range []struct{ sql, id string }{
 		{`SELECT id FROM projects WHERE id=$1 FOR UPDATE`, project},
 		{`SELECT id FROM friction_tickets WHERE id=$1 FOR UPDATE`, ticket},

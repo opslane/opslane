@@ -116,6 +116,101 @@ describeDb('ticket store', () => {
     await store.finalizeBatch(db, t, b.id);
     return rs;
   }
+  it('admits the current recording identity after a model snapshot becomes stale', async () => {
+    const t = await ticket();
+    const oldUser = await user();
+    const newUser = await user();
+    const r = await recording(oldUser);
+    await db.query('SELECT friction_set_session_identity($1,$2,$3)', [
+      scope.projectId,
+      r.sessionId,
+      newUser,
+    ]);
+    await store.recordMatch(db, { ticket: t, ...r });
+    expect(
+      (
+        await db.query(
+          'SELECT end_user_id FROM friction_ticket_matches WHERE ticket_id=$1',
+          [t.id],
+        )
+      ).rows[0].end_user_id,
+    ).toBe(newUser);
+  });
+  it('invalidates surviving presentation and immediately unpublishes an identity collapse', async () => {
+    const t = await ticket();
+    const rs = await checked(t, [
+      'confirmed',
+      'confirmed',
+      'confirmed',
+      'confirmed',
+      'confirmed',
+    ]);
+    const g = await store.activateGeneration(
+      db,
+      t,
+      await store.cohortStats(db, t),
+      'Cached steps',
+    );
+    await db.query(
+      `UPDATE error_groups SET representative_session_id=$2,representative_signal_id=$3 WHERE id=$1`,
+      [g.errorGroupId, rs[0]!.sessionId, rs[0]!.signalIds[0]],
+    );
+    await db.query(
+      `INSERT INTO digest_card_copy(error_group_id,spell_started_at,input_fingerprint,title,copy,action,model,prompt_version) VALUES($1,now(),'fp','Save','Cached quote','fix','test',1)`,
+      [g.errorGroupId],
+    );
+    await db.query('DELETE FROM sessions WHERE id=$1', [rs[4]!.sessionId]);
+    await db.query('SELECT friction_reconcile_after_delete($1)', [t.id]);
+    expect(await store.getTicket(db, scope.projectId, t.id)).toMatchObject({
+      status: 'published',
+      matched_count: 4,
+      steps: null,
+      reconcile_needed: true,
+    });
+    expect(
+      (
+        await db.query(
+          'SELECT representative_signal_id,representative_session_id FROM error_groups WHERE id=$1',
+          [g.errorGroupId],
+        )
+      ).rows[0],
+    ).toEqual({
+      representative_signal_id: null,
+      representative_session_id: null,
+    });
+    expect(
+      (
+        await db.query(
+          'SELECT invalidated_at FROM digest_card_copy WHERE error_group_id=$1',
+          [g.errorGroupId],
+        )
+      ).rows[0].invalidated_at,
+    ).not.toBeNull();
+    for (const r of rs.slice(0, 4))
+      await db.query('SELECT friction_set_session_identity($1,$2,$3)', [
+        scope.projectId,
+        r.sessionId,
+        rs[0]!.endUserId,
+      ]);
+    expect(await store.getTicket(db, scope.projectId, t.id)).toMatchObject({
+      status: 'unpublished',
+    });
+    expect(
+      (
+        await db.query('SELECT status FROM error_groups WHERE id=$1', [
+          g.errorGroupId,
+        ])
+      ).rows[0].status,
+    ).toBe('archived');
+    expect(
+      (
+        await db.query(
+          'SELECT status FROM error_group_jobs WHERE error_group_id=$1',
+          [g.errorGroupId],
+        )
+      ).rows,
+    ).toEqual([{ status: 'failed' }]);
+  });
   it('fences investigation executions, records stale results, and preserves an active fix', async () => {
     const t = await ticket();
     const rs = await checked(t, [
