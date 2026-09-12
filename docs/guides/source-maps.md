@@ -89,8 +89,8 @@ Without a key, both the Vite plugin and command skip uploads. The Next.js config
 | Exit code | Meaning |
 | --- | --- |
 | `0` | Upload succeeded, or skipped because the key is absent |
-| `1` | Invalid input, invalid key, or stamping failed |
-| `2` | Upload failed; maps remain for retry |
+| `1` | A file could not be stamped or uploaded; failed maps remain for retry |
+| `2` | Invalid command arguments or key, or a required key is absent |
 
 
 ## A note on privacy
