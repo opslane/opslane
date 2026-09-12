@@ -519,7 +519,7 @@ describeDb('friction match job', () => {
       ).rows,
     ).toEqual([{ ticket_id: target.id }]);
   });
-  it('applies the matching cap fleet-wide and leaves unimplemented job types pending', async () => {
+  it('applies matching and confirmation caps fleet-wide and leaves unimplemented job types pending', async () => {
     const tx = await pool.connect();
     try {
       for (let i = 0; i < 4; i++)
@@ -543,16 +543,13 @@ describeDb('friction match job', () => {
     const claimed = await Promise.all(
       Array.from({ length: 5 }, (_, i) => db.claimJob(`fleet-${i}`, 60_000)),
     );
-    expect(claimed.filter(Boolean)).toHaveLength(2);
-    expect(
-      claimed.filter(Boolean).every((j) => j!.jobType === 'friction_match'),
-    ).toBe(true);
+    expect(claimed.filter((j) => j?.jobType === 'friction_match')).toHaveLength(2);
+    expect(claimed.filter((j) => j?.jobType === 'friction_confirm')).toHaveLength(1);
     const future = await pool.query(
-      `SELECT status FROM error_group_jobs WHERE project_id=$1 AND job_type IN ('friction_confirm','friction_reconcile','friction_pr_event')`,
+      `SELECT status FROM error_group_jobs WHERE project_id=$1 AND job_type IN ('friction_reconcile','friction_pr_event')`,
       [projectId],
     );
     expect(future.rows).toEqual([
-      { status: 'pending' },
       { status: 'pending' },
       { status: 'pending' },
     ]);

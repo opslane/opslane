@@ -409,6 +409,7 @@ export async function recordInvestigatedCommit(lease: JobLease, commit: string):
 }
 
 export type UsagePhase =
+  | `friction_confirm:${string}`
   | 'investigation'
   | 'embeddings'
   | 'friction_match'
@@ -672,7 +673,7 @@ export async function claimJob(
          -- Claim only job types this worker can dispatch. New types stay
          -- pending until a handler ships and joins this list.
 		 AND job_type IN ('session_analysis','session_narrate','session_verify_frames','ci_watch','route_map','product_context','issue_inquiry','digest_write',
-                          'score_sync','stack_resolve','fix','investigate','error_fix','friction_match')
+                          'score_sync','stack_resolve','fix','investigate','error_fix','friction_match','friction_confirm')
          AND (job_type <> 'session_analysis'
               OR (SELECT COUNT(*) FROM error_group_jobs
                    WHERE status = 'claimed'
@@ -801,6 +802,13 @@ export async function getQueueDepth(): Promise<QueueDepthRow[]> {
         ? null
         : Math.round(Number(row.oldest_eligible_seconds)),
   }));
+}
+
+export class JobCompletedInTransaction extends Error {
+  constructor(jobId: string) {
+    super(`Job ${jobId} completed in its finalizer transaction`);
+    this.name = 'JobCompletedInTransaction';
+  }
 }
 
 export class JobRescheduledError extends Error {

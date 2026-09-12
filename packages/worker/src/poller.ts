@@ -207,8 +207,8 @@ export function createPoller(options: PollerOptions): Poller {
       });
       return 'completed';
     } catch (err: unknown) {
-      if (err instanceof Error && err.name === 'JobRescheduledError') {
-        logger.info('Job rescheduled', { job_id: job.id });
+      if (err instanceof Error && ['JobRescheduledError', 'JobCompletedInTransaction'].includes(err.name)) {
+        logger.info(err.name === 'JobRescheduledError' ? 'Job rescheduled' : 'Job completed in transaction', { job_id: job.id });
         return 'completed';
       }
       const message = err instanceof Error ? err.message : String(err);

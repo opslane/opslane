@@ -1,3 +1,4 @@
+import { frictionConfirmDepsFromEnv, processFrictionConfirm } from './friction/confirm-job.js';
 import { frictionMatchDepsFromEnv, processFrictionMatch } from './friction/match-job.js';
 import crypto from 'node:crypto';
 import http from 'node:http';
@@ -351,6 +352,12 @@ export async function processJobInner(job: ClaimedJob, signal: AbortSignal): Pro
     project_id: job.projectId,
     attempt: job.attempts + 1,
   });
+
+  if (job.jobType === 'friction_confirm') {
+    if (!job.ticketId) throw new Error(`Job ${job.id} missing ticket_id`);
+    await processFrictionConfirm(job as ClaimedJob & { ticketId: string }, frictionConfirmDepsFromEnv(), signal);
+    return;
+  }
 
   if (job.jobType === 'friction_match') {
     if (!job.sessionId) throw new Error(`Job ${job.id} missing session_id`);

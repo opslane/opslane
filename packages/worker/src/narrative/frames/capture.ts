@@ -95,11 +95,12 @@ export async function captureFrames(
   opts: {
     viewport?: { width: number; height: number };
     wallClockBudgetMs?: number;
+    maxOffsets?: number;
   } = {},
 ): Promise<{ frames: CapturedFrame[]; assetsMissing: boolean }> {
   const viewport = opts.viewport ?? { ...DEFAULT_CAPTURE_VIEWPORT };
   const deadline = Date.now() + (opts.wallClockBudgetMs ?? 120_000);
-  const offsets = offsetsMs.slice(0, 3);
+  const offsets = offsetsMs.slice(0, opts.maxOffsets ?? 3);
   const harness = readFileSync(new URL('./harness.html', import.meta.url), 'utf8');
   const rrwebEntry = require.resolve('rrweb');
   const rrwebBundle = readFileSync(join(dirname(rrwebEntry), 'rrweb.umd.min.cjs'), 'utf8');

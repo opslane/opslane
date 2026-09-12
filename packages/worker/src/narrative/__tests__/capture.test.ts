@@ -29,4 +29,15 @@ describe.skipIf(!chromiumAvailable)('captureFrames', () => {
     }
     expect(result.assetsMissing).toBe(true);
   }, 60_000);
+  it('captures four requested moments for a confirmation batch', async () => {
+    const start = 1_700_000_000_000;
+    const result = await captureFrames([{ events: [
+      { type: 4, data: { href: 'https://app.example.com/x', width: 1440, height: 900 }, timestamp: start },
+      { type: 2, timestamp: start + 10, data: { node: { id: 1, type: 0, childNodes: [
+        { id: 2, type: 2, tagName: 'p', attributes: {}, childNodes: [{ id: 3, type: 3, textContent: 'Saved' }] },
+      ] } } },
+    ], meta: { chunked_at: start, has_full_snapshot: true, sdk_version: 'test' } }] as never, [1000, 2000, 3000, 4000, 5000], { maxOffsets: 4 });
+    expect(result.frames.map((f) => f.offsetMs)).toEqual([1000, 1000, 2000, 2000, 3000, 3000, 4000, 4000]);
+  }, 60_000);
+
 });

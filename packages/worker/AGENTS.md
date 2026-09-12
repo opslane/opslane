@@ -37,6 +37,8 @@ The worker polls Postgres and owns investigation, fix verification, lease handli
   report health during the exact outage the field exists to surface. Keep the payload
   snake_case; `QueueDepthRow` stays camelCase as the internal type.
 
+- `FRICTION_CONFIRM_DAILY_CAP` reserves one project/UTC-day unit per unstaged recording check in PostgreSQL; do not reuse narrative session budget stamps. A resumed batch skips staged recordings. `FRICTION_CONFIRM_MAX_CONCURRENT=0` pauses confirmation and reconciliation.
+
 ## Verification
 
 - Run `pnpm --filter @opslane/worker build` and `pnpm --filter @opslane/worker test`.

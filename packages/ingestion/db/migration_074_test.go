@@ -40,7 +40,7 @@ func TestMigration074FreshInstallAndPopulatedReplay(t *testing.T) {
 		"friction_tickets", "friction_observation_decisions", "friction_ticket_matches",
 		"friction_ticket_match_observations", "friction_session_processed", "friction_confirm_batches",
 		"friction_check_attempts", "friction_checks", "friction_unavailable_retries",
-		"friction_incident_evidence", "friction_fix_attempts",
+		"friction_incident_evidence", "friction_fix_attempts", "friction_confirmation_budget",
 	}
 	for _, table := range tables {
 		var exists bool
@@ -80,6 +80,8 @@ func TestMigration074FreshInstallAndPopulatedReplay(t *testing.T) {
 	}
 	orgID := insertID(`INSERT INTO orgs(name) VALUES ('074-replay') RETURNING id`)
 	projectID := insertID(`INSERT INTO projects(org_id,name) VALUES ($1,'p') RETURNING id`, orgID)
+	exec(`INSERT INTO friction_confirmation_budget(project_id,budget_day,used)
+		VALUES ($1,'2026-09-11',7)`, projectID)
 	environmentID := insertID(`INSERT INTO environments(project_id,name) VALUES ($1,'production') RETURNING id`, projectID)
 	sessionID := "074-session"
 	exec(`INSERT INTO sessions(id,project_id,environment_id,started_at) VALUES ($1,$2,$3,now())`, sessionID, projectID, environmentID)
@@ -105,8 +107,8 @@ func TestMigration074FreshInstallAndPopulatedReplay(t *testing.T) {
 		VALUES ($1,$2,'friction_confirm','completed',$3,2,$1) RETURNING id`, groupID, projectID, ticketID)
 	batchID := insertID(`INSERT INTO friction_confirm_batches(ticket_id,job_id,manifest,arrival_boundary_at_select,live_generation_at_select,status_at_select,status)
 		VALUES ($1,$2,'["074-session"]',1,2,'published','finalized') RETURNING id`, ticketID, jobID)
-	stagingBatchID := insertID(`INSERT INTO friction_confirm_batches(ticket_id,job_id,manifest,arrival_boundary_at_select,live_generation_at_select,status_at_select)
-		VALUES ($1,$2,'["074-session"]',1,2,'published') RETURNING id`, ticketID, jobID)
+	stagingBatchID := insertID(`INSERT INTO friction_confirm_batches(ticket_id,job_id,manifest,arrival_boundary_at_select,live_generation_at_select,status_at_select,evidence_version_at_select)
+		VALUES ($1,$2,'["074-session"]',1,2,'published',7) RETURNING id`, ticketID, jobID)
 	attemptSQL := `INSERT INTO friction_check_attempts(batch_id,ticket_id,session_id,outcome,model,evidence_lines,signal_ids)
 		VALUES ($1,$2,$3,'confirmed','test-model','["Pay did not respond"]',jsonb_build_array($4::text)) RETURNING id`
 	attemptID := insertID(attemptSQL, batchID, ticketID, sessionID, signalID)

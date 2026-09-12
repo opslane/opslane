@@ -94,6 +94,13 @@ CREATE TABLE IF NOT EXISTS friction_confirm_batches (          -- immutable batc
   created_at                 TIMESTAMPTZ NOT NULL DEFAULT now(),
   finalized_at               TIMESTAMPTZ
 );
+ALTER TABLE friction_confirm_batches ADD COLUMN IF NOT EXISTS evidence_version_at_select INT NOT NULL DEFAULT 0;
+CREATE TABLE IF NOT EXISTS friction_confirmation_budget (
+  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  budget_day DATE NOT NULL,
+  used INT NOT NULL DEFAULT 0 CHECK (used >= 0),
+  PRIMARY KEY(project_id,budget_day)
+);
 CREATE TABLE IF NOT EXISTS friction_check_attempts (           -- staging and forensic history
   id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   batch_id       UUID NOT NULL REFERENCES friction_confirm_batches(id) ON DELETE CASCADE,

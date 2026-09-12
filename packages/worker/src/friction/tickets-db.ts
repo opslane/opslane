@@ -88,6 +88,7 @@ export interface ConfirmBatch {
   arrival_boundary_at_select: bigint;
   live_generation_at_select: number;
   status_at_select: TicketStatus;
+  evidence_version_at_select: number;
   status: 'staging' | 'finalized' | 'discarded';
   created_at: Date;
   finalized_at: Date | null;
@@ -375,8 +376,8 @@ export async function selectBatch(
     }
   >(
     `INSERT INTO friction_confirm_batches
-    (ticket_id,job_id,manifest,arrival_boundary_at_select,live_generation_at_select,status_at_select)
-    VALUES($1,$2,$3,$4,$5,$6) RETURNING *`,
+    (ticket_id,job_id,manifest,arrival_boundary_at_select,live_generation_at_select,status_at_select,evidence_version_at_select)
+    VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
     [
       t.id,
       jobId,
@@ -384,6 +385,7 @@ export async function selectBatch(
       t.arrival_boundary.toString(),
       t.live_generation,
       t.status,
+      t.evidence_version,
     ],
   );
   // The watermark covers arrivals present at selection, including unsampled backlog.
@@ -769,4 +771,170 @@ export async function foldInto(
       ticketId: t.id,
     });
   return { confirmNeeded };
+}
+
+/** Scoped reader shared by confirmation and reconciliation. */
+export async function getTicket(
+  db: TicketDb,
+  projectId: string,
+  id: string,
+  lock = false,
+): Promise<TicketRow | null> {
+  const r = await db.query<RawTicket>(
+    `SELECT ${ticketColumns} FROM friction_tickets t WHERE id=$1 AND project_id=$2 ${
+      lock ? 'FOR UPDATE' : ''
+    }`,
+    [id, projectId],
+  );
+  return r.rows[0] ? decodeTicket(r.rows[0]) : null;
+}
+export async function getBatch(
+  db: TicketDb,
+  ticketId: string,
+  batchId: string,
+): Promise<ConfirmBatch | null> {
+  const r = await db.query<
+    Omit<ConfirmBatch, 'arrival_boundary_at_select'> & {
+      arrival_boundary_at_select: string;
+    }
+  >(`SELECT * FROM friction_confirm_batches WHERE id=$1 AND ticket_id=$2`, [
+    batchId,
+    ticketId,
+  ]);
+  const row = r.rows[0];
+  return row
+    ? {
+        ...row,
+        batchId: row.id,
+        sessionIds: row.manifest.map((m) => m.sessionId),
+        arrival_boundary_at_select: BigInt(row.arrival_boundary_at_select),
+      }
+    : null;
+}
+export async function publishedNeighbors(
+  db: TicketDb,
+  ticket: TicketRow,
+): Promise<(TicketRow & { similarity: number })[]> {
+  if (!ticket.embedding || ticket.embedding_model !== EMBEDDING_MODEL)
+    return [];
+  const r = await db.query<RawTicket & { similarity: number }>(
+    `SELECT ${ticketColumns},1-(t.embedding <=> $4::vector) AS similarity
+    FROM friction_tickets t JOIN error_groups g ON g.ticket_id=t.id AND g.publication_generation=t.live_generation
+    WHERE t.project_id=$1 AND t.environment_id=$2 AND t.id<>$3 AND t.status='published' AND g.status<>'archived'
+      AND g.fix_substate IS DISTINCT FROM 'resolved' AND t.embedding_model=$5 AND t.embedding IS NOT NULL
+      AND 1-(t.embedding <=> $4::vector)>=0.80 ORDER BY similarity DESC,t.id`,
+    [
+      ticket.project_id,
+      ticket.environment_id,
+      ticket.id,
+      vectorValue(ticket.embedding),
+      EMBEDDING_MODEL,
+    ],
+  );
+  return r.rows.map((r) => ({ ...decodeTicket(r), similarity: r.similarity }));
+}
+export interface LiveIncident {
+  id: string;
+  fix_substate: string | null;
+  evidence_version_used: number | null;
+  pr_url: string | null;
+}
+export async function liveIncident(
+  db: TicketDb,
+  t: TicketRow,
+): Promise<LiveIncident | null> {
+  const r = await db.query<LiveIncident>(
+    `SELECT g.id,g.fix_substate,g.evidence_version_used,
+    (SELECT pr_url FROM friction_fix_attempts a WHERE a.ticket_id=g.ticket_id AND a.generation=g.publication_generation AND a.pr_url IS NOT NULL ORDER BY a.created_at DESC LIMIT 1) AS pr_url
+    FROM error_groups g WHERE g.ticket_id=$1 AND g.publication_generation=$2 AND g.status<>'archived'`,
+    [t.id, t.live_generation],
+  );
+  return r.rows[0] ?? null;
+}
+/** Includes this batch's staged checks for planning only; never used for display. */
+export async function previewCohort(
+  db: TicketDb,
+  t: TicketRow,
+  batchId: string | null,
+): Promise<{ stats: CohortStats; notes: string[] }> {
+  const r = await db.query<{
+    outcome: string;
+    end_user_id: string | null;
+    note: string;
+  }>(
+    `WITH checks AS (
+      SELECT c.session_id,c.outcome,a.note FROM friction_checks c JOIN friction_check_attempts a ON a.id=c.attempt_id
+        JOIN friction_confirm_batches b ON b.id=a.batch_id AND b.status='finalized' WHERE c.ticket_id=$1
+      UNION ALL SELECT a.session_id,a.outcome,a.note FROM friction_check_attempts a JOIN friction_confirm_batches b ON b.id=a.batch_id
+        WHERE a.batch_id=$2 AND a.ticket_id=$1 AND b.status='staging' AND a.outcome<>'unavailable'
+          AND NOT EXISTS(SELECT 1 FROM friction_checks c WHERE c.ticket_id=a.ticket_id AND c.session_id=a.session_id)
+    ) SELECT c.outcome,m.end_user_id,c.note FROM checks c JOIN friction_ticket_matches m ON m.ticket_id=$1 AND m.session_id=c.session_id
+      JOIN friction_tickets t ON t.id=m.ticket_id WHERE t.cohort_cutoff IS NULL OR m.occurred_at>t.cohort_cutoff
+      ORDER BY m.arrival_number`,
+    [t.id, batchId],
+  );
+  const confirmed = r.rows.filter((r) => r.outcome === 'confirmed');
+  const users = new Set(
+    confirmed.flatMap((r) => (r.end_user_id ? [r.end_user_id] : [])),
+  );
+  return {
+    stats: {
+      counted: r.rows.length,
+      confirmed: confirmed.length,
+      refuted: r.rows.filter((r) => r.outcome === 'refuted').length,
+      inconclusive: r.rows.filter((r) => r.outcome === 'inconclusive').length,
+      confirmedUsers: users.size,
+      identityKnown: users.size > 0,
+    },
+    notes: [...new Set(confirmed.map((r) => r.note).filter(Boolean))],
+  };
+}
+/** Null means no remaining selectable or retryable work. */
+export async function nextConfirmationAt(
+  db: TicketDb,
+  ticketId: string,
+): Promise<Date | null> {
+  const r = await db.query<{ available_at: Date | null }>(
+    `SELECT min(CASE WHEN r.session_id IS NULL THEN now() ELSE greatest(now(),r.retry_at) END) AS available_at
+    FROM friction_ticket_matches m LEFT JOIN friction_checks c USING(ticket_id,session_id)
+      LEFT JOIN friction_unavailable_retries r USING(ticket_id,session_id)
+    WHERE m.ticket_id=$1 AND c.session_id IS NULL AND (r.session_id IS NULL OR NOT r.permanent)`,
+    [ticketId],
+  );
+  return r.rows[0]?.available_at ?? null;
+}
+export async function batchIntact(
+  db: TicketDb,
+  batch: ConfirmBatch,
+): Promise<boolean> {
+  const r = await db.query<{ intact: boolean }>(
+    `SELECT NOT EXISTS(SELECT 1 FROM friction_confirm_batches b,
+    jsonb_array_elements(b.manifest) member WHERE b.id=$1 AND NOT EXISTS(
+      SELECT 1 FROM friction_ticket_matches m JOIN sessions s ON s.id=m.session_id
+      WHERE m.ticket_id=b.ticket_id AND m.session_id=member->>'sessionId'
+        AND NOT EXISTS(SELECT 1 FROM jsonb_array_elements_text(member->'signalIds') signal(id)
+          WHERE NOT EXISTS(SELECT 1 FROM friction_ticket_match_observations o WHERE o.ticket_id=m.ticket_id AND o.session_id=m.session_id AND o.signal_id::text=signal.id)))) AS intact`,
+    [batch.id],
+  );
+  return r.rows[0]!.intact;
+}
+/** Fleet-wide project/day counter. Reserve only for an unstaged recording. */
+export async function reserveConfirmationBudget(
+  dbtx: pg.PoolClient,
+  projectId: string,
+  cap: number,
+): Promise<{ reserved: boolean; nextWindow: Date }> {
+  const r = await dbtx.query(
+    `INSERT INTO friction_confirmation_budget AS b(project_id,budget_day,used)
+    SELECT $1,(clock_timestamp() AT TIME ZONE 'UTC')::date,1 WHERE $2::int>0
+    ON CONFLICT(project_id,budget_day) DO UPDATE SET used=b.used+1 WHERE b.used<$2 RETURNING used`,
+    [projectId, cap],
+  );
+  const window = await dbtx.query<{ next_window: Date }>(
+    `SELECT (((clock_timestamp() AT TIME ZONE 'UTC')::date+1)::timestamp AT TIME ZONE 'UTC') AS next_window`,
+  );
+  return {
+    reserved: Boolean(r.rowCount),
+    nextWindow: window.rows[0]!.next_window,
+  };
 }
