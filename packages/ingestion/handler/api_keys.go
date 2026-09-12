@@ -35,6 +35,9 @@ func presentAPIKey(key db.APIKeyRecord) apiKeyJSON {
 	if key.Scope == db.ScopeIngest {
 		prefix = "opslane_pk_"
 	}
+	if key.Scope == db.ScopeSourcemaps {
+		prefix = "opslane_sk_"
+	}
 	return apiKeyJSON{
 		KeyID:      key.KeyID,
 		Label:      key.Label,
@@ -75,28 +78,28 @@ func (d *Dependencies) CreateAPIKey(w http.ResponseWriter, r *http.Request) {
 	if input.Scope == "" {
 		input.Scope = db.ScopeAPI
 	}
-	if input.Scope != db.ScopeAPI && input.Scope != db.ScopeIngest {
-		writeJSONError(w, http.StatusBadRequest, "scope must be api or ingest")
+	switch input.Scope {
+	case db.ScopeAPI, db.ScopeIngest, db.ScopeSourcemaps:
+	default:
+		writeJSONError(w, http.StatusBadRequest, "scope must be api, ingest, or sourcemaps")
 		return
 	}
-	if input.Scope == db.ScopeIngest && input.ExpiresAt != nil {
-		// Ingest keys have no expiry support; silently dropping the field
-		// would mint a non-expiring key the caller believes is bounded.
-		writeJSONError(w, http.StatusBadRequest, "expires_at is not supported for ingest keys")
+	if input.Scope != db.ScopeAPI && input.ExpiresAt != nil {
+		writeJSONError(w, http.StatusBadRequest, "expires_at is only supported for api keys")
 		return
 	}
 
 	var minted *db.MintedProjectKey
 	var record *db.APIKeyRecord
 	var err error
-	if input.Scope == db.ScopeIngest {
-		userID := UserIDFromCtx(r.Context())
-		minted, record, err = d.Queries.CreateIngestKeyCapped(
-			r.Context(), OrgIDFromCtx(r.Context()), projectID, input.Label, &userID,
-		)
-	} else {
-		minted, record, err = d.Queries.CreateAPIKey(r.Context(), OrgIDFromCtx(r.Context()),
-			projectID, input.Label, UserIDFromCtx(r.Context()), input.ExpiresAt)
+	orgID, userID := OrgIDFromCtx(r.Context()), UserIDFromCtx(r.Context())
+	switch input.Scope {
+	case db.ScopeIngest:
+		minted, record, err = d.Queries.CreateIngestKeyCapped(r.Context(), orgID, projectID, input.Label, &userID)
+	case db.ScopeSourcemaps:
+		minted, record, err = d.Queries.CreateSourcemapKey(r.Context(), orgID, projectID, input.Label, userID, d.publicOrigin(r))
+	default:
+		minted, record, err = d.Queries.CreateAPIKey(r.Context(), orgID, projectID, input.Label, userID, input.ExpiresAt)
 	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeJSONError(w, http.StatusNotFound, "project not found")
