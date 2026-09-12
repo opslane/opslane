@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"encoding/json"
@@ -49,12 +50,48 @@ func writeSessionGate(w http.ResponseWriter, session *db.AgentSession, status in
 	case http.StatusNotFound:
 		agentJSON(w, status, map[string]any{"status": "not_found"})
 	case http.StatusGone:
-		agentJSON(w, status, map[string]any{"status": "expired", "message": "session expired; ask the user to run setup again"})
+		agentJSON(w, status, map[string]any{"status": "expired", "approved": false, "message": "session expired; ask the user to run setup again"})
 	case http.StatusConflict:
 		agentJSON(w, status, map[string]any{"status": session.Status, "message": "session is not approved yet"})
 	default:
 		agentJSON(w, status, map[string]any{"status": "internal_error", "message": "internal error"})
 	}
+}
+
+// agentSessionResponse holds the small JSON response until the final expiry
+// check. A database or network operation cannot release stale session facts.
+type agentSessionResponse struct {
+	http.ResponseWriter
+	body   bytes.Buffer
+	status int
+}
+
+func (w *agentSessionResponse) WriteHeader(status int) {
+	if w.status == 0 {
+		w.status = status
+	}
+}
+func (w *agentSessionResponse) Write(body []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	return w.body.Write(body)
+}
+
+// refreshAgentSession guards mutations after decoding a potentially slow body.
+func (d *Dependencies) refreshAgentSession(w http.ResponseWriter, r *http.Request) bool {
+	s := agentSessionFromCtx(r.Context())
+	if !time.Now().Before(s.ExpiresAt) {
+		writeSessionGate(w, s, http.StatusGone)
+		return false
+	}
+	current, status := d.loadAgentSessionForToken(r.Context(), s.ID, r.Header.Get("X-Opslane-Poll-Token"))
+	if status != http.StatusOK {
+		writeSessionGate(w, current, status)
+		return false
+	}
+	*s = *current
+	return true
 }
 
 // AgentSessionAuth authenticates a session-scoped route with the poll token
@@ -77,7 +114,18 @@ func (d *Dependencies) AgentSessionAuth(next http.Handler) http.Handler {
 			writeSessionGate(w, session, status)
 			return
 		}
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), agentSessionCtxKey{}, session)))
+		ctx, cancel := context.WithDeadline(r.Context(), session.ExpiresAt)
+		defer cancel()
+		response := &agentSessionResponse{ResponseWriter: w}
+		next.ServeHTTP(response, r.WithContext(context.WithValue(ctx, agentSessionCtxKey{}, session)))
+		if !time.Now().Before(session.ExpiresAt) {
+			writeSessionGate(w, session, http.StatusGone)
+			return
+		}
+		if response.status != 0 {
+			w.WriteHeader(response.status)
+			_, _ = w.Write(response.body.Bytes())
+		}
 	})
 }
 
@@ -153,6 +201,9 @@ func (d *Dependencies) AgentSessionGitHub(w http.ResponseWriter, r *http.Request
 		writeJSONError(w, http.StatusBadRequest, "repo must be in owner/repo format")
 		return
 	}
+	if !d.refreshAgentSession(w, r) {
+		return
+	}
 	canonical, code, msg := d.attachGitHubRepo(r.Context(), *s.OrgID, *s.ProjectID, req.Repo)
 	if code != 0 {
 		writeJSONError(w, code, msg)
@@ -169,6 +220,9 @@ func (d *Dependencies) AgentSessionSlack(w http.ResponseWriter, r *http.Request)
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<12)).Decode(&req); err != nil || req.WebhookURL == "" {
 		writeJSONError(w, http.StatusBadRequest, "webhook_url is required")
+		return
+	}
+	if !d.refreshAgentSession(w, r) {
 		return
 	}
 	destID, ok, errMsg, classification, err := d.createTestEnableSlack(r.Context(), *s.OrgID, *s.ProjectID, req.WebhookURL)
@@ -227,6 +281,9 @@ func (d *Dependencies) AgentSessionProgress(w http.ResponseWriter, r *http.Reque
 		writeJSONError(w, http.StatusBadRequest, "note must be 500 characters or less")
 		return
 	}
+	if !d.refreshAgentSession(w, r) {
+		return
+	}
 	if err := d.Queries.UpsertAgentStep(r.Context(), s.ID, req.Step, req.Status, req.Note); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "failed to record progress")
 		return
@@ -237,6 +294,9 @@ func (d *Dependencies) AgentSessionProgress(w http.ResponseWriter, r *http.Reque
 // POST /api/v1/agent/poll/{sessionID}/complete
 func (d *Dependencies) AgentSessionComplete(w http.ResponseWriter, r *http.Request) {
 	s := agentSessionFromCtx(r.Context())
+	if !d.refreshAgentSession(w, r) {
+		return
+	}
 	onboarded, err := d.Queries.OrgOnboarded(r.Context(), *s.OrgID)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "failed to check onboarding")

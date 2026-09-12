@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"crypto/hmac"
 	"encoding/json"
 	"fmt"
@@ -151,7 +152,9 @@ func (d *Dependencies) AgentPoll(w http.ResponseWriter, r *http.Request) {
 		approved := session.Status != "pending" && !terminal
 		var facts agentFacts
 		if approved {
-			facts = d.agentSessionFacts(r, session)
+			ctx, cancel := context.WithDeadline(r.Context(), session.ExpiresAt)
+			facts = d.agentSessionFacts(r.WithContext(ctx), session)
+			cancel()
 		}
 		// completed is approved and final: never hold a wait on it.
 		done := terminal || session.Status == "completed" || (approved && (!untilEvent || facts.HasEvents))
@@ -174,6 +177,9 @@ func (d *Dependencies) writeAgentPollResponse(w http.ResponseWriter, r *http.Req
 		agentJSON(w, http.StatusGone, map[string]any{"status": "expired", "approved": false, "message": "session expired; ask the user to run setup again"})
 		return
 	}
+	ctx, cancel := context.WithDeadline(r.Context(), session.ExpiresAt)
+	defer cancel()
+	r = r.WithContext(ctx)
 	switch session.Status {
 	case "completed", "provisioned", "key_ok", "app_reporting":
 		resp := map[string]any{
@@ -216,6 +222,10 @@ func (d *Dependencies) writeAgentPollResponse(w http.ResponseWriter, r *http.Req
 			if err := d.Queries.MarkAgentKeyDelivered(r.Context(), session.ID); err != nil {
 				slog.Warn("agent poll: mark delivered", "error", err)
 			}
+		}
+		if !time.Now().Before(session.ExpiresAt) {
+			writeSessionGate(w, session, http.StatusGone)
+			return
 		}
 		agentJSON(w, http.StatusOK, resp)
 	case "failed":
