@@ -1,5 +1,5 @@
 import type {
-  Incident, AffectedUser, Account, IncidentFilters,
+  AgentApproveInfo, Incident, AffectedUser, Account, IncidentFilters,
   SampleEvent,
   GitHubConfig, GitHubAppStatus, GitHubRepo,
   SessionDetail, SessionFilters, SessionListResponse, SessionNarrative,
@@ -778,4 +778,19 @@ export function unarchiveIncident(
     `/projects/${projectId}/incidents/${incidentId}/unarchive`,
     {}
   );
+}
+
+export function getAgentApproveInfo(sessionId: string): Promise<AgentApproveInfo> {
+  return fetchJSON<AgentApproveInfo>(`/agent/approve/${encodeURIComponent(sessionId)}`);
+}
+
+export function approveAgentSession(
+  sessionId: string,
+  body: { project_name?: string; existing_project_id?: string },
+): Promise<{ status: string; project_id: string; project_name: string }> {
+  return postJSON(`/agent/approve/${encodeURIComponent(sessionId)}`, body);
+}
+
+export function denyAgentSession(sessionId: string): Promise<{ status: string }> {
+  return postJSON(`/agent/approve/${encodeURIComponent(sessionId)}/deny`, {});
 }

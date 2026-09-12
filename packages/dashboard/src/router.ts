@@ -10,6 +10,7 @@ import Settings from './views/Settings.vue';
 import AccountsList from './views/AccountsList.vue';
 import AccountDetail from './views/AccountDetail.vue';
 import AcceptInvitation from './views/AcceptInvitation.vue';
+import AgentApprove from './views/AgentApprove.vue';
 import { routeNeedsProject } from './route-project';
 
 export const routes: RouteRecordRaw[] = [
@@ -17,6 +18,7 @@ export const routes: RouteRecordRaw[] = [
   { path: '/reset-password', name: 'reset-password', component: ResetPassword, meta: { public: true } },
   { path: '/auth/complete', name: 'auth-complete', component: AuthCallback, meta: { public: true } },
   { path: '/invite/accept', name: 'invite-accept', component: AcceptInvitation },
+  { path: '/agent/approve/:id', name: 'agent-approve', component: AgentApprove },
   { path: '/setup', name: 'setup', component: SetupWizard },
   { path: '/', name: 'issues', component: IssuesList },
   { path: '/issues/:id', name: 'incident', component: IncidentDetail },
@@ -42,7 +44,7 @@ router.beforeEach((to) => {
   const publicRoutes = ['login', 'auth-complete'];
 
   if (!to.meta.public && !authed) {
-    if (to.name === 'invite-accept') {
+    if (to.name === 'invite-accept' || to.name === 'agent-approve') {
       sessionStorage.setItem('opslane_post_auth_path', to.fullPath);
     }
     return { name: 'login' };

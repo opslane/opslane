@@ -528,3 +528,19 @@ export interface HealthResponse {
   version: string;
   uptime_seconds: number;
 }
+
+export interface AgentApproveProject { id: string; name: string; github_repo: string | null }
+export type AgentStepName = 'approve' | 'install_sdk' | 'first_event' | 'github' | 'slack' | 'sourcemaps' | 'mcp';
+export type AgentStepStatus = 'pending' | 'running' | 'done' | 'skipped' | 'failed';
+export interface AgentStepState { status: AgentStepStatus; note: string; updated_at: string }
+export interface AgentFacts {
+  has_events: boolean; latest_error_group_url: string | null; issues_url: string;
+  github_connected: boolean; github_installed: boolean; github_mode: 'app' | 'pat';
+  github_connect_url: string; github_repo: string | null; slack_connected: boolean;
+  sourcemaps_uploaded: boolean; steps: Partial<Record<Exclude<AgentStepName, 'approve'>, AgentStepState>>;
+}
+export type AgentSessionStatus = 'pending' | 'provisioned' | 'key_ok' | 'app_reporting' | 'completed' | 'failed' | 'expired';
+export interface AgentApproveInfo {
+  status: AgentSessionStatus; agent_name?: string; project_name?: string; git_remote?: string; expires_at: string;
+  projects: AgentApproveProject[]; suggested_project_id: string | null; facts?: AgentFacts;
+}
