@@ -81,7 +81,7 @@ function selectSettingsTab(value: string): void {
 
 // Project tab
 const projects = ref<Project[]>([]);
-const selectedProjectId = ref(localStorage.getItem('opslane_project_id') ?? '');
+const selectedProjectId = ref('');
 const loadingProjects = ref(true);
 const showNewProjectForm = ref(false);
 const newProjectName = ref('');
@@ -263,25 +263,38 @@ onMounted(async () => {
     }).catch(() => {}),
   ]);
   authLoaded.value = true;
-  const requestedTab = route.query.tab;
-  if (
-    typeof requestedTab === 'string'
-    && settingsTabs.value.some((tab) => tab.id === requestedTab)
-  ) {
-    selectSettingsTab(requestedTab);
-  }
   try {
     projects.value = await listProjects();
+    const requestedProjectId = route.query.project_id;
+    const requestedProject = typeof requestedProjectId === 'string'
+      ? projects.value.find((project) => project.id === requestedProjectId)
+      : undefined;
+    const cachedProject = projects.value.find((project) => project.id === localStorage.getItem('opslane_project_id'));
+    const activeProject = requestedProject ?? cachedProject ?? projects.value[0];
+    if (activeProject) {
+      selectedProjectId.value = activeProject.id;
+      if (activeProject.id !== localStorage.getItem('opslane_project_id')) {
+        applyProjectSelection(localStorage, activeProject);
+      } else {
+        localStorage.setItem('opslane_project_name', activeProject.name);
+      }
+    }
     // Load GitHub App status + per-project config
     loadGitHubAppStatus();
     if (selectedProjectId.value) {
       loadGitHubConfig(selectedProjectId.value);
     }
   } catch {
-    // The active project remains available from local storage; project-scoped
-    // requests below will surface their own failures.
+    // Keep project actions unavailable until the organization project list loads.
   } finally {
     loadingProjects.value = false;
+  }
+  const requestedTab = route.query.tab;
+  if (
+    typeof requestedTab === 'string'
+    && settingsTabs.value.some((tab) => tab.id === requestedTab)
+  ) {
+    selectSettingsTab(requestedTab);
   }
 });
 
@@ -511,7 +524,7 @@ function optionStats(value: Project['friction_autonomy']): string {
 
 function switchTab(tab: SettingsTab): void {
   activeTab.value = tab;
-  const pid = selectedProjectId.value || localStorage.getItem('opslane_project_id') || '';
+  const pid = selectedProjectId.value;
   if (tab === 'environments' && environments.value.length === 0 && pid) {
     loadEnvironments(pid);
   }
@@ -680,7 +693,7 @@ async function loadGitHubAppStatus(): Promise<void> {
 }
 
 async function handleConnectGithub(): Promise<void> {
-  const pid = selectedProjectId.value || localStorage.getItem('opslane_project_id') || '';
+  const pid = selectedProjectId.value;
   if (!pid || !selectedRepo.value) return;
   connectingGithub.value = true;
   githubError.value = '';
@@ -698,7 +711,7 @@ async function handleConnectGithub(): Promise<void> {
 }
 
 async function handleDisconnectGithub(): Promise<void> {
-  const pid = selectedProjectId.value || localStorage.getItem('opslane_project_id') || '';
+  const pid = selectedProjectId.value;
   if (!pid) return;
   disconnectingGithub.value = true;
   try {
@@ -1068,7 +1081,7 @@ async function handleDisconnectGithub(): Promise<void> {
             class="mt-1 block w-full rounded-md border border-border bg-surface-subtle px-3 py-2 text-sm text-text focus:border-accent focus:ring-1 focus:ring-accent"
           />
         </label>
-        <Button variant="primary" type="submit" :disabled="creatingAPIKey || !apiKeyLabel.trim()">
+        <Button variant="primary" type="submit" :disabled="creatingAPIKey || !selectedProjectId || !apiKeyLabel.trim()">
           {{ creatingAPIKey ? 'Creating...' : 'Create secret API key' }}
         </Button>
       </form>

@@ -64,6 +64,7 @@ async function mountSettings(
   selectedProject = project,
   options: {
     billingEnabled?: boolean;
+    projects?: Project[];
     query?: Record<string, string>;
     navigate?: (target: string) => void;
   } = {},
@@ -84,7 +85,7 @@ async function mountSettings(
     social_providers: [],
     billing_enabled: options.billingEnabled ?? false,
   });
-  vi.mocked(listProjects).mockResolvedValue([selectedProject]);
+  vi.mocked(listProjects).mockResolvedValue(options.projects ?? [selectedProject]);
   vi.mocked(listEnvironments).mockResolvedValue({
     environments: [
       { id: 'env-production', project_id: selectedProject.id, name: 'production', created_at: selectedProject.created_at },
@@ -283,6 +284,39 @@ describe('MCP API key management', () => {
   afterEach(() => {
     vi.clearAllMocks();
     localStorage.clear();
+  });
+
+  it.each(['empty', 'another project'])('uses the project in an agent Settings link when cached selection is %s', async (cache) => {
+    localStorage.clear();
+    if (cache === 'another project') {
+      localStorage.setItem('opslane_project_id', 'project-a');
+      localStorage.setItem('opslane_environment_id', 'environment-a');
+    }
+    const projectB = { ...project, id: 'project-b', name: 'App B' };
+    vi.mocked(createAPIKey).mockResolvedValue({ key_id: 'kb', token: 'opslane_sk_b', label: 'CI', scope: 'sourcemaps', expires_at: null });
+    const wrapper = await mountSettings('admin', projectB, {
+      query: { project_id: projectB.id, tab: 'api-keys' },
+      projects: [{ ...project, id: 'project-a', name: 'App A' }, projectB],
+    });
+    expect(localStorage.getItem('opslane_project_id')).toBe(projectB.id);
+    expect(localStorage.getItem('opslane_project_name')).toBe('App B');
+    expect(localStorage.getItem('opslane_environment_id')).toBeNull();
+    expect(listAPIKeys).toHaveBeenCalledWith(projectB.id);
+    expect(listAPIKeys).not.toHaveBeenCalledWith('project-a');
+    await wrapper.get('[data-testid="api-key-scope"]').setValue('sourcemaps');
+    await wrapper.get('[data-testid="api-key-label"]').setValue('CI');
+    await wrapper.get('[data-testid="api-key-create"]').trigger('submit');
+    await flushPromises();
+    expect(createAPIKey).toHaveBeenCalledWith(projectB.id, { label: 'CI', scope: 'sourcemaps', expires_at: null });
+    wrapper.unmount();
+  });
+
+  it('does not accept a project query outside the organization project list', async () => {
+    const wrapper = await mountSettings('admin', project, { query: { project_id: 'foreign-project', tab: 'api-keys' } });
+    expect(localStorage.getItem('opslane_project_id')).toBe(project.id);
+    expect(listAPIKeys).toHaveBeenCalledWith(project.id);
+    expect(listAPIKeys).not.toHaveBeenCalledWith('foreign-project');
+    wrapper.unmount();
   });
 
   it('loads redacted keys for admins when the tab opens', async () => {
