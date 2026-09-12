@@ -58,8 +58,11 @@ func (d *Dependencies) AgentApproveInfo(w http.ResponseWriter, r *http.Request) 
 	}
 	orgID := OrgIDFromCtx(r.Context())
 	status := session.Status
-	if status == "pending" && time.Now().After(session.ExpiresAt) {
-		status = "expired"
+	if time.Now().After(session.ExpiresAt) {
+		switch status {
+		case "pending", "provisioned", "key_ok", "app_reporting":
+			status = "expired"
+		}
 	}
 	resp := map[string]any{
 		"status":     status,

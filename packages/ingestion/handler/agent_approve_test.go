@@ -214,3 +214,25 @@ func TestAgentPoll_RejectsLegacyAndIncompleteKeyBundles(t *testing.T) {
 		}
 	}
 }
+
+func TestAgentApproveInfo_ExpiredActiveSessionsShowRecovery(t *testing.T) {
+	a := approvedRig(t)
+	for _, status := range []string{"pending", "provisioned", "key_ok", "app_reporting", "completed", "failed", "expired"} {
+		if _, err := a.deps.Queries.Pool().Exec(context.Background(), `UPDATE agent_sessions SET status=$2,expires_at=now()-interval '1 second' WHERE id=$1`, a.pollID, status); err != nil {
+			t.Fatal(err)
+		}
+		code, info := a.do(t, http.MethodGet, "/api/v1/agent/approve/"+a.pollID, "", true)
+		want := status
+		switch status {
+		case "pending", "provisioned", "key_ok", "app_reporting":
+			want = "expired"
+		}
+		if code != http.StatusOK || info["status"] != want || info["project_id"] != a.project {
+			t.Fatalf("%s info: code=%d status=%v project=%v", status, code, info["status"], info["project_id"])
+		}
+		stored, err := a.deps.Queries.GetAgentSession(context.Background(), a.pollID)
+		if err != nil || stored.Status != status {
+			t.Fatalf("derived status changed stored lifecycle: %v %v", stored, err)
+		}
+	}
+}
