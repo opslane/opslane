@@ -21,6 +21,8 @@ import (
 	gh "github.com/opslane/opslane/packages/ingestion/github"
 )
 
+var errGitHubUpstream = errors.New("github upstream failure")
+
 type oauthLoginStateStore interface {
 	StoreOAuthLoginState(ctx context.Context, tokenHash string, expiresAt time.Time) error
 }
@@ -221,12 +223,17 @@ func (d *Dependencies) OAuthLoginCallback(w http.ResponseWriter, r *http.Request
 			return
 		}
 		slog.Warn("identity provider code exchange failed", "provider", d.provider().Name(), "error", err)
-		writeJSONError(w, http.StatusBadGateway, "authentication failed")
+		writeGitHubFailure(w, &githubFailure{Status: http.StatusServiceUnavailable, Code: "identity_provider_unreachable", Message: "authentication failed"})
 		return
 	}
 
 	completion, err := d.completeOAuthIdentity(r.Context(), identity, cont)
 	if err != nil {
+		if errors.Is(err, errGitHubUpstream) {
+			slog.Warn("OAuth install: GitHub upstream failure", "error", err)
+			writeGitHubFailure(w, &githubFailure{Status: http.StatusServiceUnavailable, Code: "github_unreachable", Message: "could not load GitHub installation; retry the installation"})
+			return
+		}
 		slog.Error("OAuth login completion failed", "error", err)
 		writeJSONError(w, http.StatusInternalServerError, "could not complete authentication")
 		return
@@ -323,13 +330,13 @@ func (d *Dependencies) gitHubInstallCallback(w http.ResponseWriter, r *http.Requ
 	if err != nil {
 		release()
 		slog.Warn("GitHub install code exchange failed", "error", err)
-		writeJSONError(w, http.StatusBadGateway, "GitHub authorization failed")
+		writeGitHubFailure(w, &githubFailure{Status: http.StatusServiceUnavailable, Code: "github_unreachable", Message: "GitHub authorization failed"})
 		return
 	}
 	userInstalls, err := gh.ListUserInstallations(userToken.AccessToken)
 	if err != nil {
 		release()
-		writeJSONError(w, http.StatusBadGateway, "could not verify GitHub installation ownership")
+		writeGitHubFailure(w, &githubFailure{Status: http.StatusServiceUnavailable, Code: "github_unreachable", Message: "could not verify GitHub installation ownership"})
 		return
 	}
 	if !containsInstallation(userInstalls, installationID) {
@@ -346,19 +353,23 @@ func (d *Dependencies) gitHubInstallCallback(w http.ResponseWriter, r *http.Requ
 	installInfo, err := gh.VerifyInstallation(appJWT, installationID)
 	if err != nil {
 		release()
-		writeJSONError(w, http.StatusBadRequest, "invalid or unauthorized installation")
+		if errors.Is(err, gh.ErrInstallationGone) {
+			writeJSONError(w, http.StatusBadRequest, "invalid or unauthorized installation")
+			return
+		}
+		writeGitHubFailure(w, classifyGitHubError(err))
 		return
 	}
 	installationToken, err := gh.GetInstallationToken(appJWT, installationID)
 	if err != nil {
 		release()
-		writeJSONError(w, http.StatusBadGateway, "could not load GitHub installation repositories")
+		writeGitHubFailure(w, d.githubTokenFailure(r.Context(), err, installationID, *loginState.TargetOrgID, d.publicOrigin(r)+"/settings#github"))
 		return
 	}
 	repos, err := gh.ListInstallationRepos(installationToken.Token)
 	if err != nil {
 		release()
-		writeJSONError(w, http.StatusBadGateway, "could not load GitHub installation repositories")
+		writeGitHubFailure(w, classifyGitHubError(err))
 		return
 	}
 	installationRepos := toInstallationRepos(repos)
@@ -620,25 +631,28 @@ func (d *Dependencies) applyCombinedGitHubInstallationContext(ctx context.Contex
 	}
 	installInfo, err := gh.VerifyInstallation(appJWT, installationID)
 	if err != nil {
-		return fmt.Errorf("invalid or unauthorized installation")
+		if errors.Is(err, gh.ErrInstallationGone) {
+			return fmt.Errorf("invalid or unauthorized installation")
+		}
+		return fmt.Errorf("%w: verify installation: %v", errGitHubUpstream, err)
 	}
 	if identity.AccessToken == "" {
 		return fmt.Errorf("cannot verify installation ownership")
 	}
 	userInstalls, err := gh.ListUserInstallations(identity.AccessToken)
 	if err != nil {
-		return fmt.Errorf("verify installation ownership: %w", err)
+		return fmt.Errorf("%w: verify installation ownership: %v", errGitHubUpstream, err)
 	}
 	if !containsInstallation(userInstalls, installationID) {
 		return fmt.Errorf("installation does not belong to the authenticated user")
 	}
 	installationToken, err := gh.GetInstallationToken(appJWT, installationID)
 	if err != nil {
-		return fmt.Errorf("get installation token: %w", err)
+		return fmt.Errorf("%w: get installation token: %v", errGitHubUpstream, err)
 	}
 	repos, err := gh.ListInstallationRepos(installationToken.Token)
 	if err != nil {
-		return fmt.Errorf("list installation repositories: %w", err)
+		return fmt.Errorf("%w: list installation repos: %v", errGitHubUpstream, err)
 	}
 	installationRepos := toInstallationRepos(repos)
 	orgID := user.OrgID
@@ -767,11 +781,16 @@ func (d *Dependencies) GetGitHubAppStatus(w http.ResponseWriter, r *http.Request
 		InstallURL     string `json:"install_url"`
 	}
 
+	active, err := d.Queries.OrgHasActiveGitHubInstallation(r.Context(), orgID)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
 	resp := statusResponse{
-		Installed:  installationID > 0,
+		Installed:  active,
 		InstallURL: installURL,
 	}
-	if installationID > 0 {
+	if active && installationID > 0 {
 		resp.InstallationID = &installationID
 	}
 
@@ -793,8 +812,9 @@ func (d *Dependencies) ListGitHubRepos(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
+	connectURL := d.publicOrigin(r) + "/settings#github"
 	if installationID == 0 {
-		writeJSONError(w, http.StatusBadRequest, "GitHub App not installed")
+		writeGitHubFailure(w, &githubFailure{Status: http.StatusBadRequest, Code: "github_not_installed", Message: "GitHub App not installed", Extra: map[string]string{"github_connect_url": connectURL}})
 		return
 	}
 
@@ -813,14 +833,14 @@ func (d *Dependencies) ListGitHubRepos(w http.ResponseWriter, r *http.Request) {
 	installToken, err := gh.GetInstallationToken(appJWT, installationID)
 	if err != nil {
 		slog.Error("failed to get installation token", "error", err, "installation_id", installationID)
-		writeJSONError(w, http.StatusBadGateway, "failed to get GitHub access")
+		writeGitHubFailure(w, d.githubTokenFailure(r.Context(), err, installationID, orgID, connectURL))
 		return
 	}
 
 	repos, err := gh.ListInstallationRepos(installToken.Token)
 	if err != nil {
 		slog.Error("failed to list repos", "error", err)
-		writeJSONError(w, http.StatusBadGateway, "failed to list repositories")
+		writeGitHubFailure(w, classifyGitHubError(err))
 		return
 	}
 

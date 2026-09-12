@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,6 +18,65 @@ import (
 	"github.com/opslane/opslane/packages/ingestion/db"
 	gh "github.com/opslane/opslane/packages/ingestion/github"
 )
+
+func TestListGitHubReposRetiresGoneInstallation(t *testing.T) {
+	deps, q, orgID, projectID, installationID := setGitHubConfigFixture(t)
+	ctx := context.Background()
+	if _, err := q.Pool().Exec(ctx,
+		`INSERT INTO github_app_installations (installation_id, github_org_name, github_org_id, org_id, repos)
+		 VALUES ($1, 'acme', 1, $2, '[]')`, installationID, orgID); err != nil {
+		t.Fatal(err)
+	}
+	restore := gh.OverrideHTTPClientForTests(githubGoneOrMissingClient(installationID, http.StatusNotFound, `{"repositories":[]}`, ""))
+	defer restore()
+
+	recorder := httptest.NewRecorder()
+	deps.ListGitHubRepos(recorder, newSetGitHubConfigRequest(orgID, projectID, ""))
+	if recorder.Code != http.StatusConflict || !strings.Contains(recorder.Body.String(), `"code":"github_installation_gone"`) {
+		t.Fatalf("code=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if pointer, _ := q.GetOrgGitHubInstallation(ctx, orgID); pointer != 0 {
+		t.Fatalf("org pointer must be cleared: %d", pointer)
+	}
+	recorder = httptest.NewRecorder()
+	deps.ListGitHubRepos(recorder, newSetGitHubConfigRequest(orgID, projectID, ""))
+	if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), `"code":"github_not_installed"`) ||
+		!strings.Contains(recorder.Body.String(), `"github_connect_url"`) {
+		t.Fatalf("after retire: code=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestGetGitHubAppStatusReflectsSuspension(t *testing.T) {
+	deps, q, orgID, projectID, installationID := setGitHubConfigFixture(t)
+	deps.GitHubAppSlug = ""
+	ctx := context.Background()
+	if _, err := q.Pool().Exec(ctx,
+		`INSERT INTO github_app_installations (installation_id, github_org_name, github_org_id, org_id, repos)
+		 VALUES ($1, 'acme', 1, $2, '[]')`, installationID, orgID); err != nil {
+		t.Fatal(err)
+	}
+	status := func() map[string]any {
+		recorder := httptest.NewRecorder()
+		deps.GetGitHubAppStatus(recorder, newSetGitHubConfigRequest(orgID, projectID, ""))
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("status code=%d body=%s", recorder.Code, recorder.Body.String())
+		}
+		var body map[string]any
+		if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		return body
+	}
+	if got := status(); got["installed"] != true {
+		t.Fatalf("active installation must read installed: %v", got)
+	}
+	if _, err := q.SetGitHubInstallationSuspended(ctx, installationID, true); err != nil {
+		t.Fatal(err)
+	}
+	if got := status(); got["installed"] != false {
+		t.Fatalf("suspended installation must read not installed: %v", got)
+	}
+}
 
 type recordingProvider struct {
 	authorizeCalls int
