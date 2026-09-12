@@ -15,9 +15,9 @@ type AgentStep struct {
 	UpdatedAt time.Time
 }
 
-// AgentStepNames is the fixed checklist in display order. Migration 075's
-// CHECK constraint is the source of truth; keep them equal.
-var AgentStepNames = []string{"install_sdk", "first_event", "github", "slack", "sourcemaps", "mcp"}
+// AgentStepNames is the fixed checklist in display order and the source of
+// truth for names accepted by the progress handler.
+var AgentStepNames = []string{"install_sdk", "first_event", "github", "slack", "sourcemaps", "mcp", "pull_request"}
 
 func (q *Queries) UpsertAgentStep(ctx context.Context, sessionID, step, status, note string) error {
 	_, err := q.pool.Exec(ctx,

@@ -246,9 +246,10 @@ func (d *Dependencies) AgentSessionGitHub(w http.ResponseWriter, r *http.Request
 	if !d.refreshAgentSession(w, r) {
 		return
 	}
-	canonical, code, msg := d.attachGitHubRepo(r.Context(), *s.OrgID, *s.ProjectID, req.Repo)
-	if code != 0 {
-		writeJSONError(w, code, msg)
+	connectURL := d.publicOrigin(r) + "/settings?project_id=" + *s.ProjectID + "#github"
+	canonical, failure := d.attachGitHubRepo(r.Context(), *s.OrgID, *s.ProjectID, req.Repo, connectURL)
+	if failure != nil {
+		writeGitHubFailure(w, failure)
 		return
 	}
 	agentJSON(w, http.StatusOK, map[string]any{"github_connected": true, "github_repo": canonical})
@@ -309,7 +310,7 @@ func (d *Dependencies) AgentSessionProgress(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	switch req.Step {
-	case "install_sdk", "mcp":
+	case "install_sdk", "mcp", "pull_request":
 	case "first_event", "github", "slack", "sourcemaps":
 		if req.Status != "failed" && req.Status != "skipped" {
 			writeJSONError(w, http.StatusBadRequest, "server-derived step accepts only failed or skipped")

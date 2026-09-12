@@ -39,15 +39,15 @@ func TestAgentSteps_UpsertListAndEnum(t *testing.T) {
 	if err := q.UpsertAgentStep(ctx, s.ID, "mcp", "skipped", "headless"); err != nil {
 		t.Fatal(err)
 	}
+	if err := q.UpsertAgentStep(ctx, s.ID, "pull_request", "done", "https://github.com/acme/web/pull/12"); err != nil {
+		t.Fatal(err)
+	}
 	steps, err := q.ListAgentSteps(ctx, s.ID)
-	if err != nil || len(steps) != 2 {
+	if err != nil || len(steps) != 3 {
 		t.Fatalf("list: %v %+v", err, steps)
 	}
-	if steps[0].Step != "install_sdk" || steps[0].Status != "done" || steps[0].Note != "vite + vue" || steps[1].Step != "mcp" {
+	if steps[0].Step != "install_sdk" || steps[0].Status != "done" || steps[0].Note != "vite + vue" || steps[1].Step != "mcp" || steps[2].Step != "pull_request" {
 		t.Fatalf("upsert/order wrong: %+v", steps)
-	}
-	if err := q.UpsertAgentStep(ctx, s.ID, "bogus", "done", ""); err == nil {
-		t.Fatal("expected CHECK violation for unknown step")
 	}
 	if err := q.UpsertAgentStep(ctx, s.ID, "mcp", "bogus", ""); err == nil {
 		t.Fatal("expected CHECK violation for unknown status")
