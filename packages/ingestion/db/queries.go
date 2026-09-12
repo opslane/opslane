@@ -4516,3 +4516,17 @@ func (q *Queries) GetGitHubAppInstallationByID(ctx context.Context, installation
 	}
 	return &i, nil
 }
+
+// OrgHasActiveGitHubInstallation reports a live installation owned by this org.
+func (q *Queries) OrgHasActiveGitHubInstallation(ctx context.Context, orgID string) (bool, error) {
+	var ok bool
+	err := q.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM orgs o JOIN github_app_installations i ON i.installation_id=o.github_installation_id AND i.org_id=o.id WHERE o.id=$1 AND NOT i.suspended)`, orgID).Scan(&ok)
+	return ok, err
+}
+
+// HasEnabledSlackDestination includes every Slack subscription, not just digests.
+func (q *Queries) HasEnabledSlackDestination(ctx context.Context, projectID string) (bool, error) {
+	var ok bool
+	err := q.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM notification_destinations WHERE project_id=$1 AND enabled AND type='slack')`, projectID).Scan(&ok)
+	return ok, err
+}

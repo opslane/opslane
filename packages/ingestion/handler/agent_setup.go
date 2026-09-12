@@ -18,7 +18,7 @@ import (
 )
 
 var agentSetupLimiter = newRateLimiter(5)
-var agentPollLimiter = newRateLimiter(30)
+var agentPollLimiter = newRateLimiter(60)
 var repoURLPattern = regexp.MustCompile(`^[a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+$`)
 
 func agentJSON(w http.ResponseWriter, code int, body map[string]any) {
@@ -130,23 +130,44 @@ func (d *Dependencies) AgentPoll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	session, err := d.Queries.GetAgentSession(r.Context(), sessionID)
-	if err != nil {
-		slog.Error("agent poll: get session", "error", err)
-		agentJSON(w, http.StatusInternalServerError, map[string]any{"status": "internal_error", "message": "internal error"})
-		return
+	wait := parseWait(r.URL.Query().Get("wait"))
+	untilEvent := r.URL.Query().Get("until") == "event"
+	deadline := time.Now().Add(time.Duration(wait) * time.Second)
+	for {
+		session, err := d.Queries.GetAgentSession(r.Context(), sessionID)
+		if err != nil {
+			slog.Error("agent poll: get session", "error", err)
+			agentJSON(w, http.StatusInternalServerError, map[string]any{"status": "internal_error", "message": "internal error"})
+			return
+		}
+		if session == nil || session.PollTokenHash == nil ||
+			!hmac.Equal([]byte(auth.HashToken(pollToken)), []byte(*session.PollTokenHash)) {
+			agentJSON(w, http.StatusNotFound, map[string]any{"status": "not_found"})
+			return
+		}
+		terminal := session.Status == "failed" || session.Status == "expired" || time.Now().After(session.ExpiresAt)
+		approved := session.Status != "pending" && !terminal
+		var facts agentFacts
+		if approved {
+			facts = d.agentSessionFacts(r, session)
+		}
+		// completed is approved and final: never hold a wait on it.
+		done := terminal || session.Status == "completed" || (approved && (!untilEvent || facts.HasEvents))
+		if done || wait == 0 || time.Now().After(deadline) {
+			d.writeAgentPollResponse(w, r, session, pollToken, facts)
+			return
+		}
+		select {
+		case <-r.Context().Done():
+			return
+		case <-time.After(time.Second):
+		}
 	}
-	if session == nil || session.PollTokenHash == nil ||
-		!hmac.Equal([]byte(auth.HashToken(pollToken)), []byte(*session.PollTokenHash)) {
-		agentJSON(w, http.StatusNotFound, map[string]any{"status": "not_found"})
-		return
-	}
-	d.writeAgentPollResponse(w, r, session, pollToken)
 }
 
 // writeAgentPollResponse renders a session for the agent. Expiry is checked
 // first for every status: nothing about an expired session is returned.
-func (d *Dependencies) writeAgentPollResponse(w http.ResponseWriter, r *http.Request, session *db.AgentSession, pollToken string) {
+func (d *Dependencies) writeAgentPollResponse(w http.ResponseWriter, r *http.Request, session *db.AgentSession, pollToken string, facts agentFacts) {
 	if session.Status == "expired" || time.Now().After(session.ExpiresAt) {
 		agentJSON(w, http.StatusGone, map[string]any{"status": "expired", "approved": false, "message": "session expired; ask the user to run setup again"})
 		return
@@ -158,6 +179,10 @@ func (d *Dependencies) writeAgentPollResponse(w http.ResponseWriter, r *http.Req
 			"approved":      true,
 			"dashboard_url": d.publicOrigin(r),
 		}
+		mergeFacts(resp, facts)
+		resp["next"] = agentNextHint(session.Status, facts)
+		resp["status_help"] = agentStatusHelp
+
 		if session.ProjectName != nil {
 			resp["project_name"] = *session.ProjectName
 		}
