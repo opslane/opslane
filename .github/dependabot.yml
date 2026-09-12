@@ -25,6 +25,10 @@ updates:
     directory: '/'
     schedule:
       interval: monthly
+    ignore:
+      # changesets/action v2 requires Changesets CLI v3; bump both together by hand.
+      - dependency-name: changesets/action
+        update-types: ['version-update:semver-major']
   - package-ecosystem: docker
     directories:
       - '/packages/ingestion'
