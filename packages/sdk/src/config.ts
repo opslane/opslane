@@ -92,7 +92,9 @@ export function loadConfig(options: SdkInitOptions): void {
     if (!origin || origin === 'null') {
       throw new Error('endpoint path requires a browser origin; pass an absolute URL');
     }
-    endpoint = origin + endpoint.replace(/\/+$/, '');
+    let end = endpoint.length;
+    while (end > 0 && endpoint.charCodeAt(end - 1) === 47 /* '/' */) end--;
+    endpoint = origin + endpoint.slice(0, end);
   }
   // URL-parse (not regex): rejects 'not-a-url', whitespace, and host-less inputs
   // like 'https://?x' that a permissive regex would wrongly accept.
