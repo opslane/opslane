@@ -127,7 +127,8 @@ export async function processFrictionMatch(
     FROM sessions s JOIN projects p ON p.id=s.project_id
     JOIN session_narratives n ON n.session_id=s.id AND n.project_id=s.project_id AND n.environment_id=s.environment_id
     WHERE s.id=$1 AND s.project_id=$2 AND n.status='ok'
-      AND n.verification_state IN ('ok','failed','unsupported','skipped_budget')`,
+      AND (n.verification_state IN ('ok','failed','unsupported','skipped_budget')
+        OR (n.verification_state='none' AND n.narrative->'observations'='[]'::jsonb))`,
     [job.sessionId, job.projectId],
   );
   const row = loaded.rows[0];

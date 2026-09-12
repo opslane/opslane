@@ -25,6 +25,7 @@ const mocks = vi.hoisted(() => ({
   create: vi.fn(),
   resolve: vi.fn(),
   match: vi.fn(),
+  lockPublication: vi.fn(),
 }));
 vi.mock('../../db.js', () => ({
   getPool: () => ({
@@ -38,6 +39,7 @@ vi.mock('../../db.js', () => ({
 }));
 vi.mock('../persist.js', () => ({ writeObservationSignals: mocks.write }));
 vi.mock('../tickets-db.js', () => ({
+  lockPublication: mocks.lockPublication,
   shortlistTickets: mocks.shortlist,
   nearestTickets: mocks.nearest,
   reserveDecision: mocks.reserve,

@@ -1,300 +1,336 @@
-/**
- * Session narrative pipeline live-service gate.
- *
- * Deterministic chunks travel through ingestion -> MinIO -> scrubber, then the
- * production analysis, narrative, frame capture, signal, and promotion code
- * runs in-process against live PostgreSQL/MinIO. Model traffic goes through an
- * Anthropic-compatible loopback stub, including the image request.
- */
+/** Real SDK recordings through compiled worker handlers and Go publication/purge. */
+import { execFile } from 'node:child_process';
 import { createServer, type Server } from 'node:http';
+import { readFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
+import { promisify } from 'node:util';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import {
-  cleanupTenant,
-  closePool,
-  getConfig,
-  getPool,
-  initSession,
-  makeChunksScrubbable,
-  seedTenant,
-  uploadChunk,
-  waitForScrubbedChunks,
-  type TestTenant,
-} from './helpers.js';
+import type { Browser } from '@playwright/test';
+import type { ClaimedJob } from '../packages/worker/dist/db.js';
+import type { DigestCandidate } from '../packages/worker/dist/digest-writer/job.js';
+import type { NarrativeModelResult } from '../packages/worker/dist/narrative/client.js';
+import { cleanupTenant, closePool, getConfig, getPool, listIncidents,
+  makeChunksScrubbable, seedTenant, waitForScrubbedChunks, type TestTenant } from './helpers.js';
+import { startFixture, type FixtureServer } from './browser-helpers.js';
 
-/* Production worker modules are loaded from dist so this proves the same
- * compiled surface the image runs. The worker entrypoint is VITEST-guarded. */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let workerDb: any;
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let processSessionAnalysisJob: any;
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let processNarration: any;
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let processFrameVerification: any;
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let NarrativeClient: any;
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let readChunksBounded: any;
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let captureFrames: any;
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let getMinIOConfig: any;
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let putFrameObject: any;
-
-async function loadWorkerPipeline(): Promise<void> {
-  workerDb = await import('../packages/worker/dist/db.js');
-  ({ processSessionAnalysisJob } = await import('../packages/worker/dist/index.js'));
-  ({ processNarration } = await import('../packages/worker/dist/narrative/job.js'));
-  ({ processFrameVerification } = await import('../packages/worker/dist/narrative/verify.js'));
-  ({ NarrativeClient } = await import('../packages/worker/dist/narrative/client.js'));
-  ({ readChunksBounded } = await import('../packages/worker/dist/friction/chunk-reader.js'));
-  ({ captureFrames } = await import('../packages/worker/dist/narrative/frames/capture.js'));
-  ({ getMinIOConfig, putFrameObject } = await import('../packages/worker/dist/minio-client.js'));
-}
-
+const exec = promisify(execFile);
+const ROOT = resolve(__dirname, '..');
+const FIXTURE = resolve(ROOT, 'test-fixtures/vue-app');
+const SOURCE_FILE = 'src/components/FrictionLab.vue';
 const RUN_ID = crypto.randomUUID().slice(0, 8);
-const PAGE = 'https://app.example.com/assets';
+const signal = new AbortController().signal;
 
-function telemetryClick(at: number, id: string) {
-  return {
-    type: 5,
-    timestamp: at,
-    data: { tag: 'opslane.telemetry', payload: { kind: 'click', clickId: id, selector: 'button.save', cursor: 'pointer', at } },
-  };
+async function loadPipeline() {
+  const [db, entry, narrate, verify, client, chunks, frames, storage, match, confirm, investigate, tickets, writer, embeddings] = await Promise.all([
+    import('../packages/worker/dist/db.js'), import('../packages/worker/dist/index.js'),
+    import('../packages/worker/dist/narrative/job.js'), import('../packages/worker/dist/narrative/verify.js'),
+    import('../packages/worker/dist/narrative/client.js'), import('../packages/worker/dist/friction/chunk-reader.js'),
+    import('../packages/worker/dist/narrative/frames/capture.js'), import('../packages/worker/dist/minio-client.js'),
+    import('../packages/worker/dist/friction/match-job.js'), import('../packages/worker/dist/friction/confirm-job.js'),
+    import('../packages/worker/dist/friction/investigate-ticket.js'), import('../packages/worker/dist/friction/tickets-db.js'),
+    import('../packages/worker/dist/digest-writer/job.js'), import('../packages/worker/dist/embeddings.js'),
+  ]);
+  return { db, entry, narrate, verify, client, chunks, frames, storage, match, confirm, investigate, tickets, writer, embeddings };
 }
+type Pipeline = Awaited<ReturnType<typeof loadPipeline>>;
 
-function activeNarrativeChunk(t0: number) {
-  return {
-    events: [
-      { type: 4, timestamp: t0, data: { href: PAGE, width: 1440, height: 900 } },
-      { type: 2, timestamp: t0 + 10, data: { node: { id: 1, type: 0, childNodes: [
-        { id: 2, type: 2, tagName: 'button', attributes: { class: 'save' }, childNodes: [{ id: 3, type: 3, textContent: 'Save asset' }] },
-      ] } } },
-      telemetryClick(t0 + 1_000, 'c1'),
-      telemetryClick(t0 + 2_000, 'c2'),
-      telemetryClick(t0 + 3_000, 'c3'),
-      { type: 3, timestamp: t0 + 3_200, data: { source: 0, adds: [{ parentId: 1, node: { id: 9, type: 3, textContent: 'Saved successfully, but Name is required' } }], removes: [], texts: [], attributes: [] } },
-    ],
-    meta: { sdk_version: 'e2e', has_full_snapshot: true, chunked_at: t0 },
-  };
-}
-
-async function startModelStub(): Promise<{ server: Server; baseURL: string; imageDimensions: number[][] }> {
-  const imageDimensions: number[][] = [];
-  const server = createServer(async (request, response) => {
-    const chunks: Buffer[] = [];
-    for await (const chunk of request) chunks.push(Buffer.from(chunk));
-    const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as {
-      messages?: Array<{ content?: string | Array<{ type?: string; text?: string; source?: { data: string } }> }>;
-    };
-    const content = body.messages?.[0]?.content;
-    const imageRequest = Array.isArray(content) && content.some((part) => part.type === 'image');
-    const userText = typeof content === 'string'
-      ? content
-      : (content ?? []).filter((part) => part.type === 'text').map((part) => part.text ?? '').join('\n');
-    let text: string;
-    if (imageRequest) {
-      for (const part of content) {
-        if (part.type === 'image' && part.source) {
-          const png = Buffer.from(part.source.data, 'base64');
-          imageDimensions.push([png.readUInt32BE(16), png.readUInt32BE(20)]);
-        }
-      }
-      const observationID = /"id":"([^"]+)"/.exec(userText)?.[1] ?? '0-missing';
-      text = JSON.stringify({ grades: [{ observationId: observationID, grade: 'confirmed', reason: 'The conflicting save and validation messages are visible.' }] });
-    } else {
-      const clickLine = /^(L\d+) .*CLICK/m.exec(userText)?.[1] ?? 'L1';
-      const uiLine = /^(L\d+) .*UI TEXT APPEARED/m.exec(userText)?.[1] ?? 'L2';
-      text = JSON.stringify({
-        user_goal: 'Save an asset',
-        narrative: 'The user clicked save and got no usable feedback.',
-        observations: [{ category: 'no_feedback_after_action', what: 'Clicking save produced contradictory feedback.', evidence_lines: [clickLine, uiLine], severity: 'high' }],
-        notable: true,
-      });
-    }
-    response.setHeader('content-type', 'application/json');
-    response.end(JSON.stringify({
-      id: 'msg_e2e', type: 'message', role: 'assistant', model: 'e2e-stub',
-      content: [{ type: 'text', text }], stop_reason: 'end_turn', stop_sequence: null,
-      usage: { input_tokens: 10, output_tokens: 10 },
-    }));
+async function goHelper(project: string, mode: string, args: string[] = []): Promise<unknown> {
+  const { stdout } = await exec('go', ['run', '../../test-e2e/known-problems-helper.go', '-mode', mode, '-project', project, ...args], {
+    cwd: resolve(ROOT, 'packages/ingestion'),
+    env: { ...process.env, DASHBOARD_URL: 'https://dashboard.example.test',
+      JWT_SECRET: process.env['JWT_SECRET'] ?? 'opslane-dev-jwt-secret-key-minimum-32-bytes-long' },
+    maxBuffer: 8 * 1024 * 1024,
   });
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-  const address = server.address();
-  if (address === null || typeof address === 'string') throw new Error('model stub did not bind');
-  return { server, baseURL: `http://127.0.0.1:${address.port}`, imageDimensions };
+  return JSON.parse(stdout) as unknown;
+}
+function modelResult(value: unknown): NarrativeModelResult {
+  return { text: JSON.stringify(value), inputTokens: 10, outputTokens: 10,
+    cacheReadTokens: 0, cacheWriteTokens: 0, stopReason: 'end_turn' };
+}
+function block<T>(user: string, name: string): T {
+  const content = user.split(`${name}_START\n`)[1]?.split(`\n${name}_END`)[0];
+  if (content === undefined) throw new Error(`missing model input ${name}`);
+  return JSON.parse(content.replace(/^<untrusted_data>\n/, '').replace(/\n<\/untrusted_data>$/, '')) as T;
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function claimJob(projectID: string, sessionID: string, jobType: string): Promise<any> {
-  const workerID = `e2e-${RUN_ID}`;
-  const { rows } = await getPool().query<{
-    id: string; lease_generation: string;
-  }>(`UPDATE error_group_jobs
-      SET status='claimed', worker_id=$4, claimed_at=now(), lease_expires_at=now()+interval '10 minutes',
-          lease_generation=lease_generation+1, updated_at=now()
-      WHERE id=(SELECT id FROM error_group_jobs
-        WHERE project_id=$1 AND session_id=$2 AND job_type=$3 AND status='pending'
-        ORDER BY created_at DESC LIMIT 1 FOR UPDATE SKIP LOCKED)
-      RETURNING id, lease_generation::text`, [projectID, sessionID, jobType, workerID]);
-  let row = rows[0];
-  if (!row) {
-    // The live keyless worker container polls the same queue and can consume
-    // the job first. For session_narrate it is a no-op that leaves the
-    // reservation pending; for session_verify_frames it finalizes the
-    // narrative 'unsupported' and writes ungraded signals. Heal the state the
-    // container touched, then hand the pipeline a fresh claimed job row.
-    if (jobType === 'session_verify_frames') {
-      await getPool().query(
-        `UPDATE session_narratives
-         SET verification_state='pending', verification=NULL, verification_reason=NULL, updated_at=now()
-         WHERE session_id=$1 AND project_id=$2 AND verification_state IN ('verifying','unsupported','failed')`,
-        [sessionID, projectID],
-      );
-      await getPool().query(
-        `DELETE FROM friction_signals WHERE session_id=$1 AND project_id=$2`,
-        [sessionID, projectID],
-      );
-    }
-    const inserted = await getPool().query<{ id: string; lease_generation: string }>(
-      `INSERT INTO error_group_jobs
-         (project_id, session_id, job_type, status, triggered_by, worker_id, claimed_at, lease_expires_at)
-       VALUES ($1, $2, $3, 'claimed', 'auto', $4, now(), now()+interval '10 minutes')
-       RETURNING id, lease_generation::text`,
-      [projectID, sessionID, jobType, workerID],
-    );
-    row = inserted.rows[0];
+/** Claim only the real pending job produced by the preceding stage. */
+async function claim(project: string, jobType: ClaimedJob['jobType'], sessionId: string | null, ticketId: string | null = null): Promise<ClaimedJob> {
+  const result = await getPool().query<ClaimedJob>(`UPDATE error_group_jobs
+    SET status='claimed',worker_id=$5,claimed_at=now(),lease_expires_at=now()+interval '10 minutes',
+        lease_generation=lease_generation+1,updated_at=now()
+    WHERE id=(SELECT id FROM error_group_jobs WHERE project_id=$1 AND job_type=$2
+      AND session_id IS NOT DISTINCT FROM $3::text AND ticket_id IS NOT DISTINCT FROM $4::uuid
+      AND status='pending' AND available_at<=clock_timestamp() ORDER BY created_at,id LIMIT 1 FOR UPDATE SKIP LOCKED)
+    RETURNING id,project_id AS "projectId",error_group_id AS "errorGroupId",session_id AS "sessionId",
+      ticket_id AS "ticketId",publication_generation AS "publicationGeneration",batch_id AS "batchId",
+      event_id AS "eventId",source_id AS "sourceId",job_type AS "jobType",attempts,max_attempts AS "maxAttempts",
+      guidance,triggered_by AS "triggeredBy",worker_id AS "workerId",lease_generation::text AS "leaseGeneration",payload`,
+  [project, jobType, sessionId, ticketId, `known-problems-smoke-${RUN_ID}`]);
+  if (!result.rows[0]) throw new Error(`no pending ${jobType} job for ${sessionId ?? ticketId}; stop all worker containers before this smoke`);
+  return result.rows[0];
+}
+async function runJob(p: Pipeline, job: ClaimedJob, body: () => Promise<void>): Promise<void> {
+  try {
+    await body();
+    if (!await p.db.completeJob(job.id, job.workerId, job.leaseGeneration)) throw new Error(`completion rejected for ${job.id}`);
+  } catch (error) {
+    if (!(error instanceof p.db.JobCompletedInTransaction)) throw error;
   }
-  if (!row) throw new Error(`no ${jobType} job for ${sessionID}`);
-  return {
-    id: row.id, workerId: workerID, leaseGeneration: row.lease_generation,
-    projectId: projectID, sessionId: sessionID, jobType, errorGroupId: null,
-    eventId: null, sourceId: null, attempts: 0, maxAttempts: 3, guidance: null, triggeredBy: 'auto',
-  };
+  expect((await getPool().query<{ status: string }>('SELECT status FROM error_group_jobs WHERE id=$1', [job.id])).rows[0]?.status).toBe('completed');
 }
 
-async function finishJob(job: { id: string; workerId: string; leaseGeneration: string }): Promise<void> {
-  if (!await workerDb.completeJob(job.id, job.workerId, job.leaseGeneration)) {
-    throw new Error(`could not complete ${job.id}`);
-  }
-}
-
-const describeLive = process.env['DATABASE_URL'] && (process.env['MINIO_ENDPOINT'] || process.env['REPLAY_STORE_ENDPOINT'])
-  ? describe
-  : describe.skip;
-
-describeLive('session narratives — live-service pipeline', () => {
+const describeLive = process.env['DATABASE_URL'] && (process.env['MINIO_ENDPOINT'] || process.env['REPLAY_STORE_ENDPOINT']) ? describe : describe.skip;
+describeLive('known problems — real recording pipeline', () => {
+  let p: Pipeline;
   let tenant: TestTenant;
-  let modelServer: Server;
-  let imageDimensions: number[][];
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let modelClient: any;
+  let fixture: FixtureServer;
+  let browser: Browser;
+  let server: Server;
+  let narrativeClient: InstanceType<Pipeline['client']['NarrativeClient']>;
+  let problem: 'purchase' | 'stepper' = 'purchase';
+  const dimensions: number[][] = [];
+  const purchase = { name: 'Complete purchase leaves checkout unchanged', control: 'Complete purchase',
+    what_happened: 'Clicking Complete purchase repeatedly leaves checkout unchanged.',
+    steps: 'Open checkout and click Complete purchase.', kind: 'defect' as const };
+  const stepper = { name: 'Advancing the stepper requires repeated clicks', control: 'Next step',
+    what_happened: 'Advancing the stepper requires repeated Next step clicks.',
+    steps: 'Open the stepper and click Next step repeatedly.', kind: 'ux_insight' as const };
 
   beforeAll(async () => {
-    await loadWorkerPipeline();
+    if (process.env['E2E_IN_PROCESS_WORKER'] !== '1') throw new Error('Stop the worker container and set E2E_IN_PROCESS_WORKER=1 for the known-problems smoke.');
+    p = await loadPipeline();
     tenant = await seedTenant();
-    const stub = await startModelStub();
-    modelServer = stub.server;
-    imageDimensions = stub.imageDimensions;
-    modelClient = new NarrativeClient({ model: 'e2e-stub', baseURL: stub.baseURL, apiKey: 'e2e', maxTokens: 2048, reasoning: 'off' });
-  });
+    const vue = (await import('@vitejs/plugin-vue')).default;
+    fixture = await startFixture({ fixtureDir: FIXTURE, apiKey: tenant.ingestKey,
+      ingestionUrl: getConfig().ingestionUrl, environment: 'production', entryPattern: /\/main\.ts$/,
+      plugins: [vue(), { name: 'expose-sdk-flush', transform(code, id) {
+        if (!/\/main\.ts$/.test(id)) return;
+        return `${code}\nimport { flushReplayBufferForError as smokeFlush } from '@opslane/sdk/_replay';\nObject.assign(window, { __opslaneSmokeFlush: smokeFlush });`;
+      } }],
+    });
+    browser = await (await import('@playwright/test')).chromium.launch();
+    server = createServer(async (request, response) => {
+      try {
+        const buffers: Buffer[] = [];
+        for await (const chunk of request) buffers.push(Buffer.from(chunk));
+        const body = JSON.parse(Buffer.concat(buffers).toString('utf8')) as {
+          messages: Array<{ content: string | Array<{ type: string; text?: string; source?: { data: string } }> }>;
+        };
+        const content = body.messages[0].content;
+        const images = typeof content === 'string' ? [] : content.filter(part => part.type === 'image');
+        const user = typeof content === 'string' ? content : content.map(part => part.text ?? '').join('\n');
+        let value: unknown;
+        if (images.length) {
+          for (const image of images) {
+            const png = Buffer.from(image.source!.data, 'base64');
+            dimensions.push([png.readUInt32BE(16), png.readUInt32BE(20)]);
+          }
+          value = { grades: block<Array<{ id: string }>>(user, 'OBSERVATIONS').map(o => ({ observationId: o.id,
+            grade: 'confirmed', reason: 'The recorded control and result are visible.' })) };
+        } else {
+          const target = problem === 'purchase' ? 'complete-purchase' : 'friction-stepper-next';
+          const line = user.split('\n').find(text => /^L\d+ /.test(text) && /CLICK/.test(text) && text.includes(target));
+          if (!line) throw new Error(`real recording contains no ${target} click`);
+          value = { user_goal: problem === 'purchase' ? 'Complete a purchase' : 'Advance the stepper',
+            narrative: (problem === 'purchase' ? purchase : stepper).what_happened,
+            observations: [{ what: (problem === 'purchase' ? purchase : stepper).what_happened,
+              evidence_lines: [line.split(' ')[0]] }], notable: true };
+        }
+        response.setHeader('content-type', 'application/json');
+        response.end(JSON.stringify({ id: 'msg_smoke', type: 'message', role: 'assistant', model: 'e2e-stub',
+          content: [{ type: 'text', text: JSON.stringify(value) }], stop_reason: 'end_turn', stop_sequence: null,
+          usage: { input_tokens: 10, output_tokens: 10 } }));
+      } catch (error) {
+        response.writeHead(500).end(JSON.stringify({ error: { message: String(error) } }));
+      }
+    });
+    await new Promise<void>(done => server.listen(0, '127.0.0.1', done));
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('model stub failed to bind');
+    narrativeClient = new p.client.NarrativeClient({ model: 'e2e-stub', apiKey: 'e2e',
+      baseURL: `http://127.0.0.1:${address.port}`, maxTokens: 2048, reasoning: 'off' });
+  }, 60_000);
 
   afterAll(async () => {
-    await new Promise<void>((resolve) => modelServer.close(() => resolve()));
-    const db = getPool();
-    await db.query(`UPDATE error_groups SET representative_signal_id=NULL WHERE project_id=$1`, [tenant.projectId]);
-    await cleanupTenant(tenant.orgId);
-    await closePool();
-    await workerDb.closePool();
-  });
-
-  it('emits verified narrative signals and promotes on the third session', { timeout: 300_000 }, async () => {
-    const storage = getMinIOConfig();
-    if (!storage) throw new Error('MinIO configuration is required');
-    const db = getPool();
-    const sessionIDs: string[] = [];
-
-    for (let index = 0; index < 3; index++) {
-      const sessionID = `e2e_narrative_${RUN_ID}_${index}`;
-      sessionIDs.push(sessionID);
-      await initSession(tenant.ingestKey, sessionID, undefined, PAGE);
-      await uploadChunk(tenant.ingestKey, sessionID, 0, activeNarrativeChunk(Date.now() - 10_000));
-      await makeChunksScrubbable(sessionID);
-      await waitForScrubbedChunks(sessionID, 1);
-      await db.query(`UPDATE sessions SET status='closed' WHERE id=$1 AND project_id=$2`, [sessionID, tenant.projectId]);
-      await db.query(`INSERT INTO error_group_jobs (project_id,session_id,job_type,status,triggered_by)
-        VALUES ($1,$2,'session_analysis','pending','auto')`, [tenant.projectId, sessionID]);
-
-      const analysisJob = await claimJob(tenant.projectId, sessionID, 'session_analysis');
-      await processSessionAnalysisJob(analysisJob, new AbortController().signal);
-      await finishJob(analysisJob);
-
-      const narrateJob = await claimJob(tenant.projectId, sessionID, 'session_narrate');
-      await processNarration(narrateJob, {
-        client: modelClient,
-        loadChunks: async (sid: string, pid: string) => readChunksBounded(await workerDb.getScrubbedChunksForSession(sid, pid)).then((result: { envelopes: unknown[] }) => result.envelopes),
-        dailyCap: 2_000, wallClockBudgetMs: 30_000, appContext: '', projectName: 'E2E project',
-      }, new AbortController().signal);
-      await finishJob(narrateJob);
-
-      const verifyJob = await claimJob(tenant.projectId, sessionID, 'session_verify_frames');
-      await processFrameVerification(verifyJob, {
-        client: modelClient,
-        supported: true,
-        loadChunks: async (sid: string, pid: string) => readChunksBounded(await workerDb.getScrubbedChunksForSession(sid, pid)).then((result: { envelopes: unknown[] }) => result.envelopes),
-        capture: captureFrames,
-        uploadFrame: (objectKey: string, png: Buffer) => putFrameObject(objectKey, png, storage),
-        dailyCap: 2_000,
-      }, new AbortController().signal);
-      await finishJob(verifyJob);
+    await browser?.close();
+    await fixture?.close();
+    if (server) await new Promise<void>(done => server.close(() => done()));
+    if (tenant) {
+      const sessions = await getPool().query<{ id: string }>('SELECT id FROM sessions WHERE project_id=$1', [tenant.projectId]);
+      for (const { id } of sessions.rows) {
+        await getPool().query("UPDATE sessions SET started_at=now()-interval '91 days' WHERE id=$1 AND project_id=$2", [id, tenant.projectId]);
+        await goHelper(tenant.projectId, 'purge', ['-session', id]);
+      }
+      await getPool().query('DELETE FROM friction_investigation_results WHERE ticket_id IN (SELECT id FROM friction_tickets WHERE project_id=$1)', [tenant.projectId]);
+      await cleanupTenant(tenant.orgId);
     }
+    await closePool();
+    await p?.db.closePool();
+  }, 120_000);
 
-    const narratives = await db.query<{ status: string; verification_state: string }>(
-      `SELECT status,verification_state FROM session_narratives WHERE project_id=$1 ORDER BY session_id`, [tenant.projectId]);
-    expect(narratives.rows).toHaveLength(3);
-    expect(narratives.rows.every((row) => row.status === 'ok' && row.verification_state === 'ok')).toBe(true);
-    expect(imageDimensions.length).toBeGreaterThan(0);
-    // Assert the bound, not the exact size: a fixture recorded at a smaller
-    // viewport is downscaled correctly and must not turn this red.
-    expect(imageDimensions.every(([width, height]) => width <= 720 && height <= 450)).toBe(true);
-    // The seeded fixtures all record a 1440x900 viewport, so they do hit the box exactly.
-    expect(imageDimensions[0]).toEqual([720, 450]);
-    const usage = await db.query<{ phase: string; rows: string; input: string; output: string }>(
-      `SELECT u.phase, count(*)::text AS rows, sum(u.input_tokens)::text AS input,
-              sum(u.output_tokens)::text AS output
-       FROM job_usage u JOIN error_group_jobs j ON j.id=u.job_id
-       WHERE j.project_id=$1 AND j.session_id=ANY($2::text[])
-       GROUP BY u.phase ORDER BY u.phase`, [tenant.projectId, sessionIDs]);
-    expect(usage.rows).toEqual([
-      { phase: 'narrate', rows: '3', input: '30', output: '30' },
-      { phase: 'verify', rows: '3', input: '30', output: '30' },
-    ]);
+  async function recordAndMatch(index: number): Promise<string> {
+    const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+    let sessionId = '';
+    try {
+      await page.goto(fixture.url);
+      await page.waitForFunction(() => (window as unknown as { __opslaneReplayReady?: boolean }).__opslaneReplayReady === true);
+      await page.click('[data-testid="nav-friction"]');
+      await page.selectOption('[data-testid="friction-user-select"]', `batch4-user-${index + 1}`);
+      await page.click('[data-testid="friction-user-apply"]');
+      await expect.poll(async () => {
+        const result = await getPool().query<{ id: string }>(`SELECT s.id FROM sessions s JOIN end_users u ON u.id=s.end_user_id
+          WHERE s.project_id=$1 AND u.external_user_id=$2 ORDER BY s.started_at DESC LIMIT 1`, [tenant.projectId, `batch4-user-${index + 1}`]);
+        sessionId = result.rows[0]?.id ?? '';
+        return sessionId;
+      }, { timeout: 30_000 }).not.toBe('');
+      const target = problem === 'purchase' ? '#complete-purchase' : '[data-testid="friction-stepper-next"]';
+      for (let click = 0; click < 5; click++) await page.click(target);
+      await page.evaluate(() => (window as unknown as { __opslaneSmokeFlush(): void }).__opslaneSmokeFlush());
+      await expect.poll(async () => Number((await getPool().query<{ n: string }>(
+        'SELECT count(*)::text AS n FROM session_chunks WHERE session_id=$1 AND uploaded_at IS NOT NULL', [sessionId])).rows[0].n), { timeout: 30_000 }).toBeGreaterThan(0);
+    } finally {
+      await page.close();
+    }
+    await getPool().query("UPDATE sessions SET status='closed' WHERE id=$1 AND project_id=$2", [sessionId, tenant.projectId]);
+    await makeChunksScrubbable(sessionId);
+    const count = Number((await getPool().query<{ n: string }>('SELECT count(*)::text AS n FROM session_chunks WHERE session_id=$1', [sessionId])).rows[0].n);
+    await waitForScrubbedChunks(sessionId, count);
+    const analysis = await claim(tenant.projectId, 'session_analysis', sessionId);
+    await runJob(p, analysis, () => p.entry.processSessionAnalysisJob({ ...analysis, sessionId }, signal));
+    const loadChunks = async (sid: string, pid: string) => (await p.chunks.readChunksBounded(await p.db.getScrubbedChunksForSession(sid, pid))).envelopes;
+    const narrate = await claim(tenant.projectId, 'session_narrate', sessionId);
+    await runJob(p, narrate, () => p.narrate.processNarration({ ...narrate, sessionId }, {
+      client: narrativeClient, loadChunks, dailyCap: 2000, wallClockBudgetMs: 30_000, appContext: '', projectName: 'Known problems smoke',
+    }, signal));
+    const storage = p.storage.getMinIOConfig();
+    if (!storage) throw new Error('MinIO configuration required');
+    const verify = await claim(tenant.projectId, 'session_verify_frames', sessionId);
+    await runJob(p, verify, () => p.verify.processFrameVerification({ ...verify, sessionId }, {
+      client: narrativeClient, loadChunks, supported: true, capture: p.frames.captureFrames,
+      uploadFrame: (key, png) => p.storage.putFrameObject(key, png, storage), dailyCap: 2000,
+    }, signal));
+    const match = await claim(tenant.projectId, 'friction_match', sessionId);
+    await runJob(p, match, () => p.match.processFrictionMatch({ ...match, sessionId }, {
+      cheap: { modelName: 'e2e-stub', complete: async ({ user }) => {
+        const observations = block<Array<{ id: string; what: string }>>(user, 'OBSERVATIONS');
+        const candidates = block<Array<{ id: string; control: string }>>(user, 'CANDIDATES');
+        const definition = problem === 'purchase' ? purchase : stepper;
+        const same = candidates.find(candidate => candidate.control === definition.control);
+        return modelResult({ decisions: observations.map(o => same
+          ? { kind: 'matched', observation_id: o.id, ticket_id: same.id }
+          : { kind: 'draft', observation_id: o.id, draft: { name: definition.name, control: definition.control, steps: definition.steps } }) });
+      } },
+      strong: { modelName: 'e2e-stub', complete: async ({ user }) => modelResult({
+        decisions: block<Array<{ observationId: string }>>(user, 'DRAFTS').map(draft => ({
+          kind: 'create', observation_id: draft.observationId, ticket: problem === 'purchase' ? purchase : stepper,
+        })),
+      }) },
+      embed: async () => { throw new p.embeddings.EmbeddingsUnavailable('Deterministic smoke uses route shortlists.'); },
+    }, signal));
+    return sessionId;
+  }
 
-    const signals = await db.query<{ signal_type: string; rule_version: number; observation_text: string | null; element_selector: string | null }>(
-      `SELECT signal_type,rule_version,observation_text,element_selector FROM friction_signals
-       WHERE project_id=$1 AND session_id=ANY($2::text[]) ORDER BY session_id`, [tenant.projectId, sessionIDs]);
-    expect(signals.rows).toHaveLength(3);
-    expect(signals.rows.every((row) => row.signal_type === 'no_feedback_after_action' && row.rule_version === 7 && row.observation_text !== null)).toBe(true);
-    expect(signals.rows.every((row) => row.element_selector !== null)).toBe(true);
-
-    const incident = await db.query<{ id: string; status: string }>(
-      `SELECT id,status FROM error_groups WHERE project_id=$1 AND kind='friction' AND status<>'candidate'`, [tenant.projectId]);
-    expect(incident.rows).toHaveLength(1);
-    expect(incident.rows[0]!.status).toBe('queued');
-
-    const { ingestionUrl } = getConfig();
-    const response = await fetch(`${ingestionUrl}/api/v1/projects/${tenant.projectId}/sessions/${sessionIDs[0]}/narrative`, {
-      headers: { Authorization: `Bearer ${tenant.userSession}` },
+  it('publishes only confirmed problems with a covering cause and archives after recording purge', { timeout: 600_000 }, async () => {
+    const recordings: string[] = [];
+    for (let i = 0; i < 3; i++) recordings.push(await recordAndMatch(i));
+    const db = getPool();
+    const tickets = await db.query<{ id: string; status: string; matched_count: number }>('SELECT id,status,matched_count FROM friction_tickets WHERE project_id=$1', [tenant.projectId]);
+    expect(tickets.rows).toHaveLength(1);
+    expect(tickets.rows[0]).toMatchObject({ status: 'tracking', matched_count: 3 });
+    const ticketId = tickets.rows[0].id;
+    expect((await db.query("SELECT id FROM error_group_jobs WHERE ticket_id=$1 AND job_type='friction_confirm' AND status='pending'", [ticketId])).rows).toHaveLength(1);
+    const confirm = await claim(tenant.projectId, 'friction_confirm', null, ticketId);
+    let confirmationReads = 0;
+    await runJob(p, confirm, () => p.confirm.processFrictionConfirm({ ...confirm, ticketId }, {
+      ...p.confirm.frictionConfirmDepsFromEnv(), dailyCap: 2000,
+      client: { modelName: 'e2e-stub', complete: async ({ user, images }) => {
+        expect(images?.length).toBeGreaterThan(0);
+        confirmationReads++;
+        const signals = block<Array<{ id: string }>>(user, 'SIGNALS');
+        const timeline = user.split('TIMELINE_START\n')[1].split('\nTIMELINE_END')[0];
+        const click = timeline.split('\n').find(text => /^L\d+:/.test(text) && text.includes('CLICK') && text.includes('complete-purchase'));
+        const line = click?.split(':')[0];
+        if (!line) throw new Error('confirmation timeline has no purchase click');
+        return modelResult({ outcome: 'confirmed', signalIds: signals.map(s => s.id), evidenceLines: [line],
+          note: 'The user clicks Complete purchase repeatedly and checkout stays unchanged.', costToUser: 'lost_time' });
+      } },
+    }, signal));
+    expect(confirmationReads).toBe(3);
+    const live = await db.query<{ id: string; publication_generation: number; investigation_status: string }>(
+      'SELECT id,publication_generation,investigation_status FROM error_groups WHERE ticket_id=$1', [ticketId]);
+    expect(live.rows).toHaveLength(1);
+    expect(live.rows[0]).toMatchObject({ publication_generation: 1, investigation_status: 'pending' });
+    const groupId = live.rows[0].id;
+    const evidence = await db.query<{ signal_id: string }>('SELECT signal_id FROM friction_incident_evidence WHERE error_group_id=$1', [groupId]);
+    expect(evidence.rows).toHaveLength(3);
+    const before = await goHelper(tenant.projectId, 'freeze', ['-at', new Date().toISOString()]) as { candidates: DigestCandidate[] };
+    expect(before.candidates.some(c => c.ticketId === ticketId)).toBe(false);
+    const investigation = await claim(tenant.projectId, 'investigate', null, ticketId);
+    const group = await p.db.getErrorGroup(groupId, tenant.projectId);
+    if (!group) throw new Error('published group missing');
+    const source = await readFile(resolve(FIXTURE, SOURCE_FILE), 'utf8');
+    expect(source).toContain('function deadClick');
+    await runJob(p, investigation, () => p.investigate.processTicketInvestigation({ ...investigation,
+      ticketId, errorGroupId: groupId, publicationGeneration: 1 }, group, signal, {
+      apiKey: 'e2e', checkout: async () => ({ headSha: 'a'.repeat(40), tree: SOURCE_FILE, close: async () => {},
+        reader: { readFile: async path => { if (path !== SOURCE_FILE) throw new Error('unknown fixture path'); return source; },
+          grep: async () => source, list: async () => SOURCE_FILE, exists: async paths => paths.filter(path => path === SOURCE_FILE) } }),
+      investigate: async (_key, input) => {
+        expect(new Set(input.confirmedSignalIds)).toEqual(new Set(evidence.rows.map(row => row.signal_id)));
+        const ids = input.confirmedSignalIds!;
+        return { status: 'verdict', investigatedCommit: input.investigatedCommit, usage: { input: 10, output: 10, cacheRead: 0, cacheWrite: 0 }, costUsd: 0,
+          verdict: { codeCause: true, explains: ids.slice(0, 2), doesNotExplain: ids.slice(2), confidence: 'high',
+            reason: 'The purchase click handler has an empty body.', agentTaskBrief: 'Connect the purchase button to checkout submission and show the result.',
+            evidence: [{ path: SOURCE_FILE, detail: 'deadClick has an empty body.', symptomLink: 'Clicking the purchase control cannot submit checkout.' }] } };
+      },
+    }));
+    expect((await db.query<{ investigation_status: string; n: number }>(
+      'SELECT investigation_status,jsonb_array_length(explained_signal_ids) AS n FROM error_groups WHERE id=$1', [groupId])).rows[0])
+      .toEqual({ investigation_status: 'done', n: 2 });
+    // A run is immutable per project/day. The next day's freeze observes the verdict.
+    const after = await goHelper(tenant.projectId, 'freeze', ['-at', new Date(Date.now() + 86_400_000).toISOString()]) as { runId: string; candidates: DigestCandidate[] };
+    expect(after.candidates).toHaveLength(1);
+    expect(after.candidates[0]).toMatchObject({ ticketId, generation: 1, verifiedUsers: 3, verifiedSessions: 3 });
+    expect(after.candidates[0].coverage).toBeCloseTo(2 / 3);
+    await p.writer.writeDigest(after.runId, tenant.projectId, {
+      loadRun: p.writer.loadFrozenDigestRun, persist: p.writer.persistWrittenDigest,
+      askModel: async candidates => ({ included: candidates.map(c => ({ errorGroupId: c.errorGroupId,
+        title: 'Complete purchase leaves checkout unchanged', copy: 'Clicking Complete purchase repeatedly leaves checkout unchanged.',
+        why: c.why, steps: c.steps })), deferred: [] }),
     });
-    expect(response.status).toBe(200);
-    const narrative = await response.json() as { observations: Array<{ category: string; grade?: string }> };
-    expect(narrative.observations[0]).toMatchObject({ category: 'no_feedback_after_action', grade: 'confirmed' });
-
-    const frames = await db.query<{ n: string }>(
-      `SELECT count(*)::text AS n FROM session_narratives,
-       LATERAL jsonb_array_elements(verification->'frames') frame
-       WHERE project_id=$1`, [tenant.projectId]);
-    expect(Number(frames.rows[0]!.n)).toBeGreaterThan(0);
+    // Invalid encrypted fixture config cannot send a message; inspect the real outbox.
+    await db.query(`INSERT INTO notification_destinations(id,project_id,type,name,config_encrypted,config_fingerprint,event_types)
+      VALUES(gen_random_uuid(),$1,'slack','known-problems-smoke',decode('00','hex'),$2,ARRAY['digest.daily'])`, [tenant.projectId, RUN_ID]);
+    const rendered = await goHelper(tenant.projectId, 'publish', ['-run', after.runId]) as {
+      event: { digest: { schema_version: number; generated_cards: unknown[]; receipt_items?: unknown[] } }; slack: unknown;
+    };
+    await db.query('UPDATE notification_destinations SET enabled=false WHERE project_id=$1', [tenant.projectId]);
+    expect(rendered.event.digest.schema_version).toBe(5);
+    expect(rendered.event.digest.generated_cards).toHaveLength(1);
+    expect(rendered.event.digest.receipt_items ?? []).toHaveLength(0);
+    const slack = JSON.stringify(rendered.slack);
+    expect(slack).toContain('3 users');
+    expect(slack).toContain('3 sessions');
+    expect(slack).not.toMatch(/visits/i);
+    expect(slack.match(/Create fix PR/g)).toHaveLength(1);
+    expect(slack).toContain('fixIntent=');
+    expect(dimensions.length).toBeGreaterThanOrEqual(3);
+    expect(dimensions.every(([width, height]) => width <= 720 && height <= 450)).toBe(true);
+    const narratives = await db.query<{ status: string; verification_state: string }>(
+      'SELECT status,verification_state FROM session_narratives WHERE project_id=$1 AND session_id=ANY($2::text[])', [tenant.projectId, recordings]);
+    expect(narratives.rows).toHaveLength(3);
+    expect(narratives.rows.every(row => row.status === 'ok' && row.verification_state === 'ok')).toBe(true);
+    problem = 'stepper';
+    await recordAndMatch(3);
+    const internal = await db.query<{ id: string; status: string }>('SELECT id,status FROM friction_tickets WHERE project_id=$1 AND id<>$2', [tenant.projectId, ticketId]);
+    expect(internal.rows).toHaveLength(1);
+    expect(internal.rows[0].status).toBe('tracking');
+    expect((await listIncidents(tenant.userSession, tenant.projectId)).map(incident => incident.id)).toEqual([groupId]);
+    await db.query("UPDATE sessions SET started_at=now()-interval '91 days' WHERE id=$1 AND project_id=$2", [recordings[0], tenant.projectId]);
+    const purged = await goHelper(tenant.projectId, 'purge', ['-session', recordings[0]]) as { removedObjects: number };
+    expect(purged.removedObjects).toBeGreaterThan(1);
+    expect((await db.query('SELECT id FROM sessions WHERE id=$1', [recordings[0]])).rows).toHaveLength(0);
+    expect((await db.query<{ status: string }>('SELECT status FROM error_groups WHERE id=$1', [groupId])).rows[0].status).toBe('archived');
+    expect((await db.query<{ n: string }>("SELECT count(*)::text AS n FROM friction_checks WHERE ticket_id=$1 AND outcome='confirmed'", [ticketId])).rows[0].n).toBe('2');
   });
 });

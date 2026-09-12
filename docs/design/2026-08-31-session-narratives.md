@@ -4,6 +4,13 @@
 **Status:** Draft, validated end-to-end on production data
 **Scope:** worker (narrative detection, frames verification), ingestion (storage, API, MCP, digest), dashboard, SDK unchanged
 
+> **Superseded downstream (2026-09-12):** narrative and frame extraction remain,
+> but atomic observations now match durable tickets. Recording confirmation,
+> publication generations, and cause investigation replace fingerprint buckets
+> and bucket promotion. The downstream pipeline and rollout claims below are
+> historical. See [the current friction guide](../guides/friction.md) and
+> [the migration 074 cutover](../quickstart/self-host.md#known-problems-cutover-migration-074).
+
 ## The decision
 
 Friction detection is **one pipeline**, and this design replaces its top of funnel. The mechanical detectors (`dead_click`, `rage_click`) and the adjudication veto stage **retire**. In their place, an LLM narrates every active session from a rich timeline, emits categorized friction observations anchored to elements and routes, and those observations flow into the **existing** machinery: fingerprinted signals → buckets → promotion → incidents → investigation → fix PRs → digest. Nothing downstream is rebuilt; the understanding layer is swapped.

@@ -3,6 +3,10 @@ covers:
   - docker-compose.yml
   - packages/ingestion/db/migrations/**
   - scripts/seed-e2e.sql
+  - scripts/retire-friction-buckets.sql
+  - packages/worker/src/bin/backfill-tickets.ts
+  - packages/worker/src/friction/match-job.ts
+  - packages/worker/src/friction/confirm-job.ts
   - packages/ingestion/db/project_keys.go
 ---
 # Self-host quickstart
@@ -15,6 +19,14 @@ There are two paths, depending on which credentials you have. Both start the sam
 
 - Docker with Compose
 - Ports `8082` (API + dashboard), `5434` (Postgres), and `9012` (MinIO) free on your machine
+
+Compose uses `pgvector/pgvector:pg16`. An external PostgreSQL server must make the
+`vector` extension available and permit the migration role to create it; migration
+074 runs `CREATE EXTENSION IF NOT EXISTS vector`. On Amazon RDS, check the
+[extension matrix for your exact engine version](https://docs.aws.amazon.com/AmazonRDS/latest/PostgreSQLReleaseNotes/postgresql-extensions.html)
+and enable `vector` with an authorized database role before upgrading. Local
+Compose is the verified deployment path here; these instructions do not claim an
+RDS deployment test.
 
 No other tools are required for Path 1. Nothing here needs Node, Go, or pnpm; everything runs in containers.
 
@@ -42,7 +54,79 @@ If the `curl` returns `{"status":"ok"}`-style output with HTTP 200, the stack is
 
 ## Upgrading a running stack
 
-Pull and bring the stack back up the same way. The one-shot `migrate` service runs before the API service and the worker serve anything, so a release's database migrations are always committed before any code that depends on them starts. That ordering is what lets a migration and the code that reads it ship together.
+For releases after the known-problems cutover, pull the release and rebuild the
+services. The one-shot `migrate` service applies schema changes before the new API
+and worker start. The first upgrade across migration 074 requires the explicit
+order below: schema ordering alone cannot retire work held by old workers.
+
+### Known-problems cutover (migration 074)
+
+Deploy outside the daily summary window. Keep the same Compose project, volumes,
+and port settings throughout. These commands use Compose's bundled database;
+external-database operators must run the SQL against their configured database.
+
+1. Pull the release and build its `ingestion` and worker images. Start PostgreSQL
+   with the pgvector image, apply the additive schema through migration 074, and
+   deploy the new `ingestion` service first. Keep new workers stopped at this stage.
+
+   ```bash
+   git pull
+   docker compose build ingestion worker
+   docker compose up -d --wait postgres
+   docker compose run --rm migrate
+   docker compose up -d --no-deps --wait ingestion
+   ```
+
+2. Stop **every old worker**, across all hosts and replicas. For a single Compose
+   stack, run `docker compose stop worker`. Confirm no old worker process remains;
+   a worker still running a job could otherwise rewrite an archived bucket.
+
+3. Retire old buckets in one transaction:
+
+   ```bash
+   docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U opslane -d opslane < scripts/retire-friction-buckets.sql
+   ```
+
+   This archives groups with `kind='friction'` and no ticket in `candidate`, `queued`,
+   `analyzing`, `awaiting_approval`, `insight`, `needs_human`, or `investigated`,
+   preserving their previous status. It fails their pending or claimed
+   investigation and fix jobs and invalidates cached digest copy. Existing
+   `fixing`, `pr_draft`, and `pr_created` groups remain intact. Delivered digest payloads remain immutable. The script
+   is safe to rerun.
+
+4. Start the new workers, then backfill each intended project and environment.
+   Replace the two UUID placeholders with stored IDs:
+
+   ```bash
+   docker compose up -d --no-deps --wait worker
+   docker compose exec -T worker node dist/bin/backfill-tickets.js \
+     --project PROJECT_UUID --environment ENVIRONMENT_UUID --since 14d --rate 60
+   ```
+
+   The CLI schedules jobs at 60 per minute and exits. Workers process them through
+   the ordinary matching pipeline. Reruns skip active jobs and completed finding
+   decisions, including findings judged not to be problems. Partial decisions
+   resume, and completed empty narratives stay skipped. A host checkout can run
+   the same command after a build with `pnpm --filter @opslane/worker backfill:tickets`
+   and `DATABASE_URL` set.
+
+5. Let matching and confirmation drain, then check cause investigations before
+   the next digest. Use worker health and job logs to distinguish future scheduled
+   jobs, retries, and failed work. The next digest includes only tickets with
+   qualifying confirmed evidence and a completed cause investigation.
+
+`FRICTION_MATCH_MAX_CONCURRENT=2` and `FRICTION_CONFIRM_MAX_CONCURRENT=1` are the
+fleet-wide defaults. Confirmation permits 2000 recording checks per project per
+UTC day by default. A backfill can consume model tokens and that daily budget;
+`--rate` controls scheduled arrivals, not model spend or a global throughput limit.
+
+**Fix forward:** after new workers have written atomic findings, API
+rollback below migration 074 is unsupported: replaying migration 068 against those
+`friction_signals` rows fails. Set `FRICTION_MATCH_MAX_CONCURRENT=0` and
+`FRICTION_CONFIRM_MAX_CONCURRENT=0` on every worker and recreate the workers to
+pause matching, confirmation, reconciliation, and new publication while preserving
+data. These caps do not undo work already committed or stop unrelated job types.
+Resume by restoring the caps after deploying the correction.
 
 The daily summary is the one surface a mid-flight upgrade can visibly change. A run picks its issues, writes the summary, and checks it a few minutes later. That is normally a ten-minute window around 09:00 in the project's own timezone, and longer on a day a run is retrying. An upgrade landing inside that window can leave a run whose text was written by one version and checked by another. Any item that fails the check falls back to its plain mechanical lines for that day, so the reader sees the same issues described more tersely rather than losing them, and the next morning's run writes them normally again. Deploy outside a project's summary window if you would rather not spend that day.
 

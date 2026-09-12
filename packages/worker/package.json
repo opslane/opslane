@@ -10,6 +10,7 @@
   "scripts": {
     "build": "tsc && tsc -p tsconfig.scripts.json && mkdir -p dist/narrative/frames && cp src/narrative/frames/harness.html dist/narrative/frames/",
     "start": "node dist/index.js",
+    "backfill:tickets": "node dist/bin/backfill-tickets.js",
     "dev": "tsx watch src/index.ts",
     "test": "vitest run",
     "test:watch": "vitest"

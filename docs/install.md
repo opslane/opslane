@@ -17,6 +17,10 @@ The onboarding wizard puts this key directly in its setup snippet so you can sen
 
 > **Privacy:** session recording is on by default. Review [replay privacy and masking](guides/replay-privacy.md) before you deploy.
 
+Self-hosted servers need PostgreSQL with the `vector` extension. Compose supplies
+`pgvector/pgvector:pg16`; RDS operators must check their engine's extension support.
+See [server prerequisites and upgrades](quickstart/self-host.md#prerequisites).
+
 ## Install
 
 ```bash

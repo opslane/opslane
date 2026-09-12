@@ -313,6 +313,7 @@ describeDb('friction match job', () => {
   });
   it('records an empty surviving narrative under lease without billing', async () => {
     const job = await seed([]);
+    await pool.query("UPDATE session_narratives SET verification_state='none' WHERE session_id=$1", [job.sessionId]);
     const cheap = model([]);
     await run(job, cheap);
     expect(cheap.complete).not.toHaveBeenCalled();
@@ -336,6 +337,12 @@ describeDb('friction match job', () => {
       (await pool.query('SELECT * FROM job_usage WHERE job_id=$1', [job.id]))
         .rows,
     ).toEqual([]);
+  });
+  it('rejects a nonempty narrative that has not been verified', async () => {
+    const job = await seed();
+    await pool.query("UPDATE session_narratives SET verification_state='none' WHERE session_id=$1", [job.sessionId]);
+    await expect(run(job)).rejects.toThrow(/finalized narrative/);
+    expect(await decisionCounts()).toEqual({ tickets: 0, decisions: 0, matches: 0 });
   });
   it('rejects lease loss during model work before any decision state mutation', async () => {
     const job = await seed();
