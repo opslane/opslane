@@ -1259,6 +1259,76 @@ describeDb('confirmation job', () => {
     ).toEqual([{ status: 'failed' }]);
   });
 
+  describe('insight investigation threshold', () => {
+    beforeEach(() => vi.stubEnv('FRICTION_INSIGHT_INVESTIGATE_USERS', '5'));
+    afterEach(() => vi.unstubAllEnvs());
+
+    it('publishes an insight without investigating it until five identified users confirm', async () => {
+      const t = await insightTicket();
+      await identifiedMatches(t, 3);
+      await expect(
+        processFrictionConfirm(await claim(t), deps([]), new AbortController().signal),
+      ).rejects.toMatchObject({ name: 'JobCompletedInTransaction' });
+      expect((await store.getTicket(pool, projectId, t.id))!.status).toBe('published');
+      expect(
+        (await pool.query(`SELECT investigation_status FROM error_groups WHERE ticket_id=$1`, [t.id])).rows,
+      ).toEqual([{ investigation_status: 'pending' }]);
+      expect(await investigateJobs(t)).toEqual([]);
+
+      // Ten more arrivals earn a second batch; the confirmed identified users
+      // cross five and the finalizer queues the first investigation, once.
+      await identifiedMatches(t, 10);
+      await expect(
+        processFrictionConfirm(await claim(t), deps([]), new AbortController().signal),
+      ).rejects.toMatchObject({ name: 'JobCompletedInTransaction' });
+      expect((await store.verifiedEvidence(pool, t)).users).toBeGreaterThanOrEqual(5);
+      expect(await investigateJobs(t)).toEqual([{ generation: 1, status: 'pending' }]);
+    });
+
+    it('does not requeue an insight below the threshold after a failed investigation', async () => {
+      const t = await insightTicket();
+      await identifiedMatches(t, 3);
+      await expect(
+        processFrictionConfirm(await claim(t), deps([]), new AbortController().signal),
+      ).rejects.toMatchObject({ name: 'JobCompletedInTransaction' });
+      // A failed investigation sets reinvestigate_needed; evidence then grows
+      // to four users, still under five: nothing may be queued.
+      await pool.query(`UPDATE error_groups SET investigation_status='failed' WHERE ticket_id=$1`, [t.id]);
+      await pool.query(`UPDATE friction_tickets SET reinvestigate_needed=true WHERE id=$1`, [t.id]);
+      await identifiedMatches(t, 1);
+      await pool.query(`UPDATE friction_tickets SET arrival_boundary=0 WHERE id=$1`, [t.id]);
+      await expect(
+        processFrictionConfirm(await claim(t), deps([]), new AbortController().signal),
+      ).rejects.toMatchObject({ name: 'JobCompletedInTransaction' });
+      expect((await store.verifiedEvidence(pool, t)).users).toBe(4);
+      expect(await investigateJobs(t)).toEqual([]);
+    });
+
+    it('carries the threshold into generation two', async () => {
+      const t = await insightTicket();
+      await identifiedMatches(t, 3);
+      await expect(
+        processFrictionConfirm(await claim(t), deps([]), new AbortController().signal),
+      ).rejects.toMatchObject({ name: 'JobCompletedInTransaction' });
+      await transaction((tx) => store.unpublish(tx, t));
+      await identifiedMatches(t, 10);
+      await expect(
+        processFrictionConfirm(await claim(t), deps([]), new AbortController().signal),
+      ).rejects.toMatchObject({ name: 'JobCompletedInTransaction' });
+      expect((await store.getTicket(pool, projectId, t.id))!.live_generation).toBe(2);
+      expect(await investigateJobs(t)).toEqual([{ generation: 2, status: 'pending' }]);
+    });
+
+    it('still investigates a defect on publication regardless of user count', async () => {
+      const t = await ticket();
+      await matches(t, 3);
+      await expect(
+        processFrictionConfirm(await claim(t), deps([]), new AbortController().signal),
+      ).rejects.toMatchObject({ name: 'JobCompletedInTransaction' });
+      expect(await investigateJobs(t)).toEqual([{ generation: 1, status: 'pending' }]);
+    });
+  });
+
   it('publishes three of four checks with exactly verified evidence and a generation-stamped investigation', async () => {
     const t = await ticket();
     const recordings = await matches(t, 4);

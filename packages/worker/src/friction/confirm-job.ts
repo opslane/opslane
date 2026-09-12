@@ -226,20 +226,27 @@ export async function applyConfirmationTransition(
       `UPDATE digest_card_copy SET invalidated_at=now() WHERE error_group_id=$1 AND invalidated_at IS NULL`,
       [incident.id],
     );
+    const allowed = store.investigationAllowed(ticket, evidence.users);
     if (
+      allowed &&
       ticket.reinvestigate_needed &&
       ticket.evidence_version > (incident.evidence_version_used ?? -1)
     ) {
-      await db.enqueueJobTx(tx, 'investigate', ticket.project_id, {
-        ticketId: ticket.id,
-        errorGroupId: incident.id,
-        sourceId: incident.id,
-        publicationGeneration: ticket.live_generation,
-      });
+      await store.enqueueTicketInvestigation(tx, ticket, incident.id);
       await tx.query(
         `UPDATE friction_tickets SET reinvestigate_needed=false WHERE id=$1`,
         [ticket.id],
       );
+    }
+    // An insight published below the user threshold has an incident that was
+    // never investigated. Its first investigation starts from the batch that
+    // carries it over the threshold; the helper makes this idempotent.
+    if (allowed && ticket.kind === 'ux_insight' && incident.investigation_status === 'pending') {
+      const everQueued = await tx.query(
+        `SELECT 1 FROM error_group_jobs WHERE error_group_id=$1 AND job_type='investigate' LIMIT 1`,
+        [incident.id],
+      );
+      if (!everQueued.rowCount) await store.enqueueTicketInvestigation(tx, ticket, incident.id);
     }
   }
   await tx.query(

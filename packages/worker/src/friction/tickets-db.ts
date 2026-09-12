@@ -718,12 +718,9 @@ export async function activateGeneration(
     fixed_at=NULL,updated_at=now() WHERE id=$1`,
     [t.id, generation, steps, screens],
   );
-  await enqueueJobTx(dbtx, 'investigate', t.project_id, {
-    errorGroupId,
-    sourceId: errorGroupId,
-    ticketId: t.id,
-    publicationGeneration: generation,
-  });
+  if (investigationAllowed(t, evidence.users)) {
+    await enqueueTicketInvestigation(dbtx, { ...t, live_generation: generation }, errorGroupId);
+  }
   return { errorGroupId, generation };
 }
 export async function unpublish(dbtx: pg.PoolClient, ticket: TicketRow): Promise<void> {
@@ -862,6 +859,42 @@ export function foldMinSimilarity(): number {
   const raw = Number(process.env['FRICTION_FOLD_MIN_SIMILARITY'] ?? '0.75');
   return Number.isFinite(raw) && raw > 0 && raw <= 1 ? raw : 0.75;
 }
+/** Insights (kind ux_insight) are investigated only once this many identified
+ * users have confirmed recordings; defects are investigated on publication.
+ * Grilling decision Q2/Q3, 2026-09-12. */
+export function insightInvestigateUsers(): number {
+  const raw = Number(process.env['FRICTION_INSIGHT_INVESTIGATE_USERS'] ?? '5');
+  return Number.isInteger(raw) && raw > 0 ? raw : 5;
+}
+/** The one rule every investigation-queueing path asks. */
+export function investigationAllowed(
+  ticket: Pick<TicketRow, 'kind'>,
+  confirmedIdentifiedUsers: number,
+): boolean {
+  return ticket.kind !== 'ux_insight' || confirmedIdentifiedUsers >= insightInvestigateUsers();
+}
+/** Queues one investigation for the live generation unless one is already
+ * pending or claimed for that incident and generation. Caller holds the
+ * ticket lock, which serializes this with activation and reconciliation. */
+export async function enqueueTicketInvestigation(
+  tx: pg.PoolClient,
+  ticket: Pick<TicketRow, 'id' | 'project_id' | 'live_generation'>,
+  errorGroupId: string,
+): Promise<boolean> {
+  const active = await tx.query(
+    `SELECT 1 FROM error_group_jobs WHERE error_group_id=$1 AND job_type='investigate'
+       AND publication_generation=$2 AND status IN ('pending','claimed') LIMIT 1`,
+    [errorGroupId, ticket.live_generation],
+  );
+  if (active.rowCount) return false;
+  await enqueueJobTx(tx, 'investigate', ticket.project_id, {
+    errorGroupId,
+    sourceId: errorGroupId,
+    ticketId: ticket.id,
+    publicationGeneration: ticket.live_generation,
+  });
+  return true;
+}
 export async function publishedNeighbors(
   db: TicketDb,
   ticket: TicketRow,
@@ -889,6 +922,7 @@ export interface LiveIncident {
   id: string;
   fix_substate: string | null;
   evidence_version_used: number | null;
+  investigation_status: string;
   pr_url: string | null;
 }
 export async function liveIncident(
@@ -896,7 +930,7 @@ export async function liveIncident(
   t: TicketRow,
 ): Promise<LiveIncident | null> {
   const r = await db.query<LiveIncident>(
-    `SELECT g.id,g.fix_substate,g.evidence_version_used,
+    `SELECT g.id,g.fix_substate,g.evidence_version_used,g.investigation_status,
     (SELECT pr_url FROM friction_fix_attempts a WHERE a.ticket_id=g.ticket_id AND a.generation=g.publication_generation AND a.pr_url IS NOT NULL ORDER BY a.created_at DESC LIMIT 1) AS pr_url
     FROM error_groups g WHERE g.ticket_id=$1 AND g.publication_generation=$2 AND g.status<>'archived'`,
     [t.id, t.live_generation],
