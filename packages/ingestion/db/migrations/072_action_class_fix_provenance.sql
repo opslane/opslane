@@ -103,7 +103,6 @@ DECLARE
   was_class TEXT := NULL;
   is_class TEXT;
 BEGIN
-  IF NEW.ticket_id IS NOT NULL THEN RETURN NEW; END IF;
   -- OLD is unassigned for INSERT triggers.
   IF TG_OP = 'UPDATE' THEN
     was_class := error_groups_action_class(OLD.status::text, OLD.candidate_diff, OLD.pr_url,
@@ -164,14 +163,11 @@ END $$;
 -- which is the one that owns the reset.
 CREATE OR REPLACE FUNCTION error_groups_pending_action_guard() RETURNS trigger AS $$
 DECLARE
-  was_class TEXT;
-  is_class TEXT;
-BEGIN
-  IF NEW.ticket_id IS NOT NULL THEN RETURN NEW; END IF;
-  was_class := error_groups_action_class(OLD.status::text, OLD.candidate_diff, OLD.pr_url,
+  was_class TEXT := error_groups_action_class(OLD.status::text, OLD.candidate_diff, OLD.pr_url,
     error_groups_fix_attempted(OLD.terminal_fix_job_id, OLD.project_id));
-  is_class := error_groups_action_class(NEW.status::text, NEW.candidate_diff, NEW.pr_url,
+  is_class TEXT := error_groups_action_class(NEW.status::text, NEW.candidate_diff, NEW.pr_url,
     error_groups_fix_attempted(NEW.terminal_fix_job_id, NEW.project_id));
+BEGIN
   SELECT * INTO NEW.actionable_since, NEW.snoozed_until
     FROM error_groups_hold_pending_action(was_class, is_class,
       NEW.actionable_since, NEW.snoozed_until, OLD.actionable_since, OLD.snoozed_until);

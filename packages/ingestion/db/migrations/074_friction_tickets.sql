@@ -288,4 +288,97 @@ CREATE TABLE IF NOT EXISTS friction_fix_failures (
 ALTER TABLE error_group_jobs ADD COLUMN IF NOT EXISTS investigation_evidence_version INT;
 ALTER TABLE digest_card_copy ADD COLUMN IF NOT EXISTS steps TEXT;
 
+-- Ticket-generation incidents own their publication clock (activateGeneration
+-- stamps actionable_since; a person may still un-snooze). The legacy lifecycle
+-- in 064/066/072 must neither classify them nor let its replayed sweeps rewrite
+-- their stamps. Shipped migrations are immutable, so two things happen here:
+--
+-- 1. The final lifecycle function bodies are restated with a ticket early
+--    return. The boot replay runs every file in order, so these definitions
+--    are the ones installed once the replay finishes.
+-- 2. A separate trigger, named to fire after the legacy pair, puts a ticket
+--    row's stamps back whenever a write has the shape of a replayed sweep.
+--    066's replay redefines the legacy functions without the early return
+--    before 074 restores them, so a guard that lives only in those functions
+--    is absent exactly while 066's own sweeps run. This trigger is never
+--    replaced by an earlier file, so it holds across the whole replay.
+--
+-- The sweeps have fixed shapes: 064/066 stamp actionable_since where it is
+-- NULL without touching anything else, and reset both stamps to NULL for rows
+-- outside the legacy statuses. A write that changes anything else, or that
+-- clears only the snooze, goes through untouched.
+CREATE OR REPLACE FUNCTION error_groups_actionable_lifecycle() RETURNS trigger AS $$
+DECLARE
+  was_class TEXT := NULL;
+  is_class TEXT;
+BEGIN
+  IF NEW.ticket_id IS NOT NULL THEN RETURN NEW; END IF;
+  -- OLD is unassigned for INSERT triggers.
+  IF TG_OP = 'UPDATE' THEN
+    was_class := error_groups_action_class(OLD.status::text, OLD.candidate_diff, OLD.pr_url,
+      error_groups_fix_attempted(OLD.terminal_fix_job_id, OLD.project_id));
+  END IF;
+  is_class := error_groups_action_class(NEW.status::text, NEW.candidate_diff, NEW.pr_url,
+    error_groups_fix_attempted(NEW.terminal_fix_job_id, NEW.project_id));
+
+  IF is_class IS NULL THEN
+    NEW.actionable_since := NULL;
+    NEW.snoozed_until := NULL;
+  ELSIF was_class IS DISTINCT FROM is_class THEN
+    NEW.actionable_since := now();
+    NEW.snoozed_until := NULL;
+  ELSE
+    SELECT * INTO NEW.actionable_since, NEW.snoozed_until
+      FROM error_groups_hold_pending_action(was_class, is_class,
+        NEW.actionable_since, NEW.snoozed_until, OLD.actionable_since, OLD.snoozed_until);
+  END IF;
+  RETURN NEW;
+END $$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION error_groups_pending_action_guard() RETURNS trigger AS $$
+DECLARE
+  was_class TEXT;
+  is_class TEXT;
+BEGIN
+  IF NEW.ticket_id IS NOT NULL THEN RETURN NEW; END IF;
+  was_class := error_groups_action_class(OLD.status::text, OLD.candidate_diff, OLD.pr_url,
+    error_groups_fix_attempted(OLD.terminal_fix_job_id, OLD.project_id));
+  is_class := error_groups_action_class(NEW.status::text, NEW.candidate_diff, NEW.pr_url,
+    error_groups_fix_attempted(NEW.terminal_fix_job_id, NEW.project_id));
+  SELECT * INTO NEW.actionable_since, NEW.snoozed_until
+    FROM error_groups_hold_pending_action(was_class, is_class,
+      NEW.actionable_since, NEW.snoozed_until, OLD.actionable_since, OLD.snoozed_until);
+  IF NEW IS NOT DISTINCT FROM OLD THEN
+    RETURN NULL;
+  END IF;
+  RETURN NEW;
+END $$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION error_groups_ticket_stamps_guard() RETURNS trigger AS $$
+BEGIN
+  IF NEW.actionable_since IS NULL AND NEW.snoozed_until IS NULL AND OLD.actionable_since IS NOT NULL THEN
+    NEW.actionable_since := OLD.actionable_since;
+    NEW.snoozed_until := OLD.snoozed_until;
+  ELSIF OLD.actionable_since IS NULL AND NEW.actionable_since IS NOT NULL
+     AND NEW.status = OLD.status
+     AND NEW.snoozed_until IS NOT DISTINCT FROM OLD.snoozed_until THEN
+    NEW.actionable_since := NULL;
+    NEW.updated_at := OLD.updated_at;
+  END IF;
+  IF NEW IS NOT DISTINCT FROM OLD THEN RETURN NULL; END IF;
+  RETURN NEW;
+END $$ LANGUAGE plpgsql;
+
+-- BEFORE row triggers fire in name order; this one sorts after
+-- error_groups_actionable_lifecycle_upd and error_groups_pending_action_guard_upd.
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid='error_groups'::regclass AND tgname='error_groups_ticket_stamps_guard_upd') THEN
+    CREATE TRIGGER error_groups_ticket_stamps_guard_upd
+      BEFORE UPDATE OF status, actionable_since, snoozed_until ON error_groups
+      FOR EACH ROW WHEN (NEW.ticket_id IS NOT NULL)
+      EXECUTE FUNCTION error_groups_ticket_stamps_guard();
+  END IF;
+END $$;
+
 COMMIT;

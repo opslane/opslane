@@ -5,9 +5,6 @@
 -- DROP TRIGGER/CREATE TRIGGER pair must never leave a window with no
 -- lifecycle trigger on a live database. Nothing here needs CONCURRENTLY.
 BEGIN;
--- Ticket generations own their publication clock independently of legacy status.
--- Add the bare column here so the guards also work before 069/074 on fresh installs.
-ALTER TABLE error_groups ADD COLUMN IF NOT EXISTS ticket_id UUID;
 ALTER TABLE error_groups ADD COLUMN IF NOT EXISTS actionable_since TIMESTAMPTZ;
 ALTER TABLE error_groups ADD COLUMN IF NOT EXISTS snoozed_until TIMESTAMPTZ;
 
@@ -16,7 +13,6 @@ DECLARE
   was_actionable BOOLEAN := false;
   is_actionable BOOLEAN;
 BEGIN
-  IF NEW.ticket_id IS NOT NULL THEN RETURN NEW; END IF;
   -- OLD is unassigned for INSERT triggers.
   IF TG_OP = 'UPDATE' THEN
     was_actionable := OLD.status IN ('awaiting_approval', 'needs_human');
@@ -54,7 +50,7 @@ UPDATE error_groups
          ELSE updated_at
        END
  WHERE status IN ('awaiting_approval', 'needs_human')
-   AND actionable_since IS NULL AND ticket_id IS NULL;
+   AND actionable_since IS NULL;
 
 -- Project scope is derived from digest_runs; duplicating it here would make
 -- the audit ledger capable of storing an inconsistent project identifier.
@@ -81,7 +77,6 @@ CREATE INDEX IF NOT EXISTS idx_error_groups_actionable
 UPDATE error_groups
    SET actionable_since = NULL, snoozed_until = NULL
  WHERE status NOT IN ('awaiting_approval','needs_human')
-   AND (actionable_since IS NOT NULL OR snoozed_until IS NOT NULL)
-   AND ticket_id IS NULL;
+   AND (actionable_since IS NOT NULL OR snoozed_until IS NOT NULL);
 
 COMMIT;
