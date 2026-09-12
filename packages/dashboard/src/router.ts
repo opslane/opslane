@@ -11,6 +11,7 @@ import AccountsList from './views/AccountsList.vue';
 import AccountDetail from './views/AccountDetail.vue';
 import AcceptInvitation from './views/AcceptInvitation.vue';
 import AgentApprove from './views/AgentApprove.vue';
+import AgentGitHubInstall from './views/AgentGitHubInstall.vue';
 import { routeNeedsProject } from './route-project';
 
 export const routes: RouteRecordRaw[] = [
@@ -19,6 +20,7 @@ export const routes: RouteRecordRaw[] = [
   { path: '/auth/complete', name: 'auth-complete', component: AuthCallback, meta: { public: true } },
   { path: '/invite/accept', name: 'invite-accept', component: AcceptInvitation },
   { path: '/agent/approve/:id', name: 'agent-approve', component: AgentApprove },
+  { path: '/agent/github/:id', name: 'agent-github-install', component: AgentGitHubInstall },
   { path: '/setup', name: 'setup', component: SetupWizard },
   { path: '/', name: 'issues', component: IssuesList },
   { path: '/issues/:id', name: 'incident', component: IncidentDetail },
@@ -44,7 +46,7 @@ router.beforeEach((to) => {
   const publicRoutes = ['login', 'auth-complete'];
 
   if (!to.meta.public && !authed) {
-    if (to.name === 'invite-accept' || to.name === 'agent-approve') {
+    if (to.name === 'invite-accept' || to.name === 'agent-approve' || to.name === 'agent-github-install') {
       sessionStorage.setItem('opslane_post_auth_path', to.fullPath);
     }
     return { name: 'login' };

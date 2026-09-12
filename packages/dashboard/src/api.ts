@@ -84,13 +84,38 @@ async function doRefresh(): Promise<boolean> {
 // === Shared auth-aware fetch core ===
 
 export class APIError extends Error {
-  constructor(
-    public readonly status: number,
-    message: string,
-  ) {
-    super(message);
-    this.name = 'APIError';
-  }
+	public readonly code?: string;
+	public readonly details: Record<string, string>;
+	constructor(
+		public readonly status: number,
+		message: string,
+		code?: string,
+		details: Record<string, string> = {},
+	) {
+		super(message);
+		this.name = 'APIError';
+		this.code = code;
+		this.details = details;
+	}
+}
+
+function parseErrorBody(status: number, statusText: string, body: string): APIError {
+	try {
+		const parsed: unknown = JSON.parse(body);
+		if (parsed && typeof parsed === 'object') {
+			const obj = parsed as Record<string, unknown>;
+			const message = typeof obj.error === 'string' ? obj.error : `API ${status}`;
+			const code = typeof obj.code === 'string' ? obj.code : undefined;
+			const details: Record<string, string> = {};
+			for (const [key, value] of Object.entries(obj)) {
+				if (key !== 'error' && key !== 'code' && typeof value === 'string') details[key] = value;
+			}
+			return new APIError(status, message, code, details);
+		}
+	} catch {
+		// Edge proxies may return HTML or an empty body. Never surface it.
+	}
+	return new APIError(status, `API ${status}: ${statusText || 'non-JSON response'}`);
 }
 
 async function fetchWithAuth<T>(path: string, options: RequestInit = {}): Promise<T> {
@@ -110,9 +135,9 @@ async function fetchWithAuth<T>(path: string, options: RequestInit = {}): Promis
     }
   }
 
-  if (!res.ok) {
-    const body = await res.text();
-    throw new APIError(res.status, `API ${res.status}: ${body || res.statusText}`);
+	if (!res.ok) {
+		const body = await res.text();
+		throw parseErrorBody(res.status, res.statusText, body);
   }
   if (res.status === 204) return undefined as T;
   return res.json() as Promise<T>;
@@ -793,4 +818,8 @@ export function approveAgentSession(
 
 export function denyAgentSession(sessionId: string): Promise<{ status: string }> {
   return postJSON(`/agent/approve/${encodeURIComponent(sessionId)}/deny`, {});
+}
+
+export function agentGitHubInstallUrl(sessionId: string): Promise<{ install_url: string }> {
+  return postJSON(`/agent/github/${encodeURIComponent(sessionId)}/install-url`, {});
 }
