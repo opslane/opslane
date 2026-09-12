@@ -110,7 +110,7 @@ Agent setup uses normal dashboard sign-in and an explicit approval. Approval cre
 | GET | `/api/v1/projects/{projectID}/sessions/{sessionID}/narrative` | Fetch the session narrative, finding grades, and verification timestamp |
 | GET | `/api/v1/projects/{projectID}/sessions/{sessionID}/chunks/{seq}` | Fetch one decoded, redacted part of the recording |
 | GET | `/api/v1/projects/{projectID}/incidents/{incidentID}/affected-users` | Affected users |
-| GET | `/api/v1/projects/{projectID}/incidents/{incidentID}/sample-event` | Fetch the redacted representative error event for traceback, breadcrumbs, and request context |
+| GET | `/api/v1/projects/{projectID}/incidents/{incidentID}/sample-event` | Fetch the redacted representative event with available source-mapped frames, the raw stack, breadcrumbs, and request context |
 | POST | `/api/v1/projects/{projectID}/incidents/{incidentID}/fix` | Start a fix for an issue that is ready to fix, whether it came from an error or a session recording |
 | POST | `/api/v1/projects/{projectID}/incidents/{incidentID}/review` | Request another short repository review for the current issue; reuses an investigation already in progress |
 | POST | `/api/v1/projects/{projectID}/incidents/{incidentID}/link-pr` | Record a same-repository GitHub pull request without marking the issue resolved |

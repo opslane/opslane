@@ -1968,13 +1968,14 @@ func (q *Queries) GetLatestAgentTaskBrief(ctx context.Context, projectID, groupI
 // SampleEvent is the representative event for an error group, used by the
 // dashboard detail view. Tenant-scoped through the owning group's project_id.
 type SampleEvent struct {
-	Timestamp     time.Time
-	Platform      string
-	ErrorType     string
-	ErrorMessage  string
-	StackTraceRaw string
-	Breadcrumbs   []byte // JSONB passthrough
-	Context       []byte // JSONB passthrough
+	Timestamp          time.Time
+	Platform           string
+	ErrorType          string
+	ErrorMessage       string
+	StackTraceRaw      string
+	ResolutionEnvelope []byte // current resolved source frames, when available
+	Breadcrumbs        []byte // JSONB passthrough
+	Context            []byte // JSONB passthrough
 }
 
 // GetSampleEvent returns the sample event for a group, scoped to the project.
@@ -1986,15 +1987,17 @@ func (q *Queries) GetSampleEvent(ctx context.Context, projectID, groupID string)
 	var ev SampleEvent
 	err := q.pool.QueryRow(ctx,
 		`SELECT e."timestamp", e.platform, e.error_type, e.error_message,
-		        e.stack_trace_raw, e.breadcrumbs, e.context
+		        e.stack_trace_raw, e.breadcrumbs, e.context, r.envelope
 		 FROM error_groups g
 		 JOIN error_events e ON e.id = g.sample_event_id
 		   AND e.project_id = g.project_id AND e.error_group_id = g.id
+		 LEFT JOIN error_event_resolutions r
+		   ON r.event_id = e.id AND r.project_id = e.project_id AND r.status = 'resolved'
 		 WHERE g.id = $1 AND g.project_id = $2
 		   AND (g.status <> 'candidate' OR g.adjudication_status = 'unchecked')`,
 		groupID, projectID,
 	).Scan(&ev.Timestamp, &ev.Platform, &ev.ErrorType, &ev.ErrorMessage,
-		&ev.StackTraceRaw, &ev.Breadcrumbs, &ev.Context)
+		&ev.StackTraceRaw, &ev.Breadcrumbs, &ev.Context, &ev.ResolutionEnvelope)
 	if err != nil {
 		return nil, err
 	}

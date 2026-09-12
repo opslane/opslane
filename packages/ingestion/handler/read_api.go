@@ -19,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/opslane/opslane/packages/ingestion/db"
+	"github.com/opslane/opslane/packages/ingestion/identity"
 	"github.com/opslane/opslane/packages/ingestion/masking"
 	"github.com/opslane/opslane/packages/ingestion/narrative"
 	"github.com/opslane/opslane/packages/ingestion/notify"
@@ -790,6 +791,30 @@ func normalizeSampleBreadcrumbs(raw []byte) json.RawMessage {
 	return redacted
 }
 
+// sampleEventStack presents available original frames without losing generated
+// frames that could not be resolved. Redaction happens on the combined result.
+func sampleEventStack(event *db.SampleEvent) string {
+	var envelope identity.Envelope
+	if json.Unmarshal(event.ResolutionEnvelope, &envelope) != nil || envelope.Version != identity.ResolverVersion {
+		return event.StackTraceRaw
+	}
+	var frames []string
+	for _, frame := range envelope.Frames {
+		if strings.TrimSpace(frame.OriginalFile) == "" || frame.OriginalLine <= 0 {
+			continue
+		}
+		name := frame.OriginalFunction
+		if name == "" {
+			name = "<anonymous>"
+		}
+		frames = append(frames, "    at "+name+" ("+frame.OriginalFile+":"+strconv.Itoa(frame.OriginalLine)+")")
+	}
+	if len(frames) == 0 {
+		return event.StackTraceRaw
+	}
+	return "Source-mapped stack:\n" + strings.Join(frames, "\n") + "\n\nRaw stack:\n" + event.StackTraceRaw
+}
+
 // GetSampleEvent returns the representative error event for an incident.
 func (d *Dependencies) GetSampleEvent(w http.ResponseWriter, r *http.Request) {
 	projectID := chi.URLParam(r, "projectID")
@@ -817,7 +842,7 @@ func (d *Dependencies) GetSampleEvent(w http.ResponseWriter, r *http.Request) {
 		Error: sampleErrorJSON{
 			Type:    masking.RedactBody(event.ErrorType),
 			Message: masking.RedactURL(masking.RedactBody(event.ErrorMessage)),
-			Stack:   masking.RedactURL(masking.RedactBody(event.StackTraceRaw)),
+			Stack:   masking.RedactURL(masking.RedactBody(sampleEventStack(event))),
 		},
 		Breadcrumbs: normalizeSampleBreadcrumbs(event.Breadcrumbs),
 		Context:     sanitizeSampleContext(event.Context),
