@@ -64,7 +64,11 @@ router.beforeEach((to) => {
 	// syncs the project id (and routes truly project-less orgs) after mount.
 	if (authed && routeNeedsProject(to.name)) {
 		const onboarded = localStorage.getItem('opslane_onboarding_complete') === '1';
-		if (!onboarded) {
+		// A project-qualified deep link (the ones an onboarding agent prints:
+		// issues_url, latest_error_group_url, github_connect_url) names a
+		// project the server already created, so the wizard has nothing to add.
+		const projectDeepLink = typeof to.query.project_id === 'string' && to.query.project_id !== '';
+		if (!onboarded && !projectDeepLink) {
 			return { name: 'setup' };
     }
   }

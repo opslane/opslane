@@ -339,15 +339,9 @@ func (d *Dependencies) AgentSessionComplete(w http.ResponseWriter, r *http.Reque
 	if !d.refreshAgentSession(w, r) {
 		return
 	}
-	onboarded, err := d.Queries.OrgOnboarded(r.Context(), *s.OrgID)
-	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "failed to check onboarding")
-		return
-	}
-	if onboarded {
-		agentJSON(w, http.StatusOK, map[string]any{"onboarding_complete": true})
-		return
-	}
+	// A 200 here is the runbook's proof that this session's test error
+	// arrived, so the event check applies even when the org is already
+	// onboarded from an earlier project.
 	has, err := d.Queries.HasEventsSince(r.Context(), *s.ProjectID, s.CreatedAt)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "failed to check events")

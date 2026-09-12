@@ -97,7 +97,7 @@ func TestAgentSessionRoutes_StateLongPollExpiresMidWait(t *testing.T) {
 	}
 }
 
-func TestAgentSessionRoutes_CompleteRequiresEventOrOnboardedOrg(t *testing.T) {
+func TestAgentSessionRoutes_CompleteRequiresSessionEventEvenWhenOrgOnboarded(t *testing.T) {
 	a := approvedRig(t)
 	code, out := sessionCall(t, a, http.MethodPost, "complete", "", a.token)
 	if code != http.StatusUnprocessableEntity || out["error"] != "missing_facts" {
@@ -114,8 +114,8 @@ func TestAgentSessionRoutes_CompleteRequiresEventOrOnboardedOrg(t *testing.T) {
 	if has, err := a.deps.Queries.HasEvents(ctx, a.project); err != nil || has {
 		t.Fatalf("events must be gone before the retry: %v %v", has, err)
 	}
-	if code, _ = sessionCall(t, a, http.MethodPost, "complete", "", a.token); code != http.StatusOK {
-		t.Fatalf("complete on an already-onboarded org must stay 200: %d", code)
+	if code, out = sessionCall(t, a, http.MethodPost, "complete", "", a.token); code != http.StatusUnprocessableEntity || out["error"] != "missing_facts" {
+		t.Fatalf("complete on an onboarded org still needs this session's event: %d %v", code, out)
 	}
 }
 

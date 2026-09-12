@@ -3,7 +3,9 @@ package handler
 import (
 	"encoding/json"
 	"net/http"
+	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/opslane/opslane/packages/ingestion/db"
@@ -66,6 +68,8 @@ func (d *Dependencies) agentSessionFacts(r *http.Request, s *db.AgentSession) ag
 		}
 		f.GitHubConnected = f.GitHubInstalled && repoAttached
 	} else {
+		// PAT mode has no install step: a configured token is the installation.
+		f.GitHubInstalled = strings.TrimSpace(os.Getenv("GITHUB_TOKEN")) != ""
 		f.GitHubConnected = repoAttached
 	}
 	if ok, err := d.Queries.HasEnabledSlackDestination(ctx, projectID); err == nil {

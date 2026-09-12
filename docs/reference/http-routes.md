@@ -46,7 +46,7 @@ Agent setup uses normal dashboard sign-in and an explicit approval. Approval cre
 | POST | `/api/v1/agent/poll/{sessionID}/github` | poll token | Validate and attach `{repo}` through the organization's installation or server PAT |
 | POST | `/api/v1/agent/poll/{sessionID}/slack` | poll token | Store an encrypted webhook disabled, test delivery, then enable; failed tests remove the disabled destination |
 | POST | `/api/v1/agent/poll/{sessionID}/progress` | poll token | Report SDK/MCP progress or failed/skipped diagnostics for server-derived steps |
-| POST | `/api/v1/agent/poll/{sessionID}/complete` | poll token | Complete onboarding after a first event, or return 422 with `missing: ["first_event"]`; already-onboarded orgs succeed |
+| POST | `/api/v1/agent/poll/{sessionID}/complete` | poll token | Complete onboarding after this session's first event, or return 422 with `missing: ["first_event"]`; an already-onboarded org still needs the event |
 
 ## SDK (X-API-Key)
 

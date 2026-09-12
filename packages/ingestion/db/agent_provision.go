@@ -38,6 +38,8 @@ type AgentApproveInput struct {
 // page. It creates a project or attaches to one the org owns, mints the three
 // keys, seals them to the session, and moves it to provisioned. The row lock
 // plus the status guard on UPDATE give concurrent approvals exactly one winner.
+// Approval restarts the two-hour window: the remaining steps have their own
+// human stops and must not inherit whatever a slow sign-up left over.
 func (q *Queries) ApproveAgentSession(ctx context.Context, in AgentApproveInput) (*Project, error) {
 	if in.SealKeys == nil {
 		return nil, fmt.Errorf("approve: no seal function")
@@ -114,7 +116,8 @@ func (q *Queries) ApproveAgentSession(ctx context.Context, in AgentApproveInput)
 	tag, err := tx.Exec(ctx,
 		`UPDATE agent_sessions
 		 SET status = 'provisioned', org_id = $2, project_id = $3, api_key_sealed = $4,
-		     project_name = $5, provisioned_by_user_id = $6
+		     project_name = $5, provisioned_by_user_id = $6,
+		     expires_at = GREATEST(expires_at, now() + interval '2 hours')
 		 WHERE id = $1 AND status = 'pending' AND expires_at > now()`,
 		in.SessionID, in.OrgID, project.ID, sealed, project.Name, in.UserID)
 	if err != nil {

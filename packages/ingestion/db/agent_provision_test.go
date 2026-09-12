@@ -205,8 +205,8 @@ func TestApproveAgentSession_ExpiredIsNotPending(t *testing.T) {
 	orgID, userID := approveTenant(t, q)
 	s, _ := newPendingSession(t, q, "approve-expired")
 	q.Pool().Exec(ctx, `UPDATE agent_sessions SET expires_at = now() - interval '1 minute' WHERE id = $1`, s.ID)
-	if _, err := q.ApproveAgentSession(ctx, approveInput(s, orgID, userID)); !errors.Is(err, db.ErrAgentSessionNotPending) {
-		t.Fatalf("expected not-pending for expired, got %v", err)
+	if _, err := q.ApproveAgentSession(ctx, approveInput(s, orgID, userID)); !errors.Is(err, db.ErrAgentSessionExpired) {
+		t.Fatalf("expected expired, got %v", err)
 	}
 }
 
