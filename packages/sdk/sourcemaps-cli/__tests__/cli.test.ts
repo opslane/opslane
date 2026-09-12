@@ -247,3 +247,33 @@ describe('inline source-map directives', () => {
     expect(output).not.toContain('sourceMappingURL=../../maps/b.js.map');
   });
 });
+
+describe('output syntax compatibility', () => {
+  it('stamps and strips sloppy IIFE and CJS output containing octal literals and escapes', async () => {
+    const path = join(dir, 'chunks/b/main.js');
+    const source = String.raw`var n = 010; var s = "\141";`;
+    const { fetchImpl } = recorder(() => 201);
+    for (const format of ['iife', 'cjs']) {
+      await writeFile(path, `${source} //# sourceMappingURL=../../maps/b.js.map\n`);
+      await writeFile(join(dir, 'maps/b.js.map'), MAP('main.js', '../../src/b.ts'));
+      const result = await run({ format, fetchImpl });
+      expect(result.failed.find(failure => failure.fileName === 'maps/b.js.map')).toBeUndefined();
+      const output = await readFile(path, 'utf8');
+      expect(output).toContain(source);
+      expect(output).not.toContain('sourceMappingURL');
+      expect(output).toMatch(/\/\/# debugId=[0-9a-f-]{36}$/);
+    }
+  });
+
+  it('continues to tokenize ESM imports, exports, dynamic import, and import.meta', async () => {
+    const path = join(dir, 'chunks/b/main.js');
+    const source = 'import { x } from "./x.js"; export const url = import.meta.url; export const lazy = () => import("./lazy.js");';
+    await writeFile(path, `${source} //# sourceMappingURL=../../maps/b.js.map\n`);
+    const { fetchImpl } = recorder(() => 201);
+    expect(await run({ format: 'es', fetchImpl })).toMatchObject({ stamped: 2, uploaded: 2, removed: 2 });
+    const output = await readFile(path, 'utf8');
+    expect(output).toContain(source);
+    expect(output).not.toContain('sourceMappingURL');
+    expect(output).toMatch(/\/\/# debugId=[0-9a-f-]{36}$/);
+  });
+});

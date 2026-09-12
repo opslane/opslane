@@ -119,7 +119,8 @@ function sourceMappingDirectives(code: string): SourceMappingDirective[] {
   const directives: SourceMappingDirective[] = [];
   const tokens = tokenizer(code, {
     ecmaVersion: 'latest',
-    sourceType: 'module',
+    // Comment discovery must accept sloppy scripts as well as ESM tokens.
+    sourceType: 'script',
     onComment(_block, text, start, end) {
       const match = /^[@#][ \t]*sourceMappingURL[ \t]*=[ \t]*(\S+)[ \t]*$/.exec(text);
       if (match) directives.push({ start, end, url: match[1] });
