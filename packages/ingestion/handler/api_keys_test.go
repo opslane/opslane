@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"github.com/google/uuid"
+	"github.com/opslane/opslane/packages/ingestion/debugid"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -262,5 +265,98 @@ func TestCreateAPIKeyScopeValidation(t *testing.T) {
 	// silently dropped.
 	if res := request(`{"label":"onboarding","expires_at":"2030-01-01T00:00:00Z","scope":"ingest"}`); res.Code != http.StatusBadRequest {
 		t.Fatalf("ingest+expires_at: got %d want 400 (%s)", res.Code, res.Body.String())
+	}
+}
+
+// apiKeyRouter seeds a tenant with an admin user and returns a router, the
+// project id, an admin session cookie, and the raw ingest key.
+func apiKeyRouter(t *testing.T) (deps *handler.Dependencies, router http.Handler, projectID string, cookie *http.Cookie) {
+	t.Helper()
+	deps, pool := testDeps(t)
+	ctx := context.Background()
+	deps.JWTSecret = []byte(authTestJWTSecret)
+	deps.SourcemapStore = newMemorySourceMapStore() // the store sourcemap_upload_test.go:104 uses; needed for the upload round-trip below
+	orgID, projectID, _, _ := seedTenant(t, deps.Queries)
+	t.Cleanup(func() { cleanupTenantHandler(t, pool, orgID) })
+	email := fmt.Sprintf("keys-%s@example.com", uuid.NewString())
+	user, err := deps.Queries.CreateUserGitHub(ctx, orgID, email, "Keys", time.Now().UnixNano(), "keys", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := deps.Queries.CreateMembership(ctx, user.ID, orgID, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	tok, err := auth.SignAccessToken(deps.JWTSecret, user.ID, orgID, email)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return deps, handler.NewRouterWithPool(deps, pool), projectID, &http.Cookie{Name: handler.AccessCookieName, Value: tok}
+}
+
+func TestAPIKeySourcemapsScopeMintsListsRevokes(t *testing.T) {
+	deps, router, projectID, cookie := apiKeyRouter(t)
+	deps.AuthCallbackOrigin = "https://app.example.test"
+
+	create := func(body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/projects/"+projectID+"/api-keys", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.AddCookie(cookie)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		return rec
+	}
+	rec := create(`{"label":"ci","scope":"sourcemaps"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+	}
+	var created struct {
+		KeyID string `json:"key_id"`
+		Token string `json:"token"`
+		Scope string `json:"scope"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+	if !strings.HasPrefix(created.Token, "opslane_sk_") || created.Scope != "sourcemaps" {
+		t.Fatalf("token %q scope %q", created.Token, created.Scope)
+	}
+	if rec := create(`{"label":"ci","scope":"sourcemaps","expires_at":"2030-01-01T00:00:00Z"}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("expires_at on sourcemaps must be refused: %d", rec.Code)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/projects/"+projectID+"/api-keys", nil)
+	req.AddCookie(cookie)
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if !strings.Contains(rec.Body.String(), `"scope":"sourcemaps"`) || !strings.Contains(rec.Body.String(), `"redacted":"opslane_sk_`+created.KeyID) {
+		t.Fatalf("listing: %s", rec.Body.String())
+	}
+
+	// The minted key must work before revocation, or the 401 below proves nothing.
+	mapBody := []byte(`{"version":3,"file":"a.js","sources":["a.ts"],"names":[],"mappings":"AAAA"}`)
+	computed, err := debugid.Compute(mapBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	debugID := computed.DebugID // the helper sourcemap_upload_test.go:104 uses to derive the id from the bytes
+	upload := func() *httptest.ResponseRecorder {
+		up := httptest.NewRequest(http.MethodPut, "/api/v1/sourcemaps/"+debugID, bytes.NewReader(mapBody))
+		up.Header.Set("Content-Type", "application/json")
+		up.Header.Set("X-API-Key", created.Token)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, up)
+		return rec
+	}
+	if rec := upload(); rec.Code != http.StatusCreated {
+		t.Fatalf("upload with the fresh sourcemaps key: %d %s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodDelete, "/api/v1/projects/"+projectID+"/api-keys/"+created.KeyID, nil)
+	req.AddCookie(cookie)
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent && rec.Code != http.StatusOK {
+		t.Fatalf("revoke: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := upload(); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("revoked sourcemaps key must be rejected on upload, got %d", rec.Code)
 	}
 }

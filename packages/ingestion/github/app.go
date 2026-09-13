@@ -16,6 +16,15 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
+var (
+	// ErrInstallationGone means GitHub no longer has this installation: it was
+	// uninstalled, or recreated under a new ID.
+	ErrInstallationGone = errors.New("github installation no longer exists")
+	// ErrInstallationSuspended means the installation exists but GitHub refuses
+	// tokens for it until it is unsuspended.
+	ErrInstallationSuspended = errors.New("github installation is suspended")
+)
+
 // httpClient is used for all GitHub API calls. Override in tests.
 var httpClient = &http.Client{Timeout: 10 * time.Second}
 
@@ -107,6 +116,12 @@ func GetInstallationToken(appJWT string, installationID int64) (*InstallationTok
 
 	if resp.StatusCode != http.StatusCreated {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		switch {
+		case resp.StatusCode == http.StatusNotFound:
+			return nil, fmt.Errorf("%w: installation %d: %s", ErrInstallationGone, installationID, string(body))
+		case resp.StatusCode == http.StatusForbidden && strings.Contains(strings.ToLower(string(body)), "suspended"):
+			return nil, fmt.Errorf("%w: installation %d: %s", ErrInstallationSuspended, installationID, string(body))
+		}
 		return nil, fmt.Errorf("GitHub API error (status %d): %s", resp.StatusCode, string(body))
 	}
 
@@ -297,6 +312,42 @@ type InstallationInfo struct {
 		Login string `json:"login"`
 		ID    int64  `json:"id"`
 	} `json:"account"`
+	// HTMLURL is the GitHub page where a human edits this installation's
+	// repository access. Users get /settings/installations/{id}; organizations
+	// get /organizations/{login}/settings/installations/{id}.
+	HTMLURL string `json:"html_url"`
+}
+
+// AppInfo is the App identity GitHub reports for an App JWT.
+type AppInfo struct {
+	ID   int64  `json:"id"`
+	Slug string `json:"slug"`
+}
+
+// GetApp returns the App the JWT authenticates as (GET /app). Callers use it
+// to tell "this installation is gone" from "these credentials belong to a
+// different App", since both answer 404 on the installation endpoints.
+func GetApp(appJWT string) (*AppInfo, error) {
+	req, err := http.NewRequest("GET", githubAPIBase+"/app", nil)
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+appJWT)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("get app: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return nil, fmt.Errorf("GitHub API error (status %d): %s", resp.StatusCode, string(body))
+	}
+	var info AppInfo
+	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
+		return nil, fmt.Errorf("decode response: %w", err)
+	}
+	return &info, nil
 }
 
 // VerifyInstallation checks that an installation_id belongs to this GitHub App
@@ -318,7 +369,7 @@ func VerifyInstallation(appJWT string, installationID int64) (*InstallationInfo,
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNotFound {
-		return nil, fmt.Errorf("installation %d not found for this app", installationID)
+		return nil, fmt.Errorf("%w: installation %d", ErrInstallationGone, installationID)
 	}
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))

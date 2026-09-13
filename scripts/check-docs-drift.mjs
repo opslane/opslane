@@ -24,6 +24,11 @@ const problems = [];
 // Known drift, allowlisted with a tracking issue. Remove entries as bugs close.
 const KNOWN_DRIFT = new Map([]);
 
+// The agent runbook is served under two names; they must stay byte-identical.
+if (read('docs-site/public/INSTALL.md') !== read('docs-site/public/SKILL.md')) {
+  problems.push('docs-site/public/SKILL.md differs from docs-site/public/INSTALL.md (copy INSTALL.md over it)');
+}
+
 // ---------- prose-doc coverage metadata ----------
 for (const doc of findUncoveredProseDocs(buildDocsIndex(root))) {
   problems.push(`${doc} is a prose-tier doc but does not declare a non-empty covers: list`);

@@ -59,7 +59,7 @@ export interface OrgInvitation {
 
 export interface ManagedAPIKey {
   key_id: string;
-	scope: 'api' | 'ingest';
+	scope: 'api' | 'ingest' | 'sourcemaps';
   label: string;
   status: 'active' | 'revoked';
   redacted: string;
@@ -74,7 +74,7 @@ export interface CreatedAPIKey {
   key_id: string;
   token: string;
   label: string;
-	scope: 'api' | 'ingest';
+	scope: 'api' | 'ingest' | 'sourcemaps';
   expires_at: string | null;
 }
 
@@ -407,6 +407,8 @@ export interface IncidentFilters {
 export interface GitHubConfig {
   github_repo: string;
   connected: boolean;
+  repo_access: boolean;
+  add_repo_url?: string;
 }
 
 export interface GitHubAppStatus {
@@ -538,4 +540,20 @@ export interface HealthResponse {
   checks: Record<string, HealthCheckResult>;
   version: string;
   uptime_seconds: number;
+}
+
+export interface AgentApproveProject { id: string; name: string; github_repo: string | null }
+export type AgentStepName = 'approve' | 'install_sdk' | 'first_event' | 'github' | 'slack' | 'sourcemaps' | 'mcp' | 'pull_request';
+export type AgentStepStatus = 'pending' | 'running' | 'done' | 'skipped' | 'failed';
+export interface AgentStepState { status: AgentStepStatus; note: string; updated_at: string }
+export interface AgentFacts {
+  has_events: boolean; latest_error_group_url: string | null; issues_url: string;
+  github_connected: boolean; github_installed: boolean; github_mode: 'app' | 'pat';
+  github_connect_url: string; github_install_url?: string; github_repo: string | null; github_repo_access: boolean; slack_connected: boolean;
+  sourcemaps_uploaded: boolean; steps: Partial<Record<Exclude<AgentStepName, 'approve'>, AgentStepState>>;
+}
+export type AgentSessionStatus = 'pending' | 'provisioned' | 'key_ok' | 'app_reporting' | 'completed' | 'failed' | 'expired';
+export interface AgentApproveInfo {
+  status: AgentSessionStatus; project_id?: string; agent_name?: string; project_name?: string; git_remote?: string; expires_at: string;
+  projects: AgentApproveProject[]; suggested_project_id: string | null; facts?: AgentFacts;
 }

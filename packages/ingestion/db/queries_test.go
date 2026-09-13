@@ -952,6 +952,70 @@ func TestProcessPRWebhook_DraftCloseRestoresNeedsHumanAndClosesDelivery(t *testi
 	}
 }
 
+// An org can hold several app installations, and orgs.github_installation_id
+// remembers only the newest. A token minted from that column for a repo the
+// newest installation cannot see turns every clone into "Repository not
+// found" (seen in prod 2026-09-12: an importcsv install overwrote the column
+// and every conelike inquiry dead-lettered). The webhook cleanup path must
+// resolve the installation that actually covers the project's repo.
+func TestProcessPRWebhook_DraftCleanupResolvesInstallationByRepo(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	q := db.New(pool)
+	orgID, projectID, _, groupID := seedGroup(t, pool, q, "two-installs")
+
+	const (
+		coveringInstallation = int64(111000111)
+		newestInstallation   = int64(222000222)
+	)
+	// The newest installation covers a different repo, and the org column
+	// points at it — the exact state a second GitHub org connection leaves.
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO github_app_installations
+		   (installation_id, github_org_name, github_org_id, org_id, repos, created_at)
+		 VALUES ($1, 'org', 1, $3, '["org/two-installs"]'::jsonb, now() - interval '1 day'),
+		        ($2, 'other', 2, $3, '["other/marketing"]'::jsonb, now())`,
+		coveringInstallation, newestInstallation, orgID,
+	); err != nil {
+		t.Fatalf("seed installations: %v", err)
+	}
+	if _, err := pool.Exec(ctx,
+		`UPDATE orgs SET github_installation_id = $2 WHERE id = $1`,
+		orgID, newestInstallation,
+	); err != nil {
+		t.Fatalf("point org at newest installation: %v", err)
+	}
+
+	if _, err := pool.Exec(ctx,
+		`UPDATE error_groups SET status = 'pr_draft', pr_number = 9,
+		     pr_url = 'https://github.com/org/two-installs/pull/9'
+		 WHERE id = $1`, groupID,
+	); err != nil {
+		t.Fatalf("seed draft group: %v", err)
+	}
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO delivery_reservations
+		   (error_group_id, project_id, operation_key, branch_name, posture,
+		    diff_hash, candidate_diff, state, pr_url, pr_number)
+		 VALUES ($1, $2, $3, 'opslane/fix-two-installs', 'draft',
+		         'hash', 'diff', 'open', 'https://github.com/org/two-installs/pull/9', 9)`,
+		groupID, projectID, "fix:"+groupID,
+	); err != nil {
+		t.Fatalf("seed delivery reservation: %v", err)
+	}
+
+	result, err := q.ProcessPRWebhook(
+		ctx, "org/two-installs", 9, false, "delivery-two-installs", time.Now(),
+	)
+	if err != nil || result.GroupID != groupID || result.CleanupBranch != "opslane/fix-two-installs" {
+		t.Fatalf("ProcessPRWebhook = (%+v, %v), want cleanup for group %s", result, err, groupID)
+	}
+	if result.InstallationID == nil || *result.InstallationID != coveringInstallation {
+		t.Fatalf("cleanup installation = %v, want the one covering the repo (%d), not the org's newest (%d)",
+			result.InstallationID, coveringInstallation, newestInstallation)
+	}
+}
+
 func TestProcessPRWebhook_ConcurrentRedeliveryReportsDuplicate(t *testing.T) {
 	pool := testPool(t)
 	ctx := context.Background()

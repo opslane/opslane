@@ -71,7 +71,7 @@ after this phase finishes, excluding `friction-incidents.test.ts` from that phas
   `ANTHROPIC_API_KEY` / `ANTHROPIC_BASE_URL`.
 - `OPENAI_API_KEY` enables `text-embedding-3-small` retrieval (1536 dimensions).
   Missing or unavailable embeddings fall back to screen-based retrieval.
-  PostgreSQL still requires the `vector` extension for migration 074.
+  PostgreSQL still requires the `vector` extension for migration 078.
 - `FRICTION_MATCH_MAX_CONCURRENT` defaults to 2; `FRICTION_CONFIRM_MAX_CONCURRENT`
   defaults to 1. Both are fleet-wide claim caps. Set both to 0 on every worker
   to pause matching, confirmation, reconciliation, and new publication.
@@ -85,7 +85,7 @@ after this phase finishes, excluding `friction-incidents.test.ts` from that phas
   `created_at::text` and `prompt_version`, preserving PostgreSQL microseconds.
   Completed decisions include `not_a_problem`; empty narratives use the exact
   `friction_session_processed` marker. Partial ledgers remain eligible.
-- Follow the [migration 074 cutover](../../docs/quickstart/self-host.md#known-problems-cutover-migration-074).
+- Follow the [migration 078 cutover](../../docs/quickstart/self-host.md#known-problems-cutover-migration-078).
   Stop every old worker before retiring buckets. Once new workers have written
-  atomic signals, ingestion rollback below 074 is unsupported; fix forward with
+  atomic signals, ingestion rollback below 078 is unsupported; fix forward with
   the two claim caps at 0. Preserve job spend under ADR-0001 throughout cutover.

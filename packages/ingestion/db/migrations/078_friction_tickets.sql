@@ -1,6 +1,6 @@
 -- Known problems: durable tickets, atomic observations, and publication generations.
 BEGIN;
-SELECT pg_advisory_xact_lock(hashtext('074_friction_tickets'));
+SELECT pg_advisory_xact_lock(hashtext('078_friction_tickets'));
 CREATE EXTENSION IF NOT EXISTS vector;
 
 CREATE TABLE IF NOT EXISTS friction_tickets (
@@ -324,7 +324,7 @@ ALTER TABLE digest_card_copy ADD COLUMN IF NOT EXISTS steps TEXT;
 -- 2. A separate trigger, named to fire after the legacy pair, puts a ticket
 --    row's stamps back whenever a write has the shape of a replayed sweep.
 --    066's replay redefines the legacy functions without the early return
---    before 074 restores them, so a guard that lives only in those functions
+--    before 078 restores them, so a guard that lives only in those functions
 --    is absent exactly while 066's own sweeps run. This trigger is never
 --    replaced by an earlier file, so it holds across the whole replay.
 --

@@ -11,7 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const migration074File = "migrations/074_friction_tickets.sql"
+const migration078File = "migrations/078_friction_tickets.sql"
 
 func applyKnownProblemMigrations(t *testing.T, dsn string) {
 	t.Helper()
@@ -31,8 +31,8 @@ func requireMigrationConstraint(t *testing.T, err error, code string) {
 	}
 }
 
-func TestMigration074FreshInstallAndPopulatedReplay(t *testing.T) {
-	// This must start empty: a fresh install reaches 074 with no ticket_id column.
+func TestMigration078FreshInstallAndPopulatedReplay(t *testing.T) {
+	// This must start empty: a fresh install reaches 078 with no ticket_id column.
 	pool, dsn := disposableDB(t, testPool(t))
 	applyKnownProblemMigrations(t, dsn)
 	ctx := context.Background()
@@ -78,18 +78,18 @@ func TestMigration074FreshInstallAndPopulatedReplay(t *testing.T) {
 			t.Fatalf("seed fixture: %v\n%s", err, query)
 		}
 	}
-	orgID := insertID(`INSERT INTO orgs(name) VALUES ('074-replay') RETURNING id`)
+	orgID := insertID(`INSERT INTO orgs(name) VALUES ('078-replay') RETURNING id`)
 	projectID := insertID(`INSERT INTO projects(org_id,name) VALUES ($1,'p') RETURNING id`, orgID)
 	exec(`INSERT INTO friction_confirmation_budget(project_id,budget_day,used)
 		VALUES ($1,'2026-09-11',7)`, projectID)
 	environmentID := insertID(`INSERT INTO environments(project_id,name) VALUES ($1,'production') RETURNING id`, projectID)
-	sessionID := "074-session"
+	sessionID := "078-session"
 	exec(`INSERT INTO sessions(id,project_id,environment_id,started_at) VALUES ($1,$2,$3,now())`, sessionID, projectID, environmentID)
 	exec(`INSERT INTO session_narratives(session_id,project_id,environment_id,status,narrative,prompt_version)
 		VALUES ($1,$2,$3,'ok','{"observations":[]}',3)`, sessionID, projectID, environmentID)
 	signalID := insertID(`INSERT INTO friction_signals
 		(session_id,project_id,environment_id,rule_version,signal_type,fingerprint,page_url_normalized,occurred_at,observation_id,narrative_id,evidence_lines)
-		VALUES ($1,$2,$3,3,'other','074-observation','/checkout',now(),'observation-1','narrative-1','["Clicked Pay; nothing changed"]') RETURNING id`, sessionID, projectID, environmentID)
+		VALUES ($1,$2,$3,3,'other','078-observation','/checkout',now(),'observation-1','narrative-1','["Clicked Pay; nothing changed"]') RETURNING id`, sessionID, projectID, environmentID)
 	ticketID := insertID(`INSERT INTO friction_tickets
 		(project_id,environment_id,name,control,what_happened,kind,status,matched_count,next_arrival_number,arrival_boundary,live_generation)
 		VALUES ($1,$2,'Payment stalls','Pay','Nothing changed','defect','published',1,1,1,2) RETURNING id`, projectID, environmentID)
@@ -106,9 +106,9 @@ func TestMigration074FreshInstallAndPopulatedReplay(t *testing.T) {
 	jobID := insertID(`INSERT INTO error_group_jobs(error_group_id,project_id,job_type,status,ticket_id,publication_generation,source_id)
 		VALUES ($1,$2,'friction_confirm','completed',$3,2,$1) RETURNING id`, groupID, projectID, ticketID)
 	batchID := insertID(`INSERT INTO friction_confirm_batches(ticket_id,job_id,manifest,arrival_boundary_at_select,live_generation_at_select,status_at_select,status)
-		VALUES ($1,$2,'["074-session"]',1,2,'published','finalized') RETURNING id`, ticketID, jobID)
+		VALUES ($1,$2,'["078-session"]',1,2,'published','finalized') RETURNING id`, ticketID, jobID)
 	stagingBatchID := insertID(`INSERT INTO friction_confirm_batches(ticket_id,job_id,manifest,arrival_boundary_at_select,live_generation_at_select,status_at_select,evidence_version_at_select)
-		VALUES ($1,$2,'["074-session"]',1,2,'published',7) RETURNING id`, ticketID, jobID)
+		VALUES ($1,$2,'["078-session"]',1,2,'published',7) RETURNING id`, ticketID, jobID)
 	attemptSQL := `INSERT INTO friction_check_attempts(batch_id,ticket_id,session_id,outcome,model,evidence_lines,signal_ids)
 		VALUES ($1,$2,$3,'confirmed','test-model','["Pay did not respond"]',jsonb_build_array($4::text)) RETURNING id`
 	attemptID := insertID(attemptSQL, batchID, ticketID, sessionID, signalID)
@@ -202,11 +202,11 @@ func knownProblemRows(t *testing.T, pool *pgxpool.Pool, tables []string) map[str
 	return result
 }
 
-func TestMigration074UpgradesAutonomyAndReplaysCheck(t *testing.T) {
+func TestMigration078UpgradesAutonomyAndReplaysCheck(t *testing.T) {
 	pool, dsn := disposableDB(t, testPool(t))
 	psql := findPsql(t)
 	for _, file := range migrationFiles(t) {
-		if filepath.ToSlash(file) >= migration074File {
+		if filepath.ToSlash(file) >= migration078File {
 			break
 		}
 		if err := applyMigration(t, psql, dsn, file); err != nil {
@@ -215,11 +215,11 @@ func TestMigration074UpgradesAutonomyAndReplaysCheck(t *testing.T) {
 	}
 	ctx := context.Background()
 	var projectID string
-	if err := pool.QueryRow(ctx, `WITH org AS (INSERT INTO orgs(name) VALUES ('074-autonomy') RETURNING id)
+	if err := pool.QueryRow(ctx, `WITH org AS (INSERT INTO orgs(name) VALUES ('078-autonomy') RETURNING id)
 		INSERT INTO projects(org_id,name,friction_autonomy) SELECT id,'p','auto_fix_ux' FROM org RETURNING id`).Scan(&projectID); err != nil {
 		t.Fatal(err)
 	}
-	if err := applyMigration(t, psql, dsn, migration074File); err != nil {
+	if err := applyMigration(t, psql, dsn, migration078File); err != nil {
 		t.Fatalf("upgrade existing auto_fix_ux project: %v", err)
 	}
 	for boot := 0; boot < 2; boot++ {

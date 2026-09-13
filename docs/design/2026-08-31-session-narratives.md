@@ -9,7 +9,7 @@
 > publication generations, and cause investigation replace fingerprint buckets
 > and bucket promotion. The downstream pipeline and rollout claims below are
 > historical. See [the current friction guide](../guides/friction.md) and
-> [the migration 074 cutover](../quickstart/self-host.md#known-problems-cutover-migration-074).
+> [the migration 078 cutover](../quickstart/self-host.md#known-problems-cutover-migration-078).
 
 ## The decision
 

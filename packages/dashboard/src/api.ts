@@ -1,13 +1,13 @@
 import type {
-  Incident, AffectedUser, Account, IncidentFilters,
+  AgentApproveInfo, Incident, AffectedUser, Account, IncidentFilters,
   SampleEvent,
   GitHubConfig, GitHubAppStatus, GitHubRepo,
   SessionDetail, SessionFilters, SessionListResponse, SessionNarrative,
   AdminOverview, AdminJobsResponse, HealthResponse,
   AuthConfig, AuthUser, ForgotPasswordResult, OrgInvitation,
-	NotificationDestination, NotificationDestinationList, NotificationEventType, NotificationTestResult,
+  NotificationDestination, NotificationDestinationList, NotificationEventType, NotificationTestResult,
   OAuthEmailVerificationResult, PasswordAuthResult, ResetPasswordResult,
-	ManagedAPIKey, CreatedAPIKey, OnboardingState,
+  ManagedAPIKey, CreatedAPIKey, OnboardingState,
 } from './types/api';
 export type {
   AuthConfig, AuthMembership, AuthUser, ForgotPasswordResult, OrgInvitation,
@@ -41,8 +41,8 @@ export function markAuthed(): void {
 }
 
 export function clearAuth(): void {
-	localStorage.removeItem(AUTHED_KEY);
-	localStorage.removeItem('opslane_onboarding_complete');
+  localStorage.removeItem(AUTHED_KEY);
+  localStorage.removeItem('opslane_onboarding_complete');
   // Historical pre-cookie key names — do not rename.
   localStorage.removeItem('defender_access_token');
   localStorage.removeItem('defender_refresh_token');
@@ -84,13 +84,38 @@ async function doRefresh(): Promise<boolean> {
 // === Shared auth-aware fetch core ===
 
 export class APIError extends Error {
+  public readonly code?: string;
+  public readonly details: Record<string, string>;
   constructor(
     public readonly status: number,
     message: string,
+    code?: string,
+    details: Record<string, string> = {},
   ) {
     super(message);
     this.name = 'APIError';
+    this.code = code;
+    this.details = details;
   }
+}
+
+function parseErrorBody(status: number, statusText: string, body: string): APIError {
+  try {
+    const parsed: unknown = JSON.parse(body);
+    if (parsed && typeof parsed === 'object') {
+      const obj = parsed as Record<string, unknown>;
+      const message = typeof obj.error === 'string' ? obj.error : `API ${status}`;
+      const code = typeof obj.code === 'string' ? obj.code : undefined;
+      const details: Record<string, string> = {};
+      for (const [key, value] of Object.entries(obj)) {
+        if (key !== 'error' && key !== 'code' && typeof value === 'string') details[key] = value;
+      }
+      return new APIError(status, message, code, details);
+    }
+  } catch {
+    // Edge proxies may return HTML or an empty body. Never surface it.
+  }
+  return new APIError(status, `API ${status}: ${statusText || 'non-JSON response'}`);
 }
 
 async function fetchWithAuth<T>(path: string, options: RequestInit = {}): Promise<T> {
@@ -112,7 +137,7 @@ async function fetchWithAuth<T>(path: string, options: RequestInit = {}): Promis
 
   if (!res.ok) {
     const body = await res.text();
-    throw new APIError(res.status, `API ${res.status}: ${body || res.statusText}`);
+    throw parseErrorBody(res.status, res.statusText, body);
   }
   if (res.status === 204) return undefined as T;
   return res.json() as Promise<T>;
@@ -217,8 +242,8 @@ export interface OnboardingSetupResponse {
 }
 
 export interface EventStatus {
-	has_events: boolean;
-	latest_error_group_id: string | null;
+  has_events: boolean;
+  latest_error_group_id: string | null;
 }
 
 // === Project D: replay ===
@@ -491,8 +516,8 @@ export function listAPIKeys(projectId: string): Promise<ManagedAPIKey[]> {
 }
 
 export function createAPIKey(
-	projectId: string,
-	input: { label: string; expires_at: string | null; scope?: 'api' | 'ingest' },
+  projectId: string,
+  input: { label: string; expires_at: string | null; scope?: 'api' | 'ingest' | 'sourcemaps' },
 ): Promise<CreatedAPIKey> {
   return postJSON<CreatedAPIKey>(`/projects/${projectId}/api-keys`, input);
 }
@@ -510,14 +535,14 @@ export function listNotificationDestinations(
 }
 
 export function createNotificationDestination(
-	projectId: string,
-	data: {
-		name: string;
-		webhook_url: string;
-		enabled?: boolean;
-		event_types?: NotificationEventType[];
-		delivery_policy?: NotificationDestination['delivery_policy'];
-	},
+  projectId: string,
+  data: {
+    name: string;
+    webhook_url: string;
+    enabled?: boolean;
+    event_types?: NotificationEventType[];
+    delivery_policy?: NotificationDestination['delivery_policy'];
+  },
 ): Promise<NotificationDestination> {
   return postJSON<NotificationDestination>(
     `/projects/${projectId}/notification-destinations`,
@@ -563,21 +588,21 @@ export function testNotificationDestination(
 }
 
 export function onboardingSetup(
-	projectName: string,
-	idempotencyToken: string,
+  projectName: string,
+  idempotencyToken: string,
 ): Promise<OnboardingSetupResponse> {
-	return postJSON<OnboardingSetupResponse>('/onboarding/setup', {
-		project_name: projectName,
-		idempotency_token: idempotencyToken,
-	});
+  return postJSON<OnboardingSetupResponse>('/onboarding/setup', {
+    project_name: projectName,
+    idempotency_token: idempotencyToken,
+  });
 }
 
 export function getOnboardingState(): Promise<OnboardingState> {
-	return fetchJSON<OnboardingState>('/onboarding/state');
+  return fetchJSON<OnboardingState>('/onboarding/state');
 }
 
 export function completeOnboarding(): Promise<{ onboarding_complete: boolean }> {
-	return postJSON<{ onboarding_complete: boolean }>('/onboarding/complete', {});
+  return postJSON<{ onboarding_complete: boolean }>('/onboarding/complete', {});
 }
 
 export function getEventStatus(projectId: string): Promise<EventStatus> {
@@ -779,4 +804,23 @@ export function unarchiveIncident(
     `/projects/${projectId}/incidents/${incidentId}/unarchive`,
     {}
   );
+}
+
+export function getAgentApproveInfo(sessionId: string): Promise<AgentApproveInfo> {
+  return fetchJSON<AgentApproveInfo>(`/agent/approve/${encodeURIComponent(sessionId)}`);
+}
+
+export function approveAgentSession(
+  sessionId: string,
+  body: { project_name?: string; existing_project_id?: string },
+): Promise<{ status: string; project_id: string; project_name: string }> {
+  return postJSON(`/agent/approve/${encodeURIComponent(sessionId)}`, body);
+}
+
+export function denyAgentSession(sessionId: string): Promise<{ status: string }> {
+  return postJSON(`/agent/approve/${encodeURIComponent(sessionId)}/deny`, {});
+}
+
+export function agentGitHubInstallUrl(sessionId: string): Promise<{ install_url: string }> {
+  return postJSON(`/agent/github/${encodeURIComponent(sessionId)}/install-url`, {});
 }

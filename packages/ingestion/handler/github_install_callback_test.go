@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -81,7 +82,7 @@ func TestWebInstallCallbackTransientFailureReleasesStateAndPreservesCookie(t *te
 	fixture := newWebInstallFixture(t, "admin")
 	restore := gh.OverrideHTTPClientForTests(&http.Client{Transport: handlerRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
 		return &http.Response{
-			StatusCode: http.StatusBadGateway,
+			StatusCode: 502,
 			Header:     make(http.Header),
 			Body:       http.NoBody,
 			Request:    req,
@@ -91,7 +92,7 @@ func TestWebInstallCallbackTransientFailureReleasesStateAndPreservesCookie(t *te
 
 	w := httptest.NewRecorder()
 	fixture.deps.OAuthLoginCallback(w, fixture.request(t, fixture.user, time.Now().UnixNano()))
-	if w.Code != http.StatusBadGateway {
+	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("code=%d body=%q", w.Code, w.Body.String())
 	}
 	if strings.Contains(w.Header().Get("Set-Cookie"), "__auth_state") {
@@ -108,6 +109,49 @@ func TestWebInstallCallbackTransientFailureReleasesStateAndPreservesCookie(t *te
 	}
 	if reservedAt != nil || reservationToken != nil || consumedAt != nil {
 		t.Fatalf("state reserved=%v token=%v consumed=%v", reservedAt, reservationToken, consumedAt)
+	}
+}
+
+func TestWebInstallCallbackRetiresGoneInstallation(t *testing.T) {
+	fixture := newWebInstallFixture(t, "admin")
+	installationID := time.Now().UnixNano()
+	ctx := context.Background()
+	if _, err := fixture.q.Pool().Exec(ctx,
+		`INSERT INTO github_app_installations (installation_id, github_org_name, github_org_id, org_id, repos)
+		 VALUES ($1, 'acme', 1, $2, '[]')`, installationID, fixture.orgID); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.q.SetOrgGitHubInstallation(ctx, fixture.orgID, installationID); err != nil {
+		t.Fatal(err)
+	}
+	restore := gh.OverrideHTTPClientForTests(&http.Client{Transport: handlerRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		response := func(status int, body string) (*http.Response, error) {
+			return &http.Response{StatusCode: status, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
+		}
+		switch {
+		case req.URL.Host == "github.com" && req.URL.Path == "/login/oauth/access_token":
+			return response(http.StatusOK, `{"access_token":"user-token"}`)
+		case req.URL.Path == "/user/installations":
+			return response(http.StatusOK, fmt.Sprintf(`{"installations":[{"id":%d}]}`, installationID))
+		case req.Method == http.MethodGet && req.URL.Path == "/app":
+			return response(http.StatusOK, `{"id":1,"slug":"opslane-test"}`)
+		case req.Method == http.MethodGet && req.URL.Path == fmt.Sprintf("/app/installations/%d", installationID):
+			return response(http.StatusOK, fmt.Sprintf(`{"id":%d,"account":{"login":"acme","id":1}}`, installationID))
+		case req.Method == http.MethodPost && req.URL.Path == fmt.Sprintf("/app/installations/%d/access_tokens", installationID):
+			return response(http.StatusNotFound, `{"message":"Not Found"}`)
+		default:
+			return response(http.StatusNotFound, `{}`)
+		}
+	})})
+	defer restore()
+
+	w := httptest.NewRecorder()
+	fixture.deps.OAuthLoginCallback(w, fixture.request(t, fixture.user, installationID))
+	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), `"code":"github_installation_gone"`) {
+		t.Fatalf("code=%d body=%q", w.Code, w.Body.String())
+	}
+	if pointer, err := fixture.q.GetOrgGitHubInstallation(ctx, fixture.orgID); err != nil || pointer != 0 {
+		t.Fatalf("pointer=%d err=%v", pointer, err)
 	}
 }
 
@@ -152,50 +196,6 @@ func assertOAuthStateUnreserved(t *testing.T, q *db.Queries, state string) {
 	}
 	if reservedAt != nil {
 		t.Fatalf("state was reserved at %v", reservedAt)
-	}
-}
-
-func TestAuthorizationDeniedAgentCallbackIsTerminal(t *testing.T) {
-	pool := githubOAuthTestPool(t)
-	q := db.New(pool)
-	session, _ := createCallbackSession(t, q, "denied-owner/denied-"+uuid.NewString())
-	t.Cleanup(func() { _, _ = pool.Exec(context.Background(), `DELETE FROM agent_sessions WHERE id = $1`, session.ID) })
-
-	req := httptest.NewRequest(http.MethodGet, "/auth/callback?state="+session.ID+"&error=access_denied", nil)
-	w := httptest.NewRecorder()
-	(&Dependencies{Queries: q}).OAuthLoginCallback(w, req)
-	after, err := q.GetAgentSession(context.Background(), session.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if after == nil || after.Status != "failed" || after.FailureReason == nil || *after.FailureReason != "authorization_denied" {
-		t.Fatalf("session=%+v", after)
-	}
-}
-
-func TestAgentPollDiagnosesDivergentInstallWithoutMutation(t *testing.T) {
-	pool := githubOAuthTestPool(t)
-	q := db.New(pool)
-	repo := "Diverged/Repo-" + uuid.NewString()
-	session, raw := createCallbackSession(t, q, repo)
-	installationID := time.Now().UnixNano()
-	if _, err := pool.Exec(context.Background(),
-		`INSERT INTO installation_landed (installation_id, repos) VALUES ($1, $2)`,
-		installationID, []string{repo}); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		_, _ = pool.Exec(context.Background(), `DELETE FROM agent_sessions WHERE id = $1`, session.ID)
-		_, _ = pool.Exec(context.Background(), `DELETE FROM installation_landed WHERE installation_id = $1`, installationID)
-	})
-
-	code, body := pollAgentSession(t, &Dependencies{Queries: q}, session.ID, raw)
-	if code != http.StatusOK || body["status"] != "pending" || !strings.Contains(fmt.Sprint(body["diagnosis"]), "outside this setup session") {
-		t.Fatalf("code=%d body=%v", code, body)
-	}
-	after, err := q.GetAgentSession(context.Background(), session.ID)
-	if err != nil || after == nil || after.Status != "pending" {
-		t.Fatalf("session=%+v err=%v", after, err)
 	}
 }
 

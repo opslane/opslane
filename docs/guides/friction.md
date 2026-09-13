@@ -82,4 +82,4 @@ after the fix. The ticket retains its identity and publishes a new incident when
 the new evidence qualifies.
 
 Operators upgrading from the old bucket pipeline must follow the
-[known-problems cutover](../quickstart/self-host.md#known-problems-cutover-migration-074).
+[known-problems cutover](../quickstart/self-host.md#known-problems-cutover-migration-078).

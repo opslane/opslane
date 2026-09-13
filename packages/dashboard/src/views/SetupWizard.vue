@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import AgentPasteBox from '../components/AgentPasteBox.vue';
 import { computed, onMounted, onUnmounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import {
@@ -7,6 +8,7 @@ import {
   createNotificationDestination,
   getEventStatus,
   getGitHubAppStatus,
+  getGitHubConfig,
   getMe,
   getOnboardingState,
   listNotificationDestinations,
@@ -16,8 +18,9 @@ import {
   testNotificationDestination,
   updateNotificationDestination,
   updateProject,
+  APIError,
 } from '../api';
-import type { GitHubAppStatus, OnboardingState } from '../types/api';
+import type { GitHubAppStatus, GitHubConfig, OnboardingState } from '../types/api';
 import { GITHUB_PR_URL_OPTIONS, safeUrl } from '../utils';
 import CodeBlock from '../components/CodeBlock.vue';
 import RepoSelector from '../components/RepoSelector.vue';
@@ -132,16 +135,28 @@ const pollTimer = ref<ReturnType<typeof setInterval>>();
 const keyError = ref('');
 const keyLoading = ref(false);
 
-// Always emit the endpoint. The dashboard is served by the ingestion service,
-// so window.location.origin is the correct ingest endpoint everywhere --
-// including hosted. Omitting it on hosted left users on the SDK's baked-in
-// default, which pointed at a hostname never wired to an origin (the CORS
-// failure every hosted onboarding hit).
+// The dashboard is served by the ingestion service, so window.location.origin
+// is the ingest endpoint. The SDK's own default is the hosted origin, so the
+// snippet names an endpoint only when this deployment is not the hosted one.
+const SDK_DEFAULT_ENDPOINT = 'https://app.opslane.com';
 const endpointLine = computed(() => (
-  `\n  endpoint: '${window.location.origin}',`
+  window.location.origin === SDK_DEFAULT_ENDPOINT ? '' : `\n  endpoint: '${window.location.origin}',`
 ));
+// environment comes from the build's public env so the same snippet serves
+// development and production; the fallback keeps local runs out of the
+// project's default (production) environment.
+const environmentLine = computed(() => {
+  switch (framework.value) {
+    case 'nextjs':
+      return `\n  environment: process.env.NEXT_PUBLIC_OPSLANE_ENVIRONMENT ?? 'development',`;
+    case 'other':
+      return `\n  environment: 'development', // set from your build environment in production`;
+    default:
+      return `\n  environment: import.meta.env.VITE_OPSLANE_ENVIRONMENT ?? 'development',`;
+  }
+});
 const initSnippet = computed(() => {
-  const common = `init({\n  apiKey: '${apiKey.value}',\n  environment: 'development',${endpointLine.value}\n});`;
+  const common = `init({\n  apiKey: '${apiKey.value}',${environmentLine.value}${endpointLine.value}\n});`;
   switch (framework.value) {
     case 'vue':
       return `import { createApp } from 'vue';\nimport { init, opslaneVuePlugin } from '@opslane/sdk';\nimport App from './App.vue';\n\n${common}\n\ncreateApp(App).use(opslaneVuePlugin).mount('#app');`;
@@ -225,6 +240,8 @@ const githubAppStatus = ref<GitHubAppStatus | null>(null);
 const patRepo = ref('');
 const selectedRepo = ref('');
 const githubError = ref('');
+const wizardAddRepoUrl = ref('');
+const githubConfig = ref<GitHubConfig | null>(null);
 const githubBusy = ref(false);
 const installHref = computed(() => safeUrl(
   githubAppStatus.value?.install_url ?? '', GITHUB_PR_URL_OPTIONS,
@@ -234,12 +251,21 @@ const githubStatusFailed = ref(false);
 async function loadGitHubStatus(): Promise<void> {
   try {
     githubAppStatus.value = await getGitHubAppStatus();
+    if (githubAppStatus.value.installed && projectId.value) {
+      githubConfig.value = await getGitHubConfig(projectId.value);
+    }
     githubStatusFailed.value = false;
   } catch {
     // Keep the last known status so a transient failure mid-poll doesn't
     // blank the Install link; flag a failure only when we have nothing to
     // show, which renders the retry affordance instead of a dead end.
     githubStatusFailed.value = !githubAppStatus.value;
+  }
+}
+
+async function onRepoLoadError(err: unknown): Promise<void> {
+  if (err instanceof APIError && err.code === 'github_installation_gone') {
+    await loadGitHubStatus();
   }
 }
 
@@ -279,6 +305,7 @@ function stopGitHubStatusPolling(): void {
 async function attachRepo(repo: string): Promise<void> {
   if (!repo.trim()) return;
   githubError.value = '';
+  wizardAddRepoUrl.value = '';
   githubBusy.value = true;
   try {
     await setGitHubConfig(projectId.value, { github_repo: repo.trim() });
@@ -287,6 +314,10 @@ async function attachRepo(repo: string): Promise<void> {
     else step.value = 'connect_slack';
   } catch (caught: unknown) {
     githubError.value = caught instanceof Error ? caught.message : 'Could not connect the repository';
+    wizardAddRepoUrl.value = caught instanceof APIError ? (caught.details.add_repo_url ?? '') : '';
+    if (caught instanceof APIError && caught.code === 'github_installation_gone') {
+      await loadGitHubStatus();
+    }
   } finally {
     githubBusy.value = false;
   }
@@ -433,6 +464,9 @@ onUnmounted(() => {
           <div v-if="error" class="mb-4 rounded-md border border-danger/30 bg-danger/10 p-3 text-sm text-danger" v-text="error"></div>
 
           <section v-if="step === 'create_project'">
+            <AgentPasteBox variant="wizard" class="mb-6">
+              <template #manual>Prefer to do it by hand? Create your project below.</template>
+            </AgentPasteBox>
             <h1 class="text-2xl font-semibold text-text">Create your project</h1>
             <p class="mt-2 text-sm text-muted">Name the app you want Opslane to monitor.</p>
             <form class="mt-6 space-y-4" @submit.prevent="submitProject">
@@ -464,6 +498,7 @@ onUnmounted(() => {
             </div>
             <p v-else-if="keyLoading || !apiKey" class="mt-6 text-sm text-muted">Creating a browser ingest key…</p>
             <div v-else class="mt-6 space-y-5">
+              <AgentPasteBox variant="wizard" />
               <CodeBlock :code="installSnippet" />
               <div class="flex flex-wrap gap-2" role="tablist" aria-label="Framework">
                 <button
@@ -499,6 +534,7 @@ onUnmounted(() => {
             <h1 class="text-2xl font-semibold text-text">Connect GitHub</h1>
             <p class="mt-2 text-sm text-muted">Connect a repository so Opslane can open verified fix PRs.</p>
             <p v-if="githubError" class="mt-4 text-sm text-danger" v-text="githubError"></p>
+      <a v-if="safeUrl(wizardAddRepoUrl, GITHUB_PR_URL_OPTIONS)" :href="safeUrl(wizardAddRepoUrl, GITHUB_PR_URL_OPTIONS)" target="_blank" rel="noopener" class="mt-2 inline-block text-sm text-accent underline" data-testid="wizard-add-repo-link">Add the repository on GitHub</a>
 
             <form v-if="state?.github_mode === 'pat'" class="mt-6 space-y-4" @submit.prevent="attachRepo(patRepo)">
               <div>
@@ -518,7 +554,11 @@ onUnmounted(() => {
                 @click="startGitHubStatusPolling"
               >Install GitHub App</a>
               <div v-if="githubAppStatus?.installed" class="space-y-3">
-                <RepoSelector v-model="selectedRepo" :disabled="githubBusy" />
+        <p v-if="githubConfig?.connected && !githubConfig.repo_access" role="alert" class="text-sm text-warning">
+          Opslane lost access to <code v-text="githubConfig.github_repo"></code> on GitHub.
+          <a v-if="safeUrl(githubConfig.add_repo_url, GITHUB_PR_URL_OPTIONS)" :href="safeUrl(githubConfig.add_repo_url, GITHUB_PR_URL_OPTIONS)" target="_blank" rel="noopener noreferrer" class="text-accent underline" data-testid="github-repo-access-link">Add the repository on GitHub</a>
+        </p>
+        <RepoSelector v-model="selectedRepo" :disabled="githubBusy" @load-error="onRepoLoadError" />
                 <Button variant="primary" class="w-full" :busy="githubBusy" :disabled="!selectedRepo" @click="attachRepo(selectedRepo)">Connect repository</Button>
               </div>
               <p v-else-if="githubStatusFailed" class="text-sm text-danger">

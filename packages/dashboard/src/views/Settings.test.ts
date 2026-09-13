@@ -10,22 +10,31 @@ import {
   createAPIKey,
   fetchAuthConfig,
   getBillingSummary,
+	getGitHubAppStatus,
+	getGitHubConfig,
   getMe,
   listAPIKeys,
   listEnvironments,
   listProjects,
   openBillingPortal,
   revokeAPIKey,
+	setGitHubConfig,
   updateProject,
+	APIError,
   type Project,
 } from '../api';
 
 vi.mock('../api', () => ({
+	APIError: class APIError extends Error {
+		constructor(public readonly status: number, message: string, public readonly code?: string, public readonly details: Record<string, string> = {}) { super(message); }
+	},
   createBillingCheckout: vi.fn(),
+	createNotificationDestination: vi.fn(),
   createInvitation: vi.fn(),
   createAPIKey: vi.fn(),
   createProject: vi.fn(),
   deleteGitHubConfig: vi.fn(),
+	deleteNotificationDestination: vi.fn(),
   fetchAuthConfig: vi.fn(),
   getBillingSummary: vi.fn(),
   getFixStats: vi.fn().mockResolvedValue({
@@ -37,12 +46,16 @@ vi.mock('../api', () => ({
   getMe: vi.fn(),
   listEnvironments: vi.fn().mockResolvedValue({ environments: [], rollup_ready: true }),
   listInvitations: vi.fn().mockResolvedValue([]),
+  listGitHubRepos: vi.fn().mockResolvedValue([]),
+	listNotificationDestinations: vi.fn().mockResolvedValue({ destinations: [], can_manage: true }),
   listAPIKeys: vi.fn().mockResolvedValue([]),
   listProjects: vi.fn(),
   openBillingPortal: vi.fn(),
   revokeInvitation: vi.fn(),
   revokeAPIKey: vi.fn(),
   setGitHubConfig: vi.fn(),
+	testNotificationDestination: vi.fn(),
+	updateNotificationDestination: vi.fn(),
   updateProject: vi.fn(),
 }));
 
@@ -64,6 +77,7 @@ async function mountSettings(
   selectedProject = project,
   options: {
     billingEnabled?: boolean;
+    projects?: Project[];
     query?: Record<string, string>;
     navigate?: (target: string) => void;
   } = {},
@@ -84,7 +98,7 @@ async function mountSettings(
     social_providers: [],
     billing_enabled: options.billingEnabled ?? false,
   });
-  vi.mocked(listProjects).mockResolvedValue([selectedProject]);
+  vi.mocked(listProjects).mockResolvedValue(options.projects ?? [selectedProject]);
   vi.mocked(listEnvironments).mockResolvedValue({
     environments: [
       { id: 'env-production', project_id: selectedProject.id, name: 'production', created_at: selectedProject.created_at },
@@ -107,6 +121,57 @@ async function mountSettings(
   await flushPromises();
   return wrapper;
 }
+
+describe('GitHub settings', () => {
+	beforeEach(() => {
+		localStorage.clear();
+		localStorage.setItem('opslane_project_id', project.id);
+		localStorage.setItem('opslane_project_name', project.name);
+		vi.mocked(getGitHubAppStatus).mockResolvedValue({ installed: true, installation_id: 7, install_url: '' });
+	});
+
+	afterEach(() => {
+		vi.clearAllMocks();
+		localStorage.clear();
+	});
+
+	it('shows GitHub’s repository-access page when a configured repo loses access', async () => {
+		vi.mocked(getGitHubConfig).mockResolvedValue({
+			connected: true,
+			github_repo: 'acme/web',
+			repo_access: false,
+			add_repo_url: 'https://github.com/settings/installations/7',
+		});
+		const wrapper = await mountSettings('admin');
+		await flushPromises();
+		expect(wrapper.text()).toContain('lost access to acme/web');
+		expect(wrapper.get('[data-testid="github-repo-access-link"]').attributes('href')).toBe('https://github.com/settings/installations/7');
+		wrapper.unmount();
+	});
+
+	it('renders a safe add-repo link and reloads status after a gone installation', async () => {
+		vi.mocked(getGitHubConfig).mockResolvedValue({ connected: false, github_repo: '', repo_access: false });
+		vi.mocked(setGitHubConfig).mockRejectedValueOnce(new APIError(400, 'cannot see acme/web', 'repo_not_in_installation', {
+			add_repo_url: 'https://github.com/settings/installations/7',
+		}));
+		const wrapper = await mountSettings('admin');
+		await flushPromises();
+		wrapper.findComponent({ name: 'RepoSelector' }).vm.$emit('update:modelValue', 'acme/web');
+		await wrapper.vm.$nextTick();
+		await wrapper.findAll('button').find((button) => button.text().includes('Connect repository'))!.trigger('click');
+		await flushPromises();
+		expect(wrapper.get('[data-testid="github-add-repo-link"]').attributes('href')).toBe('https://github.com/settings/installations/7');
+
+		vi.mocked(setGitHubConfig).mockRejectedValueOnce(new APIError(409, 'gone', 'github_installation_gone'));
+		wrapper.findComponent({ name: 'RepoSelector' }).vm.$emit('update:modelValue', 'acme/web');
+		await wrapper.vm.$nextTick();
+		const calls = vi.mocked(getGitHubAppStatus).mock.calls.length;
+		await wrapper.findAll('button').find((button) => button.text().includes('Connect repository'))!.trigger('click');
+		await flushPromises();
+		expect(getGitHubAppStatus).toHaveBeenCalledTimes(calls + 1);
+		wrapper.unmount();
+	});
+});
 
 describe('billing settings', () => {
   beforeEach(() => {
@@ -285,6 +350,39 @@ describe('MCP API key management', () => {
     localStorage.clear();
   });
 
+  it.each(['empty', 'another project'])('uses the project in an agent Settings link when cached selection is %s', async (cache) => {
+    localStorage.clear();
+    if (cache === 'another project') {
+      localStorage.setItem('opslane_project_id', 'project-a');
+      localStorage.setItem('opslane_environment_id', 'environment-a');
+    }
+    const projectB = { ...project, id: 'project-b', name: 'App B' };
+    vi.mocked(createAPIKey).mockResolvedValue({ key_id: 'kb', token: 'opslane_sk_b', label: 'CI', scope: 'sourcemaps', expires_at: null });
+    const wrapper = await mountSettings('admin', projectB, {
+      query: { project_id: projectB.id, tab: 'api-keys' },
+      projects: [{ ...project, id: 'project-a', name: 'App A' }, projectB],
+    });
+    expect(localStorage.getItem('opslane_project_id')).toBe(projectB.id);
+    expect(localStorage.getItem('opslane_project_name')).toBe('App B');
+    expect(localStorage.getItem('opslane_environment_id')).toBeNull();
+    expect(listAPIKeys).toHaveBeenCalledWith(projectB.id);
+    expect(listAPIKeys).not.toHaveBeenCalledWith('project-a');
+    await wrapper.get('[data-testid="api-key-scope"]').setValue('sourcemaps');
+    await wrapper.get('[data-testid="api-key-label"]').setValue('CI');
+    await wrapper.get('[data-testid="api-key-create"]').trigger('submit');
+    await flushPromises();
+    expect(createAPIKey).toHaveBeenCalledWith(projectB.id, { label: 'CI', scope: 'sourcemaps', expires_at: null });
+    wrapper.unmount();
+  });
+
+  it('does not accept a project query outside the organization project list', async () => {
+    const wrapper = await mountSettings('admin', project, { query: { project_id: 'foreign-project', tab: 'api-keys' } });
+    expect(localStorage.getItem('opslane_project_id')).toBe(project.id);
+    expect(listAPIKeys).toHaveBeenCalledWith(project.id);
+    expect(listAPIKeys).not.toHaveBeenCalledWith('foreign-project');
+    wrapper.unmount();
+  });
+
   it('loads redacted keys for admins when the tab opens', async () => {
     const wrapper = await mountSettings('admin');
     await wrapper.get('#settings-api-keys-tab').trigger('click');
@@ -312,13 +410,34 @@ describe('MCP API key management', () => {
     await wrapper.get('#api-key-create-form').trigger('submit');
     await flushPromises();
 
-    expect(createAPIKey).toHaveBeenCalledWith(project.id, { label: 'Codex', expires_at: null });
+    expect(createAPIKey).toHaveBeenCalledWith(project.id, { label: 'Codex', expires_at: null, scope: 'api' });
     expect(wrapper.text()).toContain('opslane_ak_bbbbbbbbbbbbbbbbbbbbbbbbbb_SECRET');
     const done = wrapper.findAll('button').find((button) => button.text() === 'Done');
     expect(done?.attributes('disabled')).toBeDefined();
     await wrapper.get('#api-key-acknowledged').setValue(true);
     await done!.trigger('click');
     expect(wrapper.text()).not.toContain('opslane_ak_bbbbbbbbbbbbbbbbbbbbbbbbbb_SECRET');
+    wrapper.unmount();
+  });
+
+  it('lists key scopes and can mint a sourcemaps key', async () => {
+    vi.mocked(listAPIKeys).mockResolvedValue([
+      { key_id: 'k1', scope: 'api', label: 'mcp', status: 'active', redacted: 'opslane_ak_k1_…', created_by: null, created_at: '2030-01-01T00:00:00Z', last_used_at: null, expires_at: null, revoked_at: null },
+      { key_id: 'k2', scope: 'sourcemaps', label: 'ci', status: 'active', redacted: 'opslane_sk_k2_…', created_by: null, created_at: '2030-01-01T00:00:00Z', last_used_at: null, expires_at: null, revoked_at: null },
+    ]);
+    vi.mocked(createAPIKey).mockResolvedValue({ key_id: 'k3', token: 'opslane_sk_new', label: 'ci2', scope: 'sourcemaps', expires_at: null });
+    const wrapper = await mountSettings('admin');
+    await wrapper.get('#settings-api-keys-tab').trigger('click');
+    await flushPromises();
+    expect(wrapper.text()).toContain('sourcemaps');
+    await wrapper.get('[data-testid="api-key-scope"]').setValue('sourcemaps');
+    await wrapper.get('[data-testid="api-key-label"]').setValue('ci2');
+    await wrapper.get('[data-testid="api-key-create"]').trigger('submit');
+    await flushPromises();
+    expect(createAPIKey).toHaveBeenCalledWith(expect.any(String), { label: 'ci2', expires_at: null, scope: 'sourcemaps' });
+    expect(wrapper.text()).toContain('OPSLANE_SOURCEMAP_KEY');
+    expect(wrapper.text()).not.toContain('Configure your MCP client');
+    expect(wrapper.text()).not.toContain('OPSLANE_API_KEY=');
     wrapper.unmount();
   });
 

@@ -72,7 +72,7 @@ A duplicate only matters if the customer sees it twice, so the check runs at the
 
 ## Data
 
-Migration `074_friction_tickets.sql`, all additive:
+Migration `078_friction_tickets.sql`, all additive:
 
 - `friction_tickets`: definition (name, control, what_happened, kind, steps, screens_confirmed, screens_proposed), status (`tracking` | `published` | `unpublished` | `merged` | `archived`), embedding (1536) + embedding_model, matched_count, arrival_boundary, next_arrival_number, evidence_version, live_generation, fold_retries, fixed_at, cohort_cutoff, reconcile_needed, reinvestigate_needed, merged_into.
 - `friction_observation_decisions`: one row per atomic observation (signal) with its decision (`reserved` | `matched` | `created` | `not_a_problem`) and ticket.

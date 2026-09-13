@@ -29,6 +29,7 @@ export interface ReportingInitOptions {
 
 export interface SdkInitOptions {
   apiKey: string;
+  /** Absolute server URL, or a same-origin proxy path such as `/opslane`. */
   endpoint?: string;
   release?: string;
   environment?: string;
@@ -84,7 +85,17 @@ export function loadConfig(options: SdkInitOptions): void {
   if (options.endpoint === '') {
     throw new Error('endpoint is required');
   }
-  const endpoint = options.endpoint ?? DEFAULT_ENDPOINT;
+  let endpoint = options.endpoint ?? DEFAULT_ENDPOINT;
+  if (endpoint.startsWith('/')) {
+    const origin = typeof location !== 'undefined' && location && typeof location.origin === 'string'
+      ? location.origin : '';
+    if (!origin || origin === 'null') {
+      throw new Error('endpoint path requires a browser origin; pass an absolute URL');
+    }
+    let end = endpoint.length;
+    while (end > 0 && endpoint.charCodeAt(end - 1) === 47 /* '/' */) end--;
+    endpoint = origin + endpoint.slice(0, end);
+  }
   // URL-parse (not regex): rejects 'not-a-url', whitespace, and host-less inputs
   // like 'https://?x' that a permissive regex would wrongly accept.
   let parsed: URL;

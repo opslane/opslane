@@ -22,7 +22,7 @@ There are two paths, depending on which credentials you have. Both start the sam
 
 Compose uses `pgvector/pgvector:pg16`. An external PostgreSQL server must make the
 `vector` extension available and permit the migration role to create it; migration
-074 runs `CREATE EXTENSION IF NOT EXISTS vector`. On Amazon RDS, check the
+078 runs `CREATE EXTENSION IF NOT EXISTS vector`. On Amazon RDS, check the
 [extension matrix for your exact engine version](https://docs.aws.amazon.com/AmazonRDS/latest/PostgreSQLReleaseNotes/postgresql-extensions.html)
 and enable `vector` with an authorized database role before upgrading. Local
 Compose is the verified deployment path here; these instructions do not claim an
@@ -56,17 +56,17 @@ If the `curl` returns `{"status":"ok"}`-style output with HTTP 200, the stack is
 
 For releases after the known-problems cutover, pull the release and rebuild the
 services. The one-shot `migrate` service applies schema changes before the new API
-and worker start. The first upgrade across migration 074 requires the explicit
+and worker start. The first upgrade across migration 078 requires the explicit
 order below: schema ordering alone cannot retire work held by old workers.
 
-### Known-problems cutover (migration 074)
+### Known-problems cutover (migration 078)
 
 Deploy outside the daily summary window. Keep the same Compose project, volumes,
 and port settings throughout. These commands use Compose's bundled database;
 external-database operators must run the SQL against their configured database.
 
 1. Pull the release and build its `ingestion` and worker images. Start PostgreSQL
-   with the pgvector image, apply the additive schema through migration 074, and
+   with the pgvector image, apply the additive schema through migration 078, and
    deploy the new `ingestion` service first. Keep new workers stopped at this stage.
 
    ```bash
@@ -121,7 +121,7 @@ UTC day by default. A backfill can consume model tokens and that daily budget;
 `--rate` controls scheduled arrivals, not model spend or a global throughput limit.
 
 **Fix forward:** after new workers have written atomic findings, API
-rollback below migration 074 is unsupported: replaying migration 068 against those
+rollback below migration 078 is unsupported: replaying migration 068 against those
 `friction_signals` rows fails. Set `FRICTION_MATCH_MAX_CONCURRENT=0` and
 `FRICTION_CONFIRM_MAX_CONCURRENT=0` on every worker and recreate the workers to
 pause matching, confirmation, reconciliation, and new publication while preserving

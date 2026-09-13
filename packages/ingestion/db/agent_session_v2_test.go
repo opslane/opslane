@@ -3,6 +3,7 @@ package db_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/opslane/opslane/packages/ingestion/auth"
@@ -173,5 +174,34 @@ func TestAgentSessionLifecycleStatuses(t *testing.T) {
 		if err != nil || got.Status != status {
 			t.Fatalf("lifecycle status = %q err=%v, want %q", got.Status, err, status)
 		}
+	}
+}
+
+func TestCreateAgentSession_ApproveFieldsAndTTL(t *testing.T) {
+	pool := testPool(t)
+	q := db.New(pool)
+	ctx := context.Background()
+	_, hash, pub, err := auth.NewAgentPollToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := "acme-dashboard"
+	remote := "acme/dashboard"
+	s, err := q.CreateAgentSession(ctx, db.CreateAgentSessionParams{
+		ProjectName: &name, GitRemote: &remote, PollTokenHash: hash, AgentKeyPub: pub,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { pool.Exec(ctx, `DELETE FROM agent_sessions WHERE id = $1`, s.ID) })
+	if s.ProjectName == nil || *s.ProjectName != name || s.GitRemote == nil || *s.GitRemote != remote {
+		t.Fatalf("approve fields not stored: %+v", s)
+	}
+	if ttl := time.Until(s.ExpiresAt); ttl < 115*time.Minute || ttl > 125*time.Minute {
+		t.Fatalf("expected ~2h TTL, got %s", ttl)
+	}
+	got, err := q.GetAgentSession(ctx, s.ID)
+	if err != nil || got == nil || got.ProjectName == nil || *got.ProjectName != name || got.GitRemote == nil {
+		t.Fatalf("GetAgentSession did not round-trip: %v %+v", err, got)
 	}
 }

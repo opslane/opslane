@@ -65,11 +65,21 @@ func NewRouterWithPool(deps *Dependencies, pool *pgxpool.Pool) *chi.Mux {
 	r.HandleFunc("/oauth/authorize", deps.OAuthAuthorize) // GET + POST
 	r.Post("/oauth/token", deps.OAuthToken)
 
-	// Agent-first onboarding (unauthenticated start; polling uses a split token)
+	// Agent-driven onboarding: unauthenticated start, poll-token polling,
+	// cookie-authenticated approve page.
 	r.Post("/api/v1/agent/setup", deps.AgentSetup)
 	r.Get("/api/v1/agent/poll/{sessionID}", deps.AgentPoll)
 	r.Get("/agent/auth/{sessionID}", deps.AgentAuthRedirect)
-	r.Get("/agent/auth/callback", deps.AgentAuthCallback)
+	r.With(deps.AuthenticateUserSession).Get("/api/v1/agent/approve/{sessionID}", deps.AgentApproveInfo)
+	r.With(deps.AuthenticateUserSession, deps.RequireRoleIfCloud("admin")).Post("/api/v1/agent/approve/{sessionID}", deps.AgentApprove)
+	r.With(deps.AuthenticateUserSession, deps.RequireRoleIfCloud("admin")).Post("/api/v1/agent/approve/{sessionID}/deny", deps.AgentDeny)
+	r.With(deps.AuthenticateUserSession, deps.RequireRoleIfCloud("admin")).Post("/api/v1/agent/github/{sessionID}/install-url", deps.AgentGitHubInstallURL)
+
+	r.With(deps.AgentSessionAuth).Get("/api/v1/agent/poll/{sessionID}/state", deps.AgentSessionState)
+	r.With(deps.AgentSessionAuth).Post("/api/v1/agent/poll/{sessionID}/github", deps.AgentSessionGitHub)
+	r.With(deps.AgentSessionAuth).Post("/api/v1/agent/poll/{sessionID}/slack", deps.AgentSessionSlack)
+	r.With(deps.AgentSessionAuth).Post("/api/v1/agent/poll/{sessionID}/progress", deps.AgentSessionProgress)
+	r.With(deps.AgentSessionAuth).Post("/api/v1/agent/poll/{sessionID}/complete", deps.AgentSessionComplete)
 
 	// GitHub webhook (unauthenticated — uses HMAC signature verification)
 	r.Post("/api/v1/github/webhook", deps.HandleWebhook)
@@ -133,7 +143,6 @@ func NewRouterWithPool(deps *Dependencies, pool *pgxpool.Pool) *chi.Mux {
 		r.With(deps.AuthenticateUserSession, deps.RequireAdmin).Get("/admin/jobs", deps.AdminJobs)
 
 		// Onboarding
-		r.With(deps.AuthenticateUserSession, deps.RequireRoleIfCloud("admin")).Post("/onboard/provision", deps.OnboardProvision)
 		r.With(deps.AuthenticateUserSession, deps.RequireRoleIfCloud("admin")).Post("/onboarding/setup", deps.OnboardingSetup)
 		r.With(deps.AuthenticateUserSession).Get("/onboarding/state", deps.OnboardingState)
 		r.With(deps.AuthenticateUserSession, deps.RequireRoleIfCloud("admin")).Post("/onboarding/complete", deps.OnboardingComplete)

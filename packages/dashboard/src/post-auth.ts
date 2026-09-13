@@ -11,6 +11,12 @@ export async function completePostAuth(router: Pick<Router, 'push'>): Promise<vo
 
   const returnPath = sessionStorage.getItem('opslane_post_auth_path');
   if (returnPath) {
+    // Keep the guard's cache honest for whatever the parked page links to next.
+    if (me.onboarding_complete) {
+      localStorage.setItem('opslane_onboarding_complete', '1');
+    } else {
+      localStorage.removeItem('opslane_onboarding_complete');
+    }
     markAuthed();
     sessionStorage.removeItem('opslane_post_auth_path');
     await router.push(returnPath);

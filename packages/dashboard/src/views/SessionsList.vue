@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import AgentPasteBox from '../components/AgentPasteBox.vue';
 import { computed, onMounted, ref, toRef, watch } from 'vue';
 import { listSessions } from '../api';
 import type { SessionFilters, SessionSummary } from '../types/api';
@@ -337,10 +338,7 @@ onMounted(() => {
         title="No sessions recorded yet"
         description="Recordings appear after the SDK sends its first chunk."
       >
-        <router-link
-          to="/setup"
-          class="inline-flex min-h-10 items-center bg-accent px-4 py-2 text-sm font-semibold text-on-accent hover:bg-accent-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2"
-        >Setup guide</router-link>
+        <AgentPasteBox />
       </EmptyState>
 
       <div

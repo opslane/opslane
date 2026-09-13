@@ -1,4 +1,4 @@
--- Apply migration 074 and stop EVERY old worker before running this script.
+-- Apply migration 078 and stop EVERY old worker before running this script.
 -- Safe to rerun. Existing fixing/PR rows retain their lifecycle and history.
 BEGIN;
 

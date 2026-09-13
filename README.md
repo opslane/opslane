@@ -18,6 +18,7 @@
 <p align="center">
   <a href="docs">Docs</a> ·
   <a href="docs/quickstart/self-host.md">Self-host quickstart</a> ·
+  <a href="https://docs.opslane.com/INSTALL.md">Set up with your agent</a> ·
   <a href="docs/install.md">Install the SDK</a> ·
   <a href="https://discord.gg/uWcEKv2bXt">Discord</a> ·
   <a href="https://github.com/opslane/opslane/issues">Issue tracker</a>
@@ -126,6 +127,16 @@ Opslane captured the event, mapped the stack trace back to your source files, an
 - **Pull requests:** GitHub credentials with access to the target repository.
 
 Exact permissions and environment variables are in the [self-host quickstart](docs/quickstart/self-host.md). SDK setup is in the [install guide](docs/install.md); replay privacy defaults in [replay privacy and masking](docs/guides/replay-privacy.md).
+
+## Add it to your app
+
+Paste this into your coding agent:
+
+```text
+Set up https://docs.opslane.com/INSTALL.md
+```
+
+Approve the project in your browser. Your agent installs the SDK and verifies a test error, then offers GitHub, Slack, source maps, and MCP. For manual setup, use the [install guide](docs/install.md).
 
 ## Documentation
 

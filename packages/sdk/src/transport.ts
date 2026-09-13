@@ -123,6 +123,7 @@ export async function flushEvents(): Promise<void> {
 
         const response = await fetch(`${config.endpoint}/api/v1/events`, {
           method: 'POST',
+          credentials: 'omit',
           headers: {
             'Content-Type': 'application/json',
             'X-API-Key': config.apiKey,
@@ -221,6 +222,7 @@ export function flushOnUnload(): void {
       // Fire-and-forget: do NOT await (the page may freeze mid-loop).
       void fetch(`${config.endpoint}/api/v1/events`, {
         method: 'POST',
+        credentials: 'omit',
         headers: {
           'Content-Type': 'application/json',
           'X-API-Key': config.apiKey,

@@ -287,7 +287,7 @@ func TestUpdateProjectEndpoint_FrictionAutonomy(t *testing.T) {
 	if response := patch(`{"friction_autonomy":"yolo"}`); response.Code != http.StatusBadRequest {
 		t.Fatalf("invalid autonomy status = %d, want 400: %s", response.Code, response.Body.String())
 	}
-	// auto_fix_ux is a deprecated alias: migration 074 rewrites stored rows to
+	// auto_fix_ux is a deprecated alias: migration 078 rewrites stored rows to
 	// auto_fix, and a client still sending the old value gets the same result.
 	if response := patch(`{"friction_autonomy":"ask_first"}`); response.Code != http.StatusOK {
 		t.Fatalf("ask_first autonomy status = %d, want 200: %s", response.Code, response.Body.String())

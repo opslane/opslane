@@ -4,8 +4,9 @@
  *
  * For each publishable package (@opslane/sdk):
  *   1. `pnpm pack` the exact tarball npm would ship
- *   2. Assert the tarball contains ONLY allowlisted paths (dist/, package.json,
- *      README*, LICENSE*) — no stray env files, sources, or maps
+ *   2. Assert the tarball contains ONLY allowlisted paths (dist/, bin/*.mjs,
+ *      package.json, README*, LICENSE*, THIRD_PARTY_NOTICES.md) — no stray env
+ *      files, sources, or maps
  *   3. Install the tarball into a fresh, empty consumer project (no workspace)
  *   4. SDK: typecheck real imports with tsc — catches unresolvable type-only
  *      imports from the private @opslane/shared package
@@ -18,7 +19,9 @@ import { mkdtempSync, writeFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
-const ALLOWED_TARBALL_PATH = /^package\/(dist\/|package\.json$|README[^/]*$|LICENSE[^/]*$)/;
+// bin/ carries the opslane-sourcemaps CLI entry; THIRD_PARTY_NOTICES.md carries
+// the licenses of the build-time dependencies bundled into dist/.
+const ALLOWED_TARBALL_PATH = /^package\/(dist\/|bin\/[^/]+\.mjs$|package\.json$|README[^/]*$|LICENSE[^/]*$|THIRD_PARTY_NOTICES\.md$)/;
 
 const TARGETS = [
   {

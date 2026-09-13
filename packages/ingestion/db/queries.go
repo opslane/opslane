@@ -1973,13 +1973,14 @@ func (q *Queries) GetLatestAgentTaskBrief(ctx context.Context, projectID, groupI
 // SampleEvent is the representative event for an error group, used by the
 // dashboard detail view. Tenant-scoped through the owning group's project_id.
 type SampleEvent struct {
-	Timestamp     time.Time
-	Platform      string
-	ErrorType     string
-	ErrorMessage  string
-	StackTraceRaw string
-	Breadcrumbs   []byte // JSONB passthrough
-	Context       []byte // JSONB passthrough
+	Timestamp          time.Time
+	Platform           string
+	ErrorType          string
+	ErrorMessage       string
+	StackTraceRaw      string
+	ResolutionEnvelope []byte // current resolved source frames, when available
+	Breadcrumbs        []byte // JSONB passthrough
+	Context            []byte // JSONB passthrough
 }
 
 // GetSampleEvent returns the sample event for a group, scoped to the project.
@@ -1991,15 +1992,17 @@ func (q *Queries) GetSampleEvent(ctx context.Context, projectID, groupID string)
 	var ev SampleEvent
 	err := q.pool.QueryRow(ctx,
 		`SELECT e."timestamp", e.platform, e.error_type, e.error_message,
-		        e.stack_trace_raw, e.breadcrumbs, e.context
+		        e.stack_trace_raw, e.breadcrumbs, e.context, r.envelope
 		 FROM error_groups g
 		 JOIN error_events e ON e.id = g.sample_event_id
 		   AND e.project_id = g.project_id AND e.error_group_id = g.id
+		 LEFT JOIN error_event_resolutions r
+		   ON r.event_id = e.id AND r.project_id = e.project_id AND r.status = 'resolved'
 		 WHERE g.id = $1 AND g.project_id = $2
 		   AND (g.status <> 'candidate' OR g.adjudication_status = 'unchecked')`,
 		groupID, projectID,
 	).Scan(&ev.Timestamp, &ev.Platform, &ev.ErrorType, &ev.ErrorMessage,
-		&ev.StackTraceRaw, &ev.Breadcrumbs, &ev.Context)
+		&ev.StackTraceRaw, &ev.Breadcrumbs, &ev.Context, &ev.ResolutionEnvelope)
 	if err != nil {
 		return nil, err
 	}
@@ -2449,7 +2452,17 @@ func loadDraftBranchCleanup(ctx context.Context, tx pgx.Tx, groupID string) (str
 	var branch string
 	var installationID *int64
 	err := tx.QueryRow(ctx,
-		`SELECT r.branch_name, o.github_installation_id
+		`SELECT r.branch_name,
+		        COALESCE(
+		          (SELECT i.installation_id
+		             FROM github_app_installations i
+		            WHERE i.org_id = p.org_id
+		              AND NOT i.suspended
+		              AND i.repos ? p.github_repo
+		            ORDER BY i.created_at DESC
+		            LIMIT 1),
+		          o.github_installation_id
+		        ) AS github_installation_id
 		 FROM delivery_reservations r
 		 JOIN projects p ON p.id = r.project_id
 		 JOIN orgs o ON o.id = p.org_id
@@ -2523,7 +2536,17 @@ func (q *Queries) ProcessPRWebhook(ctx context.Context, githubRepo string, prNum
 	var installationID *int64
 	err = tx.QueryRow(ctx,
 		`SELECT eg.id, eg.project_id, eg.kind, eg.status, eg.pr_fix_job_id,
-		        r.branch_name, o.github_installation_id
+		        r.branch_name,
+		        COALESCE(
+		          (SELECT i.installation_id
+		             FROM github_app_installations i
+		            WHERE i.org_id = p.org_id
+		              AND NOT i.suspended
+		              AND i.repos ? p.github_repo
+		            ORDER BY i.created_at DESC
+		            LIMIT 1),
+		          o.github_installation_id
+		        ) AS github_installation_id
 		 FROM error_groups eg
 		 JOIN projects p ON eg.project_id = p.id
 		 JOIN orgs o ON o.id = p.org_id
@@ -4117,6 +4140,21 @@ func (q *Queries) HasEvents(ctx context.Context, projectID string) (bool, error)
 }
 
 // LatestErrorGroupID returns the most recently active error group, or nil.
+// HasEventsSince reports whether the project received any event at or after
+// the given time. Agent sessions use it so attaching to an existing project
+// does not satisfy the first-event proof with history.
+func (q *Queries) HasEventsSince(ctx context.Context, projectID string, since time.Time) (bool, error) {
+	var exists bool
+	err := q.pool.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM error_events WHERE project_id = $1 AND created_at >= $2)`,
+		projectID, since,
+	).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("has events since: %w", err)
+	}
+	return exists, nil
+}
+
 func (q *Queries) LatestErrorGroupID(ctx context.Context, projectID string) (*string, error) {
 	var id string
 	err := q.pool.QueryRow(ctx,
@@ -4359,7 +4397,7 @@ func (q *Queries) GetProjectGitHubConfig(ctx context.Context, orgID, projectID s
 
 // === Agent sessions ===
 
-// AgentSession represents a CLI-initiated auth session for agent-first onboarding.
+// AgentSession represents a setup session approved through the dashboard.
 type AgentSession struct {
 	ID             string
 	RepoURL        string
@@ -4377,9 +4415,13 @@ type AgentSession struct {
 	CreatedAt      time.Time
 	CompletedAt    *time.Time
 	ExpiresAt      time.Time
+	ProjectName    *string
+	GitRemote      *string
 }
 
 type CreateAgentSessionParams struct {
+	ProjectName   *string
+	GitRemote     *string
 	RepoURL       string
 	AgentName     *string
 	PollTokenHash string
@@ -4387,21 +4429,21 @@ type CreateAgentSessionParams struct {
 }
 
 // CreateAgentSession creates a pending agent session. Multiple pending
-// sessions per repo are allowed; provisioning serializes canonical repo writes.
+// sessions per repo are allowed; approval serializes writes per session.
 func (q *Queries) CreateAgentSession(ctx context.Context, p CreateAgentSessionParams) (*AgentSession, error) {
 	var s AgentSession
 	err := q.pool.QueryRow(ctx,
-		`INSERT INTO agent_sessions (repo_url, agent_name, poll_token_hash, agent_key_pub)
-		 VALUES ($1, $2, $3, $4)
+		`INSERT INTO agent_sessions (repo_url, agent_name, poll_token_hash, agent_key_pub, project_name, git_remote)
+		 VALUES ($1, $2, $3, $4, $5, $6)
 		 RETURNING id, repo_url, agent_name, status, org_id, project_id,
 		           installation_id, created_at, completed_at, expires_at,
 		           poll_token_hash, agent_key_pub, api_key_sealed, failure_reason,
-		           auth_clicked_at, key_claimed_at`,
-		p.RepoURL, p.AgentName, p.PollTokenHash, p.AgentKeyPub,
+		           auth_clicked_at, key_claimed_at, project_name, git_remote`,
+		p.RepoURL, p.AgentName, p.PollTokenHash, p.AgentKeyPub, p.ProjectName, p.GitRemote,
 	).Scan(&s.ID, &s.RepoURL, &s.AgentName, &s.Status, &s.OrgID, &s.ProjectID,
 		&s.InstallationID, &s.CreatedAt, &s.CompletedAt, &s.ExpiresAt,
 		&s.PollTokenHash, &s.AgentKeyPub, &s.APIKeySealed, &s.FailureReason,
-		&s.AuthClickedAt, &s.KeyClaimedAt)
+		&s.AuthClickedAt, &s.KeyClaimedAt, &s.ProjectName, &s.GitRemote)
 	if err != nil {
 		return nil, fmt.Errorf("create agent session: %w", err)
 	}
@@ -4415,13 +4457,13 @@ func (q *Queries) GetAgentSession(ctx context.Context, sessionID string) (*Agent
 		`SELECT id, repo_url, agent_name, status, org_id, project_id,
 		        installation_id, created_at, completed_at, expires_at,
 		        poll_token_hash, agent_key_pub, api_key_sealed, failure_reason,
-		        auth_clicked_at, key_claimed_at
+		        auth_clicked_at, key_claimed_at, project_name, git_remote
 		 FROM agent_sessions WHERE id = $1`,
 		sessionID,
 	).Scan(&s.ID, &s.RepoURL, &s.AgentName, &s.Status, &s.OrgID, &s.ProjectID,
 		&s.InstallationID, &s.CreatedAt, &s.CompletedAt, &s.ExpiresAt,
 		&s.PollTokenHash, &s.AgentKeyPub, &s.APIKeySealed, &s.FailureReason,
-		&s.AuthClickedAt, &s.KeyClaimedAt)
+		&s.AuthClickedAt, &s.KeyClaimedAt, &s.ProjectName, &s.GitRemote)
 	if err == pgx.ErrNoRows {
 		return nil, nil
 	}
@@ -4431,7 +4473,17 @@ func (q *Queries) GetAgentSession(ctx context.Context, sessionID string) (*Agent
 	return &s, nil
 }
 
-// ExpireAgentSessions marks all pending sessions past their expiry as expired.
+// AgentKeyDeliveryWindow is how long after the first key delivery a poll can
+// still return the sealed bundle. It covers an agent that lost the response,
+// then the bundle is purged so a leaked poll token stops yielding live keys.
+const AgentKeyDeliveryWindow = 15 * time.Minute
+
+// agentSessionRetention is how long terminal sessions stay on disk.
+const agentSessionRetention = 7 * 24 * time.Hour
+
+// ExpireAgentSessions marks all pending sessions past their expiry as expired,
+// purges sealed key bundles past their delivery window, and deletes terminal
+// sessions past retention.
 // Called periodically by the cleanup goroutine.
 func (q *Queries) ExpireAgentSessions(ctx context.Context) (int64, error) {
 	tag, err := q.pool.Exec(ctx,
@@ -4443,10 +4495,20 @@ func (q *Queries) ExpireAgentSessions(ctx context.Context) (int64, error) {
 	}
 	if _, err := q.pool.Exec(ctx,
 		`UPDATE agent_sessions SET api_key_sealed = NULL
-		 WHERE status IN ('completed', 'provisioned', 'key_ok', 'app_reporting')
-		   AND expires_at <= now() AND api_key_sealed IS NOT NULL`,
+		 WHERE api_key_sealed IS NOT NULL
+		   AND (expires_at <= now()
+		        OR status IN ('failed', 'expired')
+		        OR key_claimed_at <= now() - $1::interval)`,
+		AgentKeyDeliveryWindow.String(),
 	); err != nil {
 		return 0, fmt.Errorf("purge sealed agent keys: %w", err)
+	}
+	if _, err := q.pool.Exec(ctx,
+		`DELETE FROM agent_sessions
+		 WHERE expires_at <= now() - $1::interval`,
+		agentSessionRetention.String(),
+	); err != nil {
+		return 0, fmt.Errorf("delete stale agent sessions: %w", err)
 	}
 	return tag.RowsAffected(), nil
 }
@@ -4502,28 +4564,6 @@ func (q *Queries) MarkAgentSessionAuthClicked(ctx context.Context, sessionID str
 	return nil
 }
 
-// FindProjectByRepoURL returns the project for a given repo URL (owner/repo format).
-// Used by the agent setup flow to detect returning users.
-// Returns nil if no project matches.
-func (q *Queries) FindProjectByRepoURL(ctx context.Context, repoURL string) (*Project, error) {
-	var p Project
-	err := q.pool.QueryRow(ctx,
-		`SELECT id, org_id, name, github_repo, default_branch, friction_autonomy, pr_posture, default_environment_id, digest_timezone, created_at
-		 FROM projects
-		 WHERE github_repo = $1
-		 ORDER BY created_at ASC
-		 LIMIT 1`,
-		repoURL,
-	).Scan(&p.ID, &p.OrgID, &p.Name, &p.GithubRepo, &p.DefaultBranch, &p.FrictionAutonomy, &p.PrPosture, &p.DefaultEnvironmentID, &p.DigestTimezone, &p.CreatedAt)
-	if err == pgx.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("find project by repo url: %w", err)
-	}
-	return &p, nil
-}
-
 // === GitHub App installations ===
 
 // GitHubAppInstallation represents a GitHub App installation with org mapping.
@@ -4575,4 +4615,31 @@ func (q *Queries) GetGitHubAppInstallationByID(ctx context.Context, installation
 		return nil, fmt.Errorf("get github app installation: %w", err)
 	}
 	return &i, nil
+}
+
+// OrgHasActiveGitHubInstallation reports a live installation owned by this org.
+func (q *Queries) OrgHasActiveGitHubInstallation(ctx context.Context, orgID string) (bool, error) {
+	var ok bool
+	err := q.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM orgs o JOIN github_app_installations i ON i.installation_id=o.github_installation_id AND i.org_id=o.id WHERE o.id=$1 AND NOT i.suspended)`, orgID).Scan(&ok)
+	return ok, err
+}
+
+// RepoCoveredByActiveInstallation reports whether an unsuspended installation
+// owned by the organization lists the repository.
+func (q *Queries) RepoCoveredByActiveInstallation(ctx context.Context, orgID, repo string) (bool, error) {
+	var ok bool
+	err := q.pool.QueryRow(ctx,
+		// GitHub repository names are case-insensitive; compare like PersistInstallation does.
+		`SELECT EXISTS(
+		   SELECT 1 FROM github_app_installations i, jsonb_array_elements_text(i.repos) AS r(name)
+		   WHERE i.org_id = $1 AND NOT i.suspended AND lower(r.name) = lower($2))`,
+		orgID, repo).Scan(&ok)
+	return ok, err
+}
+
+// HasEnabledSlackDestination includes every Slack subscription, not just digests.
+func (q *Queries) HasEnabledSlackDestination(ctx context.Context, projectID string) (bool, error) {
+	var ok bool
+	err := q.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM notification_destinations WHERE project_id=$1 AND enabled AND type='slack')`, projectID).Scan(&ok)
+	return ok, err
 }

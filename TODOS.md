@@ -179,18 +179,6 @@ It was deliberately left alone by the issue-list polish plan, which is scoped da
 
 **Depends on / blocked by:** Nothing.
 
-## Revisit member-level onboarding provisioning in cloud
-
-**What:** `POST /api/v1/onboard/provision` is admin-gated in cloud (`RequireRoleIfCloud("admin")`, `packages/ingestion/handler/routes.go:113`). Decide deliberately whether org members should be able to self-provision.
-
-**Why:** The milestone 0.5 plan (docs/plans/2026-07-22-milestone-0.5-account-provisioning.md, line 24) settled the opposite — "no admin gate, login + org membership only" — to enable bottom-up adoption (any teammate tries Opslane without pinging an admin). Commit e365003 reversed that as a security hardening with no written rationale; the integration test now asserts member→403. If bottom-up adoption becomes the growth motion, this gate silently blocks it.
-
-**Pros:** members can adopt Opslane solo; matches the original product decision. **Cons:** provisioning mints/rotates a production key — member-level access widens that surface; sibling key routes are admin-gated.
-
-**Context:** Found during the 2026-07-24 /plan-eng-review of Phase 2 (onboarding-10x). The removed CLI surfaced a typed `NotAuthorizedError` with "ask an org admin" remediation, so the failure was at least honest. Self-hosted OSS is unaffected (`RequireRoleIfCloud` is transparent there). Re-decide with real cloud data on who actually provisions projects (the CLI entry point for this route was removed 2026-08-23; the dashboard uses `/api/v1/onboarding/setup`).
-
-**Depends on / blocked by:** cloud usage data; a product call, not an eng task.
-
 ## SDK: recover from a 409 on /sessions/init instead of never reporting
 
 **What:** When the browser SDK holds a stored session identity from a previous project (localStorage on the same origin) and the app is re-onboarded to a NEW project, `POST /api/v1/sessions/init` returns 409 repeatedly and the SDK never reaches `app_reporting`. It should treat 409 as "discard stored identity, start a fresh session."
@@ -334,3 +322,11 @@ review made the value overridable, which is the prerequisite; the docs and a Min
 CORS/origin story are the remaining work. Note MinIO must also be reachable from the
 browser, which interacts with the loopback bind added at the same time
 (`OPSLANE_INFRA_BIND_ADDR`).
+
+## GitHub installation webhooks: durability and ordering
+
+**What:** `installation` and `installation_repositories` events are applied state-based with no delivery receipt, so a redelivered or late event can rewind a newer state (a late `suspend` after `unsuspend`, a redelivered `created` after later `added` events), and an event for an installation Opslane has not mapped yet is acknowledged and dropped even though GitHub does not redeliver on its own. Store `X-GitHub-Delivery` for these events, order by the payload's timestamp, and retain unknown-installation events until the OAuth callback binds the ID. Also handle `repository.renamed`/`transferred` so the cached repo list follows renames.
+
+**Why:** the self-healing PR (2026-09-12) made the record current on first use and on webhooks; the remaining gap is ordering under retries. The on-use path re-checks GitHub, so the damage of a stale webhook is a wrong `github_installed` until the next attach.
+
+**Depends on / blocked by:** nothing. The worker's repo lookup (`packages/worker/src/db.ts`, `i.repos ? p.github_repo`) is case-sensitive while ingestion's coverage check is not; align it when touching this.

@@ -38,7 +38,7 @@ On **hosted Opslane** the App already exists: Settings → GitHub → Install, p
 To **self-host**, create your own App once (GitHub → Settings → Developer settings → GitHub Apps) with:
 
 - Permissions: **Contents** read/write, **Pull requests** read/write, **Checks** read, **Commit statuses** read
-- Events: **Pull request** and **Push**
+- Events: **Installation**, **Installation repositories**, **Pull request**, and **Push**. The first two keep Opslane's installation record current when you change repository access or uninstall directly on GitHub.
 - Callback URL: `https://your-instance/auth/github/callback`
 - Webhook URL: `https://your-instance/api/v1/github/webhook` (with a secret)
 

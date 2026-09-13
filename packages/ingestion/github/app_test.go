@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -163,6 +164,62 @@ func TestListInstallationRepos(t *testing.T) {
 	}
 	if repos[1].Private != true {
 		t.Error("repo[1] should be private")
+	}
+}
+
+func TestGetInstallationToken_ClassifiesGoneAndSuspended(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		body   string
+		want   error
+	}{
+		{"deleted installation", http.StatusNotFound, `{"message":"Not Found"}`, ErrInstallationGone},
+		{"suspended installation", http.StatusForbidden, `{"message":"This installation has been suspended"}`, ErrInstallationSuspended},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			orig := httpClient
+			httpClient = &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: tc.status, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(tc.body))}, nil
+			})}
+			defer func() { httpClient = orig }()
+			_, err := GetInstallationToken("jwt", 42)
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("err = %v, want %v", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestGetInstallationToken_OtherErrorsAreNotClassified(t *testing.T) {
+	orig := httpClient
+	httpClient = &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusBadGateway, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`upstream`))}, nil
+	})}
+	defer func() { httpClient = orig }()
+	_, err := GetInstallationToken("jwt", 42)
+	if err == nil || errors.Is(err, ErrInstallationGone) || errors.Is(err, ErrInstallationSuspended) {
+		t.Fatalf("502 must stay a generic error, got %v", err)
+	}
+}
+
+func TestVerifyInstallation_ReturnsHTMLURLAndGone(t *testing.T) {
+	orig := httpClient
+	httpClient = &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Path == "/app/installations/7" {
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(
+				`{"id":7,"account":{"login":"acme","id":9},"html_url":"https://github.com/organizations/acme/settings/installations/7"}`))}, nil
+		}
+		return &http.Response{StatusCode: http.StatusNotFound, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{}`))}, nil
+	})}
+	defer func() { httpClient = orig }()
+	info, err := VerifyInstallation("jwt", 7)
+	if err != nil || info.HTMLURL != "https://github.com/organizations/acme/settings/installations/7" {
+		t.Fatalf("info=%+v err=%v", info, err)
+	}
+	if _, err := VerifyInstallation("jwt", 8); !errors.Is(err, ErrInstallationGone) {
+		t.Fatalf("404 must be ErrInstallationGone, got %v", err)
 	}
 }
 

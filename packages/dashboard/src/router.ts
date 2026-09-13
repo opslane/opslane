@@ -10,6 +10,8 @@ import Settings from './views/Settings.vue';
 import AccountsList from './views/AccountsList.vue';
 import AccountDetail from './views/AccountDetail.vue';
 import AcceptInvitation from './views/AcceptInvitation.vue';
+import AgentApprove from './views/AgentApprove.vue';
+import AgentGitHubInstall from './views/AgentGitHubInstall.vue';
 import { routeNeedsProject } from './route-project';
 
 export const routes: RouteRecordRaw[] = [
@@ -17,6 +19,8 @@ export const routes: RouteRecordRaw[] = [
   { path: '/reset-password', name: 'reset-password', component: ResetPassword, meta: { public: true } },
   { path: '/auth/complete', name: 'auth-complete', component: AuthCallback, meta: { public: true } },
   { path: '/invite/accept', name: 'invite-accept', component: AcceptInvitation },
+  { path: '/agent/approve/:id', name: 'agent-approve', component: AgentApprove },
+  { path: '/agent/github/:id', name: 'agent-github-install', component: AgentGitHubInstall },
   { path: '/setup', name: 'setup', component: SetupWizard },
   { path: '/', name: 'issues', component: IssuesList },
   { path: '/issues/:id', name: 'incident', component: IncidentDetail },
@@ -42,7 +46,7 @@ router.beforeEach((to) => {
   const publicRoutes = ['login', 'auth-complete'];
 
   if (!to.meta.public && !authed) {
-    if (to.name === 'invite-accept' || (to.name === 'incident' && typeof to.query['fixIntent'] === 'string')) {
+    if (to.name === 'invite-accept' || to.name === 'agent-approve' || to.name === 'agent-github-install' || (to.name === 'incident' && typeof to.query['fixIntent'] === 'string')) {
       sessionStorage.setItem('opslane_post_auth_path', to.fullPath);
     }
     return { name: 'login' };
@@ -62,7 +66,11 @@ router.beforeEach((to) => {
 	// syncs the project id (and routes truly project-less orgs) after mount.
 	if (authed && routeNeedsProject(to.name)) {
 		const onboarded = localStorage.getItem('opslane_onboarding_complete') === '1';
-		if (!onboarded) {
+		// A project-qualified deep link (the ones an onboarding agent prints:
+		// issues_url, latest_error_group_url, github_connect_url) names a
+		// project the server already created, so the wizard has nothing to add.
+		const projectDeepLink = typeof to.query.project_id === 'string' && to.query.project_id !== '';
+		if (!onboarded && !projectDeepLink) {
 			return { name: 'setup' };
     }
   }

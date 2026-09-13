@@ -1,6 +1,6 @@
 {
   "name": "@opslane/sdk",
-  "version": "4.1.1",
+  "version": "4.2.0",
   "type": "module",
   "description": "Browser error monitoring SDK for Opslane",
   "license": "MIT",
@@ -28,10 +28,16 @@
     "./build/debug-id": {
       "types": "./dist/debug-id.d.ts",
       "import": "./dist/build/debug-id.js"
+    },
+    "./sourcemaps-cli": {
+      "types": "./dist/sourcemaps-cli.d.ts",
+      "import": "./dist/sourcemaps-cli.js"
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "bin",
+    "THIRD_PARTY_NOTICES.md"
   ],
   "scripts": {
     "build": "vite build",
@@ -52,6 +58,7 @@
     "@types/react": "^18.3.0",
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-vue": "^6.0.8",
+    "acorn": "^8.18.0",
     "jsdom": "^30.0.1",
     "magic-string": "^1.2.2",
     "react": "^18.3.0",
@@ -81,5 +88,8 @@
     "vite": {
       "optional": true
     }
+  },
+  "bin": {
+    "opslane-sourcemaps": "bin/opslane-sourcemaps.mjs"
   }
 }

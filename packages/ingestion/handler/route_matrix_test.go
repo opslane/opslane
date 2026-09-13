@@ -278,7 +278,7 @@ func TestEveryAPIRouteHasAnAuthenticator(t *testing.T) {
 	deps := &handler.Dependencies{Queries: q, JWTSecret: sessionReadSecret}
 	router := handler.NewRouter(deps)
 
-	authenticators := []string{".ProjectKey.", "AuthenticateUserSession", "AuthenticateSession"}
+	authenticators := []string{".ProjectKey.", "AuthenticateUserSession", "AgentSessionAuth", "AuthenticateSession"}
 	var unauthenticated []string
 	walked := 0
 
