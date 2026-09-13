@@ -764,6 +764,19 @@ func (q *Queries) OrgExists(ctx context.Context, orgID string) (bool, error) {
 	return exists, nil
 }
 
+// GetOrgName returns the organization's name and whether it exists.
+func (q *Queries) GetOrgName(ctx context.Context, orgID string) (string, bool, error) {
+	var name string
+	err := q.pool.QueryRow(ctx, `SELECT name FROM orgs WHERE id = $1`, orgID).Scan(&name)
+	if err == pgx.ErrNoRows {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("get org name: %w", err)
+	}
+	return name, true, nil
+}
+
 func (q *Queries) CreateOrg(ctx context.Context, name string) (*Org, error) {
 	var org Org
 	err := q.pool.QueryRow(ctx,
