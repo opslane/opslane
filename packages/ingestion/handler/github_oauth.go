@@ -750,52 +750,26 @@ func (d *Dependencies) GetGitHubAppStatus(w http.ResponseWriter, r *http.Request
 		writeJSONError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-
-	installURL := ""
-	if d.GitHubAppSlug != "" {
-		state, err := generateOAuthState(d.JWTSecret)
-		if err != nil {
-			writeJSONError(w, http.StatusInternalServerError, "internal error")
-			return
-		}
-		if d.Queries != nil {
-			if err := d.Queries.StoreOAuthLoginStateForOrg(r.Context(), auth.HashToken(state), orgID, UserIDFromCtx(r.Context()), time.Now().Add(5*time.Minute)); err != nil {
-				writeJSONError(w, http.StatusInternalServerError, "internal error")
-				return
-			}
-		}
-		isSecure := r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https"
-		http.SetCookie(w, &http.Cookie{
-			Name:     "__auth_state",
-			Value:    state,
-			Path:     "/auth",
-			MaxAge:   300,
-			HttpOnly: true,
-			Secure:   isSecure,
-			SameSite: http.SameSiteLaxMode,
-		})
-		installURL = fmt.Sprintf("https://github.com/apps/%s/installations/new?state=%s", d.GitHubAppSlug, url.QueryEscape(state))
-	}
-
-	type statusResponse struct {
-		Installed      bool   `json:"installed"`
-		InstallationID *int64 `json:"installation_id"`
-		InstallURL     string `json:"install_url"`
-	}
-
 	active, err := d.Queries.OrgHasActiveGitHubInstallation(r.Context(), orgID)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	resp := statusResponse{
-		Installed:  active,
-		InstallURL: installURL,
+
+	// The dashboard polls this endpoint while an install is in progress in
+	// another tab, so it must never mint install state: that would replace the
+	// __auth_state cookie the GitHub tab depends on. The install link comes
+	// from POST /api/v1/github/install-url when the user opens it.
+	type statusResponse struct {
+		Installed        bool   `json:"installed"`
+		InstallationID   *int64 `json:"installation_id"`
+		InstallAvailable bool   `json:"install_available"`
 	}
+	resp := statusResponse{Installed: active, InstallAvailable: d.GitHubAppSlug != ""}
 	if active && installationID > 0 {
 		resp.InstallationID = &installationID
 	}
-
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
 }

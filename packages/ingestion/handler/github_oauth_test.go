@@ -254,69 +254,6 @@ func TestApplyCombinedGitHubInstallationBindsAuthenticatedUser(t *testing.T) {
 	}
 }
 
-func TestGetGitHubAppStatusUsesSharedOAuthState(t *testing.T) {
-	pool := githubOAuthTestPool(t)
-	q := db.New(pool)
-	org, err := q.CreateOrg(context.Background(), "wizard-state-"+fmt.Sprint(time.Now().UnixNano()))
-	if err != nil {
-		t.Fatal(err)
-	}
-	user, err := q.CreateUserGitHub(context.Background(), org.ID,
-		"wizard-state-"+fmt.Sprint(time.Now().UnixNano())+"@example.com", "Wizard State",
-		time.Now().UnixNano(), "wizard-state", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		_, _ = pool.Exec(context.Background(), `DELETE FROM oauth_login_states WHERE target_org_id = $1`, org.ID)
-		cleanupGitHubOAuthOrg(t, pool, org.ID)
-	})
-
-	deps := &Dependencies{Queries: q, GitHubAppSlug: "opslane", JWTSecret: []byte("secret")}
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/github/status", nil)
-	reqCtx := context.WithValue(req.Context(), ctxOrgID, org.ID)
-	reqCtx = context.WithValue(reqCtx, ctxUserID, user.ID)
-	req = req.WithContext(reqCtx)
-	w := httptest.NewRecorder()
-	deps.GetGitHubAppStatus(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("code=%d body=%q", w.Code, w.Body.String())
-	}
-	var body struct {
-		InstallURL string `json:"install_url"`
-	}
-	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
-		t.Fatal(err)
-	}
-	if body.InstallURL == "" {
-		t.Fatal("missing install URL")
-	}
-	found := false
-	for _, cookie := range w.Result().Cookies() {
-		if cookie.Name == "__auth_state" {
-			found = true
-			if cookie.Path != "/auth" {
-				t.Fatalf("cookie path=%q", cookie.Path)
-			}
-		}
-		if cookie.Name == "__github_state" {
-			t.Fatal("legacy __github_state cookie still emitted")
-		}
-	}
-	if !found {
-		t.Fatal("missing __auth_state cookie")
-	}
-	var initiatingUserID string
-	if err := pool.QueryRow(context.Background(),
-		`SELECT initiating_user_id FROM oauth_login_states WHERE target_org_id = $1`, org.ID).
-		Scan(&initiatingUserID); err != nil {
-		t.Fatal(err)
-	}
-	if initiatingUserID != user.ID {
-		t.Fatalf("initiating user=%s, want %s", initiatingUserID, user.ID)
-	}
-}
-
 func TestWorkosInstallCallbackPreservesActiveOrgAndBypassesProvider(t *testing.T) {
 	t.Setenv("AUTH_PROVIDER", "workos")
 	pool := githubOAuthTestPool(t)
@@ -387,34 +324,34 @@ func TestWorkosInstallCallbackPreservesActiveOrgAndBypassesProvider(t *testing.T
 		GitHubAppPrivateKey: callbackTestKey(t), DashboardOrigin: "https://app.example",
 		AuthProvider: provider,
 	}
-	statusReq := httptest.NewRequest(http.MethodGet, "/api/v1/github/status", nil)
-	statusCtx := context.WithValue(statusReq.Context(), ctxOrgID, activeOrg.ID)
-	statusCtx = context.WithValue(statusCtx, ctxUserID, user.ID)
-	statusReq = statusReq.WithContext(statusCtx)
-	statusW := httptest.NewRecorder()
-	deps.GetGitHubAppStatus(statusW, statusReq)
-	if statusW.Code != http.StatusOK {
-		t.Fatalf("status code=%d body=%q", statusW.Code, statusW.Body.String())
+	startReq := httptest.NewRequest(http.MethodPost, "/api/v1/github/install-url", nil)
+	startCtx := context.WithValue(startReq.Context(), ctxOrgID, activeOrg.ID)
+	startCtx = context.WithValue(startCtx, ctxUserID, user.ID)
+	startReq = startReq.WithContext(startCtx)
+	startW := httptest.NewRecorder()
+	deps.GitHubInstallURL(startW, startReq)
+	if startW.Code != http.StatusOK {
+		t.Fatalf("install-url code=%d body=%q", startW.Code, startW.Body.String())
 	}
-	var statusBody struct {
+	var startBody struct {
 		InstallURL string `json:"install_url"`
 	}
-	if err := json.Unmarshal(statusW.Body.Bytes(), &statusBody); err != nil {
+	if err := json.Unmarshal(startW.Body.Bytes(), &startBody); err != nil {
 		t.Fatal(err)
 	}
-	installURL, err := url.Parse(statusBody.InstallURL)
+	installURL, err := url.Parse(startBody.InstallURL)
 	if err != nil {
 		t.Fatal(err)
 	}
 	state := installURL.Query().Get("state")
 	var stateCookie *http.Cookie
-	for _, cookie := range statusW.Result().Cookies() {
+	for _, cookie := range startW.Result().Cookies() {
 		if cookie.Name == "__auth_state" {
 			stateCookie = cookie
 		}
 	}
 	if state == "" || stateCookie == nil {
-		t.Fatalf("missing state or cookie: url=%q cookies=%v", statusBody.InstallURL, statusW.Result().Cookies())
+		t.Fatalf("missing state or cookie: url=%q cookies=%v", startBody.InstallURL, startW.Result().Cookies())
 	}
 
 	callbackReq := httptest.NewRequest(http.MethodGet, fmt.Sprintf(

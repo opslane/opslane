@@ -123,7 +123,8 @@ Agent setup uses normal dashboard sign-in and an explicit approval. Approval cre
 | GET | `/api/v1/projects/{projectID}/accounts/{accountID}` | Account detail |
 | GET | `/api/v1/projects/{projectID}/accounts/{accountID}/incidents` | Issues for one account |
 | GET | `/api/v1/github/setup` | GitHub App install callback |
-| GET | `/api/v1/github/status` | GitHub App status |
+| GET | `/api/v1/github/status` | GitHub App status: `installed`, `installation_id`, and `install_available`; never creates install state |
+| POST | `/api/v1/github/install-url` | Start a GitHub App installation for the active organization: returns `install_url` and sets its single-use, 30-minute callback state; admin on cloud; 400 `github_app_not_configured` without an App |
 | GET | `/api/v1/github/repos` | List installable repos; returns typed 400/409 installation errors or 503 `github_unreachable` with `Retry-After` |
 | PUT | `/api/v1/projects/{projectID}/github` | Set project repo config; returns 400 `repo_not_in_installation` with `add_repo_url`, 400 `github_not_installed` with `github_connect_url`, 409 `github_installation_gone`, or 503 `github_unreachable` with `Retry-After` |
 | GET | `/api/v1/projects/{projectID}/github` | Get project repo config |

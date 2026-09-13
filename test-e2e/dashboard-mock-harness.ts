@@ -139,7 +139,7 @@ function defaultBody(method: string, pathname: string): unknown {
     return { onboarding_complete: false, next_step: 'connect_github', project_id: 'project-1', has_events: true, github_connected: false, github_mode: 'app', slack_connected: false };
   }
   if (pathname === '/api/v1/onboarding/complete' && method === 'POST') return { onboarding_complete: true };
-  if (pathname === '/api/v1/github/status') return { installed: true, installation_id: 1, install_url: 'https://github.com/apps/example' };
+  if (pathname === '/api/v1/github/status') return { installed: true, installation_id: 1, install_available: true };
   if (pathname === '/api/v1/github/repos') return [];
   if (/\/fix-stats$/.test(pathname)) {
     const stats = { generated_auto: 0, generated_human: 0, prs_merged: 0, prs_closed: 0, prs_merged_auto: 0, prs_closed_auto: 0 };

@@ -15,6 +15,7 @@ RUN go mod download
 COPY packages/ingestion/ .
 RUN CGO_ENABLED=0 go build -o /ingestion .
 RUN CGO_ENABLED=0 go build -o /mint-key ./cmd/mint-key
+RUN CGO_ENABLED=0 go build -o /link-installation ./cmd/link-installation
 
 # Stage 3: Final image
 FROM alpine:3.24
@@ -27,6 +28,9 @@ COPY --from=builder /ingestion /usr/local/bin/ingestion
 # DATABASE_URL and OPSLANE_PUBLIC_INGEST_URL, so re-keying a project is
 #   docker exec <container> mint-key -project <uuid> -scope <ingest|sourcemaps>
 COPY --from=builder /mint-key /usr/local/bin/mint-key
+# Linking a GitHub App installation whose install callback never reached
+# Opslane. Dry run by default; see docs/guides/github-app.md.
+COPY --from=builder /link-installation /usr/local/bin/link-installation
 COPY --from=builder /app/db/migrations /app/db/migrations
 COPY scripts/run-migrations.sh /app/run-migrations.sh
 COPY --from=dashboard-builder /app/packages/dashboard/dist /app/dashboard

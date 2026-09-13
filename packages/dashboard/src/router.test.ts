@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createMemoryHistory, createRouter } from 'vue-router';
 import { router as appRouter, routes } from './router';
 
@@ -52,6 +52,27 @@ describe('onboarding guard', () => {
 	});
 });
 
+describe('GitHub install page', () => {
+  beforeEach(async () => {
+    localStorage.clear();
+    sessionStorage.clear();
+    // The app router is shared; start each test from another route so the push is a real navigation.
+    await appRouter.push('/login');
+    sessionStorage.clear();
+  });
+
+  it('parks /github/install for after sign-in', async () => {
+    await appRouter.push('/github/install');
+    expect(appRouter.currentRoute.value.name).toBe('login');
+    expect(sessionStorage.getItem('opslane_post_auth_path')).toBe('/github/install');
+  });
+
+  it('keeps a signed-in user who has not finished onboarding on /github/install', async () => {
+    localStorage.setItem('opslane_authed', '1');
+    await appRouter.push('/github/install');
+    expect(appRouter.currentRoute.value.name).toBe('github-install');
+  });
+});
 
 describe('digest action login', () => {
   it('preserves the project and signed intent through login', async () => {

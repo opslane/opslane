@@ -3,6 +3,8 @@ package db_test
 import (
 	"context"
 	"encoding/json"
+	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -225,5 +227,75 @@ func TestRepoCoveredByActiveInstallation_IsCaseInsensitive(t *testing.T) {
 	}
 	if ok, _ := q.RepoCoveredByActiveInstallation(ctx, orgID, "acme/web"); ok {
 		t.Fatal("a suspended installation covers nothing")
+	}
+}
+
+func TestInstallationOrgIDs_FindsRecordAndLegacyOwners(t *testing.T) {
+	pool := testPool(t)
+	q := db.New(pool)
+	ctx := context.Background()
+	owner, err := q.CreateOrg(ctx, "inst-owner-"+uuid.NewString())
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreign, err := q.CreateOrg(ctx, "inst-foreign-"+uuid.NewString())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		cleanupTenant(t, pool, owner.ID)
+		cleanupTenant(t, pool, foreign.ID)
+	})
+	installationID := time.Now().UnixNano()
+	check := func(label string, want ...string) {
+		t.Helper()
+		sort.Strings(want)
+		got, err := q.InstallationOrgIDs(ctx, installationID)
+		if err != nil || strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Fatalf("%s: InstallationOrgIDs = %v, %v; want %v", label, got, err, want)
+		}
+	}
+	check("unlinked")
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO github_app_installations (installation_id, github_org_name, github_org_id, org_id, repos)
+		 VALUES ($1, 'acme', 1, $2, '[]')`, installationID, owner.ID); err != nil {
+		t.Fatal(err)
+	}
+	check("installation record", owner.ID)
+	if err := q.SetOrgGitHubInstallation(ctx, owner.ID, installationID); err != nil {
+		t.Fatal(err)
+	}
+	check("record plus the same organization's pointer", owner.ID)
+	if err := q.SetOrgGitHubInstallation(ctx, foreign.ID, installationID); err != nil {
+		t.Fatal(err)
+	}
+	check("another organization's legacy pointer", owner.ID, foreign.ID)
+}
+
+func TestGetOrgName_DistinguishesMissingFromEmpty(t *testing.T) {
+	pool := testPool(t)
+	q := db.New(pool)
+	ctx := context.Background()
+	name := "org-name-" + uuid.NewString()
+	named, err := q.CreateOrg(ctx, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unnamed, err := q.CreateOrg(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		cleanupTenant(t, pool, named.ID)
+		cleanupTenant(t, pool, unnamed.ID)
+	})
+	if got, ok, err := q.GetOrgName(ctx, named.ID); err != nil || !ok || got != name {
+		t.Fatalf("GetOrgName(named) = %q, %v, %v; want %q, true", got, ok, err, name)
+	}
+	if got, ok, err := q.GetOrgName(ctx, unnamed.ID); err != nil || !ok || got != "" {
+		t.Fatalf("GetOrgName(empty name) = %q, %v, %v; want \"\", true", got, ok, err)
+	}
+	if got, ok, err := q.GetOrgName(ctx, uuid.NewString()); err != nil || ok || got != "" {
+		t.Fatalf("GetOrgName(missing) = %q, %v, %v; want \"\", false", got, ok, err)
 	}
 }

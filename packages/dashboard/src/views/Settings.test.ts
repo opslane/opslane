@@ -41,7 +41,7 @@ vi.mock('../api', () => ({
     error: {},
     friction: {},
   }),
-  getGitHubAppStatus: vi.fn().mockResolvedValue({ installed: false }),
+  getGitHubAppStatus: vi.fn().mockResolvedValue({ installed: false, installation_id: null, install_available: false }),
   getGitHubConfig: vi.fn().mockResolvedValue(null),
   getMe: vi.fn(),
   listEnvironments: vi.fn().mockResolvedValue({ environments: [], rollup_ready: true }),
@@ -127,7 +127,7 @@ describe('GitHub settings', () => {
 		localStorage.clear();
 		localStorage.setItem('opslane_project_id', project.id);
 		localStorage.setItem('opslane_project_name', project.name);
-		vi.mocked(getGitHubAppStatus).mockResolvedValue({ installed: true, installation_id: 7, install_url: '' });
+		vi.mocked(getGitHubAppStatus).mockResolvedValue({ installed: true, installation_id: 7, install_available: true });
 	});
 
 	afterEach(() => {
@@ -169,6 +169,25 @@ describe('GitHub settings', () => {
 		await wrapper.findAll('button').find((button) => button.text().includes('Connect repository'))!.trigger('click');
 		await flushPromises();
 		expect(getGitHubAppStatus).toHaveBeenCalledTimes(calls + 1);
+		wrapper.unmount();
+	});
+
+	it('points Install at the click-time install page', async () => {
+		vi.mocked(getGitHubAppStatus).mockResolvedValue({ installed: false, installation_id: null, install_available: true });
+		const wrapper = await mountSettings('admin');
+		await flushPromises();
+		expect(wrapper.get('[data-testid="settings-github-install"]').attributes('href')).toBe('/github/install');
+		wrapper.unmount();
+	});
+
+	it('hides Install without a GitHub App, even if an old server still sends install_url', async () => {
+		vi.mocked(getGitHubAppStatus).mockResolvedValue({
+			installed: false, installation_id: null, install_available: false,
+			install_url: 'https://github.com/apps/x/installations/new',
+		} as never);
+		const wrapper = await mountSettings('admin');
+		await flushPromises();
+		expect(wrapper.find('[data-testid="settings-github-install"]').exists()).toBe(false);
 		wrapper.unmount();
 	});
 });

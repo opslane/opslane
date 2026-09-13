@@ -272,6 +272,13 @@
       "redirect": "/login on failed refresh"
     },
     {
+      "method": "POST",
+      "path": "/api/v1/github/install-url",
+      "source": "api.ts:githubInstallUrl",
+      "pollIntervalMs": null,
+      "redirect": "/login on failed refresh"
+    },
+    {
       "method": "GET",
       "path": "/api/v1/github/repos",
       "source": "api.ts:listGitHubRepos",

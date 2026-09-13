@@ -414,7 +414,8 @@ export interface GitHubConfig {
 export interface GitHubAppStatus {
   installed: boolean;
   installation_id: number | null;
-  install_url: string;
+  /** True when this Opslane has a GitHub App; the link itself is minted on click. */
+  install_available: boolean;
 }
 
 export interface GitHubRepo {

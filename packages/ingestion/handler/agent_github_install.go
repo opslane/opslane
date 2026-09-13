@@ -1,15 +1,12 @@
 package handler
 
 import (
-	"fmt"
+	"log/slog"
 	"net/http"
-	"net/url"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
-
-	"github.com/opslane/opslane/packages/ingestion/auth"
 )
 
 // AgentGitHubInstallURL mints the GitHub App install link for an agent
@@ -46,21 +43,11 @@ func (d *Dependencies) AgentGitHubInstallURL(w http.ResponseWriter, r *http.Requ
 		writeJSONErrorCode(w, http.StatusBadRequest, "this Opslane has no GitHub App; connect a repository from Settings with a token", "github_app_not_configured")
 		return
 	}
-	state, err := generateOAuthState(d.JWTSecret)
+	installURL, err := d.startGitHubInstall(w, r, *session.OrgID)
 	if err != nil {
+		slog.Error("start agent GitHub install failed", "error", err)
 		writeJSONError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	if err := d.Queries.StoreOAuthLoginStateForOrg(r.Context(), auth.HashToken(state), *session.OrgID, UserIDFromCtx(r.Context()), time.Now().Add(30*time.Minute)); err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "internal error")
-		return
-	}
-	isSecure := r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https"
-	http.SetCookie(w, &http.Cookie{
-		Name: "__auth_state", Value: state, Path: "/auth", MaxAge: 1800,
-		HttpOnly: true, Secure: isSecure, SameSite: http.SameSiteLaxMode,
-	})
-	writeJSON(w, http.StatusOK, map[string]string{
-		"install_url": fmt.Sprintf("https://github.com/apps/%s/installations/new?state=%s", d.GitHubAppSlug, url.QueryEscape(state)),
-	})
+	writeJSON(w, http.StatusOK, map[string]string{"install_url": installURL})
 }

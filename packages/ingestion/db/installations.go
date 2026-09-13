@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -147,6 +148,35 @@ func installationOrgID(ctx context.Context, tx pgx.Tx, installationID int64) (st
 		return "", fmt.Errorf("look up legacy installation organization: %w", err)
 	}
 	return orgID, nil
+}
+
+// InstallationOrgIDs returns every Opslane organization linked to an
+// installation: the one on its installation record and any whose legacy
+// github_installation_id names it. Legacy pointers are not unique, so a caller
+// that must never move an installation checks the whole set.
+func (q *Queries) InstallationOrgIDs(ctx context.Context, installationID int64) ([]string, error) {
+	rows, err := q.pool.Query(ctx,
+		`SELECT org_id::text FROM github_app_installations
+		  WHERE installation_id = $1 AND org_id IS NOT NULL
+		 UNION
+		 SELECT id::text FROM orgs WHERE github_installation_id = $1`, installationID)
+	if err != nil {
+		return nil, fmt.Errorf("list installation organizations: %w", err)
+	}
+	defer rows.Close()
+	var orgIDs []string
+	for rows.Next() {
+		var orgID string
+		if err := rows.Scan(&orgID); err != nil {
+			return nil, fmt.Errorf("scan installation organization: %w", err)
+		}
+		orgIDs = append(orgIDs, orgID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list installation organizations: %w", err)
+	}
+	sort.Strings(orgIDs)
+	return orgIDs, nil
 }
 
 // RetireGitHubInstallation records that GitHub no longer honours an

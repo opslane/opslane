@@ -243,9 +243,9 @@ const githubError = ref('');
 const wizardAddRepoUrl = ref('');
 const githubConfig = ref<GitHubConfig | null>(null);
 const githubBusy = ref(false);
-const installHref = computed(() => safeUrl(
-  githubAppStatus.value?.install_url ?? '', GITHUB_PR_URL_OPTIONS,
-));
+// A same-origin page mints the install state when opened, so the status poll
+// below can never replace the cookie the GitHub tab depends on.
+const installHref = computed(() => (githubAppStatus.value?.install_available ? '/github/install' : ''));
 
 const githubStatusFailed = ref(false);
 async function loadGitHubStatus(): Promise<void> {
