@@ -96,7 +96,7 @@ external-database operators must run the SQL against their configured database.
 
 4. Start the new workers, then backfill each intended project and environment.
    Before a backfill, confirm the worker has `OPENAI_API_KEY`: without embeddings
-   every observation becomes a new known problem and the publish gate never asks
+   every problem a recording shows becomes a new known problem, and the publish gate never asks
    whether two problems share one fix. Backfill jobs fail on a worker without the
    key unless scheduled with `--allow-missing-embeddings`, and the command warns
    when its own environment lacks it. Start with `--since 1d` and check
