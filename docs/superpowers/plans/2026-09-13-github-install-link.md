@@ -18,12 +18,13 @@
 - No new dependencies, no migrations, no changes to the OAuth callback.
 - Commits in this repository use the identity `abhishek@opslane.com` (check `git config user.email`; if it differs, commit with `git -c user.email=abhishek@opslane.com commit …`) and end with the line `Claude-Session: https://claude.ai/code/session_01NH1xAULqRNKBh4oNBptCXv`.
 - Do not push, open a pull request, or touch production. Task 6 is for the operator only.
+- Every verification pipeline runs under `set -o pipefail`, and skip checks use `! grep -q`, so a skipped or failed test cannot read as success.
 
 ## File Structure
 
 | File | Responsibility |
 |---|---|
-| `packages/ingestion/db/installations.go` | Add `InstallationOrgID`, the pool-level form of the existing mapping lookup. |
+| `packages/ingestion/db/installations.go` | Add `InstallationOrgIDs`: every organization linked to an installation. |
 | `packages/ingestion/db/queries.go` | Add `GetOrgName`. |
 | `packages/ingestion/db/installations_test.go` | Tests for both helpers. |
 | `packages/ingestion/cmd/link-installation/main.go` | Flag parsing, environment checks, process exit codes. |
@@ -36,12 +37,13 @@
 | `packages/ingestion/handler/github_oauth.go` | Status handler stops minting and reports `install_available`. |
 | `packages/ingestion/handler/agent_github_install.go` | Uses the shared helper. |
 | `packages/ingestion/handler/routes.go` | Registers `POST /api/v1/github/install-url`. |
-| `packages/ingestion/handler/github_oauth_test.go` | Removes the test that pinned minting in status. |
+| `packages/ingestion/handler/github_oauth_test.go` | Removes the test that pinned minting in status; the WorkOS install test gets its state from the new endpoint. |
+| `packages/ingestion/handler/github_install_callback_test.go` | Route test covers the new endpoint's auth and admin checks. |
 | `packages/dashboard/src/types/api.ts`, `src/api.ts` | `install_available` field and `githubInstallUrl()`. |
 | `packages/dashboard/src/views/AgentGitHubInstall.vue` | Serves both `/agent/github/:id` and `/github/install`. |
 | `packages/dashboard/src/router.ts`, `src/route-project.ts` | New route, post-sign-in resume, project-gate exemption. |
 | `packages/dashboard/src/views/SetupWizard.vue`, `src/views/Settings.vue` | Install links point at `/github/install`. |
-| Dashboard tests, `test-e2e/dashboard-mock-harness.ts` | Updated status shape and new assertions. |
+| Dashboard tests, `src/api-github.test.ts`, `test-e2e/dashboard-mock-harness.ts` | Updated status shape, API method test, route and gate tests. |
 | `docs/reference/http-routes.md`, `docs/guides/github-app.md` | Route contract and operator instructions. |
 
 ## Test database
@@ -65,125 +67,159 @@ Shell variables do not persist between tool calls: re-export `DATABASE_URL` in e
 ### Task 1: Database lookups for the command
 
 **Files:**
-- Modify: `packages/ingestion/db/installations.go:129-151`
+- Modify: `packages/ingestion/db/installations.go` (add a method after `installationOrgID`, which ends near line 151)
 - Modify: `packages/ingestion/db/queries.go` (next to `OrgExists` at line 756)
 - Test: `packages/ingestion/db/installations_test.go`
 
 **Interfaces:**
-- Produces: `func (q *Queries) InstallationOrgID(ctx context.Context, installationID int64) (string, error)` returns the mapped organization ID from the rich row, else from the legacy `orgs.github_installation_id` pointer, else `""`.
-- Produces: `func (q *Queries) GetOrgName(ctx context.Context, orgID string) (string, error)` returns `""` with a nil error when the organization does not exist.
+- Produces: `func (q *Queries) InstallationOrgIDs(ctx context.Context, installationID int64) ([]string, error)` returns every organization linked to the installation: the `org_id` on its `github_app_installations` row and every organization whose legacy `github_installation_id` names it. The result is de-duplicated and sorted; empty means unlinked. Legacy pointers are not unique, which is why this returns a set. The existing transaction helper `installationOrgID` stays unchanged.
+- Produces: `func (q *Queries) GetOrgName(ctx context.Context, orgID string) (string, bool, error)` returns the name and whether the organization exists, so an existing organization with an empty name is not mistaken for a missing one.
 
 - [ ] **Step 1: Write the failing tests**
 
-Append to `packages/ingestion/db/installations_test.go` (it is `package db_test` and already imports `context`, `testing`, `time`, `uuid`, and `db`):
+Append to `packages/ingestion/db/installations_test.go` (`package db_test`; it already imports `context`, `testing`, `time`, `uuid`, and `db`). Add `sort` and `strings` to its imports.
 
 ```go
-func TestInstallationOrgID_RichRowLegacyPointerAndUnmapped(t *testing.T) {
+func TestInstallationOrgIDs_FindsRecordAndLegacyOwners(t *testing.T) {
 	pool := testPool(t)
 	q := db.New(pool)
 	ctx := context.Background()
-	rich, err := q.CreateOrg(ctx, "inst-owner-rich-"+uuid.NewString())
+	owner, err := q.CreateOrg(ctx, "inst-owner-"+uuid.NewString())
 	if err != nil {
 		t.Fatal(err)
 	}
-	legacy, err := q.CreateOrg(ctx, "inst-owner-legacy-"+uuid.NewString())
+	foreign, err := q.CreateOrg(ctx, "inst-foreign-"+uuid.NewString())
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		cleanupTenant(t, pool, rich.ID)
-		cleanupTenant(t, pool, legacy.ID)
+		cleanupTenant(t, pool, owner.ID)
+		cleanupTenant(t, pool, foreign.ID)
 	})
-	richID := time.Now().UnixNano()
-	legacyID := richID + 1
-	unmappedID := richID + 2
-	if _, err := pool.Exec(ctx,
-		`INSERT INTO github_app_installations (installation_id, github_org_name, github_org_id, org_id, repos)
-		 VALUES ($1, 'acme', 1, $2, '[]')`, richID, rich.ID); err != nil {
-		t.Fatal(err)
-	}
-	if err := q.SetOrgGitHubInstallation(ctx, legacy.ID, legacyID); err != nil {
-		t.Fatal(err)
-	}
-	for _, c := range []struct {
-		id   int64
-		want string
-	}{{richID, rich.ID}, {legacyID, legacy.ID}, {unmappedID, ""}} {
-		got, err := q.InstallationOrgID(ctx, c.id)
-		if err != nil || got != c.want {
-			t.Fatalf("InstallationOrgID(%d) = %q, %v; want %q", c.id, got, err, c.want)
+	installationID := time.Now().UnixNano()
+	check := func(label string, want ...string) {
+		t.Helper()
+		sort.Strings(want)
+		got, err := q.InstallationOrgIDs(ctx, installationID)
+		if err != nil || strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Fatalf("%s: InstallationOrgIDs = %v, %v; want %v", label, got, err, want)
 		}
 	}
+	check("unlinked")
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO github_app_installations (installation_id, github_org_name, github_org_id, org_id, repos)
+		 VALUES ($1, 'acme', 1, $2, '[]')`, installationID, owner.ID); err != nil {
+		t.Fatal(err)
+	}
+	check("installation record", owner.ID)
+	if err := q.SetOrgGitHubInstallation(ctx, owner.ID, installationID); err != nil {
+		t.Fatal(err)
+	}
+	check("record plus the same organization's pointer", owner.ID)
+	if err := q.SetOrgGitHubInstallation(ctx, foreign.ID, installationID); err != nil {
+		t.Fatal(err)
+	}
+	check("another organization's legacy pointer", owner.ID, foreign.ID)
 }
 
-func TestGetOrgName(t *testing.T) {
+func TestGetOrgName_DistinguishesMissingFromEmpty(t *testing.T) {
 	pool := testPool(t)
 	q := db.New(pool)
 	ctx := context.Background()
 	name := "org-name-" + uuid.NewString()
-	org, err := q.CreateOrg(ctx, name)
+	named, err := q.CreateOrg(ctx, name)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { cleanupTenant(t, pool, org.ID) })
-	if got, err := q.GetOrgName(ctx, org.ID); err != nil || got != name {
-		t.Fatalf("GetOrgName(existing) = %q, %v; want %q", got, err, name)
+	unnamed, err := q.CreateOrg(ctx, "")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got, err := q.GetOrgName(ctx, uuid.NewString()); err != nil || got != "" {
-		t.Fatalf("GetOrgName(missing) = %q, %v; want empty", got, err)
+	t.Cleanup(func() {
+		cleanupTenant(t, pool, named.ID)
+		cleanupTenant(t, pool, unnamed.ID)
+	})
+	if got, ok, err := q.GetOrgName(ctx, named.ID); err != nil || !ok || got != name {
+		t.Fatalf("GetOrgName(named) = %q, %v, %v; want %q, true", got, ok, err, name)
+	}
+	if got, ok, err := q.GetOrgName(ctx, unnamed.ID); err != nil || !ok || got != "" {
+		t.Fatalf("GetOrgName(empty name) = %q, %v, %v; want \"\", true", got, ok, err)
+	}
+	if got, ok, err := q.GetOrgName(ctx, uuid.NewString()); err != nil || ok || got != "" {
+		t.Fatalf("GetOrgName(missing) = %q, %v, %v; want \"\", false", got, ok, err)
 	}
 }
 ```
+
+If `CreateOrg` rejects an empty name, create that row with `pool.QueryRow(ctx, "INSERT INTO orgs (name) VALUES ('') RETURNING id").Scan(&id)` instead.
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cd packages/ingestion && export DATABASE_URL=… && go test -count=1 -run 'TestInstallationOrgID_|TestGetOrgName' ./db/`
-Expected: build failure, `q.InstallationOrgID undefined` and `q.GetOrgName undefined`.
+Run: `cd packages/ingestion && export DATABASE_URL="postgres://opslane:opslane_dev@localhost:5434/link_installation_test?sslmode=disable" && go test -count=1 -run 'TestInstallationOrgIDs_|TestGetOrgName_' ./db/`
+Expected: build failure, `q.InstallationOrgIDs undefined` and `q.GetOrgName undefined`.
 
 - [ ] **Step 3: Implement**
 
-In `packages/ingestion/db/installations.go`, change the helper to accept either a transaction or the pool, and add the exported method directly above it. `projectQueryRower` is the existing `QueryRow`-only interface in `queries.go`; both `pgx.Tx` and `*pgxpool.Pool` satisfy it.
+In `packages/ingestion/db/installations.go`, after `installationOrgID` (add `sort` to the imports):
 
 ```go
-// InstallationOrgID returns the Opslane organization an installation is linked
-// to: the rich row's org_id, else the oldest organization whose legacy pointer
-// names it, else "".
-func (q *Queries) InstallationOrgID(ctx context.Context, installationID int64) (string, error) {
-	return installationOrgID(ctx, q.pool, installationID)
+// InstallationOrgIDs returns every Opslane organization linked to an
+// installation: the one on its installation record and any whose legacy
+// github_installation_id names it. Legacy pointers are not unique, so a caller
+// that must never move an installation checks the whole set.
+func (q *Queries) InstallationOrgIDs(ctx context.Context, installationID int64) ([]string, error) {
+	rows, err := q.pool.Query(ctx,
+		`SELECT org_id::text FROM github_app_installations
+		  WHERE installation_id = $1 AND org_id IS NOT NULL
+		 UNION
+		 SELECT id::text FROM orgs WHERE github_installation_id = $1`, installationID)
+	if err != nil {
+		return nil, fmt.Errorf("list installation organizations: %w", err)
+	}
+	defer rows.Close()
+	var orgIDs []string
+	for rows.Next() {
+		var orgID string
+		if err := rows.Scan(&orgID); err != nil {
+			return nil, fmt.Errorf("scan installation organization: %w", err)
+		}
+		orgIDs = append(orgIDs, orgID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list installation organizations: %w", err)
+	}
+	sort.Strings(orgIDs)
+	return orgIDs, nil
 }
-
-func installationOrgID(ctx context.Context, tx projectQueryRower, installationID int64) (string, error) {
 ```
-
-The body of `installationOrgID` stays unchanged. `PersistInstallation` still passes its `pgx.Tx`.
 
 In `packages/ingestion/db/queries.go`, after `OrgExists`:
 
 ```go
-// GetOrgName returns the organization's name, or "" when it does not exist.
-func (q *Queries) GetOrgName(ctx context.Context, orgID string) (string, error) {
+// GetOrgName returns the organization's name and whether it exists.
+func (q *Queries) GetOrgName(ctx context.Context, orgID string) (string, bool, error) {
 	var name string
 	err := q.pool.QueryRow(ctx, `SELECT name FROM orgs WHERE id = $1`, orgID).Scan(&name)
 	if err == pgx.ErrNoRows {
-		return "", nil
+		return "", false, nil
 	}
 	if err != nil {
-		return "", fmt.Errorf("get org name: %w", err)
+		return "", false, fmt.Errorf("get org name: %w", err)
 	}
-	return name, nil
+	return name, true, nil
 }
 ```
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `cd packages/ingestion && export DATABASE_URL=… && go test -count=1 -v -run 'TestInstallationOrgID_|TestGetOrgName|TestPersistInstallation|TestRetireGitHubInstallation' ./db/ 2>&1 | tee /tmp/claude-1000/task1.log; grep -c -- '--- SKIP' /tmp/claude-1000/task1.log`
-Expected: every test PASS, and the skip count prints `0`.
+Run: `cd packages/ingestion && export DATABASE_URL="postgres://opslane:opslane_dev@localhost:5434/link_installation_test?sslmode=disable" && set -o pipefail && go test -count=1 -v -run 'TestInstallationOrgIDs_|TestGetOrgName_|TestPersistInstallation|TestRetireGitHubInstallation' ./db/ 2>&1 | tee /tmp/claude-1000/task1.log && ! grep -q -- '--- SKIP' /tmp/claude-1000/task1.log && echo TASK1-OK`
+Expected: every test PASS and the last line is `TASK1-OK`.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add packages/ingestion/db/installations.go packages/ingestion/db/queries.go packages/ingestion/db/installations_test.go
-git commit -m "feat(db): look up an installation's organization and an organization's name outside a transaction"
+git commit -m "feat(db): list every organization linked to an installation and look up an organization's name"
 ```
 
 ---
@@ -199,7 +235,7 @@ git commit -m "feat(db): look up an installation's organization and an organizat
 - Modify: `docs/guides/github-app.md` (end of the "GitHub App mode" section, before "## Point a project at a repo")
 
 **Interfaces:**
-- Consumes: `db.Queries.InstallationOrgID`, `db.Queries.GetOrgName` (Task 1); existing `gh.GenerateAppJWT`, `gh.GetApp`, `gh.VerifyInstallation`, `gh.GetInstallationToken`, `gh.ListInstallationRepos`, `gh.ErrInstallationGone`, `gh.ErrInstallationSuspended`, `db.Queries.GetOrgGitHubInstallation`, `GetProjectByOrgID`, `ListProjectsByOrg`, `PersistInstallation`, `SetProjectGitHubConfig`, `OrgHasActiveGitHubInstallation`, `RepoCoveredByActiveInstallation`, `db.ErrInstallationOrgConflict`.
+- Consumes: `db.Queries.InstallationOrgIDs`, `db.Queries.GetOrgName` (Task 1); existing `gh.GenerateAppJWT`, `gh.GetApp`, `gh.VerifyInstallation`, `gh.GetInstallationToken`, `gh.ListInstallationRepos`, `gh.ErrInstallationGone`, `gh.ErrInstallationSuspended`, `db.Queries.GetOrgGitHubInstallation`, `GetProjectByOrgID`, `ListProjectsByOrg`, `PersistInstallation`, `SetProjectGitHubConfig`, `OrgHasActiveGitHubInstallation`, `RepoCoveredByActiveInstallation`, `db.ErrInstallationOrgConflict`.
 - Produces: binary `/usr/local/bin/link-installation` in the ingestion image; exit 0 on success or dry run, 1 on a refusal or failure, 2 on usage or missing environment.
 
 - [ ] **Step 1: Write the failing flag tests**
@@ -430,40 +466,45 @@ func (f fixture) run(c config) (string, error) {
 	return out.String(), err
 }
 
-// assertNotLinked proves no installation write reached this organization.
-func (f fixture) assertNotLinked(t *testing.T) {
-	t.Helper()
-	ctx := context.Background()
-	var rows int
-	if err := f.pool.QueryRow(ctx,
-		`SELECT count(*) FROM github_app_installations WHERE installation_id = $1 AND org_id = $2`,
-		f.installationID, f.orgID).Scan(&rows); err != nil {
-		t.Fatal(err)
-	}
-	pointer, err := f.q.GetOrgGitHubInstallation(ctx, f.orgID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if rows != 0 || pointer != 0 {
-		t.Fatalf("expected no link: installation rows=%d org pointer=%d", rows, pointer)
-	}
+// linkState is everything a link can change. Dry runs and refusals must leave
+// it exactly as it was.
+type linkState struct {
+	installationRows int
+	landedRows       int
+	projectJobs      int
+	orgPointer       int64
+	projectRepo      string
+	defaultBranch    string
 }
 
-func (f fixture) projectRepo(t *testing.T) string {
+func (f fixture) state(t *testing.T) linkState {
 	t.Helper()
-	project, err := f.q.GetProjectByOrgID(context.Background(), f.orgID, f.projectID)
-	if err != nil || project == nil {
-		t.Fatalf("project=%v err=%v", project, err)
+	var s linkState
+	var repo, branch *string
+	if err := f.pool.QueryRow(context.Background(), `SELECT
+		(SELECT count(*) FROM github_app_installations WHERE installation_id = $1),
+		(SELECT count(*) FROM installation_landed WHERE installation_id = $1),
+		(SELECT count(*) FROM error_group_jobs WHERE project_id = $3::uuid),
+		COALESCE((SELECT github_installation_id FROM orgs WHERE id = $2::uuid), 0),
+		(SELECT github_repo FROM projects WHERE id = $3::uuid),
+		(SELECT default_branch FROM projects WHERE id = $3::uuid)`,
+		f.installationID, f.orgID, f.projectID,
+	).Scan(&s.installationRows, &s.landedRows, &s.projectJobs, &s.orgPointer, &repo, &branch); err != nil {
+		t.Fatal(err)
 	}
-	if project.GithubRepo == nil {
-		return ""
+	if repo != nil {
+		s.projectRepo = *repo
 	}
-	return *project.GithubRepo
+	if branch != nil {
+		s.defaultBranch = *branch
+	}
+	return s
 }
 
 func TestDryRunVerifiesAndWritesNothing(t *testing.T) {
 	f := newFixture(t)
 	fakeGitHub{appID: 4242, login: "agentwebpro", repos: oneRepo}.serve(t, f.installationID)
+	before := f.state(t)
 	out, err := f.run(f.config(nil))
 	if err != nil {
 		t.Fatalf("run: %v\n%s", err, out)
@@ -473,15 +514,15 @@ func TestDryRunVerifiesAndWritesNothing(t *testing.T) {
 			t.Fatalf("output is missing %q:\n%s", want, out)
 		}
 	}
-	f.assertNotLinked(t)
-	if repo := f.projectRepo(t); repo != "" {
-		t.Fatalf("dry run connected the project to %q", repo)
+	if after := f.state(t); after != before {
+		t.Fatalf("dry run changed state: before %+v, after %+v", before, after)
 	}
 }
 
 func TestApplyLinksInstallationAndConnectsProject(t *testing.T) {
 	f := newFixture(t)
 	fakeGitHub{appID: 4242, login: "AgentWebPro", repos: oneRepo}.serve(t, f.installationID)
+	before := f.state(t)
 	out, err := f.run(f.config(func(c *config) { c.Apply = true }))
 	if err != nil {
 		t.Fatalf("run: %v\n%s", err, out)
@@ -490,38 +531,36 @@ func TestApplyLinksInstallationAndConnectsProject(t *testing.T) {
 	if active, err := f.q.OrgHasActiveGitHubInstallation(ctx, f.orgID); err != nil || !active {
 		t.Fatalf("active=%v err=%v", active, err)
 	}
-	if pointer, err := f.q.GetOrgGitHubInstallation(ctx, f.orgID); err != nil || pointer != f.installationID {
-		t.Fatalf("pointer=%d err=%v", pointer, err)
-	}
 	if covered, err := f.q.RepoCoveredByActiveInstallation(ctx, f.orgID, "agentwebpro/agentweb"); err != nil || !covered {
 		t.Fatalf("covered=%v err=%v", covered, err)
 	}
-	if repo := f.projectRepo(t); repo != "agentwebpro/agentweb" {
-		t.Fatalf("project repo=%q", repo)
+	want := linkState{
+		installationRows: 1, landedRows: 1, projectJobs: before.projectJobs + 1, orgPointer: f.installationID,
+		projectRepo: "agentwebpro/agentweb", defaultBranch: "main",
 	}
-	var landed int
-	if err := f.pool.QueryRow(ctx,
-		`SELECT count(*) FROM installation_landed WHERE installation_id = $1 AND org_id = $2`,
-		f.installationID, f.orgID).Scan(&landed); err != nil || landed != 1 {
-		t.Fatalf("installation_landed rows=%d err=%v", landed, err)
+	if got := f.state(t); got != want {
+		t.Fatalf("state after apply = %+v, want %+v", got, want)
 	}
 	if out, err := f.run(f.config(func(c *config) { c.Apply = true })); err != nil {
 		t.Fatalf("re-running -apply failed: %v\n%s", err, out)
+	}
+	if again := f.state(t); again.installationRows != 1 || again.orgPointer != f.installationID || again.projectRepo != want.projectRepo {
+		t.Fatalf("state after re-run = %+v", again)
 	}
 }
 
 func TestApplyWithoutProjectLinksOnly(t *testing.T) {
 	f := newFixture(t)
 	fakeGitHub{appID: 4242, login: "agentwebpro", repos: twoRepos}.serve(t, f.installationID)
+	before := f.state(t)
 	out, err := f.run(f.config(func(c *config) { c.ProjectID = ""; c.Apply = true }))
 	if err != nil {
 		t.Fatalf("run: %v\n%s", err, out)
 	}
-	if active, err := f.q.OrgHasActiveGitHubInstallation(context.Background(), f.orgID); err != nil || !active {
-		t.Fatalf("active=%v err=%v", active, err)
-	}
-	if repo := f.projectRepo(t); repo != "" {
-		t.Fatalf("project was connected to %q without -project", repo)
+	got := f.state(t)
+	if got.installationRows != 1 || got.orgPointer != f.installationID ||
+		got.projectRepo != before.projectRepo || got.projectJobs != before.projectJobs {
+		t.Fatalf("state after apply without -project = %+v (before %+v)", got, before)
 	}
 }
 
@@ -532,14 +571,21 @@ func TestApplyWithRepoUsesGitHubSpelling(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v\n%s", err, out)
 	}
-	project, err := f.q.GetProjectByOrgID(context.Background(), f.orgID, f.projectID)
-	if err != nil || project == nil || project.GithubRepo == nil || *project.GithubRepo != "agentwebpro/docs" ||
-		project.DefaultBranch == nil || *project.DefaultBranch != "trunk" {
-		t.Fatalf("project=%+v err=%v", project, err)
+	if got := f.state(t); got.projectRepo != "agentwebpro/docs" || got.defaultBranch != "trunk" {
+		t.Fatalf("state = %+v", got)
 	}
 }
 
 func TestRefusalsWriteNothing(t *testing.T) {
+	otherOrg := func(t *testing.T, f fixture) string {
+		t.Helper()
+		other, err := f.q.CreateOrg(context.Background(), "link-installation-other-"+uuid.NewString())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { cleanupOrg(t, f.pool, other.ID) })
+		return other.ID
+	}
 	cases := []struct {
 		name    string
 		github  fakeGitHub
@@ -559,16 +605,17 @@ func TestRefusalsWriteNothing(t *testing.T) {
 			mutate: func(c *config) { c.OrgID = uuid.NewString(); c.ProjectID = "" }, wantErr: "does not exist"},
 		{name: "project outside the organization", github: fakeGitHub{appID: 4242, login: "agentwebpro", repos: oneRepo},
 			mutate: func(c *config) { c.ProjectID = uuid.NewString() }, wantErr: "is not in organization"},
-		{name: "installation linked to another organization", github: fakeGitHub{appID: 4242, login: "agentwebpro", repos: oneRepo},
+		{name: "installation record in another organization", github: fakeGitHub{appID: 4242, login: "agentwebpro", repos: oneRepo},
 			seed: func(t *testing.T, f fixture) {
-				other, err := f.q.CreateOrg(context.Background(), "link-installation-other-"+uuid.NewString())
-				if err != nil {
-					t.Fatal(err)
-				}
-				t.Cleanup(func() { cleanupOrg(t, f.pool, other.ID) })
 				if _, err := f.pool.Exec(context.Background(),
 					`INSERT INTO github_app_installations (installation_id, github_org_name, github_org_id, org_id, repos)
-					 VALUES ($1, 'agentwebpro', 77, $2, '[]')`, f.installationID, other.ID); err != nil {
+					 VALUES ($1, 'agentwebpro', 77, $2, '[]')`, f.installationID, otherOrg(t, f)); err != nil {
+					t.Fatal(err)
+				}
+			}, wantErr: "already linked to organization"},
+		{name: "another organization's legacy pointer", github: fakeGitHub{appID: 4242, login: "agentwebpro", repos: oneRepo},
+			seed: func(t *testing.T, f fixture) {
+				if err := f.q.SetOrgGitHubInstallation(context.Background(), otherOrg(t, f), f.installationID); err != nil {
 					t.Fatal(err)
 				}
 			}, wantErr: "already linked to organization"},
@@ -587,7 +634,7 @@ func TestRefusalsWriteNothing(t *testing.T) {
 			if tc.seed != nil {
 				tc.seed(t, f)
 			}
-			repoBefore := f.projectRepo(t)
+			before := f.state(t)
 			out, err := f.run(f.config(func(c *config) {
 				c.Apply = true
 				if tc.mutate != nil {
@@ -597,9 +644,8 @@ func TestRefusalsWriteNothing(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 				t.Fatalf("err=%v, want it to contain %q\n%s", err, tc.wantErr, out)
 			}
-			f.assertNotLinked(t)
-			if repo := f.projectRepo(t); repo != repoBefore {
-				t.Fatalf("project repo changed from %q to %q", repoBefore, repo)
+			if after := f.state(t); after != before {
+				t.Fatalf("refusal changed state: before %+v, after %+v", before, after)
 			}
 		})
 	}
@@ -608,7 +654,7 @@ func TestRefusalsWriteNothing(t *testing.T) {
 
 - [ ] **Step 3: Run the tests to verify they fail**
 
-Run: `cd packages/ingestion && export DATABASE_URL=… && go test -count=1 ./cmd/link-installation/`
+Run: `cd packages/ingestion && export DATABASE_URL="postgres://opslane:opslane_dev@localhost:5434/link_installation_test?sslmode=disable" && go test -count=1 ./cmd/link-installation/`
 Expected: build failure, `undefined: parseArgs`, `undefined: config`, `undefined: run`.
 
 - [ ] **Step 4: Implement `main.go`**
@@ -780,28 +826,34 @@ func run(ctx context.Context, q *db.Queries, appID string, privateKey []byte, cf
 		fmt.Fprintf(out, "  - %s (default branch %s)\n", repo.FullName, repo.DefaultBranch)
 	}
 
-	orgName, err := q.GetOrgName(ctx, cfg.OrgID)
+	orgName, orgExists, err := q.GetOrgName(ctx, cfg.OrgID)
 	if err != nil {
 		return err
 	}
-	if orgName == "" {
+	if !orgExists {
 		return fmt.Errorf("organization %s does not exist", cfg.OrgID)
 	}
-	fmt.Fprintf(out, "Organization:  %s (%s)\n", orgName, cfg.OrgID)
+	fmt.Fprintf(out, "Organization:  %q (%s)\n", orgName, cfg.OrgID)
 
-	linkedOrg, err := q.InstallationOrgID(ctx, cfg.InstallationID)
+	// Legacy organization pointers are not unique, so check every organization
+	// that names this installation, not only the first.
+	linkedOrgs, err := q.InstallationOrgIDs(ctx, cfg.InstallationID)
 	if err != nil {
 		return err
 	}
-	if linkedOrg != "" && linkedOrg != cfg.OrgID {
-		return fmt.Errorf("installation %d is already linked to organization %s; refusing to move it", cfg.InstallationID, linkedOrg)
+	alreadyLinked := false
+	for _, linked := range linkedOrgs {
+		if linked != cfg.OrgID {
+			return fmt.Errorf("installation %d is already linked to organization %s; refusing to move it", cfg.InstallationID, linked)
+		}
+		alreadyLinked = true
 	}
 	current, err := q.GetOrgGitHubInstallation(ctx, cfg.OrgID)
 	if err != nil {
 		return err
 	}
 	switch {
-	case linkedOrg == cfg.OrgID:
+	case alreadyLinked:
 		fmt.Fprintln(out, "Status:        already linked to this organization; -apply refreshes its repositories")
 	case current != 0 && current != cfg.InstallationID:
 		fmt.Fprintf(out, "Status:        the organization's primary installation changes from %d to %d\n", current, cfg.InstallationID)
@@ -880,12 +932,21 @@ func run(ctx context.Context, q *db.Queries, appID string, privateKey []byte, cf
 		fmt.Fprintf(out, "Connected project %s to %s.\n", cfg.ProjectID, target.FullName)
 	}
 
+	// Read back this installation specifically, not just "some installation".
+	linkedOrgs, err = q.InstallationOrgIDs(ctx, cfg.InstallationID)
+	if err != nil {
+		return err
+	}
+	pointer, err := q.GetOrgGitHubInstallation(ctx, cfg.OrgID)
+	if err != nil {
+		return err
+	}
 	active, err := q.OrgHasActiveGitHubInstallation(ctx, cfg.OrgID)
 	if err != nil {
 		return err
 	}
-	if !active {
-		return errors.New("read-back failed: the organization still has no active installation")
+	if len(linkedOrgs) != 1 || linkedOrgs[0] != cfg.OrgID || pointer != cfg.InstallationID || !active {
+		return fmt.Errorf("read-back failed: installation organizations %v, organization installation %d, active %v", linkedOrgs, pointer, active)
 	}
 	if target != nil {
 		covered, err := q.RepoCoveredByActiveInstallation(ctx, cfg.OrgID, target.FullName)
@@ -936,8 +997,8 @@ If `go vet` flags an unused import in either file, remove it; the code above is 
 
 - [ ] **Step 6: Run the tests to verify they pass**
 
-Run: `cd packages/ingestion && export DATABASE_URL=… && go vet ./cmd/link-installation/ && go test -count=1 -v ./cmd/link-installation/ 2>&1 | tee /tmp/claude-1000/task2.log; grep -c -- '--- SKIP' /tmp/claude-1000/task2.log`
-Expected: every test PASS, including all `TestRefusalsWriteNothing` subtests, and the skip count prints `0`.
+Run: `cd packages/ingestion && export DATABASE_URL="postgres://opslane:opslane_dev@localhost:5434/link_installation_test?sslmode=disable" && set -o pipefail && go vet ./cmd/link-installation/ && go test -count=1 -v ./cmd/link-installation/ 2>&1 | tee /tmp/claude-1000/task2.log && ! grep -q -- '--- SKIP' /tmp/claude-1000/task2.log && echo TASK2-OK`
+Expected: every test PASS, including all `TestRefusalsWriteNothing` subtests, and the last line is `TASK2-OK`.
 
 - [ ] **Step 7: Ship the binary in the image**
 
@@ -994,12 +1055,13 @@ git commit -m "feat(ingestion): add link-installation to link a GitHub App insta
 - Modify: `packages/ingestion/handler/github_oauth.go:741-801` (`GetGitHubAppStatus`)
 - Modify: `packages/ingestion/handler/agent_github_install.go:49-65`
 - Modify: `packages/ingestion/handler/routes.go:196`
-- Modify: `packages/ingestion/handler/github_oauth_test.go:257` (delete `TestGetGitHubAppStatusUsesSharedOAuthState`)
+- Modify: `packages/ingestion/handler/github_oauth_test.go` (delete `TestGetGitHubAppStatusUsesSharedOAuthState` at line 257; update `TestWorkosInstallCallbackPreservesActiveOrgAndBypassesProvider` near line 390)
+- Modify: `packages/ingestion/handler/github_install_callback_test.go` (`TestGitHubInstallRoutesRequireCloudAdmin`, near line 220)
 - Modify: `docs/reference/http-routes.md:126`
 
 **Interfaces:**
 - Produces: `POST /api/v1/github/install-url` returning 200 `{"install_url": string}` with a `Set-Cookie: __auth_state`, or 400 `{"code":"github_app_not_configured"}`, or 401.
-- Produces: `GET /api/v1/github/status` returning `{"installed": bool, "installation_id": number|null, "install_available": bool}`.
+- Produces: `GET /api/v1/github/status` returning `{"installed": bool, "installation_id": number|null, "install_available": bool}` with `Cache-Control: no-store`.
 - Produces: `func (d *Dependencies) startGitHubInstall(w http.ResponseWriter, r *http.Request, orgID string) (string, error)`.
 
 - [ ] **Step 1: Write the failing tests**
@@ -1044,6 +1106,17 @@ func TestGitHubStatusPollingDoesNotReplaceInstallState(t *testing.T) {
 		reqCtx = context.WithValue(reqCtx, ctxUserID, user.ID)
 		return req.WithContext(reqCtx)
 	}
+	// Scoped to this org and user: other packages' tests share the database.
+	stateRows := func() int {
+		t.Helper()
+		var n int
+		if err := pool.QueryRow(ctx,
+			`SELECT count(*) FROM oauth_login_states WHERE target_org_id = $1 OR initiating_user_id = $2`,
+			org.ID, user.ID).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
 
 	start := httptest.NewRecorder()
 	deps.GitHubInstallURL(start, asUser(httptest.NewRequest(http.MethodPost, "/api/v1/github/install-url", nil)))
@@ -1051,7 +1124,7 @@ func TestGitHubStatusPollingDoesNotReplaceInstallState(t *testing.T) {
 		t.Fatalf("install-url code=%d body=%q", start.Code, start.Body.String())
 	}
 	if got := start.Header().Get("Cache-Control"); got != "no-store" {
-		t.Fatalf("Cache-Control=%q", got)
+		t.Fatalf("install-url Cache-Control=%q", got)
 	}
 	var body struct {
 		InstallURL string `json:"install_url"`
@@ -1073,7 +1146,8 @@ func TestGitHubStatusPollingDoesNotReplaceInstallState(t *testing.T) {
 			cookie = c
 		}
 	}
-	if cookie == nil || cookie.Value != state || cookie.Path != "/auth" || cookie.MaxAge != 1800 || !cookie.HttpOnly {
+	if cookie == nil || cookie.Value != state || cookie.Path != "/auth" || cookie.MaxAge != 1800 ||
+		!cookie.HttpOnly || cookie.SameSite != http.SameSiteLaxMode || cookie.Secure {
 		t.Fatalf("state cookie=%+v", cookie)
 	}
 	details, err := q.GetOAuthLoginStateDetails(ctx, auth.HashToken(state))
@@ -1081,7 +1155,16 @@ func TestGitHubStatusPollingDoesNotReplaceInstallState(t *testing.T) {
 		details.InitiatingUserID == nil || *details.InitiatingUserID != user.ID {
 		t.Fatalf("stored state=%+v err=%v", details, err)
 	}
+	var expiresAt time.Time
+	if err := pool.QueryRow(ctx, `SELECT expires_at FROM oauth_login_states WHERE state_hash = $1`,
+		auth.HashToken(state)).Scan(&expiresAt); err != nil {
+		t.Fatal(err)
+	}
+	if lifetime := time.Until(expiresAt); lifetime < 29*time.Minute || lifetime > 31*time.Minute {
+		t.Fatalf("state lifetime=%v, want 30 minutes", lifetime)
+	}
 
+	rowsBeforePolling := stateRows()
 	for i := 0; i < 3; i++ {
 		poll := httptest.NewRecorder()
 		deps.GetGitHubAppStatus(poll, asUser(httptest.NewRequest(http.MethodGet, "/api/v1/github/status", nil)))
@@ -1091,33 +1174,47 @@ func TestGitHubStatusPollingDoesNotReplaceInstallState(t *testing.T) {
 		if cookies := poll.Result().Cookies(); len(cookies) != 0 {
 			t.Fatalf("status poll set cookies: %v", cookies)
 		}
+		if got := poll.Header().Get("Cache-Control"); got != "no-store" {
+			t.Fatalf("status Cache-Control=%q", got)
+		}
 		var status map[string]any
 		if err := json.Unmarshal(poll.Body.Bytes(), &status); err != nil {
 			t.Fatal(err)
 		}
-		if status["install_available"] != true || status["installed"] != false {
+		installationID, hasInstallationID := status["installation_id"]
+		if status["install_available"] != true || status["installed"] != false || !hasInstallationID || installationID != nil {
 			t.Fatalf("status=%v", status)
 		}
 		if _, ok := status["install_url"]; ok {
 			t.Fatalf("status still returns install_url: %v", status)
 		}
 	}
-	var states int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM oauth_login_states WHERE target_org_id = $1`, org.ID).Scan(&states); err != nil {
-		t.Fatal(err)
-	}
-	if states != 1 {
-		t.Fatalf("oauth_login_states rows=%d, want only the one install-url minted", states)
+	if got := stateRows(); got != rowsBeforePolling {
+		t.Fatalf("status polls wrote install state: %d rows before, %d after", rowsBeforePolling, got)
 	}
 	if details, err := q.GetOAuthLoginStateDetails(ctx, auth.HashToken(state)); err != nil || details == nil {
 		t.Fatalf("clicked state no longer valid after polling: %+v err=%v", details, err)
 	}
 
+	secureReq := asUser(httptest.NewRequest(http.MethodPost, "/api/v1/github/install-url", nil))
+	secureReq.Header.Set("X-Forwarded-Proto", "https")
+	secureStart := httptest.NewRecorder()
+	deps.GitHubInstallURL(secureStart, secureReq)
+	secure := false
+	for _, c := range secureStart.Result().Cookies() {
+		if c.Name == "__auth_state" {
+			secure = c.Secure
+		}
+	}
+	if secureStart.Code != http.StatusOK || !secure {
+		t.Fatalf("HTTPS install-url code=%d secure cookie=%v", secureStart.Code, secure)
+	}
+
 	noApp := &Dependencies{Queries: q, JWTSecret: []byte("secret")}
-	poll := httptest.NewRecorder()
-	noApp.GetGitHubAppStatus(poll, asUser(httptest.NewRequest(http.MethodGet, "/api/v1/github/status", nil)))
-	if !strings.Contains(poll.Body.String(), `"install_available":false`) {
-		t.Fatalf("status without an App slug=%q", poll.Body.String())
+	noAppPoll := httptest.NewRecorder()
+	noApp.GetGitHubAppStatus(noAppPoll, asUser(httptest.NewRequest(http.MethodGet, "/api/v1/github/status", nil)))
+	if !strings.Contains(noAppPoll.Body.String(), `"install_available":false`) {
+		t.Fatalf("status without an App slug=%q", noAppPoll.Body.String())
 	}
 }
 
@@ -1149,7 +1246,7 @@ func TestGitHubInstallURLRequiresUser(t *testing.T) {
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cd packages/ingestion && export DATABASE_URL=… && go test -count=1 -run 'TestGitHubStatusPolling|TestGitHubInstallURL' ./handler/`
+Run: `cd packages/ingestion && export DATABASE_URL="postgres://opslane:opslane_dev@localhost:5434/link_installation_test?sslmode=disable" && go test -count=1 -run 'TestGitHubStatusPolling|TestGitHubInstallURL' ./handler/`
 Expected: build failure, `deps.GitHubInstallURL undefined`.
 
 - [ ] **Step 3: Implement the helper and handler**
@@ -1253,6 +1350,7 @@ func (d *Dependencies) GetGitHubAppStatus(w http.ResponseWriter, r *http.Request
 	if active && installationID > 0 {
 		resp.InstallationID = &installationID
 	}
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
 }
@@ -1260,7 +1358,83 @@ func (d *Dependencies) GetGitHubAppStatus(w http.ResponseWriter, r *http.Request
 
 Delete `TestGetGitHubAppStatusUsesSharedOAuthState` from `packages/ingestion/handler/github_oauth_test.go`; the new test replaces it. Remove imports the deletion leaves unused in either file (`go build` names them).
 
-- [ ] **Step 5: Share the helper with the agent endpoint**
+- [ ] **Step 5: Update the two existing tests that relied on status minting**
+
+`TestWorkosInstallCallbackPreservesActiveOrgAndBypassesProvider` in `packages/ingestion/handler/github_oauth_test.go` (near line 390) gets its install state from the status endpoint. Replace the block from `statusReq := httptest.NewRequest(http.MethodGet, "/api/v1/github/status", nil)` through the `if state == "" || stateCookie == nil {` check and its closing brace with:
+
+```go
+	startReq := httptest.NewRequest(http.MethodPost, "/api/v1/github/install-url", nil)
+	startCtx := context.WithValue(startReq.Context(), ctxOrgID, activeOrg.ID)
+	startCtx = context.WithValue(startCtx, ctxUserID, user.ID)
+	startReq = startReq.WithContext(startCtx)
+	startW := httptest.NewRecorder()
+	deps.GitHubInstallURL(startW, startReq)
+	if startW.Code != http.StatusOK {
+		t.Fatalf("install-url code=%d body=%q", startW.Code, startW.Body.String())
+	}
+	var startBody struct {
+		InstallURL string `json:"install_url"`
+	}
+	if err := json.Unmarshal(startW.Body.Bytes(), &startBody); err != nil {
+		t.Fatal(err)
+	}
+	installURL, err := url.Parse(startBody.InstallURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := installURL.Query().Get("state")
+	var stateCookie *http.Cookie
+	for _, cookie := range startW.Result().Cookies() {
+		if cookie.Name == "__auth_state" {
+			stateCookie = cookie
+		}
+	}
+	if state == "" || stateCookie == nil {
+		t.Fatalf("missing state or cookie: url=%q cookies=%v", startBody.InstallURL, startW.Result().Cookies())
+	}
+```
+
+`TestGitHubInstallRoutesRequireCloudAdmin` in `packages/ingestion/handler/github_install_callback_test.go` (near line 220) checks only the GET routes. Add `GitHubAppSlug: "opslane"` to its `Dependencies`, then replace everything from `request := func(path string) *httptest.ResponseRecorder {` to the end of the function with:
+
+```go
+	request := func(method, path string, signedIn bool) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, nil)
+		if signedIn {
+			req.AddCookie(&http.Cookie{Name: AccessCookieName, Value: token})
+		}
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		return w
+	}
+	adminRoutes := []struct{ method, path string }{
+		{http.MethodGet, "/api/v1/github/setup"},
+		{http.MethodGet, "/api/v1/github/status"},
+		{http.MethodPost, "/api/v1/github/install-url"},
+	}
+	if w := request(http.MethodPost, "/api/v1/github/install-url", false); w.Code != http.StatusUnauthorized {
+		t.Fatalf("signed-out install-url code=%d body=%q", w.Code, w.Body.String())
+	}
+	for _, route := range adminRoutes {
+		if w := request(route.method, route.path, true); w.Code != http.StatusForbidden {
+			t.Fatalf("member %s %s code=%d body=%q", route.method, route.path, w.Code, w.Body.String())
+		}
+	}
+	if _, err := pool.Exec(ctx, `UPDATE memberships SET role = 'admin' WHERE user_id = $1 AND org_id = $2`, user.ID, org.ID); err != nil {
+		t.Fatal(err)
+	}
+	for _, route := range adminRoutes {
+		if w := request(route.method, route.path, true); w.Code == http.StatusForbidden || w.Code == http.StatusUnauthorized {
+			t.Fatalf("admin %s %s code=%d body=%q", route.method, route.path, w.Code, w.Body.String())
+		}
+	}
+	if w := request(http.MethodPost, "/api/v1/github/install-url", true); w.Code != http.StatusOK ||
+		!strings.Contains(w.Body.String(), "/apps/opslane/installations/new?state=") {
+		t.Fatalf("admin install-url code=%d body=%q", w.Code, w.Body.String())
+	}
+}
+```
+
+- [ ] **Step 6: Share the helper with the agent endpoint**
 
 In `packages/ingestion/handler/agent_github_install.go`, replace everything from `state, err := generateOAuthState(d.JWTSecret)` to the end of the function with:
 
@@ -1277,7 +1451,7 @@ In `packages/ingestion/handler/agent_github_install.go`, replace everything from
 
 Fix the imports: add `log/slog`; remove `fmt`, `net/url`, and `auth` if nothing else uses them. Keep `time` (used by the expiry check).
 
-- [ ] **Step 6: Register the route**
+- [ ] **Step 7: Register the route**
 
 In `packages/ingestion/handler/routes.go`, after the `/github/status` line:
 
@@ -1285,7 +1459,7 @@ In `packages/ingestion/handler/routes.go`, after the `/github/status` line:
 		r.With(deps.AuthenticateUserSession, deps.RequireRoleIfCloud("admin")).Post("/github/install-url", deps.GitHubInstallURL)
 ```
 
-- [ ] **Step 7: Update the route reference**
+- [ ] **Step 8: Update the route reference**
 
 In `docs/reference/http-routes.md`, replace the `/api/v1/github/status` row and add the new row after it:
 
@@ -1294,16 +1468,16 @@ In `docs/reference/http-routes.md`, replace the `/api/v1/github/status` row and 
 | POST | `/api/v1/github/install-url` | Start a GitHub App installation for the active organization: returns `install_url` and sets its single-use, 30-minute callback state; admin on cloud; 400 `github_app_not_configured` without an App |
 ```
 
-- [ ] **Step 8: Run the tests to verify they pass**
+- [ ] **Step 9: Run the tests to verify they pass**
 
-Run: `cd packages/ingestion && export DATABASE_URL=… && go build ./... && go vet ./handler/ && go test -count=1 -v -run 'TestGitHubStatusPolling|TestGitHubInstallURL|TestAgentGitHubInstall|TestWebInstallCallback|GitHubAppStatus|InstallCallback' ./handler/ 2>&1 | tee /tmp/claude-1000/task3.log; grep -c -- '--- SKIP' /tmp/claude-1000/task3.log; grep -- '--- FAIL' /tmp/claude-1000/task3.log`
-Expected: every selected test PASS, the skip count prints `0`, and no FAIL lines. If `-run` selects no agent install test, run `grep -ln AgentGitHubInstallURL packages/ingestion/handler/*_test.go` and include those test names.
+Run: `cd packages/ingestion && export DATABASE_URL="postgres://opslane:opslane_dev@localhost:5434/link_installation_test?sslmode=disable" && set -o pipefail && go build ./... && go vet ./handler/ && go test -count=1 -v -run 'TestGitHubStatusPolling|TestGitHubInstallURL|TestGitHubInstallRoutesRequireCloudAdmin|TestWorkosInstallCallback|AgentGitHubInstall|TestWebInstallCallback' ./handler/ 2>&1 | tee /tmp/claude-1000/task3.log && ! grep -q -- '--- SKIP' /tmp/claude-1000/task3.log && echo TASK3-OK`
+Expected: every selected test PASS and the last line is `TASK3-OK`. If `-run` selects no agent install-url test, run `grep -ln AgentGitHubInstallURL packages/ingestion/handler/*_test.go` and add those test names to the pattern.
 
-- [ ] **Step 9: Commit**
+- [ ] **Step 10: Commit**
 
 ```bash
 git add packages/ingestion/handler/github_install_start.go packages/ingestion/handler/github_install_start_test.go \
-  packages/ingestion/handler/github_oauth.go packages/ingestion/handler/github_oauth_test.go \
+  packages/ingestion/handler/github_oauth.go packages/ingestion/handler/github_oauth_test.go packages/ingestion/handler/github_install_callback_test.go \
   packages/ingestion/handler/agent_github_install.go packages/ingestion/handler/routes.go docs/reference/http-routes.md
 git commit -m "fix(github): mint install state when the user opens Install, not on every status poll"
 ```
@@ -1320,7 +1494,8 @@ git commit -m "fix(github): mint install state when the user opens Install, not 
 - Modify: `packages/dashboard/src/route-project.ts:1`
 - Modify: `packages/dashboard/src/views/SetupWizard.vue:246-248`
 - Modify: `packages/dashboard/src/views/Settings.vue:841-844`
-- Test: `packages/dashboard/src/views/__tests__/agent-github-install.test.ts`, `src/views/__tests__/setup-wizard.test.ts`, `src/views/Settings.test.ts`
+- Test: `packages/dashboard/src/views/__tests__/agent-github-install.test.ts`, `src/views/__tests__/setup-wizard.test.ts`, `src/views/Settings.test.ts`, `src/router.test.ts`, `src/route-project.test.ts`
+- Create: `packages/dashboard/src/api-github.test.ts`
 - Modify: `test-e2e/dashboard-mock-harness.ts:142`
 
 **Interfaces:**
@@ -1362,6 +1537,15 @@ vi.mock('vue-router', () => ({ useRoute: () => route }));
     expect(navigate).not.toHaveBeenCalled();
     expect(wrapper.text()).toContain('unexpected install link');
   });
+
+  it('asks for an admin without a shareable link on the organization route', async () => {
+    route.params = {};
+    api.githubInstallUrl.mockRejectedValue(new api.APIError(403, 'organization admin required'));
+    const wrapper = mount(AgentGitHubInstall);
+    await flushPromises();
+    expect(wrapper.text()).toContain('Ask an admin of this organization');
+    expect(wrapper.find('[data-testid="agent-github-install-link"]').exists()).toBe(false);
+  });
 ```
 
 In `packages/dashboard/src/views/__tests__/setup-wizard.test.ts`:
@@ -1382,7 +1566,11 @@ In `packages/dashboard/src/views/__tests__/setup-wizard.test.ts`:
     api.getOnboardingState.mockResolvedValue({
       ...baseState, next_step: 'connect_github', project_id: 'p1', has_events: true,
     });
-    api.getGitHubAppStatus.mockResolvedValue({ installed: false, installation_id: null, install_available: false });
+    // A stale install_url from an old server must not bring the link back.
+    api.getGitHubAppStatus.mockResolvedValue({
+      installed: false, installation_id: null, install_available: false,
+      install_url: 'https://github.com/apps/x/installations/new',
+    });
     const wrapper = mount(SetupWizard, { global: { stubs: { RouterLink: true } } });
     await flushPromises();
     expect(wrapper.find('[data-testid="github-install"]').exists()).toBe(false);
@@ -1405,10 +1593,65 @@ In `packages/dashboard/src/views/Settings.test.ts`:
 	});
 ```
 
+
+Create `packages/dashboard/src/api-github.test.ts`:
+
+```ts
+// @vitest-environment jsdom
+
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { githubInstallUrl } from './api';
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
+describe('GitHub install API', () => {
+  it('mints the install link with an authenticated POST', async () => {
+    const response = { install_url: 'https://github.com/apps/opslane/installations/new?state=s' };
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => response });
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(githubInstallUrl()).resolves.toEqual(response);
+    expect(fetchMock).toHaveBeenCalledWith('/api/v1/github/install-url', expect.objectContaining({
+      method: 'POST', credentials: 'include', body: '{}',
+    }));
+  });
+});
+```
+
+In `packages/dashboard/src/route-project.test.ts`, add to the `'allows projectless organizations to approve an agent setup'` test:
+
+```ts
+    expect(routeNeedsProject('github-install')).toBe(false);
+```
+
+In `packages/dashboard/src/router.test.ts`, add `beforeEach` to the `vitest` import if it is missing, and append:
+
+```ts
+describe('GitHub install page', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    sessionStorage.clear();
+  });
+
+  it('parks /github/install for after sign-in', async () => {
+    await appRouter.push('/github/install');
+    expect(appRouter.currentRoute.value.name).toBe('login');
+    expect(sessionStorage.getItem('opslane_post_auth_path')).toBe('/github/install');
+  });
+
+  it('keeps a signed-in user who has not finished onboarding on /github/install', async () => {
+    localStorage.setItem('opslane_authed', '1');
+    await appRouter.push('/github/install');
+    expect(appRouter.currentRoute.value.name).toBe('github-install');
+  });
+});
+```
+
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `pnpm --filter @opslane/dashboard test -- src/views/__tests__/agent-github-install.test.ts src/views/__tests__/setup-wizard.test.ts src/views/Settings.test.ts`
-Expected: the new tests FAIL. The organization-install test fails because `githubInstallUrl` is never called; the link tests fail on `href`.
+Run: `pnpm --filter @opslane/dashboard test -- src/views/__tests__/agent-github-install.test.ts src/views/__tests__/setup-wizard.test.ts src/views/Settings.test.ts src/api-github.test.ts src/router.test.ts src/route-project.test.ts`
+Expected: the new tests FAIL: the API test and component tests on the missing `githubInstallUrl`, the link tests on `href`, and the router tests on the missing route.
 
 - [ ] **Step 3: Implement the API contract**
 
@@ -1435,12 +1678,13 @@ export function githubInstallUrl(): Promise<{ install_url: string }> {
 
 - [ ] **Step 4: Serve both install routes from one page**
 
-In `packages/dashboard/src/views/AgentGitHubInstall.vue`, change the import to `import { agentGitHubInstallUrl, APIError, githubInstallUrl } from '../api';` and replace the first four lines inside the `try` block with:
+In `packages/dashboard/src/views/AgentGitHubInstall.vue`, change the import to `import { agentGitHubInstallUrl, APIError, githubInstallUrl } from '../api';`, add `const sessionId = route.params.id ? String(route.params.id) : '';` after `const route = useRoute();`, and replace the whole `onMounted` callback with:
 
 ```ts
-    const sessionId = route.params.id;
+onMounted(async () => {
+  try {
     const { install_url } = sessionId
-      ? await agentGitHubInstallUrl(String(sessionId))
+      ? await agentGitHubInstallUrl(sessionId)
       : await githubInstallUrl();
     const target = safeUrl(install_url, GITHUB_PR_URL_OPTIONS);
     if (!target) {
@@ -1450,7 +1694,24 @@ In `packages/dashboard/src/views/AgentGitHubInstall.vue`, change the import to `
     }
     // replace, not assign: Back from GitHub must not reopen this page and mint again.
     (props.navigate ?? window.location.replace.bind(window.location))(target);
+  } catch (err) {
+    if (err instanceof APIError && err.status === 403 && err.code !== 'foreign_org') {
+      phase.value = 'needs-admin';
+      // Only a session link is safe to hand to an admin: it names its organization.
+      // The organization route installs for whichever organization the opener has active.
+      message.value = sessionId
+        ? 'Installing the GitHub App needs an organization admin. Send an admin this link; they will be asked to sign in to Opslane first:'
+        : 'Installing the GitHub App needs an organization admin. Ask an admin of this organization to install it from Settings.';
+      return;
+    }
+    phase.value = 'error';
+    message.value = (err instanceof APIError && err.code && KNOWN_ERRORS[err.code])
+      || (err instanceof Error ? err.message : 'Could not start the GitHub installation.');
+  }
+});
 ```
+
+In the template, change the copyable-link `<div>` to `v-if="phase === 'needs-admin' && sessionId"` and the Back link to `v-if="phase === 'error' || (phase === 'needs-admin' && !sessionId)"`.
 
 `packages/dashboard/src/router.ts`: add the route after the agent one, and add its name to the post-sign-in resume condition.
 
@@ -1491,11 +1752,11 @@ Leave its classes and content unchanged.
 
 - [ ] **Step 6: Run the tests to verify they pass**
 
-Run: `pnpm --filter @opslane/dashboard build && pnpm --filter @opslane/dashboard test`
-Expected: the build succeeds and every dashboard test passes.
+Run: `pnpm --filter @opslane/dashboard build && pnpm --filter @opslane/dashboard test && pnpm --filter @opslane/test-e2e typecheck`
+Expected: the build succeeds, every dashboard test passes, and the e2e package typechecks.
 
-Then run: `grep -rn "install_url" packages/dashboard/src test-e2e --include=*.ts --include=*.vue | grep -v node_modules`
-Expected: matches only in `api.ts`, `AgentGitHubInstall.vue`, and `agent-github-install.test.ts`.
+Then run: `grep -rnw install_url packages/dashboard/src test-e2e --include=*.ts --include=*.vue | grep -v node_modules`
+Expected: matches only in `api.ts`, `AgentGitHubInstall.vue`, `agent-github-install.test.ts`, `api-github.test.ts`, and the stale-field mock in `setup-wizard.test.ts`. The agent state's `github_install_url` is a different field and does not match `-w`.
 
 - [ ] **Step 7: Commit**
 
@@ -1514,19 +1775,22 @@ git commit -m "fix(dashboard): open the GitHub install through a page that mints
 cd /home/claude-dev/orca/workspaces/opslane-oss/onboarding-agent/packages/ingestion
 export DATABASE_URL="postgres://opslane:opslane_dev@localhost:5434/link_installation_test?sslmode=disable"
 go build ./... && go vet ./...
-go test -count=1 ./... 2>&1 | tee /tmp/claude-1000/go-all.log | grep -v '^ok' | head -40
+go test -count=1 -json ./... > /tmp/claude-1000/go-all.json; echo "go test exit=$?"
+jq -r 'select(.Action=="fail" and .Test!=null) | "\(.Package) \(.Test)"' /tmp/claude-1000/go-all.json
+jq -r 'select(.Action=="skip" and .Test!=null) | .Package' /tmp/claude-1000/go-all.json | sort | uniq -c
 ```
 
-Expected: no `FAIL` lines. Storage suites may skip without MinIO; report any failure together with whether it also fails on `origin/main` (`git stash` is shared, so check with a temporary worktree: `git worktree add /tmp/claude-1000/main-check origin/main`).
+Expected: `go test exit=0` and no failure lines. Skips may appear only in storage packages that need MinIO; none may appear in `cmd/link-installation`, `db`, or `handler`. Report any failure together with whether it also fails on `origin/main`, checked in a temporary worktree (`git worktree add /tmp/claude-1000/main-check origin/main`), never with `git stash`.
 
-- [ ] **Step 2: Dashboard and workspace types**
+- [ ] **Step 2: Dashboard and e2e types**
 
 ```bash
 cd /home/claude-dev/orca/workspaces/opslane-oss/onboarding-agent
-pnpm --filter @opslane/dashboard build && pnpm --filter @opslane/dashboard test
+set -o pipefail
+pnpm --filter @opslane/dashboard build && pnpm --filter @opslane/dashboard test && pnpm --filter @opslane/test-e2e typecheck && echo DASHBOARD-OK
 ```
 
-Expected: build succeeds, all tests pass.
+Expected: the last line is `DASHBOARD-OK`.
 
 - [ ] **Step 3: Image contains the command**
 
@@ -1541,49 +1805,65 @@ Expected: the first prints the usage line and `exit=2`. The second prints `DATAB
 
 - [ ] **Step 4: Report**
 
-Report each command's result, the skip counts from Tasks 1 to 3, and any failure with its output. Do not push.
+Report each command's result, the skip lists, and any failure with its output. Do not push.
 
 ---
 
 ### Task 6: Link the stuck installation in production (operator only, after merge and deploy)
 
-Not for the implementing agent. Each step that writes needs the user's explicit yes.
+Not for the implementing agent. Two constraints shape this task:
 
-- [ ] **Step 1: Resolve the organization and project IDs (read-only)**
+- The devbox's AWS identity, `opslane-devbox-debug`, is read-only. It can run only the debug SQL task and cannot run the ingestion task definition or pass its roles. Steps 2 and 4 need a deployment-administrator identity, so the user runs them, for example by typing `! <command>` in a session whose shell has those credentials.
+- Step 4 writes to production and needs the user's explicit yes after they have seen the dry-run output.
+
+- [ ] **Step 1: Resolve the organization and project IDs (read-only, devbox)**
 
 ```bash
 ~/deploy/scripts/prod-sql.sh "SELECT o.id AS org_id, o.name, o.github_installation_id, p.id AS project_id, p.name AS project, p.github_repo FROM orgs o LEFT JOIN projects p ON p.org_id = o.id WHERE o.id::text LIKE '0ff3bcae%'"
 ```
 
-- [ ] **Step 2: Dry run as a one-off task**
+- [ ] **Step 2: Dry run as a one-off task (deployment administrator)**
 
 ```bash
-export AWS_PROFILE=opslane AWS_REGION=us-west-2
+export AWS_PROFILE=<deployment-admin profile> AWS_REGION=us-west-2
+test "$(aws sts get-caller-identity --query Account --output text)" = 127214199666 || echo "STOP: not the production account"
 ORG=<org_id from step 1>; PROJECT=<project_id from step 1>
 TD=$(aws ecs describe-services --cluster opslane --services ingestion --query 'services[0].taskDefinition' --output text)
 NET=$(aws ecs describe-services --cluster opslane --services ingestion --query 'services[0].networkConfiguration' --output json)
 link_task() {
-  OVR=$(jq -cn '{containerOverrides:[{name:"ingestion",command:$ARGS.positional}]}' --args link-installation "$@")
-  TASK=$(aws ecs run-task --cluster opslane --launch-type FARGATE --task-definition "$TD" \
-    --network-configuration "$NET" --overrides "$OVR" --query 'tasks[0].taskArn' --output text)
-  aws ecs wait tasks-stopped --cluster opslane --tasks "$TASK"
-  aws ecs describe-tasks --cluster opslane --tasks "$TASK" --query 'tasks[0].containers[0].exitCode'
-  aws logs get-log-events --log-group-name /ecs/opslane-ingestion \
-    --log-stream-name "ingestion/ingestion/${TASK##*/}" --query 'events[].message' --output text
+  local ovr run task desc code stream logs
+  ovr=$(jq -cn '{containerOverrides:[{name:"ingestion",command:$ARGS.positional}]}' --args link-installation "$@")
+  run=$(aws ecs run-task --cluster opslane --launch-type FARGATE --task-definition "$TD" \
+    --network-configuration "$NET" --overrides "$ovr" --output json) || return 1
+  if [ "$(jq '.failures | length' <<<"$run")" -ne 0 ]; then jq '.failures' <<<"$run"; return 1; fi
+  task=$(jq -er '.tasks[0].taskArn' <<<"$run") || return 1
+  aws ecs wait tasks-stopped --cluster opslane --tasks "$task"
+  desc=$(aws ecs describe-tasks --cluster opslane --tasks "$task" --output json)
+  code=$(jq -r '.tasks[0].containers[] | select(.name=="ingestion") | .exitCode // empty' <<<"$desc")
+  stream=$(jq -r '.tasks[0].containers[] | select(.name=="ingestion") | .logStreamName // empty' <<<"$desc")
+  [ -n "$stream" ] || stream="ingestion/ingestion/${task##*/}"
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    logs=$(aws logs get-log-events --log-group-name /ecs/opslane-ingestion --log-stream-name "$stream" \
+      --start-from-head --output json 2>/dev/null) && [ "$(jq '.events | length' <<<"$logs")" -gt 0 ] && break
+    sleep 3
+  done
+  jq -r '.events[]?.message' <<<"${logs:-{\}}"
+  echo "exit code: ${code:-none}; stopped: $(jq -r '.tasks[0].stoppedReason // "unknown"' <<<"$desc")"
+  [ "$code" = 0 ]
 }
 link_task -installation 161250809 -org "$ORG" -expect-account agentwebpro -project "$PROJECT"
 ```
 
-Expected: exit code 0, output ending in `Dry run: nothing written`, listing the `agentwebpro` repositories and the project. If the installation covers several repositories, pick the one the project should use and add `-repo owner/name`.
+Expected: `exit code: 0` and output ending in `Dry run: nothing written`, listing the `agentwebpro` repositories and the project. If the installation covers several repositories, choose the one the project should use and add `-repo owner/name`.
 
 - [ ] **Step 3: Show the dry-run output to the user and get an explicit yes**
 
-- [ ] **Step 4: Apply**
+- [ ] **Step 4: Apply (deployment administrator)**
 
-Run the same `link_task` line with `-apply` appended. Expected: exit code 0 and `Verified: the dashboard now reports GitHub as installed.`
+Run the same `link_task` line with `-apply` appended. Expected: `exit code: 0` and `Verified: the dashboard now reports GitHub as installed.`
 
-- [ ] **Step 5: Confirm (read-only)**
+- [ ] **Step 5: Confirm (read-only, devbox)**
 
 ```bash
-~/deploy/scripts/prod-sql.sh "SELECT installation_id, org_id, github_org_name, suspended, jsonb_array_length(repos) AS repos FROM github_app_installations WHERE installation_id = 161250809"
+~/deploy/scripts/prod-sql.sh "SELECT i.installation_id, i.org_id, i.github_org_name, i.suspended, jsonb_array_length(i.repos) AS repos, o.github_installation_id FROM github_app_installations i JOIN orgs o ON o.id = i.org_id WHERE i.installation_id = 161250809"
 ```
