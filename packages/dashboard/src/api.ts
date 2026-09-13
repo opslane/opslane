@@ -634,6 +634,12 @@ export function getGitHubAppStatus(): Promise<GitHubAppStatus> {
   return fetchJSON<GitHubAppStatus>('/github/status');
 }
 
+// Mints single-use install state and its cookie. Call only when the user opens
+// the install link: each call replaces the state an open GitHub tab relies on.
+export function githubInstallUrl(): Promise<{ install_url: string }> {
+  return postJSON<{ install_url: string }>('/github/install-url', {});
+}
+
 export function listGitHubRepos(): Promise<GitHubRepo[]> {
   return fetchJSON<GitHubRepo[]>('/github/repos');
 }

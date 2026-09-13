@@ -9,6 +9,7 @@ describe('routeNeedsProject', () => {
 
   it('allows projectless organizations to approve an agent setup', () => {
     expect(routeNeedsProject('agent-approve')).toBe(false);
+    expect(routeNeedsProject('github-install')).toBe(false);
   });
 
   it('still requires a project for tenant-scoped routes', () => {

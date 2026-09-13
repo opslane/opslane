@@ -839,8 +839,9 @@ async function handleDisconnectGithub(): Promise<void> {
             The Opslane GitHub App needs to be installed on your organization to access repositories.
           </p>
           <a
-            v-if="githubAppStatus?.install_url"
-            :href="safeUrl(githubAppStatus.install_url)"
+            v-if="githubAppStatus?.install_available"
+            href="/github/install"
+            data-testid="settings-github-install"
             class="inline-flex items-center gap-2 inline-flex min-h-10 items-center justify-center border border-border-strong bg-surface px-4 py-2 text-sm font-semibold text-text hover:bg-surface-subtle focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:opacity-50"
           >
             <svg class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">

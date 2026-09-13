@@ -55,7 +55,7 @@ describe('SetupWizard', () => {
     api.getGitHubAppStatus.mockResolvedValue({
       installed: false,
       installation_id: null,
-      install_url: 'https://github.com/apps/x/installations/new',
+      install_available: true,
     });
     api.listGitHubRepos.mockResolvedValue([]);
 		api.getGitHubConfig.mockResolvedValue({ connected: false, github_repo: '', repo_access: false });
@@ -166,6 +166,9 @@ describe('SetupWizard', () => {
     expect(wrapper.text()).not.toContain('Check again');
     expect(wrapper.text()).not.toContain('Waiting for GitHub');
     const initialCalls = api.getGitHubAppStatus.mock.calls.length;
+    const installLink = wrapper.get('[data-testid="github-install"]');
+    expect(installLink.attributes('href')).toBe('/github/install');
+    expect(installLink.attributes('target')).toBe('_blank');
     await wrapper.get('[data-testid="github-install"]').trigger('click');
     expect(wrapper.text()).toContain('Waiting for GitHub');
     await vi.advanceTimersByTimeAsync(4000);
@@ -180,7 +183,7 @@ describe('SetupWizard', () => {
 		api.getOnboardingState.mockResolvedValue({
 			...baseState, next_step: 'connect_github', project_id: 'p1', has_events: true,
 		});
-		api.getGitHubAppStatus.mockResolvedValue({ installed: true, installation_id: 7, install_url: '' });
+		api.getGitHubAppStatus.mockResolvedValue({ installed: true, installation_id: 7, install_available: true });
 		api.getGitHubConfig.mockResolvedValue({
 			connected: true,
 			github_repo: 'acme/web',
@@ -210,7 +213,7 @@ describe('SetupWizard', () => {
     const wrapper = mount(SetupWizard, { global: { stubs: { RouterLink: true } } });
     await flushPromises();
     api.getGitHubAppStatus.mockResolvedValue({
-      installed: true, installation_id: 7, install_url: null,
+      installed: true, installation_id: 7, install_available: true,
     });
     await wrapper.get('[data-testid="github-install"]').trigger('click');
     await flushPromises();
@@ -296,6 +299,21 @@ describe('SetupWizard', () => {
     await flushPromises();
     expect(wrapper.text()).toContain('Ask an organization admin');
     expect(api.getOnboardingState).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it('hides the install link when this Opslane has no GitHub App', async () => {
+    api.getOnboardingState.mockResolvedValue({
+      ...baseState, next_step: 'connect_github', project_id: 'p1', has_events: true,
+    });
+    // A stale install_url from an old server must not bring the link back.
+    api.getGitHubAppStatus.mockResolvedValue({
+      installed: false, installation_id: null, install_available: false,
+      install_url: 'https://github.com/apps/x/installations/new',
+    });
+    const wrapper = mount(SetupWizard, { global: { stubs: { RouterLink: true } } });
+    await flushPromises();
+    expect(wrapper.find('[data-testid="github-install"]').exists()).toBe(false);
     wrapper.unmount();
   });
 });
