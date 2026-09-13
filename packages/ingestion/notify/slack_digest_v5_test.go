@@ -89,3 +89,39 @@ func TestKnownProblemsMergedFooterPreservesWholeLinksWithinSlackBudget(t *testin
 		})
 	}
 }
+
+// "Fix in progress" is a state, not something to click: it renders as context
+// text and the card carries no actions block.
+func TestKnownProblemsDigestFixInProgressIsNotAButton(t *testing.T) {
+	p := EventPayload{Project: ProjectRef{ID: "project", Name: "Shop"}, DashboardURL: "https://app.example", Digest: &DigestPayload{SchemaVersion: 5, Date: "2026-09-12",
+		GeneratedCards: []GeneratedDigestCard{{IncidentID: "incident", TicketID: "ticket", Kind: "friction", Title: "Payment stalls", Copy: "The payment control ignores clicks.", Coverage: .5, VerifiedUsers: 2, VerifiedSessions: 4, Action: "Fix in progress"}},
+		ReceiptItems:   []ReceiptItem{{IncidentID: "receipt", TicketID: "ticket-2", Kind: "friction", Title: "Export stalls", Copy: "Export ignores clicks.", Action: "Fix in progress"}}}}
+	body, _, err := formatSlackDigest(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var message struct {
+		Blocks []map[string]any `json:"blocks"`
+	}
+	if err := json.Unmarshal(body, &message); err != nil {
+		t.Fatal(err)
+	}
+	statuses := 0
+	for _, block := range message.Blocks {
+		if block["type"] == "actions" {
+			t.Fatalf("non-clickable state rendered an actions block: %s", body)
+		}
+		if block["type"] != "context" {
+			continue
+		}
+		elements, _ := block["elements"].([]any)
+		for _, element := range elements {
+			if fields, ok := element.(map[string]any); ok && strings.Contains(fmt.Sprint(fields["text"]), "Fix in progress") {
+				statuses++
+			}
+		}
+	}
+	if statuses != 2 {
+		t.Fatalf("Fix in progress context lines=%d want 2: %s", statuses, body)
+	}
+}

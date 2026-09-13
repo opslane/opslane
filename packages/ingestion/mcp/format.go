@@ -305,7 +305,12 @@ func FormatIssue(input IssueInput) string {
 	incident := input.Incident
 	evidence := input.Evidence
 	lines := make([]string, 0)
-	if incident.Kind == "friction" {
+	if incident.Kind == "friction" && incident.TicketID != nil {
+		lines = append(lines, "Signal: known problem — a verified problem seen in session recordings of real users.")
+		if !IsFillerRootCause(incident.RootCause) {
+			lines = append(lines, "Root cause: "+Fence(Truncate(*incident.RootCause, RootCauseLimit)))
+		}
+	} else if incident.Kind == "friction" {
 		lines = append(lines, "Signal: user friction — people tried an action and it silently did nothing (no exception was thrown). The fix is a product decision, not a crash to diagnose.")
 	} else if IsFillerRootCause(incident.RootCause) {
 		lines = append(lines, "Root cause: the investigation did not complete with a usable diagnosis.")

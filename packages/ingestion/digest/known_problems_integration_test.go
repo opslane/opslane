@@ -148,7 +148,7 @@ func TestKnownProblemDigestFreezeValidateAndMergedFooter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	current, err := candidateStillUnified(ctx, tx, p.ID, c)
+	current, err := candidateStillUnified(ctx, tx, p.ID, c, at)
 	if err != nil || !current {
 		t.Fatalf("current=%v error=%v", current, err)
 	}
@@ -159,7 +159,7 @@ func TestKnownProblemDigestFreezeValidateAndMergedFooter(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		current, err := candidateStillUnified(ctx, tx, p.ID, c)
+		current, err := candidateStillUnified(ctx, tx, p.ID, c, at)
 		tx.Rollback(ctx)
 		if err != nil || current {
 			t.Fatalf("moved candidate accepted=%v err=%v", current, err)
@@ -229,6 +229,27 @@ func TestTicketDigestFencesEveryActionBeforePublication(t *testing.T) {
 		t.Run(mode, func(t *testing.T) { testTicketDigestActionAfterAuthoringCycle(t, mode) })
 	}
 }
+
+// A JWT_SECRET that cannot sign a fix link costs the card its link, never the
+// whole digest run.
+func TestTicketDigestUnsignableActionDoesNotAbortRun(t *testing.T) {
+	for _, mode := range []string{"short_secret", "empty_secret", "deferred_short_secret"} {
+		t.Run(mode, func(t *testing.T) { testTicketDigestActionAfterAuthoringCycle(t, mode) })
+	}
+}
+
+// Steps are the confirmed notes, substituted when the writer leaves them out;
+// cards do not render them, so the authored-steps length cap does not apply.
+func TestTicketDigestSubstitutedStepsPublish(t *testing.T) {
+	testTicketDigestActionAfterAuthoringCycle(t, "long_steps")
+}
+
+// Evidence that aged out of the seven-day window after the freeze must not
+// defer a card that was valid on the frozen day.
+func TestTicketDigestValidatesAtFrozenEvaluationTime(t *testing.T) {
+	testTicketDigestActionAfterAuthoringCycle(t, "fixing_frozen_window")
+}
+
 func testTicketDigestActionAfterAuthoringCycle(t *testing.T, mode string) {
 	pool := knownProblemPool(t)
 	ctx := context.Background()
@@ -272,6 +293,15 @@ func testTicketDigestActionAfterAuthoringCycle(t *testing.T, mode string) {
 		run(`INSERT INTO friction_checks(ticket_id,session_id,attempt_id,outcome)VALUES($1,$2,$3,'confirmed')`, ticket, session, check)
 	}
 	run(`UPDATE error_groups SET explained_signal_ids=(SELECT jsonb_agg(signal_id::text) FROM friction_ticket_match_observations WHERE ticket_id=$2) WHERE id=$1`, group, ticket)
+	if mode == "long_steps" {
+		run(`UPDATE friction_tickets SET steps=repeat('Click Save and wait. ',40) WHERE id=$1`, ticket)
+	}
+	if mode == "fixing_frozen_window" {
+		// Inside the window when the run froze an hour ago; outside it now.
+		run(`UPDATE friction_ticket_matches SET occurred_at=now()-interval '7 days 30 minutes' WHERE ticket_id=$1`, ticket)
+	}
+	unsignable := mode == "short_secret" || mode == "empty_secret" || mode == "deferred_short_secret"
+	deferred := mode == "deferred_changed_cause" || mode == "deferred_short_secret"
 	wantAction := "Create fix PR"
 	if strings.HasPrefix(mode, "fixing_") {
 		run(`UPDATE error_groups SET status='fixing',fix_substate='fixing' WHERE id=$1`, group)
@@ -282,7 +312,11 @@ func testTicketDigestActionAfterAuthoringCycle(t *testing.T, mode string) {
 	}
 	seedDestination(t, pool, project.ID, []string{"digest.daily"})
 	unrelated := insert(`INSERT INTO error_groups(project_id,environment_id,fingerprint,title,kind,status,first_seen,last_seen)VALUES($1,$2,'unrelated','Other checkout issue','error','needs_human',now(),now())RETURNING id`, project.ID, env)
-	runID, candidates, err := FreezeCandidates(ctx, pool, project.ID, time.Now())
+	freezeAt := time.Now()
+	if mode == "fixing_frozen_window" {
+		freezeAt = freezeAt.Add(-time.Hour)
+	}
+	runID, candidates, err := FreezeCandidates(ctx, pool, project.ID, freezeAt)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -306,15 +340,18 @@ func testTicketDigestActionAfterAuthoringCycle(t *testing.T, mode string) {
 		run(`UPDATE error_groups SET status='needs_human',fix_substate='none',terminal_fix_job_id=$2 WHERE id=$1`, group, job)
 	}
 	written := writtenDigestPayload{Included: []writtenDigestCard{{ErrorGroupID: group, Title: "Save stalls", Copy: "Save ignores clicks.", Steps: frozen.Steps, Why: frozen.RootCause}}}
+	if mode == "long_steps" {
+		written.Included[0].Steps = ""
+	}
 	changedCause := "The handler drops the save request."
-	if mode == "deferred_changed_cause" {
+	if deferred {
 		run(`UPDATE error_groups SET root_cause=$2 WHERE id=$1`, group, changedCause)
 		written = writtenDigestPayload{Deferred: []deferredDigestItem{{ErrorGroupID: group, Reason: "card check: invalid prose"}}}
 	}
 	stale := mode == "stale_action" || mode == "fixing_resolved" || mode == "pr_resolved" || mode == "pr_unpublished"
 	if stale || mode == "pr_replaced" {
 		original := loadActionableCandidatesForValidation
-		loadActionableCandidatesForValidation = func(ctx context.Context, tx pgx.Tx, projectID string, status actionableStatusSet) ([]actionableCandidate, error) {
+		loadActionableCandidatesForValidation = func(ctx context.Context, tx pgx.Tx, projectID string, status actionableStatusSet, evaluatedAt time.Time) ([]actionableCandidate, error) {
 			if projectID == project.ID {
 				var err error
 				switch mode {
@@ -331,7 +368,7 @@ func testTicketDigestActionAfterAuthoringCycle(t *testing.T, mode string) {
 					return nil, err
 				}
 			}
-			return original(ctx, tx, projectID, status)
+			return original(ctx, tx, projectID, status, evaluatedAt)
 		}
 		t.Cleanup(func() { loadActionableCandidatesForValidation = original })
 	}
@@ -344,6 +381,13 @@ func testTicketDigestActionAfterAuthoringCycle(t *testing.T, mode string) {
 	if mode == "pr_unchanged" || mode == "pr_replaced" {
 		// Reviewing a PR requires no fix intent and must retain its existing URL.
 		secret = nil
+	}
+	switch mode {
+	case "short_secret", "deferred_short_secret":
+		secret = []byte("too-short")
+	case "empty_secret":
+		secret = nil
+		t.Setenv("JWT_SECRET", "")
 	}
 	t.Setenv("DASHBOARD_URL", "https://app.example")
 	if err := ValidateAndPublish(ctx, pool, runID, secret); err != nil {
@@ -369,6 +413,35 @@ func testTicketDigestActionAfterAuthoringCycle(t *testing.T, mode string) {
 		}
 		return
 	}
+	if unsignable {
+		found := 0
+		for _, card := range published.Digest.GeneratedCards {
+			if card.IncidentID == group {
+				found++
+				if card.Action != "Create fix PR" || card.ActionURL != "" {
+					t.Fatalf("unsignable card=%+v", card)
+				}
+			}
+		}
+		for _, receipt := range published.Digest.ReceiptItems {
+			if receipt.IncidentID == group {
+				found++
+				if receipt.Action != "Create fix PR" || receipt.ActionURL != "" {
+					t.Fatalf("unsignable receipt=%+v", receipt)
+				}
+			}
+		}
+		if found != 1 {
+			t.Fatalf("unsignable ticket was dropped: %+v", published.Digest)
+		}
+		return
+	}
+	if mode == "fixing_frozen_window" {
+		if len(published.Digest.GeneratedCards) != 1 || published.Digest.GeneratedCards[0].IncidentID != group || published.Digest.GeneratedCards[0].Action != "Fix in progress" {
+			t.Fatalf("aged-out evidence changed the frozen day's card: %+v", published.Digest)
+		}
+		return
+	}
 	if mode == "pr_unchanged" || mode == "pr_replaced" {
 		wantPRURL := "https://github.com/acme/shop/pull/7"
 		if mode == "pr_replaced" {
@@ -380,7 +453,7 @@ func testTicketDigestActionAfterAuthoringCycle(t *testing.T, mode string) {
 		return
 	}
 	var actionURL string
-	if mode == "deferred_changed_cause" {
+	if deferred {
 		if len(published.Digest.GeneratedCards) != 0 || len(published.Digest.ReceiptItems) != 2 {
 			t.Fatalf("live receipt was lost: %+v", published.Digest)
 		}

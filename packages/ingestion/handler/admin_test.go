@@ -55,7 +55,7 @@ func TestAdminJobsAllowsCurrentJobTypeFilters(t *testing.T) {
 	if _, ok := adminJobTypes["score_sync"]; !ok {
 		t.Fatal("score_sync is missing from the admin job-type allowlist")
 	}
-	for _, jobType := range []string{"digest_write", "stack_resolve"} {
+	for _, jobType := range []string{"digest_write", "stack_resolve", "friction_match", "friction_confirm", "friction_reconcile", "friction_pr_event"} {
 		if _, ok := adminJobTypes[jobType]; !ok {
 			t.Fatalf("%s is missing from the admin job-type allowlist", jobType)
 		}

@@ -48,7 +48,7 @@ func BuildDigestView(digest *DigestPayload) DigestView {
 	// v1 (schema_version 0/1) has neither and is reported as Legacy.
 	switch {
 	case digest.SchemaVersion >= 4:
-		view.Cards = digest.GeneratedCards
+		view.Cards = cardsWithoutSignedActions(digest.GeneratedCards)
 		view.Receipts = renderableReceiptItems(digest)
 		view.ReceiptOverflow = digest.ReceiptOverflow
 		view.OverflowCount = digest.OverflowCount
@@ -72,7 +72,15 @@ func BuildDigestView(digest *DigestPayload) DigestView {
 // this the view would reintroduce the divergence it exists to remove.
 func renderableReceiptItems(digest *DigestPayload) []ReceiptItem {
 	if digest.SchemaVersion >= 5 {
-		return digest.ReceiptItems
+		if len(digest.ReceiptItems) == 0 {
+			return nil
+		}
+		items := make([]ReceiptItem, 0, len(digest.ReceiptItems))
+		for _, item := range digest.ReceiptItems {
+			item.ActionURL, item.LatestAttemptID = "", ""
+			items = append(items, item)
+		}
+		return items
 	}
 	renderable := renderableDigestReceipts(digest)
 	if len(renderable) == 0 {
@@ -83,4 +91,19 @@ func renderableReceiptItems(digest *DigestPayload) []ReceiptItem {
 		items = append(items, entry.item)
 	}
 	return items
+}
+
+// cardsWithoutSignedActions copies cards without their signed fix links. The
+// intent is a credential for the Slack delivery, which renders from the stored
+// digest; the read API and the MCP tool must not hand it out.
+func cardsWithoutSignedActions(cards []GeneratedDigestCard) []GeneratedDigestCard {
+	if len(cards) == 0 {
+		return cards
+	}
+	copied := make([]GeneratedDigestCard, 0, len(cards))
+	for _, card := range cards {
+		card.ActionURL = ""
+		copied = append(copied, card)
+	}
+	return copied
 }

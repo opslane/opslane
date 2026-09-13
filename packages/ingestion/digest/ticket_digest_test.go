@@ -71,3 +71,25 @@ func TestTicketDigestDistinguishesCustomerNounPhrasesFromInteractionUnits(t *tes
 		})
 	}
 }
+
+// The worker's confirmer rejects the same provenance in notes, so a note that
+// passed confirmation cannot sink its card at publication.
+func TestProvenanceVocabularyMatchesConfirmerPattern(t *testing.T) {
+	for _, tc := range []struct {
+		text  string
+		match bool
+	}{
+		{"The form stayed unchanged at line 12.", true},
+		{"LINE  7 shows the click.", true},
+		{"User clicked Update (L23-24).", true},
+		{"The timelines agree.", true},
+		{"Frames show the spinner.", true},
+		{"Line items do not update.", false},
+		{"The deadline 12 passed.", false},
+		{"Online checkout stalls.", false},
+	} {
+		if got := provenanceVocabulary.MatchString(tc.text); got != tc.match {
+			t.Errorf("%q match=%v, want %v", tc.text, got, tc.match)
+		}
+	}
+}

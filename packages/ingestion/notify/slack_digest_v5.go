@@ -14,14 +14,14 @@ func formatSlackDigestV5(payload EventPayload) ([]byte, string, error) {
 	d := payload.Digest
 	cards := append([]GeneratedDigestCard(nil), d.GeneratedCards...)
 	for _, r := range d.ReceiptItems {
-		copy := r.RootCauseExcerpt
+		cardCopy := r.RootCauseExcerpt
 		why := ""
 		if r.TicketID != "" {
-			copy = r.Copy
+			cardCopy = r.Copy
 			why = r.RootCauseExcerpt
 		}
-		if copy == "" {
-			copy = r.Title
+		if cardCopy == "" {
+			cardCopy = r.Title
 		}
 		action := r.Action
 		if action == "" {
@@ -30,7 +30,7 @@ func formatSlackDigestV5(payload EventPayload) ([]byte, string, error) {
 				action = "Review PR"
 			}
 		}
-		cards = append(cards, GeneratedDigestCard{IncidentID: r.IncidentID, Kind: r.Kind, Title: r.Title, Copy: copy, Why: why,
+		cards = append(cards, GeneratedDigestCard{IncidentID: r.IncidentID, Kind: r.Kind, Title: r.Title, Copy: cardCopy, Why: why,
 			TicketID: r.TicketID, Generation: r.Generation, Steps: r.Steps, VerifiedUsers: r.VerifiedUsers, VerifiedSessions: r.VerifiedSessions, Coverage: r.Coverage,
 			AffectedUsers: r.AffectedUsers, OccurrenceCount: int(r.OccurrenceCount), Accounts: r.Accounts, Action: action, ActionURL: r.ActionURL, PRURL: r.PRURL, ReplayURL: r.SessionURL})
 	}
@@ -59,16 +59,6 @@ func formatSlackDigestV5(payload EventPayload) ([]byte, string, error) {
 		text += "\n" + counts
 		blocks = append(blocks, digestSectionBlock(text))
 		issue := BuildIncidentURL(payload.DashboardURL, c.IncidentID, payload.Project.ID)
-		links := []string{}
-		if c.ReplayURL != "" {
-			links = append(links, slackDigestLink(c.ReplayURL, "Replay"))
-		}
-		if issue != "" {
-			links = append(links, slackDigestLink(issue, "Issue"))
-		}
-		if len(links) > 0 {
-			blocks = append(blocks, digestContextBlock(strings.Join(links, " · ")))
-		}
 		action, target := c.Action, c.ActionURL
 		if target == "" {
 			target = issue
@@ -83,6 +73,21 @@ func formatSlackDigestV5(payload EventPayload) ([]byte, string, error) {
 			} else if action == "" {
 				action = "Review issue"
 			}
+		}
+		links := []string{}
+		if c.ReplayURL != "" {
+			links = append(links, slackDigestLink(c.ReplayURL, "Replay"))
+		}
+		if issue != "" {
+			links = append(links, slackDigestLink(issue, "Issue"))
+		}
+		// A fix already running is a state to report, not something to click.
+		if c.TicketID != "" && action == "Fix in progress" {
+			links = append(links, cleanProse(action, 80))
+			target = ""
+		}
+		if len(links) > 0 {
+			blocks = append(blocks, digestContextBlock(strings.Join(links, " · ")))
 		}
 		if target != "" {
 			blocks = append(blocks, map[string]any{"type": "actions", "elements": []map[string]any{digestButton("digest_action_"+strconv.Itoa(i), action, target, "primary")}})

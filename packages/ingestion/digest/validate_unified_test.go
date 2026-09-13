@@ -553,7 +553,7 @@ func TestValidateOnDeliversFrozenReceiptsWhenTheLiveReloadFails(t *testing.T) {
 	writeOnCardPayload(t, pool, runID, candidates)
 
 	restore := loadActionableCandidatesForValidation
-	loadActionableCandidatesForValidation = func(context.Context, pgx.Tx, string, actionableStatusSet) ([]actionableCandidate, error) {
+	loadActionableCandidatesForValidation = func(context.Context, pgx.Tx, string, actionableStatusSet, time.Time) ([]actionableCandidate, error) {
 		return nil, errors.New("injected actionable reload failure")
 	}
 	t.Cleanup(func() { loadActionableCandidatesForValidation = restore })

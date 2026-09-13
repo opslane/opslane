@@ -99,3 +99,34 @@ func TestDigestViewOverflowOnlyIsNotEmpty(t *testing.T) {
 		t.Fatal("a digest with deferred cards is not empty")
 	}
 }
+
+// A v5 fix link is a signed intent for the Slack delivery only. The read API
+// and the MCP digest tool render from the view, which must not carry it.
+func TestBuildDigestViewV5StripsSignedActionLinks(t *testing.T) {
+	digest := &DigestPayload{
+		SchemaVersion: 5,
+		Date:          "2026-09-12",
+		GeneratedCards: []GeneratedDigestCard{{IncidentID: "i-card", TicketID: "t-card", Action: "Create fix PR",
+			ActionURL: "https://app.example/issues/i-card?fixIntent=signed.card"}},
+		ReceiptItems: []ReceiptItem{{IncidentID: "i-receipt", Kind: "friction", TicketID: "t-receipt", Action: "Create fix PR",
+			LatestAttemptID: "attempt-1", ActionURL: "https://app.example/issues/i-receipt?fixIntent=signed.receipt"}},
+	}
+	view := BuildDigestView(digest)
+	if len(view.Cards) != 1 || len(view.Receipts) != 1 {
+		t.Fatalf("view = %+v", view)
+	}
+	if view.Cards[0].ActionURL != "" || view.Receipts[0].ActionURL != "" || view.Receipts[0].LatestAttemptID != "" {
+		t.Fatalf("view leaked the signed action: cards=%+v receipts=%+v", view.Cards, view.Receipts)
+	}
+	if view.Cards[0].Action != "Create fix PR" || view.Receipts[0].Action != "Create fix PR" || view.Receipts[0].TicketID != "t-receipt" {
+		t.Fatalf("view lost the action label: cards=%+v receipts=%+v", view.Cards, view.Receipts)
+	}
+	if digest.GeneratedCards[0].ActionURL == "" || digest.ReceiptItems[0].ActionURL == "" || digest.ReceiptItems[0].LatestAttemptID == "" {
+		t.Fatal("building the view stripped the stored digest Slack delivers from")
+	}
+	merged := BuildDigestView(&DigestPayload{SchemaVersion: 5, Date: "2026-09-12",
+		MergedThisWeek: []DigestPRMerged{{Title: "Save fixed", PRURL: "https://github.com/acme/shop/pull/4"}}})
+	if merged.Empty() {
+		t.Fatal("a digest with merged PRs is not empty")
+	}
+}

@@ -463,10 +463,11 @@ func toReceiptItems(candidates []actionableCandidate) ([]notify.ReceiptItem, err
 			item.Accounts = f.Accounts
 			item.Coverage = f.Coverage
 			item.Action = ticketDigestAction(f.FixSubstate)
+		}
+		if candidate.TicketFacts != nil || candidate.HasValidatedDiagnosis {
 			item.RootCauseExcerpt = narrative.SanitizeExcerpt(candidate.RootCause, excerptMax)
 		}
 		if candidate.HasValidatedDiagnosis {
-			item.RootCauseExcerpt = narrative.SanitizeExcerpt(candidate.RootCause, excerptMax)
 			item.MitigationExcerpt = narrative.SanitizeExcerpt(candidate.Mitigation, excerptMax)
 		}
 		items = append(items, item)

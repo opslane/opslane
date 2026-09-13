@@ -1145,6 +1145,7 @@ type ErrorGroup struct {
 	AffectedUsersCount     int
 	Status                 string
 	Kind                   string
+	TicketID               *string // ListErrorGroups only; other readers leave it nil
 	Platform               *string
 	EnvironmentID          *string
 	AdjudicationStatus     *string
@@ -1633,7 +1634,7 @@ func (q *Queries) ListErrorGroups(ctx context.Context, projectID string, filters
 		               eg.signal_type, eg.element_selector, eg.page_url_normalized,
 		               eg.priority_score, eg.priority_inputs, eg.priority_scored_at,
 		               eg.created_at, eg.updated_at,
-		               eg.merged_at, eg.resolved_at, eg.archived_at
+		               eg.merged_at, eg.resolved_at, eg.archived_at, eg.ticket_id::text
 		        FROM error_groups eg
 		        WHERE ` + strings.Join(wheres, " AND ") + `
 		        ORDER BY COALESCE(eg.priority_score, 0) DESC, eg.last_seen DESC, eg.id DESC
@@ -1732,7 +1733,7 @@ func (q *Queries) ListErrorGroups(ctx context.Context, projectID string, filters
 		       eg.signal_type, eg.element_selector, eg.page_url_normalized,
 		       candidates.priority_score, candidates.priority_inputs, candidates.priority_scored_at,
 		       eg.created_at, eg.updated_at,
-		       eg.merged_at, eg.resolved_at, eg.archived_at
+		       eg.merged_at, eg.resolved_at, eg.archived_at, eg.ticket_id::text
 		FROM candidates
 		JOIN error_groups eg ON eg.id = candidates.id
 		ORDER BY COALESCE(candidates.priority_score, 0) DESC, candidates.last_seen DESC, candidates.id DESC
@@ -1758,7 +1759,7 @@ func (q *Queries) ListErrorGroups(ctx context.Context, projectID string, filters
 			&g.SignalType, &g.ElementSelector, &g.PageURLNormalized,
 			&g.PriorityScore, &g.PriorityInputs, &g.PriorityScoredAt,
 			&g.CreatedAt, &g.UpdatedAt,
-			&g.MergedAt, &g.ResolvedAt, &g.ArchivedAt,
+			&g.MergedAt, &g.ResolvedAt, &g.ArchivedAt, &g.TicketID,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan error group: %w", err)

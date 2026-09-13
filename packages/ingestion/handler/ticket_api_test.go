@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/opslane/opslane/packages/ingestion/auth"
+	"github.com/opslane/opslane/packages/ingestion/db"
 	"github.com/opslane/opslane/packages/ingestion/handler"
 )
 
@@ -96,24 +98,68 @@ func TestTicketIncidentActionsAndOpenedWebhook(t *testing.T) {
 	}
 	const secret = "ticket-webhook-test-secret"
 	t.Setenv("GITHUB_WEBHOOK_SECRET", secret)
-	body := fmt.Sprintf(`{"action":"opened","pull_request":{"number":73,"html_url":"https://github.com/%s/pull/73"},"repository":{"full_name":"%s"}}`, repo, repo)
-	mac := hmac.New(sha256.New, []byte(secret))
-	_, _ = mac.Write([]byte(body))
-	r := httptest.NewRequest(http.MethodPost, "/api/v1/github/webhook", strings.NewReader(body))
-	r.Header.Set("X-Hub-Signature-256", "sha256="+hex.EncodeToString(mac.Sum(nil)))
-	r.Header.Set("X-GitHub-Event", "pull_request")
-	r.Header.Set("X-GitHub-Delivery", "ticket-open-"+attempt)
-	w = httptest.NewRecorder()
-	router.ServeHTTP(w, r)
-	if w.Code != http.StatusOK {
-		t.Fatalf("webhook=%d %s", w.Code, w.Body.String())
+	sendOpened := func(htmlURL, delivery string) {
+		t.Helper()
+		body := fmt.Sprintf(`{"action":"opened","pull_request":{"number":73,"html_url":%q},"repository":{"full_name":%q}}`, htmlURL, repo)
+		mac := hmac.New(sha256.New, []byte(secret))
+		_, _ = mac.Write([]byte(body))
+		r := httptest.NewRequest(http.MethodPost, "/api/v1/github/webhook", strings.NewReader(body))
+		r.Header.Set("X-Hub-Signature-256", "sha256="+hex.EncodeToString(mac.Sum(nil)))
+		r.Header.Set("X-GitHub-Event", "pull_request")
+		r.Header.Set("X-GitHub-Delivery", delivery)
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, r)
+		if w.Code != http.StatusOK {
+			t.Fatalf("webhook=%d %s", w.Code, w.Body.String())
+		}
 	}
+	sendOpened("https://github.com/"+repo+"/pull/73", "ticket-open-"+attempt)
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM friction_pr_events e JOIN error_group_jobs j ON j.payload->>'eventId'=e.id::text
 		WHERE e.fix_attempt_id=$1 AND e.event='opened' AND NOT e.applied AND j.job_type='friction_pr_event'`, attempt).Scan(&queued); err != nil || queued != 1 {
 		t.Fatalf("receipt jobs=%d error=%v", queued, err)
 	}
-	if w := request(http.MethodPost, "/archive", true); w.Code != http.StatusOK {
+	storedURL := func(delivery string) string {
+		t.Helper()
+		var stored string
+		if err := pool.QueryRow(ctx, `SELECT coalesce(pr_url,'') FROM friction_pr_events WHERE delivery_id=$1`, delivery).Scan(&stored); err != nil {
+			t.Fatal(err)
+		}
+		return stored
+	}
+	if got := storedURL("ticket-open-" + attempt); got != "https://github.com/"+repo+"/pull/73" {
+		t.Fatalf("stored PR url=%q", got)
+	}
+	// The stored link becomes a Slack link target, so a payload link that is
+	// not this repository's own PR on github.com is never persisted.
+	for i, spoofed := range []string{
+		"https://evil.example/" + repo + "/pull/73",
+		"http://github.com/" + repo + "/pull/73",
+		"https://github.com/" + repo + "/pull/74",
+		"https://github.com/acme/other/pull/73",
+		"https://github.com/" + repo + "/pull/73?next=https://evil.example",
+	} {
+		delivery := fmt.Sprintf("ticket-open-spoof-%d-%s", i, attempt)
+		sendOpened(spoofed, delivery)
+		if got := storedURL(delivery); got != "" {
+			t.Fatalf("spoofed %q stored as %q", spoofed, got)
+		}
+	}
+	w = request(http.MethodPost, "/archive", true)
+	if w.Code != http.StatusOK {
 		t.Fatalf("archive=%d %s", w.Code, w.Body.String())
+	}
+	// The dashboard assigns this response straight into page state, so it is
+	// presented exactly like GET.
+	var archived struct {
+		TicketID               *string `json:"ticket_id"`
+		InvestigationReadiness *string `json:"investigation_readiness"`
+		RootCause              *string `json:"root_cause"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &archived); err != nil {
+		t.Fatal(err)
+	}
+	if archived.TicketID == nil || *archived.TicketID != ticket || archived.InvestigationReadiness == nil || *archived.InvestigationReadiness != "ineligible" || archived.RootCause != nil {
+		t.Fatalf("archive response skipped ticket presentation: %s", w.Body.String())
 	}
 	if w := request(http.MethodPost, "/unarchive", true); w.Code != http.StatusConflict {
 		t.Fatalf("unarchive=%d %s", w.Code, w.Body.String())
@@ -290,5 +336,85 @@ func TestTicketInsightIsNeverFixable(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT count(*) FILTER (WHERE job_type='fix'),count(*) FILTER (WHERE job_type='investigate')
 		FROM error_group_jobs WHERE error_group_id=$1`, group).Scan(&fixJobs, &investigateJobs); err != nil || fixJobs != 0 || investigateJobs != 1 {
 		t.Fatalf("insight fix request queued %d fix and %d investigate jobs (err=%v)", fixJobs, investigateJobs, err)
+	}
+}
+
+// The list loads verified evidence only for ticket rows, and one row whose
+// evidence cannot load loses its counts instead of failing the whole list.
+func TestListIncidentsLoadsTicketFactsPerTicketRow(t *testing.T) {
+	router, q, pool := authTestRouter(t)
+	org, project, environment, _ := seedTenant(t, q)
+	t.Cleanup(func() { cleanupTenantHandler(t, pool, org) })
+	ctx := context.Background()
+	ticketGroup := func(name string) (string, string) {
+		t.Helper()
+		var ticket, group string
+		if err := pool.QueryRow(ctx, `INSERT INTO friction_tickets(project_id,environment_id,name,control,what_happened,kind,status,live_generation)
+			VALUES($1,$2,$3,'Save',$3,'defect','published',1) RETURNING id`, project, environment, name).Scan(&ticket); err != nil {
+			t.Fatal(err)
+		}
+		if err := pool.QueryRow(ctx, `INSERT INTO error_groups(project_id,fingerprint,title,first_seen,last_seen,kind,status,ticket_id,publication_generation,fix_substate,investigation_status,root_cause,occurrence_count,affected_users_count)
+			VALUES($1,$2,$3,now(),now(),'friction','awaiting_approval',$4,1,'none','done','Unverified cause',999,123) RETURNING id`, project, "ticket|"+ticket, name, ticket).Scan(&group); err != nil {
+			t.Fatal(err)
+		}
+		return ticket, group
+	}
+	_, loaded := ticketGroup("Save stalls")
+	brokenTicket, broken := ticketGroup("Export stalls")
+	var legacy string
+	if err := pool.QueryRow(ctx, `INSERT INTO error_groups(project_id,fingerprint,title,first_seen,last_seen,kind,status,occurrence_count,affected_users_count)
+		VALUES($1,'legacy-friction','Dead clicks',now(),now(),'friction','awaiting_approval',4,2) RETURNING id`, project).Scan(&legacy); err != nil {
+		t.Fatal(err)
+	}
+	calls := map[string]int{}
+	handler.SetTicketFactsLoaderForTest(t, func(ctx context.Context, q db.TicketEvidenceQuerier, projectID, groupID string, at time.Time) (*db.TicketDigestFacts, error) {
+		calls[groupID]++
+		if groupID == broken {
+			return nil, errors.New("injected evidence failure")
+		}
+		return db.LoadTicketDigestFacts(ctx, q, projectID, groupID, at)
+	})
+	token, err := auth.SignAccessToken([]byte(authTestJWTSecret), "ticket-list-user", org, "list@example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRequest(http.MethodGet, "/api/v1/projects/"+project+"/incidents", nil)
+	r.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("list=%d %s", w.Code, w.Body.String())
+	}
+	if calls[legacy] != 0 || calls[loaded] != 1 || calls[broken] != 1 {
+		t.Fatalf("ticket fact loads=%v legacy=%s loaded=%s broken=%s", calls, legacy, loaded, broken)
+	}
+	var incidents []struct {
+		ID                 string  `json:"id"`
+		TicketID           *string `json:"ticket_id"`
+		VerifiedUsers      *int    `json:"verified_users"`
+		OccurrenceCount    int     `json:"occurrence_count"`
+		AffectedUsersCount int     `json:"affected_users_count"`
+		RootCause          *string `json:"root_cause"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &incidents); err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, incident := range incidents {
+		seen[incident.ID] = true
+		switch incident.ID {
+		case loaded:
+			if incident.VerifiedUsers == nil || *incident.VerifiedUsers != 0 {
+				t.Fatalf("loaded ticket row=%+v", incident)
+			}
+		case broken:
+			if incident.TicketID == nil || *incident.TicketID != brokenTicket || incident.VerifiedUsers != nil ||
+				incident.OccurrenceCount != 0 || incident.AffectedUsersCount != 0 || incident.RootCause != nil {
+				t.Fatalf("failed ticket row showed unverified facts: %+v", incident)
+			}
+		}
+	}
+	if !seen[loaded] || !seen[broken] || !seen[legacy] {
+		t.Fatalf("list dropped rows: %s", w.Body.String())
 	}
 }

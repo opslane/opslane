@@ -186,8 +186,6 @@ func FreezeCandidates(ctx context.Context, pool *pgxpool.Pool, projectID string,
 			} else if ok {
 				if candidate.TicketID == "" {
 					candidate.ReplaySessionID = id
-				}
-				if candidate.TicketID == "" {
 					candidate.ReplayAnchorMs = anchor
 				}
 			}

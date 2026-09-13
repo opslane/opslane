@@ -14,6 +14,10 @@ import (
 
 var errInvalidGitHubPR = errors.New("invalid GitHub pull request URL")
 
+// loadTicketFacts is the verified seven-day evidence projection. Tests replace
+// it to count or fail individual row loads.
+var loadTicketFacts = db.LoadTicketDigestFacts
+
 func (d *Dependencies) linkIncidentPR(ctx context.Context, projectID, incidentID, rawURL string) error {
 	repo, number, ok := parseGitHubPR(rawURL)
 	if !ok {
@@ -220,7 +224,7 @@ func (d *Dependencies) attachTicketFacts(ctx context.Context, projectID string, 
 	if inc.Kind != "friction" {
 		return nil
 	}
-	f, err := db.LoadTicketDigestFacts(ctx, d.Queries.Pool(), projectID, inc.ID, time.Now())
+	f, err := loadTicketFacts(ctx, d.Queries.Pool(), projectID, inc.ID, time.Now())
 	if err != nil {
 		return err
 	}

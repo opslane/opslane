@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -44,6 +45,18 @@ type pushEvent struct {
 		Modified []string `json:"modified"`
 		Removed  []string `json:"removed"`
 	} `json:"commits"`
+}
+
+// ticketPRURL keeps a payload link only when it names this delivery's own pull
+// request on github.com, and stores the rebuilt canonical form rather than the
+// raw string: the URL later becomes a Slack link target. Anything else yields
+// "" so the attempt's recorded link is kept.
+func ticketPRURL(raw, repo string, number int) string {
+	linkedRepo, linkedNumber, ok := parseGitHubPR(raw)
+	if !ok || !strings.EqualFold(linkedRepo, repo) || linkedNumber != number {
+		return ""
+	}
+	return "https://github.com/" + repo + "/pull/" + strconv.Itoa(number)
 }
 
 // HandleWebhook handles POST /api/v1/github/webhook.
@@ -93,7 +106,9 @@ func (d *Dependencies) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if event.Action != "closed" && event.Action != "opened" && event.Action != "reopened" {
+	// A reopened PR is deliberately ignored: ticket fix events admit only
+	// active or open attempts, so recording it as "opened" is never applied.
+	if event.Action != "closed" && event.Action != "opened" {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "ignored", "action": event.Action})
 		return
@@ -116,7 +131,7 @@ func (d *Dependencies) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 	var result db.PRWebhookResult
 	if action == "opened" {
 		result, err = d.Queries.ProcessTicketPRWebhook(r.Context(), db.TicketPRWebhook{
-			Repository: repo, Number: prNumber, Event: action, DeliveryID: deliveryID, URL: event.PullRequest.HTMLURL, OccurredAt: occurredAt,
+			Repository: repo, Number: prNumber, Event: action, DeliveryID: deliveryID, URL: ticketPRURL(event.PullRequest.HTMLURL, repo, prNumber), OccurredAt: occurredAt,
 		})
 	} else {
 		result, err = d.Queries.ProcessPRWebhook(r.Context(), repo, prNumber, event.PullRequest.Merged, deliveryID, occurredAt)

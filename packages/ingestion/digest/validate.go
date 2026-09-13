@@ -142,8 +142,8 @@ func capDigestDelivery(
 // loadActionableCandidatesForValidation is the validator's live reload of the
 // actionable set. It is a variable so a test can inject the infrastructure
 // failure this degrade path exists for; production always uses the real query.
-var loadActionableCandidatesForValidation = func(ctx context.Context, tx pgx.Tx, projectID string, status actionableStatusSet) ([]actionableCandidate, error) {
-	return loadActionableCandidates(ctx, tx, projectID, status)
+var loadActionableCandidatesForValidation = func(ctx context.Context, tx pgx.Tx, projectID string, status actionableStatusSet, evaluatedAt time.Time) ([]actionableCandidate, error) {
+	return loadActionableCandidates(ctx, tx, projectID, status, evaluatedAt)
 }
 
 // ValidateAndPublish rechecks model output against the immutable snapshots and
@@ -168,9 +168,11 @@ func ValidateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string, s
 var internalVocabulary = regexp.MustCompile(`(?i)(^|[^a-z0-9_])(needs_human|verified_fix|report_ready|do_not_pursue|unable_to_establish_cause)($|[^a-z0-9_])`)
 
 // provenanceVocabulary matches the confirmer's evidence language when it leaks
-// into customer prose: timeline line ids (L23, L29-L38) and the names of the
-// verification material. A production replay shipped both in card copy.
-var provenanceVocabulary = regexp.MustCompile(`(?i)\bL\d+(?:\s*[-\x{2013}]\s*L?\d+)?\b|\b(?:timelines?|screenshots?|frames?)\b`)
+// into customer prose: timeline line ids (L23, L29-L38, line 12) and the names
+// of the verification material. A production replay shipped both in card copy.
+// The worker's note validator uses the same alternation, so a note that passed
+// confirmation cannot sink its card here.
+var provenanceVocabulary = regexp.MustCompile(`(?i)\bL\d+(?:\s*[-\x{2013}]\s*L?\d+)?\b|\b(?:timelines?|screenshots?|frames?)\b|\bline\s+\d+\b`)
 
 // \p{Nd}, not \d: Go's \d is ASCII-only, so full-width or Arabic-Indic digits
 // ("４０００ users") would sail past the grounding scan entirely. Any decimal
@@ -307,8 +309,15 @@ func checkUnifiedWrittenCard(
 		provenanceVocabulary.MatchString(card.Why) || provenanceVocabulary.MatchString(card.Steps) {
 		return card, "", fmt.Errorf("evidence provenance language in card for %s", identity)
 	}
+	// The steps cap bounds writer prose. Steps equal to the ticket's own
+	// confirmed notes (substituted above, or echoed back from a cached card) are
+	// not authored, and cards no longer render them.
+	authoredSteps := card.Steps
+	if candidate.PromptVersion >= 7 && card.Steps == stripInvisible(candidate.Steps) {
+		authoredSteps = ""
+	}
 	if len([]rune(strings.TrimSpace(card.Title))) > 80 || len([]rune(card.Copy)) > 300 ||
-		len([]rune(card.Why)) > 300 || len([]rune(card.Action)) > 300 || len([]rune(card.Steps)) > 600 {
+		len([]rune(card.Why)) > 300 || len([]rune(card.Action)) > 300 || len([]rune(authoredSteps)) > 600 {
 		return card, "", fmt.Errorf("card length exceeded for %s", identity)
 	}
 	// Copy and action are digit-free. The renderer prints the measured scale
@@ -356,7 +365,7 @@ func checkUnifiedWrittenCard(
 	if candidate.PRURL != "" && !projectPullRequest(candidate.PRURL, run.GithubRepo) {
 		return card, "", fmt.Errorf("frozen link for %s is outside the project repository", identity)
 	}
-	current, err := candidateStillUnified(ctx, tx, run.ProjectID, candidate)
+	current, err := candidateStillUnified(ctx, tx, run.ProjectID, candidate, run.WindowTo)
 	if err != nil {
 		return card, "", err
 	}
@@ -392,9 +401,12 @@ func checkUnifiedWrittenCard(
 	return card, renderMode, nil
 }
 
-func candidateStillUnified(ctx context.Context, tx pgx.Tx, projectID string, frozen Candidate) (bool, error) {
+// candidateStillUnified re-checks a frozen candidate. Verified ticket evidence
+// is judged at the run's frozen evaluation time (window_to): the seven-day
+// window must not slide between freeze and publication and flip coverage.
+func candidateStillUnified(ctx context.Context, tx pgx.Tx, projectID string, frozen Candidate, evaluatedAt time.Time) (bool, error) {
 	if frozen.TicketID != "" {
-		facts, err := ingestiondb.LoadTicketDigestFacts(ctx, tx, projectID, frozen.ErrorGroupID, time.Now())
+		facts, err := ingestiondb.LoadTicketDigestFacts(ctx, tx, projectID, frozen.ErrorGroupID, evaluatedAt)
 		if err != nil {
 			return false, unifiedInfrastructureError{err}
 		}
@@ -895,7 +907,7 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string, s
 		if run.Mode == UnifiedCardsOn {
 			statusSQL = onCardStatusSQL
 		}
-		actionableCandidates, err := loadActionableCandidatesForValidation(ctx, tx, run.ProjectID, statusSQL)
+		actionableCandidates, err := loadActionableCandidatesForValidation(ctx, tx, run.ProjectID, statusSQL, run.WindowTo)
 		if err != nil {
 			actionableErr = err
 		} else {
@@ -1237,6 +1249,21 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string, s
 			}
 			return live, nil
 		}
+		// A secret that cannot sign (unset or under 32 bytes) costs a card its
+		// fix link, never the digest: the card still links to its issue page.
+		warnedUnsigned := false
+		signedFixURL := func(group, ticket string, generation int, latestAttempt string) string {
+			actionURL, signErr := ticketFixActionURL(os.Getenv("DASHBOARD_URL"), run.ProjectID, group, ticket, generation, latestAttempt, secret, time.Now())
+			if signErr != nil {
+				if !warnedUnsigned {
+					slog.Warn("digest fix links unavailable; publishing without them",
+						"diagnostic", "fix_link_unsigned", "project_id", run.ProjectID, "digest_run_id", runID, "error", signErr)
+					warnedUnsigned = true
+				}
+				return ""
+			}
+			return actionURL
+		}
 		excludeStaleAction := func(identity string, actionErr error) bool {
 			var changed unifiedCandidateChangedError
 			if !errors.As(actionErr, &changed) {
@@ -1261,10 +1288,7 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string, s
 				if card.Action == "Create fix PR" {
 					// Attempt lineage is mechanical action state. A fix can complete
 					// during authoring without changing any of the authored facts.
-					card.ActionURL, err = ticketFixActionURL(os.Getenv("DASHBOARD_URL"), run.ProjectID, card.IncidentID, card.TicketID, card.Generation, live.TicketFacts.LatestAttemptID, secret, time.Now())
-					if err != nil {
-						return err
-					}
+					card.ActionURL = signedFixURL(card.IncidentID, card.TicketID, card.Generation, live.TicketFacts.LatestAttemptID)
 				} else if card.Action == "Review PR" {
 					// The PR link is mechanical lifecycle state and may change while
 					// the authored prose is being validated.
@@ -1287,10 +1311,7 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string, s
 					return err
 				}
 				if item.Action == "Create fix PR" {
-					item.ActionURL, err = ticketFixActionURL(os.Getenv("DASHBOARD_URL"), run.ProjectID, item.IncidentID, item.TicketID, item.Generation, live.TicketFacts.LatestAttemptID, secret, time.Now())
-					if err != nil {
-						return err
-					}
+					item.ActionURL = signedFixURL(item.IncidentID, item.TicketID, item.Generation, live.TicketFacts.LatestAttemptID)
 				} else if item.Action == "Review PR" {
 					item.PRURL = live.PRURL
 				}

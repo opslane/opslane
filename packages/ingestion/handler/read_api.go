@@ -277,7 +277,22 @@ func (d *Dependencies) GetLatestDigest(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if len(raw.Digest.GeneratedCards) > 0 && string(raw.Digest.GeneratedCards) != "null" {
-			cards = raw.Digest.GeneratedCards
+			// A v5 card's action_url is a signed fix intent for the Slack
+			// delivery. Drop that one key; every other field passes through.
+			var fields []map[string]json.RawMessage
+			if err := json.Unmarshal(raw.Digest.GeneratedCards, &fields); err != nil {
+				writeJSONError(w, http.StatusInternalServerError, "stored digest payload is malformed")
+				return
+			}
+			for _, card := range fields {
+				delete(card, "action_url")
+			}
+			stripped, err := json.Marshal(fields)
+			if err != nil {
+				writeJSONError(w, http.StatusInternalServerError, "failed to encode digest cards")
+				return
+			}
+			cards = stripped
 		}
 	}
 	receipts := view.Receipts
@@ -565,9 +580,20 @@ func (d *Dependencies) ListIncidents(w http.ResponseWriter, r *http.Request) {
 	for _, g := range groups {
 		incident := toIncidentJSON(g)
 		attachPipelineState(&incident, pipeline[g.ID])
-		if err := d.attachTicketFacts(r.Context(), projectID, &incident); err != nil {
-			writeJSONError(w, http.StatusInternalServerError, "failed to load verified ticket evidence")
-			return
+		// Only known problems carry verified evidence, so other rows issue no
+		// evidence load at all.
+		if g.TicketID != nil {
+			if err := d.attachTicketFacts(r.Context(), projectID, &incident); err != nil {
+				// One row's evidence must not cost the whole list. The row keeps its
+				// ticket identity and shows no count or cause it cannot verify.
+				slog.WarnContext(r.Context(), "list incidents: verified ticket evidence unavailable",
+					"incident_id", g.ID, "error", err)
+				incident.TicketID = g.TicketID
+				incident.OccurrenceCount, incident.AffectedUsersCount = 0, 0
+				incident.ImpactClass, incident.ImpactVisits, incident.ImpactRecovered = nil, nil, nil
+				incident.RootCause, incident.SuggestedMitigation = nil, nil
+				incident.Story = ""
+			}
 		}
 		incidents = append(incidents, incident)
 	}
@@ -1084,6 +1110,10 @@ func (d *Dependencies) UpdateProjectEndpoint(w http.ResponseWriter, r *http.Requ
 	if req.FrictionAutonomy != nil {
 		switch *req.FrictionAutonomy {
 		case "ask_first", "auto_fix":
+		case "auto_fix_ux":
+			// Deprecated alias; migration 074 rewrites stored rows the same way.
+			autonomy := "auto_fix"
+			req.FrictionAutonomy = &autonomy
 		default:
 			writeJSONError(w, http.StatusBadRequest,
 				"friction_autonomy must be one of ask_first, auto_fix")
@@ -1366,20 +1396,16 @@ func sanitizeGuidance(s string) string {
 
 // respondWithIncident fetches the updated incident and writes it as JSON.
 func (d *Dependencies) respondWithIncident(w http.ResponseWriter, r *http.Request, projectID, incidentID string) {
-	group, err := d.Queries.GetErrorGroup(r.Context(), projectID, incidentID)
-	if err != nil || group == nil {
+	// The dashboard assigns this response straight into its page state, so it
+	// is presented exactly like GET: a known problem's readiness and cause, and
+	// the detail-only receipt and recordings sections, or they vanish after
+	// resolve/archive/unarchive.
+	inc, group, err := d.presentIncident(r.Context(), projectID, incidentID)
+	if err != nil || inc == nil || group == nil {
 		writeJSONError(w, http.StatusInternalServerError, "failed to fetch updated incident")
 		return
 	}
-	inc := toIncidentJSON(*group)
-	// The dashboard assigns this response straight into its page state, so it
-	// must carry the same detail-only surfaces GET does or the receipt and
-	// recordings sections vanish after resolve/archive/unarchive.
-	d.attachReceiptAndRecordings(r.Context(), projectID, incidentID, *group, &inc)
-	if err := d.attachTicketFacts(r.Context(), projectID, &inc); err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "failed to load verified ticket evidence")
-		return
-	}
+	d.attachReceiptAndRecordings(r.Context(), projectID, incidentID, *group, inc)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(inc)
 }

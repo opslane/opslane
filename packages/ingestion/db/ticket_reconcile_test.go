@@ -2,8 +2,11 @@ package db_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
+
+	"github.com/opslane/opslane/packages/ingestion/db"
 )
 
 func TestTicketPurgeReconcilesPublication(t *testing.T) {
@@ -83,8 +86,8 @@ func TestTicketArchivePermanentlyCancelsWork(t *testing.T) {
 		VALUES($1,$2,'Old publication',now(),now(),'friction','archived',$3,0) RETURNING id`, f.project, "old|"+f.ticket, f.ticket).Scan(&oldGroup); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.q.ArchiveErrorGroup(ctx, f.project, oldGroup); err == nil {
-		t.Fatal("old generation archived current problem")
+	if err := f.q.ArchiveErrorGroup(ctx, f.project, oldGroup); !errors.Is(err, db.ErrTicketGeneration) {
+		t.Fatalf("old generation archive err=%v, want ErrTicketGeneration", err)
 	}
 	if _, err := f.q.TriggerFixJob(ctx, f.project, f.group, ""); err != nil {
 		t.Fatal(err)
