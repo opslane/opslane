@@ -53,8 +53,11 @@ describe('onboarding guard', () => {
 });
 
 describe('GitHub install page', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     localStorage.clear();
+    sessionStorage.clear();
+    // The app router is shared; start each test from another route so the push is a real navigation.
+    await appRouter.push('/login');
     sessionStorage.clear();
   });
 

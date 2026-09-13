@@ -173,3 +173,13 @@ func TestGitHubInstallURLRequiresUser(t *testing.T) {
 		t.Fatalf("code=%d body=%q", w.Code, w.Body.String())
 	}
 }
+
+func TestGitHubInstallURLRequiresOrg(t *testing.T) {
+	deps := &Dependencies{GitHubAppSlug: "opslane", JWTSecret: []byte("secret")}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/github/install-url", nil)
+	w := httptest.NewRecorder()
+	deps.GitHubInstallURL(w, req.WithContext(context.WithValue(req.Context(), ctxUserID, uuid.NewString())))
+	if w.Code != http.StatusUnauthorized || len(w.Result().Cookies()) != 0 {
+		t.Fatalf("code=%d cookies=%v", w.Code, w.Result().Cookies())
+	}
+}

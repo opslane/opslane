@@ -81,13 +81,15 @@ func run(ctx context.Context, q *db.Queries, appID string, privateKey []byte, cf
 	if err != nil {
 		return err
 	}
-	switch {
-	case alreadyLinked:
+	if alreadyLinked {
 		fmt.Fprintln(out, "Status:        already linked to this organization; -apply refreshes its repositories")
-	case current != 0 && current != cfg.InstallationID:
-		fmt.Fprintf(out, "Status:        the organization's primary installation changes from %d to %d\n", current, cfg.InstallationID)
-	default:
+	} else {
 		fmt.Fprintln(out, "Status:        not linked")
+	}
+	// PersistInstallation always points the organization at this installation,
+	// so warn whenever that moves an existing pointer, linked or not.
+	if current != 0 && current != cfg.InstallationID {
+		fmt.Fprintf(out, "Warning:       the organization's primary installation changes from %d to %d\n", current, cfg.InstallationID)
 	}
 
 	var target *gh.Repo
@@ -102,10 +104,17 @@ func run(ctx context.Context, q *db.Queries, appID string, privateKey []byte, cf
 		if target, err = chooseRepo(repos, cfg.Repo); err != nil {
 			return err
 		}
-		if project.GithubRepo != nil && *project.GithubRepo != "" && !strings.EqualFold(*project.GithubRepo, target.FullName) {
-			return fmt.Errorf("project %q is already connected to %s; disconnect it in Settings first", project.Name, *project.GithubRepo)
+		if project.GithubRepo != nil && *project.GithubRepo != "" {
+			if !strings.EqualFold(*project.GithubRepo, target.FullName) {
+				return fmt.Errorf("project %q is already connected to %s; disconnect it in Settings first", project.Name, *project.GithubRepo)
+			}
+			// Keep the stored spelling: a case-only change looks like a new
+			// repository to SetProjectGitHubConfig and queues a context rebuild.
+			stored := *target
+			stored.FullName = *project.GithubRepo
+			target = &stored
 		}
-		fmt.Fprintf(out, "Project:       %s (%s) connects to %s\n", project.Name, project.ID, target.FullName)
+		fmt.Fprintf(out, "Project:       %q (%s) connects to %s\n", project.Name, project.ID, target.FullName)
 	} else {
 		projects, err := q.ListProjectsByOrg(ctx, cfg.OrgID)
 		if err != nil {
@@ -117,7 +126,7 @@ func run(ctx context.Context, q *db.Queries, appID string, privateKey []byte, cf
 			if p.GithubRepo != nil && *p.GithubRepo != "" {
 				repo = *p.GithubRepo
 			}
-			fmt.Fprintf(out, "  - %s %s (%s)\n", p.ID, p.Name, repo)
+			fmt.Fprintf(out, "  - %s %q (%s)\n", p.ID, p.Name, repo)
 		}
 	}
 
@@ -175,7 +184,7 @@ func run(ctx context.Context, q *db.Queries, appID string, privateKey []byte, cf
 		return err
 	}
 	if len(linkedOrgs) != 1 || linkedOrgs[0] != cfg.OrgID || pointer != cfg.InstallationID || !active {
-		return fmt.Errorf("read-back failed: installation organizations %v, organization installation %d, active %v", linkedOrgs, pointer, active)
+		return fmt.Errorf("link committed, but read-back failed: installation organizations %v, organization installation %d, active %v", linkedOrgs, pointer, active)
 	}
 	if target != nil {
 		covered, err := q.RepoCoveredByActiveInstallation(ctx, cfg.OrgID, target.FullName)
@@ -183,7 +192,7 @@ func run(ctx context.Context, q *db.Queries, appID string, privateKey []byte, cf
 			return err
 		}
 		if !covered {
-			return fmt.Errorf("read-back failed: %s is not covered by an active installation", target.FullName)
+			return fmt.Errorf("link committed, but read-back failed: %s is not covered by an active installation", target.FullName)
 		}
 	}
 	fmt.Fprintln(out, "Verified: the dashboard now reports GitHub as installed.")

@@ -27,10 +27,9 @@ func (d *Dependencies) startGitHubInstall(w http.ResponseWriter, r *http.Request
 		UserIDFromCtx(r.Context()), time.Now().Add(githubInstallStateTTL)); err != nil {
 		return "", fmt.Errorf("store install state: %w", err)
 	}
-	isSecure := r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https"
 	http.SetCookie(w, &http.Cookie{
 		Name: "__auth_state", Value: state, Path: "/auth", MaxAge: int(githubInstallStateTTL / time.Second),
-		HttpOnly: true, Secure: isSecure, SameSite: http.SameSiteLaxMode,
+		HttpOnly: true, Secure: isSecureRequest(r), SameSite: http.SameSiteLaxMode,
 	})
 	return fmt.Sprintf("https://github.com/apps/%s/installations/new?state=%s", d.GitHubAppSlug, url.QueryEscape(state)), nil
 }

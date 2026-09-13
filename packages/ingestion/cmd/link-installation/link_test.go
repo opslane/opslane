@@ -358,3 +358,63 @@ func TestRefusalsWriteNothing(t *testing.T) {
 		})
 	}
 }
+
+func TestApplyMovesPrimaryInstallationWithWarning(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	previous := f.installationID - 1
+	if _, err := f.pool.Exec(ctx,
+		`INSERT INTO github_app_installations (installation_id, github_org_name, github_org_id, org_id, repos)
+		 VALUES ($1, 'agentwebpro', 77, $2, '[]')`, previous, f.orgID); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.q.SetOrgGitHubInstallation(ctx, f.orgID, previous); err != nil {
+		t.Fatal(err)
+	}
+	fakeGitHub{appID: 4242, login: "agentwebpro", repos: oneRepo}.serve(t, f.installationID)
+	before := f.state(t)
+	out, err := f.run(f.config(nil))
+	if err != nil || !strings.Contains(out, fmt.Sprintf("changes from %d to %d", previous, f.installationID)) {
+		t.Fatalf("dry run err=%v\n%s", err, out)
+	}
+	if after := f.state(t); after != before {
+		t.Fatalf("dry run changed state: before %+v, after %+v", before, after)
+	}
+	if out, err := f.run(f.config(func(c *config) { c.Apply = true })); err != nil {
+		t.Fatalf("apply: %v\n%s", err, out)
+	}
+	if got := f.state(t); got.orgPointer != f.installationID || got.installationRows != 1 {
+		t.Fatalf("state after apply = %+v", got)
+	}
+}
+
+func TestReRunConnectsProjectAfterLinkOnly(t *testing.T) {
+	f := newFixture(t)
+	fakeGitHub{appID: 4242, login: "agentwebpro", repos: oneRepo}.serve(t, f.installationID)
+	if out, err := f.run(f.config(func(c *config) { c.ProjectID = ""; c.Apply = true })); err != nil {
+		t.Fatalf("link only: %v\n%s", err, out)
+	}
+	out, err := f.run(f.config(func(c *config) { c.Apply = true }))
+	if err != nil || !strings.Contains(out, "already linked") {
+		t.Fatalf("re-run: %v\n%s", err, out)
+	}
+	if got := f.state(t); got.installationRows != 1 || got.projectRepo != "agentwebpro/agentweb" {
+		t.Fatalf("state = %+v", got)
+	}
+}
+
+func TestApplyKeepsStoredRepoSpelling(t *testing.T) {
+	f := newFixture(t)
+	fakeGitHub{appID: 4242, login: "agentwebpro", repos: oneRepo}.serve(t, f.installationID)
+	if _, err := f.pool.Exec(context.Background(),
+		`UPDATE projects SET github_repo = 'AgentWebPro/AgentWeb' WHERE id = $1`, f.projectID); err != nil {
+		t.Fatal(err)
+	}
+	before := f.state(t)
+	if out, err := f.run(f.config(func(c *config) { c.Apply = true })); err != nil {
+		t.Fatalf("run: %v\n%s", err, out)
+	}
+	if got := f.state(t); got.projectRepo != "AgentWebPro/AgentWeb" || got.projectJobs != before.projectJobs {
+		t.Fatalf("state = %+v (before %+v)", got, before)
+	}
+}

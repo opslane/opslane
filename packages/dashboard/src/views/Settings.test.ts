@@ -179,6 +179,17 @@ describe('GitHub settings', () => {
 		expect(wrapper.get('[data-testid="settings-github-install"]').attributes('href')).toBe('/github/install');
 		wrapper.unmount();
 	});
+
+	it('hides Install without a GitHub App, even if an old server still sends install_url', async () => {
+		vi.mocked(getGitHubAppStatus).mockResolvedValue({
+			installed: false, installation_id: null, install_available: false,
+			install_url: 'https://github.com/apps/x/installations/new',
+		} as never);
+		const wrapper = await mountSettings('admin');
+		await flushPromises();
+		expect(wrapper.find('[data-testid="settings-github-install"]').exists()).toBe(false);
+		wrapper.unmount();
+	});
 });
 
 describe('billing settings', () => {

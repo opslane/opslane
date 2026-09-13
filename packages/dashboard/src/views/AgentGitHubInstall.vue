@@ -1,4 +1,6 @@
 <script setup lang="ts">
+// Serves two routes: /agent/github/:id, an agent session's install link, and
+// /github/install, the organization install link from the wizard and Settings.
 import { onMounted, ref } from 'vue';
 import { useRoute } from 'vue-router';
 import { agentGitHubInstallUrl, APIError, githubInstallUrl } from '../api';
