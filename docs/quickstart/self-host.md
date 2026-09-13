@@ -95,7 +95,12 @@ external-database operators must run the SQL against their configured database.
    is safe to rerun.
 
 4. Start the new workers, then backfill each intended project and environment.
-   Replace the two UUID placeholders with stored IDs:
+   Before a backfill, confirm the worker has `OPENAI_API_KEY`: without embeddings
+   every observation becomes a new known problem and the publish gate never asks
+   whether two problems share one fix. The backfill refuses to run without it
+   unless passed `--allow-missing-embeddings`. Start with `--since 1d` and check
+   that recordings of one problem gather on one known problem before running the
+   full lookback. Replace the two UUID placeholders with stored IDs:
 
    ```bash
    docker compose up -d --no-deps --wait worker
@@ -111,7 +116,29 @@ external-database operators must run the SQL against their configured database.
    and `DATABASE_URL` set.
 
 5. Let matching and confirmation drain, then check cause investigations before
-   the next digest. Use worker health and job logs to distinguish future scheduled
+   the next digest.
+
+   To start an environment's known-problem list over (for example after a
+   backfill ran without embeddings), run the reset, then the backfill again with
+   the same `--since`:
+
+   ```bash
+   docker compose exec -T worker node dist/bin/reset-friction-tickets.js \
+     --project PROJECT_UUID --environment ENVIRONMENT_UUID --since 14d --confirm
+   ```
+
+   The reset archives every known problem in the environment and its issue,
+   fails their queued work and pending matching, detaches recordings from the
+   archived issues, and deletes the matching decisions for narratives inside the
+   lookback so the backfill decides them again. Recordings, checks and matches
+   stay for audit. It refuses while a fix is in flight or a fix PR is open.
+
+   Run the rerun with `FRICTION_MATCH_MAX_CONCURRENT=1`: concurrent matching
+   jobs read the ticket list before taking the environment lock, so two jobs can
+   each create the same new problem. Restore the default when the backfill
+   drains. A digest already frozen for the day keeps its archived cards out but
+   does not pick up the new list until the next run. Model spend for the rerun is
+   roughly the same as the first backfill. Use worker health and job logs to distinguish future scheduled
    jobs, retries, and failed work. The next digest includes only tickets with
    qualifying confirmed evidence and a completed cause investigation.
 

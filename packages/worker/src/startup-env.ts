@@ -22,3 +22,10 @@ export function requiredEnvMissing(env: NodeJS.ProcessEnv): string[] {
 export function optionalEnvMissing(env: NodeJS.ProcessEnv): string[] {
   return OPTIONAL.filter((key) => !present(env[key]));
 }
+
+/** Matching does not fail without OPENAI_API_KEY; it degrades. New known
+ * problems get no embedding, so similar problems are not found and the
+ * publish gate never asks whether two problems share one fix. */
+export function embeddingsMissing(env: NodeJS.ProcessEnv): boolean {
+  return !present(env['OPENAI_API_KEY']);
+}

@@ -70,8 +70,16 @@ after this phase finishes, excluding `friction-incidents.test.ts` from that phas
   These clients use `NARRATIVE_API_KEY` / `NARRATIVE_BASE_URL`, falling back to
   `ANTHROPIC_API_KEY` / `ANTHROPIC_BASE_URL`.
 - `OPENAI_API_KEY` enables `text-embedding-3-small` retrieval (1536 dimensions).
-  Missing or unavailable embeddings fall back to screen-based retrieval.
+  Without it matching degrades silently: new tickets get no embedding, first looks
+  see no similar tickets, and the publish gate never folds duplicates. The worker
+  warns at startup. Backfill jobs carry `requireEmbeddings` and retry instead of
+  degrading unless scheduled with `--allow-missing-embeddings`.
   PostgreSQL still requires the `vector` extension for migration 078.
+- `FRICTION_FIRST_LOOK_MAX_TOKENS` (default 16384) bounds first-look output.
+- `pnpm --filter @opslane/worker reset:tickets --project UUID --environment UUID
+  --since 14d --confirm` archives an environment's tickets and deletes decisions
+  inside the lookback so a backfill with the same `--since` re-decides them. Run
+  the rerun with `FRICTION_MATCH_MAX_CONCURRENT=1`.
 - `FRICTION_MATCH_MAX_CONCURRENT` defaults to 2; `FRICTION_CONFIRM_MAX_CONCURRENT`
   defaults to 1. Both are fleet-wide claim caps. Set both to 0 on every worker
   to pause matching, confirmation, reconciliation, and new publication.

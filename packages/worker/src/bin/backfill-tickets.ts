@@ -9,12 +9,16 @@ export interface BackfillOptions {
   environmentId: string;
   since: Date;
   rate: number;
+  /** Without embeddings every observation becomes a new ticket and the publish
+   * gate never asks the one-fix question, so a backfill refuses by default. */
+  allowMissingEmbeddings: boolean;
 }
 
 export function parseBackfillArgs(args: string[], now = new Date()): BackfillOptions {
   const { values } = parseArgs({ args, options: {
     project: { type: 'string' }, environment: { type: 'string' },
     since: { type: 'string' }, rate: { type: 'string' },
+    'allow-missing-embeddings': { type: 'boolean' },
   } });
   const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   const days = /^(\d+)d$/.exec(values.since ?? '');
@@ -22,16 +26,25 @@ export function parseBackfillArgs(args: string[], now = new Date()): BackfillOpt
   if (!values.project || !uuid.test(values.project) ||
       !values.environment || !uuid.test(values.environment) ||
       !days || Number(days[1]) <= 0 || !Number.isFinite(rate) || rate <= 0) {
-    throw new Error('Usage: backfill-tickets --project UUID --environment UUID --since 14d --rate 60');
+    throw new Error('Usage: backfill-tickets --project UUID --environment UUID --since 14d --rate 60 [--allow-missing-embeddings]');
   }
   const since = new Date(now.getTime() - Number(days[1]) * 86_400_000);
   if (!Number.isFinite(since.getTime())) throw new Error('Invalid lookback duration');
-  return { projectId: values.project, environmentId: values.environment, since, rate };
+  return {
+    projectId: values.project, environmentId: values.environment, since, rate,
+    allowMissingEmbeddings: values['allow-missing-embeddings'] === true,
+  };
 }
 
 /** Schedule work durably, then exit. The ordinary match handler converts old narratives. */
+export function assertEmbeddingsConfigured(options: Pick<BackfillOptions, 'allowMissingEmbeddings'>, env: NodeJS.ProcessEnv = process.env): void {
+  if (options.allowMissingEmbeddings || env['OPENAI_API_KEY']?.trim()) return;
+  throw new Error('OPENAI_API_KEY is not set: tickets would be created without embeddings, duplicates would not be found, and the publish gate would not run. Set it, or pass --allow-missing-embeddings to proceed anyway.');
+}
+
 export async function backfillTickets(pool: pg.Pool, options: BackfillOptions): Promise<number> {
   if (!Number.isFinite(options.rate) || options.rate <= 0) throw new Error('Rate must be positive');
+  assertEmbeddingsConfigured(options);
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -60,7 +73,8 @@ export async function backfillTickets(pool: pg.Pool, options: BackfillOptions): 
          ))`, [options.projectId, options.environmentId, narrative.session_id, narrativeId]);
       if (!pending.rowCount) continue;
       const id = await enqueueJobTx(client, 'friction_match', options.projectId, {
-        sessionId: narrative.session_id, payload: { backfill: true },
+        sessionId: narrative.session_id,
+        payload: options.allowMissingEmbeddings ? { backfill: true } : { backfill: true, requireEmbeddings: true },
         availableAt: new Date(startedAt + enqueued * 60_000 / options.rate),
       });
       if (id) enqueued++;
