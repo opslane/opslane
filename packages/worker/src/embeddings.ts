@@ -17,6 +17,14 @@ export class EmbeddingsUnavailable extends Error {
   }
 }
 
+/** No key is configured: every call fails the same way, before any request. */
+export class EmbeddingsNotConfigured extends EmbeddingsUnavailable {
+  constructor() {
+    super('OpenAI embeddings are not configured');
+    this.name = 'EmbeddingsNotConfigured';
+  }
+}
+
 export interface EmbeddableTicket {
   name: string;
   control: string;
@@ -39,7 +47,7 @@ export async function embedTexts(
 ): Promise<{ vectors: number[][]; model: string }> {
   signal?.throwIfAborted();
   const apiKey = process.env['OPENAI_API_KEY'];
-  if (!apiKey) throw new EmbeddingsUnavailable('OpenAI embeddings are not configured');
+  if (!apiKey) throw new EmbeddingsNotConfigured();
 
   const vectors: number[][] = [];
   for (let start = 0; start < texts.length; start += BATCH_SIZE) {

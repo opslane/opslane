@@ -97,8 +97,9 @@ external-database operators must run the SQL against their configured database.
 4. Start the new workers, then backfill each intended project and environment.
    Before a backfill, confirm the worker has `OPENAI_API_KEY`: without embeddings
    every observation becomes a new known problem and the publish gate never asks
-   whether two problems share one fix. The backfill refuses to run without it
-   unless passed `--allow-missing-embeddings`. Start with `--since 1d` and check
+   whether two problems share one fix. Backfill jobs fail on a worker without the
+   key unless scheduled with `--allow-missing-embeddings`, and the command warns
+   when its own environment lacks it. Start with `--since 1d` and check
    that recordings of one problem gather on one known problem before running the
    full lookback. Replace the two UUID placeholders with stored IDs:
 
@@ -128,7 +129,7 @@ external-database operators must run the SQL against their configured database.
    ```
 
    The reset archives every known problem in the environment and its issue,
-   fails their queued work and pending matching, detaches recordings from the
+   fails their queued work and pending matching inside the lookback, detaches recordings from the
    archived issues, and deletes the matching decisions for narratives inside the
    lookback so the backfill decides them again. Recordings, checks and matches
    stay for audit. It refuses while a fix is in flight or a fix PR is open.

@@ -72,10 +72,11 @@ after this phase finishes, excluding `friction-incidents.test.ts` from that phas
 - `OPENAI_API_KEY` enables `text-embedding-3-small` retrieval (1536 dimensions).
   Without it matching degrades silently: new tickets get no embedding, first looks
   see no similar tickets, and the publish gate never folds duplicates. The worker
-  warns at startup. Backfill jobs carry `requireEmbeddings` and retry instead of
-  degrading unless scheduled with `--allow-missing-embeddings`.
+  warns at startup. Backfill jobs carry `requireEmbeddings` and fail on a worker
+  with no key (transient embedding errors still degrade) unless scheduled with
+  `--allow-missing-embeddings`.
   PostgreSQL still requires the `vector` extension for migration 078.
-- `FRICTION_FIRST_LOOK_MAX_TOKENS` (default 16384) bounds first-look output.
+- `FRICTION_FIRST_LOOK_MAX_TOKENS` (default 16384, max 32000) bounds first-look output; its request timeout scales with it.
 - `pnpm --filter @opslane/worker reset:tickets --project UUID --environment UUID
   --since 14d --confirm` archives an environment's tickets and deletes decisions
   inside the lookback so a backfill with the same `--since` re-decides them. Run

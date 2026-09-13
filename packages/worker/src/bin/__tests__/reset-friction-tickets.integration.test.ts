@@ -112,7 +112,8 @@ describeDb('known problems reset', () => {
 
     const jobs = (await pool.query<{ error_group_id: string | null; session_id: string | null; status: string }>(
       `SELECT error_group_id,session_id,status FROM error_group_jobs WHERE project_id=$1 AND status IN ('pending','claimed')`, [projectId])).rows;
-    expect(jobs.map((j) => j.error_group_id ?? j.session_id).sort()).toEqual([staging.group, stagingDecided.sessionId].sort());
+    // The out-of-window recording's matching is not rescheduled by the backfill, so it keeps running.
+    expect(jobs.map((j) => j.error_group_id ?? j.session_id).sort()).toEqual([staging.group, stagingDecided.sessionId, older.sessionId].sort());
 
     expect((await pool.query('SELECT invalidated_at IS NOT NULL AS invalid FROM digest_card_copy WHERE error_group_id=$1', [production.group])).rows[0]).toEqual({ invalid: true });
     expect((await pool.query('SELECT invalidated_at IS NOT NULL AS invalid FROM digest_card_copy WHERE error_group_id=$1', [staging.group])).rows[0]).toEqual({ invalid: false });

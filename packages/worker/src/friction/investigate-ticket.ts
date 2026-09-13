@@ -150,6 +150,7 @@ export async function finishInvestigation(
   // confirmation batch; the per-generation cap still bounds it.
   if (
     done &&
+    g.fix_substate === 'none' &&
     coverage < CAUSE_COVERAGE_MIN &&
     current.signalIds.length > 0 &&
     ticket.evidence_version > snapshot.ticket.evidence_version &&
@@ -159,6 +160,11 @@ export async function finishInvestigation(
     await tx.query(
       `UPDATE friction_tickets SET reinvestigate_needed=false,updated_at=now() WHERE id=$1`,
       [job.ticketId],
+    );
+    // The applied result is already stale; show the queued successor.
+    await tx.query(
+      `UPDATE error_groups SET investigation_status='pending',updated_at=now() WHERE id=$1`,
+      [job.errorGroupId],
     );
   }
   await tx.query(

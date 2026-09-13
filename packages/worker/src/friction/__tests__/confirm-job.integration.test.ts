@@ -2418,6 +2418,19 @@ describeDb('confirmation job', () => {
       ).rows,
     ).toEqual([{ publication_generation: 1 }]);
     expect((await store.getTicket(pool, projectId, t.id))!.reinvestigate_needed).toBe(false);
+    expect(
+      (await pool.query(`SELECT investigation_status FROM error_groups WHERE id=$1`, [j.error_group_id])).rows,
+    ).toEqual([{ investigation_status: 'pending' }]);
+  });
+  it('does not reopen a diluted cause once a fix PR is open', async () => {
+    const t = await publish(await ticket());
+    const incident = await investigatedWith(t, 2);
+    await pool.query(`UPDATE error_groups SET fix_substate='pr_open' WHERE id=$1`, [incident.id]);
+    await matches(t, 2);
+    await expect(
+      processFrictionConfirm(await claim(t), deps([]), new AbortController().signal),
+    ).rejects.toMatchObject({ name: 'JobCompletedInTransaction' });
+    expect(await pendingInvestigations(t)).toEqual([]);
   });
   it('records no checks when the daily cap is zero or the lease expires during a model read', async () => {
     const t = await ticket();

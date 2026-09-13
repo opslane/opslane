@@ -268,7 +268,10 @@ export async function applyConfirmationTransition(
     // same seven-day evidence, so re-check coverage here rather than trusting
     // the flag set at finish.
     const recent = await store.verifiedEvidence(tx, ticket);
+    // Never re-open a cause once a fix is in flight, a PR is open or the fix
+    // merged: rewriting it would leave that fix without the cause it acted on.
     const diluted =
+      incident.fix_substate === 'none' &&
       incident.investigation_status === 'done' &&
       recent.signalIds.length > 0 &&
       causeCoverage(incident.explained_signal_ids ?? [], recent.signalIds) <

@@ -80,11 +80,13 @@ export async function resetFrictionTickets(pool: pg.Pool, options: ResetOptions)
        WHERE project_id=$1 AND ticket_id=ANY($2::uuid[]) AND status IN ('pending','claimed')`,
       [options.projectId, ids],
     );
+    // Only matching the following backfill schedules again; jobs for older
+    // narratives keep running and match against the fresh list.
     const matchJobs = await client.query(
       `UPDATE error_group_jobs j SET status='failed',last_error='known problems reset',lease_expires_at=NULL,updated_at=now()
-       FROM sessions s WHERE j.project_id=$1 AND j.job_type='friction_match' AND j.status IN ('pending','claimed')
-         AND s.id=j.session_id AND s.project_id=$1 AND s.environment_id=$2`,
-      [options.projectId, options.environmentId],
+       FROM session_narratives n WHERE j.project_id=$1 AND j.job_type='friction_match' AND j.status IN ('pending','claimed')
+         AND n.session_id=j.session_id AND n.project_id=$1 AND n.environment_id=$2 AND n.created_at >= $3`,
+      [options.projectId, options.environmentId, options.since],
     );
     await client.query(
       `UPDATE friction_confirm_batches SET status='discarded' WHERE ticket_id=ANY($1::uuid[]) AND status='staging'`,
