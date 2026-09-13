@@ -466,10 +466,12 @@ func (f fixture) run(c config) (string, error) {
 	return out.String(), err
 }
 
-// linkState is everything a link can change. Dry runs and refusals must leave
-// it exactly as it was.
+// linkState is everything a link can change, including other tenants' rows
+// that name the installation. Dry runs and refusals must leave it identical.
 type linkState struct {
 	installationRows int
+	installationRow  string
+	legacyPointers   int
 	landedRows       int
 	projectJobs      int
 	orgPointer       int64
@@ -483,13 +485,16 @@ func (f fixture) state(t *testing.T) linkState {
 	var repo, branch *string
 	if err := f.pool.QueryRow(context.Background(), `SELECT
 		(SELECT count(*) FROM github_app_installations WHERE installation_id = $1),
+		COALESCE((SELECT md5(i::text) FROM github_app_installations i WHERE i.installation_id = $1), ''),
+		(SELECT count(*) FROM orgs WHERE github_installation_id = $1),
 		(SELECT count(*) FROM installation_landed WHERE installation_id = $1),
 		(SELECT count(*) FROM error_group_jobs WHERE project_id = $3::uuid),
 		COALESCE((SELECT github_installation_id FROM orgs WHERE id = $2::uuid), 0),
 		(SELECT github_repo FROM projects WHERE id = $3::uuid),
 		(SELECT default_branch FROM projects WHERE id = $3::uuid)`,
 		f.installationID, f.orgID, f.projectID,
-	).Scan(&s.installationRows, &s.landedRows, &s.projectJobs, &s.orgPointer, &repo, &branch); err != nil {
+	).Scan(&s.installationRows, &s.installationRow, &s.legacyPointers, &s.landedRows, &s.projectJobs,
+		&s.orgPointer, &repo, &branch); err != nil {
 		t.Fatal(err)
 	}
 	if repo != nil {
@@ -534,13 +539,16 @@ func TestApplyLinksInstallationAndConnectsProject(t *testing.T) {
 	if covered, err := f.q.RepoCoveredByActiveInstallation(ctx, f.orgID, "agentwebpro/agentweb"); err != nil || !covered {
 		t.Fatalf("covered=%v err=%v", covered, err)
 	}
+	got := f.state(t)
 	want := linkState{
-		installationRows: 1, landedRows: 1, projectJobs: before.projectJobs + 1, orgPointer: f.installationID,
+		installationRows: 1, installationRow: got.installationRow, legacyPointers: 1, landedRows: 1,
+		projectJobs: before.projectJobs + 1, orgPointer: f.installationID,
 		projectRepo: "agentwebpro/agentweb", defaultBranch: "main",
 	}
-	if got := f.state(t); got != want {
+	if got != want || got.installationRow == "" {
 		t.Fatalf("state after apply = %+v, want %+v", got, want)
 	}
+	// Re-running appends a second installation_landed audit row by design (spec D5).
 	if out, err := f.run(f.config(func(c *config) { c.Apply = true })); err != nil {
 		t.Fatalf("re-running -apply failed: %v\n%s", err, out)
 	}
@@ -586,6 +594,7 @@ func TestRefusalsWriteNothing(t *testing.T) {
 		t.Cleanup(func() { cleanupOrg(t, f.pool, other.ID) })
 		return other.ID
 	}
+	foreignProjectID := "" // set by the seed of the case that needs it; subtests run in order
 	cases := []struct {
 		name    string
 		github  fakeGitHub
@@ -603,8 +612,15 @@ func TestRefusalsWriteNothing(t *testing.T) {
 			mutate: func(c *config) { c.Repo = "agentwebpro/missing" }, wantErr: "does not cover"},
 		{name: "missing organization", github: fakeGitHub{appID: 4242, login: "agentwebpro", repos: oneRepo},
 			mutate: func(c *config) { c.OrgID = uuid.NewString(); c.ProjectID = "" }, wantErr: "does not exist"},
-		{name: "project outside the organization", github: fakeGitHub{appID: 4242, login: "agentwebpro", repos: oneRepo},
-			mutate: func(c *config) { c.ProjectID = uuid.NewString() }, wantErr: "is not in organization"},
+		{name: "project in another organization", github: fakeGitHub{appID: 4242, login: "agentwebpro", repos: oneRepo},
+			seed: func(t *testing.T, f fixture) {
+				project, err := f.q.CreateProject(context.Background(), otherOrg(t, f), "foreign", nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				foreignProjectID = project.ID
+			},
+			mutate: func(c *config) { c.ProjectID = foreignProjectID }, wantErr: "is not in organization"},
 		{name: "installation record in another organization", github: fakeGitHub{appID: 4242, login: "agentwebpro", repos: oneRepo},
 			seed: func(t *testing.T, f fixture) {
 				if _, err := f.pool.Exec(context.Background(),
@@ -1119,7 +1135,9 @@ func TestGitHubStatusPollingDoesNotReplaceInstallState(t *testing.T) {
 	}
 
 	start := httptest.NewRecorder()
+	requestedAt := time.Now()
 	deps.GitHubInstallURL(start, asUser(httptest.NewRequest(http.MethodPost, "/api/v1/github/install-url", nil)))
+	respondedAt := time.Now()
 	if start.Code != http.StatusOK {
 		t.Fatalf("install-url code=%d body=%q", start.Code, start.Body.String())
 	}
@@ -1160,8 +1178,8 @@ func TestGitHubStatusPollingDoesNotReplaceInstallState(t *testing.T) {
 		auth.HashToken(state)).Scan(&expiresAt); err != nil {
 		t.Fatal(err)
 	}
-	if lifetime := time.Until(expiresAt); lifetime < 29*time.Minute || lifetime > 31*time.Minute {
-		t.Fatalf("state lifetime=%v, want 30 minutes", lifetime)
+	if expiresAt.Before(requestedAt.Add(30*time.Minute).Add(-time.Second)) || expiresAt.After(respondedAt.Add(30*time.Minute).Add(time.Second)) {
+		t.Fatalf("state expires at %v, want 30 minutes after the request at %v", expiresAt, requestedAt)
 	}
 
 	rowsBeforePolling := stateRows()
@@ -1472,6 +1490,9 @@ In `docs/reference/http-routes.md`, replace the `/api/v1/github/status` row and 
 
 Run: `cd packages/ingestion && export DATABASE_URL="postgres://opslane:opslane_dev@localhost:5434/link_installation_test?sslmode=disable" && set -o pipefail && go build ./... && go vet ./handler/ && go test -count=1 -v -run 'TestGitHubStatusPolling|TestGitHubInstallURL|TestGitHubInstallRoutesRequireCloudAdmin|TestWorkosInstallCallback|AgentGitHubInstall|TestWebInstallCallback' ./handler/ 2>&1 | tee /tmp/claude-1000/task3.log && ! grep -q -- '--- SKIP' /tmp/claude-1000/task3.log && echo TASK3-OK`
 Expected: every selected test PASS and the last line is `TASK3-OK`. If `-run` selects no agent install-url test, run `grep -ln AgentGitHubInstallURL packages/ingestion/handler/*_test.go` and add those test names to the pattern.
+
+Then run: `! grep -nE 'generateOAuthState|StoreOAuthLoginStateForOrg|http.SetCookie' packages/ingestion/handler/agent_github_install.go && echo HELPER-SHARED`
+Expected: `HELPER-SHARED`. The existing agent tests pass with or without the shared helper, so this check is what proves the agent endpoint mints only through `startGitHubInstall`.
 
 - [ ] **Step 10: Commit**
 
@@ -1826,18 +1847,18 @@ Not for the implementing agent. Two constraints shape this task:
 
 ```bash
 export AWS_PROFILE=<deployment-admin profile> AWS_REGION=us-west-2
-test "$(aws sts get-caller-identity --query Account --output text)" = 127214199666 || echo "STOP: not the production account"
 ORG=<org_id from step 1>; PROJECT=<project_id from step 1>
 TD=$(aws ecs describe-services --cluster opslane --services ingestion --query 'services[0].taskDefinition' --output text)
 NET=$(aws ecs describe-services --cluster opslane --services ingestion --query 'services[0].networkConfiguration' --output json)
 link_task() {
   local ovr run task desc code stream logs
+  [ "$(aws sts get-caller-identity --query Account --output text)" = 127214199666 ] || { echo "not the production account; stopping" >&2; return 1; }
   ovr=$(jq -cn '{containerOverrides:[{name:"ingestion",command:$ARGS.positional}]}' --args link-installation "$@")
   run=$(aws ecs run-task --cluster opslane --launch-type FARGATE --task-definition "$TD" \
     --network-configuration "$NET" --overrides "$ovr" --output json) || return 1
   if [ "$(jq '.failures | length' <<<"$run")" -ne 0 ]; then jq '.failures' <<<"$run"; return 1; fi
   task=$(jq -er '.tasks[0].taskArn' <<<"$run") || return 1
-  aws ecs wait tasks-stopped --cluster opslane --tasks "$task"
+  aws ecs wait tasks-stopped --cluster opslane --tasks "$task" || { echo "waiter failed; $task may still be running" >&2; return 1; }
   desc=$(aws ecs describe-tasks --cluster opslane --tasks "$task" --output json)
   code=$(jq -r '.tasks[0].containers[] | select(.name=="ingestion") | .exitCode // empty' <<<"$desc")
   stream=$(jq -r '.tasks[0].containers[] | select(.name=="ingestion") | .logStreamName // empty' <<<"$desc")
@@ -1849,7 +1870,8 @@ link_task() {
   done
   jq -r '.events[]?.message' <<<"${logs:-{\}}"
   echo "exit code: ${code:-none}; stopped: $(jq -r '.tasks[0].stoppedReason // "unknown"' <<<"$desc")"
-  [ "$code" = 0 ]
+  # Success needs exit 0 AND the command's own final line, so missing logs never read as success.
+  [ "$code" = 0 ] && jq -r '.events[]?.message' <<<"${logs:-{\}}" | grep -q -e 'Dry run: nothing written' -e 'Verified: the dashboard now reports GitHub as installed.'
 }
 link_task -installation 161250809 -org "$ORG" -expect-account agentwebpro -project "$PROJECT"
 ```
