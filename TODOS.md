@@ -22,7 +22,7 @@ Deferred work with enough context to pick up cold. Add items with What / Why / P
 
 ## Gate session automation by environment (action scope follow-up)
 
-**What:** `session_analysis` enqueue sites (`packages/ingestion/db/sessions.go:381` and `:609`, `packages/ingestion/db/sessions_read.go:205`) do not consult `project_action_environments`, so scoped projects still get session analysis — and, under `auto_fix`/`auto_fix_ux` friction autonomy, potentially auto-PRs — from out-of-scope environments.
+**What:** `session_analysis` enqueue sites (`packages/ingestion/db/sessions.go:381` and `:609`, `packages/ingestion/db/sessions_read.go:205`) do not consult `project_action_environments`, so scoped projects still get session analysis — and, under `auto_fix` friction autonomy, potentially auto-PRs — from out-of-scope environments.
 
 **Why:** A customer who scopes automation to `production` reasonably expects staging sessions to stop spending LLM budget. V1 deliberately narrows the promise instead (Settings copy says "automatic error investigation"; `docs/contracts/action-scope.md` § "What the scope does not cover" documents the exclusion), but the cost leak is real.
 

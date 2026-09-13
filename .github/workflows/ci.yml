@@ -426,7 +426,7 @@ jobs:
           # The exact collected total, not a slack floor, so any silently
           # dropped test trips it. Re-derive from an actual run's
           # numTotalTests — NOT from `vitest list`, which does not expand
-          # it.each and undercounts (60 vs 75, the 24 REASON_CODES cases):
+          # it.each and undercounts (the REASON_CODES table counts as one):
           #   vitest run --reporter=json --outputFile=/tmp/e2e.json
           #   node -e 'console.log(require("/tmp/e2e.json").numTotalTests)'
           E2E_MIN_TESTS: "74"

@@ -50,12 +50,27 @@ const fixAvailable = computed(() => {
     && current.investigation_status === 'done' && current.investigation_readiness === 'eligible'
     && (current.cause_coverage ?? 0) >= 0.5;
 });
-const causeInsufficient = computed(() => {
+// One explanatory line for a ticket's investigation, or none. A null status
+// means the ticket is not yet eligible for investigation.
+const investigationNote = computed(() => {
   const current = incident.value;
-  return current?.ticket_id && current.status !== 'archived' && current.fix_substate !== 'resolved'
-    && current.investigation_status !== 'pending'
-    && (current.investigation_status !== 'done' || current.investigation_readiness === 'ineligible'
-      || (current.cause_coverage ?? 0) < 0.5);
+  if (!current?.ticket_id || current.status === 'archived' || current.fix_substate === 'resolved') return null;
+  switch (current.investigation_status) {
+    case 'pending':
+      return 'Investigation pending.';
+    case 'failed':
+      return 'Investigation failed.';
+    case 'done':
+      if (current.investigation_readiness === 'cause_only') {
+        return 'Opslane found the cause, but it calls for a product change rather than a code fix, so there is no fix PR to create.';
+      }
+      if (current.investigation_readiness === 'ineligible' || (current.cause_coverage ?? 0) < 0.5) {
+        return 'A cause must explain at least half of the current verified evidence before a fix can start. Opslane investigates again on its own when new verified evidence arrives.';
+      }
+      return null;
+    default:
+      return null;
+  }
 });
 const loading = ref(true);
 const error = ref<string | null>(null);
@@ -156,9 +171,14 @@ let fixPollTimer: ReturnType<typeof setInterval> | null = null;
 let fixPollCount = 0;
 const fixTimedOut = ref(false);
 const MAX_FIX_POLLS = 60; // 5 minutes at 5s intervals
+// A signed digest fix link only arms the button; a click submits it.
+const armedIntent = ref<string | null>(null);
 
-async function handleTriggerFix(intent?: string) {
+async function handleTriggerFix() {
   if (fixLoading.value || !incident.value) return;
+  // The signed action is one-shot: any later click is a normal request.
+  const intent = armedIntent.value;
+  armedIntent.value = null;
   fixLoading.value = true;
   fixError.value = null;
   fixTimedOut.value = false;
@@ -254,11 +274,11 @@ onMounted(async () => {
     const actionURL = new URL(window.location.href);
     const intent = actionURL.searchParams.get('fixIntent');
     if (intent) {
-      // Remove before submitting: refresh and remount must never replay an
-      // action, including after a network failure. The server verifies scope.
+      // Strip it so refresh and remount never re-arm the action. Opening the
+      // link submits nothing; the server verifies scope when the button is clicked.
       actionURL.searchParams.delete('fixIntent');
       window.history.replaceState(window.history.state, '', actionURL.pathname + actionURL.search + actionURL.hash);
-      await handleTriggerFix(intent);
+      if (fixAvailable.value) armedIntent.value = intent;
     }
     if (incident.value.kind === 'error') {
       void loadSampleEvent();
@@ -410,7 +430,7 @@ onMounted(async () => {
             :class="activeTab === 'affected-users' ? 'border-b-2 border-accent px-3 py-2 text-text' : 'border-b-2 border-transparent px-3 py-2 text-muted hover:text-text'"
             @click="switchTab('affected-users')"
           >
-            Affected Users ({{ incident.verified_users ?? incident.affected_users_count }})
+            Affected Users ({{ incident.affected_users_count }})
           </button>
         </nav>
       </div>
@@ -675,18 +695,21 @@ onMounted(async () => {
           </div>
         </div>
 
-        <p v-if="causeInsufficient" class="text-sm text-muted">
-          A cause must explain at least half of the current verified evidence before a fix can start. Opslane investigates again on its own when new verified evidence arrives.
-        </p>
-        <p v-else-if="incident.ticket_id && incident.investigation_status === 'pending'" class="text-sm text-muted">
-          Investigation pending.
-        </p>
+        <p
+          v-if="investigationNote"
+          data-testid="investigation-note"
+          class="text-sm text-muted"
+          v-text="investigationNote"
+        ></p>
         <div
           v-if="fixAvailable"
           class="p-4 bg-surface border border-border rounded-lg space-y-3"
         >
           <p v-if="incident.ticket_id" class="text-xs text-muted">
             The cause explains the verified evidence. Create a pull request for the fix when you are ready.
+          </p>
+          <p v-if="armedIntent" data-testid="fix-intent-armed" class="text-xs text-muted">
+            You opened this from a fix link. Review the cause, then select Create fix PR to start the fix.
           </p>
           <p v-else-if="incident.status === 'awaiting_approval'" class="text-xs text-muted">
             This friction fix has a code cause and is waiting for your approval.
@@ -713,11 +736,6 @@ onMounted(async () => {
               <span v-if="fixLoading">Triggering...</span>
               <span v-else>{{ incident.ticket_id ? 'Create fix PR' : incident.status === 'awaiting_approval' ? 'Generate fix' : 'Find Fix' }}</span>
             </Button>
-            <p
-              v-if="fixError"
-              class="text-sm text-danger"
-              v-text="fixError"
-            ></p>
           </div>
         </div>
 

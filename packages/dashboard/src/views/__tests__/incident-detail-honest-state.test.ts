@@ -25,6 +25,9 @@ const base: Incident = {
   story: '1 crash; recording impact unavailable',
 };
 
+const fixableTicket: Incident = { ...base, kind: 'friction', ticket_id: 't1', status: 'awaiting_approval',
+  fix_substate: 'none', investigation_status: 'done', investigation_readiness: 'eligible', cause_coverage: 0.5 };
+
 function mountView() {
   return mount(IncidentDetail, { global: { stubs: { ReplayPlayer: true, RouterLink: { template: '<a><slot /></a>' } } } });
 }
@@ -36,34 +39,63 @@ beforeEach(() => {
 });
 
 describe('IncidentDetail honest state', () => {
-  it('consumes the signed fix intent once and renders verified weekly counts', async () => {
+  it('arms the signed fix intent without submitting it and renders verified weekly counts', async () => {
     window.history.replaceState({}, '', '/issues/i1?project_id=p1&fixIntent=signed.intent');
-    api.getIncident.mockResolvedValue({ ...base, kind: 'friction', ticket_id: 't1', status: 'awaiting_approval',
-      fix_substate: 'none', investigation_status: 'done', investigation_readiness: 'eligible', cause_coverage: 0.5,
+    api.getIncident.mockResolvedValue({ ...fixableTicket,
       occurrence_count: 999, affected_users_count: 999, verified_users: 2, verified_sessions: 4 });
-    api.triggerFix.mockResolvedValue({ job_id: 'j1' });
     let wrapper = mountView();
     await flushPromises();
-    expect(api.triggerFix).toHaveBeenCalledExactlyOnceWith('p1', 'i1', undefined, 'signed.intent');
+    expect(api.triggerFix).not.toHaveBeenCalled();
     expect(window.location.search).toBe('?project_id=p1');
+    expect(wrapper.find('[data-testid="fix-intent-armed"]').exists()).toBe(true);
+    expect(wrapper.findAll('button').some(button => button.text() === 'Create fix PR')).toBe(true);
     expect(wrapper.text()).toContain('2 users · 4 sessions this week');
     expect(wrapper.text()).not.toContain('999 occurrences');
     wrapper.unmount();
     wrapper = mountView();
     await flushPromises();
-    expect(api.triggerFix).toHaveBeenCalledTimes(1);
+    expect(wrapper.find('[data-testid="fix-intent-armed"]').exists()).toBe(false);
+    expect(api.triggerFix).not.toHaveBeenCalled();
     wrapper.unmount();
   });
 
-  it('shows a rejected signed action without retrying it', async () => {
-    window.history.replaceState({}, '', '/issues/i1?project_id=p1&fixIntent=expired');
-    api.getIncident.mockResolvedValue({ ...base, ticket_id: 't1', status: 'archived' });
-    api.triggerFix.mockRejectedValue(new Error('Fix link expired'));
+  it('submits the armed intent once when Create fix PR is clicked', async () => {
+    window.history.replaceState({}, '', '/issues/i1?project_id=p1&fixIntent=signed.intent');
+    api.getIncident.mockResolvedValue(fixableTicket);
+    api.triggerFix.mockResolvedValue({ job_id: 'j1' });
     const wrapper = mountView();
     await flushPromises();
-    expect(wrapper.text()).toContain('Fix link expired');
+    await wrapper.findAll('button').find(button => button.text() === 'Create fix PR')!.trigger('click');
+    await flushPromises();
+    expect(api.triggerFix).toHaveBeenCalledExactlyOnceWith('p1', 'i1', undefined, 'signed.intent');
+    expect(wrapper.text()).not.toContain('Create fix PR');
+    wrapper.unmount();
+  });
+
+  it('shows a rejected signed action once and disarms it', async () => {
+    window.history.replaceState({}, '', '/issues/i1?project_id=p1&fixIntent=expired');
+    api.getIncident.mockResolvedValue(fixableTicket);
+    api.triggerFix.mockRejectedValue(new Error('fix link has expired or no longer matches this issue'));
+    const wrapper = mountView();
+    await flushPromises();
+    await wrapper.findAll('button').find(button => button.text() === 'Create fix PR')!.trigger('click');
+    await flushPromises();
+    expect(wrapper.findAll('[role="alert"]')).toHaveLength(1);
+    expect(wrapper.get('[role="alert"]').text()).toBe('fix link has expired or no longer matches this issue');
+    expect(wrapper.find('[data-testid="fix-intent-armed"]').exists()).toBe(false);
+    expect(api.triggerFix).toHaveBeenCalledExactlyOnceWith('p1', 'i1', undefined, 'expired');
+    wrapper.unmount();
+  });
+
+  it('ignores a fix link on an issue that cannot be fixed', async () => {
+    window.history.replaceState({}, '', '/issues/i1?project_id=p1&fixIntent=expired');
+    api.getIncident.mockResolvedValue({ ...fixableTicket, status: 'archived' });
+    const wrapper = mountView();
+    await flushPromises();
     expect(window.location.search).not.toContain('fixIntent');
-    expect(api.triggerFix).toHaveBeenCalledTimes(1);
+    expect(wrapper.text()).not.toContain('Create fix PR');
+    expect(wrapper.find('[data-testid="fix-intent-armed"]').exists()).toBe(false);
+    expect(api.triggerFix).not.toHaveBeenCalled();
     wrapper.unmount();
   });
 
@@ -126,6 +158,35 @@ describe('IncidentDetail honest state', () => {
     await flushPromises();
     expect(wrapper.text()).toContain('The export button offers no bulk action.');
     expect(wrapper.text()).not.toContain('Create fix PR');
+    expect(wrapper.get('[data-testid="investigation-note"]').text()).toBe(
+      'Opslane found the cause, but it calls for a product change rather than a code fix, so there is no fix PR to create.',
+    );
+    wrapper.unmount();
+  });
+
+  it.each([
+    ['failed', { investigation_status: 'failed', investigation_readiness: 'ineligible' }, 'Investigation failed.'],
+    ['pending', { investigation_status: 'pending', investigation_readiness: 'pending' }, 'Investigation pending.'],
+    ['done below half coverage', { investigation_status: 'done', investigation_readiness: 'ineligible', cause_coverage: 0.3 },
+      'A cause must explain at least half of the current verified evidence before a fix can start. Opslane investigates again on its own when new verified evidence arrives.'],
+  ] as const)('explains a ticket whose investigation is %s', async (_label, facts, note) => {
+    api.getIncident.mockResolvedValue({ ...fixableTicket, ...facts });
+    const wrapper = mountView();
+    await flushPromises();
+    expect(wrapper.findAll('[data-testid="investigation-note"]')).toHaveLength(1);
+    expect(wrapper.get('[data-testid="investigation-note"]').text()).toBe(note);
+    expect(wrapper.text()).not.toContain('Create fix PR');
+    wrapper.unmount();
+  });
+
+  it('shows no investigation line for a ticket not yet eligible for investigation', async () => {
+    api.getIncident.mockResolvedValue({ ...fixableTicket, investigation_status: null, investigation_readiness: 'ineligible' });
+    const wrapper = mountView();
+    await flushPromises();
+    expect(wrapper.find('[data-testid="investigation-note"]').exists()).toBe(false);
+    expect(wrapper.text()).not.toContain('Investigation pending.');
+    expect(wrapper.text()).not.toContain('Investigation failed.');
+    expect(wrapper.text()).not.toContain('A cause must explain');
     wrapper.unmount();
   });
 

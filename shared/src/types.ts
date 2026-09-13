@@ -415,6 +415,14 @@ export interface Incident {
   id: string;
   project_id: string;
   kind: IncidentKind;
+  /** Present only on known-problem tickets; absent on legacy incidents. */
+  ticket_id?: string;
+  publication_generation?: number;
+  fix_substate?: 'none' | 'fixing' | 'pr_open' | 'resolved';
+  /** Null while the ticket is not yet eligible for investigation. */
+  investigation_status?: 'pending' | 'done' | 'failed' | null;
+  /** Share of current verified evidence the cause explains, 0-1. */
+  cause_coverage?: number;
   /** Platform wire token ('javascript', 'python', future tokens) for error
    * incidents; null/absent for friction. */
   platform?: string | null;
@@ -441,6 +449,9 @@ export interface Incident {
   last_seen: string;
   occurrence_count: number;
   affected_users_count: number;
+  /** Ticket-only weekly verified counts. */
+  verified_users?: number;
+  verified_sessions?: number;
   priority_score?: number;
   priority_inputs?: PriorityInputs;
   priority_scored_at?: string;
@@ -457,7 +468,7 @@ export interface Incident {
   session_pointer?: { session_id: string; error_at: string };
   reason?: NeedsHumanReason;
   root_cause?: string;
-  investigation_readiness?: 'eligible' | 'ineligible' | 'pending';
+  investigation_readiness?: 'eligible' | 'cause_only' | 'ineligible' | 'pending';
   /** Model-authored technical report; render only under an investigation-output label. */
   agent_task_brief?: string;
   /** Structured verification evidence for the latest fix attempt. */

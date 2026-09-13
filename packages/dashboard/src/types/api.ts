@@ -190,7 +190,7 @@ export interface Incident {
   ticket_id?: string;
   publication_generation?: number;
   fix_substate?: 'none' | 'fixing' | 'pr_open' | 'resolved';
-  investigation_status?: 'pending' | 'done' | 'failed';
+  investigation_status?: 'pending' | 'done' | 'failed' | null;
   cause_coverage?: number;
   platform?: string | null;
   /** Present only on kind='friction': friction identity is environment-scoped. */
@@ -452,7 +452,11 @@ export type AdminJobType =
   | 'product_context'
   | 'digest_write'
   | 'score_sync'
-  | 'stack_resolve';
+  | 'stack_resolve'
+  | 'friction_match'
+  | 'friction_confirm'
+  | 'friction_reconcile'
+  | 'friction_pr_event';
 
 export interface AdminHourlyEventBucket {
   hour: string;

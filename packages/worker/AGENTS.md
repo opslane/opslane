@@ -37,15 +37,11 @@ The worker polls Postgres and owns investigation, fix verification, lease handli
   report health during the exact outage the field exists to surface. Keep the payload
   snake_case; `QueueDepthRow` stays camelCase as the internal type.
 
-- `FRICTION_CONFIRM_DAILY_CAP` reserves one project/UTC-day unit per unstaged recording check in PostgreSQL; do not reuse narrative session budget stamps. A resumed batch skips staged recordings. `FRICTION_CONFIRM_MAX_CONCURRENT=0` pauses confirmation and reconciliation.
-
 ## Verification
 
 - Run `pnpm --filter @opslane/worker build` and `pnpm --filter @opslane/worker test`.
 - For worker pipeline behavior, also run the live smoke described in the root `AGENTS.md` and confirm the expected terminal state.
 - Build the worker Compose image after Dockerfile changes.
-
-- `FRICTION_MAX_OPEN_FIX_PRS` defaults to 5 per project. Automatic delivery reserves its slot under the project lock; manual requests are exempt. Ticket fixes and PR callbacks must match the live generation and attempt.
 
 ### In-process known-problems smoke
 
@@ -80,6 +76,8 @@ after this phase finishes, excluding `friction-incidents.test.ts` from that phas
   defaults to 1. Both are fleet-wide claim caps. Set both to 0 on every worker
   to pause matching, confirmation, reconciliation, and new publication.
   `FRICTION_CONFIRM_DAILY_CAP` defaults to 2000 recording checks per project per UTC day.
+- `FRICTION_CONFIRM_DAILY_CAP` reserves one project/UTC-day unit per unstaged recording check in PostgreSQL; do not reuse narrative session budget stamps. A resumed batch skips staged recordings. `FRICTION_CONFIRM_MAX_CONCURRENT=0` pauses confirmation and reconciliation.
+- `FRICTION_MAX_OPEN_FIX_PRS` defaults to 5 per project. Automatic delivery reserves its slot under the project lock; manual requests are exempt. Ticket fixes and PR callbacks must match the live generation and attempt.
 - Run `pnpm --filter @opslane/worker backfill:tickets --project UUID --environment UUID
   --since 14d --rate 60` after building. It schedules `friction_match` jobs through
   `available_at` and exits; it never sleeps to pace work. Matching materializes
