@@ -87,7 +87,7 @@ import { pushScore } from './scores.js';
 import { processScoreSyncJob } from './score-sync.js';
 import * as billing from './billing.js';
 import { emitUsageEvent } from './usage-events.js';
-import { optionalEnvMissing, requiredEnvMissing } from './startup-env.js';
+import { embeddingsMissing, optionalEnvMissing, requiredEnvMissing } from './startup-env.js';
 
 function nonNegativeIntegerEnv(raw: string | undefined, fallback: number): number {
   const parsed = Number(raw);
@@ -1814,6 +1814,9 @@ async function main(): Promise<void> {
   if (missingRequired.length > 0) process.exit(1);
   for (const key of optionalEnvMissing(process.env)) {
     logger.warn('Optional environment variable not set — jobs requiring it will fail', { key });
+  }
+  if (embeddingsMissing(process.env)) {
+    logger.warn('OPENAI_API_KEY not set: known problems are created without embeddings, so similar problems are not found and duplicates are never folded at publication', { key: 'OPENAI_API_KEY' });
   }
 
   // Best-effort: a schema that is one migration behind, or a requeue that

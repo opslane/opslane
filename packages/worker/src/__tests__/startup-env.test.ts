@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { optionalEnvMissing, requiredEnvMissing } from '../startup-env.js';
+import { embeddingsMissing, optionalEnvMissing, requiredEnvMissing } from '../startup-env.js';
 
 const base = { DATABASE_URL: 'postgres://x', ANTHROPIC_API_KEY: 'k', GITHUB_TOKEN: 't' };
 
@@ -39,5 +39,13 @@ describe('optionalEnvMissing', () => {
   it('lists the keys whose absence only fails the jobs that need them', () => {
     expect(optionalEnvMissing({ DATABASE_URL: 'x' }))
       .toEqual(['ANTHROPIC_API_KEY', 'E2B_API_KEY', 'GITHUB_TOKEN']);
+  });
+});
+
+describe('embeddingsMissing', () => {
+  it('flags an unset or blank OpenAI key', () => {
+    expect(embeddingsMissing({})).toBe(true);
+    expect(embeddingsMissing({ OPENAI_API_KEY: '  ' })).toBe(true);
+    expect(embeddingsMissing({ OPENAI_API_KEY: 'sk-test' })).toBe(false);
   });
 });

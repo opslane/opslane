@@ -4,7 +4,7 @@ import * as db from '../../db.js';
 import { deriveNarrativeId, buildSignalRows } from '../../narrative/emit.js';
 import { writeObservationSignals } from '../../friction/persist.js';
 import { processFrictionMatch } from '../../friction/match-job.js';
-import { backfillTickets, parseBackfillArgs } from '../backfill-tickets.js';
+import { assertEmbeddingsConfigured, backfillTickets, parseBackfillArgs } from '../backfill-tickets.js';
 
 const describeDb = process.env['DATABASE_URL'] ? describe : describe.skip;
 const projectId = randomUUID();
@@ -20,8 +20,15 @@ const observations = ['o1', 'o2'].map(id => ({ id, what: 'Save failed', evidence
 describe('backfill arguments', () => {
   it('parses the required scope, lookback and rate', () => {
     expect(parseBackfillArgs(['--project', projectId, '--environment', environmentId, '--since', '14d', '--rate', '60'], since)).toEqual({
-      projectId, environmentId, since: new Date('2026-08-18T00:00:00Z'), rate: 60,
+      projectId, environmentId, since: new Date('2026-08-18T00:00:00Z'), rate: 60, allowMissingEmbeddings: false,
     });
+    expect(parseBackfillArgs(['--project', projectId, '--environment', environmentId, '--since', '14d', '--rate', '60', '--allow-missing-embeddings'], since).allowMissingEmbeddings).toBe(true);
+  });
+  it('refuses to run without embeddings unless explicitly allowed', () => {
+    expect(() => assertEmbeddingsConfigured({ allowMissingEmbeddings: false }, {})).toThrow(/OPENAI_API_KEY is not set/);
+    expect(() => assertEmbeddingsConfigured({ allowMissingEmbeddings: false }, { OPENAI_API_KEY: '  ' })).toThrow(/OPENAI_API_KEY/);
+    expect(() => assertEmbeddingsConfigured({ allowMissingEmbeddings: false }, { OPENAI_API_KEY: 'sk-test' })).not.toThrow();
+    expect(() => assertEmbeddingsConfigured({ allowMissingEmbeddings: true }, {})).not.toThrow();
   });
   it.each([
     [], ['--project', 'bad'],
@@ -36,7 +43,7 @@ describe('backfill arguments', () => {
 
 describeDb('ticket backfill', () => {
   const pool = db.getPool();
-  const options = { projectId, environmentId, since, rate: 60 };
+  const options = { projectId, environmentId, since, rate: 60, allowMissingEmbeddings: true };
   beforeAll(async () => {
     await pool.query('INSERT INTO orgs(id,name) VALUES($1,$2)', [orgId, `backfill-${orgId}`]);
     await pool.query("INSERT INTO projects(id,org_id,name) VALUES($1,$3,'backfill'),($2,$3,'other')", [projectId, otherProject, orgId]);
@@ -92,6 +99,15 @@ describeDb('ticket backfill', () => {
     expect(jobs.map(row => row.session_id).sort()).toEqual(eligible.sort());
     expect(jobs.map(row => row.payload)).toEqual(Array(3).fill({ backfill: true }));
     expect(jobs.map(row => row.spacing)).toEqual([null, 1, 1]);
+  });
+  it('marks jobs as requiring embeddings unless the operator allowed their absence', async () => {
+    vi.stubEnv('OPENAI_API_KEY', 'sk-test');
+    try {
+      await seed();
+      expect(await backfillTickets(pool, { ...options, allowMissingEmbeddings: false })).toBe(1);
+      expect((await pool.query('SELECT payload FROM error_group_jobs WHERE project_id=$1', [projectId])).rows)
+        .toEqual([{ payload: { backfill: true, requireEmbeddings: true } }]);
+    } finally { vi.unstubAllEnvs(); }
   });
   it('skips completed decisions including not_a_problem and resumes a partial or reserved ledger', async () => {
     const complete = await seed();

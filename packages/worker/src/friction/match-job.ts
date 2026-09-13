@@ -27,7 +27,10 @@ export interface MatchJobDeps {
 }
 /** Lazily construct providers so empty/completed narratives need no model key. */
 export function frictionMatchDepsFromEnv(): MatchJobDeps {
-  const client = (modelName: string): MatchJobDeps['cheap'] => ({
+  const client = (
+    modelName: string,
+    maxTokens: number,
+  ): MatchJobDeps['cheap'] => ({
     modelName,
     complete: async (args) => {
       const apiKey =
@@ -39,7 +42,7 @@ export function frictionMatchDepsFromEnv(): MatchJobDeps {
       return new NarrativeClient({
         model: modelName,
         apiKey,
-        maxTokens: 8192,
+        maxTokens,
         reasoning: 'off',
         baseURL:
           process.env['NARRATIVE_BASE_URL'] ||
@@ -51,11 +54,35 @@ export function frictionMatchDepsFromEnv(): MatchJobDeps {
   return {
     cheap: client(
       process.env['FRICTION_MATCH_MODEL'] || 'claude-haiku-4-5-20251001',
+      8192,
     ),
     strong: client(
       process.env['FRICTION_FIRST_LOOK_MODEL'] || 'claude-sonnet-5',
+      firstLookMaxTokens(),
     ),
   };
+}
+
+/** Backfill jobs scheduled without --allow-missing-embeddings carry this flag. */
+export function embeddingsRequired(payload: unknown): boolean {
+  return (
+    typeof payload === 'object' &&
+    payload !== null &&
+    'requireEmbeddings' in payload &&
+    payload.requireEmbeddings === true
+  );
+}
+/** Output ceiling for the first careful look. A session with many drafts
+ * writes one decision per draft, and 8,192 tokens truncated real production
+ * responses. Invalid values fall back to the default. */
+export const FIRST_LOOK_MAX_TOKENS_DEFAULT = 16_384;
+export function firstLookMaxTokens(
+  value: string | undefined = process.env['FRICTION_FIRST_LOOK_MAX_TOKENS'],
+): number {
+  const raw = Number(value ?? '');
+  return Number.isInteger(raw) && raw >= 1_024 && raw <= 64_000
+    ? raw
+    : FIRST_LOOK_MAX_TOKENS_DEFAULT;
 }
 
 type MatchJob = db.ClaimedJob & { sessionId: string };
@@ -210,7 +237,13 @@ export async function processFrictionMatch(
       return (await (deps.embed ?? embedTexts)(texts, embeddingMeter, signal))
         .vectors;
     } catch (error) {
-      if (error instanceof EmbeddingsUnavailable) return texts.map(() => null);
+      if (error instanceof EmbeddingsUnavailable) {
+        // A backfill that requires embeddings retries instead of creating
+        // tickets no duplicate search or publish gate can see.
+        if (embeddingsRequired(job.payload))
+          throw new Error(`Embeddings required for this backfill: ${error.message}`);
+        return texts.map(() => null);
+      }
       throw error;
     }
   };
