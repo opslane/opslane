@@ -56,6 +56,22 @@ export DASHBOARD_ORIGIN=http://localhost:8082
 
 If you created the App before Opslane read CI, approve the **Checks** and **Commit statuses** read permissions in GitHub. Until you do, Opslane leaves fixes as drafts rather than assuming that missing CI means a fix is fine.
 
+### Link an installation Opslane did not record
+
+If GitHub shows the App installed but Opslane says GitHub is not connected, the install never reached Opslane. An operator can link it from the server container without the user:
+
+```bash
+docker exec <ingestion-container> link-installation \
+  -installation <installation-id> \
+  -org <organization-uuid> \
+  -expect-account <github-account-login> \
+  -project <project-uuid>
+```
+
+The installation ID is the number at the end of the installation's settings URL on GitHub. The command checks with GitHub that the installation belongs to this App and to that account, then prints what it would change and writes nothing. Add `-apply` to link it. Pass `-repo owner/name` when the installation covers more than one repository.
+
+It refuses to move an installation that is linked to a different organization, and it refuses to replace a project's existing repository.
+
 ## Point a project at a repo
 
 Each project maps to one repository. In App mode, open project → Settings → GitHub and pick the repo. In PAT mode, enter `owner/repo` in the onboarding wizard or call the project GitHub endpoint. Opslane stores only the repo name and authenticates through your App or token each time it acts.
