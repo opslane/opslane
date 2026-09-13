@@ -194,6 +194,7 @@ func NewRouterWithPool(deps *Dependencies, pool *pgxpool.Pool) *chi.Mux {
 		// GitHub App integration
 		r.With(deps.AuthenticateUserSession, deps.RequireRoleIfCloud("admin")).Get("/github/setup", deps.GitHubSetupCallback)
 		r.With(deps.AuthenticateUserSession, deps.RequireRoleIfCloud("admin")).Get("/github/status", deps.GetGitHubAppStatus)
+		r.With(deps.AuthenticateUserSession, deps.RequireRoleIfCloud("admin")).Post("/github/install-url", deps.GitHubInstallURL)
 		r.With(deps.AuthenticateUserSession).Get("/github/repos", deps.ListGitHubRepos)
 
 		// Per-project GitHub config

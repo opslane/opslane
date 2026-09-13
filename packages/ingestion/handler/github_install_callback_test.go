@@ -241,26 +241,40 @@ func TestGitHubInstallRoutesRequireCloudAdmin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	deps := &Dependencies{Queries: q, JWTSecret: secret, AuthProvider: &recordingProvider{}, DashboardOrigin: "https://app.example"}
+	deps := &Dependencies{Queries: q, JWTSecret: secret, AuthProvider: &recordingProvider{}, DashboardOrigin: "https://app.example", GitHubAppSlug: "opslane"}
 	router := NewRouter(deps)
-	request := func(path string) *httptest.ResponseRecorder {
-		req := httptest.NewRequest(http.MethodGet, path, nil)
-		req.AddCookie(&http.Cookie{Name: AccessCookieName, Value: token})
+	request := func(method, path string, signedIn bool) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, nil)
+		if signedIn {
+			req.AddCookie(&http.Cookie{Name: AccessCookieName, Value: token})
+		}
 		w := httptest.NewRecorder()
 		router.ServeHTTP(w, req)
 		return w
 	}
-	for _, path := range []string{"/api/v1/github/setup", "/api/v1/github/status"} {
-		if w := request(path); w.Code != http.StatusForbidden {
-			t.Fatalf("member %s code=%d body=%q", path, w.Code, w.Body.String())
+	adminRoutes := []struct{ method, path string }{
+		{http.MethodGet, "/api/v1/github/setup"},
+		{http.MethodGet, "/api/v1/github/status"},
+		{http.MethodPost, "/api/v1/github/install-url"},
+	}
+	if w := request(http.MethodPost, "/api/v1/github/install-url", false); w.Code != http.StatusUnauthorized {
+		t.Fatalf("signed-out install-url code=%d body=%q", w.Code, w.Body.String())
+	}
+	for _, route := range adminRoutes {
+		if w := request(route.method, route.path, true); w.Code != http.StatusForbidden {
+			t.Fatalf("member %s %s code=%d body=%q", route.method, route.path, w.Code, w.Body.String())
 		}
 	}
 	if _, err := pool.Exec(ctx, `UPDATE memberships SET role = 'admin' WHERE user_id = $1 AND org_id = $2`, user.ID, org.ID); err != nil {
 		t.Fatal(err)
 	}
-	for _, path := range []string{"/api/v1/github/setup", "/api/v1/github/status"} {
-		if w := request(path); w.Code == http.StatusForbidden || w.Code == http.StatusUnauthorized {
-			t.Fatalf("admin %s code=%d body=%q", path, w.Code, w.Body.String())
+	for _, route := range adminRoutes {
+		if w := request(route.method, route.path, true); w.Code == http.StatusForbidden || w.Code == http.StatusUnauthorized {
+			t.Fatalf("admin %s %s code=%d body=%q", route.method, route.path, w.Code, w.Body.String())
 		}
+	}
+	if w := request(http.MethodPost, "/api/v1/github/install-url", true); w.Code != http.StatusOK ||
+		!strings.Contains(w.Body.String(), "/apps/opslane/installations/new?state=") {
+		t.Fatalf("admin install-url code=%d body=%q", w.Code, w.Body.String())
 	}
 }
