@@ -16,6 +16,7 @@ import {
 } from './confirm.js';
 import { judgeOneFix } from './one-fix.js';
 import * as store from './tickets-db.js';
+import { CAUSE_COVERAGE_MIN, causeCoverage } from './fix-attempts.js';
 
 export interface ConfirmJobDeps {
   client: ConfirmClient;
@@ -262,12 +263,22 @@ export async function applyConfirmationTransition(
       [incident.id],
     );
     const allowed = store.investigationAllowed(ticket, evidence.users);
+    // A cause that explained its evidence when the investigation finished can
+    // fall below half as confirmed recordings arrive; the digest judges the
+    // same seven-day evidence, so re-check coverage here rather than trusting
+    // the flag set at finish.
+    const recent = await store.verifiedEvidence(tx, ticket);
+    const diluted =
+      incident.investigation_status === 'done' &&
+      recent.signalIds.length > 0 &&
+      causeCoverage(incident.explained_signal_ids ?? [], recent.signalIds) <
+        CAUSE_COVERAGE_MIN;
     if (
       allowed &&
-      ticket.reinvestigate_needed &&
-      ticket.evidence_version > (incident.evidence_version_used ?? -1)
+      (ticket.reinvestigate_needed || diluted) &&
+      ticket.evidence_version > (incident.evidence_version_used ?? -1) &&
+      (await store.enqueueTicketInvestigation(tx, ticket, incident.id))
     ) {
-      await store.enqueueTicketInvestigation(tx, ticket, incident.id);
       await tx.query(
         `UPDATE friction_tickets SET reinvestigate_needed=false WHERE id=$1`,
         [ticket.id],

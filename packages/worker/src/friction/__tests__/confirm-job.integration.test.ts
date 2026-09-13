@@ -2289,6 +2289,136 @@ describeDb('confirmation job', () => {
       ).rows,
     ).toHaveLength(4);
   });
+  async function investigatedWith(t: store.TicketRow, explainedCount: number) {
+    const incident = (await store.liveIncident(pool, t))!;
+    const evidence = await store.verifiedEvidence(pool, t);
+    await pool.query(
+      `UPDATE error_group_jobs SET status='completed' WHERE ticket_id=$1 AND job_type='investigate'`,
+      [t.id],
+    );
+    await pool.query(
+      `UPDATE error_groups SET investigation_status='done',evidence_version_used=$2,explained_signal_ids=$3::jsonb WHERE id=$1`,
+      [incident.id, t.evidence_version, JSON.stringify(evidence.signalIds.slice(0, explainedCount))],
+    );
+    await pool.query(
+      `UPDATE friction_tickets SET reinvestigate_needed=false WHERE id=$1`,
+      [t.id],
+    );
+    return incident;
+  }
+  async function pendingInvestigations(t: store.TicketRow) {
+    return (
+      await pool.query(
+        `SELECT publication_generation FROM error_group_jobs WHERE ticket_id=$1 AND job_type='investigate' AND status='pending'`,
+        [t.id],
+      )
+    ).rows;
+  }
+  it('reinvestigates when new verified evidence dilutes a covering cause below half', async () => {
+    const t = await publish(await ticket());
+    // Two of three recordings explained: 67% when the investigation finished.
+    await investigatedWith(t, 2);
+    await matches(t, 2);
+    await expect(
+      processFrictionConfirm(await claim(t), deps([]), new AbortController().signal),
+    ).rejects.toMatchObject({ name: 'JobCompletedInTransaction' });
+    // Two of five now: 40%, so the cause no longer qualifies for a card.
+    expect(await pendingInvestigations(t)).toEqual([{ publication_generation: 1 }]);
+    expect((await store.getTicket(pool, projectId, t.id))!.reinvestigate_needed).toBe(false);
+  });
+  it('does not reinvestigate while the cause still explains half of the grown evidence', async () => {
+    const t = await publish(await ticket());
+    await investigatedWith(t, 3);
+    await matches(t, 1);
+    await expect(
+      processFrictionConfirm(await claim(t), deps([]), new AbortController().signal),
+    ).rejects.toMatchObject({ name: 'JobCompletedInTransaction' });
+    // Three of four: 75%.
+    expect(await pendingInvestigations(t)).toEqual([]);
+  });
+  it('stops reinvestigating a diluted cause once the generation used its investigations', async () => {
+    const t = await publish(await ticket());
+    const incident = await investigatedWith(t, 2);
+    await pool.query(
+      `INSERT INTO error_group_jobs(error_group_id,project_id,ticket_id,job_type,status,publication_generation)
+       SELECT $1,$2,$3,'investigate','completed',1 FROM generate_series(1,$4::int)`,
+      [incident.id, projectId, t.id, store.MAX_INVESTIGATIONS_PER_GENERATION],
+    );
+    await matches(t, 2);
+    await expect(
+      processFrictionConfirm(await claim(t), deps([]), new AbortController().signal),
+    ).rejects.toMatchObject({ name: 'JobCompletedInTransaction' });
+    expect(await pendingInvestigations(t)).toEqual([]);
+  });
+  it('queues a successor when evidence arrived while the investigation ran and the cause no longer covers half', async () => {
+    const t = await publish(await ticket());
+    const j = (
+      await pool.query(
+        `UPDATE error_group_jobs SET status='claimed',worker_id='successor-test',lease_generation=1,lease_expires_at=now()+interval '5 minutes' WHERE ticket_id=$1 AND job_type='investigate' RETURNING id,error_group_id`,
+        [t.id],
+      )
+    ).rows[0];
+    const job = {
+      id: j.id,
+      projectId,
+      ticketId: t.id,
+      errorGroupId: j.error_group_id,
+      publicationGeneration: 1,
+      workerId: 'successor-test',
+      leaseGeneration: '1',
+      sessionId: null,
+    } as TicketInvestigateJob;
+    await expect(
+      processTicketInvestigation(
+        job,
+        (await db.getErrorGroup(j.error_group_id, projectId))!,
+        new AbortController().signal,
+        {
+          apiKey: 'test',
+          checkout: async () => ({
+            reader: { readFile: async () => '', grep: async () => '', list: async () => '', exists: async () => [] },
+            tree: 'src/save.ts',
+            headSha: 'abc',
+            close: async () => {},
+          }),
+          investigate: async (_key, input) => {
+            const supplied = input.confirmedSignalIds!;
+            // Two more recordings are confirmed while the sandbox runs. The
+            // confirmation sees a pending investigation and queues nothing.
+            await matches(t, 2);
+            await expect(
+              processFrictionConfirm(await claim(t), deps([]), new AbortController().signal),
+            ).rejects.toMatchObject({ name: 'JobCompletedInTransaction' });
+            return {
+              status: 'verdict',
+              investigatedCommit: 'abc',
+              costUsd: 0,
+              usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+              verdict: {
+                codeCause: true,
+                confidence: 'high',
+                reason: 'The save handler drops input.',
+                explains: supplied.slice(0, 2),
+                doesNotExplain: supplied.slice(2),
+                evidence: [{ path: 'src/save.ts', detail: 'Drops input', symptomLink: 'Data lost' }],
+                agentTaskBrief: 'Preserve input.',
+              },
+            };
+          },
+        },
+      ),
+    ).rejects.toMatchObject({ name: 'JobCompletedInTransaction' });
+    // Two of five current recordings explained: the finish queues the successor.
+    expect(
+      (
+        await pool.query(
+          `SELECT publication_generation FROM error_group_jobs WHERE ticket_id=$1 AND job_type='investigate' AND status='pending'`,
+          [t.id],
+        )
+      ).rows,
+    ).toEqual([{ publication_generation: 1 }]);
+    expect((await store.getTicket(pool, projectId, t.id))!.reinvestigate_needed).toBe(false);
+  });
   it('records no checks when the daily cap is zero or the lease expires during a model read', async () => {
     const t = await ticket();
     await matches(t, 3);

@@ -2,6 +2,8 @@ import type pg from 'pg';
 import * as db from '../db.js';
 import * as store from './tickets-db.js';
 
+/** A cause must explain at least this share of current verified evidence. */
+export const CAUSE_COVERAGE_MIN = 0.5;
 export function causeCoverage(
   explained: readonly string[],
   confirmed: readonly string[],
@@ -121,7 +123,7 @@ export async function requestFix(
     !group.root_cause?.trim() ||
     typeof brief !== 'string' ||
     !brief.trim() ||
-    causeCoverage(group.explained_signal_ids ?? [], confirmed.signalIds) < 0.5
+    causeCoverage(group.explained_signal_ids ?? [], confirmed.signalIds) < CAUSE_COVERAGE_MIN
   ) {
     // Nothing is queued on refusal: reinvestigation follows new verified
     // evidence only, never a click (commit eb7d509 did the same on the Go side).
