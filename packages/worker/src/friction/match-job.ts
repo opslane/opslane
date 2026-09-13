@@ -3,6 +3,7 @@ import type { FrameVerification, SessionNarrative } from '@opslane/shared';
 import * as db from '../db.js';
 import {
   embedTexts,
+  EmbeddingsNotConfigured,
   EmbeddingsUnavailable,
   ticketText,
 } from '../embeddings.js';
@@ -43,6 +44,7 @@ export function frictionMatchDepsFromEnv(): MatchJobDeps {
         model: modelName,
         apiKey,
         maxTokens,
+        timeoutMs: modelTimeoutMs(maxTokens),
         reasoning: 'off',
         baseURL:
           process.env['NARRATIVE_BASE_URL'] ||
@@ -80,9 +82,16 @@ export function firstLookMaxTokens(
   value: string | undefined = process.env['FRICTION_FIRST_LOOK_MAX_TOKENS'],
 ): number {
   const raw = Number(value ?? '');
-  return Number.isInteger(raw) && raw >= 1_024 && raw <= 64_000
+  return Number.isInteger(raw) && raw >= 1_024 && raw <= 32_000
     ? raw
     : FIRST_LOOK_MAX_TOKENS_DEFAULT;
+}
+/** A response near its token ceiling streams for minutes; the SDK's 120 s
+ * default would turn a long first look into a timeout instead of a result.
+ * Allows 20 ms per output token, never less than 120 s. The job lease is
+ * heartbeated while the call runs. */
+export function modelTimeoutMs(maxTokens: number): number {
+  return Math.max(120_000, maxTokens * 20);
 }
 
 type MatchJob = db.ClaimedJob & { sessionId: string };
@@ -238,9 +247,12 @@ export async function processFrictionMatch(
         .vectors;
     } catch (error) {
       if (error instanceof EmbeddingsUnavailable) {
-        // A backfill that requires embeddings retries instead of creating
-        // tickets no duplicate search or publish gate can see.
-        if (embeddingsRequired(job.payload))
+        // A backfill that requires embeddings fails fast on a worker with no
+        // key, instead of creating tickets no duplicate search or publish gate
+        // can see. The first embedding call precedes any model call, so this
+        // costs nothing. Transient failures still degrade: retrying would pay
+        // for the model calls again.
+        if (error instanceof EmbeddingsNotConfigured && embeddingsRequired(job.payload))
           throw new Error(`Embeddings required for this backfill: ${error.message}`);
         return texts.map(() => null);
       }

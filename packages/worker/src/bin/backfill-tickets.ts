@@ -10,7 +10,8 @@ export interface BackfillOptions {
   since: Date;
   rate: number;
   /** Without embeddings every observation becomes a new ticket and the publish
-   * gate never asks the one-fix question, so a backfill refuses by default. */
+   * gate never asks the one-fix question, so backfill jobs require them unless
+   * the operator accepts their absence. */
   allowMissingEmbeddings: boolean;
 }
 
@@ -37,14 +38,16 @@ export function parseBackfillArgs(args: string[], now = new Date()): BackfillOpt
 }
 
 /** Schedule work durably, then exit. The ordinary match handler converts old narratives. */
-export function assertEmbeddingsConfigured(options: Pick<BackfillOptions, 'allowMissingEmbeddings'>, env: NodeJS.ProcessEnv = process.env): void {
-  if (options.allowMissingEmbeddings || env['OPENAI_API_KEY']?.trim()) return;
-  throw new Error('OPENAI_API_KEY is not set: tickets would be created without embeddings, duplicates would not be found, and the publish gate would not run. Set it, or pass --allow-missing-embeddings to proceed anyway.');
+/** This command only schedules jobs; the workers embed. Its own environment
+ * says nothing certain about theirs, so a missing key here is a warning and
+ * the jobs themselves carry requireEmbeddings. */
+export function embeddingsWarning(options: Pick<BackfillOptions, 'allowMissingEmbeddings'>, env: NodeJS.ProcessEnv = process.env): string | null {
+  if (options.allowMissingEmbeddings || env['OPENAI_API_KEY']?.trim()) return null;
+  return 'OPENAI_API_KEY is not set here. Scheduled jobs require embeddings and fail on any worker without the key; pass --allow-missing-embeddings only to accept tickets without duplicate detection.';
 }
 
 export async function backfillTickets(pool: pg.Pool, options: BackfillOptions): Promise<number> {
   if (!Number.isFinite(options.rate) || options.rate <= 0) throw new Error('Rate must be positive');
-  assertEmbeddingsConfigured(options);
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -91,6 +94,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   try {
     const options = parseBackfillArgs(process.argv.slice(2));
     if (!process.env['DATABASE_URL']) throw new Error('DATABASE_URL is required');
+    const warning = embeddingsWarning(options);
+    if (warning) console.warn(warning);
     console.log(`Enqueued ${await backfillTickets(getPool(), options)} friction_match jobs`);
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));

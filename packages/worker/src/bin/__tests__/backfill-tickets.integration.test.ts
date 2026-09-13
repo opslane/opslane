@@ -4,7 +4,7 @@ import * as db from '../../db.js';
 import { deriveNarrativeId, buildSignalRows } from '../../narrative/emit.js';
 import { writeObservationSignals } from '../../friction/persist.js';
 import { processFrictionMatch } from '../../friction/match-job.js';
-import { assertEmbeddingsConfigured, backfillTickets, parseBackfillArgs } from '../backfill-tickets.js';
+import { backfillTickets, embeddingsWarning, parseBackfillArgs } from '../backfill-tickets.js';
 
 const describeDb = process.env['DATABASE_URL'] ? describe : describe.skip;
 const projectId = randomUUID();
@@ -24,11 +24,11 @@ describe('backfill arguments', () => {
     });
     expect(parseBackfillArgs(['--project', projectId, '--environment', environmentId, '--since', '14d', '--rate', '60', '--allow-missing-embeddings'], since).allowMissingEmbeddings).toBe(true);
   });
-  it('refuses to run without embeddings unless explicitly allowed', () => {
-    expect(() => assertEmbeddingsConfigured({ allowMissingEmbeddings: false }, {})).toThrow(/OPENAI_API_KEY is not set/);
-    expect(() => assertEmbeddingsConfigured({ allowMissingEmbeddings: false }, { OPENAI_API_KEY: '  ' })).toThrow(/OPENAI_API_KEY/);
-    expect(() => assertEmbeddingsConfigured({ allowMissingEmbeddings: false }, { OPENAI_API_KEY: 'sk-test' })).not.toThrow();
-    expect(() => assertEmbeddingsConfigured({ allowMissingEmbeddings: true }, {})).not.toThrow();
+  it('warns when this environment lacks an OpenAI key unless absence was accepted', () => {
+    expect(embeddingsWarning({ allowMissingEmbeddings: false }, {})).toMatch(/OPENAI_API_KEY is not set/);
+    expect(embeddingsWarning({ allowMissingEmbeddings: false }, { OPENAI_API_KEY: '  ' })).toMatch(/OPENAI_API_KEY/);
+    expect(embeddingsWarning({ allowMissingEmbeddings: false }, { OPENAI_API_KEY: 'sk-test' })).toBeNull();
+    expect(embeddingsWarning({ allowMissingEmbeddings: true }, {})).toBeNull();
   });
   it.each([
     [], ['--project', 'bad'],
@@ -100,14 +100,11 @@ describeDb('ticket backfill', () => {
     expect(jobs.map(row => row.payload)).toEqual(Array(3).fill({ backfill: true }));
     expect(jobs.map(row => row.spacing)).toEqual([null, 1, 1]);
   });
-  it('marks jobs as requiring embeddings unless the operator allowed their absence', async () => {
-    vi.stubEnv('OPENAI_API_KEY', 'sk-test');
-    try {
-      await seed();
-      expect(await backfillTickets(pool, { ...options, allowMissingEmbeddings: false })).toBe(1);
-      expect((await pool.query('SELECT payload FROM error_group_jobs WHERE project_id=$1', [projectId])).rows)
-        .toEqual([{ payload: { backfill: true, requireEmbeddings: true } }]);
-    } finally { vi.unstubAllEnvs(); }
+  it('marks jobs as requiring embeddings unless the operator allowed their absence, whatever this environment holds', async () => {
+    await seed();
+    expect(await backfillTickets(pool, { ...options, allowMissingEmbeddings: false })).toBe(1);
+    expect((await pool.query('SELECT payload FROM error_group_jobs WHERE project_id=$1', [projectId])).rows)
+      .toEqual([{ payload: { backfill: true, requireEmbeddings: true } }]);
   });
   it('skips completed decisions including not_a_problem and resumes a partial or reserved ledger', async () => {
     const complete = await seed();

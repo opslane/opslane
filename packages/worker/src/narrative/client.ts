@@ -6,6 +6,8 @@ export interface NarrativeClientConfig {
   apiKey: string;
   maxTokens: number;
   reasoning: 'on' | 'off';
+  /** Request timeout; long outputs need more than the 120 s default. */
+  timeoutMs?: number;
 }
 
 export interface NarrativeModelResult {
@@ -60,7 +62,7 @@ export class NarrativeClient {
     this.anthropic = new Anthropic({
       apiKey: config.apiKey,
       baseURL: config.baseURL,
-      timeout: 120_000,
+      timeout: config.timeoutMs ?? 120_000,
     });
   }
 
