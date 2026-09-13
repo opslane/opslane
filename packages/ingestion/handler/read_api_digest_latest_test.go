@@ -236,3 +236,33 @@ func TestLatestDigestDoesNotLeakCardsFromAnUnservedVersion(t *testing.T) {
 		t.Fatalf("legacy response must not carry cards the view does not serve, got %d", len(body.Cards))
 	}
 }
+
+// A v5 fix link is a signed intent meant for the Slack delivery only. The read
+// API returns the same cards and receipts without it.
+func TestLatestDigestV5OmitsSignedActionLinks(t *testing.T) {
+	deps, pool := testDeps(t)
+	orgID, projectID, _, _ := seedTenant(t, deps.Queries)
+	t.Cleanup(func() { cleanupTenantHandler(t, pool, orgID) })
+	insertDeliveredDigest(t, pool, projectID, "2026-09-12",
+		`{"event_type":"digest.daily","digest":{"schema_version":5,"date":"2026-09-12","generated_cards":[{"episode_id":"","incident_id":"i-card","ticket_id":"t-card","title":"Save stalls","label":"","copy":"c","action":"Create fix PR","action_url":"https://app.example/issues/i-card?fixIntent=signed.card","affected_users":0,"accounts":[]}],"receipt_items":[{"kind":"friction","incident_id":"i-receipt","ticket_id":"t-receipt","title":"Export stalls","receipt_state":"","action":"Create fix PR","latest_attempt_id":"attempt-1","action_url":"https://app.example/issues/i-receipt?fixIntent=signed.receipt"}]}}`)
+
+	router := handler.NewRouterWithPool(deps, pool)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/projects/"+projectID+"/digest/latest", nil)
+	req.Header.Set("Authorization", "Bearer "+dashboardToken(t, orgID))
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, leaked := range []string{"fixIntent", "action_url", "latest_attempt_id"} {
+		if strings.Contains(body, leaked) {
+			t.Fatalf("read API leaked %s: %s", leaked, body)
+		}
+	}
+	for _, kept := range []string{"i-card", "i-receipt", "Create fix PR"} {
+		if !strings.Contains(body, kept) {
+			t.Fatalf("read API dropped %s: %s", kept, body)
+		}
+	}
+}

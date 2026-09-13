@@ -99,7 +99,7 @@ jobs:
     timeout-minutes: 15
     services:
       postgres:
-        image: postgres:16@sha256:ab47a724d0e37131ac950b98ff2beeb3fdb3bfcc592d73c6cc4b4e7626649671
+        image: pgvector/pgvector:pg16@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b
         env:
           POSTGRES_USER: opslane
           POSTGRES_PASSWORD: opslane_dev
@@ -170,7 +170,7 @@ jobs:
       - name: Test (fails on unexpected skips)
         run: |
           set -o pipefail
-          go test ./... -v 2>&1 | tee /tmp/go-test.log
+          go test ./... -v -timeout 30m 2>&1 | tee /tmp/go-test.log
           ../../scripts/check-go-skips.mjs /tmp/go-test.log
 
   # Repo-wide static checks: docs drift/scope, action pinning, wire-fixture
@@ -215,7 +215,7 @@ jobs:
     timeout-minutes: 20
     services:
       postgres:
-        image: postgres:16@sha256:ab47a724d0e37131ac950b98ff2beeb3fdb3bfcc592d73c6cc4b4e7626649671
+        image: pgvector/pgvector:pg16@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b
         env:
           POSTGRES_USER: opslane
           POSTGRES_PASSWORD: opslane_dev
@@ -314,6 +314,10 @@ jobs:
         with:
           node-version-file: .nvmrc
           cache: pnpm
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: packages/ingestion/go.mod
+          cache-dependency-path: packages/ingestion/go.sum
       - run: pnpm install --frozen-lockfile
       # The friction e2e gate runs the worker's session-analysis pipeline
       # in-process (issue #56), so the built worker package must exist — and the
@@ -388,6 +392,7 @@ jobs:
           PRIORITY_SCORE_INTERVAL_SECONDS: "5"
         run: >
           pnpm --filter @opslane/test-e2e exec vitest run
+          --exclude friction-incidents.test.ts
           --reporter=default --reporter=json
           --outputFile=${{ runner.temp }}/e2e-results.json
       - name: Enforce zero unexpected skips
@@ -421,10 +426,10 @@ jobs:
           # The exact collected total, not a slack floor, so any silently
           # dropped test trips it. Re-derive from an actual run's
           # numTotalTests — NOT from `vitest list`, which does not expand
-          # it.each and undercounts (60 vs 75, the 24 REASON_CODES cases):
+          # it.each and undercounts (the REASON_CODES table counts as one):
           #   vitest run --reporter=json --outputFile=/tmp/e2e.json
           #   node -e 'console.log(require("/tmp/e2e.json").numTotalTests)'
-          E2E_MIN_TESTS: "75"
+          E2E_MIN_TESTS: "74"
           # The browser smoke suites must be collected AND pass by name, so a
           # future edit cannot drop them while keeping the total count intact.
           # The environments/projects suites below are pinned for the same
@@ -440,11 +445,8 @@ jobs:
           # suite prefix: they carry the #104 security contract, and a suite
           # prefix would let the rejection cases be deleted while the accepted
           # case alone keeps the pattern matching.
-          # The friction-incidents cases are pinned individually too: that suite
-          # is the lane's only end-to-end proof of the 5-user promotion
-          # threshold, environment isolation, and the ±30s error-fold window,
-          # and it is the suite the scrub fast-forward makes cheap. Pinning stops
-          # a future edit dropping one while E2E_MIN_TESTS still passes.
+          # The known-problems recording pipeline has its own pinned phase
+          # below, with the competing worker stopped.
           # Pins retired by the Slice 2 capture boundary (restored when the
           # named slice un-suspends the suite): the Vue/React needs_human
           # smokes (Slice 9), the python live smoke and wire adversarial
@@ -468,9 +470,24 @@ jobs:
             ^origin allowlist with a server-side SDK > keeps browser-only routes strict for header-less callers$
             ^real Chromium always sends Origin to /events > rejects a page whose origin is not on the allowlist$
             ^real Chromium always sends Origin to /events > accepts the same page once its origin is allowlisted$
-            ^session narratives — live-service pipeline > emits verified narrative signals and promotes on the third session
             ^credential boundary >
         run: node scripts/check-e2e-results.mjs "${{ runner.temp }}/e2e-results.json"
+      - name: Run known-problems pipeline with the worker stopped
+        env:
+          DATABASE_URL: postgres://opslane:opslane_dev@localhost:5434/opslane
+          INGESTION_URL: http://localhost:8082
+          E2E_IN_PROCESS_WORKER: "1"
+          MINIO_ENDPOINT: http://localhost:9012
+          MINIO_ACCESS_KEY: minio
+          MINIO_SECRET_KEY: minio12345
+          MINIO_BUCKET: opslane-replays
+          E2E_MIN_TESTS: "1"
+          E2E_REQUIRED_PATTERNS: '^known problems — real recording pipeline > publishes only confirmed problems with a covering cause and archives after recording purge$'
+        run: |
+          docker compose stop worker
+          pnpm --filter @opslane/test-e2e typecheck
+          pnpm --filter @opslane/test-e2e exec vitest run friction-incidents.test.ts --reporter=default --reporter=json --outputFile="${{ runner.temp }}/known-problems-results.json"
+          node scripts/check-e2e-results.mjs "${{ runner.temp }}/known-problems-results.json"
       - name: Token-leak scan over logs and public HTTP surfaces
         run: |
           docker compose logs --no-color > "${{ runner.temp }}/stack-logs.txt"

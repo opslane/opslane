@@ -4,6 +4,9 @@ import (
 	"context"
 	"net/http"
 	"testing"
+	"time"
+
+	"github.com/opslane/opslane/packages/ingestion/db"
 )
 
 func RateLimitByProjectForTest(maxPerMinute int) func(http.Handler) http.Handler {
@@ -31,4 +34,11 @@ func SetDebugIDFramesForTest(t *testing.T, enabled bool) {
 	previous := debugIDFramesEnabled
 	debugIDFramesEnabled = enabled
 	t.Cleanup(func() { debugIDFramesEnabled = previous })
+}
+
+func SetTicketFactsLoaderForTest(t *testing.T, load func(context.Context, db.TicketEvidenceQuerier, string, string, time.Time) (*db.TicketDigestFacts, error)) {
+	t.Helper()
+	previous := loadTicketFacts
+	loadTicketFacts = load
+	t.Cleanup(func() { loadTicketFacts = previous })
 }

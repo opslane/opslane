@@ -47,7 +47,7 @@ router.beforeEach((to) => {
   const publicRoutes = ['login', 'auth-complete'];
 
   if (!to.meta.public && !authed) {
-    if (to.name === 'invite-accept' || to.name === 'agent-approve' || to.name === 'agent-github-install' || to.name === 'github-install') {
+    if (to.name === 'invite-accept' || to.name === 'agent-approve' || to.name === 'agent-github-install' || to.name === 'github-install' || (to.name === 'incident' && typeof to.query['fixIntent'] === 'string')) {
       sessionStorage.setItem('opslane_post_auth_path', to.fullPath);
     }
     return { name: 'login' };

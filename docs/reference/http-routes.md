@@ -89,7 +89,7 @@ Agent setup uses normal dashboard sign-in and an explicit approval. Approval cre
 | POST | `/api/v1/onboarding/complete` | Mark onboarding complete after the project receives its first event; GitHub and Slack are optional (admin on cloud) |
 | GET | `/api/v1/projects` | List projects |
 | POST | `/api/v1/projects` | Create project |
-| PATCH | `/api/v1/projects/{projectID}` | Update project settings. `friction_autonomy` controls automatic fixes for session-recording issues; `pr_posture` controls whether unverified fixes may open as drafts. A same-project `default_environment_id` must be an explicit UUID string when present. |
+| PATCH | `/api/v1/projects/{projectID}` | Update project settings. `friction_autonomy` (`ask_first` or `auto_fix`) controls automatic fixes for session-recording issues; the retired `auto_fix_ux` is accepted as a deprecated alias and stored as `auto_fix`; `pr_posture` controls whether unverified fixes may open as drafts. A same-project `default_environment_id` must be an explicit UUID string when present. |
 | GET | `/api/v1/projects/{projectID}/fix-stats` | Fix-attempt and pull-request outcome counts by issue type |
 | GET | `/api/v1/projects/{projectID}/environments` | List all environments, or only environments that contain issues with `used_by=incidents` or sessions with `used_by=sessions` |
 | GET | `/api/v1/projects/{projectID}/event-count` | Return `has_events` and the nullable `latest_error_group_id` |
@@ -112,7 +112,7 @@ Agent setup uses normal dashboard sign-in and an explicit approval. Approval cre
 | GET | `/api/v1/projects/{projectID}/sessions/{sessionID}/chunks/{seq}` | Fetch one decoded, redacted part of the recording |
 | GET | `/api/v1/projects/{projectID}/incidents/{incidentID}/affected-users` | Affected users |
 | GET | `/api/v1/projects/{projectID}/incidents/{incidentID}/sample-event` | Fetch the redacted representative event with available source-mapped frames, the raw stack, breadcrumbs, and request context |
-| POST | `/api/v1/projects/{projectID}/incidents/{incidentID}/fix` | Start a fix for an issue that is ready to fix, whether it came from an error or a session recording |
+| POST | `/api/v1/projects/{projectID}/incidents/{incidentID}/fix` | Start a fix for an issue that is ready to fix, whether it came from an error or a session recording. Optional body fields: `guidance` (up to 2000 characters) and `intent`, the signed fix action from a digest link. An intent is scoped to this project and issue; an expired or mismatched intent returns 409 `fix link has expired or no longer matches this issue` |
 | POST | `/api/v1/projects/{projectID}/incidents/{incidentID}/review` | Request another short repository review for the current issue; reuses an investigation already in progress |
 | POST | `/api/v1/projects/{projectID}/incidents/{incidentID}/link-pr` | Record a same-repository GitHub pull request without marking the issue resolved |
 | POST | `/api/v1/projects/{projectID}/incidents/{incidentID}/resolve` | Resolve issue |

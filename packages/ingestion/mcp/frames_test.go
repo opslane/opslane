@@ -24,3 +24,32 @@ func TestFormatSessionFramesFencesNarrativeAndStaysBounded(t *testing.T) {
 		t.Fatalf("bounded response did not report omitted frames: %s", body)
 	}
 }
+
+func TestFormatSessionFramesOptionalObservationMetadata(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		observation NarrativeObservationView
+		metadata    string
+	}{
+		{"v3 ungraded", NarrativeObservationView{What: "The page shows an error."}, ""},
+		{"v3 graded", NarrativeObservationView{What: "The page shows an error.", Grade: "confirmed"}, "confirmed"},
+		{"v2 legacy", NarrativeObservationView{What: "The page shows an error.", Category: "validation_confusion", Severity: "high", Grade: "confirmed"}, "validation_confusion, high, confirmed"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			body := FormatSessionFrames(SessionFramesInput{SessionID: "s1", Observations: []NarrativeObservationView{test.observation}})
+			want := "- " + Fence(test.observation.What)
+			if test.metadata != "" {
+				want += " [" + Fence(test.metadata) + "]"
+			}
+			for _, line := range strings.Split(body, "\n") {
+				if strings.HasPrefix(line, "- ") {
+					if line != want {
+						t.Fatalf("observation line = %q, want %q", line, want)
+					}
+					return
+				}
+			}
+			t.Fatalf("observation missing from %s", body)
+		})
+	}
+}

@@ -124,6 +124,12 @@ function callName(body: Record<string, unknown>, bare: string): string {
   return declaredTools(body).find((name) => bareToolName(name) === bare) ?? bare;
 }
 
+/** The signal IDs the investigation prompt asks the verdict to partition. */
+function confirmedSignalIds(body: Record<string, unknown>): string[] {
+  const list = /confirmedSignalIds\\*":\[([^\]]*)\]/.exec(JSON.stringify(body))?.[1] ?? '';
+  return [...new Set(list.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi) ?? [])];
+}
+
 function toolResultCount(body: Record<string, unknown>): number {
   const messages = Array.isArray(body['messages']) ? body['messages'] : [];
   let count = 0;
@@ -249,6 +255,10 @@ export async function startProviderRecorders(options: ProviderTwinOptions = {}):
           id: 'tool_classify_friction',
           name: callName(body, 'classify_friction'),
           input: {
+            // Every supplied signal ID is partitioned exactly once; the twin
+            // explains them all, as a code-caused verdict does.
+            explains: confirmedSignalIds(body),
+            does_not_explain: [],
             codeCause: true,
             confidence: 'high',
             reason: 'The value renderer dereferences missing input, so the control appears dead.',

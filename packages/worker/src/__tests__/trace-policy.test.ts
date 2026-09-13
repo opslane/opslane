@@ -2,11 +2,12 @@ import { describe, expect, it } from 'vitest';
 import { TRACE_POLICY, tracePolicyFor } from '../trace-policy.js';
 
 describe('tracePolicyFor', () => {
-  it('turns tracing off for the four job types that never call a model', () => {
+  it('turns tracing off for job types that never call a model', () => {
     expect(tracePolicyFor('session_analysis')).toEqual({ mode: 'off' });
     expect(tracePolicyFor('stack_resolve')).toEqual({ mode: 'off' });
     expect(tracePolicyFor('ci_watch')).toEqual({ mode: 'off' });
     expect(tracePolicyFor('score_sync')).toEqual({ mode: 'off' });
+    expect(tracePolicyFor('friction_pr_event')).toEqual({mode:'off'});
   });
 
   it('traces error_fix, which dispatches to the investigation path despite its name', () => {
@@ -19,6 +20,7 @@ describe('tracePolicyFor', () => {
 
   it('traces every other model-calling job type', () => {
     for (const jobType of [
+      'friction_match','friction_confirm','friction_reconcile',
       'investigate', 'session_narrate', 'session_verify_frames',
       'issue_inquiry', 'product_context', 'route_map', 'digest_write',
     ] as const) {
@@ -31,6 +33,6 @@ describe('tracePolicyFor', () => {
   });
 
   it('covers every member of the JobType union', () => {
-    expect(Object.keys(TRACE_POLICY)).toHaveLength(13);
+    expect(Object.keys(TRACE_POLICY)).toHaveLength(17);
   });
 });

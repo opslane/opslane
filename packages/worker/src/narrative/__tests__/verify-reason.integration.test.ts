@@ -1,6 +1,7 @@
 import pg from 'pg';
+import { deriveNarrativeId } from '../emit.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { closePool, finalizeVerification, type ClaimedJob } from '../../db.js';
+import { claimVerifyingNarrative, closePool, finalizeVerification, sweepNarratives, type ClaimedJob } from '../../db.js';
 
 const DATABASE_URL = process.env['DATABASE_URL'];
 const describeDb = DATABASE_URL ? describe : describe.skip;
@@ -78,6 +79,7 @@ describeDb('finalizeVerification stores a bounded verification reason', () => {
     await pool.query(`DELETE FROM error_group_jobs WHERE project_id = $1`, [projectId]);
     await pool.query(`DELETE FROM session_narratives WHERE session_id = $1`, [sessionId]);
     await pool.query(`DELETE FROM sessions WHERE id = $1`, [sessionId]);
+    await pool.query(`DELETE FROM error_groups WHERE project_id = $1`, [projectId]);
     await pool.query(`DELETE FROM environments WHERE id = $1`, [environmentId]);
     await pool.query(`DELETE FROM projects WHERE id = $1`, [projectId]);
     await pool.query(`DELETE FROM orgs WHERE id = $1`, [orgId]);
@@ -85,7 +87,36 @@ describeDb('finalizeVerification stores a bounded verification reason', () => {
     await closePool();
   });
 
+  it('claims a deterministic identity using the stored version and full timestamp precision', async () => {
+    const createdAt = '2026-09-11 12:34:56.123456+00';
+    await pool.query(
+      `UPDATE session_narratives SET verification_state = 'pending', created_at = $2::timestamptz
+       WHERE session_id = $1`, [sessionId, createdAt],
+    );
+    const claimed = await claimVerifyingNarrative(sessionId, projectId);
+    expect(claimed).toMatchObject({ narrativeId: deriveNarrativeId(sessionId, createdAt, 1) });
+  });
+
+  it('rolls back both verification and the match handoff when evidence cannot be written', async () => {
+    await resetToVerifying();
+    const count = await pool.query(`SELECT count(*)::int AS n FROM error_group_jobs WHERE project_id=$1 AND job_type='friction_match'`,[projectId]);
+    await expect(finalizeVerification(job, {
+      sessionId,projectId,state:'failed',claimedPromptVersion:1,verifyPromptVersion:1,
+      signalRows:[{signalType:'other',observationId:'o1',narrativeId:'bad-uuid',evidenceLines:['L1'],
+        fingerprint:null as unknown as string,elementSelector:null,pageUrlNormalized:'/',occurredAts:[1],occurrenceCount:1,what:'Error shown'}],
+    })).rejects.toThrow();
+    expect((await pool.query('SELECT verification_state FROM session_narratives WHERE session_id=$1',[sessionId])).rows[0].verification_state).toBe('verifying');
+    expect((await pool.query(`SELECT count(*)::int AS n FROM error_group_jobs WHERE project_id=$1 AND job_type='friction_match'`,[projectId])).rows).toEqual(count.rows);
+  });
+
+  it('atomically hands finalized narratives to matching with no legacy promotion', async () => {
+    await resetToVerifying();
+    await finalizeVerification(job,{sessionId,projectId,state:'unsupported',claimedPromptVersion:1,verifyPromptVersion:1,signalRows:[]});
+    expect((await pool.query(`SELECT job_type FROM error_group_jobs WHERE project_id=$1 AND job_type='friction_match'`,[projectId])).rows).toEqual([{job_type:'friction_match'}]);
+  });
+
   it('sanitizes and bounds a huge reason, and a later success clears it', async () => {
+    await resetToVerifying();
     // Chromium and provider failures arrive with control characters and
     // kilobytes of path noise; neither may reach the column or a UI.
     const noisy = `chromium\u0000 crashed\u0007: SIGTRAP\u2028${'x'.repeat(2_000)}`;
@@ -116,5 +147,44 @@ describeDb('finalizeVerification stores a bounded verification reason', () => {
       signalRows: [],
     });
     expect(await storedReason()).toBeNull();
+  });
+
+  it('drops absence claims when the stale verification sweep emits unverified observations', async () => {
+    await pool.query(
+      `UPDATE session_narratives
+       SET narrative = $2::jsonb, timeline = $3::jsonb,
+           verification_state = 'pending', verification = NULL,
+           created_at = now() - interval '25 hours'
+       WHERE session_id = $1`,
+      [
+        sessionId,
+        JSON.stringify({
+          userGoal: 'Submit', narrative: 'The user submitted.', notable: true,
+          observations: [
+            { id: 'absence', what: 'Clicking submit does nothing', evidenceLines: ['L1'] },
+            { id: 'positive', what: 'A validation message appeared', evidenceLines: ['L2'] },
+          ],
+        }),
+        JSON.stringify({ startTs: 1_000, lines: [
+          { t: 'click', s: 'button', r: '/form', a: 1_000 },
+          { t: 'validation', s: '.error', r: '/form', a: 2_000 },
+        ] }),
+      ],
+    );
+    const oldNarrativeKey = process.env['NARRATIVE_API_KEY'];
+    const oldAnthropicKey = process.env['ANTHROPIC_API_KEY'];
+    delete process.env['NARRATIVE_API_KEY'];
+    delete process.env['ANTHROPIC_API_KEY'];
+    try {
+      await sweepNarratives();
+    } finally {
+      if (oldNarrativeKey !== undefined) process.env['NARRATIVE_API_KEY'] = oldNarrativeKey;
+      if (oldAnthropicKey !== undefined) process.env['ANTHROPIC_API_KEY'] = oldAnthropicKey;
+    }
+    const emitted = await pool.query<{ observation_id: string }>(
+      `SELECT observation_id FROM friction_signals WHERE session_id = $1 ORDER BY observation_id`,
+      [sessionId],
+    );
+    expect(emitted.rows.map((row) => row.observation_id)).toEqual(['positive']);
   });
 });

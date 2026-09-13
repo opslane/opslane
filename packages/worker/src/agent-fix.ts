@@ -424,7 +424,7 @@ ${fenced(input.stackTrace, MAX_STACK_TRACE)}
     }
     parts.push('</untrusted_data>');
     if (input.investigation.findings) {
-      parts.push(`Findings:\n<untrusted_data>\n${input.investigation.findings}\n</untrusted_data>`);
+      parts.push(`Findings:\n<untrusted_data>\n${fenced(input.investigation.findings, 20000)}\n</untrusted_data>`);
     }
     if (input.investigation.filesRead && input.investigation.filesRead.length > 0) {
       const uniqueFiles = [...new Set(input.investigation.filesRead)];

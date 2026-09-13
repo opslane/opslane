@@ -14,6 +14,7 @@ var adminJobStatuses = map[string]struct{}{
 var adminJobTypes = map[string]struct{}{
 	// Keep this list aligned with shared/src/types.ts JobType.
 	"investigate": {}, "fix": {}, "error_fix": {}, "session_analysis": {}, "ci_watch": {}, "route_map": {}, "product_context": {}, "issue_inquiry": {}, "digest_write": {}, "score_sync": {}, "stack_resolve": {},
+	"friction_match": {}, "friction_confirm": {}, "friction_reconcile": {}, "friction_pr_event": {},
 }
 
 var secretRedactors = []struct {

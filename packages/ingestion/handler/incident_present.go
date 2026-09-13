@@ -6,12 +6,17 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/opslane/opslane/packages/ingestion/db"
 	mcpformat "github.com/opslane/opslane/packages/ingestion/mcp"
 )
 
 var errInvalidGitHubPR = errors.New("invalid GitHub pull request URL")
+
+// loadTicketFacts is the verified seven-day evidence projection. Tests replace
+// it to count or fail individual row loads.
+var loadTicketFacts = db.LoadTicketDigestFacts
 
 func (d *Dependencies) linkIncidentPR(ctx context.Context, projectID, incidentID, rawURL string) error {
 	repo, number, ok := parseGitHubPR(rawURL)
@@ -30,8 +35,41 @@ func (d *Dependencies) presentIncident(
 		return nil, group, err
 	}
 	incident := toIncidentJSON(*group)
+	if group.Kind == "friction" {
+		state, err := d.Queries.GetTicketIncidentState(ctx, projectID, incidentID)
+		if err != nil {
+			return nil, group, err
+		}
+		if state != nil {
+			incident.TicketID, incident.PublicationGeneration = &state.TicketID, &state.Generation
+			incident.FixSubstate, incident.InvestigationStatus = &state.FixSubstate, &state.InvestigationStatus
+			incident.CauseCoverage = &state.CauseCoverage
+			readiness := "ineligible"
+			if state.InvestigationStatus == "pending" {
+				readiness = "pending"
+			}
+			if state.TicketStatus == "published" && state.GroupStatus != "archived" && state.Generation == state.LiveGeneration &&
+				state.InvestigationStatus == "done" && state.CauseCoverage >= 0.5 && state.Cause != "" && state.Brief != "" {
+				// A found cause is shown for every kind. Only a defect may be
+				// fixed; an insight's page says "cause_only" and offers no button.
+				// The kind itself is never sent to the client.
+				readiness = "eligible"
+				if state.Kind != "defect" {
+					readiness = "cause_only"
+				}
+				incident.RootCause = &state.Cause
+				incident.AgentTaskBrief = &state.Brief
+			} else {
+				incident.RootCause, incident.SuggestedMitigation = nil, nil
+			}
+			group.InvestigationReadiness, incident.InvestigationReadiness = &readiness, &readiness
+		}
+	}
 	if pipeline, err := d.Queries.IssuePipelineRecords(ctx, projectID, []string{incidentID}); err == nil {
 		attachPipelineState(&incident, pipeline[incidentID])
+	}
+	if err := d.attachTicketFacts(ctx, projectID, &incident); err != nil {
+		return nil, group, err
 	}
 	return &incident, group, nil
 }
@@ -111,6 +149,7 @@ func (d *Dependencies) presentMCPIncident(
 		}
 	}
 	incidentView := mcpformat.MCPIncident{
+		TicketID:               incident.TicketID,
 		ID:                     incident.ID,
 		Kind:                   incident.Kind,
 		Title:                  incident.Title,
@@ -177,4 +216,37 @@ func toMCPEvidence(evidence db.IssueEvidenceResult) (*mcpformat.IssueEvidence, e
 		})
 	}
 	return result, nil
+}
+
+// attachTicketFacts keeps ticket list and detail counts on the same verified
+// seven-day projection as the digest, including zero-evidence responses.
+func (d *Dependencies) attachTicketFacts(ctx context.Context, projectID string, inc *incidentJSON) error {
+	if inc.Kind != "friction" {
+		return nil
+	}
+	f, err := loadTicketFacts(ctx, d.Queries.Pool(), projectID, inc.ID, time.Now())
+	if err != nil {
+		return err
+	}
+	if f == nil {
+		return nil
+	}
+	inc.TicketID = &f.TicketID
+	inc.PublicationGeneration = &f.Generation
+	inc.FixSubstate = &f.FixSubstate
+	inc.InvestigationStatus = &f.InvestigationStatus
+	inc.CauseCoverage = &f.Coverage
+	inc.VerifiedUsers = &f.VerifiedUsers
+	inc.VerifiedSessions = &f.VerifiedSessions
+	inc.AffectedUsersCount = f.VerifiedUsers
+	inc.OccurrenceCount = len(f.SignalIDs)
+	inc.ImpactClass = nil
+	inc.ImpactVisits = nil
+	inc.ImpactRecovered = nil
+	inc.Story = fmt.Sprintf("%d users · %d sessions this week", f.VerifiedUsers, f.VerifiedSessions)
+	if !f.OnCard() {
+		inc.RootCause = nil
+		inc.SuggestedMitigation = nil
+	}
+	return nil
 }

@@ -62,6 +62,7 @@ function verdict(overrides: Record<string, unknown> = {}) {
     reason: 'The save button has no click handler.',
     remediation: 'Wire the save action.',
     evidence: [{ path: 'src/App.vue', detail: 'button has no handler', symptomLink: 'clicks do nothing' }],
+    explains: [], does_not_explain: [],
     agent_task_brief: '## Symptom\nSave does nothing.\n## Change\nWire the click handler.',
     ...overrides,
   });
@@ -81,6 +82,18 @@ afterEach(async () => {
 });
 
 describe('investigateFriction', () => {
+  it.each([
+    { explains: ['a'], does_not_explain: ['a', 'b'] },
+    { explains: ['a'], does_not_explain: [] },
+  ])('rejects an incomplete or overlapping confirmed partition', async (partition) => {
+    mockMessagesCreate
+      .mockResolvedValueOnce(response([tool('read_file', { path: 'src/App.vue' })]))
+      .mockResolvedValueOnce(response([verdict(partition)]));
+    expect(await investigateFriction('key', { ...input(), confirmedSignalIds: ['a', 'b'] })).toMatchObject({
+      status: 'incomplete', reason: expect.stringContaining('partition'),
+    });
+  });
+
   it('returns a validated verdict with evidence, usage and cost', async () => {
     mockMessagesCreate
       .mockResolvedValueOnce(response([tool('read_file', { path: 'src/App.vue' })]))
@@ -171,6 +184,26 @@ describe('investigateFriction', () => {
     const second = mockMessagesCreate.mock.calls[1]![0];
     expect(JSON.stringify(first.system)).toContain('src/App.vue');
     expect(first.system).toEqual(second.system);
+  });
+
+  it('grounds a ticket investigation in its problem definition, not a research category', async () => {
+    mockMessagesCreate.mockResolvedValueOnce(response([tool('read_file', { path: 'src/App.vue' })]));
+    mockMessagesCreate.mockResolvedValueOnce(response([verdict()]));
+    const ticketInput = input();
+    ticketInput.ticketDefinition = {
+      name: 'Save fails',
+      control: 'Save button',
+      what_happened: 'The spinner never stops',
+      kind: 'defect',
+    };
+
+    await investigateFriction('key', ticketInput);
+
+    const system = JSON.stringify(mockMessagesCreate.mock.calls[0]![0].system);
+    expect(system).toContain('The spinner never stops');
+    expect(system).toContain('verified problem definition');
+    expect(system).not.toContain('semantic research category');
+    expect(system).not.toContain('validation_confusion: form/validation messaging is wrong');
   });
 
   it('threads narrative category, observation text, and shared definitions into the prompt', async () => {

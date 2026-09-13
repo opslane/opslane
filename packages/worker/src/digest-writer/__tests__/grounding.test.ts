@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CARD_CHECK_REASON_PREFIX, groundPayload } from '../job.js';
+import { CARD_CHECK_REASON_PREFIX, DIGEST_SYSTEM_PROMPT, groundPayload } from '../job.js';
 import type { DigestCandidate } from '../job.js';
 
 /** A card that fails one of its own factual checks is demoted to its receipt,
@@ -148,5 +148,13 @@ describe('groundPayload zero-count normalization', () => {
       deferred: [],
     };
     expect(demotedReason(groundPayload(payload, [anonymousFrictionCandidate]))).toMatch(/unsupported identified count/);
+  });
+});
+
+describe('writer prompt', () => {
+  it('forbids evidence provenance in customer copy', () => {
+    expect(DIGEST_SYSTEM_PROMPT).toMatch(/never repeat line ids such as L23/);
+    expect(DIGEST_SYSTEM_PROMPT).toMatch(/never mention timelines, screenshots, frames/);
+    expect(DIGEST_SYSTEM_PROMPT).toMatch(/Do not write a steps field/);
   });
 });

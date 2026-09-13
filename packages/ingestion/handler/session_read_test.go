@@ -283,9 +283,31 @@ func TestSessionRead_NarrativeRouteIsProjectScopedAndMergesGrades(t *testing.T) 
 	if response.Code != http.StatusOK {
 		t.Fatalf("narrative returned %d: %s", response.Code, response.Body.String())
 	}
-	for _, want := range []string{`"userGoal":"Save an asset"`, `"grade":"corrected"`, `"replacementWhat":"The success message appeared beside an error."`, `"atMs":1700000001234`} {
+	for _, want := range []string{`"category":"validation_confusion"`, `"severity":"high"`, `"userGoal":"Save an asset"`, `"grade":"corrected"`, `"replacementWhat":"The success message appeared beside an error."`, `"atMs":1700000001234`} {
 		if !strings.Contains(response.Body.String(), want) {
 			t.Fatalf("narrative response missing %s: %s", want, response.Body.String())
+		}
+	}
+
+	// V3 retains the same evidence and grades without legacy classifications.
+	if _, err := pool.Exec(context.Background(), `
+		UPDATE session_narratives SET prompt_version = 3,
+			narrative = jsonb_set(narrative, '{observations,0}', (narrative->'observations'->0) - 'category' - 'severity')
+		WHERE session_id = $1`, sessionID); err != nil {
+		t.Fatalf("update v3 narrative: %v", err)
+	}
+	v3 := dashboardRequest(t, router, token, path)
+	if v3.Code != http.StatusOK {
+		t.Fatalf("v3 narrative returned %d: %s", v3.Code, v3.Body.String())
+	}
+	for _, absent := range []string{`"category":`, `"severity":`} {
+		if strings.Contains(v3.Body.String(), absent) {
+			t.Fatalf("v3 narrative fabricated optional field %s: %s", absent, v3.Body.String())
+		}
+	}
+	for _, want := range []string{`"id":"0-abcd"`, `"evidenceLines":["L2"]`, `"grade":"corrected"`, `"atMs":1700000001234`} {
+		if !strings.Contains(v3.Body.String(), want) {
+			t.Fatalf("v3 narrative response missing %s: %s", want, v3.Body.String())
 		}
 	}
 

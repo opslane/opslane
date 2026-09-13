@@ -26,7 +26,11 @@ This is a single-context repo:
 └── shared/
 ```
 
-All packages share the same domain vocabulary (error groups, jobs, fingerprints, environments, projects, etc.). There is no per-package `CONTEXT.md`.
+All packages share the vocabulary in `CONTEXT.md`. For recording-derived problems,
+use **Ticket**, **Observation**, **Confirmed evidence**, and **Publication generation**.
+A ticket owns durable problem identity; an `error_groups` row represents one
+published generation. Error capture buckets and fingerprint aliases still belong
+to error identity settlement. There is no per-package `CONTEXT.md`.
 
 ## Use the glossary's vocabulary
 

@@ -20,8 +20,8 @@ func TestCandidateFingerprintSemanticContract(t *testing.T) {
 	}
 	// Pinned to the live constants: the prompt version is the cache authority,
 	// so a bump here is what retires every card written under the old contract.
-	if digestPromptVersion != 6 || digestValidatorVersion != 1 {
-		t.Fatalf("prompt/validator version = %d/%d, want 6/1", digestPromptVersion, digestValidatorVersion)
+	if digestPromptVersion != 7 || digestValidatorVersion != 1 {
+		t.Fatalf("prompt/validator version = %d/%d, want 7/1", digestPromptVersion, digestValidatorVersion)
 	}
 	want := candidateFingerprint(base, digestPromptVersion, digestValidatorVersion)
 	if want == "" || want != candidateFingerprint(base, digestPromptVersion, digestValidatorVersion) {
@@ -41,6 +41,10 @@ func TestCandidateFingerprintSemanticContract(t *testing.T) {
 	}
 
 	mutations := map[string]func(*Candidate){
+		"ticket":           func(c *Candidate) { c.TicketID = "ticket" },
+		"generation":       func(c *Candidate) { c.Generation++ },
+		"evidence version": func(c *Candidate) { c.EvidenceVersion++ },
+		"steps":            func(c *Candidate) { c.Steps = "Open checkout" },
 		"title":            func(c *Candidate) { c.Title += " now" },
 		"summary":          func(c *Candidate) { c.Summary += " changed" },
 		"root cause":       func(c *Candidate) { c.RootCause += " changed" },

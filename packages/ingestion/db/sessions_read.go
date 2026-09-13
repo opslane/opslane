@@ -90,7 +90,7 @@ const sessionSummarySelect = `SELECT s.id, s.started_at, s.last_chunk_at, s.stat
            COALESCE(sum(fs.occurrence_count) FILTER (WHERE fs.adjudication_status = 'accepted' AND fs.signal_type = 'dead_click'), 0) AS dead,
            COALESCE(sum(fs.occurrence_count) FILTER (WHERE fs.adjudication_status = 'accepted' AND fs.signal_type = 'form_abandon'), 0) AS abandon,
            COALESCE(sum(fs.occurrence_count) FILTER (WHERE fs.adjudication_status = 'pending'), 0) AS pending,
-           COALESCE(sum(fs.occurrence_count) FILTER (WHERE fs.adjudication_status = 'accepted' AND fs.observation_text IS NOT NULL AND fs.signal_type <> 'other'), 0) AS observations
+           COALESCE(sum(fs.occurrence_count) FILTER (WHERE fs.adjudication_status = 'accepted' AND fs.observation_text IS NOT NULL AND (fs.signal_type <> 'other' OR fs.observation_id IS NOT NULL)), 0) AS observations
       FROM friction_signals fs
      WHERE fs.session_id = s.id
        AND fs.project_id = $1

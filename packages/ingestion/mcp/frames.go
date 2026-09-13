@@ -44,11 +44,17 @@ func FormatSessionFrames(input SessionFramesInput) string {
 			if observation.Grade == "corrected" && observation.ReplacementWhat != "" {
 				what = observation.ReplacementWhat + " (original: " + observation.What + ")"
 			}
-			meta := observation.Category + ", " + observation.Severity
-			if observation.Grade != "" {
-				meta += ", " + observation.Grade
+			metadata := make([]string, 0, 3)
+			for _, value := range []string{observation.Category, observation.Severity, observation.Grade} {
+				if value != "" {
+					metadata = append(metadata, value)
+				}
 			}
-			lines = append(lines, "- "+Fence(Truncate(what, RootCauseLimit))+" ["+Fence(Truncate(meta, TitleLimit))+"]")
+			line := "- " + Fence(Truncate(what, RootCauseLimit))
+			if len(metadata) > 0 {
+				line += " [" + Fence(Truncate(strings.Join(metadata, ", "), TitleLimit)) + "]"
+			}
+			lines = append(lines, line)
 		}
 	}
 	if len(input.Frames) == 0 {

@@ -75,9 +75,9 @@ type sessionDetailJSON struct {
 
 type sessionNarrativeObservationJSON struct {
 	ID              string   `json:"id"`
-	Category        string   `json:"category"`
+	Category        string   `json:"category,omitempty"`
 	What            string   `json:"what"`
-	Severity        string   `json:"severity"`
+	Severity        string   `json:"severity,omitempty"`
 	EvidenceLines   []string `json:"evidenceLines"`
 	Grade           string   `json:"grade,omitempty"`
 	ReplacementWhat string   `json:"replacementWhat,omitempty"`
