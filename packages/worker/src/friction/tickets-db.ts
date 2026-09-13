@@ -888,11 +888,14 @@ export async function enqueueTicketInvestigation(
   tx: pg.PoolClient,
   ticket: Pick<TicketRow, 'id' | 'project_id' | 'live_generation'>,
   errorGroupId: string,
+  /** A finishing investigation queues its own successor: it is still claimed
+   * but no longer counts as active work (it still counts toward the cap). */
+  finishingJobId: string | null = null,
 ): Promise<boolean> {
   const prior = await tx.query<{ active: number; total: number }>(
-    `SELECT count(*) FILTER (WHERE status IN ('pending','claimed'))::int AS active,count(*)::int AS total
+    `SELECT count(*) FILTER (WHERE status IN ('pending','claimed') AND id IS DISTINCT FROM $3::uuid)::int AS active,count(*)::int AS total
        FROM error_group_jobs WHERE error_group_id=$1 AND job_type='investigate' AND publication_generation=$2`,
-    [errorGroupId, ticket.live_generation],
+    [errorGroupId, ticket.live_generation, finishingJobId],
   );
   const { active, total } = prior.rows[0]!;
   if (active || total >= MAX_INVESTIGATIONS_PER_GENERATION) return false;
@@ -937,6 +940,8 @@ export interface LiveIncident {
   evidence_version_used: number | null;
   /** Null until an insight's first investigation is queued. */
   investigation_status: string | null;
+  /** Signals the applied verdict explained; coverage is judged against current evidence. */
+  explained_signal_ids: string[] | null;
   pr_url: string | null;
 }
 export async function liveIncident(
@@ -944,7 +949,7 @@ export async function liveIncident(
   t: TicketRow,
 ): Promise<LiveIncident | null> {
   const r = await db.query<LiveIncident>(
-    `SELECT g.id,g.fix_substate,g.evidence_version_used,g.investigation_status,
+    `SELECT g.id,g.fix_substate,g.evidence_version_used,g.investigation_status,g.explained_signal_ids,
     (SELECT pr_url FROM friction_fix_attempts a WHERE a.ticket_id=g.ticket_id AND a.generation=g.publication_generation AND a.pr_url IS NOT NULL ORDER BY a.created_at DESC LIMIT 1) AS pr_url
     FROM error_groups g WHERE g.ticket_id=$1 AND g.publication_generation=$2 AND g.status<>'archived'`,
     [t.id, t.live_generation],

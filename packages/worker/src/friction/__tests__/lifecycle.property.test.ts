@@ -264,6 +264,7 @@ describe('randomized confirmation histories', () => {
               fix_substate: fixSubstate,
               evidence_version_used: 12,
               investigation_status: 'done',
+              explained_signal_ids: null,
               pr_url: null,
             });
             // 3 (batch generation fence) / 10: any invalidation must take the

@@ -2,7 +2,7 @@ import type pg from 'pg';
 import * as db from '../db.js';
 import * as store from './tickets-db.js';
 import {
-  causeCoverage,
+  CAUSE_COVERAGE_MIN, causeCoverage,
   lockJob,
   requestFix,
   transaction,
@@ -125,10 +125,8 @@ export async function finishInvestigation(
     partition.every((id) => snapshot.signalIds.includes(id));
   const done = valid && verdict.codeCause && !!verdict.agentTaskBrief;
   const explained = done ? verdict.explains : [];
-  const coverage = causeCoverage(
-    explained,
-    (await store.verifiedEvidence(tx, ticket)).signalIds,
-  );
+  const current = await store.verifiedEvidence(tx, ticket);
+  const coverage = causeCoverage(explained, current.signalIds);
   await tx.query(
     `UPDATE error_groups SET investigation_status=$2,investigation_result_execution=$3,evidence_version_used=$4,
     explained_signal_ids=$5::jsonb,root_cause=$6,confidence=$7,status=CASE WHEN fix_substate='none' THEN 'awaiting_approval'::error_group_status ELSE status END,updated_at=now() WHERE id=$1`,
@@ -144,8 +142,25 @@ export async function finishInvestigation(
   );
   await tx.query(
     `UPDATE friction_tickets SET reinvestigate_needed=$2,updated_at=now() WHERE id=$1`,
-    [job.ticketId, !done || coverage < 0.5],
+    [job.ticketId, !done || coverage < CAUSE_COVERAGE_MIN],
   );
+  // Evidence that arrived while this investigation ran is not in its
+  // snapshot, and the confirmation that brought it saw a pending
+  // investigation. Queue the successor now instead of waiting for the next
+  // confirmation batch; the per-generation cap still bounds it.
+  if (
+    done &&
+    coverage < CAUSE_COVERAGE_MIN &&
+    current.signalIds.length > 0 &&
+    ticket.evidence_version > snapshot.ticket.evidence_version &&
+    store.investigationAllowed(ticket, current.users) &&
+    (await store.enqueueTicketInvestigation(tx, ticket, job.errorGroupId, job.id))
+  ) {
+    await tx.query(
+      `UPDATE friction_tickets SET reinvestigate_needed=false,updated_at=now() WHERE id=$1`,
+      [job.ticketId],
+    );
+  }
   await tx.query(
     `INSERT INTO diagnosis_decisions(error_group_id,project_id,job_id,outcome,decision_reason,diagnosis,model,prompt_version,basis,confidence)
     VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,'friction-ticket-v1','friction_classify',$8)`,
@@ -177,7 +192,7 @@ export async function finishInvestigation(
     [job.errorGroupId],
   );
   await lockJob(tx, job);
-  return done && coverage >= 0.5;
+  return done && coverage >= CAUSE_COVERAGE_MIN;
 }
 export interface TicketInvestigationDeps {
   checkout(): Promise<
