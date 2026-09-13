@@ -64,7 +64,7 @@ func seedTicketFixWithCount(t *testing.T, recordings int) ticketFixFixture {
 		session := fmt.Sprintf("%s-%d", ticket, i)
 		exec(`INSERT INTO sessions(id,project_id,environment_id,started_at) VALUES($1,$2,$3,now()-interval '1 hour')`, session, project, environment)
 		signal := insert(`INSERT INTO friction_signals(session_id,project_id,environment_id,rule_version,signal_type,fingerprint,page_url_normalized,occurred_at,observation_id,narrative_id)
-			VALUES($1,$2,$3,3,'narrative',$1,'/pay',now()-interval '1 hour','o','n') RETURNING id`, session, project, environment)
+			VALUES($1,$2,$3,3,'other',$1,'/pay',now()-interval '1 hour','o','n') RETURNING id`, session, project, environment)
 		exec(`INSERT INTO friction_ticket_matches(ticket_id,session_id,project_id,environment_id,arrival_number,source,occurred_at)
 			VALUES($1,$2,$3,$4,$5,'strong',now()-interval '1 hour')`, ticket, session, project, environment, i+1)
 		exec(`INSERT INTO friction_ticket_match_observations(ticket_id,session_id,signal_id) VALUES($1,$2,$3)`, ticket, session, signal)

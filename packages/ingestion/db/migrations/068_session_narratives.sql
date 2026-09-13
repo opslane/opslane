@@ -49,5 +49,5 @@ ALTER TABLE friction_signals ADD CONSTRAINT friction_signals_signal_type_check
     'rage_click','dead_click','form_abandon',
     'unclickable_affordance','no_feedback_after_action','dead_end_state',
     'validation_confusion','slow_response','repetitive_workflow',
-    'discoverability_gap','hard_blocker','other','narrative'
+    'discoverability_gap','hard_blocker','other'
   ));

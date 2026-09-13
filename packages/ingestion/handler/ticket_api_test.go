@@ -210,7 +210,7 @@ func TestTicketInsightIsNeverFixable(t *testing.T) {
 	}
 	signal := ""
 	if err := pool.QueryRow(ctx, `INSERT INTO friction_signals(session_id,project_id,environment_id,rule_version,signal_type,fingerprint,page_url_normalized,occurred_at,observation_id,narrative_id)
-		VALUES($1,$2,$3,3,'narrative',$1,'/export',now(),'o','n') RETURNING id`, session, project, environment).Scan(&signal); err != nil {
+		VALUES($1,$2,$3,3,'other',$1,'/export',now(),'o','n') RETURNING id`, session, project, environment).Scan(&signal); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := pool.Exec(ctx, `INSERT INTO friction_ticket_matches(ticket_id,session_id,project_id,environment_id,arrival_number,source,occurred_at,end_user_id)

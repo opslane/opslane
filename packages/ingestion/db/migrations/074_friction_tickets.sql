@@ -66,6 +66,8 @@ CREATE TABLE IF NOT EXISTS friction_ticket_matches (          -- counting unit
   PRIMARY KEY (ticket_id, session_id),
   UNIQUE (ticket_id, arrival_number)
 );
+-- Session purges cascade through these foreign keys; the primary keys lead with ticket_id.
+CREATE INDEX IF NOT EXISTS idx_friction_ticket_matches_session ON friction_ticket_matches (session_id);
 CREATE TABLE IF NOT EXISTS friction_ticket_match_observations ( -- evidence unit
   ticket_id      UUID NOT NULL,
   session_id     TEXT NOT NULL,
@@ -73,6 +75,7 @@ CREATE TABLE IF NOT EXISTS friction_ticket_match_observations ( -- evidence unit
   PRIMARY KEY (ticket_id, session_id, signal_id),
   FOREIGN KEY (ticket_id, session_id) REFERENCES friction_ticket_matches(ticket_id, session_id) ON DELETE CASCADE
 );
+CREATE INDEX IF NOT EXISTS idx_friction_match_observations_signal ON friction_ticket_match_observations (signal_id);
 
 CREATE TABLE IF NOT EXISTS friction_session_processed (
   project_id   UUID NOT NULL,
@@ -145,6 +148,7 @@ CREATE TABLE IF NOT EXISTS friction_incident_evidence (
   signal_id      UUID NOT NULL REFERENCES friction_signals(id) ON DELETE CASCADE,
   PRIMARY KEY (error_group_id, signal_id)
 );
+CREATE INDEX IF NOT EXISTS idx_friction_incident_evidence_signal ON friction_incident_evidence (signal_id);
 CREATE TABLE IF NOT EXISTS friction_fix_attempts (
   id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   ticket_id      UUID NOT NULL REFERENCES friction_tickets(id) ON DELETE CASCADE,
@@ -157,7 +161,7 @@ CREATE TABLE IF NOT EXISTS friction_fix_attempts (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_fix_attempts_outstanding ON friction_fix_attempts (ticket_id, generation) WHERE status IN ('active','pr_open');
 
-ALTER TABLE error_groups ADD COLUMN IF NOT EXISTS ticket_id UUID;   -- 069 may have created it without the FK
+ALTER TABLE error_groups ADD COLUMN IF NOT EXISTS ticket_id UUID;
 DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'error_groups'::regclass AND conname = 'error_groups_ticket_id_fkey') THEN
     ALTER TABLE error_groups ADD CONSTRAINT error_groups_ticket_id_fkey FOREIGN KEY (ticket_id) REFERENCES friction_tickets(id);
@@ -178,6 +182,7 @@ ALTER TABLE error_group_jobs ADD COLUMN IF NOT EXISTS fix_attempt_id UUID;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_friction_confirm_pending ON error_group_jobs (ticket_id) WHERE job_type = 'friction_confirm' AND status IN ('pending','claimed');
 CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_friction_match_pending ON error_group_jobs (session_id) WHERE job_type = 'friction_match' AND status IN ('pending','claimed');
 CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_friction_reconcile_pending ON error_group_jobs (ticket_id) WHERE job_type = 'friction_reconcile' AND status IN ('pending','claimed');
+CREATE INDEX IF NOT EXISTS idx_jobs_ticket_open ON error_group_jobs (ticket_id) WHERE ticket_id IS NOT NULL AND status IN ('pending','claimed');
 
 -- Same-transaction reconcile after a recording is purged (rulebook: Recording deleted; invariant 9).
 -- Callers own the environment publication lock before ticket locks.
@@ -235,10 +240,18 @@ END $$;
 -- The old UX-only autonomy setting now applies to every verified ticket.
 -- Keep the original constraint name so migration 004's guarded replay cannot
 -- reinstall its retired value before this migration runs again.
-UPDATE projects SET friction_autonomy = 'auto_fix' WHERE friction_autonomy = 'auto_fix_ux';
-ALTER TABLE projects DROP CONSTRAINT IF EXISTS projects_friction_autonomy_check;
-ALTER TABLE projects ADD CONSTRAINT projects_friction_autonomy_check
-  CHECK (friction_autonomy IN ('ask_first','auto_fix'));
+-- Guarded so a boot replay neither locks projects nor revalidates the constraint.
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                  WHERE conrelid = 'projects'::regclass AND conname = 'projects_friction_autonomy_check'
+                    AND pg_get_constraintdef(oid) NOT LIKE '%auto_fix_ux%') THEN
+    UPDATE projects SET friction_autonomy = 'auto_fix' WHERE friction_autonomy = 'auto_fix_ux';
+    ALTER TABLE projects DROP CONSTRAINT IF EXISTS projects_friction_autonomy_check;
+    ALTER TABLE projects ADD CONSTRAINT projects_friction_autonomy_check
+      CHECK (friction_autonomy IN ('ask_first','auto_fix'));
+  END IF;
+END $$;
 
 -- Ticket investigation and delivery history survive publication changes.
 ALTER TABLE error_groups ADD COLUMN IF NOT EXISTS investigation_execution BIGINT NOT NULL DEFAULT 0;
@@ -390,6 +403,51 @@ BEGIN
       BEFORE UPDATE OF status, actionable_since, snoozed_until ON error_groups
       FOR EACH ROW WHEN (NEW.ticket_id IS NOT NULL)
       EXECUTE FUNCTION error_groups_ticket_stamps_guard();
+  END IF;
+END $$;
+
+-- 069's boot replay re-queues friction incidents parked in awaiting_approval
+-- without a cause and inserts an investigate job for queued ones. Ticket
+-- incidents own their investigation (activateGeneration and the confirm
+-- refresh), so neither write may touch them. 069 is shipped and immutable; its
+-- transaction takes a known advisory lock first, so these guards skip a ticket
+-- row only while that lock is held by the current session.
+CREATE OR REPLACE FUNCTION friction_069_replay_active() RETURNS boolean LANGUAGE sql STABLE AS $$
+  SELECT EXISTS (
+    SELECT 1 FROM pg_locks
+     WHERE locktype = 'advisory' AND pid = pg_backend_pid() AND granted AND objsubid = 1
+       AND classid::bigint = ((hashtext('069_verdict_gated_investigation')::bigint >> 32) & 4294967295)
+       AND objid::bigint = (hashtext('069_verdict_gated_investigation')::bigint & 4294967295))
+$$;
+
+CREATE OR REPLACE FUNCTION error_groups_ticket_069_guard() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF friction_069_replay_active() THEN RETURN NULL; END IF;
+  RETURN NEW;
+END $$;
+
+CREATE OR REPLACE FUNCTION error_group_jobs_ticket_069_guard() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM error_groups WHERE id = NEW.error_group_id AND ticket_id IS NOT NULL)
+     AND friction_069_replay_active() THEN
+    RETURN NULL;
+  END IF;
+  RETURN NEW;
+END $$;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid='error_groups'::regclass AND tgname='error_groups_ticket_069_guard_upd') THEN
+    CREATE TRIGGER error_groups_ticket_069_guard_upd
+      BEFORE UPDATE OF status ON error_groups
+      FOR EACH ROW WHEN (NEW.ticket_id IS NOT NULL AND OLD.status = 'awaiting_approval' AND NEW.status = 'queued')
+      EXECUTE FUNCTION error_groups_ticket_069_guard();
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid='error_group_jobs'::regclass AND tgname='error_group_jobs_ticket_069_guard_ins') THEN
+    CREATE TRIGGER error_group_jobs_ticket_069_guard_ins
+      BEFORE INSERT ON error_group_jobs
+      FOR EACH ROW WHEN (NEW.job_type = 'investigate' AND NEW.ticket_id IS NULL)
+      EXECUTE FUNCTION error_group_jobs_ticket_069_guard();
   END IF;
 END $$;
 

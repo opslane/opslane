@@ -97,7 +97,7 @@ func TestKnownProblemDigestFreezeValidateAndMergedFooter(t *testing.T) {
 			occurred = time.Now().Add(time.Hour)
 		}
 		run(`INSERT INTO sessions(id,project_id,environment_id,started_at)VALUES($1,$2,$3,$4)`, session, p.ID, env, occurred)
-		id := insert(`INSERT INTO friction_signals(session_id,project_id,environment_id,rule_version,signal_type,fingerprint,page_url_normalized,occurred_at,observation_id,narrative_id)VALUES($1,$2,$3,3,'narrative',$1,'/view',$4,'o','n')RETURNING id`, session, p.ID, env, occurred)
+		id := insert(`INSERT INTO friction_signals(session_id,project_id,environment_id,rule_version,signal_type,fingerprint,page_url_normalized,occurred_at,observation_id,narrative_id)VALUES($1,$2,$3,3,'other',$1,'/view',$4,'o','n')RETURNING id`, session, p.ID, env, occurred)
 		run(`INSERT INTO friction_ticket_matches(ticket_id,session_id,project_id,environment_id,arrival_number,source,occurred_at,end_user_id)VALUES($1,$2,$3,$4,$5,'strong',$6,$7)`, ticket, session, p.ID, env, i+1, occurred, user)
 		run(`INSERT INTO friction_ticket_match_observations(ticket_id,session_id,signal_id)VALUES($1,$2,$3)`, ticket, session, id)
 		batch := finalized
@@ -109,7 +109,7 @@ func TestKnownProblemDigestFreezeValidateAndMergedFooter(t *testing.T) {
 		ids = append(ids, id)
 	}
 	// A later match observation was never included in the finalized check.
-	unchecked := insert(`INSERT INTO friction_signals(session_id,project_id,environment_id,rule_version,signal_type,fingerprint,page_url_normalized,occurred_at,observation_id,narrative_id)VALUES($1,$2,$3,3,'narrative','unchecked','/view',now(),'o2','n')RETURNING id`, ticket+"-0", p.ID, env)
+	unchecked := insert(`INSERT INTO friction_signals(session_id,project_id,environment_id,rule_version,signal_type,fingerprint,page_url_normalized,occurred_at,observation_id,narrative_id)VALUES($1,$2,$3,3,'other','unchecked','/view',now(),'o2','n')RETURNING id`, ticket+"-0", p.ID, env)
 	run(`INSERT INTO friction_ticket_match_observations(ticket_id,session_id,signal_id)VALUES($1,$2,$3)`, ticket, ticket+"-0", unchecked)
 	run(`UPDATE error_groups SET explained_signal_ids=jsonb_build_array($2::text,$3::text,$4::text) WHERE id=$1`, group, ids[0], ids[1], unchecked)
 	seedDestination(t, pool, p.ID, []string{"digest.daily"})
@@ -265,7 +265,7 @@ func testTicketDigestActionAfterAuthoringCycle(t *testing.T, mode string) {
 	for i := 0; i < 3; i++ {
 		session := fmt.Sprintf("%s-%d", ticket, i)
 		run(`INSERT INTO sessions(id,project_id,environment_id,started_at)VALUES($1,$2,$3,now()-interval '1 hour')`, session, project.ID, env)
-		signal := insert(`INSERT INTO friction_signals(session_id,project_id,environment_id,rule_version,signal_type,fingerprint,page_url_normalized,occurred_at,observation_id,narrative_id)VALUES($1,$2,$3,3,'narrative',$1,'/save',now()-interval '1 hour','o','n')RETURNING id`, session, project.ID, env)
+		signal := insert(`INSERT INTO friction_signals(session_id,project_id,environment_id,rule_version,signal_type,fingerprint,page_url_normalized,occurred_at,observation_id,narrative_id)VALUES($1,$2,$3,3,'other',$1,'/save',now()-interval '1 hour','o','n')RETURNING id`, session, project.ID, env)
 		run(`INSERT INTO friction_ticket_matches(ticket_id,session_id,project_id,environment_id,arrival_number,source,occurred_at)VALUES($1,$2,$3,$4,$5,'strong',now()-interval '1 hour')`, ticket, session, project.ID, env, i+1)
 		run(`INSERT INTO friction_ticket_match_observations(ticket_id,session_id,signal_id)VALUES($1,$2,$3)`, ticket, session, signal)
 		check := insert(`INSERT INTO friction_check_attempts(batch_id,ticket_id,session_id,outcome,signal_ids,note,model)VALUES($1,$2,$3,'confirmed',jsonb_build_array($4::text),'Save ignores clicks.','test')RETURNING id`, batch, ticket, session, signal)

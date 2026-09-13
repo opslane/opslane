@@ -32,7 +32,7 @@ func requireMigrationConstraint(t *testing.T, err error, code string) {
 }
 
 func TestMigration074FreshInstallAndPopulatedReplay(t *testing.T) {
-	// This must start empty: 069 creates ticket_id before 074 adds its FK.
+	// This must start empty: a fresh install reaches 074 with no ticket_id column.
 	pool, dsn := disposableDB(t, testPool(t))
 	applyKnownProblemMigrations(t, dsn)
 	ctx := context.Background()
@@ -62,7 +62,7 @@ func TestMigration074FreshInstallAndPopulatedReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !hasFK {
-		t.Fatal("fresh install did not add error_groups_ticket_id_fkey to 069's bare column")
+		t.Fatal("fresh install did not add error_groups_ticket_id_fkey")
 	}
 	insertID := func(query string, args ...any) string {
 		t.Helper()
@@ -89,7 +89,7 @@ func TestMigration074FreshInstallAndPopulatedReplay(t *testing.T) {
 		VALUES ($1,$2,$3,'ok','{"observations":[]}',3)`, sessionID, projectID, environmentID)
 	signalID := insertID(`INSERT INTO friction_signals
 		(session_id,project_id,environment_id,rule_version,signal_type,fingerprint,page_url_normalized,occurred_at,observation_id,narrative_id,evidence_lines)
-		VALUES ($1,$2,$3,3,'narrative','074-observation','/checkout',now(),'observation-1','narrative-1','["Clicked Pay; nothing changed"]') RETURNING id`, sessionID, projectID, environmentID)
+		VALUES ($1,$2,$3,3,'other','074-observation','/checkout',now(),'observation-1','narrative-1','["Clicked Pay; nothing changed"]') RETURNING id`, sessionID, projectID, environmentID)
 	ticketID := insertID(`INSERT INTO friction_tickets
 		(project_id,environment_id,name,control,what_happened,kind,status,matched_count,next_arrival_number,arrival_boundary,live_generation)
 		VALUES ($1,$2,'Payment stalls','Pay','Nothing changed','defect','published',1,1,1,2) RETURNING id`, projectID, environmentID)
@@ -125,7 +125,7 @@ func TestMigration074FreshInstallAndPopulatedReplay(t *testing.T) {
 	requireMigrationConstraint(t, err, "23505")
 	_, err = pool.Exec(ctx, `INSERT INTO friction_signals
 		(session_id,project_id,environment_id,rule_version,signal_type,fingerprint,page_url_normalized,occurred_at,observation_id,narrative_id)
-		VALUES ($1,$2,$3,4,'narrative','different-fingerprint','/checkout',now(),'observation-1','narrative-1')`, sessionID, projectID, environmentID)
+		VALUES ($1,$2,$3,4,'other','different-fingerprint','/checkout',now(),'observation-1','narrative-1')`, sessionID, projectID, environmentID)
 	requireMigrationConstraint(t, err, "23505")
 
 	// Test both 069 predicates: a queued ticket must not receive a job, and
