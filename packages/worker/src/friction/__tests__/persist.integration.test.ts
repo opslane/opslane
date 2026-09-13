@@ -45,7 +45,7 @@ describeDb('atomic observation persistence', () => {
   it('keeps one row per observation and returns the same signal IDs on retries', async () => {
     const narrativeId = randomUUID();
     const rows: ObservationSignalRow[] = ['first', 'second'].map((observationId) => ({
-      signalType: 'narrative', fingerprint: randomUUID().replaceAll('-', ''),
+      signalType: 'other', fingerprint: randomUUID().replaceAll('-', ''),
       observationId, narrativeId, evidenceLines: ['L1'],
       elementSelector: 'button.save', pageUrlNormalized: '/assets',
       occurredAts: [Date.parse(session.started_at)], occurrenceCount: 1,
@@ -91,7 +91,7 @@ describeDb('atomic observation persistence', () => {
       [session.id, narrativeId],
     );
     expect(stored.rows).toEqual(observations.map((observation) => ({
-      signal_type: 'narrative', observation_id: observation.id, narrative_id: narrativeId,
+      signal_type: 'other', observation_id: observation.id, narrative_id: narrativeId,
       evidence_lines: ['L1'], severity: observation.severity,
     })));
   });

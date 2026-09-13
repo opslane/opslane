@@ -46,7 +46,7 @@ export function buildSignalRows(
       .find((line) => line !== undefined && line.k !== 'idle');
     const occurredAt = firstLine?.a ?? timeline.startTs;
     return {
-      signalType: 'narrative',
+      signalType: 'other',
       fingerprint: createHash('sha256').update(`${sessionId}|${narrativeId}|${observation.id}`).digest('hex').slice(0, 32),
       observationId: observation.id,
       narrativeId,

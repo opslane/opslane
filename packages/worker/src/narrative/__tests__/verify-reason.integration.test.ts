@@ -102,7 +102,7 @@ describeDb('finalizeVerification stores a bounded verification reason', () => {
     const count = await pool.query(`SELECT count(*)::int AS n FROM error_group_jobs WHERE project_id=$1 AND job_type='friction_match'`,[projectId]);
     await expect(finalizeVerification(job, {
       sessionId,projectId,state:'failed',claimedPromptVersion:1,verifyPromptVersion:1,
-      signalRows:[{signalType:'narrative',observationId:'o1',narrativeId:'bad-uuid',evidenceLines:['L1'],
+      signalRows:[{signalType:'other',observationId:'o1',narrativeId:'bad-uuid',evidenceLines:['L1'],
         fingerprint:null as unknown as string,elementSelector:null,pageUrlNormalized:'/',occurredAts:[1],occurrenceCount:1,what:'Error shown'}],
     })).rejects.toThrow();
     expect((await pool.query('SELECT verification_state FROM session_narratives WHERE session_id=$1',[sessionId])).rows[0].verification_state).toBe('verifying');

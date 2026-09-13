@@ -669,7 +669,6 @@ async function retireLiveGeneration(dbtx: pg.PoolClient, t: TicketRow): Promise<
 export async function activateGeneration(
   dbtx: pg.PoolClient,
   ticket: TicketRow,
-  _cohort: CohortStats,
   steps: string,
 ): Promise<{ errorGroupId: string; generation: number }> {
   const t = await lockTicket(dbtx, ticket);
@@ -685,11 +684,14 @@ export async function activateGeneration(
   const generation = t.live_generation + 1;
   const fingerprint = createHash('sha256').update(`ticket|${t.id}|${generation}`).digest('hex');
   const screens = [...new Set(rows.flatMap((r) => r.screens))].sort();
+  // An insight below its user threshold is not investigated, so it carries no
+  // investigation status until its first investigation is queued.
+  const allowed = investigationAllowed(t, evidence.users);
   const g = await dbtx.query<{ id: string }>(
     `INSERT INTO error_groups
     (project_id,environment_id,fingerprint,title,first_seen,last_seen,occurrence_count,affected_users_count,status,kind,
       ticket_id,publication_generation,fix_substate,investigation_status,evidence_version_used,actionable_since,page_url_normalized)
-    VALUES($1,$2,$3,$4,now(),now(),$5,$6,'queued','friction',$7,$8,'none','pending',$9,now(),$10) RETURNING id`,
+    VALUES($1,$2,$3,$4,now(),now(),$5,$6,'queued','friction',$7,$8,'none',$11,$9,now(),$10) RETURNING id`,
     [
       t.project_id,
       t.environment_id,
@@ -701,6 +703,7 @@ export async function activateGeneration(
       generation,
       t.evidence_version,
       screens[0] ?? null,
+      allowed ? 'pending' : null,
     ],
   );
   const errorGroupId = g.rows[0]!.id;
@@ -715,10 +718,10 @@ export async function activateGeneration(
   );
   await dbtx.query(
     `UPDATE friction_tickets SET status='published',live_generation=$2,steps=$3,screens_confirmed=$4,
-    fixed_at=NULL,updated_at=now() WHERE id=$1`,
+    fixed_at=NULL,fold_retries=0,updated_at=now() WHERE id=$1`,
     [t.id, generation, steps, screens],
   );
-  if (investigationAllowed(t, evidence.users)) {
+  if (allowed) {
     await enqueueTicketInvestigation(dbtx, { ...t, live_generation: generation }, errorGroupId);
   }
   return { errorGroupId, generation };
@@ -873,26 +876,36 @@ export function investigationAllowed(
 ): boolean {
   return ticket.kind !== 'ux_insight' || confirmedIdentifiedUsers >= insightInvestigateUsers();
 }
+/** Investigations one publication generation may start. A ticket whose repo is
+ * unreachable, or whose cause never covers its evidence, would otherwise start
+ * a sandbox investigation on every confirmation batch. */
+export const MAX_INVESTIGATIONS_PER_GENERATION = 3;
 /** Queues one investigation for the live generation unless one is already
- * pending or claimed for that incident and generation. Caller holds the
- * ticket lock, which serializes this with activation and reconciliation. */
+ * pending or claimed for that incident and generation, or the generation has
+ * used its investigations. Caller holds the ticket lock, which serializes this
+ * with activation and reconciliation. */
 export async function enqueueTicketInvestigation(
   tx: pg.PoolClient,
   ticket: Pick<TicketRow, 'id' | 'project_id' | 'live_generation'>,
   errorGroupId: string,
 ): Promise<boolean> {
-  const active = await tx.query(
-    `SELECT 1 FROM error_group_jobs WHERE error_group_id=$1 AND job_type='investigate'
-       AND publication_generation=$2 AND status IN ('pending','claimed') LIMIT 1`,
+  const prior = await tx.query<{ active: number; total: number }>(
+    `SELECT count(*) FILTER (WHERE status IN ('pending','claimed'))::int AS active,count(*)::int AS total
+       FROM error_group_jobs WHERE error_group_id=$1 AND job_type='investigate' AND publication_generation=$2`,
     [errorGroupId, ticket.live_generation],
   );
-  if (active.rowCount) return false;
+  const { active, total } = prior.rows[0]!;
+  if (active || total >= MAX_INVESTIGATIONS_PER_GENERATION) return false;
   await enqueueJobTx(tx, 'investigate', ticket.project_id, {
     errorGroupId,
     sourceId: errorGroupId,
     ticketId: ticket.id,
     publicationGeneration: ticket.live_generation,
   });
+  await tx.query(
+    `UPDATE error_groups SET investigation_status='pending',updated_at=now() WHERE id=$1 AND investigation_status IS NULL`,
+    [errorGroupId],
+  );
   return true;
 }
 export async function publishedNeighbors(
@@ -922,7 +935,8 @@ export interface LiveIncident {
   id: string;
   fix_substate: string | null;
   evidence_version_used: number | null;
-  investigation_status: string;
+  /** Null until an insight's first investigation is queued. */
+  investigation_status: string | null;
   pr_url: string | null;
 }
 export async function liveIncident(
@@ -1025,8 +1039,8 @@ export async function reserveConfirmationBudget(
   };
 }
 
-/** One row per one-fix question asked at the publish gate. Audit only: it
- * never changes a decision, it lets a later reader see why two cards exist. */
+/** One row per one-fix question asked at the publish gate, so a later reader
+ * can see why two cards exist. latestGateDecision reuses the answer. */
 export async function recordGateDecision(
   db: TicketDb,
   d: { ticketId: string; batchId: string | null; candidateId: string; similarity: number; oneFix: boolean; reason: string; model: string },
@@ -1035,4 +1049,17 @@ export async function recordGateDecision(
     `INSERT INTO friction_gate_decisions(ticket_id,batch_id,candidate_id,similarity,one_fix,reason,model) VALUES($1,$2,$3,$4,$5,$6,$7)`,
     [d.ticketId, d.batchId, d.candidateId, d.similarity, d.oneFix, d.reason, d.model],
   );
+}
+/** Ticket definitions are immutable, so the latest answer for an ordered pair
+ * still holds; asking again would only spend another strong-model call. */
+export async function latestGateDecision(
+  db: TicketDb,
+  ticketId: string,
+  candidateId: string,
+): Promise<boolean | null> {
+  const r = await db.query<{ one_fix: boolean }>(
+    `SELECT one_fix FROM friction_gate_decisions WHERE ticket_id=$1 AND candidate_id=$2 ORDER BY decided_at DESC,id DESC LIMIT 1`,
+    [ticketId, candidateId],
+  );
+  return r.rows[0]?.one_fix ?? null;
 }

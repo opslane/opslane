@@ -165,6 +165,16 @@ vi.mock('../tracing.js', () => ({
 }));
 vi.mock('../visual-analysis.js', () => ({ runVisualAnalysis: vi.fn() }));
 vi.mock('../friction/friction-evidence.js', () => ({ gatherFrictionEvidence: vi.fn() }));
+vi.mock('../friction/fix-attempts.js', () => ({
+  assertFixAttemptCurrent: vi.fn(),
+  recordAttemptPr: vi.fn(),
+  attemptFailed: vi.fn(async () => true),
+  applyPrEvent: vi.fn(),
+  causeCoverage: vi.fn(),
+  requestFix: vi.fn(),
+  lockJob: vi.fn(),
+  transaction: vi.fn(async (action: (tx: unknown) => Promise<unknown>) => action({ query: vi.fn() })),
+}));
 vi.mock('../friction/investigate-friction.js', () => ({
   investigateFriction: vi.fn(),
   FRICTION_INVESTIGATION_MODEL: 'claude-sonnet-4-6',
@@ -1466,6 +1476,56 @@ describe('friction worker path', () => {
     const signal = new AbortController().signal;
     await processJobInner(job,signal);
     expect(processFrictionMatch).toHaveBeenCalledWith(job,{cheap:{modelName:'cheap'},strong:{modelName:'strong'}},signal);
+  });
+
+  it('refuses an automatic ticket fix under ask_first through the attempt ledger, never the pipeline', async () => {
+    const { assertFixAttemptCurrent, attemptFailed } = await import('../friction/fix-attempts.js');
+    mockGetErrorGroup.mockResolvedValue(makeGroup({
+      kind: 'friction', status: 'fixing', sample_event_id: '', confidence: 'high',
+    }));
+    const job = {
+      ...makeJob(), jobType: 'fix' as const, triggeredBy: 'auto' as const,
+      ticketId: 'ticket-1', fixAttemptId: 'attempt-1', publicationGeneration: 1,
+    };
+
+    await processFixJob(job, new AbortController().signal);
+
+    expect(assertFixAttemptCurrent).toHaveBeenCalledWith(job);
+    expect(attemptFailed).toHaveBeenCalledWith(expect.anything(), job.id, job.projectId, 'Automatic fixes are disabled');
+    expect(mockUpdateGroupStatus).not.toHaveBeenCalled();
+    expect(mockCloneRepo).not.toHaveBeenCalled();
+    expect(mockRunPipeline).not.toHaveBeenCalled();
+  });
+
+  it('aborts a stale ticket fix attempt before any pipeline work', async () => {
+    const { assertFixAttemptCurrent, attemptFailed } = await import('../friction/fix-attempts.js');
+    vi.mocked(assertFixAttemptCurrent).mockRejectedValueOnce(new Error('Stale ticket fix attempt'));
+    mockGetErrorGroup.mockResolvedValue(makeGroup({
+      kind: 'friction', status: 'fixing', sample_event_id: '', confidence: 'high',
+    }));
+    mockGetProject.mockResolvedValue({
+      id: 'proj-1', name: 'app', github_repo: 'org/app', default_branch: 'main', friction_autonomy: 'auto_fix',
+    });
+    const job = {
+      ...makeJob(), jobType: 'fix' as const, triggeredBy: 'auto' as const,
+      ticketId: 'ticket-1', fixAttemptId: 'attempt-1', publicationGeneration: 1,
+    };
+
+    await expect(processFixJob(job, new AbortController().signal)).rejects.toThrow('Stale ticket fix attempt');
+
+    expect(attemptFailed).not.toHaveBeenCalled();
+    expect(mockCloneRepo).not.toHaveBeenCalled();
+    expect(mockRunPipeline).not.toHaveBeenCalled();
+  });
+
+  it('rejects a ticket investigation that carries no publication generation', async () => {
+    const job = { ...makeJob(), ticketId: 'ticket-1', publicationGeneration: null };
+
+    await expect(processInvestigateJob(job, new AbortController().signal))
+      .rejects.toThrow('Ticket investigation missing generation');
+
+    expect(mockCreateReadOnlyCheckout).not.toHaveBeenCalled();
+    expect(investigateFriction).not.toHaveBeenCalled();
   });
 
   it('refuses an auto friction fix under ask-first while preserving confidence', async () => {

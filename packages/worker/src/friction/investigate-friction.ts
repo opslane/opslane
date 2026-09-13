@@ -162,6 +162,14 @@ function repositoryTree(tree: string): string {
   return tree.length > 8192 ? `${tree.slice(0, 8192)}\n…truncated` : tree;
 }
 
+/** Ticket investigations carry a verified problem definition and no research
+ * category; only legacy narrative-born incidents still carry categories. */
+function incidentGuide(input: FrictionInvestigateInput): string {
+  return input.ticketDefinition
+    ? 'The problem field is the verified problem definition: the control, what happened, and whether it is a defect or a UX insight. Every confirmed signal is a recording checked against that definition.'
+    : `For narrative-born incidents, signalType is a semantic research category and observationText is the researcher's one-sentence account of what they saw. Interpret categories using these exact definitions:\n${CATEGORY_DEFINITIONS}`;
+}
+
 async function systemPrompt(input: FrictionInvestigateInput): Promise<string> {
   const evidence = input.evidence
     ? {
@@ -174,8 +182,7 @@ async function systemPrompt(input: FrictionInvestigateInput): Promise<string> {
   const tree = repositoryTree(input.tree);
   return `You investigate user-friction incidents using read-only repository tools.
 
-For narrative-born incidents, signalType is a semantic research category and observationText is the researcher's one-sentence account of what they saw. Interpret categories using these exact definitions:
-${CATEGORY_DEFINITIONS}
+${incidentGuide(input)}
 
 Decide whether a concrete change in this repository can explain and improve the verified problem. codeCause=true includes defects and laborious but working UX with a concrete code improvement. Ground the improvement in code you read and provide a self-contained coding brief. If no grounded improvement exists, codeCause=false. Partition EVERY supplied confirmed signal ID exactly once between explains and does_not_explain; include no other IDs. Only classify after reading files. Your verdict is machine-checked: it must cite at least one file you actually read, with what you found there and how it links to the symptom; a verdict with no citations is discarded as incomplete. Only files opened with read_file count as read — a file seen only in search results must be read before you cite it. If you cannot verify a cause, say so plainly — an unverified guess is worse than no answer.
 

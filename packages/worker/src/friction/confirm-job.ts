@@ -4,11 +4,12 @@ import * as db from '../db.js';
 import { NarrativeClient } from '../narrative/client.js';
 import type { CompactTimeline } from '../narrative/emit.js';
 import { readChunksBounded } from './chunk-reader.js';
-import { captureFrames as captureReplayFrames } from '../narrative/frames/capture.js';
+import { captureFrames } from '../narrative/frames/capture.js';
 import { PhaseMeter } from '../metered.js';
-import type { captureFrames } from '../narrative/frames/capture.js';
+import { logger, safeErrorMessage } from '../logger.js';
 import {
   confirmRead,
+  ticketSteps,
   type ConfirmClient,
   type ConfirmMeter,
   type ConfirmResult,
@@ -30,6 +31,14 @@ export interface ConfirmJobDeps {
   capture: typeof captureFrames;
   dailyCap: number;
 }
+/** Changed neighbor snapshots a classification may retry before publishing
+ * without the one-fix gate. */
+export const FOLD_RETRY_LIMIT = 3;
+/** The recording itself is missing or incomplete, so its check is unavailable.
+ * Any other loading failure is infrastructure and retries the job. */
+export class RecordingUnavailableError extends Error {
+  override readonly name = 'RecordingUnavailableError';
+}
 type ConfirmJob = db.ClaimedJob & { ticketId: string };
 export interface TransitionPlan {
   ticket: store.TicketRow;
@@ -37,6 +46,8 @@ export interface TransitionPlan {
   steps: string;
   neighbors: { id: string; similarity: number }[] | null;
   targetId: string | null;
+  /** The one-fix gate answered for every planned neighbor. */
+  judged: boolean;
 }
 /** Production transition table, shared with reconciliation and property tests. */
 export function confirmationTransition(
@@ -99,19 +110,32 @@ export async function prepareConfirmationTransition(
 ): Promise<TransitionPlan> {
   const incident = await store.liveIncident(database, ticket);
   const preview = await store.previewCohort(database, ticket, batchId);
-  let steps = preview.notes.join('\n');
-  if (incident?.fix_substate === 'resolved' && ticket.fixed_at) {
-    steps = `Fix merged on ${ticket.fixed_at}, seen again since${
-      incident.pr_url ? ` (${incident.pr_url})` : ''
-    }.\n${steps}`;
-  }
+  const resolvedNote =
+    incident?.fix_substate === 'resolved' && ticket.fixed_at
+      ? [
+          `Fix merged on ${ticket.fixed_at}, seen again since${
+            incident.pr_url ? ` (${incident.pr_url})` : ''
+          }.`,
+        ]
+      : [];
   const plan: TransitionPlan = {
     ticket,
     incident,
-    steps,
+    steps: ticketSteps([...resolvedNote, ...preview.notes]),
     neighbors: null,
     targetId: null,
+    judged: false,
   };
+  // Plan neighbors for every classifiable status, not only when the preview
+  // passes: the locked cohort can pass when the preview did not, and a missing
+  // snapshot would read as a changed one and spend a fold retry.
+  if (
+    !['tracking', 'unpublished'].includes(ticket.status) ||
+    ticket.fold_retries >= FOLD_RETRY_LIMIT
+  )
+    return plan;
+  const neighbors = await store.publishedNeighbors(database, ticket);
+  plan.neighbors = neighbors.map(({ id, similarity }) => ({ id, similarity }));
   if (
     confirmationTransition(
       ticket.status,
@@ -120,30 +144,32 @@ export async function prepareConfirmationTransition(
         status: ticket.status,
         fixSubstate: incident?.fix_substate ?? null,
       }),
-    ) !== 'classify' ||
-    ticket.fold_retries >= 3
+    ) !== 'classify'
   )
     return plan;
-  const neighbors = await store.publishedNeighbors(database, ticket);
-  plan.neighbors = neighbors.map(({ id, similarity }) => ({ id, similarity }));
+  plan.judged = true;
   for (const neighbor of neighbors) {
-    let result = await judgeOneFix(client, ticket, neighbor, meter);
-    if ('invalid' in result)
-      result = await judgeOneFix(client, ticket, neighbor, meter);
-    if ('invalid' in result)
-      throw new Error(`One-fix classification invalid: ${result.invalid}`);
-    // Every one-fix answer is kept as a fact so a duplicate card can be traced
-    // to the question that let it through, not guessed at afterwards.
-    await store.recordGateDecision(database, {
-      ticketId: ticket.id,
-      batchId,
-      candidateId: neighbor.id,
-      similarity: neighbor.similarity,
-      oneFix: result.oneFix,
-      reason: result.reason,
-      model: client.modelName,
-    });
-    if (result.oneFix) {
+    let oneFix = await store.latestGateDecision(database, ticket.id, neighbor.id);
+    if (oneFix === null) {
+      let result = await judgeOneFix(client, ticket, neighbor, meter);
+      if ('invalid' in result)
+        result = await judgeOneFix(client, ticket, neighbor, meter);
+      if ('invalid' in result)
+        throw new Error(`One-fix classification invalid: ${result.invalid}`);
+      // Every one-fix answer is kept as a fact so a duplicate card can be traced
+      // to the question that let it through, not guessed at afterwards.
+      await store.recordGateDecision(database, {
+        ticketId: ticket.id,
+        batchId,
+        candidateId: neighbor.id,
+        similarity: neighbor.similarity,
+        oneFix: result.oneFix,
+        reason: result.reason,
+        model: client.modelName,
+      });
+      oneFix = result.oneFix;
+    }
+    if (oneFix) {
       plan.targetId = neighbor.id;
       break;
     }
@@ -168,7 +194,7 @@ export async function applyConfirmationTransition(
     }),
   );
   if (transition === 'classify') {
-    if (ticket.fold_retries < 3) {
+    if (ticket.fold_retries < FOLD_RETRY_LIMIT) {
       const candidates = await store.publishedNeighbors(tx, ticket);
       const snapshot = candidates.map(({ id, similarity }) => ({
         id,
@@ -178,6 +204,15 @@ export async function applyConfirmationTransition(
       if (JSON.stringify(snapshot) !== JSON.stringify(plan.neighbors)) {
         await tx.query(
           `UPDATE friction_tickets SET reconcile_needed=true,fold_retries=fold_retries+1 WHERE id=$1`,
+          [ticket.id],
+        );
+        return;
+      }
+      // The preview missed the bar, so the gate was never asked about these
+      // candidates. Replan from the passing cohort instead of publishing past them.
+      if (!plan.judged && snapshot.length) {
+        await tx.query(
+          `UPDATE friction_tickets SET reconcile_needed=true WHERE id=$1`,
           [ticket.id],
         );
         return;
@@ -192,9 +227,9 @@ export async function applyConfirmationTransition(
         return;
       }
     }
-    await store.activateGeneration(tx, ticket, stats, plan.steps);
+    await store.activateGeneration(tx, ticket, plan.steps);
   } else if (transition === 'activate') {
-    await store.activateGeneration(tx, ticket, stats, plan.steps);
+    await store.activateGeneration(tx, ticket, plan.steps);
   } else if (transition === 'unpublish') {
     await store.unpublish(tx, ticket);
   } else if (transition === 'refresh' && incident) {
@@ -219,7 +254,7 @@ export async function applyConfirmationTransition(
     );
     await tx.query(
       `UPDATE friction_tickets SET steps=$2 WHERE id=$1 AND NOT EXISTS(
-      SELECT 1 FROM digest_card_copy WHERE error_group_id=$3 AND authored_at >= (SELECT created_at FROM error_groups WHERE id=$3))`,
+      SELECT 1 FROM digest_card_copy WHERE error_group_id=$3 AND invalidated_at IS NULL AND authored_at >= (SELECT created_at FROM error_groups WHERE id=$3))`,
       [ticket.id, plan.steps, incident.id],
     );
     await tx.query(
@@ -238,16 +273,11 @@ export async function applyConfirmationTransition(
         [ticket.id],
       );
     }
-    // An insight published below the user threshold has an incident that was
-    // never investigated. Its first investigation starts from the batch that
-    // carries it over the threshold; the helper makes this idempotent.
-    if (allowed && ticket.kind === 'ux_insight' && incident.investigation_status === 'pending') {
-      const everQueued = await tx.query(
-        `SELECT 1 FROM error_group_jobs WHERE error_group_id=$1 AND job_type='investigate' LIMIT 1`,
-        [incident.id],
-      );
-      if (!everQueued.rowCount) await store.enqueueTicketInvestigation(tx, ticket, incident.id);
-    }
+    // An insight published below the user threshold has an incident with no
+    // investigation status. Its first investigation starts from the batch that
+    // carries it over the threshold; queueing sets the status to pending.
+    if (allowed && ticket.kind === 'ux_insight' && incident.investigation_status === null)
+      await store.enqueueTicketInvestigation(tx, ticket, incident.id);
   }
   await tx.query(
     `UPDATE friction_tickets SET reconcile_needed=false WHERE id=$1`,
@@ -378,19 +408,46 @@ export async function processFrictionConfirm(
       let recording: Awaited<
         ReturnType<ConfirmJobDeps['loadRecording']>
       > | null = null;
+      const context = {
+        job_id: job.id,
+        ticket_id: ticket.id,
+        session_id: member.sessionId,
+      };
       try {
         recording = await deps.loadRecording(
           member.sessionId,
           job.projectId,
           member.signalIds,
         );
-        await check();
-        frames = await deps.capture(recording.envelopes, recording.offsetsMs, {
-          maxOffsets: 4,
-        });
       } catch (error) {
         signal.throwIfAborted();
         if (error instanceof db.LeaseLostError) throw error;
+        // Only a missing recording is evidence about the recording. A database
+        // or storage failure retries the job instead of counting toward the
+        // permanent unavailable cap.
+        const missing = error instanceof RecordingUnavailableError;
+        logger.warn(
+          missing
+            ? 'Recording unavailable for confirmation'
+            : 'Recording load failed; confirmation will retry',
+          { ...context, error: safeErrorMessage(error) },
+        );
+        if (!missing) throw error;
+      }
+      if (recording) {
+        await check();
+        try {
+          frames = await deps.capture(recording.envelopes, recording.offsetsMs, {
+            maxOffsets: 4,
+          });
+        } catch (error) {
+          signal.throwIfAborted();
+          if (error instanceof db.LeaseLostError) throw error;
+          logger.warn('Replay capture failed for confirmation', {
+            ...context,
+            error: safeErrorMessage(error),
+          });
+        }
       }
       // The daily budget counts strong-model reads. A capture that produced no
       // frames is staged as unavailable without a model call, so it must not
@@ -532,7 +589,7 @@ export function frictionConfirmDepsFromEnv(): ConfirmJobDeps {
       },
     },
     dailyCap: Number.isSafeInteger(cap) && cap >= 0 ? cap : 2000,
-    capture: captureReplayFrames,
+    capture: captureFrames,
     loadRecording: async (sessionId, projectId, signalIds) => {
       const result = await db
         .getPool()
@@ -541,11 +598,14 @@ export function frictionConfirmDepsFromEnv(): ConfirmJobDeps {
         }>(`SELECT n.timeline FROM session_narratives n JOIN sessions s ON s.id=n.session_id AND s.project_id=n.project_id AND s.environment_id=n.environment_id WHERE n.session_id=$1 AND n.project_id=$2 AND n.status='ok'`, [sessionId, projectId]);
       const timeline = result.rows[0]?.timeline;
       if (!timeline || !Array.isArray(timeline.lines))
-        throw new Error('Recording timeline unavailable');
+        throw new RecordingUnavailableError('Recording timeline unavailable');
       const chunks = await db.getScrubbedChunksForSession(sessionId, projectId);
-      const read = await readChunksBounded(chunks);
+      // Corrupt chunk data counts as unreadable; a storage fetch failure throws.
+      const read = await readChunksBounded(chunks, { skipUnreadable: true });
       if (!read.envelopes.length || read.truncated || read.unreadableCount)
-        throw new Error('Recording chunks unavailable or incomplete');
+        throw new RecordingUnavailableError(
+          'Recording chunks unavailable or incomplete',
+        );
       const anchors = await db
         .getPool()
         .query<{

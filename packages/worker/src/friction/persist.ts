@@ -3,7 +3,7 @@ import type { SessionRow } from '../db.js';
 import { NARRATIVE_RULE_VERSION } from '../narrative/emit.js';
 
 export interface ObservationSignalRow {
-  signalType: 'narrative';
+  signalType: 'other';
   observationId: string;
   narrativeId: string;
   evidenceLines: string[];

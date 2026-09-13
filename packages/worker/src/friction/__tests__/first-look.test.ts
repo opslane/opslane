@@ -162,6 +162,46 @@ describe('firstLook', () => {
     await expect(firstLook(fixture.client, fixture.input, { add: fixture.add })).resolves.toHaveProperty('invalid');
   });
 
+  it('trims create ticket fields before returning them', async () => {
+    const payload = structuredClone(validPayload);
+    const create = payload.decisions[2] as { ticket: Record<string, unknown> };
+    create.ticket = {
+      ...create.ticket,
+      name: '  Export is hard to find \n',
+      control: ' Export control ',
+      what_happened: '\tThe user searched repeatedly ',
+      steps: ' Open reports ',
+    };
+    const fixture = setup(payload);
+    await expect(firstLook(fixture.client, fixture.input, { add: fixture.add })).resolves.toMatchObject({
+      decisions: [{}, {}, { ticket: {
+        name: 'Export is hard to find',
+        control: 'Export control',
+        what_happened: 'The user searched repeatedly',
+        steps: 'Open reports',
+      } }],
+    });
+  });
+
+  it.each([
+    ['name', 201], ['control', 2001], ['what_happened', 2001], ['steps', 2001],
+  ])('rejects a create ticket %s longer than its cap of %i code points', async (field, length) => {
+    const payload = structuredClone(validPayload);
+    const create = payload.decisions[2] as { ticket: Record<string, unknown> };
+    create.ticket[field] = 'x'.repeat(length);
+    const fixture = setup(payload);
+    await expect(firstLook(fixture.client, fixture.input, { add: fixture.add })).resolves.toHaveProperty('invalid');
+  });
+
+  it('measures create ticket caps in code points, not UTF-16 units', async () => {
+    const payload = structuredClone(validPayload);
+    const create = payload.decisions[2] as { ticket: Record<string, unknown> };
+    create.ticket['name'] = '📦'.repeat(200);
+    create.ticket['steps'] = '📦'.repeat(2000);
+    const fixture = setup(payload);
+    await expect(firstLook(fixture.client, fixture.input, { add: fixture.add })).resolves.toHaveProperty('decisions');
+  });
+
   it('accepts defect as the other valid create kind', async () => {
     const payload = structuredClone(validPayload);
     const create = payload.decisions[2] as { ticket: { kind: string } };

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { confirmRead } from '../confirm.js';
+import { confirmRead, PROVENANCE_IN_NOTE, ticketSteps } from '../confirm.js';
 import { judgeOneFix } from '../one-fix.js';
 const ticket = {
   name: 'Save',
@@ -72,6 +72,7 @@ describe('confirmation read', () => {
       'User edited the Loanee field (L29-L38: click field, select, click checkmark).',
       'The frames show the button did nothing after the click.',
       'At line 12 the user clicked Save.',
+      'Both timelines agree the save failed.',
     ]) {
       const client = {
         modelName: 'test',
@@ -94,6 +95,30 @@ describe('confirmation read', () => {
     expect(
       await confirmRead(plain, { ticket, timelineText: 'L1: Click', frames: [frame], framesOk: true, signals: [{ id: 's1', what: 'Error' }] }, meter),
     ).toMatchObject({ outcome: 'confirmed', evidenceLines: ['L1'] });
+  });
+  it('shares one provenance pattern with the Go digest validator', () => {
+    expect(PROVENANCE_IN_NOTE.source).toBe(
+      String.raw`\bL\d+(?:\s*[-–]\s*L?\d+)?\b|\b(?:timelines?|screenshots?|frames?)\b|\bline\s+\d+\b`,
+    );
+    expect(PROVENANCE_IN_NOTE.flags).toBe('i');
+  });
+  it('rejects a note longer than 300 code points', async () => {
+    const read = (note: string) =>
+      confirmRead(
+        { modelName: 'test', complete: vi.fn().mockResolvedValue(response({ ...valid, note })) },
+        { ticket, timelineText: 'L1: Click Save', frames: [frame], framesOk: true, signals: [{ id: 's1', what: 'Error' }] },
+        { add: vi.fn() },
+      );
+    expect(await read('a'.repeat(301))).toHaveProperty('invalid');
+    expect(await read('a'.repeat(300))).toMatchObject({ outcome: 'confirmed' });
+    expect(await read('💾'.repeat(300))).toMatchObject({ outcome: 'confirmed' });
+  });
+  it('builds ticket steps from whole notes within 600 code points', () => {
+    expect(ticketSteps(['Open settings.', 'Click Save.'])).toBe('Open settings.\nClick Save.');
+    const note = 'x'.repeat(250);
+    expect(ticketSteps([note, note, note, 'Short.'])).toBe(`${note}\n${note}`);
+    const wide = '💾'.repeat(199);
+    expect(ticketSteps([wide, wide, wide])).toBe([wide, wide, wide].join('\n'));
   });
   it('tells the model when the replay rendered without external assets, and still reads', async () => {
     const meter = { add: vi.fn() };

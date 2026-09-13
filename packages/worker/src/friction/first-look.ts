@@ -81,6 +81,17 @@ function nonBlank(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0;
 }
 
+/** A ticket name becomes an incident title and a Slack header. */
+const TICKET_NAME_MAX_CODE_POINTS = 200;
+const TICKET_FIELD_MAX_CODE_POINTS = 2000;
+
+/** Trimmed text within a code-point cap, or null when blank, oversize, or not text. */
+function boundedText(value: unknown, max: number): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  return trimmed && [...trimmed].length <= max ? trimmed : null;
+}
+
 function invalid(reason: string): FirstLookResult {
   return { invalid: reason };
 }
@@ -126,21 +137,21 @@ function validateDecisions(value: unknown, input: FirstLookInput): FirstLookResu
       const ticket = rawDecision['ticket'];
       if (!hasExactKeys(rawDecision, ['kind', 'observation_id', 'ticket']) || !isRecord(ticket)
         || !hasExactKeys(ticket, ['name', 'control', 'what_happened', 'steps', 'kind'])
-        || !nonBlank(ticket['name']) || !nonBlank(ticket['control'])
-        || !nonBlank(ticket['what_happened']) || !nonBlank(ticket['steps'])
         || (ticket['kind'] !== 'defect' && ticket['kind'] !== 'ux_insight')) {
         return invalid(`create decision ${index} is malformed`);
+      }
+      const kind = ticket['kind'];
+      const name = boundedText(ticket['name'], TICKET_NAME_MAX_CODE_POINTS);
+      const control = boundedText(ticket['control'], TICKET_FIELD_MAX_CODE_POINTS);
+      const whatHappened = boundedText(ticket['what_happened'], TICKET_FIELD_MAX_CODE_POINTS);
+      const steps = boundedText(ticket['steps'], TICKET_FIELD_MAX_CODE_POINTS);
+      if (name === null || control === null || whatHappened === null || steps === null) {
+        return invalid(`create decision ${index} has a blank or oversize ticket field`);
       }
       decisions.push({
         kind: 'create',
         observationId,
-        ticket: {
-          name: ticket['name'],
-          control: ticket['control'],
-          what_happened: ticket['what_happened'],
-          steps: ticket['steps'],
-          kind: ticket['kind'],
-        },
+        ticket: { name, control, what_happened: whatHappened, steps, kind },
       });
       continue;
     }

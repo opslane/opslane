@@ -27,7 +27,7 @@ describe('narrative signal emission', () => {
     expect(rows).toHaveLength(2);
     for (const [index, row] of rows.entries()) {
       expect(row).toMatchObject({
-        signalType: 'narrative', observationId: observations[index]!.id,
+        signalType: 'other', observationId: observations[index]!.id,
         narrativeId: 'narrative-1', evidenceLines: ['L2'], occurrenceCount: 1,
         occurredAts: [1_100],
       });

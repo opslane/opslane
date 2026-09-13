@@ -69,7 +69,7 @@ describeDb('ticket store', () => {
       [sessionId, scope.projectId, scope.environmentId, age, user],
     );
     const s = await db.query(
-      `INSERT INTO friction_signals(session_id,project_id,environment_id,signal_type,fingerprint,page_url_normalized,occurred_at,rule_version) VALUES($1,$2,$3,'narrative',$4,'/save',now()-$5*interval '1 day',1) RETURNING id,occurred_at::text`,
+      `INSERT INTO friction_signals(session_id,project_id,environment_id,signal_type,fingerprint,page_url_normalized,occurred_at,rule_version) VALUES($1,$2,$3,'other',$4,'/save',now()-$5*interval '1 day',1) RETURNING id,occurred_at::text`,
       [sessionId, scope.projectId, scope.environmentId, randomUUID(), age],
     );
     return {
@@ -116,6 +116,57 @@ describeDb('ticket store', () => {
     await store.finalizeBatch(db, t, b.id);
     return rs;
   }
+  it('caps investigations per generation, stays idempotent, and starts a new generation fresh', async () => {
+    expect(store.MAX_INVESTIGATIONS_PER_GENERATION).toBe(3);
+    const t = await ticket();
+    await checked(t, ['confirmed', 'confirmed', 'confirmed']);
+    const first = await store.activateGeneration(db, t, 'Save');
+    const live = (await store.getTicket(db, scope.projectId, t.id))!;
+    const jobs = async (errorGroupId: string) =>
+      (
+        await db.query(
+          `SELECT status FROM error_group_jobs WHERE error_group_id=$1 AND job_type='investigate'`,
+          [errorGroupId],
+        )
+      ).rows;
+    expect(await store.enqueueTicketInvestigation(db, live, first.errorGroupId)).toBe(false);
+    for (let i = 1; i < store.MAX_INVESTIGATIONS_PER_GENERATION; i++) {
+      await db.query(
+        `UPDATE error_group_jobs SET status='dead_letter' WHERE error_group_id=$1 AND job_type='investigate'`,
+        [first.errorGroupId],
+      );
+      expect(await store.enqueueTicketInvestigation(db, live, first.errorGroupId)).toBe(true);
+    }
+    await db.query(
+      `UPDATE error_group_jobs SET status='completed' WHERE error_group_id=$1 AND job_type='investigate' AND status='pending'`,
+      [first.errorGroupId],
+    );
+    expect(await store.enqueueTicketInvestigation(db, live, first.errorGroupId)).toBe(false);
+    expect(await jobs(first.errorGroupId)).toHaveLength(3);
+    await store.unpublish(db, live);
+    const second = await store.activateGeneration(
+      db,
+      (await store.getTicket(db, scope.projectId, t.id))!,
+      'Save',
+    );
+    expect(second.generation).toBe(2);
+    expect(await jobs(second.errorGroupId)).toEqual([{ status: 'pending' }]);
+  });
+  it('leaves an ineligible insight without an investigation status until its investigation is queued', async () => {
+    const t = await ticket('ux_insight');
+    await checked(t, ['confirmed', 'confirmed', 'confirmed']);
+    const g = await store.activateGeneration(db, t, 'Export');
+    const status = async () =>
+      (await db.query(`SELECT investigation_status FROM error_groups WHERE id=$1`, [g.errorGroupId]))
+        .rows[0].investigation_status;
+    expect(await status()).toBeNull();
+    expect(
+      (await db.query(`SELECT 1 FROM error_group_jobs WHERE error_group_id=$1`, [g.errorGroupId])).rowCount,
+    ).toBe(0);
+    const live = (await store.getTicket(db, scope.projectId, t.id))!;
+    expect(await store.enqueueTicketInvestigation(db, live, g.errorGroupId)).toBe(true);
+    expect(await status()).toBe('pending');
+  });
   it('admits the current recording identity after a model snapshot becomes stale', async () => {
     const t = await ticket();
     const oldUser = await user();
@@ -148,7 +199,6 @@ describeDb('ticket store', () => {
     const g = await store.activateGeneration(
       db,
       t,
-      await store.cohortStats(db, t),
       'Cached steps',
     );
     await db.query(
@@ -222,7 +272,6 @@ describeDb('ticket store', () => {
     const p = await store.activateGeneration(
       db,
       t,
-      await store.cohortStats(db, t),
       'Save',
     );
     const row = (
@@ -325,7 +374,6 @@ describeDb('ticket store', () => {
     const publication = await store.activateGeneration(
       db,
       t,
-      await store.cohortStats(db, t),
       'Save',
     );
     const current = (await store.getTicket(db, scope.projectId, t.id))!;
@@ -436,7 +484,6 @@ describeDb('ticket store', () => {
     const p = await store.activateGeneration(
       db,
       t,
-      await store.cohortStats(db, t),
       'Save',
     );
     await db.query(
@@ -467,7 +514,7 @@ describeDb('ticket store', () => {
     expect((await store.recordMatch(db, { ticket: t, ...r })).newRecording).toBe(true);
     expect((await store.recordMatch(db, { ticket: t, ...r })).newRecording).toBe(false);
     const extra = await db.query(
-      `INSERT INTO friction_signals(session_id,project_id,environment_id,signal_type,fingerprint,page_url_normalized,occurred_at,rule_version) VALUES($1,$2,$3,'narrative',$4,'/other',now(),1) RETURNING id`,
+      `INSERT INTO friction_signals(session_id,project_id,environment_id,signal_type,fingerprint,page_url_normalized,occurred_at,rule_version) VALUES($1,$2,$3,'other',$4,'/other',now(),1) RETURNING id`,
       [r.sessionId, scope.projectId, scope.environmentId, randomUUID()],
     );
     await store.recordMatch(db, {
@@ -685,7 +732,7 @@ describeDb('ticket store', () => {
     const old = await checked(t, ['confirmed'], 8);
     const fresh = await checked(t, ['confirmed', 'confirmed', 'refuted']);
     const added = await db.query(
-      `INSERT INTO friction_signals(session_id,project_id,environment_id,signal_type,fingerprint,page_url_normalized,occurred_at,rule_version) VALUES($1,$2,$3,'narrative',$4,'/save',now(),1) RETURNING id`,
+      `INSERT INTO friction_signals(session_id,project_id,environment_id,signal_type,fingerprint,page_url_normalized,occurred_at,rule_version) VALUES($1,$2,$3,'other',$4,'/save',now(),1) RETURNING id`,
       [fresh[0]!.sessionId, scope.projectId, scope.environmentId, randomUUID()],
     );
     await store.recordMatch(db, { ticket: t, ...fresh[0]!, signalIds: [added.rows[0].id] });
@@ -744,9 +791,8 @@ describeDb('ticket store', () => {
   it('publishes distinct generations, preserves old memberships, and unpublishes jobs and attempts', async () => {
     const t = await ticket();
     const rs = await checked(t, ['confirmed', 'confirmed', 'confirmed']);
-    const stats = await store.cohortStats(db, t);
-    const first = await store.activateGeneration(db, t, stats, 'Click Save');
-    const second = await store.activateGeneration(db, t, stats, 'Click Save again');
+    const first = await store.activateGeneration(db, t, 'Click Save');
+    const second = await store.activateGeneration(db, t, 'Click Save again');
     expect(second.generation).toBe(2);
     expect(second.errorGroupId).not.toBe(first.errorGroupId);
     const groups = (
@@ -802,7 +848,7 @@ describeDb('ticket store', () => {
     const source = await ticket();
     const target = await ticket();
     await checked(target, ['confirmed', 'confirmed', 'confirmed']);
-    await store.activateGeneration(db, target, await store.cohortStats(db, target), 'Save');
+    await store.activateGeneration(db, target, 'Save');
     const rs = await checked(source, ['confirmed', 'confirmed', 'confirmed']);
     await store.reserveDecision(db, rs[0]!.signalIds[0]!, scope);
     await store.commitDecision(db, rs[0]!.signalIds[0]!, {
@@ -839,7 +885,7 @@ describeDb('ticket store', () => {
   it('keeps resolved generations published', async () => {
     const t = await ticket();
     await checked(t, ['confirmed', 'confirmed', 'confirmed']);
-    const g = await store.activateGeneration(db, t, await store.cohortStats(db, t), 'Save');
+    const g = await store.activateGeneration(db, t, 'Save');
     await db.query(`UPDATE error_groups SET fix_substate='resolved' WHERE id=$1`, [g.errorGroupId]);
     await store.unpublish(db, t);
     expect(
@@ -850,7 +896,7 @@ describeDb('ticket store', () => {
     const source = await ticket();
     const target = await ticket();
     await checked(target, ['confirmed', 'confirmed', 'confirmed']);
-    await store.activateGeneration(db, target, await store.cohortStats(db, target), 'Save');
+    await store.activateGeneration(db, target, 'Save');
     await matches(source, 10);
     const job = await db.query(
       `INSERT INTO error_group_jobs(project_id,ticket_id,job_type,status,worker_id,lease_expires_at)
@@ -893,7 +939,6 @@ describeDb('ticket store', () => {
     const generation = await store.activateGeneration(
       db,
       t,
-      await store.cohortStats(db, t),
       'Save',
     );
     expect(

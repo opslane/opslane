@@ -9,6 +9,7 @@ import {
   vi,
 } from 'vitest';
 import * as db from '../../db.js';
+import { logger } from '../../logger.js';
 import * as store from '../tickets-db.js';
 import {
   processFrictionReconcile,
@@ -30,7 +31,10 @@ import {
   processFrictionConfirm,
   prepareConfirmationTransition,
   applyConfirmationTransition,
+  frictionConfirmDepsFromEnv,
+  RecordingUnavailableError,
   type ConfirmJobDeps,
+  type TransitionPlan,
 } from '../confirm-job.js';
 import { purgeDiagnosisDecisions } from '../../__tests__/purge-diagnosis-decisions.js';
 import { purgeJobUsage } from '../../__tests__/purge-job-usage.js';
@@ -142,7 +146,7 @@ describeDb('confirmation job', () => {
         );
         const signalId = (
           await tx.query(
-            `INSERT INTO friction_signals(session_id,project_id,environment_id,signal_type,fingerprint,page_url_normalized,occurred_at,rule_version) VALUES($1,$2,$3,'narrative',$4,'/save',now(),1) RETURNING id`,
+            `INSERT INTO friction_signals(session_id,project_id,environment_id,signal_type,fingerprint,page_url_normalized,occurred_at,rule_version) VALUES($1,$2,$3,'other',$4,'/save',now(),1) RETURNING id`,
             [sessionId, projectId, environmentId, randomUUID()],
           )
         ).rows[0].id as string;
@@ -678,7 +682,7 @@ describeDb('confirmation job', () => {
     );
     const signalId = (
       await pool.query(
-        `INSERT INTO friction_signals(session_id,project_id,environment_id,signal_type,fingerprint,page_url_normalized,occurred_at,rule_version) VALUES($1,$2,$3,'narrative',$4,'/save',now(),1) RETURNING id`,
+        `INSERT INTO friction_signals(session_id,project_id,environment_id,signal_type,fingerprint,page_url_normalized,occurred_at,rule_version) VALUES($1,$2,$3,'other',$4,'/save',now(),1) RETURNING id`,
         [sessionId, projectId, environmentId, randomUUID()],
       )
     ).rows[0].id;
@@ -967,7 +971,7 @@ describeDb('confirmation job', () => {
         );
         const signalId = (
           await tx.query(
-            `INSERT INTO friction_signals(session_id,project_id,environment_id,end_user_id,signal_type,fingerprint,page_url_normalized,occurred_at,rule_version) VALUES($1,$2,$3,$4,'narrative',$5,'/export',now(),1) RETURNING id`,
+            `INSERT INTO friction_signals(session_id,project_id,environment_id,end_user_id,signal_type,fingerprint,page_url_normalized,occurred_at,rule_version) VALUES($1,$2,$3,$4,'other',$5,'/export',now(),1) RETURNING id`,
             [sessionId, projectId, environmentId, endUserId, randomUUID()],
           )
         ).rows[0].id as string;
@@ -1272,7 +1276,7 @@ describeDb('confirmation job', () => {
       expect((await store.getTicket(pool, projectId, t.id))!.status).toBe('published');
       expect(
         (await pool.query(`SELECT investigation_status FROM error_groups WHERE ticket_id=$1`, [t.id])).rows,
-      ).toEqual([{ investigation_status: 'pending' }]);
+      ).toEqual([{ investigation_status: null }]);
       expect(await investigateJobs(t)).toEqual([]);
 
       // Ten more arrivals earn a second batch; the confirmed identified users
@@ -1283,6 +1287,9 @@ describeDb('confirmation job', () => {
       ).rejects.toMatchObject({ name: 'JobCompletedInTransaction' });
       expect((await store.verifiedEvidence(pool, t)).users).toBeGreaterThanOrEqual(5);
       expect(await investigateJobs(t)).toEqual([{ generation: 1, status: 'pending' }]);
+      expect(
+        (await pool.query(`SELECT investigation_status FROM error_groups WHERE ticket_id=$1`, [t.id])).rows,
+      ).toEqual([{ investigation_status: 'pending' }]);
     });
 
     it('does not requeue an insight below the threshold after a failed investigation', async () => {
@@ -1874,6 +1881,7 @@ describeDb('confirmation job', () => {
         status: 'published',
         live_generation: 2,
         reconcile_needed: false,
+        fold_retries: 0,
       });
     } finally {
       tx.release();
@@ -2018,6 +2026,222 @@ describeDb('confirmation job', () => {
     await expect(
       processFrictionConfirm(job, dependencies, controller.signal),
     ).rejects.toThrow('Canceled by user');
+  });
+  async function finalizeConfirmed(
+    t: store.TicketRow,
+    rs: { sessionId: string; signalId: string }[],
+  ) {
+    await transaction(async (tx) => {
+      const batch = (await store.selectBatch(tx, t, randomUUID()))!;
+      for (const r of rs)
+        await store.stageCheck(tx, batch.id, {
+          sessionId: r.sessionId,
+          signalIds: [r.signalId],
+          outcome: 'confirmed',
+          note: 'Save shows an error.',
+          model: 'test',
+          framesOk: true,
+        });
+      await store.finalizeBatch(tx, t, batch.id);
+    });
+  }
+  function oneFixClient(oneFix: boolean) {
+    const complete = vi.fn(async () => ({
+      text: JSON.stringify({
+        oneFix,
+        reason: oneFix ? 'Same handler' : 'Different handlers',
+      }),
+      inputTokens: 10,
+      outputTokens: 5,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      stopReason: 'end_turn',
+    }));
+    return { modelName: 'test', complete };
+  }
+  async function applyLocked(ticketId: string, plan: TransitionPlan) {
+    await transaction(async (tx) => {
+      await tx.query(
+        `SELECT pg_advisory_xact_lock(hashtext('friction_publish|'||$1))`,
+        [environmentId],
+      );
+      await applyConfirmationTransition(
+        tx,
+        (await store.getTicket(tx, projectId, ticketId, true))!,
+        plan,
+      );
+    });
+  }
+  it('plans gate neighbors when the preview misses the bar, so a locked pass reclassifies without spending fold retries', async () => {
+    const neighbor = await publish(await ticket());
+    await embed(neighbor);
+    const source = await ticket();
+    await embed(source);
+    await finalizeConfirmed(source, await matches(source, 2));
+    const client = oneFixClient(false);
+    const plan = await prepareConfirmationTransition(
+      pool,
+      (await store.getTicket(pool, projectId, source.id))!,
+      null,
+      client,
+      { add() {} },
+    );
+    expect(plan.neighbors).toEqual([
+      { id: neighbor.id, similarity: expect.any(Number) },
+    ]);
+    expect(client.complete).not.toHaveBeenCalled();
+    // A third confirmation finalizes between planning and the locked decision.
+    await finalizeConfirmed(source, await matches(source, 1));
+    await applyLocked(source.id, plan);
+    expect((await store.getTicket(pool, projectId, source.id))!).toMatchObject({
+      status: 'tracking',
+      fold_retries: 0,
+      reconcile_needed: true,
+    });
+    expect(
+      (
+        await pool.query(
+          'SELECT 1 FROM friction_gate_decisions WHERE ticket_id=$1',
+          [source.id],
+        )
+      ).rowCount,
+    ).toBe(0);
+    // Reconciliation plans against the passing cohort and asks the gate first.
+    const replanned = await prepareConfirmationTransition(
+      pool,
+      (await store.getTicket(pool, projectId, source.id))!,
+      null,
+      client,
+      { add() {} },
+    );
+    await applyLocked(source.id, replanned);
+    expect(client.complete).toHaveBeenCalledOnce();
+    expect((await store.getTicket(pool, projectId, source.id))!).toMatchObject({
+      status: 'published',
+      fold_retries: 0,
+      reconcile_needed: false,
+    });
+  });
+  it('reuses the recorded one-fix answer for a ticket pair instead of asking again', async () => {
+    const neighbor = await publish(await ticket());
+    await embed(neighbor);
+    const source = await ticket();
+    await embed(source);
+    await finalizeConfirmed(source, await matches(source, 3));
+    const client = oneFixClient(true);
+    const current = (await store.getTicket(pool, projectId, source.id))!;
+    const first = await prepareConfirmationTransition(pool, current, null, client, { add() {} });
+    const second = await prepareConfirmationTransition(pool, current, null, client, { add() {} });
+    expect(client.complete).toHaveBeenCalledOnce();
+    expect(first.targetId).toBe(neighbor.id);
+    expect(second.targetId).toBe(neighbor.id);
+    expect(
+      (
+        await pool.query(
+          'SELECT candidate_id,one_fix FROM friction_gate_decisions WHERE ticket_id=$1',
+          [source.id],
+        )
+      ).rows,
+    ).toEqual([{ candidate_id: neighbor.id, one_fix: true }]);
+  });
+  it('discards the staging batch of a dead-lettered confirmation so reconciliation recovers the ticket', async () => {
+    const t = await ticket();
+    await matches(t, 3);
+    const job = await claim(t);
+    const dependencies = deps([]);
+    dependencies.client.complete = async () => ({
+      text: 'not json',
+      inputTokens: 1,
+      outputTokens: 1,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      stopReason: 'end_turn',
+    });
+    await expect(
+      processFrictionConfirm(job, dependencies, new AbortController().signal),
+    ).rejects.toThrow('Confirmation invalid');
+    const batchId = (
+      await pool.query('SELECT batch_id FROM error_group_jobs WHERE id=$1', [
+        job.id,
+      ])
+    ).rows[0].batch_id as string;
+    expect(batchId).toBeTruthy();
+    expect(
+      await db.failJob(job.id, job.workerId, job.leaseGeneration, 'Confirmation invalid', {
+        exhaust: true,
+      }),
+    ).toBe(true);
+    expect(
+      (
+        await pool.query('SELECT status FROM friction_confirm_batches WHERE id=$1', [
+          batchId,
+        ])
+      ).rows,
+    ).toEqual([{ status: 'discarded' }]);
+    expect((await store.getTicket(pool, projectId, t.id))!.reconcile_needed).toBe(true);
+    expect(await scheduleFrictionReconciliation()).toBeGreaterThanOrEqual(1);
+  });
+  it('restores purged steps when the only card authored for the incident was invalidated', async () => {
+    const t = await publish(await ticket());
+    const incident = (await store.liveIncident(pool, t))!;
+    await pool.query(
+      `INSERT INTO digest_card_copy(error_group_id,spell_started_at,input_fingerprint,title,copy,action,model,prompt_version,invalidated_at) VALUES($1,now(),'fp','Save','Cached quote','fix','test',1,now())`,
+      [incident.id],
+    );
+    await pool.query('UPDATE friction_tickets SET steps=NULL WHERE id=$1', [t.id]);
+    await matches(t, 1);
+    await expect(
+      processFrictionConfirm(await claim(t), deps([]), new AbortController().signal),
+    ).rejects.toMatchObject({ name: 'JobCompletedInTransaction' });
+    expect((await store.getTicket(pool, projectId, t.id))!.steps).toBe(
+      'Click Save; error appears.',
+    );
+  });
+  it('retries a storage or database failure while loading a recording instead of staging it unavailable', async () => {
+    const t = await ticket();
+    await matches(t, 3);
+    const dependencies = deps([]);
+    dependencies.loadRecording = async () => {
+      throw new Error('connect ECONNREFUSED 127.0.0.1:9000');
+    };
+    const warn = vi.spyOn(logger, 'warn');
+    try {
+      await expect(
+        processFrictionConfirm(await claim(t), dependencies, new AbortController().signal),
+      ).rejects.toThrow('ECONNREFUSED');
+      expect(warn).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({ ticket_id: t.id, session_id: expect.any(String) }),
+      );
+    } finally {
+      warn.mockRestore();
+    }
+    for (const table of ['friction_check_attempts', 'friction_unavailable_retries'])
+      expect(
+        (await pool.query(`SELECT 1 FROM ${table} WHERE ticket_id=$1`, [t.id])).rowCount,
+      ).toBe(0);
+  });
+  it('stages a recording whose timeline or chunks are missing as unavailable', async () => {
+    const t = await ticket();
+    await matches(t, 3);
+    const dependencies = deps([]);
+    dependencies.loadRecording = async () => {
+      throw new RecordingUnavailableError('Recording timeline unavailable');
+    };
+    await expect(
+      processFrictionConfirm(await claim(t), dependencies, new AbortController().signal),
+    ).rejects.toMatchObject({ name: 'JobCompletedInTransaction' });
+    expect(
+      (
+        await pool.query(
+          'SELECT attempts,permanent FROM friction_unavailable_retries WHERE ticket_id=$1',
+          [t.id],
+        )
+      ).rows,
+    ).toEqual(Array.from({ length: 3 }, () => ({ attempts: 1, permanent: false })));
+    await expect(
+      frictionConfirmDepsFromEnv().loadRecording(randomUUID(), projectId, []),
+    ).rejects.toBeInstanceOf(RecordingUnavailableError);
   });
   it('refreshes verified evidence and reinvestigates without touching an open fix PR', async () => {
     const t = await publish(await ticket());

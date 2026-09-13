@@ -447,14 +447,21 @@ export async function attemptFailed(
     job_type: string;
     investigation_execution: string | null;
     investigation_evidence_version: number | null;
+    batch_id: string | null;
   }>(
-    `SELECT ticket_id,publication_generation,fix_attempt_id,error_group_id,job_type,investigation_execution::text,investigation_evidence_version FROM error_group_jobs WHERE id=$1 AND project_id=$2 AND ticket_id IS NOT NULL`,
+    `SELECT ticket_id,publication_generation,fix_attempt_id,error_group_id,job_type,investigation_execution::text,investigation_evidence_version,batch_id FROM error_group_jobs WHERE id=$1 AND project_id=$2 AND ticket_id IS NOT NULL`,
     [jobId, projectId],
   );
   const job = r.rows[0];
   if (!job?.ticket_id) return false;
   const ticket = await store.getTicket(tx, projectId, job.ticket_id, true);
   if (!ticket) return true;
+  // A dead confirmation leaves its batch staging after selection advanced the
+  // arrival watermark, so no new confirmation would come. Discarding it flags
+  // the ticket for reconciliation, which schedules the next confirmation.
+  // Reconciliation jobs never select a batch, so they have none to strand.
+  if (job.job_type === 'friction_confirm' && job.batch_id)
+    await store.discardBatch(tx, job.batch_id);
   const current =
     ticket.status === 'published' &&
     ticket.live_generation === job.publication_generation;

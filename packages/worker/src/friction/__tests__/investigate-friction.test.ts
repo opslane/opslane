@@ -186,6 +186,26 @@ describe('investigateFriction', () => {
     expect(first.system).toEqual(second.system);
   });
 
+  it('grounds a ticket investigation in its problem definition, not a research category', async () => {
+    mockMessagesCreate.mockResolvedValueOnce(response([tool('read_file', { path: 'src/App.vue' })]));
+    mockMessagesCreate.mockResolvedValueOnce(response([verdict()]));
+    const ticketInput = input();
+    ticketInput.ticketDefinition = {
+      name: 'Save fails',
+      control: 'Save button',
+      what_happened: 'The spinner never stops',
+      kind: 'defect',
+    };
+
+    await investigateFriction('key', ticketInput);
+
+    const system = JSON.stringify(mockMessagesCreate.mock.calls[0]![0].system);
+    expect(system).toContain('The spinner never stops');
+    expect(system).toContain('verified problem definition');
+    expect(system).not.toContain('semantic research category');
+    expect(system).not.toContain('validation_confusion: form/validation messaging is wrong');
+  });
+
   it('threads narrative category, observation text, and shared definitions into the prompt', async () => {
 		mockMessagesCreate.mockResolvedValueOnce(response([tool('read_file', { path: 'src/App.vue' })]));
 		mockMessagesCreate.mockResolvedValueOnce(response([verdict()]));
