@@ -12,9 +12,11 @@ import (
 	"net/http"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/opslane/opslane/packages/ingestion/db"
 	gh "github.com/opslane/opslane/packages/ingestion/github"
 )
 
@@ -25,6 +27,7 @@ type pullRequestEvent struct {
 		Number   int        `json:"number"`
 		Merged   bool       `json:"merged"`
 		ClosedAt *time.Time `json:"closed_at"`
+		HTMLURL  string     `json:"html_url"`
 	} `json:"pull_request"`
 	Repository struct {
 		FullName string `json:"full_name"`
@@ -44,6 +47,18 @@ type pushEvent struct {
 		Modified []string `json:"modified"`
 		Removed  []string `json:"removed"`
 	} `json:"commits"`
+}
+
+// ticketPRURL keeps a payload link only when it names this delivery's own pull
+// request on github.com, and stores the rebuilt canonical form rather than the
+// raw string: the URL later becomes a Slack link target. Anything else yields
+// "" so the attempt's recorded link is kept.
+func ticketPRURL(raw, repo string, number int) string {
+	linkedRepo, linkedNumber, ok := parseGitHubPR(raw)
+	if !ok || !strings.EqualFold(linkedRepo, repo) || linkedNumber != number {
+		return ""
+	}
+	return "https://github.com/" + repo + "/pull/" + strconv.Itoa(number)
 }
 
 type webhookRepo struct {
@@ -130,8 +145,9 @@ func (d *Dependencies) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Only handle "closed" action
-	if event.Action != "closed" {
+	// A reopened PR is deliberately ignored: ticket fix events admit only
+	// active or open attempts, so recording it as "opened" is never applied.
+	if event.Action != "closed" && event.Action != "opened" {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "ignored", "action": event.Action})
 		return
@@ -143,14 +159,22 @@ func (d *Dependencies) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 	if event.PullRequest.ClosedAt != nil {
 		occurredAt = *event.PullRequest.ClosedAt
 	}
-	action := "closed"
-	if event.PullRequest.Merged {
+	action := "opened"
+	if event.Action == "closed" {
+		action = "closed"
+	}
+	if event.Action == "closed" && event.PullRequest.Merged {
 		action = "merged"
 	}
 
-	result, err := d.Queries.ProcessPRWebhook(
-		r.Context(), repo, prNumber, event.PullRequest.Merged, deliveryID, occurredAt,
-	)
+	var result db.PRWebhookResult
+	if action == "opened" {
+		result, err = d.Queries.ProcessTicketPRWebhook(r.Context(), db.TicketPRWebhook{
+			Repository: repo, Number: prNumber, Event: action, DeliveryID: deliveryID, URL: ticketPRURL(event.PullRequest.HTMLURL, repo, prNumber), OccurredAt: occurredAt,
+		})
+	} else {
+		result, err = d.Queries.ProcessPRWebhook(r.Context(), repo, prNumber, event.PullRequest.Merged, deliveryID, occurredAt)
+	}
 	if err != nil {
 		slog.Error("webhook: process PR event failed", "repo", repo, "pr", prNumber, "error", err)
 		writeJSONError(w, http.StatusInternalServerError, "failed to process pull_request event")

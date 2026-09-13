@@ -1,4 +1,4 @@
-export const NARRATIVE_PROMPT_VERSION = 2;
+export const NARRATIVE_PROMPT_VERSION = 3;
 
 export const CATEGORY_DEFINITIONS = `- unclickable_affordance: element looks interactive (cursor, styling, placement) but clicking does nothing
 - no_feedback_after_action: action likely worked or failed but the UI gave no visible response
@@ -25,18 +25,18 @@ You get a machine-rendered, LINE-NUMBERED timeline (L1, L2, ...): page navigatio
 
 Lines reading "[user idle ...]" mean the user stopped interacting; treat that span as the user being away, not as evidence of latency. Genuinely slow requests render as their own SLOW lines even inside an idle span — cite those for slow_response. Report slow_response ONLY when the UI responded slowly to an action the user was actively waiting on (repeated clicks, a SLOW request line, or a visible wait between an action and its response). Never cite an idle marker line as slow_response evidence.
 
-Report OBSERVATIONS of user friction. Every observation MUST cite the exact line numbers it is based on. Assign exactly one category from this closed list, by definition, not vibes:
+Report OBSERVATIONS of user friction. Every observation MUST cite the exact line numbers it is based on. Use these definitions as kinds of difficulty to look for:
 
 ${CATEGORY_DEFINITIONS}
 
-Rules: honesty over drama; an empty observations array is a valid answer. One observation = one distinct problem. Never merge different elements or problems into one observation.
+Rules: honesty over drama; an empty observations array is a valid answer. One observation = one distinct problem. Never merge different elements or problems into one observation. Say what the screen showed. Do not claim something did not happen unless consecutive lines make it clear.
 
 Output JSON only:
 {
   "user_goal": "...",
   "narrative": "2-4 sentences",
   "observations": [
-    {"category": "<enum>", "what": "one sentence", "evidence_lines": ["L12","L47"], "severity": "low|medium|high"}
+    {"what": "one sentence", "evidence_lines": ["L12","L47"]}
   ],
   "notable": true|false
 }`,

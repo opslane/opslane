@@ -14,6 +14,21 @@ import (
 // Candidate is the immutable fact envelope supplied to the daily writer.
 // Facts omitted here are unavailable to the model by design.
 type Candidate struct {
+	LatestAttemptID         string   `json:"latestAttemptId,omitempty"`
+	PromptVersion           int      `json:"promptVersion,omitempty"`
+	TicketID                string   `json:"ticketId,omitempty"`
+	Generation              int      `json:"generation,omitempty"`
+	EvidenceVersion         int      `json:"evidenceVersion,omitempty"`
+	Steps                   string   `json:"steps,omitempty"`
+	VerifiedUsers           int      `json:"verifiedUsers,omitempty"`
+	VerifiedSessions        int      `json:"verifiedSessions,omitempty"`
+	RepresentativeSessionID string   `json:"representativeSessionId,omitempty"`
+	RepresentativeNote      string   `json:"representativeNote,omitempty"`
+	ConfirmedNotes          []string `json:"confirmedNotes,omitempty"`
+	Why                     string   `json:"why,omitempty"`
+	Coverage                float64  `json:"coverage,omitempty"`
+	FixSubstate             string   `json:"fixSubstate,omitempty"`
+
 	ErrorGroupID          string            `json:"errorGroupId"`
 	EpisodeID             string            `json:"episodeId,omitempty"`
 	EpisodeSequence       *int              `json:"episodeSequence,omitempty"`
@@ -148,7 +163,7 @@ func FreezeCandidates(ctx context.Context, pool *pgxpool.Pool, projectID string,
 		var replayFloors []time.Time
 		var actionableCandidates []actionableCandidate
 		var unifiedExcluded map[string]string
-		actionableCandidates, err = loadActionableCandidates(ctx, tx, projectID, onCardStatusSQL)
+		actionableCandidates, err = loadActionableCandidates(ctx, tx, projectID, onCardStatusSQL, at)
 		if err != nil {
 			return "", nil, err
 		}
@@ -169,8 +184,10 @@ func FreezeCandidates(ctx context.Context, pool *pgxpool.Pool, projectID string,
 					return "", nil, fmt.Errorf("roll back replay lookup savepoint: %w", err)
 				}
 			} else if ok {
-				candidate.ReplaySessionID = id
-				candidate.ReplayAnchorMs = anchor
+				if candidate.TicketID == "" {
+					candidate.ReplaySessionID = id
+					candidate.ReplayAnchorMs = anchor
+				}
 			}
 			if _, err := tx.Exec(ctx, `RELEASE SAVEPOINT digest_replay_lookup`); err != nil {
 				return "", nil, fmt.Errorf("release replay lookup savepoint: %w", err)

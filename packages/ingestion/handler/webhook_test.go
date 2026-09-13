@@ -403,6 +403,18 @@ func assertWebhookStatus(t *testing.T, response *httptest.ResponseRecorder, want
 	}
 }
 
+// A reopened PR is not a ticket event: fixEventCurrent only admits active or
+// open attempts, so recording it as "opened" left the group fixable twice.
+func TestHandleWebhook_ReopenedPullRequestIgnored(t *testing.T) {
+	t.Setenv("GITHUB_WEBHOOK_SECRET", "receipt-test-secret")
+	body := []byte(`{"action":"reopened","pull_request":{"number":73,"html_url":"https://github.com/acme/shop/pull/73"},"repository":{"full_name":"acme/shop"}}`)
+	response := sendSignedWebhook(t, &Dependencies{}, body, "delivery-reopened")
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	assertWebhookStatus(t, response, "ignored")
+}
+
 func seedWebhookInstallation(t *testing.T, queries *db.Queries, repos string) (orgID string, installationID int64) {
 	t.Helper()
 	ctx := context.Background()

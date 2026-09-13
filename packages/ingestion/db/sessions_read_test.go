@@ -849,3 +849,25 @@ func TestMarkSessionDeleting_RechecksPinAfterCandidateSelection(t *testing.T) {
 		t.Fatalf("tombstones=%d err=%v, want 0", tombstones, err)
 	}
 }
+
+func TestListSessions_CountsAtomicObservationsStoredAsOther(t *testing.T) {
+	q, pool := sessionTestQueries(t)
+	ctx := context.Background()
+	projectID, envID := seedSessionProject(t, pool)
+	insertReadSession(t, q, pool, projectID, envID, nil, "sess_read_atomic", time.Now().UTC().Add(-time.Hour))
+	legacy := addReadSignal(t, pool, "sess_read_atomic", projectID, envID, "other", "legacy-other", "accepted", 3, 1)
+	atomic := addReadSignal(t, pool, "sess_read_atomic", projectID, envID, "other", "atomic-other", "accepted", 3, 1)
+	if _, err := pool.Exec(ctx, `UPDATE friction_signals SET observation_text='Legacy note' WHERE id=$1`, legacy); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE friction_signals SET observation_text='Clicked Save; nothing changed', observation_id='o1', narrative_id='n1' WHERE id=$1`, atomic); err != nil {
+		t.Fatal(err)
+	}
+	got, _, err := q.ListSessions(ctx, projectID, db.SessionFilters{}, nil, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ObservationCount != 1 {
+		t.Fatalf("want one session with one observation, got %+v", got)
+	}
+}

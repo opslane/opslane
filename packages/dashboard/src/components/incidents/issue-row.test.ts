@@ -72,6 +72,31 @@ describe('IssueRow', () => {
     expect(row.text()).toContain('312');
   });
 
+  it('shows verified weekly sessions and users for a known-problem ticket', () => {
+    const ticket = {
+      kind: 'friction' as const,
+      platform: null,
+      ticket_id: 't1',
+      verified_users: 7,
+      verified_sessions: 1_204,
+    };
+    const cells = mountRow(ticket).findAll('td');
+    expect(cells[2].text()).toBe('1,204 sessions');
+    expect(cells[2].get('span').attributes('title')).toBe('Verified sessions this week');
+    expect(cells[3].text()).toBe('7');
+    expect(mountRow(ticket).text()).not.toContain('12,842');
+    expect(mountRow(ticket).text()).not.toContain('312');
+    expect(mountRow(ticket, { layout: 'stacked' }).text()).toContain('7 users');
+  });
+
+  it('keeps all-time occurrences and users for a legacy row', () => {
+    const cells = mountRow().findAll('td');
+    expect(cells[2].text()).toBe('12,842');
+    expect(cells[3].text()).toBe('312');
+    expect(mountRow().text()).not.toContain('sessions');
+    expect(mountRow({}, { layout: 'stacked' }).text()).toContain('312 users');
+  });
+
   it('renders a visibly linked status for a valid GitHub pr_url', () => {
     const link = mountRow({
       status: 'pr_draft',

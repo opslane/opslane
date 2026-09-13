@@ -187,6 +187,11 @@ export interface Incident {
   id: string;
   project_id: string;
   kind: 'error' | 'friction';
+  ticket_id?: string;
+  publication_generation?: number;
+  fix_substate?: 'none' | 'fixing' | 'pr_open' | 'resolved';
+  investigation_status?: 'pending' | 'done' | 'failed' | null;
+  cause_coverage?: number;
   platform?: string | null;
   /** Present only on kind='friction': friction identity is environment-scoped. */
   environment_id?: string;
@@ -211,6 +216,8 @@ export interface Incident {
   last_seen: string;
   occurrence_count: number;
   affected_users_count: number;
+  verified_users?: number;
+  verified_sessions?: number;
   priority_score?: number;
   priority_inputs?: PriorityInputs;
   priority_scored_at?: string;
@@ -228,7 +235,7 @@ export interface Incident {
   recordings?: IncidentRecording[];
   root_cause?: string;
   suggested_mitigation?: string;
-  investigation_readiness?: 'eligible' | 'ineligible' | 'pending';
+  investigation_readiness?: 'eligible' | 'cause_only' | 'ineligible' | 'pending';
   /** Model-authored technical report; render only under an investigation-output label. */
   agent_task_brief?: string;
   merged_at?: string;
@@ -333,9 +340,9 @@ export interface SessionDetail extends SessionSummary {
 
 export interface SessionNarrativeObservation {
   id: string;
-  category: string;
+  category?: string;
   what: string;
-  severity: 'low' | 'medium' | 'high';
+  severity?: 'low' | 'medium' | 'high';
   evidenceLines: string[];
   grade?: 'confirmed' | 'corrected' | 'refuted' | 'inconclusive';
   replacementWhat?: string;
@@ -447,7 +454,11 @@ export type AdminJobType =
   | 'product_context'
   | 'digest_write'
   | 'score_sync'
-  | 'stack_resolve';
+  | 'stack_resolve'
+  | 'friction_match'
+  | 'friction_confirm'
+  | 'friction_reconcile'
+  | 'friction_pr_event';
 
 export interface AdminHourlyEventBucket {
   hour: string;

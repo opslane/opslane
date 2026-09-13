@@ -186,6 +186,18 @@
           "classification": "illustrative"
         },
         {
+          "language": "bash",
+          "classification": "illustrative"
+        },
+        {
+          "language": "bash",
+          "classification": "illustrative"
+        },
+        {
+          "language": "bash",
+          "classification": "illustrative"
+        },
+        {
           "language": "text",
           "classification": "expected-output"
         },

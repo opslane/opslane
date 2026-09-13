@@ -48,16 +48,19 @@ export interface PipelineInput {
   abortSignal?: AbortSignal;
   /** Authoritative lease check immediately before irreversible provider writes. */
   assertLeaseOwned?: () => Promise<void>;
+  recordCreatedPr?: (url: string, number: number) => Promise<void>;
   replay?: ReplayInput | null;
   kind?: 'error' | 'friction';
   /** Who created the fix job. `human` authorises it past the persisted-decision gate. */
   triggeredBy?: 'auto' | 'human' | null;
   sourceJobId?: string | null;
+  fixAttemptId?: string | null;
   frictionEvidence?: string;
   /** Pre-computed investigation results. When set, agent skips internal triage. */
   investigation?: {
     rootCause: string;
     diagnosis?: Diagnosis | null;
+    findings?: string;
     guidance?: string;
   };
   prPosture?: 'verified_only' | 'draft_when_unverified';
@@ -215,8 +218,8 @@ export async function runPipeline(input: PipelineInput): Promise<PipelineResult>
     : renderCommitMessage(narrative!, fixResult.evidence, incidentUrl);
 
   // Stage 2: reserve a stable logical delivery before any provider write.
-  let branchName = `opslane/fix-${input.errorGroupId.slice(0, 8)}`;
-  const operationKey = `fix:${input.errorGroupId}`;
+  let branchName = `opslane/fix-${(input.fixAttemptId ?? input.errorGroupId).slice(0, 8)}`;
+  const operationKey = `fix:${input.fixAttemptId ?? input.errorGroupId}`;
   if (input.reserveDelivery) {
     const reservation = await input.reserveDelivery({
       operationKey,
@@ -248,6 +251,7 @@ export async function runPipeline(input: PipelineInput): Promise<PipelineResult>
       && reservation.reservation.prNumber
       && reservation.reservation.headSha
     ) {
+      await input.recordCreatedPr?.(reservation.reservation.prUrl, reservation.reservation.prNumber);
       return {
         status: deliveryPosture === 'draft' ? 'pr_draft' : 'pr_created',
         pr_url: reservation.reservation.prUrl,
@@ -276,6 +280,7 @@ export async function runPipeline(input: PipelineInput): Promise<PipelineResult>
 
   const existingPR = await githubClient?.listOpenPullsByHead?.({ owner, repo, head: branchName });
   if (existingPR) {
+    await input.recordCreatedPr?.(existingPR.url, existingPR.number);
     await input.recordDeliveryPushed?.(existingPR.headSha);
     return {
       status: deliveryPosture === 'draft' ? 'pr_draft' : 'pr_created',
@@ -364,6 +369,8 @@ export async function runPipeline(input: PipelineInput): Promise<PipelineResult>
       evidence: fixResult.evidence,
     };
   }
+
+  await input.recordCreatedPr?.(prResult.prUrl, prResult.prNumber);
 
   emitUsageEvent('fix_pr_opened', {
     project_id: input.projectId,

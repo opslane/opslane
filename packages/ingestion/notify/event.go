@@ -96,12 +96,21 @@ type DigestPayload struct {
 	// covers generated cards only and receipts render below them with their own
 	// overflow line. Absent (false) means OFF, so a payload written before this
 	// field existed renders exactly as it did then.
-	UnifiedCards bool `json:"unified_cards,omitempty"`
+	UnifiedCards   bool             `json:"unified_cards,omitempty"`
+	MergedThisWeek []DigestPRMerged `json:"merged_this_week,omitempty"`
 }
 
 // GeneratedDigestCard is model-authored prose grounded in a frozen candidate.
 // Its IDs, counts, accounts and links have all been mechanically validated.
 type GeneratedDigestCard struct {
+	TicketID         string  `json:"ticket_id,omitempty"`
+	Generation       int     `json:"generation,omitempty"`
+	Steps            string  `json:"steps,omitempty"`
+	VerifiedUsers    int     `json:"verified_users,omitempty"`
+	VerifiedSessions int     `json:"verified_sessions,omitempty"`
+	Coverage         float64 `json:"coverage,omitempty"`
+	ActionURL        string  `json:"action_url,omitempty"`
+
 	EpisodeID  string `json:"episode_id"`
 	IncidentID string `json:"incident_id"`
 	Kind       string `json:"kind,omitempty"`
@@ -143,6 +152,19 @@ type DigestTriageCounts struct {
 
 // ReceiptItem is one digest card. Kind is error, friction, or cluster.
 type ReceiptItem struct {
+	AffectedUsers    int      `json:"affected_users,omitempty"`
+	Copy             string   `json:"copy,omitempty"`
+	TicketID         string   `json:"ticket_id,omitempty"`
+	Generation       int      `json:"generation,omitempty"`
+	LatestAttemptID  string   `json:"latest_attempt_id,omitempty"`
+	Steps            string   `json:"steps,omitempty"`
+	VerifiedUsers    int      `json:"verified_users,omitempty"`
+	VerifiedSessions int      `json:"verified_sessions,omitempty"`
+	Coverage         float64  `json:"coverage,omitempty"`
+	Accounts         []string `json:"accounts,omitempty"`
+	Action           string   `json:"action,omitempty"`
+	ActionURL        string   `json:"action_url,omitempty"`
+
 	Kind              string `json:"kind"`
 	IncidentID        string `json:"incident_id"`
 	Title             string `json:"title"`

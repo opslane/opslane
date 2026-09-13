@@ -99,8 +99,8 @@ func TestValidateOnPublishesAuthoredFrictionAndCachesCopy(t *testing.T) {
 		WHERE error_group_id=$1 AND invalidated_at IS NULL`, candidate.ErrorGroupID).Scan(&cachedPromptVersion); err != nil {
 		t.Fatal(err)
 	}
-	if cachedPromptVersion != digestPromptVersion || digestPromptVersion != 6 {
-		t.Fatalf("cached prompt version = %d, live = %d, want 6", cachedPromptVersion, digestPromptVersion)
+	if cachedPromptVersion != digestPromptVersion || digestPromptVersion != 7 {
+		t.Fatalf("cached prompt version = %d, live = %d, want 7", cachedPromptVersion, digestPromptVersion)
 	}
 	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM issue_publications
 		WHERE project_id=$1 AND channel='digest'`, fixture.ProjectID).Scan(&publications); err != nil {
@@ -185,10 +185,10 @@ func TestValidateUnifiedCachedCardCarriesTodaysImpact(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(body), "23 visits this week") {
-		t.Fatalf("day two message does not print today's impact: %s", body)
+	if !strings.Contains(string(body), "17 signals") {
+		t.Fatalf("message does not accurately label existing signal count: %s", body)
 	}
-	if strings.Contains(string(body), "17 visits") {
+	if strings.Contains(string(body), "visits") || strings.Contains(string(body), "recovered") {
 		t.Fatalf("day two message replayed yesterday's impact: %s", body)
 	}
 }
@@ -553,7 +553,7 @@ func TestValidateOnDeliversFrozenReceiptsWhenTheLiveReloadFails(t *testing.T) {
 	writeOnCardPayload(t, pool, runID, candidates)
 
 	restore := loadActionableCandidatesForValidation
-	loadActionableCandidatesForValidation = func(context.Context, pgx.Tx, string, actionableStatusSet) ([]actionableCandidate, error) {
+	loadActionableCandidatesForValidation = func(context.Context, pgx.Tx, string, actionableStatusSet, time.Time) ([]actionableCandidate, error) {
 		return nil, errors.New("injected actionable reload failure")
 	}
 	t.Cleanup(func() { loadActionableCandidatesForValidation = restore })

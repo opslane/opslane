@@ -43,9 +43,10 @@ var ErrOAuthLoginStateReservation = errors.New("OAuth login state reservation is
 var ErrInvalidInvitation = errors.New("invalid invitation")
 
 var (
-	ErrPRAlreadyLinked  = errors.New("incident already has a pull request")
-	ErrPRRepoMismatch   = errors.New("pull request is not in this project's repository")
-	ErrIncidentNotFound = errors.New("incident not found")
+	ErrPRAlreadyLinked    = errors.New("incident already has a pull request")
+	ErrPRRepoMismatch     = errors.New("pull request is not in this project's repository")
+	ErrIncidentNotFound   = errors.New("incident not found")
+	ErrTicketLegacyAction = errors.New("manual resolution and PR linking are not supported for known problems")
 )
 
 // Queries wraps a connection pool and provides tenant-scoped database operations.
@@ -639,8 +640,8 @@ func (q *Queries) RequestFailuresNear(ctx context.Context, projectID, sessionID 
 }
 
 // LinkPR records a developer's PR on error_groups so the existing merge webhook
-// can resolve it. Repository matching and the no-overwrite guard are enforced
-// in the update predicate.
+// can resolve it. Ticket publications use fix attempts and cannot accept legacy
+// PR links. Repository matching and all mutation guards are atomic.
 func (q *Queries) LinkPR(ctx context.Context, projectID, groupID, prURL, repo string, prNumber int) error {
 	tag, err := q.pool.Exec(ctx,
 		`UPDATE error_groups eg
@@ -654,6 +655,7 @@ func (q *Queries) LinkPR(ctx context.Context, projectID, groupID, prURL, repo st
 		    AND eg.project_id = $2
 		    AND p.id = eg.project_id
 		    AND eg.pr_number IS NULL
+		    AND eg.ticket_id IS NULL
 		    AND eg.status NOT IN ('resolved', 'archived', 'merged')
 		    AND p.github_repo IS NOT NULL
 		    AND lower(p.github_repo) = lower($5)`,
@@ -665,22 +667,24 @@ func (q *Queries) LinkPR(ctx context.Context, projectID, groupID, prURL, repo st
 		return nil
 	}
 
-	// The update matched no row: the incident is absent for this project, its
-	// repo differs, or it already has a PR / is in a terminal state. Scope the
-	// lookup by project_id like the update, so a foreign incident id is a 404
-	// rather than leaking its existence. A repo mismatch is the only refusal we
-	// can name distinctly; every other case is the "already linked" 409.
-	var repoMatches bool
+	// The update matched no row: the incident is absent for this project, it is
+	// a ticket publication, its repo differs, or it already has a PR / is terminal.
+	// Scope the lookup by project_id like the update, so a foreign id is a 404
+	// rather than leaking its existence.
+	var repoMatches, isTicket bool
 	if err := q.pool.QueryRow(ctx,
-		`SELECT lower(coalesce(p.github_repo, '')) = lower($3)
+		`SELECT lower(coalesce(p.github_repo, '')) = lower($3), eg.ticket_id IS NOT NULL
 		   FROM error_groups eg
 		   JOIN projects p ON p.id = eg.project_id
 		  WHERE eg.id = $1 AND eg.project_id = $2`,
-		groupID, projectID, repo).Scan(&repoMatches); err != nil {
+		groupID, projectID, repo).Scan(&repoMatches, &isTicket); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrIncidentNotFound
 		}
 		return fmt.Errorf("classify link pr refusal: %w", err)
+	}
+	if isTicket {
+		return ErrTicketLegacyAction
 	}
 	if !repoMatches {
 		return ErrPRRepoMismatch
@@ -1141,6 +1145,7 @@ type ErrorGroup struct {
 	AffectedUsersCount     int
 	Status                 string
 	Kind                   string
+	TicketID               *string // ListErrorGroups only; other readers leave it nil
 	Platform               *string
 	EnvironmentID          *string
 	AdjudicationStatus     *string
@@ -1629,7 +1634,7 @@ func (q *Queries) ListErrorGroups(ctx context.Context, projectID string, filters
 		               eg.signal_type, eg.element_selector, eg.page_url_normalized,
 		               eg.priority_score, eg.priority_inputs, eg.priority_scored_at,
 		               eg.created_at, eg.updated_at,
-		               eg.merged_at, eg.resolved_at, eg.archived_at
+		               eg.merged_at, eg.resolved_at, eg.archived_at, eg.ticket_id::text
 		        FROM error_groups eg
 		        WHERE ` + strings.Join(wheres, " AND ") + `
 		        ORDER BY COALESCE(eg.priority_score, 0) DESC, eg.last_seen DESC, eg.id DESC
@@ -1728,7 +1733,7 @@ func (q *Queries) ListErrorGroups(ctx context.Context, projectID string, filters
 		       eg.signal_type, eg.element_selector, eg.page_url_normalized,
 		       candidates.priority_score, candidates.priority_inputs, candidates.priority_scored_at,
 		       eg.created_at, eg.updated_at,
-		       eg.merged_at, eg.resolved_at, eg.archived_at
+		       eg.merged_at, eg.resolved_at, eg.archived_at, eg.ticket_id::text
 		FROM candidates
 		JOIN error_groups eg ON eg.id = candidates.id
 		ORDER BY COALESCE(candidates.priority_score, 0) DESC, candidates.last_seen DESC, candidates.id DESC
@@ -1754,7 +1759,7 @@ func (q *Queries) ListErrorGroups(ctx context.Context, projectID string, filters
 			&g.SignalType, &g.ElementSelector, &g.PageURLNormalized,
 			&g.PriorityScore, &g.PriorityInputs, &g.PriorityScoredAt,
 			&g.CreatedAt, &g.UpdatedAt,
-			&g.MergedAt, &g.ResolvedAt, &g.ArchivedAt,
+			&g.MergedAt, &g.ResolvedAt, &g.ArchivedAt, &g.TicketID,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan error group: %w", err)
@@ -2078,7 +2083,20 @@ func (q *Queries) GetLatestJobTraceURL(ctx context.Context, projectID, errorGrou
 // TriggerFixJob atomically transitions an incident from its kind-specific
 // fix-triggerable state to 'fixing' and creates a human-triggered fix job.
 // Returns the new job ID or an error. Tenant-scoped.
-func (q *Queries) TriggerFixJob(ctx context.Context, projectID, groupID, guidance string) (string, error) {
+func (q *Queries) TriggerFixJob(ctx context.Context, projectID, groupID, guidance string, expected ...TicketFixExpectation) (string, error) {
+	var ticketID *string
+	if err := q.pool.QueryRow(ctx, `SELECT ticket_id FROM error_groups WHERE id=$1 AND project_id=$2`, groupID, projectID).Scan(&ticketID); err != nil {
+		if err == pgx.ErrNoRows {
+			return "", ErrNotInvestigated
+		}
+		return "", err
+	}
+	if ticketID != nil {
+		return q.requestTicketFix(ctx, projectID, groupID, guidance, expected...)
+	}
+	if len(expected) > 0 {
+		return "", ErrNotInvestigated
+	}
 	tx, err := q.pool.Begin(ctx)
 	if err != nil {
 		return "", fmt.Errorf("begin tx: %w", err)
@@ -2478,6 +2496,13 @@ func loadDraftBranchCleanup(ctx context.Context, tx pgx.Tx, groupID string) (str
 // is unique in practice. If multiple projects share the same repo, one arbitrary
 // match is used; revisit this for multi-project-per-repo support.
 func (q *Queries) ProcessPRWebhook(ctx context.Context, githubRepo string, prNumber int, merged bool, deliveryID string, occurredAt time.Time) (PRWebhookResult, error) {
+	event := "closed"
+	if merged {
+		event = "merged"
+	}
+	if result, err := q.ProcessTicketPRWebhook(ctx, TicketPRWebhook{Repository: githubRepo, Number: prNumber, Event: event, DeliveryID: deliveryID, OccurredAt: occurredAt}); err != nil || result.GroupID != "" {
+		return result, err
+	}
 	tx, err := q.pool.Begin(ctx)
 	if err != nil {
 		return PRWebhookResult{}, fmt.Errorf("begin PR webhook transaction: %w", err)
@@ -2529,6 +2554,7 @@ func (q *Queries) ProcessPRWebhook(ctx context.Context, githubRepo string, prNum
 		   ON r.error_group_id = eg.id AND r.project_id = eg.project_id
 		 WHERE p.github_repo = $1
 		   AND eg.pr_number = $2
+		   AND eg.ticket_id IS NULL
 		   AND eg.status IN ('pr_created', 'pr_draft')
 		 FOR UPDATE OF eg`,
 		githubRepo, prNumber,
@@ -2694,6 +2720,7 @@ func recoverReopenedMerge(ctx context.Context, tx pgx.Tx, githubRepo string, prN
 		 JOIN error_groups eg ON o.error_group_id = eg.id
 		 JOIN projects p ON eg.project_id = p.id
 		 WHERE p.github_repo = $1
+		   AND eg.ticket_id IS NULL
 		   AND o.pr_number = $2
 		 ORDER BY o.occurred_at DESC, o.created_at DESC
 		 LIMIT 1
@@ -2753,7 +2780,8 @@ func recoverReopenedMerge(ctx context.Context, tx pgx.Tx, githubRepo string, prN
 }
 
 // ResolveErrorGroup manually transitions an error group to resolved.
-// Allowed from any status except archived. Tenant-scoped.
+// Allowed for legacy groups from any status except archived. Ticket publications
+// resolve through their fix workflow. Tenant-scoped.
 func (q *Queries) ResolveErrorGroup(ctx context.Context, projectID, groupID string) error {
 	ct, err := q.pool.Exec(ctx,
 		`UPDATE error_groups
@@ -2766,13 +2794,21 @@ func (q *Queries) ResolveErrorGroup(ctx context.Context, projectID, groupID stri
 		       GROUP BY release ORDER BY min(created_at) DESC LIMIT 1
 		     ),
 		     updated_at = now()
-		 WHERE id = $2 AND project_id = $1 AND status != 'archived'`,
+		 WHERE id = $2 AND project_id = $1 AND status != 'archived' AND ticket_id IS NULL`,
 		projectID, groupID,
 	)
 	if err != nil {
 		return fmt.Errorf("resolve error group: %w", err)
 	}
 	if ct.RowsAffected() == 0 {
+		var isTicket bool
+		err := q.pool.QueryRow(ctx, `SELECT ticket_id IS NOT NULL FROM error_groups WHERE id=$1 AND project_id=$2`, groupID, projectID).Scan(&isTicket)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("classify resolve refusal: %w", err)
+		}
+		if isTicket {
+			return ErrTicketLegacyAction
+		}
 		return fmt.Errorf("resolve error group: no matching row (group %s may be archived or not found)", groupID)
 	}
 	return nil
@@ -2789,6 +2825,9 @@ func (q *Queries) ResolveErrorGroup(ctx context.Context, projectID, groupID stri
 // an archive issued from a stale list, would otherwise surface as 409 "incident
 // not found". Ask which case it was before reporting a failure.
 func (q *Queries) ArchiveErrorGroup(ctx context.Context, projectID, groupID string) error {
+	if handled, err := q.archiveTicketGroup(ctx, projectID, groupID); handled || err != nil {
+		return err
+	}
 	ct, err := q.pool.Exec(ctx,
 		`UPDATE error_groups
 		 SET status_before_archive = status,
@@ -2817,6 +2856,13 @@ func (q *Queries) ArchiveErrorGroup(ctx context.Context, projectID, groupID stri
 // UnarchiveErrorGroup restores the pre-archive state. Rows archived before the
 // saved-status column existed fall back to the previous kind-safe behavior.
 func (q *Queries) UnarchiveErrorGroup(ctx context.Context, projectID, groupID string) error {
+	var ticketID *string
+	if err := q.pool.QueryRow(ctx, `SELECT ticket_id FROM error_groups WHERE id=$1 AND project_id=$2`, groupID, projectID).Scan(&ticketID); err != nil && err != pgx.ErrNoRows {
+		return err
+	}
+	if ticketID != nil {
+		return ErrTicketUnarchive
+	}
 	ct, err := q.pool.Exec(ctx,
 		`UPDATE error_groups
 		 SET status = COALESCE(

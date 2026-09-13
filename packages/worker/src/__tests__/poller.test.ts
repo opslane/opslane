@@ -92,6 +92,17 @@ describe('poller', () => {
     await poller.stop();
   });
 
+  it('does not complete or fail a job whose handler committed completion with its successor', async () => {
+    mockClaimJob.mockResolvedValueOnce(makeJob());
+    const completed = new Error('Committed'); completed.name = 'JobCompletedInTransaction';
+    const poller = createPoller({ intervalMs: 1000, leaseDurationMs: 30000, workerId: 'test-worker', processJob: async () => { throw completed; } });
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mockCompleteJob).not.toHaveBeenCalled();
+    expect(mockFailJob).not.toHaveBeenCalled();
+    await poller.stop();
+  });
+
   it('should not call processJob when no job is available', async () => {
     mockClaimJob.mockResolvedValueOnce(null);
 

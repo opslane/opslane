@@ -1,54 +1,85 @@
 ---
 covers:
-  - packages/worker/src/friction/promotion.ts
-  - packages/worker/src/friction/promotion-db.ts
-  - packages/worker/src/friction/analyzer.ts
-description: How Opslane finds users getting stuck without an error, and when that becomes an issue.
+  - packages/worker/src/friction/match-job.ts
+  - packages/worker/src/friction/match.ts
+  - packages/worker/src/friction/first-look.ts
+  - packages/worker/src/friction/confirm-job.ts
+  - packages/worker/src/friction/confirm.ts
+  - packages/worker/src/friction/tickets-db.ts
+  - packages/worker/src/friction/investigate-ticket.ts
+  - packages/worker/src/friction/fix-attempts.ts
+  - packages/worker/src/narrative/**
+description: How recording findings become known problems, confirmed issues, and verified fixes.
 ---
 
 # Catching bugs that don't throw
 
-Some bugs never throw an error, such as a dead button or a form nobody can submit. Opslane finds them from session recordings.
+Some bugs never throw an error, such as a dead button or a form nobody can submit.
+Opslane finds these problems from session recordings and checks whether other
+recordings show the same problem.
 
-A **signal** is one friction pattern in one analyzed session. A **friction issue** forms when the same pattern reaches enough signed-in users recently and Opslane accepts it as real.
+## What Opslane reads
 
-Opslane detects **rage clicks**, repeated clicks on one element; **dead clicks**, a click that leaves the page unchanged; and **form abandonment**, when a user starts a form but leaves without submitting it.
+A recording captures what a visitor saw and did: clicks, page changes, and network
+requests. Once a session closes, Opslane builds a timeline, writes a narrative,
+and identifies individual findings tied to moments in the recording. Frame
+checks test claims that need visual evidence. For example, a claim that a button
+did nothing needs screenshots that show the result.
 
-## What Opslane reads from a recording
+One recording can contain several different problems. Repeated findings of
+one problem in that recording still count as one affected session.
 
-A session is one user's visit: the recording of what they saw, plus the clicks, page changes, and network requests the SDK captured. Analysis turns that into counts and labels, never a transcript.
+Raw recording chunks land in storage first, then the server redacts them. Every
+read path serves a chunk only after redaction succeeds. See
+[replay privacy and masking](replay-privacy.md).
 
-A session closes after it goes idle. Opslane then analyzes it. If a late part of the recording arrives, Opslane analyzes the complete session again.
+## Matching a known problem
 
-For each session Opslane records facts about pages, clicks, requests to the same website, requests that changed data, and active time. It stores counts and labels, not a transcript of what the user typed.
+Opslane compares each finding with known problems in the same project and
+environment. A known problem, called a **ticket**, describes a specific control,
+action, and symptom. Similar wording or a shared page alone does not establish a
+match. A second model reviews proposals for new tickets and can match an existing
+ticket, create one, or decide the finding is not a problem.
 
-Those facts also describe how much of the visit the recording captured and how active the user was. Opslane only labels activity when the recording captured enough of the visit to support the conclusion.
+Tickets stay internal while evidence accumulates. Anonymous recordings can start
+and support tickets. A nearby JavaScript error does not automatically absorb a
+recording finding. Production and staging keep separate tickets.
 
-Opslane uses session facts outside friction too. When an error occurs in an analyzed session, its investigation gets one line describing what the user was doing. The dashboard session list shows the counts and labels for each visit.
+## Confirming an issue
 
-### Redaction
+After three recordings match a ticket, Opslane re-reads recordings against that
+exact problem definition. Each check can confirm, refute, or leave the result
+inconclusive. An unavailable recording does not count as a negative result.
+A match alone never increases the issue's confirmed impact.
 
-Raw recording chunks land in storage first, then the server redacts them. Every read path, including the dashboard, API, and worker, serves a chunk only after redaction succeeds. See [replay privacy and masking](replay-privacy.md).
+Publication requires at least three confirmed recordings and a confirmation rate
+of at least 40% among counted checks. When confirmed recordings include identified
+users, they must include at least two distinct identified users. Entirely anonymous
+evidence can qualify through distinct recordings.
 
-## Problems near an error
+A published issue's counts, reproduction steps, and investigation evidence use
+only findings cited by finalized confirmation checks. Counts shown for a
+recent window can therefore differ from the ticket's total matched recordings.
+More recordings can strengthen or weaken the evidence; recording deletion can
+remove an issue from publication when it no longer qualifies.
 
-When a friction signal happens close to an error in the same session, Opslane evaluates it at once. If Opslane accepts the signal as a real problem, it adds the signal to the error issue instead of starting a separate issue.
+## Finding a cause and offering a fix
 
-## Becoming an issue
+Opslane investigates the repository after publication. It records which confirmed
+findings the proposed code cause explains. An issue enters the daily summary
+and offers **Create fix PR** only after a successful cause investigation covers at
+least half of its current confirmed finding evidence.
 
-Only a signal from a signed-in user can start a friction issue. An anonymous signal can only attach to a nearby error.
+By default, recording-derived issues wait for a person to request a fix. Projects
+can enable automatic fixes; automatic delivery is limited to five open fix PRs
+per project by default. Both paths use the current issue's evidence and verified
+fix workflow.
 
-Opslane groups signals by environment and the affected part of your app. It uses the signal type, the clicked element, and the page path. It removes changing IDs and path parameters before grouping, so those values do not split one problem. The same dead button on staging and production stays in separate groups.
+If Opslane cannot establish a code cause, the ticket keeps tracking the problem.
+It stays out of the summary until a later investigation meets the cause requirement.
+A merged fix closes that publication; a recurrence needs evidence from recordings
+after the fix. The ticket retains its identity and publishes a new incident when
+the new evidence qualifies.
 
-Once enough distinct signed-in users hit the same group recently, Opslane decides whether it represents a real problem. An accepted group becomes a visible issue. A rejected group stays hidden, but later recordings can support a new decision.
-
-## Two decisions, in order
-
-1. **Is this a real problem?** The issue and its counts include accepted signals only.
-2. **Is there a code cause?** After the group becomes an issue, Opslane investigates your repository. See [how Opslane works](../how-it-works.md#it-investigates-in-your-code).
-
-An issue with a code cause enters the fix path. By default, Opslane waits for your approval before it fixes a bug found only from a session recording. You can allow it to fix these issues automatically. An issue with no code cause closes with a note and stops there.
-
-## Ranking
-
-Friction issues use the same ranking system as errors. Recent impact across distinct users matters more than repeated activity from one person, and the importance of the affected page can raise or lower priority. See [how Opslane works](../how-it-works.md#it-only-investigates-the-errors-that-matter).
+Operators upgrading from the old bucket pipeline must follow the
+[known-problems cutover](../quickstart/self-host.md#known-problems-cutover-migration-078).

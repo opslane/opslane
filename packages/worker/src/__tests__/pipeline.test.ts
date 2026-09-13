@@ -168,6 +168,18 @@ describe('runPipeline', () => {
     mockGitCommitAndPush.mockResolvedValue('head-sha');
   });
 
+  it('records the created PR before returning, even when cancellation arrives during creation', async () => {
+    const abort = new AbortController();
+    const records: string[]=[];
+    mockRunAgentFix.mockResolvedValueOnce({status:'fix_ready',diff:VALID_DIFF,confidence:'high',rootCause:'Save handler loses input',affectedFiles:['f.ts']});
+    mockCreatePR.mockImplementationOnce(async () => { abort.abort(); return {status:'created',prUrl:'https://github.com/org/repo/pull/17',prNumber:17}; });
+    const result=await runPipeline(makePipelineInput({kind:'friction',fixAttemptId:'attempt-12345678',abortSignal:abort.signal,
+      assertLeaseOwned:async()=>{},recordCreatedPr:async(url,number)=>{records.push(`${number}:${url}`);}}));
+    expect(result.pr_number).toBe(17);
+    expect(records).toEqual(['17:https://github.com/org/repo/pull/17']);
+    expect(mockCreatePR.mock.calls[0]?.[0].branchName).toBe('opslane/fix-attempt-');
+  });
+
   it('happy path: agent fix succeeds → git push succeeds → PR created', async () => {
     const assertLeaseOwned = vi.fn().mockResolvedValue(undefined);
     mockRunAgentFix.mockResolvedValueOnce({

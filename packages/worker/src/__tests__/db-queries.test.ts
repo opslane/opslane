@@ -242,8 +242,8 @@ describe('friction and session queries', () => {
   it('loads live friction signals with incident and tenant scope', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [] });
     await getFrictionSignalsForGroup('g1', 'p1');
-    expect(mockQuery.mock.calls[0][0]).toContain('incident_id = $1 AND project_id = $2');
-    expect(mockQuery.mock.calls[0][1]).toEqual(['g1', 'p1']);
+    expect(mockQuery.mock.calls[0][0]).toContain('project_id = $2');
+    expect(mockQuery.mock.calls[0][1]).toEqual(['g1', 'p1', null]);
   });
 
   it('loads only scrubbed chunks in sequence order', async () => {
@@ -317,8 +317,8 @@ describe('claimJob friction scheduling fields', () => {
       .toBeLessThan(claimSql.indexOf("WHEN job_type <> 'session_analysis' THEN 2"));
     expect(claimSql).toContain("AND job_type = 'session_analysis'");
     expect(claimSql).toContain('< $3');
-    // Caps default to 2 analysis, 2 narrative, and 1 frame-verification job.
-    expect(mockQuery.mock.calls[2][1]).toEqual(['worker-1', 30, 2, 2, 1]);
+    // Fleet caps: analysis 2, narrative 2, frames 1, matching 2, confirmation 1.
+    expect(mockQuery.mock.calls[2][1]).toEqual(['worker-1', 30, 2, 2, 1, 2, 1]);
     expect(mockQuery.mock.calls[3][0]).toBe('COMMIT');
     expect(mockClient.release).toHaveBeenCalled();
   });
@@ -329,7 +329,20 @@ describe('claimJob friction scheduling fields', () => {
     mockQuery.mockResolvedValueOnce({ rows: [] });
     mockQuery.mockResolvedValueOnce({}); // COMMIT
     await claimJob('worker-1', 30_000, 0);
-    expect(mockQuery.mock.calls[2][1]).toEqual(['worker-1', 30, 0, 2, 1]);
+    expect(mockQuery.mock.calls[2][1]).toEqual(['worker-1', 30, 0, 2, 1, 2, 1]);
+  });
+});
+
+describe('friction admission kill switches', () => {
+  it('passes explicit zero match and confirmation caps, including the reconcile publication guard', async () => {
+    mockQuery.mockReset();
+    mockQuery.mockResolvedValueOnce({});
+    mockQuery.mockResolvedValueOnce({});
+    mockQuery.mockResolvedValueOnce({rows:[]});
+    mockQuery.mockResolvedValueOnce({});
+    await claimJob('worker',30_000,2,2,1,0,0);
+    expect(mockQuery.mock.calls[2][1]).toEqual(['worker',30,2,2,1,0,0]);
+    expect(mockQuery.mock.calls[2][0]).toContain("job_type NOT IN ('friction_confirm','friction_reconcile') OR ($6 > 0 AND $7 > 0)");
   });
 });
 
@@ -735,13 +748,15 @@ describe('source-map resolution queries', () => {
 describe('requeueStaleJobs — reconcile dead-lettered fix jobs', () => {
   beforeEach(() => {
     mockQuery.mockReset();
-    // requeueStaleJobs now runs in a transaction (BEGIN → UPDATE ... RETURNING
-    // → reconciliation → COMMIT); default every un-mocked call to empty.
+    // The reaper snapshots eligible IDs, locks ticket environments, then mutates
+    // and reconciles the still-eligible jobs in one transaction.
     mockQuery.mockResolvedValue({ rows: [], rowCount: 0 });
   });
 
   it('terminates a dead-lettered fix job group as needs_human (no stuck "fixing")', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 }); // BEGIN
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: 'j1' }] }); // eligible snapshot
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // no ticket environments
     mockQuery.mockResolvedValueOnce({
       rowCount: 1,
       rows: [{ id: 'j1', error_group_id: 'g1', project_id: 'p1', job_type: 'fix', status: 'dead_letter' }],
@@ -770,6 +785,8 @@ describe('requeueStaleJobs — reconcile dead-lettered fix jobs', () => {
 
   it('leaves requeued (non-dead-letter) and non-fix dead-letter jobs alone', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 }); // BEGIN
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: 'j2' },{ id: 'j3' }] }); // eligible snapshot
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // no ticket environments
     mockQuery.mockResolvedValueOnce({
       rowCount: 2,
       rows: [
@@ -789,6 +806,8 @@ describe('requeueStaleJobs — reconcile dead-lettered fix jobs', () => {
 
   it('marks a dead-lettered session analysis as analysis_failed', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 }); // BEGIN
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: 'j4' }] }); // eligible snapshot
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // no ticket environments
     mockQuery.mockResolvedValueOnce({
       rowCount: 1,
       rows: [{

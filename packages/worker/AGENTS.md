@@ -42,3 +42,50 @@ The worker polls Postgres and owns investigation, fix verification, lease handli
 - Run `pnpm --filter @opslane/worker build` and `pnpm --filter @opslane/worker test`.
 - For worker pipeline behavior, also run the live smoke described in the root `AGENTS.md` and confirm the expected terminal state.
 - Build the worker Compose image after Dockerfile changes.
+
+### In-process known-problems smoke
+
+Build the workspace with `pnpm -r build`, apply migrations, and keep Postgres and
+MinIO running. Export the complete `DATABASE_URL`, MinIO, and replay-store variable
+block from the [root guidance](../../AGENTS.md#verification), including storage
+credentials and URLs for the selected ports. The smoke also requires Go for its
+production ingestion helpers.
+
+Stop the worker before this test and leave it stopped throughout: the test calls
+compiled production handlers in process with a fake model, and another worker
+could claim its jobs. From the repository root:
+
+```bash
+docker compose stop worker
+E2E_IN_PROCESS_WORKER=1 pnpm --filter @opslane/test-e2e exec vitest run friction-incidents.test.ts
+```
+
+Require zero skipped tests. Run the normal e2e phase with the worker running only
+after this phase finishes, excluding `friction-incidents.test.ts` from that phase.
+
+## Known-problems operations
+
+- `FRICTION_MATCH_MODEL` defaults to `claude-haiku-4-5-20251001`;
+  `FRICTION_FIRST_LOOK_MODEL` and `FRICTION_CONFIRM_MODEL` default to `claude-sonnet-5`.
+  These clients use `NARRATIVE_API_KEY` / `NARRATIVE_BASE_URL`, falling back to
+  `ANTHROPIC_API_KEY` / `ANTHROPIC_BASE_URL`.
+- `OPENAI_API_KEY` enables `text-embedding-3-small` retrieval (1536 dimensions).
+  Missing or unavailable embeddings fall back to screen-based retrieval.
+  PostgreSQL still requires the `vector` extension for migration 078.
+- `FRICTION_MATCH_MAX_CONCURRENT` defaults to 2; `FRICTION_CONFIRM_MAX_CONCURRENT`
+  defaults to 1. Both are fleet-wide claim caps. Set both to 0 on every worker
+  to pause matching, confirmation, reconciliation, and new publication.
+  `FRICTION_CONFIRM_DAILY_CAP` defaults to 2000 recording checks per project per UTC day.
+- `FRICTION_CONFIRM_DAILY_CAP` reserves one project/UTC-day unit per unstaged recording check in PostgreSQL; do not reuse narrative session budget stamps. A resumed batch skips staged recordings. `FRICTION_CONFIRM_MAX_CONCURRENT=0` pauses confirmation and reconciliation.
+- `FRICTION_MAX_OPEN_FIX_PRS` defaults to 5 per project. Automatic delivery reserves its slot under the project lock; manual requests are exempt. Ticket fixes and PR callbacks must match the live generation and attempt.
+- Run `pnpm --filter @opslane/worker backfill:tickets --project UUID --environment UUID
+  --since 14d --rate 60` after building. It schedules `friction_match` jobs through
+  `available_at` and exits; it never sleeps to pace work. Matching materializes
+  old narratives as atomic observations. Derive identity from stored
+  `created_at::text` and `prompt_version`, preserving PostgreSQL microseconds.
+  Completed decisions include `not_a_problem`; empty narratives use the exact
+  `friction_session_processed` marker. Partial ledgers remain eligible.
+- Follow the [migration 078 cutover](../../docs/quickstart/self-host.md#known-problems-cutover-migration-078).
+  Stop every old worker before retiring buckets. Once new workers have written
+  atomic signals, ingestion rollback below 078 is unsupported; fix forward with
+  the two claim caps at 0. Preserve job spend under ADR-0001 throughout cutover.

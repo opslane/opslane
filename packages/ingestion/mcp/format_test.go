@@ -433,3 +433,25 @@ func TestFormatIssueShowsACauseThatCitedNoFile(t *testing.T) {
 		t.Fatalf("did not say why there are no paths:\n%s", got)
 	}
 }
+
+// A known problem is verified from recordings and can carry a code cause; the
+// legacy "silently did nothing, a product decision" preamble is wrong for it.
+func TestFormatIssueDescribesAVerifiedKnownProblem(t *testing.T) {
+	ticket := "ticket-1"
+	route := "/invoices"
+	cause := "The send handler returns before posting."
+	got := FormatIssue(IssueInput{
+		Incident: MCPIncident{ID: "i", Kind: "friction", TicketID: &ticket, Title: "Send does nothing", Status: "awaiting_approval",
+			OccurrenceCount: 4, AffectedUsersCount: 2, RootCause: &cause, PageURLNormalized: &route},
+		Evidence: IssueEvidence{Availability: EvidenceAvailability{Recording: "available", SourceMap: "missing"}},
+	})
+	if strings.Contains(got, "silently did nothing") || strings.Contains(got, "product decision") {
+		t.Fatalf("known problem used the legacy friction preamble:\n%s", got)
+	}
+	if !strings.Contains(got, "verified problem seen in session recordings") {
+		t.Fatalf("known problem is not described as verified:\n%s", got)
+	}
+	if !strings.Contains(got, "Root cause: ") || !strings.Contains(got, "returns before posting") {
+		t.Fatalf("known problem dropped its cause:\n%s", got)
+	}
+}

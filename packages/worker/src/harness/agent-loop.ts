@@ -12,6 +12,7 @@ const MODEL_PRICING: Record<string, {
   cacheWrite: number;
   cacheRead: number;
 }> = {
+  'text-embedding-3-small': { input: 0.02, output: 0, cacheWrite: 0, cacheRead: 0 },
   'claude-sonnet-4-6': { input: 3, output: 15, cacheWrite: 3.75, cacheRead: 0.30 },
   'claude-sonnet-4-20250514': { input: 3, output: 15, cacheWrite: 3.75, cacheRead: 0.30 },
   // Sonnet 5 is $2/$10. The increase to $3/$15 that was scheduled for

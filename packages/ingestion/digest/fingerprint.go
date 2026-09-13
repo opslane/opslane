@@ -9,13 +9,14 @@ import (
 )
 
 const digestValidatorVersion = 1
-const digestPromptVersion = 6
+const digestPromptVersion = 7
 
 // CachedDigestCard is an atomic, already validated card frozen into a run.
 // Partial cache hits are never represented.
 type CachedDigestCard struct {
 	Title string `json:"title"`
 	Copy  string `json:"copy"`
+	Steps string `json:"steps,omitempty"`
 	// Why is the card's one-sentence cause. Empty for an incident whose stored
 	// root cause is empty, which publishable() still admits.
 	Why         string    `json:"why,omitempty"`
@@ -31,20 +32,23 @@ func candidateFingerprint(candidate Candidate, promptVersion, validatorVersion i
 	accounts := append([]string(nil), candidate.Accounts...)
 	sort.Strings(accounts)
 	semantic := struct {
-		ErrorGroupID, EpisodeID   string
-		EpisodeSequence           *int
-		Kind, Status, SignalType  string
-		Title, Outcome, Summary   string
-		RootCause, Mitigation     string
-		ValidAction, DiffIdentity string
-		RoutePurpose              string
-		FrictionCategory, Route   string
-		ObservationQuote          string
-		Accounts                  []string
-		HasValidatedDiagnosis     bool
-		PromptVersion             int
-		ValidatorVersion          int
+		TicketID, Steps             string
+		Generation, EvidenceVersion int
+		ErrorGroupID, EpisodeID     string
+		EpisodeSequence             *int
+		Kind, Status, SignalType    string
+		Title, Outcome, Summary     string
+		RootCause, Mitigation       string
+		ValidAction, DiffIdentity   string
+		RoutePurpose                string
+		FrictionCategory, Route     string
+		ObservationQuote            string
+		Accounts                    []string
+		HasValidatedDiagnosis       bool
+		PromptVersion               int
+		ValidatorVersion            int
 	}{
+		TicketID: candidate.TicketID, Steps: candidate.Steps, Generation: candidate.Generation, EvidenceVersion: candidate.EvidenceVersion,
 		ErrorGroupID: candidate.ErrorGroupID, EpisodeID: candidate.EpisodeID,
 		EpisodeSequence: candidate.EpisodeSequence, Kind: candidate.Kind,
 		Status: candidate.Status, SignalType: candidate.SignalType,

@@ -67,6 +67,7 @@ export class NarrativeClient {
   async complete(args: {
     system: string;
     user: string;
+    signal?: AbortSignal;
     images?: Array<{ mediaType: string; base64: string }>;
   }): Promise<NarrativeModelResult> {
     const content: Anthropic.MessageParam['content'] = args.images?.length
@@ -92,7 +93,7 @@ export class NarrativeClient {
         : {}),
       system: args.system,
       messages: [{ role: 'user', content }],
-    });
+    }, { signal: args.signal });
     const text = response.content
       .filter((block): block is Anthropic.TextBlock => block.type === 'text')
       .map((block) => block.text)
@@ -110,7 +111,7 @@ export class NarrativeClient {
 }
 
 export function narrativeClientFromEnv(): NarrativeClient | null {
-  const apiKey = process.env['NARRATIVE_API_KEY'] ?? process.env['ANTHROPIC_API_KEY'];
+  const apiKey = process.env['NARRATIVE_API_KEY'] || process.env['ANTHROPIC_API_KEY'];
   if (!apiKey) return null;
   const parsedMax = Number(process.env['NARRATIVE_MAX_TOKENS']);
   return new NarrativeClient({

@@ -1,3 +1,9 @@
+import { processFrictionReconcile, scheduleFrictionReconciliation } from './friction/reconcile-job.js';
+import { processTicketInvestigation, type TicketInvestigateJob } from './friction/investigate-ticket.js';
+import { processPrEventJob } from './friction/pr-events-job.js';
+import { assertFixAttemptCurrent, recordAttemptPr, attemptFailed, transaction as ticketTransaction, lockJob as lockTicketJob } from './friction/fix-attempts.js';
+import { frictionConfirmDepsFromEnv, processFrictionConfirm } from './friction/confirm-job.js';
+import { frictionMatchDepsFromEnv, processFrictionMatch } from './friction/match-job.js';
 import crypto from 'node:crypto';
 import http from 'node:http';
 import type { ClaimedJob, DeadLetterCountRow, DeadLetterCounts, ErrorEventData, QueueDepthRow } from './db.js';
@@ -351,6 +357,26 @@ export async function processJobInner(job: ClaimedJob, signal: AbortSignal): Pro
     attempt: job.attempts + 1,
   });
 
+  if (job.jobType === 'friction_pr_event') { await processPrEventJob(job); return; }
+
+  if (job.jobType === 'friction_reconcile') {
+    if (!job.ticketId) throw new Error('Reconciliation job missing ticketId');
+    await processFrictionReconcile(job as ClaimedJob & { ticketId: string }, { client: frictionConfirmDepsFromEnv().client }, signal);
+    return;
+  }
+
+  if (job.jobType === 'friction_confirm') {
+    if (!job.ticketId) throw new Error(`Job ${job.id} missing ticket_id`);
+    await processFrictionConfirm(job as ClaimedJob & { ticketId: string }, frictionConfirmDepsFromEnv(), signal);
+    return;
+  }
+
+  if (job.jobType === 'friction_match') {
+    if (!job.sessionId) throw new Error(`Job ${job.id} missing session_id`);
+    await processFrictionMatch(job as ClaimedJob & { sessionId: string }, frictionMatchDepsFromEnv(), signal);
+    return;
+  }
+
   if (job.jobType === 'session_analysis') {
     if (!job.sessionId) throw new Error(`Job ${job.id} missing session_id`);
     await processSessionAnalysisJob(job as ClaimedJob & { sessionId: string }, signal);
@@ -428,6 +454,7 @@ export async function processJobInner(job: ClaimedJob, signal: AbortSignal): Pro
       if (signal.aborted || message.includes('lease lost')) {
         throw err;
       }
+      if (errorJob.ticketId) throw err;
       if (err instanceof VerificationInfraError) {
         const finalAttempt = errorJob.attempts + 1 >= (errorJob.maxAttempts ?? 3);
         if (!finalAttempt) {
@@ -564,6 +591,11 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
   const group = await db.getErrorGroup(job.errorGroupId, job.projectId);
   if (!group) throw new Error(`Error group ${job.errorGroupId} not found`);
   const platform = effectivePlatform(group.platform, pythonPipelineEnabled());
+
+  if (job.ticketId) {
+    await processFrictionInvestigateJob(job, group, signal);
+    return;
+  }
 
   // A reclaimed investigate job may have committed its durable outcome before
   // losing the lease at the final queue-completion boundary. Adopt that outcome
@@ -985,6 +1017,15 @@ export async function processFrictionInvestigateJob(
   githubToken ??= process.env['GITHUB_TOKEN'];
   checkAbort(signal);
 
+  if (job.ticketId) {
+    if (job.publicationGeneration == null) throw new Error('Ticket investigation missing generation');
+    await processTicketInvestigation(job as TicketInvestigateJob, group, signal, {
+      apiKey, investigate: investigateFriction,
+      checkout: () => createReadOnlyCheckout({repoUrl: buildRepoUrl(project.github_repo), githubToken}),
+    });
+    return;
+  }
+
   let checkout: ReadOnlyCheckout;
   try {
     checkout = await createReadOnlyCheckout({
@@ -1104,10 +1145,7 @@ export async function processFrictionInvestigateJob(
     };
 
     if (verdict.codeCause) {
-      // auto_fix_ux shares the code-caused auto-fix path until UX-suggestion
-      // fixes exist; insights remain terminal and never produce a PR.
-      const autonomyAllowsFix = project.friction_autonomy === 'auto_fix'
-        || project.friction_autonomy === 'auto_fix_ux';
+      const autonomyAllowsFix = project.friction_autonomy === 'auto_fix';
       if (impactBar?.eligible && autonomyAllowsFix) {
         // allowFriction is the ladder's explicit opt-in past the kind gate;
         // refuse-by-default stays intact for every other caller (issue #56).
@@ -1348,12 +1386,22 @@ export async function processFixJob(job: ClaimedJob & { errorGroupId: string }, 
     return;
   }
 
+  if (job.ticketId) await assertFixAttemptCurrent(job);
+
   if (group.kind === 'friction' && job.triggeredBy !== 'human') {
     // Settings can change after enqueue, so enforce the current project rung
     // when the job is claimed. Legacy jobs without attribution stay parked.
     const gateProject = await db.getProject(job.projectId);
     const autonomy = gateProject?.friction_autonomy ?? 'ask_first';
     if (job.triggeredBy !== 'auto' || autonomy === 'ask_first') {
+      if (job.ticketId) {
+        await ticketTransaction(async tx => {
+          await lockTicketJob(tx, job);
+          await attemptFailed(tx, job.id, job.projectId, 'Automatic fixes are disabled');
+          await lockTicketJob(tx, job);
+        });
+        return;
+      }
       await updateGroupStatus(job.errorGroupId, job.projectId, 'awaiting_approval', {
         confidence: group.confidence ?? undefined,
       }, job);
@@ -1576,7 +1624,7 @@ export async function processFixJob(job: ClaimedJob & { errorGroupId: string }, 
       platform,
       customerRuntime,
       jobId: job.id,
-      usageContext: { jobId: job.id, execution: job.attempts },
+      usageContext: { jobId: job.id, execution: job.ticketId ? Number(job.leaseGeneration) : job.attempts },
       errorGroupId: job.errorGroupId,
       projectId: job.projectId,
       title: group.title,
@@ -1597,10 +1645,12 @@ export async function processFixJob(job: ClaimedJob & { errorGroupId: string }, 
       defaultBranch,
       githubToken,
       abortSignal: signal,
-      assertLeaseOwned: () => db.assertJobLease(job),
+      assertLeaseOwned: async () => { await db.assertJobLease(job); if (job.ticketId) await assertFixAttemptCurrent(job, true); },
+      recordCreatedPr: job.ticketId ? async (url, number) => { await recordAttemptPr(job, project.github_repo, url, number); } : undefined,
       kind: group.kind,
       triggeredBy: job.triggeredBy,
       sourceJobId: job.sourceJobId ?? null,
+      fixAttemptId: job.fixAttemptId ?? null,
       frictionEvidence: frictionEvidence
         ? JSON.stringify({
             signals: frictionEvidence.signals,
@@ -1627,6 +1677,13 @@ export async function processFixJob(job: ClaimedJob & { errorGroupId: string }, 
           if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
           return parseDiagnosis(raw as Record<string, unknown>);
         })(),
+        findings: job.ticketId ? (() => {
+          const payload = job.payload;
+          if (!payload || typeof payload !== 'object' || !('diagnosis' in payload)) return undefined;
+          const diagnosis = payload.diagnosis;
+          if (!diagnosis || typeof diagnosis !== 'object' || !('agentTaskBrief' in diagnosis) || typeof diagnosis.agentTaskBrief !== 'string') return undefined;
+          return `Verified coding brief:\n${diagnosis.agentTaskBrief}\nRead-file citations:\n${JSON.stringify('evidence' in diagnosis ? diagnosis.evidence : [])}`;
+        })() : undefined,
         guidance: frozenEvidence
           ? `${job.guidance ?? ''}\nFrozen evidence: ${investigationEvidenceContext(frozenEvidence)}`.slice(0, 4000)
           : job.guidance ?? undefined,
@@ -1657,6 +1714,10 @@ export async function processFixJob(job: ClaimedJob & { errorGroupId: string }, 
     const durationMs = Date.now() - jobStart;
 
     if (result.status === 'pr_created' || result.status === 'pr_draft') {
+      if (job.ticketId && result.pr_url && result.pr_number) {
+        await recordAttemptPr(job, project.github_repo, result.pr_url, result.pr_number);
+        return;
+      }
       if (!result.pr_url || !result.pr_number) {
         throw new Error(`Delivery result ${result.status} is missing PR identity`);
       }
@@ -1900,6 +1961,12 @@ async function main(): Promise<void> {
       });
   }, REAPER_INTERVAL_MS);
 
+  const frictionReconcileTimer = setInterval(() => {
+    scheduleFrictionReconciliation().catch((err: unknown) => {
+      logger.error('Friction reconciliation scheduler error', { error: err instanceof Error ? err.message : String(err) });
+    });
+  }, 15 * 60_000);
+
   const narrativeSweepTimer = setInterval(() => {
     db.sweepNarratives()
       .then(({ reEnqueued, failed }) => {
@@ -1967,6 +2034,7 @@ async function main(): Promise<void> {
     logger.info('Worker shutting down');
     clearInterval(reaperTimer);
     clearInterval(narrativeSweepTimer);
+    clearInterval(frictionReconcileTimer);
     clearInterval(silenceTimer);
     clearInterval(inactivityTimer);
     clearInterval(queueSampleTimer);

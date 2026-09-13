@@ -27,7 +27,9 @@ func formatSlackDigest(payload EventPayload) ([]byte, string, error) {
 	var body []byte
 	var contentType string
 	var err error
-	if payload.Digest.SchemaVersion >= 4 {
+	if payload.Digest.SchemaVersion >= 5 {
+		body, contentType, err = formatSlackDigestV5(payload)
+	} else if payload.Digest.SchemaVersion >= 4 {
 		body, contentType, err = formatSlackDigestV4(payload)
 	} else if payload.Digest.SchemaVersion >= 3 {
 		body, contentType, err = formatSlackDigestV3(payload)

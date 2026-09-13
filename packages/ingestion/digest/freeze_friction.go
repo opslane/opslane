@@ -24,6 +24,10 @@ func selectOnCardCandidates(all []actionableCandidate, at time.Time) ([]Candidat
 	excluded := make(map[string]string, len(all))
 	eligible := make([]actionableCandidate, 0, len(all))
 	for _, source := range all {
+		if source.TicketFacts != nil && !source.TicketFacts.OnCard() {
+			excluded[source.GroupID] = reasonNotPublishable
+			continue
+		}
 		if source.SnoozedUntil != nil && source.SnoozedUntil.After(at) {
 			excluded[source.GroupID] = reasonSnoozed
 			continue
@@ -77,7 +81,8 @@ func selectOnCardCandidates(all []actionableCandidate, at time.Time) ([]Candidat
 				"error_group_id", source.GroupID, "status", source.Status)
 		}
 		candidate := Candidate{
-			ErrorGroupID: source.GroupID, IssueID: source.GroupID, Kind: source.Kind,
+			PromptVersion: digestPromptVersion,
+			ErrorGroupID:  source.GroupID, IssueID: source.GroupID, Kind: source.Kind,
 			Title: source.Title, Outcome: onCardOutcome(source.Status), Status: source.Status,
 			SignalType: source.SignalType, Summary: summary, RootCause: source.RootCause,
 			Mitigation: source.Mitigation, DiffIdentity: source.DiffIdentity,
@@ -88,6 +93,24 @@ func selectOnCardCandidates(all []actionableCandidate, at time.Time) ([]Candidat
 			DecidedAt: decidedAt, ValidAction: action, SpellStartedAt: source.ActionableSince,
 			HasValidatedDiagnosis: source.HasValidatedDiagnosis, Label: "new",
 			NotCardEligible: !actionablePublishable(source),
+		}
+		if f := source.TicketFacts; f != nil {
+			candidate.LatestAttemptID = f.LatestAttemptID
+			candidate.TicketID = f.TicketID
+			candidate.Generation = f.Generation
+			candidate.EvidenceVersion = f.EvidenceVersion
+			candidate.Steps = f.Steps
+			candidate.VerifiedUsers = f.VerifiedUsers
+			candidate.VerifiedSessions = f.VerifiedSessions
+			candidate.RepresentativeSessionID = f.RepresentativeSessionID
+			candidate.RepresentativeNote = f.RepresentativeNote
+			candidate.ReplaySessionID = f.RepresentativeSessionID
+			candidate.ConfirmedNotes = f.ConfirmedNotes
+			candidate.Coverage = f.Coverage
+			candidate.Why = source.RootCause
+			candidate.FixSubstate = f.FixSubstate
+			candidate.HasValidatedDiagnosis = true
+			candidate.ValidAction = ticketDigestAction(f.FixSubstate)
 		}
 		if source.ObservationQuote != "" {
 			candidate.FrictionCategory = source.SignalType
@@ -113,12 +136,12 @@ func attachCachedCard(ctx context.Context, tx pgx.Tx, projectID string, candidat
 		return nil
 	}
 	var cached CachedDigestCard
-	err := tx.QueryRow(ctx, `SELECT c.title,c.copy,COALESCE(c.why,''),c.action,c.authored_at,c.input_fingerprint
+	err := tx.QueryRow(ctx, `SELECT c.title,c.copy,COALESCE(c.why,''),c.action,c.authored_at,c.input_fingerprint,COALESCE(c.steps,'')
 		FROM digest_card_copy c JOIN error_groups g ON g.id=c.error_group_id
 		WHERE g.project_id=$1 AND c.error_group_id=$2 AND c.spell_started_at=$3
 		  AND c.invalidated_at IS NULL AND c.input_fingerprint=$4`, projectID,
 		candidate.ErrorGroupID, *candidate.SpellStartedAt, candidate.Fingerprint).Scan(
-		&cached.Title, &cached.Copy, &cached.Why, &cached.Action, &cached.AuthoredAt, &cached.Fingerprint,
+		&cached.Title, &cached.Copy, &cached.Why, &cached.Action, &cached.AuthoredAt, &cached.Fingerprint, &cached.Steps,
 	)
 	if err == pgx.ErrNoRows {
 		return nil
@@ -227,4 +250,15 @@ func writeUnifiedFreezeLedger(
 		return fmt.Errorf("write unified freeze ledger: %w", err)
 	}
 	return nil
+}
+
+func ticketDigestAction(substate string) string {
+	switch substate {
+	case "pr_open":
+		return "Review PR"
+	case "fixing":
+		return "Fix in progress"
+	default:
+		return "Create fix PR"
+	}
 }

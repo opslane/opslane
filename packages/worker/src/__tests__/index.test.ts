@@ -165,6 +165,16 @@ vi.mock('../tracing.js', () => ({
 }));
 vi.mock('../visual-analysis.js', () => ({ runVisualAnalysis: vi.fn() }));
 vi.mock('../friction/friction-evidence.js', () => ({ gatherFrictionEvidence: vi.fn() }));
+vi.mock('../friction/fix-attempts.js', () => ({
+  assertFixAttemptCurrent: vi.fn(),
+  recordAttemptPr: vi.fn(),
+  attemptFailed: vi.fn(async () => true),
+  applyPrEvent: vi.fn(),
+  causeCoverage: vi.fn(),
+  requestFix: vi.fn(),
+  lockJob: vi.fn(),
+  transaction: vi.fn(async (action: (tx: unknown) => Promise<unknown>) => action({ query: vi.fn() })),
+}));
 vi.mock('../friction/investigate-friction.js', () => ({
   investigateFriction: vi.fn(),
   FRICTION_INVESTIGATION_MODEL: 'claude-sonnet-4-6',
@@ -182,6 +192,9 @@ vi.mock('../friction/facts.js', () => ({
   classifyActivity: vi.fn(() => 'unknown'),
 }));
 vi.mock('../facts/persist.js', () => ({ replaceSessionFacts: vi.fn() }));
+vi.mock('../friction/reconcile-job.js', () => ({ processFrictionReconcile: vi.fn(), scheduleFrictionReconciliation: vi.fn() }));
+vi.mock('../friction/confirm-job.js', () => ({ processFrictionConfirm: vi.fn(), frictionConfirmDepsFromEnv: vi.fn(() => ({ client: { modelName: 'confirm' }, dailyCap: 2000 })) }));
+vi.mock('../friction/match-job.js', () => ({processFrictionMatch:vi.fn(),frictionMatchDepsFromEnv:vi.fn(() => ({cheap:{modelName:'cheap'},strong:{modelName:'strong'}}))}));
 vi.mock('../narrative/client.js', () => ({ narrativeClientFromEnv: vi.fn(() => null) }));
 vi.mock('../narrative/job.js', () => ({ processNarration: vi.fn() }));
 vi.mock('../narrative/frames/capture.js', () => ({ captureFrames: vi.fn() }));
@@ -1329,7 +1342,7 @@ describe('friction worker path', () => {
     vi.mocked(investigateFriction).mockResolvedValue({
       status: 'verdict', investigatedCommit: 'abc123', costUsd: 0.1,
       usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
-      verdict: { codeCause: true, confidence: 'high', reason: 'save handler is disconnected', remediation: 'wire the handler', evidence: [], agentTaskBrief: 'wire it' },
+      verdict: { explains: [], doesNotExplain: [], codeCause: true, confidence: 'high', reason: 'save handler is disconnected', remediation: 'wire the handler', evidence: [], agentTaskBrief: 'wire it' },
     });
 
     await processInvestigateJob(makeJob(), new AbortController().signal);
@@ -1344,7 +1357,7 @@ describe('friction worker path', () => {
     );
   });
 
-  it.each(['auto_fix', 'auto_fix_ux'] as const)(
+  it.each(['auto_fix'] as const)(
     'auto-triggers a high-confidence friction fix under %s autonomy', async (frictionAutonomy) => {
       mockGetProject.mockResolvedValue({
         id: 'proj-1', name: 'app', github_repo: 'org/app', default_branch: 'main', friction_autonomy: frictionAutonomy,
@@ -1352,7 +1365,7 @@ describe('friction worker path', () => {
       vi.mocked(investigateFriction).mockResolvedValue({
         status: 'verdict', investigatedCommit: 'abc123', costUsd: 0.1,
         usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
-        verdict: { codeCause: true, confidence: 'high', reason: 'save handler is disconnected', remediation: 'wire the handler', evidence: [], agentTaskBrief: 'wire it' },
+        verdict: { explains: [], doesNotExplain: [], codeCause: true, confidence: 'high', reason: 'save handler is disconnected', remediation: 'wire the handler', evidence: [], agentTaskBrief: 'wire it' },
       });
       vi.mocked(db.updateGroupAndCreateFixJob).mockResolvedValue({ created: true, fixJobId: 'fix-job-1' });
 
@@ -1377,7 +1390,7 @@ describe('friction worker path', () => {
       vi.mocked(investigateFriction).mockResolvedValueOnce({
         status: 'verdict', investigatedCommit: 'abc123', costUsd: 0.1,
         usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
-        verdict: { codeCause: true, confidence, reason: 'save handler is disconnected', remediation: 'wire the handler', evidence: [], agentTaskBrief: 'wire it' },
+        verdict: { explains: [], doesNotExplain: [], codeCause: true, confidence, reason: 'save handler is disconnected', remediation: 'wire the handler', evidence: [], agentTaskBrief: 'wire it' },
       });
       await processInvestigateJob(makeJob(), new AbortController().signal);
     }
@@ -1399,7 +1412,7 @@ describe('friction worker path', () => {
     vi.mocked(investigateFriction).mockResolvedValue({
       status: 'verdict', investigatedCommit: 'abc123', costUsd: 0.1,
       usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
-      verdict: { codeCause: true, confidence: 'high', reason: 'save handler is disconnected', remediation: 'wire the handler', evidence: [], agentTaskBrief: 'wire it' },
+      verdict: { explains: [], doesNotExplain: [], codeCause: true, confidence: 'high', reason: 'save handler is disconnected', remediation: 'wire the handler', evidence: [], agentTaskBrief: 'wire it' },
     });
 
     await processInvestigateJob(makeJob(), new AbortController().signal);
@@ -1420,6 +1433,7 @@ describe('friction worker path', () => {
       status: 'verdict', investigatedCommit: 'abc123', costUsd: 0.1,
       usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
       verdict: {
+        explains: [], doesNotExplain: [],
         codeCause: false,
         confidence: 'high',
         reason: 'Users expect the support email to be clickable; product decision, not a code defect',
@@ -1439,6 +1453,79 @@ describe('friction worker path', () => {
       makeJob(),
     );
     expect(db.updateGroupAndCreateFixJob).not.toHaveBeenCalled();
+  });
+
+  it('dispatches reconciliation with ticket scope and cancellation', async () => {
+    const { processFrictionReconcile } = await import('../friction/reconcile-job.js');
+    const job = { ...makeJob(), jobType: 'friction_reconcile' as const, errorGroupId: null, ticketId: 'ticket-1' };
+    const signal = new AbortController().signal;
+    await processJobInner(job, signal);
+    expect(processFrictionReconcile).toHaveBeenCalledWith(job, { client: { modelName: 'confirm' } }, signal);
+  });
+  it('dispatches confirmation with ticket scope and cancellation', async () => {
+    const { processFrictionConfirm } = await import('../friction/confirm-job.js');
+    const job = { ...makeJob(), jobType: 'friction_confirm' as const, errorGroupId: null, ticketId: 'ticket-1' };
+    const signal = new AbortController().signal;
+    await processJobInner(job, signal);
+    expect(processFrictionConfirm).toHaveBeenCalledWith(job, { client: { modelName: 'confirm' }, dailyCap: 2000 }, signal);
+  });
+
+  it('dispatches friction matching with session scope and cancellation', async () => {
+    const { processFrictionMatch } = await import('../friction/match-job.js');
+    const job = {...makeJob(),jobType:'friction_match' as const,errorGroupId:null,sessionId:'session-1'};
+    const signal = new AbortController().signal;
+    await processJobInner(job,signal);
+    expect(processFrictionMatch).toHaveBeenCalledWith(job,{cheap:{modelName:'cheap'},strong:{modelName:'strong'}},signal);
+  });
+
+  it('refuses an automatic ticket fix under ask_first through the attempt ledger, never the pipeline', async () => {
+    const { assertFixAttemptCurrent, attemptFailed } = await import('../friction/fix-attempts.js');
+    mockGetErrorGroup.mockResolvedValue(makeGroup({
+      kind: 'friction', status: 'fixing', sample_event_id: '', confidence: 'high',
+    }));
+    const job = {
+      ...makeJob(), jobType: 'fix' as const, triggeredBy: 'auto' as const,
+      ticketId: 'ticket-1', fixAttemptId: 'attempt-1', publicationGeneration: 1,
+    };
+
+    await processFixJob(job, new AbortController().signal);
+
+    expect(assertFixAttemptCurrent).toHaveBeenCalledWith(job);
+    expect(attemptFailed).toHaveBeenCalledWith(expect.anything(), job.id, job.projectId, 'Automatic fixes are disabled');
+    expect(mockUpdateGroupStatus).not.toHaveBeenCalled();
+    expect(mockCloneRepo).not.toHaveBeenCalled();
+    expect(mockRunPipeline).not.toHaveBeenCalled();
+  });
+
+  it('aborts a stale ticket fix attempt before any pipeline work', async () => {
+    const { assertFixAttemptCurrent, attemptFailed } = await import('../friction/fix-attempts.js');
+    vi.mocked(assertFixAttemptCurrent).mockRejectedValueOnce(new Error('Stale ticket fix attempt'));
+    mockGetErrorGroup.mockResolvedValue(makeGroup({
+      kind: 'friction', status: 'fixing', sample_event_id: '', confidence: 'high',
+    }));
+    mockGetProject.mockResolvedValue({
+      id: 'proj-1', name: 'app', github_repo: 'org/app', default_branch: 'main', friction_autonomy: 'auto_fix',
+    });
+    const job = {
+      ...makeJob(), jobType: 'fix' as const, triggeredBy: 'auto' as const,
+      ticketId: 'ticket-1', fixAttemptId: 'attempt-1', publicationGeneration: 1,
+    };
+
+    await expect(processFixJob(job, new AbortController().signal)).rejects.toThrow('Stale ticket fix attempt');
+
+    expect(attemptFailed).not.toHaveBeenCalled();
+    expect(mockCloneRepo).not.toHaveBeenCalled();
+    expect(mockRunPipeline).not.toHaveBeenCalled();
+  });
+
+  it('rejects a ticket investigation that carries no publication generation', async () => {
+    const job = { ...makeJob(), ticketId: 'ticket-1', publicationGeneration: null };
+
+    await expect(processInvestigateJob(job, new AbortController().signal))
+      .rejects.toThrow('Ticket investigation missing generation');
+
+    expect(mockCreateReadOnlyCheckout).not.toHaveBeenCalled();
+    expect(investigateFriction).not.toHaveBeenCalled();
   });
 
   it('refuses an auto friction fix under ask-first while preserving confidence', async () => {

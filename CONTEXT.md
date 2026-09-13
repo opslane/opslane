@@ -96,8 +96,10 @@ confidence; missing context means unknown, never unimportant.
 _Avoid_: "route weight" (one ranking input), "product truth" (the account is partial)
 
 **Observation**:
-One captured error or friction signal. It is evidence that exists before Opslane
-has necessarily decided which problem it belongs to.
+One captured error or atomic friction finding. A friction observation has one
+immutable signal row identified by recording, stored narrative identity, and
+observation ID. It exists before matching decides whether it belongs to a ticket;
+a match alone does not confirm it.
 _Avoid_: "issue" (identity may still be unsettled), "occurrence" (a count of observations)
 
 **Capture bucket**:
@@ -110,6 +112,27 @@ The durable identity of one customer problem. It owns impact, admission,
 investigation, lifecycle, and publication; many observations and fingerprints may
 belong to it.
 _Avoid_: "capture bucket", "error group" when canonical identity is intended
+
+**Ticket**:
+The durable identity of one problem found in recordings, scoped to a project and
+environment. Its name, control, and symptom stay fixed. Many observations can
+match it; each recording counts once. A ticket may remain internal while evidence
+accumulates, or own a published incident generation.
+_Avoid_: "bucket", "incident" when the durable ticket is intended
+
+**Confirmed evidence**:
+The observation IDs cited by a finalized recording check that confirms the exact
+ticket definition. Only these observations supply published impact, investigation,
+and digest evidence. A matched recording, narrative grade, or staged check alone
+does not qualify.
+_Avoid_: "accepted signal" when ticket confirmation is intended
+
+**Publication generation**:
+One published incident for a ticket, with its own evidence membership,
+investigation, and fix attempts. A ticket has at most one live generation;
+unpublication archives it, and later publication creates another. A merged fix
+sets a recording cutoff so old recordings cannot establish a regression.
+_Avoid_: "ticket version" (the problem definition remains fixed)
 
 **Fingerprint alias**:
 A versioned association from one exact fingerprint to a canonical issue. Raw,
@@ -131,8 +154,13 @@ _Avoid_: "canonical fingerprint" (an issue may have several equally valid aliase
   time; the URL routes uploads, the keyid+secret authenticate them.
 - Reads require a **User session**; writes require a key whose **Scope**
   matches the route.
-- An **Observation** belongs to one **Capture bucket** while identity is being
-  settled and to one **Canonical issue** after settlement.
+- An error **Observation** belongs to one **Capture bucket** while identity is
+  being settled and to one **Canonical issue** after settlement.
+- A friction **Observation** receives one completed matching decision: matched,
+  created, or not a problem. A **Ticket** counts each matched recording once;
+  only **Confirmed evidence** supplies its published incident's impact.
+- A **Ticket** owns successive **Publication generations**. Fix attempts and
+  callbacks are fenced to the generation and attempt they belong to.
 - A **Canonical issue** may have many **Fingerprint aliases**; each alias identifies
   at most one canonical issue within a project and identity version.
 

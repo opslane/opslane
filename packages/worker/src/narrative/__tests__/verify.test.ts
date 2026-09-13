@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SessionNarrative } from '@opslane/shared';
-import { processFrameVerification, selectMoments, validateVerification } from '../verify.js';
+import { gradedObservations, processFrameVerification, selectMoments, validateVerification } from '../verify.js';
 import { calculateCost } from '@opslane/agent-core';
 import { pricingFor } from '../../harness/agent-loop.js';
 
@@ -54,7 +54,7 @@ function dependencies(modelText = gradesJson) {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  dbMock.claimVerifyingNarrative.mockResolvedValue({ promptVersion: 1, narrative, timeline });
+  dbMock.claimVerifyingNarrative.mockResolvedValue({ promptVersion: 1, narrativeId: 'stable-narrative-id', narrative, timeline });
   dbMock.reserveNarrativeBudget.mockResolvedValue(true);
   dbMock.narrativeMonthlySpendExceeded.mockResolvedValue(false);
 });
@@ -68,8 +68,16 @@ describe('verification validation', () => {
     expect(validateVerification(gradesJson.replace('1-bbbb', 'unknown'), narrative).ok).toBe(false);
   });
 
-  it('selects highest-severity cited moments first', () => {
-    expect(selectMoments(narrative, timeline)).toEqual([5_000, 9_000]);
+  it('orders moments by evidence count then first evidence line regardless of severity', () => {
+    const rankedNarrative: SessionNarrative = {
+      ...narrative,
+      observations: [
+        { id: 'high', what: 'high severity', evidenceLines: ['L3'], severity: 'high' },
+        { id: 'later', what: 'later first line', evidenceLines: ['L2', 'L3'], severity: 'medium' },
+        { id: 'earlier', what: 'earlier first line', evidenceLines: ['L1', 'L2'], severity: 'low' },
+      ],
+    };
+    expect(selectMoments(rankedNarrative, timeline)).toEqual([0, 5_000, 9_000]);
   });
 
   it('uses the first non-idle citation for a capture moment', () => {
@@ -91,7 +99,55 @@ describe('verification validation', () => {
   });
 });
 
+describe('gradedObservations', () => {
+  const policyNarrative: SessionNarrative = {
+    userGoal: 'Submit a form', narrative: 'The user submitted a form.', notable: true,
+    observations: [
+      { id: 'confirmed', what: 'A validation message appeared', evidenceLines: ['L1'] },
+      { id: 'corrected', what: 'The form was slow', evidenceLines: ['L2'] },
+      { id: 'corrected-absence', what: 'The button was disabled', evidenceLines: ['L2'] },
+      { id: 'refuted', what: 'The form reset', evidenceLines: ['L3'] },
+      { id: 'inconclusive', what: 'The form was delayed', evidenceLines: ['L3'] },
+    ],
+  };
+  const policyGrades = [
+    { observationId: 'confirmed', grade: 'confirmed' as const, reason: 'visible' },
+    { observationId: 'corrected', grade: 'corrected' as const, reason: 'different result', replacementWhat: 'A warning appeared' },
+    { observationId: 'corrected-absence', grade: 'corrected' as const, reason: 'different result', replacementWhat: 'Clicking submit does nothing' },
+    { observationId: 'refuted', grade: 'refuted' as const, reason: 'contradicted' },
+    { observationId: 'inconclusive', grade: 'inconclusive' as const, reason: 'cannot tell' },
+  ];
+
+  it('keeps confirmed and positive corrected descriptions only when frames are usable', () => {
+    expect(gradedObservations(policyNarrative, policyGrades, { framesOk: true }).map(({ id, what }) => ({ id, what })))
+      .toEqual([
+        { id: 'confirmed', what: 'A validation message appeared' },
+        { id: 'corrected', what: 'A warning appeared' },
+      ]);
+  });
+
+  it('keeps only positive unverified descriptions when frames are unusable', () => {
+    const unverified: SessionNarrative = {
+      ...policyNarrative,
+      observations: [
+        { id: 'absence', what: 'There was no feedback after submit', evidenceLines: ['L1'] },
+        { id: 'positive', what: 'A validation message appeared', evidenceLines: ['L2'] },
+      ],
+    };
+    expect(gradedObservations(unverified, [], { framesOk: false }).map(({ id }) => id)).toEqual(['positive']);
+  });
+});
+
 describe('processFrameVerification', () => {
+  it('uses the claimed narrative identity when emitting observations', async () => {
+    await processFrameVerification(job, { ...dependencies(), supported: false }, new AbortController().signal);
+    expect(dbMock.finalizeVerification).toHaveBeenCalledWith(job, expect.objectContaining({
+      signalRows: expect.arrayContaining([expect.objectContaining({
+        narrativeId: 'stable-narrative-id', observationId: '0-aaaa',
+      })]),
+    }));
+  });
+
   it.each(['valid', 'invalid', 'truncated'])('ledgers paid %s responses before finalizing', async (outcome) => {
     const deps = dependencies(outcome === 'invalid' ? 'not json' : gradesJson);
     const complete = deps.client as unknown as { complete: ReturnType<typeof vi.fn> };
@@ -162,6 +218,55 @@ describe('processFrameVerification', () => {
       state: 'failed', signalRows: expect.arrayContaining([expect.objectContaining({ what: 'phantom error' })]),
     });
     expect(dbMock.recordJobUsage).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['unsupported', (deps: ReturnType<typeof dependencies>) => ({ ...deps, supported: false })],
+    ['budget', (deps: ReturnType<typeof dependencies>) => {
+      dbMock.reserveNarrativeBudget.mockResolvedValue(false);
+      return deps;
+    }],
+    ['capture failure', (deps: ReturnType<typeof dependencies>) => {
+      deps.capture.mockRejectedValue(new Error('capture failed'));
+      return deps;
+    }],
+    ['empty frames', (deps: ReturnType<typeof dependencies>) => {
+      deps.capture.mockResolvedValue({ frames: [], assetsMissing: false });
+      return deps;
+    }],
+    ['malformed output', (deps: ReturnType<typeof dependencies>) => dependencies('not json')],
+  ] as const)('filters absence claims on the %s fallback', async (_name, configure) => {
+    const fallbackNarrative: SessionNarrative = {
+      userGoal: 'Submit', narrative: 'The user submitted.', notable: true,
+      observations: [
+        { id: 'absence', what: 'Clicking submit does nothing', evidenceLines: ['L2'] },
+        { id: 'positive', what: 'A validation message appeared', evidenceLines: ['L3'] },
+      ],
+    };
+    dbMock.claimVerifyingNarrative.mockResolvedValue({
+      promptVersion: 1, narrativeId: 'stable-narrative-id', narrative: fallbackNarrative, timeline,
+    });
+    const deps = configure(dependencies());
+    await processFrameVerification(job, deps, new AbortController().signal);
+    const rows = dbMock.finalizeVerification.mock.calls[0]?.[1].signalRows;
+    expect(rows.map((row: { observationId: string }) => row.observationId)).toEqual(['positive']);
+    if (_name === 'empty frames') {
+      expect((deps.client as unknown as { complete: ReturnType<typeof vi.fn> }).complete).not.toHaveBeenCalled();
+    }
+  });
+
+  it('still grades with frames when the replay aborted external assets', async () => {
+    // Real apps load stylesheets, fonts and images from other origins; the
+    // replay aborts them and renders the DOM without them. That is not a
+    // failed capture.
+    const deps = dependencies();
+    deps.capture.mockResolvedValue({ frames: [
+      { offsetMs: 5_000, pair: 'a' as const, png: Buffer.from('png'), modelPng: Buffer.from('small-png') },
+      { offsetMs: 5_000, pair: 'b' as const, png: Buffer.from('png2'), modelPng: Buffer.from('small-png2') },
+    ], assetsMissing: true });
+    await processFrameVerification(job, deps, new AbortController().signal);
+    expect((deps.client as unknown as { complete: ReturnType<typeof vi.fn> }).complete).toHaveBeenCalled();
+    expect(dbMock.finalizeVerification.mock.calls[0]![1].state).toBe('ok');
   });
 
   it('stores the failure reason on fallback', async () => {

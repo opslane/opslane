@@ -111,7 +111,17 @@ The Opslane server reads **only** the `REPLAY_STORE_*` names; `MINIO_*` names ap
 | `RESOLVE_AGE_DAYS` | no (14) | Inactivity period before eligible human-review or completed-analysis issues resolve automatically |
 | `INACTIVITY_CHECK_INTERVAL_MS` | no (900000) | How often the worker sweeps for inactive issues (15 minutes by default) |
 | `SESSION_ANALYSIS_MAX_CONCURRENT` | no (2) | Fleet-wide cap on `session_analysis` jobs running at the same time; `0` prevents workers from starting analysis jobs. Raising it only helps if a worker also runs enough concurrent loops to use the extra room; see `WORKER_CONCURRENCY` |
-| `WORKER_CONCURRENCY` | no (1) | How many jobs one worker process runs at once (any job type, mixed). Accepted range 1-16; invalid or out-of-range values log a warning and fall back to 1, or clamp to 16. The simultaneous-analysis ceiling is `min(SESSION_ANALYSIS_MAX_CONCURRENT, replicas × WORKER_CONCURRENCY)`; the uncapped investigate/fix lanes are bounded only by this value times the replica count |
+| `WORKER_CONCURRENCY` | no (process 1, Compose 4) | How many jobs one worker process runs at once (any job type, mixed). Accepted range 1-16; invalid or out-of-range values log a warning and fall back to 1, or clamp to 16. The simultaneous-analysis ceiling is `min(SESSION_ANALYSIS_MAX_CONCURRENT, replicas × WORKER_CONCURRENCY)`. Narration, frame checks, matching and confirmation have their own caps; investigation and fix jobs do not, so they scale with this value times the replica count. |
+| `OPENAI_API_KEY` | no | OpenAI key for `text-embedding-3-small` ticket retrieval. Without it, matching falls back to screen and frequency candidates. |
+| `FRICTION_MATCH_MODEL` | no (`claude-haiku-4-5-20251001`) | Model for matching recorded behavior to known problems; uses the narrative API key and endpoint, with Anthropic fallbacks. |
+| `FRICTION_FIRST_LOOK_MODEL` | no (`claude-sonnet-5`) | Strong review model for newly reported problems. |
+| `FRICTION_MATCH_MAX_CONCURRENT` | no (2) | Fleet-wide cap on running `friction_match` jobs. `0` pauses new matches. |
+| `FRICTION_CONFIRM_MODEL` | no (`claude-sonnet-5`) | Model for checking known problems against recordings and screenshots and deciding whether one fix covers two problems. |
+| `FRICTION_MAX_OPEN_FIX_PRS` | no (5) | Maximum open fix PRs per project for automatic fixes. Manual requests remain available. |
+| `FRICTION_FOLD_MIN_SIMILARITY` | no (0.75) | Embedding similarity floor for duplicate candidates at the publish gate; each candidate still needs a yes to the one-fix question before a fold. |
+| `FRICTION_INSIGHT_INVESTIGATE_USERS` | no (5) | Identified users whose confirmed recordings an insight (kind `ux_insight`) needs before it is investigated automatically. Defects are investigated on publication. Invalid values fall back to 5. |
+| `FRICTION_CONFIRM_DAILY_CAP` | no (2000) | Maximum recording checks per project per UTC day across all workers. Retries count again; finished checks resume without using more budget. `0` pauses checks until the limit is raised. |
+| `FRICTION_CONFIRM_MAX_CONCURRENT` | no (1) | Fleet-wide cap on running `friction_confirm` jobs. `0` pauses confirmation and publication reconciliation. |
 | `NARRATIVE_API_KEY` | when session narratives are enabled | Model API key for session narratives and frame verification. Falls back to `ANTHROPIC_API_KEY`. Without either key, narrative reservations remain pending. |
 | `NARRATIVE_MODEL` | no (`claude-sonnet-5`) | Model used to write session narratives and verify findings against captured frames. |
 | `NARRATIVE_BASE_URL` | no (Anthropic default) | Alternate Anthropic-compatible endpoint for narrative and frame-verification calls. |
