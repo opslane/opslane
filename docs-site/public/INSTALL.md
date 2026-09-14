@@ -24,7 +24,7 @@ Rules for this whole runbook:
 
 Detect the framework from the manifest: Next.js, Vue, React, or plain. Read `git remote get-url origin` and reduce it to `owner/repo` if it is GitHub. In a workspace with several apps, ask which app to instrument.
 
-Search every `package.json` for `@opslane/sdk`. If it is already installed, preserve its integrations and options. You still do steps 2 and 3 (a session is required for everything after); in step 4 skip the install and the snippet, but update the configured key source (the existing `VITE_OPSLANE_API_KEY` / `NEXT_PUBLIC_OPSLANE_API_KEY` value or inline public key) with the approved session's `ingest_key` (an old key may belong to a different project, and events would land there while this session waits) and restart the dev server.
+Search every `package.json` for `@opslane/sdk`. If it is already installed, preserve its integrations and options. You still do steps 2 and 3 (a session is required for everything after); in step 4 skip the install and the snippet but still do **Identify users** if the app does not call `setUser` yet, and update the configured key source (the existing `VITE_OPSLANE_API_KEY` / `NEXT_PUBLIC_OPSLANE_API_KEY` value or inline public key) with the approved session's `ingest_key` (an old key may belong to a different project, and events would land there while this session waits) and restart the dev server.
 
 ## 2. Register
 
@@ -125,11 +125,11 @@ app.use(opslaneVuePlugin);
 
 - While auth is still loading, do nothing.
 - When the settled state is signed in, call `setUser({ id, email, account: { id, name } })` from `@opslane/sdk`. This covers a fresh sign-in, a session restored on page load, and a different user signing in.
-- When the settled state is signed out, call `clearUser()`. This covers sign-out, session expiry, and logout in another tab.
+- When the settled state is signed out, call `clearUser()`. This covers sign-out, and session expiry or logout in another tab when the app's auth state reflects them.
 
 In Next.js and other server-rendered apps, do this only in a client component. Never do it in server components, loaders, actions, route handlers, or middleware. `id` is the app's stable user ID, never a display name. `account` is the customer organization, workspace, or team the user is working in; omit it when the app has none. `email` and `account.name` are optional. Include them only when the app already shares that data with error-monitoring or analytics tools; otherwise send the IDs alone. Never log or print the user or session object. Every separately built bundle that calls `init` needs its own identification. If the app has no sign-in, skip this. When you add it, tell the user that user IDs, and emails if you sent them, now go to Opslane and belong in their privacy notice.
 
-If the site sets a Content-Security-Policy and you are not tunnelling, add `https://app.opslane.com` to `connect-src`. If a dev server was already running before the env file was written, restart it; public env vars are inlined at start. Then `opslane_progress install_sdk done "<framework>, setUser added"`, or `"<framework>, no sign-in"` when the app has no sign-in.
+If the site sets a Content-Security-Policy and you are not tunnelling, add `https://app.opslane.com` to `connect-src`. If a dev server was already running before the env file was written, restart it; public env vars are inlined at start. Then `opslane_progress install_sdk done "<framework>, setUser added"`, or `"<framework>, setUser already present"` when the app already identified users, or `"<framework>, no sign-in"` when the app has no sign-in.
 
 ## 5. Verify with a real event
 
