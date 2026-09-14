@@ -1213,7 +1213,8 @@ async function runAgentFixCore(input: AgentFixInput): Promise<AgentFixResult> {
           // mid-task chatter. Keep it for operators; the reason is fixed copy.
           logger.warn('Fix agent stopped before a result', {
             model: tier.model,
-            summary: result?.summary ?? null,
+            // The agent read customer code; never log its words unscrubbed or unbounded.
+            summary: result?.summary ? scrubSecrets(result.summary).slice(0, 500) : null,
           });
           return {
             status: 'needs_human',
@@ -1589,6 +1590,9 @@ async function runAgentFixCore(input: AgentFixInput): Promise<AgentFixResult> {
     }
     const rawMessage = err instanceof Error ? err.message : String(err);
     const message = rawMessage.replace(/https:\/\/[^@]+@/g, 'https://***@');
+    // The stored reason becomes fixed copy downstream, so this is the only
+    // place operators can see what broke.
+    logger.warn('Fix agent harness failed before a result', { error: scrubSecrets(message).slice(0, 500) });
     let retained: { diff: string; affectedFiles: string[] } | null = null;
     if (sandbox) {
       try {

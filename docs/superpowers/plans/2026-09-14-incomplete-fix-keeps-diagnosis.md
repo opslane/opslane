@@ -983,4 +983,20 @@ The root `AGENTS.md` requires a live smoke for pipeline changes. The verify phas
   - one new `incomplete` decision row carrying the fixed copy
   - the job `completed`
   - `GET` the incident through the read API and confirm the inbox state is `needs_you`.
-- [ ] **Step 3: If the fix sandbox cannot start here** (no E2B credentials), report Step 2 as blocked with the exact error. Do not claim it passed.
+- [ ] **Step 3: If the fix sandbox cannot start here**, report Step 2 as blocked with the exact error. Do not claim it passed.
+
+---
+
+## Post-review changes (2026-09-14)
+
+The pre-landing review (Claude specialists, a Claude adversarial pass and Codex) found gaps that the tasks above did not cover. They were fixed on the branch:
+
+1. **Restore and completion are one transaction.** `restoreDiagnosisAfterIncompleteFix` marks the job `completed` inside its transaction, and `processFixJob` throws `JobCompletedInTransaction`, which the poller already treats as success. Before, a lease that expired between the restore commit and `completeJob` let the reaper dead-letter the job on its last attempt and write `needs_human`/`lease_lost` over the restore (`requeueStaleJobs`, `db.ts:1297`). It also let a "Find fix" click collide with the still-claimed job on `uq_one_active_job_per_episode_type` and return 500. `processJobInner` rethrows `JobCompletedInTransaction` instead of terminalizing it.
+2. **Lock order is group, then job**, matching the investigation handoff (`updateGroupAndCreateFixJob`), and the transaction retries up to three times on `40P01`/`40001`.
+3. **A stale run cannot reset a newer fix.** The group moves only when no other `fix`/`error_fix` job for it is pending or claimed; otherwise the run is recorded and `status_changed` is returned.
+4. **Inbox:** `incomplete` maps to `needs_you` only while the group is `investigated` or `awaiting_approval`. A retried fix in `fixing` reads "investigating".
+5. **Logs:** the agent's turn-limit summary is logged scrubbed and capped at 500 characters, and the harness catch now logs its scrubbed exception, because the stored reason is fixed copy.
+
+Known consequences left for follow-up:
+- A restored `investigated` error incident is not in the digest's card lane (`digest/actionable.go:106-110`) and is not requeued on recurrence.
+- A `not_actionable` friction finding parked in `awaiting_approval` still falls back to `needs_human` (with fixed copy) when a person's fix on it stops early.

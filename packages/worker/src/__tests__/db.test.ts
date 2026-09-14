@@ -897,6 +897,39 @@ describeDb('db.ts integration tests', () => {
         { outcome: 'code_fix', decision_reason: codeFix.decisionReason, model: 'claude-sonnet-5', job_id: sourceJobId, episode_id: episodeId },
         { outcome: 'incomplete', decision_reason: reason, model: 'deterministic-fix-verification', job_id: jobId, episode_id: episodeId },
       ]);
+      // Completed in the same transaction: no reaper or reclaim can act between restore and completion.
+      expect(await jobStatus(jobId)).toBe('completed');
+    });
+
+    async function jobStatus(jobId: string) {
+      return (await testPool.query<{ status: string }>(`SELECT status FROM error_group_jobs WHERE id = $1`, [jobId])).rows[0]?.status;
+    }
+
+    it('does not borrow another job\'s code_fix when the source job wrote no decision', async () => {
+      const { errorGroupId, jobId, lease } = await seedFixing();
+      await recordDiagnosisDecision(errorGroupId, testProjectId, { ...codeFix, jobId: null });
+
+      await expect(restoreDiagnosisAfterIncompleteFix(lease, { reason })).resolves.toBe('no_completed_diagnosis');
+
+      expect((await groupRow(errorGroupId)).status).toBe('fixing');
+      expect(await decisionRows(errorGroupId)).toHaveLength(1);
+      expect(await jobStatus(jobId)).toBe('claimed');
+    });
+
+    it('records the run but does not reset a group whose newer fix job is still active', async () => {
+      const { errorGroupId, jobId, sourceJobId, lease } = await seedFixing();
+      await recordDiagnosisDecision(errorGroupId, testProjectId, { ...codeFix, jobId: sourceJobId });
+      await testPool.query(
+        `INSERT INTO error_group_jobs (error_group_id, project_id, job_type, status, triggered_by)
+         VALUES ($1, $2, 'fix', 'pending', 'human')`,
+        [errorGroupId, testProjectId],
+      );
+
+      await expect(restoreDiagnosisAfterIncompleteFix(lease, { reason })).resolves.toBe('status_changed');
+
+      expect(await groupRow(errorGroupId)).toMatchObject({ status: 'fixing', terminal_fix_job_id: null });
+      expect(await decisionRows(errorGroupId)).toContainEqual(expect.objectContaining({ outcome: 'incomplete', job_id: jobId }));
+      expect(await jobStatus(jobId)).toBe('completed');
     });
 
     it('reads the fix job source decision, not a newer decision from another job', async () => {
@@ -919,6 +952,8 @@ describeDb('db.ts integration tests', () => {
 
       expect((await groupRow(errorGroupId)).status).toBe('fixing');
       expect(await decisionRows(errorGroupId)).toHaveLength(1);
+      // Left claimed: the caller's needs_human path still has to write under this lease.
+      expect(await jobStatus(lease.id)).toBe('claimed');
     });
 
     it('falls back to the newest completed group decision when the job has no source', async () => {
@@ -963,6 +998,8 @@ describeDb('db.ts integration tests', () => {
 
       expect(await groupRow(errorGroupId)).toMatchObject({ status: 'resolved', terminal_fix_job_id: null });
       expect(await decisionRows(errorGroupId)).toContainEqual(expect.objectContaining({ outcome: 'incomplete', job_id: jobId }));
+      // Completed too, so a reclaim can never re-run the fix against the resolved incident.
+      expect(await jobStatus(jobId)).toBe('completed');
     });
 
     it('writes nothing when the lease is gone', async () => {

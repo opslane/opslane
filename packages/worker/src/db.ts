@@ -405,22 +405,52 @@ export type IncompleteFixOutcome = 'restored' | 'status_changed' | 'no_completed
  *
  * The completed diagnosis is the one that authorized this fix: the newest
  * decision of the job's source_job_id (the group's newest when the job has no
- * source, matching loadDiagnosisDecisionForSource), never an incomplete run or
- * a fix-verification row. Only code_fix restores: needs_human rows are also
- * written for not_actionable verdicts. root_cause, candidate_diff, evidence,
- * confidence and the reason fields are deliberately left as they are.
+ * source), never an incomplete run or a fix-verification row. Only code_fix
+ * restores: needs_human rows are also written for not_actionable verdicts.
+ * root_cause, candidate_diff, evidence, confidence and the reason fields are
+ * deliberately left as they are.
  *
- * terminal_fix_job_id is stamped so a reclaim of this same job adopts the
- * restore instead of paying for the fix run again; the human fix endpoint
- * clears it when a person retries.
+ * Whenever it records the run, the job is completed in the same transaction
+ * (the caller then throws JobCompletedInTransaction). A separate completeJob
+ * would leave a window where the reaper dead-letters the still-claimed job
+ * over the restore and a human retry collides with the active-job index.
+ * The group is only moved when no other fix job for it is active, so a stale
+ * run cannot reset a newer fix. terminal_fix_job_id is stamped as the
+ * adoption marker; the human fix endpoint clears it when a person retries.
+ *
+ * Lock order is group, then job, the same as the investigation handoff.
  */
 export async function restoreDiagnosisAfterIncompleteFix(
+  lease: JobLease & { errorGroupId: string },
+  args: { reason: string },
+): Promise<IncompleteFixOutcome> {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await restoreDiagnosisOnce(lease, args);
+    } catch (err: unknown) {
+      // A deadlock or serialization failure rolled everything back, so the
+      // restore is safe to repeat. Anything else is not ours to retry.
+      const code = (err as { code?: unknown } | null)?.code;
+      if (attempt >= 3 || (code !== '40P01' && code !== '40001')) throw err;
+    }
+  }
+}
+
+async function restoreDiagnosisOnce(
   lease: JobLease & { errorGroupId: string },
   args: { reason: string },
 ): Promise<IncompleteFixOutcome> {
   const client = await getPool().connect();
   try {
     await client.query('BEGIN');
+    const group = await client.query<{ status: string }>(
+      `SELECT status FROM error_groups
+        WHERE id = $1 AND project_id = $2
+        FOR UPDATE`,
+      [lease.errorGroupId, lease.projectId],
+    );
+    const status = group.rows[0]?.status;
+
     const owned = await client.query<{ source_job_id: string | null; episode_id: string | null }>(
       `SELECT source_job_id, episode_id FROM error_group_jobs
         WHERE id = $1 AND worker_id = $2 AND lease_generation = $3::bigint
@@ -431,14 +461,6 @@ export async function restoreDiagnosisAfterIncompleteFix(
     );
     const job = owned.rows[0];
     if (!job) throw new LeaseLostError(lease.id);
-
-    const group = await client.query<{ status: string }>(
-      `SELECT status FROM error_groups
-        WHERE id = $1 AND project_id = $2
-        FOR UPDATE`,
-      [lease.errorGroupId, lease.projectId],
-    );
-    const status = group.rows[0]?.status;
     if (status === undefined) {
       throw new Error(`Error group ${lease.errorGroupId} not found`);
     }
@@ -472,22 +494,32 @@ export async function restoreDiagnosisAfterIncompleteFix(
       policyBasis: null,
     });
 
-    if (status !== 'fixing') {
-      await client.query('COMMIT');
-      return 'status_changed';
-    }
-
-    await client.query(
-      `UPDATE error_groups
-          SET status = (CASE WHEN kind = 'friction' THEN 'awaiting_approval'
-                             ELSE 'investigated' END)::error_group_status,
-              terminal_fix_job_id = $3,
-              updated_at = now()
-        WHERE id = $1 AND project_id = $2`,
+    const otherActiveFix = await client.query(
+      `SELECT 1 FROM error_group_jobs
+        WHERE error_group_id = $1 AND project_id = $2 AND id <> $3
+          AND job_type IN ('fix', 'error_fix') AND status IN ('pending', 'claimed')
+        LIMIT 1`,
       [lease.errorGroupId, lease.projectId, lease.id],
     );
+    const restore = status === 'fixing' && (otherActiveFix.rowCount ?? 0) === 0;
+    if (restore) {
+      await client.query(
+        `UPDATE error_groups
+            SET status = (CASE WHEN kind = 'friction' THEN 'awaiting_approval'
+                               ELSE 'investigated' END)::error_group_status,
+                terminal_fix_job_id = $3,
+                updated_at = now()
+          WHERE id = $1 AND project_id = $2`,
+        [lease.errorGroupId, lease.projectId, lease.id],
+      );
+    }
+    // Already locked and lease-checked above.
+    await client.query(
+      `UPDATE error_group_jobs SET status = 'completed', updated_at = now() WHERE id = $1`,
+      [lease.id],
+    );
     await client.query('COMMIT');
-    return 'restored';
+    return restore ? 'restored' : 'status_changed';
   } catch (err: unknown) {
     await client.query('ROLLBACK').catch(() => {});
     throw err;
