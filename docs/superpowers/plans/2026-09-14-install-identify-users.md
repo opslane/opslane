@@ -76,7 +76,13 @@ If the site sets a Content-Security-Policy and you are not tunnelling, add `http
 Insert this paragraph between them, as its own paragraph:
 
 ```text
-**Identify users.** Opslane can only say which person and customer hit an error if the app calls `setUser`. Find the app's client-side auth state: an auth provider, a session hook, or the store that holds the current user. Wire identification to that state, in browser code that runs after `init`: while auth is still loading, do nothing; whenever the settled signed-in user becomes known or changes, including a session restored on page load, call `setUser({ id, email, account: { id, name } })` from `@opslane/sdk`; whenever it becomes signed out, including session expiry and logout in another tab, call `clearUser()`. In Next.js and other server-rendered apps, do this only in a client component, never in server components, loaders, actions, route handlers, or middleware. `id` is the app's stable user ID, never a display name. `account` is the customer organization, workspace, or team the user is working in; omit it when the app has none. `email` and `account.name` are optional: include them only when the app already shares that data with error-monitoring or analytics tools, otherwise send the IDs alone. Never log or print the user or session object. Every separately built bundle that calls `init` needs its own identification. If the app has no sign-in, skip this. When you add it, tell the user that user IDs (and emails, if sent) now go to Opslane and belong in their privacy notice.
+**Identify users.** Opslane can only say which person and customer hit an error if the app calls `setUser`. Find the app's client-side auth state: an auth provider, a session hook, or the store that holds the current user. Wire it up in browser code that runs after `init`:
+
+- While auth is still loading, do nothing.
+- When the settled state is signed in, call `setUser({ id, email, account: { id, name } })` from `@opslane/sdk`. This covers a fresh sign-in, a session restored on page load, and a different user signing in.
+- When the settled state is signed out, call `clearUser()`. This covers sign-out, session expiry, and logout in another tab.
+
+In Next.js and other server-rendered apps, do this only in a client component. Never do it in server components, loaders, actions, route handlers, or middleware. `id` is the app's stable user ID, never a display name. `account` is the customer organization, workspace, or team the user is working in; omit it when the app has none. `email` and `account.name` are optional. Include them only when the app already shares that data with error-monitoring or analytics tools; otherwise send the IDs alone. Never log or print the user or session object. Every separately built bundle that calls `init` needs its own identification. If the app has no sign-in, skip this. When you add it, tell the user that user IDs, and emails if you sent them, now go to Opslane and belong in their privacy notice.
 ```
 
 Then change the end of the Content-Security-Policy paragraph from
@@ -140,6 +146,7 @@ Run: `cp docs-site/public/INSTALL.md docs-site/public/SKILL.md`
 - [ ] **Step 6: Run the checks**
 
 ```bash
+mkdir -p /tmp/claude-1000
 set -o pipefail
 pnpm test:repo > /tmp/claude-1000/idu-test-repo.log 2>&1; echo "test:repo exit=$?"; tail -8 /tmp/claude-1000/idu-test-repo.log
 cmp docs-site/public/INSTALL.md docs-site/public/SKILL.md && echo IDENTICAL
@@ -169,18 +176,31 @@ Claude-Session: https://claude.ai/code/session_01NH1xAULqRNKBh4oNBptCXv"
 
 The change is instructions for an agent, so verify by having fresh agents follow them on small apps and checking what reaches Opslane at runtime. No fixture in `test-fixtures/` has authentication, so build throwaway apps in the session scratchpad.
 
-**Setup.** Build and pack the SDK so fixtures use current code: `pnpm --filter @opslane/sdk build && (cd packages/sdk && npm pack --pack-destination <scratch>)`. Start a local stub on a free port that answers `POST /api/v1/events` with 202 and records each JSON body, and answers any other `/api/v1/*` request with 204.
+**Setup.**
+- Build and pack the SDK so fixtures use current code: `pnpm --filter @opslane/sdk build && (cd packages/sdk && npm pack --pack-destination <scratch>)`.
+- Start a local stub on `127.0.0.1:<port>` that records each `POST /api/v1/events` JSON body and answers 202, answers other `/api/v1/*` requests with 204, and handles CORS: `OPTIONS` returns 204 with `Access-Control-Allow-Origin: *`, `Access-Control-Allow-Methods: POST, OPTIONS`, `Access-Control-Allow-Headers: Content-Type, X-API-Key`, and every response carries `Access-Control-Allow-Origin: *`. Serve fixtures on `127.0.0.1` too.
 
-**Fixture A, Vite + React + TypeScript with async auth.** `src/auth.tsx` exposes `{ status: 'loading' | 'signedIn' | 'signedOut', user }`. On load it stays `loading` for 300 ms, then restores a saved session from `localStorage` if present. `signIn(email)` sets `{ id: 'u_42', email, displayName: 'Ada', org: { id: 'org_7', name: 'Acme' } }` (a second button signs in `u_99` at `org_9`). A session expiry timer switches to `signedOut` after 5 seconds without a button click. `src/main.tsx` calls `init({ apiKey: 'opslane_pk_test', endpoint: 'http://localhost:<stub>', environment: 'development', replay: { enabled: false } })` and renders the app, and `src/App.tsx` has a "Throw" button that throws `new Error('probe')`. No `setUser` anywhere. Install the packed SDK, commit in a throwaway git repo.
+**Fixture A, Vite + React + TypeScript with async auth.**
+- `src/auth.tsx` exposes `{ status: 'loading' | 'signedIn' | 'signedOut', user }`. On load it stays `loading` for 300 ms, then restores the session saved in `localStorage` if present.
+- `signIn('ada')` sets `{ id: 'u_42', email: 'ada@acme.test', displayName: 'Ada', org: { id: 'org_7', name: 'Acme' } }` and saves it to `localStorage`; `signIn('bob')` does the same for `u_99` at `org_9`. `signOut()` and a session-expiry timer (5 seconds after sign-in, no click) clear it. A `storage` event listener signs the tab out when another tab removes the session.
+- `src/main.tsx` calls `init({ apiKey: 'opslane_pk_test', endpoint: 'http://127.0.0.1:<stub>', environment: 'development', replay: { enabled: false } })` and renders the app. `src/App.tsx` has a "Throw" button that throws `new Error(window.__probe)`, so each probe sets a unique message first.
+- The app does not share user data with any error-monitoring or analytics tool. No `setUser` anywhere. Install the packed SDK; commit in a throwaway git repo.
 
-**Fixture B, Next.js placement.** Files only, no install or build: `app/layout.tsx` (server component that reads a session with `await getSession()` and passes `user` to `<AuthProvider user={user}>`), `app/auth-provider.tsx` (`'use client'`, holds the user in state), and `app/opslane-provider.tsx` (the runbook's client provider with `init`). No `setUser` anywhere.
+**Fixture B, Next.js placement.** A minimal buildable Next.js App Router app using the packed SDK: `app/layout.tsx` is a server component that reads a session with `await getSession()` (a local stub function) and passes `user` to `<AuthProvider user={user}>` from `app/auth-provider.tsx` (`'use client'`, holds the user in state), and `app/opslane-provider.tsx` is the runbook's client provider with `init`. No `setUser` anywhere. If installing `next` fails for lack of network, fall back to a static review and report that.
 
 **Fixture C, no sign-in.** Fixture A with `auth.tsx` removed and `App.tsx` reduced to the Throw button, building cleanly.
 
-**Agent runs.** For each fixture, give a fresh general-purpose subagent the INSTALL.md rules section (top of file), all of step 4, and step 10's "Commit only files" paragraph, plus the fixture path. It edits the fixture (no Opslane registration, no network) and reports the progress note it would send and the files it would commit.
+**Agent runs.** For each fixture, give a fresh general-purpose subagent the INSTALL.md rules section (top of file), all of step 4, and step 10's "Commit only files" paragraph, plus the fixture path. It edits the fixture (no Opslane registration, no network) and reports the progress note it would send, the files it would commit, and what it would tell the user.
 
 **Pass criteria.**
-- A, static: `setUser` is called with `id: user.id` (not `displayName`) and `account: { id: org.id, ... }`, from the auth-state effect, not only inside `signIn`; `clearUser()` runs when status becomes `signedOut`; nothing happens while `loading`; no user or session object is logged; the committed-files list includes the edited file; the note is `..., setUser added`; `tsc --noEmit` and `vite build` pass.
-- A, runtime: serve the build with `vite preview` and drive it with Playwright (Chromium is installed). Record the stub's event bodies for each probe: throw before sign-in (no `context.user`); sign in `u_42` and throw (`context.user.id === 'u_42'`, `account_id === 'org_7'`); reload and throw after restore (`u_42` again); sign in `u_99` and throw (`u_99`, `org_9`); wait for expiry and throw (no `context.user`); sign in, sign out, throw (no `context.user`).
-- B: identification lands only in a `'use client'` file (the auth provider or the Opslane provider), none in `app/layout.tsx` or any server file; `init` runs before or in the same client effect chain as `setUser`.
+- A, static: `setUser` uses `id: user.id` (not `displayName`) and `account: { id: org.id }`, is driven by the auth-state effect rather than only `signIn`, does nothing while `loading`, and `clearUser()` runs when status becomes `signedOut`. No `email` or account name is passed, because the fixture shares no user data with such tools. No user or session object is logged. The committed-files list includes the edited file, the note is `..., setUser added`, and the report tells the user about the privacy notice. `tsc --noEmit` and `vite build` pass.
+- A, runtime: serve with `vite preview --host 127.0.0.1` and drive with Playwright (Chromium is installed). Before each click set a unique `window.__probe`, click Throw, and wait until the stub has that exact message before changing auth state. Expected bodies:
+  - `probe-anon` before sign-in: no `context.user`.
+  - `probe-u42` after signing in Ada: `context.user.id` is `u_42`, `account_id` is `org_7`, and neither `email` nor `account_name` is present.
+  - `probe-restore` after a reload once restore settles: `u_42`.
+  - `probe-u99` after signing in Bob: `u_99`, `org_9`.
+  - `probe-expired` after the expiry timer fires: no `context.user`.
+  - `probe-cross-tab`: open a second page signed in as Ada, sign out in the first page, wait for the second to show signed out, then throw in the second page: no `context.user`.
+- B: identification lands only in a `'use client'` file, none in `app/layout.tsx` or any server file; `init` and the first `setUser` run in one client effect in that order, or `setUser` waits for an explicit initialized signal; `next build` passes.
 - C: no identification code is added and the note is `..., no sign-in`.
+- Not covered: separately built second bundles (R5) are checked by reading the paragraph only.
