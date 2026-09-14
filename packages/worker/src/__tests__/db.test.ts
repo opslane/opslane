@@ -41,6 +41,8 @@ import {
   getWatchableSessionForGroup,
   listUnmappedPatterns,
   upsertRouteMapRows,
+  LeaseLostError,
+  restoreDiagnosisAfterIncompleteFix,
 } from '../db.js';
 import { createLedgerRecorder } from '../verification-ledger.js';
 
@@ -786,6 +788,196 @@ describeDb('db.ts integration tests', () => {
       )).toMatchObject({ policyEligible: true });
     });
 
+  });
+
+  describe('incomplete fix restore', () => {
+    const codeFix = {
+      outcome: 'code_fix' as const,
+      decisionReason: 'The cause is at forge-adapter.ts',
+      diagnosis: null,
+      model: 'claude-sonnet-5',
+      promptVersion: 'diagnosis-v1',
+      basis: 'local_defect' as const,
+      confidence: 'high' as const,
+      policyEligible: true,
+      policyBasis: null,
+    };
+    const reason = 'The fix attempt stopped before it produced a result: it reached its turn or spend limit, or a model call failed. Required action: Review the error manually.';
+    const evidence = { version: 1, tier: null, checks: [] };
+
+    /**
+     * Mirrors production: a completed investigate job that owns the decision,
+     * and a claimed fix job whose source_job_id points at it. The fix job is
+     * the one seedErrorGroupAndJob creates, so claimJob picks it.
+     */
+    async function seedFixing(options: { kind?: 'error' | 'friction'; linkSource?: boolean } = {}) {
+      const seeded = await seedErrorGroupAndJob();
+      const episode = await testPool.query<{ id: string }>(
+        `INSERT INTO issue_episodes (project_id, canonical_issue_id, sequence)
+         VALUES ($1, $2, 1) RETURNING id`,
+        [testProjectId, seeded.errorGroupId],
+      );
+      const episodeId = episode.rows[0]!.id;
+      const source = await testPool.query<{ id: string }>(
+        `INSERT INTO error_group_jobs (error_group_id, project_id, job_type, status, episode_id)
+         VALUES ($1, $2, 'investigate', 'completed', $3) RETURNING id`,
+        [seeded.errorGroupId, testProjectId, episodeId],
+      );
+      const sourceJobId = source.rows[0]!.id;
+      await testPool.query(
+        `UPDATE error_group_jobs SET job_type = 'fix', source_job_id = $2, episode_id = $3 WHERE id = $1`,
+        [seeded.jobId, options.linkSource === false ? null : sourceJobId, episodeId],
+      );
+      const claim = await claimJob(`restore-worker-${crypto.randomUUID()}`, 60_000);
+      expect(claim?.id).toBe(seeded.jobId);
+      await testPool.query(
+        `UPDATE error_groups
+            SET status = 'fixing', kind = $2,
+                root_cause = 'refresh() runs unconditionally',
+                suggested_mitigation = 'guard the refresh call',
+                candidate_diff = 'diff --git a/kept.ts b/kept.ts',
+                confidence = 'high',
+                verification_evidence = $3::jsonb,
+                reason_code = 'low_confidence_fix',
+                reason_message = 'earlier reason',
+                remediation = 'earlier remediation',
+                pr_url = 'https://github.com/octocat/hello/pull/3',
+                pr_number = 3,
+                pr_fix_job_id = $4
+          WHERE id = $1`,
+        [seeded.errorGroupId, options.kind ?? 'error', JSON.stringify(evidence), sourceJobId],
+      );
+      return { ...seeded, episodeId, sourceJobId, lease: { ...claim!, errorGroupId: seeded.errorGroupId } };
+    }
+
+    async function groupRow(errorGroupId: string) {
+      return (await testPool.query(
+        `SELECT status, root_cause, suggested_mitigation, candidate_diff, confidence,
+                verification_evidence, reason_code, reason_message, remediation,
+                pr_url, pr_number, pr_fix_job_id, terminal_fix_job_id
+           FROM error_groups WHERE id = $1`,
+        [errorGroupId],
+      )).rows[0] as Record<string, unknown>;
+    }
+
+    /** Sorted by outcome: decided_at ties break on a random UUID, so insertion order is not recoverable. */
+    async function decisionRows(errorGroupId: string) {
+      return (await testPool.query<{
+        outcome: string; decision_reason: string; model: string; job_id: string | null; episode_id: string | null;
+      }>(
+        `SELECT outcome, decision_reason, model, job_id, episode_id
+           FROM diagnosis_decisions WHERE error_group_id = $1
+          ORDER BY outcome, decision_reason`,
+        [errorGroupId],
+      )).rows;
+    }
+
+    it('returns an error group to investigated, keeps every diagnosis column, and records an incomplete row', async () => {
+      const { errorGroupId, jobId, episodeId, sourceJobId, lease } = await seedFixing();
+      await recordDiagnosisDecision(errorGroupId, testProjectId, { ...codeFix, jobId: sourceJobId, episodeId });
+
+      await expect(restoreDiagnosisAfterIncompleteFix(lease, { reason })).resolves.toBe('restored');
+
+      expect(await groupRow(errorGroupId)).toEqual({
+        root_cause: 'refresh() runs unconditionally',
+        suggested_mitigation: 'guard the refresh call',
+        candidate_diff: 'diff --git a/kept.ts b/kept.ts',
+        confidence: 'high',
+        verification_evidence: evidence,
+        reason_code: 'low_confidence_fix',
+        reason_message: 'earlier reason',
+        remediation: 'earlier remediation',
+        pr_url: 'https://github.com/octocat/hello/pull/3',
+        pr_number: 3,
+        pr_fix_job_id: sourceJobId,
+        status: 'investigated',
+        terminal_fix_job_id: jobId,
+      });
+      expect(await decisionRows(errorGroupId)).toEqual([
+        { outcome: 'code_fix', decision_reason: codeFix.decisionReason, model: 'claude-sonnet-5', job_id: sourceJobId, episode_id: episodeId },
+        { outcome: 'incomplete', decision_reason: reason, model: 'deterministic-fix-verification', job_id: jobId, episode_id: episodeId },
+      ]);
+    });
+
+    it('reads the fix job source decision, not a newer decision from another job', async () => {
+      const { errorGroupId, sourceJobId, lease } = await seedFixing();
+      await recordDiagnosisDecision(errorGroupId, testProjectId, { ...codeFix, jobId: sourceJobId });
+      await recordDiagnosisDecision(errorGroupId, testProjectId, {
+        ...codeFix, outcome: 'needs_human', decisionReason: 'unrelated newer verdict', jobId: null,
+      });
+
+      await expect(restoreDiagnosisAfterIncompleteFix(lease, { reason })).resolves.toBe('restored');
+    });
+
+    it('does not restore when the source decision is not code_fix', async () => {
+      const { errorGroupId, sourceJobId, lease } = await seedFixing();
+      await recordDiagnosisDecision(errorGroupId, testProjectId, {
+        ...codeFix, outcome: 'needs_human', decisionReason: 'not actionable', jobId: sourceJobId,
+      });
+
+      await expect(restoreDiagnosisAfterIncompleteFix(lease, { reason })).resolves.toBe('no_completed_diagnosis');
+
+      expect((await groupRow(errorGroupId)).status).toBe('fixing');
+      expect(await decisionRows(errorGroupId)).toHaveLength(1);
+    });
+
+    it('falls back to the newest completed group decision when the job has no source', async () => {
+      const { errorGroupId, lease } = await seedFixing({ linkSource: false });
+      await recordDiagnosisDecision(errorGroupId, testProjectId, codeFix);
+
+      await expect(restoreDiagnosisAfterIncompleteFix(lease, { reason })).resolves.toBe('restored');
+    });
+
+    it('never counts earlier incomplete or fix-verification rows as the completed diagnosis', async () => {
+      const { errorGroupId, lease } = await seedFixing({ linkSource: false });
+      await recordDiagnosisDecision(errorGroupId, testProjectId, codeFix);
+      await recordDiagnosisDecision(errorGroupId, testProjectId, {
+        ...codeFix, outcome: 'incomplete', decisionReason: 'earlier incomplete run',
+      });
+      await recordDiagnosisDecision(errorGroupId, testProjectId, {
+        ...codeFix,
+        outcome: 'needs_human',
+        decisionReason: 'earlier fix verdict',
+        model: 'deterministic-fix-verification',
+        promptVersion: 'fix-terminal-v1',
+      });
+
+      await expect(restoreDiagnosisAfterIncompleteFix(lease, { reason })).resolves.toBe('restored');
+    });
+
+    it('returns a friction group to awaiting_approval', async () => {
+      const { errorGroupId, sourceJobId, lease } = await seedFixing({ kind: 'friction' });
+      await recordDiagnosisDecision(errorGroupId, testProjectId, { ...codeFix, jobId: sourceJobId });
+
+      await expect(restoreDiagnosisAfterIncompleteFix(lease, { reason })).resolves.toBe('restored');
+
+      expect((await groupRow(errorGroupId)).status).toBe('awaiting_approval');
+    });
+
+    it('records the run but leaves a status that moved away from fixing', async () => {
+      const { errorGroupId, jobId, sourceJobId, lease } = await seedFixing();
+      await recordDiagnosisDecision(errorGroupId, testProjectId, { ...codeFix, jobId: sourceJobId });
+      await testPool.query(`UPDATE error_groups SET status = 'resolved' WHERE id = $1`, [errorGroupId]);
+
+      await expect(restoreDiagnosisAfterIncompleteFix(lease, { reason })).resolves.toBe('status_changed');
+
+      expect(await groupRow(errorGroupId)).toMatchObject({ status: 'resolved', terminal_fix_job_id: null });
+      expect(await decisionRows(errorGroupId)).toContainEqual(expect.objectContaining({ outcome: 'incomplete', job_id: jobId }));
+    });
+
+    it('writes nothing when the lease is gone', async () => {
+      const { errorGroupId, jobId, sourceJobId, lease } = await seedFixing();
+      await recordDiagnosisDecision(errorGroupId, testProjectId, { ...codeFix, jobId: sourceJobId });
+      await testPool.query(
+        `UPDATE error_group_jobs SET lease_expires_at = now() - interval '1 second' WHERE id = $1`,
+        [jobId],
+      );
+
+      await expect(restoreDiagnosisAfterIncompleteFix(lease, { reason })).rejects.toBeInstanceOf(LeaseLostError);
+
+      expect((await groupRow(errorGroupId)).status).toBe('fixing');
+      expect(await decisionRows(errorGroupId)).toHaveLength(1);
+    });
   });
 
   describe('draft delivery lifecycle', () => {
