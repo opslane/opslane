@@ -4,7 +4,7 @@
 
 **Goal:** The unified (ON) daily digest sends only cards that passed their checks. It never sends a mechanical receipt, an incident overflow line, or a message with no card in it.
 
-**Architecture:** Freeze stops admitting incidents that `publishable()` refuses, and it gives error candidates an explicit `why`. Validation holds back every card that fails its checks or that the writer deferred, ledgering it as excluded with reason `card_held_back` instead of building a receipt. A database failure returns a retryable error, which leaves the run `written`, so the scheduler revalidates the same writer payload on its next tick. A run with no card to send finishes `delivered` with a NULL stored payload and no outbox event. The v5 Slack renderer drops the incident overflow line. The worker prompt tells the model to write `why` whenever one is supplied.
+**Architecture:** Freeze stops admitting incidents that `publishable()` refuses, and it gives error candidates an explicit `why`. Validation holds back every card that fails its checks or that the writer deferred, ledgering it as excluded with reason `card_held_back` instead of building a receipt. A database failure returns a retryable error, which leaves the run `written`, so the scheduler revalidates the same writer payload on its next tick. A run with no card to send finishes `delivered`, storing its zero-card payload, and writes no outbox event, so no Slack message goes out. The v5 Slack renderer drops the incident overflow line. The worker prompt tells the model to write `why` whenever one is supplied.
 
 **Tech Stack:** Go 1.24 + pgx (`packages/ingestion`); Node 22 + TypeScript + Vitest (`packages/worker`).
 
@@ -28,7 +28,7 @@
 - AC2: The v5 Slack digest has no "And N more on the dashboard" incident overflow line.
 - AC3: A database failure during ON validation returns an error and leaves the run `written`, with no outbox event. A second `ValidateAndPublish` on the same run succeeds with no new writer job.
 - AC4: An error candidate with a validated root cause freezes with `why` equal to that root cause. With a stub writer's card, it publishes a card whose Slack text contains a `Why:` line.
-- AC5: An ON run with no card to send ends `delivered` with `rendered_payload IS NULL`, no `digest.daily` outbox event, and a complete ledger. A rejected cached card is still retired, because the transaction commits.
+- AC5: An ON run with no card to send ends `delivered` with a stored zero-card payload (so the read API and MCP show today's digest as empty rather than yesterday's cards), no `digest.daily` outbox event, and a complete ledger. A rejected cached card is still retired, because the transaction commits.
 - AC6: With one card valid and one failing, the valid card ships, one outbox event is written, and only the failing incident is `card_held_back`.
 
 ## Global Constraints
@@ -85,7 +85,7 @@ Freeze and validation change together in one commit. The freeze change alone bre
 
 **Interfaces:**
 - Consumes: `actionablePublishable(actionableCandidate) bool`; `selectActionable(eligible []actionableCandidate, limit int) ([]actionableCandidate, int)`; `loadActionableCandidatesForValidation` (test-injectable var); `TicketFacts.OnCard()`, `.Generation`, `.EvidenceVersion`
-- Produces: `reasonCardHeldBack = "card_held_back"`; ledger `details.held_reason`; `retryableValidationError`; ON payloads with empty `ReceiptItems`, zero `OverflowCount`/`ReceiptOverflow`, empty `DeliveryAlert`; nothing-to-send runs with `rendered_payload IS NULL`
+- Produces: `reasonCardHeldBack = "card_held_back"`; ledger `details.held_reason`; `retryableValidationError`; ON payloads with empty `ReceiptItems`, zero `OverflowCount`/`ReceiptOverflow`, empty `DeliveryAlert`; nothing-to-send runs that store their zero-card payload but write no outbox event
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -105,8 +105,10 @@ func TestFreezeOnExcludesIncidentsThatCannotEarnACard(t *testing.T) {
 	seedValidatedDiagnosis(t, pool, fixture.ProjectID, filler, now.Add(-time.Hour))
 	savedDiff := seedOnCardGroup(t, pool, fixture.ProjectID, fixture.EnvID, "error", "needs_human",
 		true, "", "The export request never leaves the page.", now.Add(-4*time.Hour))
+	prWithURL := seedOnCardGroup(t, pool, fixture.ProjectID, fixture.EnvID, "error", "pr_created",
+		false, "https://github.com/acme/shop/pull/7", "The import request never leaves the page.", now.Add(-5*time.Hour))
 	diagnosed := seedOnCardGroup(t, pool, fixture.ProjectID, fixture.EnvID, "error", "awaiting_approval",
-		true, "", "The save request never leaves the page.", now.Add(-5*time.Hour))
+		true, "", "The save request never leaves the page.", now.Add(-6*time.Hour))
 	seedValidatedDiagnosis(t, pool, fixture.ProjectID, diagnosed, now.Add(-time.Hour))
 
 	runID, candidates, err := FreezeCandidates(ctx, pool, fixture.ProjectID, now)
@@ -117,8 +119,10 @@ func TestFreezeOnExcludesIncidentsThatCannotEarnACard(t *testing.T) {
 	for _, candidate := range candidates {
 		frozen[candidate.ErrorGroupID] = true
 	}
-	if len(candidates) != 2 || !frozen[diagnosed] || !frozen[savedDiff] {
-		t.Fatalf("frozen candidates = %+v, want the diagnosed and the saved-diff incidents", candidates)
+	// A saved diff or an open PR is something to act on even without a
+	// validated diagnosis; publishable() admits both.
+	if len(candidates) != 3 || !frozen[diagnosed] || !frozen[savedDiff] || !frozen[prWithURL] {
+		t.Fatalf("frozen candidates = %+v, want the diagnosed, saved-diff, and PR-with-URL incidents", candidates)
 	}
 	for _, groupID := range []string{undiagnosed, prWithoutURL, filler} {
 		var outcome, reason string
@@ -176,17 +180,15 @@ func digestOutboxEvents(t *testing.T, pool *pgxpool.Pool, projectID, runID strin
 }
 
 // assertNothingSent pins the ON nothing-to-send completion: the run is
-// finished, nothing is stored as a delivered digest, and no message is queued.
+// finished, its stored digest is empty, and no message is queued.
 func assertNothingSent(t *testing.T, pool *pgxpool.Pool, projectID, runID string) {
 	t.Helper()
-	var status string
-	var stored bool
-	if err := pool.QueryRow(context.Background(), `SELECT status,rendered_payload IS NOT NULL
-		FROM digest_runs WHERE id=$1`, runID).Scan(&status, &stored); err != nil {
-		t.Fatal(err)
+	if status := runStatus(t, pool, runID); status != "delivered" {
+		t.Fatalf("run status = %q, want delivered", status)
 	}
-	if status != "delivered" || stored {
-		t.Fatalf("run status=%q stored payload=%v, want delivered with no stored payload", status, stored)
+	stored := renderedEvent(t, pool, runID).Digest
+	if len(stored.GeneratedCards) != 0 || len(stored.ReceiptItems) != 0 {
+		t.Fatalf("stored digest cards=%+v receipts=%+v, want an empty digest", stored.GeneratedCards, stored.ReceiptItems)
 	}
 	if events := digestOutboxEvents(t, pool, projectID, runID); events != 0 {
 		t.Fatalf("outbox events = %d, want 0", events)
@@ -579,9 +581,9 @@ Delete the `if unifiedDegraded { kept := generated[:0] … }` block (`:852-865`)
 		overflowCount, receiptOverflow = 0, 0
 	}
 	// With no card to send there is no message. The run still finishes, with its
-	// ledger committed (so a rejected cached card stays retired) and no stored
-	// payload: the read API, MCP, and digest-eval read only runs whose
-	// rendered_payload IS NOT NULL.
+	// ledger committed (so a rejected cached card stays retired) and its empty
+	// payload stored, so the read API and MCP report today's digest as empty
+	// instead of resurfacing yesterday's cards.
 	send := run.Mode != UnifiedCardsOn || len(generated) > 0
 	if !send {
 		slog.Info("digest has no card to send", "diagnostic", "digest_nothing_to_send",
@@ -589,31 +591,21 @@ Delete the `if unifiedDegraded { kept := generated[:0] … }` block (`:852-865`)
 	}
 ```
 
-Wrap the `eventPayload` construction, `Validate()`, and `json.Marshal` in `var eventJSON []byte; if send { … }`. Keep the `for identity, outcome := range accounted` item loop unconditional. Wrap the outbox insert, the deliveries insert, and the no-destination check (`:1406-1422`) in `if send { … }`. Change the final run update to store NULL when not sending:
-
-```go
-	var rendered any
-	if send {
-		rendered = eventJSON
-	}
-	if _, err := tx.Exec(ctx, `UPDATE digest_runs SET status='delivered',rendered_payload=$2::jsonb
-		WHERE id=$1`, runID, rendered); err != nil {
-		return fmt.Errorf("complete digest run: %w", err)
-	}
-```
+Leave the `eventPayload` construction, `Validate()`, `json.Marshal`, the `for identity, outcome := range accounted` item loop, and the final `UPDATE digest_runs SET status='delivered',rendered_payload=$2::jsonb` unchanged. Wrap only the outbox insert, the deliveries insert, and the `deliveries.RowsAffected() == 0` no-destination check (`:1406-1422`) in `if send { … }`. Declare `var eventID string` inside that block.
 
 4l. Delete the ON-only helpers and their comments: `cardCheckReasonPrefix`, `writerDemotedCard`, `liveFallbackReason`, `receiptForUnifiedFallback` (`:1433-1512`). Remove imports the compiler reports unused (`narrative`). Update the comment on `validateUnifiedWrittenCard` (`:220-223`): "demotes its card to a receipt every day forever" becomes "holds its card back every day forever". Update the comment at `:275-279`: "hide the incident behind a receipt" becomes "hold the card back".
 
 - [ ] **Step 5: Build and run the new tests**
 
 Run: `cd packages/ingestion && go build ./... && go vet ./digest && go test ./digest -run 'TestFreezeOnExcludesIncidentsThatCannotEarnACard|TestFreezeOnGivesErrorCandidatesTheirRootCauseAsWhy|TestValidateOnHoldingBackEveryCardSendsNothing|TestValidateOnHoldsBackTheWriterDeferral|TestValidateOnHoldsBackOneCardAndSendsItsSibling|TestValidateOnRetriesTheSameRunAfterAReloadFailure' -count=1 -v`
-Expected: PASS, no SKIP. `go vet` fails until Step 6 fixes the old tests; that is expected.
+`go test ./digest -run …` compiles every test file in the package. Before running it, fix only the **compile errors** in existing tests: reads of `NotCardEligible`, and calls to `selectOnCardEligibleFirst`, `receiptForUnifiedFallback`, and `neverEligibleRendersReceipt`. Delete or stub exactly as Step 6 prescribes for those sites; behavioral rewrites follow in Step 6.
+Expected: PASS, no SKIP.
 
 - [ ] **Step 6: Rewrite the tests that pinned receipts or the old freeze**
 
-Start with `grep -n "NotCardEligible\|selectOnCardEligibleFirst\|receipt_reason\|ReceiptItems\|DeliveryAlert\|OverflowCount\|receiptIDs\|publishEmptyWrittenRun" packages/ingestion/digest/*_test.go`. Every hit must be resolved. Rules:
+Start with `grep -niE "receipt|overflow|NotCardEligible|selectOnCardEligibleFirst|DeliveryAlert|publishEmptyWrittenRun" packages/ingestion/digest/*_test.go` and review every hit. Pure unit tests of functions the OFF lane still uses (`capDigestDelivery`, `toReceiptItems`, `evaluateActionable`, `reconcileActionable`) stay as they are. Rules:
 
-- A run that ends with no card uses `assertNothingSent`; `renderedEvent` fails on its NULL payload.
+- A run that ends with no card uses `assertNothingSent` (empty stored digest, no outbox event).
 - A held-back card asserts `heldBackLedger` → `excluded`/`card_held_back` (or the moved-state reason from 4f).
 - Delete, don't port, tests whose only subject was a receipt in ON.
 
@@ -640,7 +632,7 @@ Specific sites:
   - `TestValidateRejectsCandidateSupersededAfterFreeze`: delete the `ReceiptItems[0]` live-title assertion (`:181`). Assert the held-back ledger, or `not_publishable` if 4f reclassifies it.
 - `validate_actionable_test.go`
   - `publishEmptyWrittenRun`: rename to `publishWrittenRun`. Freeze, `writeOnCardPayload(t, pool, runID, candidates)`, validate.
-  - `receiptIDs` → `cardIDs`, reading `GeneratedCards`. It returns nil when `rendered_payload` is NULL: query `rendered_payload IS NULL` first.
+  - `receiptIDs` → `cardIDs`, reading `GeneratedCards`.
   - `TestValidateRepeatsActionableItemUntilHumanActs`: seed the group with a validated diagnosis (`seedValidatedDiagnosis`) so it can earn a card. Assert both daily runs ship one card for `groupID` with ledger `included`. Move the impact and replay checks to the card (`ImpactVisits`, `ReplayURL` contains `/sessions/actionable-replay-`). Keep the Slack `|Replay>` check, and replace `Review issue` with the stamped action's button text. For the snoozed run: `assertNothingSent` and reason `snoozed`.
   - `TestActionableReceiptFallsBackToAPreSpellRecording`: it covers ON receipt replay enrichment, which no longer exists. Delete it, unless it drives a stored `unified_cards_mode='off'` run, in which case leave it.
 - `cache_invalidation_test.go` `TestValidateInvalidatesRejectedCachedRow` and `TestValidateGroundsCachedCardTitleAgainstMovedCounts`: replace receipt expectations with `heldBackLedger` → `card_held_back` (and `assertNothingSent` where no card ships). **Keep** the assertion that the rejected `digest_card_copy` row has `invalidated_at` set; it proves the nothing-to-send run commits.
@@ -915,34 +907,50 @@ Claude-Session: https://claude.ai/code/session_012GqPQemATqQ72uDYUhaXK9"
 
 ---
 
-### Task 6: Repository gate and live smoke
+### Task 6: Repository gate and smokes
 
-- [ ] **Step 1: Full gate** (test environment exported; `pipefail` so `tee` cannot hide failures)
+- [ ] **Step 1: Full gate** (test environment exported)
 
 ```bash
-set -o pipefail
+bash -euo pipefail -c '
+OUT=$(mktemp -d)
 pnpm install --frozen-lockfile
 pnpm -r build
-pnpm test 2>&1 | tee /tmp/claude-1000/holdback-pnpm-test.txt
-(cd packages/ingestion && go build ./... && go test ./... -count=1 -json > /tmp/claude-1000/holdback-go-gate.json)
-grep -c '"Action":"skip"' /tmp/claude-1000/holdback-go-gate.json   # must print 0
-grep -E 'Tests .*skipped|skipped' /tmp/claude-1000/holdback-pnpm-test.txt   # each skip must be explained (E2E_IN_PROCESS_WORKER-gated only)
+pnpm test 2>&1 | tee "$OUT/pnpm-test.txt"
+(cd packages/ingestion && go build ./... && go test ./... -count=1 -json > "$OUT/go-test.json")
+SKIPS=$(jq -r "select(.Action==\"skip\" and .Test!=null) | \"\(.Package) \(.Test)\"" "$OUT/go-test.json")
+if [ -n "$SKIPS" ]; then echo "Go skips:"; echo "$SKIPS"; exit 1; fi
+grep -nE "skipped" "$OUT/pnpm-test.txt" || true
 docker compose config --quiet
+echo "reports in $OUT"
+'
 ```
 
-Expected: every command exits 0, Go skip count 0, and no DB-gated Vitest suite skipped.
+Expected: exit 0 and no Go skips. For Vitest, the DB-gated `packages/worker/src/__tests__/digest-writer.integration.test.ts` must run, not skip. Suites gated on `ANTHROPIC_API_KEY`, Chromium, or reliability flags may skip; list each with its gate in the verification report.
 
-- [ ] **Step 2: Live smoke through production code**
+- [ ] **Step 2: In-process known-problems smoke** (required by `packages/worker/AGENTS.md`)
 
-With the stack from the test environment and the rebuilt ingestion and worker images (`docker compose -p opslane-holdback up -d --build ingestion worker`):
+```bash
+docker compose -p opslane-holdback stop worker
+E2E_IN_PROCESS_WORKER=1 pnpm --filter @opslane/test-e2e exec vitest run friction-incidents.test.ts
+```
 
-1. `psql "$DATABASE_URL" -f scripts/seed-e2e.sql`, then create a test project with a `digest.daily` webhook destination pointing at an in-network sink (see the `digest-v4-verify-rig` memory; host networking is blocked).
-2. Seed three error groups in that project: A is `awaiting_approval` with a root cause and a validated diagnosis (an `issue_episodes` row plus a `diagnosis_decisions` row, as `seedValidatedDiagnosis` does); B is `awaiting_approval` with no diagnosis; C is `pr_created` with no `pr_url`.
-3. Freeze: `cd packages/ingestion && go run ../../test-e2e/known-problems-helper.go -mode freeze -project $P -at $(date -u +%Y-%m-%dT%H:%M:%SZ)`. Expect exactly one candidate (A) with `why` equal to A's root cause.
-4. Write with the real worker: insert a `digest_write` job for the run (`INSERT INTO error_group_jobs (project_id,run_id,job_type,status,triggered_by) VALUES ($P,$RUN,'digest_write','pending','auto')`) and wait for `digest_runs.status='written'`. Needs `ANTHROPIC_API_KEY` in the worker.
-5. Publish: `go run ../../test-e2e/known-problems-helper.go -mode publish -project $P -run $RUN`. Expect one generated card with a non-empty `why`, a Slack body containing `Why:`, and no `receipt_items`.
-6. Query `digest_run_candidate_evaluations` for the run: B and C are `excluded`/`not_publishable`, and A is `included` with `render_mode` `authored`.
-7. Hold-back check: in a second project with only A', force a writer payload whose card omits `why`. Run `-mode publish` and expect the helper to fail reading a NULL payload. Confirm `rendered_payload IS NULL`, status `delivered`, no outbox event, and A' ledgered `card_held_back`.
+Expected: zero skipped tests. It publishes a ticket digest through `known-problems-helper.go` and asserts one generated card and no receipts.
+
+- [ ] **Step 3: Live proof** (owned by the `/verify` stage)
+
+Rebuild and start ingestion and worker (`docker compose -p opslane-holdback up -d --build ingestion worker`). Send an event to `$INGESTION_URL/api/v1/events` as root `AGENTS.md` requires, and confirm its job reaches its terminal state. Then prove AC1–AC6 on the running stack with the real worker writing (`ANTHROPIC_API_KEY` set):
+
+1. **First project.** Give it a `digest.daily` webhook destination pointing at an in-network sink, and seed:
+   - one card-eligible error incident (validated diagnosis and root cause),
+   - one undiagnosed `awaiting_approval` incident,
+   - one `pr_created` incident with no URL.
+2. Freeze with `go run ../../test-e2e/known-problems-helper.go -mode freeze -project <id> -at <RFC3339>` from `packages/ingestion`.
+3. Write through a `digest_write` job.
+4. Publish with `-mode publish -run <run id>`.
+5. **Second project.** Force a writer payload that omits `why` for its only card. This proves hold-back and nothing-to-send: an empty stored digest, no outbox event, and the ledger row `card_held_back`.
+
+The verification report records the exact SQL, commands, and outputs.
 
 ---
 
@@ -960,3 +968,16 @@ With the stack from the test environment and the rebuilt ingestion and worker im
 - **Codex round 1 dispositions:**
   - Accepted: atomic freeze + validation task; `publishable()` wording; zero-diagnosis and ticket-helper test sites; filler case; `selectActionable`; `testPool` does not migrate; `narrative` import; OFF branch untouched; nothing-to-send for all zero-card days; NULL `rendered_payload`; retry revalidates without a model call; ticket and eligibility reclassification; `validate_actionable_test` rewrites; `ReceiptItems[0]` panic; outbox assertions; mixed test; prompt compatibility clause; legacy v5 receipt loop kept; `pipefail` and JSON skip count; banners on both design docs; AC1 narrowed to the payload; AC2 excludes the merged-PR footer; smoke recipe via `known-problems-helper.go`.
   - Declined: a new SLA diagnostic for repeated hold-backs (D7: maintainer accepted log-only visibility).
+- **Codex round 2 dispositions:**
+  - **Accepted:**
+    - fix compile errors before the first test run;
+    - the PR-with-URL eligibility case;
+    - nothing-to-send runs store their empty payload, so the read API and MCP show an empty digest instead of yesterday's cards, and the e2e helper keeps working;
+    - a case-insensitive test sweep that keeps the OFF-lane unit tests;
+    - Go skip counting via `jq`, without zero-match grep failures;
+    - the in-process known-problems smoke;
+    - live proof delegated to `/verify`, with its required shape.
+  - **Declined:**
+    - a filler root-cause check for on-card tickets: it predates this issue and is outside #496;
+    - wrapping every other database error as retryable: those errors already failed and triggered a rewrite before this change, and D4 replaces only the degrade path;
+    - dedicated SLA and scheduler tests: the scheduler's `written` → `ValidateAndPublish` path is unchanged, and the retry test asserts no writer job.
