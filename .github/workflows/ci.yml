@@ -439,6 +439,9 @@ jobs:
           # switch, and SDK environment payload work in a real browser. Without
           # pinning, a skipIf regression (missing INGESTION_URL or Chromium)
           # would silently drop them while the total count still passed.
+          # The session replay viewport cases are the only browser-level proof
+          # that the replay iframe keeps its recorded width, including when a
+          # deep link opens past a mid-session resize (#495).
           # The python smoke's live leg is pinned for the same reason: it
           # self-skips without flask, and a skip here is a coverage hole.
           # The origin-allowlist cases are pinned individually rather than by
@@ -463,6 +466,8 @@ jobs:
             ^first-class environment ingestion > supports out-of-order events, makes the existing same-project session
             ^first-class environment ingestion > does not expose manual environment creation
             ^SDK environment browser contract > sends the configured name through real Chromium
+            ^session replay viewport in Chromium > keeps the recorded viewport width in a narrower container, across a mid-session resize$
+            ^session replay viewport in Chromium > opens a deep link past a mid-session resize at the resized viewport width$
             ^origin allowlist with a server-side SDK > accepts a backend event that carries no Origin or Referer$
             ^origin allowlist with a server-side SDK > accepts a browser event from an allowlisted origin$
             ^origin allowlist with a server-side SDK > rejects a browser event from an origin not on the list$
