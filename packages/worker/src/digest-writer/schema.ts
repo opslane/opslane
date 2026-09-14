@@ -102,8 +102,8 @@ function text(value: unknown, label: string): string {
   return value.trim();
 }
 
-/** The deferral reason a structurally unusable card carries, so the incident
- * still reaches the digest as its mechanical receipt instead of vanishing. */
+/** The deferral reason a structurally unusable card carries; validation holds
+ * the incident back. */
 export const REJECTED_CARD_REASON = 'the authored card was unusable';
 
 export interface DigestPayloadWarning {
@@ -115,8 +115,8 @@ export interface ParsedDigestPayload {
   included: Array<Omit<DigestCard, 'label'>>;
   deferred: DeferredDigestItem[];
   /** Cards rejected for a real structural reason (missing required field,
-   * wrong type). The caller accounts for them as deferred so the incident
-   * falls back to its receipt; rejection never fails the run. */
+   * wrong type). The caller accounts for them as deferred, so the card is held
+   * back; rejection never fails the run. */
   rejected: DeferredDigestItem[];
   /** Rejections that carried no usable identity, so they could not be attached
    * to a frozen candidate. The caller cannot name the incident they belong to,
@@ -283,10 +283,10 @@ export function parseDigestPayload(raw: unknown): ParsedDigestPayload {
     try {
       included.push(parseCard(value, index));
     } catch (error: unknown) {
-      // Scoped to this card: its siblings still deliver, and the incident
-      // reaches the digest as its receipt through the deferral below.
+      // Scoped to this card: its siblings still deliver and this incident is
+      // held back.
       warnings.push({
-        message: `included[${index}] card rejected; delivering its receipt instead`,
+        message: `included[${index}] card rejected; holding it back`,
         fields: { at: `included[${index}]`, ...cardIdentity, reason: failureMessage(error) },
       });
       if (cardIdentity.errorGroupId !== undefined || cardIdentity.episodeId !== undefined) {

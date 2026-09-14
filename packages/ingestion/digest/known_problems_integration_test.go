@@ -218,7 +218,7 @@ func TestKnownProblemDigestFreezeValidateAndMergedFooter(t *testing.T) {
 func TestTicketDigestSignsLatestAttemptAfterAuthoringCycle(t *testing.T) {
 	testTicketDigestActionAfterAuthoringCycle(t, "authored")
 }
-func TestTicketDigestDeferredChangedCauseUsesLiveReceipt(t *testing.T) {
+func TestTicketDigestWriterDeferralIsHeldBack(t *testing.T) {
 	testTicketDigestActionAfterAuthoringCycle(t, "deferred_changed_cause")
 }
 func TestTicketDigestStaleActionDoesNotFailOtherCards(t *testing.T) {
@@ -320,8 +320,13 @@ func testTicketDigestActionAfterAuthoringCycle(t *testing.T, mode string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(candidates) != 2 {
+	if len(candidates) != 1 {
 		t.Fatalf("frozen candidates=%+v", candidates)
+	}
+	// The unrelated incident has no validated diagnosis, diff, or PR: it stays on
+	// the dashboard and never reaches the digest.
+	if outcome, reason, _ := heldBackLedger(t, pool, runID, unrelated); outcome != "excluded" || reason != reasonNotPublishable {
+		t.Fatalf("unrelated incident ledger = %s/%s, want excluded/%s", outcome, reason, reasonNotPublishable)
 	}
 	frozen := candidateByGroup(t, candidates, group)
 	if frozen.LatestAttemptID != "" || frozen.ValidAction != wantAction {
@@ -394,22 +399,21 @@ func testTicketDigestActionAfterAuthoringCycle(t *testing.T, mode string) {
 		t.Fatal(err)
 	}
 	published := renderedEvent(t, pool, runID)
-	hasUnrelated := false
-	for _, receipt := range published.Digest.ReceiptItems {
-		if receipt.IncidentID == unrelated {
-			hasUnrelated = true
-		}
-	}
-	if !hasUnrelated {
-		t.Fatalf("unrelated receipt was lost: %+v", published.Digest)
-	}
 	if stale {
-		if len(published.Digest.GeneratedCards) != 0 || len(published.Digest.ReceiptItems) != 1 {
-			t.Fatalf("stale action was published: %+v", published.Digest)
+		// The ticket left its card state during validation: nothing ships for
+		// it, and no other incident in this project can earn a card.
+		assertNothingSent(t, pool, project.ID, runID)
+		if outcome, reason, _ := heldBackLedger(t, pool, runID, group); outcome != "excluded" || reason != reasonNotPublishable {
+			t.Fatalf("stale action ledger = %s/%s, want excluded/%s", outcome, reason, reasonNotPublishable)
 		}
-		var outcome string
-		if err := pool.QueryRow(ctx, `SELECT outcome FROM digest_run_candidate_evaluations WHERE digest_run_id=$1 AND error_group_id=$2`, runID, group).Scan(&outcome); err != nil || outcome != "excluded" {
-			t.Fatalf("stale action ledger=%q err=%v", outcome, err)
+		return
+	}
+	if deferred {
+		// The writer deferred a ticket that is still on the card: it is held
+		// back and nothing ships in its place.
+		assertHeldBack(t, pool, project.ID, runID, group)
+		if _, _, held := heldBackLedger(t, pool, runID, group); held != "card check: invalid prose" {
+			t.Fatalf("deferred ticket held reason = %q, want the writer's reason", held)
 		}
 		return
 	}
@@ -423,13 +427,8 @@ func testTicketDigestActionAfterAuthoringCycle(t *testing.T, mode string) {
 				}
 			}
 		}
-		for _, receipt := range published.Digest.ReceiptItems {
-			if receipt.IncidentID == group {
-				found++
-				if receipt.Action != "Create fix PR" || receipt.ActionURL != "" {
-					t.Fatalf("unsignable receipt=%+v", receipt)
-				}
-			}
+		if len(published.Digest.ReceiptItems) != 0 {
+			t.Fatalf("ON digest carried receipts: %+v", published.Digest.ReceiptItems)
 		}
 		if found != 1 {
 			t.Fatalf("unsignable ticket was dropped: %+v", published.Digest)
@@ -452,26 +451,10 @@ func testTicketDigestActionAfterAuthoringCycle(t *testing.T, mode string) {
 		}
 		return
 	}
-	var actionURL string
-	if deferred {
-		if len(published.Digest.GeneratedCards) != 0 || len(published.Digest.ReceiptItems) != 2 {
-			t.Fatalf("live receipt was lost: %+v", published.Digest)
-		}
-		for _, receipt := range published.Digest.ReceiptItems {
-			if receipt.IncidentID == group {
-				if receipt.RootCauseExcerpt != changedCause || receipt.Action != "Create fix PR" {
-					t.Fatalf("stale receipt=%+v", receipt)
-				}
-				actionURL = receipt.ActionURL
-			}
-		}
-	} else {
-		if len(published.Digest.GeneratedCards) != 1 {
-			t.Fatalf("authored card was lost: %+v", published.Digest)
-		}
-		actionURL = published.Digest.GeneratedCards[0].ActionURL
+	if len(published.Digest.GeneratedCards) != 1 {
+		t.Fatalf("authored card was lost: %+v", published.Digest)
 	}
-	link, err := url.Parse(actionURL)
+	link, err := url.Parse(published.Digest.GeneratedCards[0].ActionURL)
 	if err != nil {
 		t.Fatal(err)
 	}

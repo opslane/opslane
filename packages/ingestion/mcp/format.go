@@ -136,6 +136,12 @@ func FormatDigest(input DigestInput) string {
 		return fmt.Sprintf("The digest for %s, %s was delivered in an older format this tool cannot itemize. The next daily run will be readable here.", input.ProjectLabel, *input.RunDate)
 	}
 	if input.View.Empty() {
+		// A v5 digest holds back cards that failed their checks and leaves
+		// ineligible incidents out, so an empty one says nothing about what is
+		// still waiting.
+		if input.View.SchemaVersion >= 5 {
+			return fmt.Sprintf("Opslane digest for %s, %s: no cards in this digest; waiting incidents are on the dashboard.", input.ProjectLabel, *input.RunDate)
+		}
 		return fmt.Sprintf("Opslane digest for %s, %s: nothing new and no decisions waiting.", input.ProjectLabel, *input.RunDate)
 	}
 	lines := []string{fmt.Sprintf("Opslane digest for %s, %s.", input.ProjectLabel, *input.RunDate), ""}

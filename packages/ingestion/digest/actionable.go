@@ -26,6 +26,10 @@ const (
 	// up by the SLA sweep) instead of being frozen without a spell, which sent
 	// validation down the episode path with an empty episode id.
 	reasonMissingWaitingAge = "missing_waiting_age"
+	// reasonCardHeldBack marks a card that failed its checks, or that the
+	// writer deferred, at validation. The incident stays on the dashboard and
+	// is frozen again tomorrow; the digest never sends a receipt in its place.
+	reasonCardHeldBack = "card_held_back"
 )
 
 // The ON lane's instruction lines. Exactly one is correct for any incident
@@ -89,7 +93,7 @@ func onCardOutcome(status string) string {
 var knownReasonCodes = []string{
 	reasonIncluded, reasonSnoozed, reasonErrorLaneIneligible,
 	reasonNotPublishable, reasonFrozenLaneOwns, reasonCappedOverflow,
-	reasonMissingWaitingAge,
+	reasonMissingWaitingAge, reasonCardHeldBack,
 }
 
 // actionableStatusSet is a SQL fragment spliced into the candidate query. Its
@@ -332,8 +336,8 @@ func actionablePublishable(candidate actionableCandidate) bool {
 }
 
 // onCardEligible answers "does this incident deserve an authored card?", and
-// nothing else. A false answer routes it to its mechanical receipt; it can
-// never remove the incident from the digest.
+// nothing else. In ON a false answer keeps the incident out of the digest; it
+// stays on the dashboard.
 func onCardEligible(status, prURL, rootCause string, hasSavedDiff, hasValidatedDiagnosis, fixAttempted bool) bool {
 	item := notify.ReceiptItem{
 		ReceiptState:     receiptState(status, hasSavedDiff, fixAttempted),
@@ -359,7 +363,7 @@ func selectActionable(eligible []actionableCandidate, limit int) (picked []actio
 
 // moreImpactfulActionable is the digest's impact ordering: recorded visits
 // first, then raw occurrences, then the group id so equal rows never reorder
-// between runs. Both selectors rank with it, and neither owns it.
+// between runs. selectActionable ranks with it for both lanes.
 func moreImpactfulActionable(left, right actionableCandidate) bool {
 	if left.ImpactVisits != nil || right.ImpactVisits != nil {
 		if left.ImpactVisits == nil {
@@ -408,27 +412,6 @@ func takeWithOldestWaiter(eligible, ranked []actionableCandidate, limit int) ([]
 		picked = append(picked, ranked[limit-1])
 	}
 	return picked, len(eligible) - len(picked)
-}
-
-// selectOnCardEligibleFirst is the ON card lane's selector. The scarce resource
-// the cap rations is an authored card, so an incident that can earn one ranks
-// above one that can only ever render its mechanical receipt, whatever their
-// impact. Within each of those two groups the impact ordering is unchanged, and
-// the oldest waiting item still holds its own slot.
-//
-// The OFF receipts lane keeps selectActionable, where every candidate is
-// already publishable and this split would be a no-op.
-func selectOnCardEligibleFirst(eligible []actionableCandidate, limit int) ([]actionableCandidate, int) {
-	ranked := append([]actionableCandidate(nil), eligible...)
-	sort.SliceStable(ranked, func(i, j int) bool {
-		left, right := ranked[i], ranked[j]
-		leftCard, rightCard := actionablePublishable(left), actionablePublishable(right)
-		if leftCard != rightCard {
-			return leftCard
-		}
-		return moreImpactfulActionable(left, right)
-	})
-	return takeWithOldestWaiter(eligible, ranked, limit)
 }
 
 func toReceiptItems(candidates []actionableCandidate) ([]notify.ReceiptItem, error) {

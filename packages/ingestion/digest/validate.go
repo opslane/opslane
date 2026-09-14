@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"net"
 	"net/url"
 	"os"
 	"regexp"
@@ -17,9 +19,9 @@ import (
 	"unicode"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	ingestiondb "github.com/opslane/opslane/packages/ingestion/db"
-	"github.com/opslane/opslane/packages/ingestion/narrative"
 	"github.com/opslane/opslane/packages/ingestion/notify"
 )
 
@@ -87,8 +89,8 @@ func cardIdentity(errorGroupID, episodeID string) string {
 // renderer can acquire a durable publication receipt.
 //
 // The mode decides who pays for the budget, exactly as the renderer does: ON
-// spends one cap across decisions, receipts and fixes, because there a receipt
-// is a card that could not be authored and both are the same pending incident.
+// spends one cap across decisions, receipts and fixes. Since #496 an ON run
+// carries no receipts, so in practice its cap covers generated cards alone.
 // OFF is the rollback path — the cap covers generated cards only and every
 // receipt is delivered, which is what ships on main.
 func capDigestDelivery(
@@ -140,27 +142,60 @@ func capDigestDelivery(
 }
 
 // loadActionableCandidatesForValidation is the validator's live reload of the
-// actionable set. It is a variable so a test can inject the infrastructure
-// failure this degrade path exists for; production always uses the real query.
+// actionable set. It is a variable so a test can inject the database failure
+// that OFF degrades around and ON retries; production always uses the real
+// query.
 var loadActionableCandidatesForValidation = func(ctx context.Context, tx pgx.Tx, projectID string, status actionableStatusSet, evaluatedAt time.Time) ([]actionableCandidate, error) {
 	return loadActionableCandidates(ctx, tx, projectID, status, evaluatedAt)
 }
 
 // ValidateAndPublish rechecks model output against the immutable snapshots and
-// publishes the run, its receipts, outbox event and deliveries atomically.
+// publishes the run, its outbox event and deliveries (and, in OFF, its receipts)
+// atomically.
 func ValidateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string, secret ...[]byte) error {
 	key := []byte(os.Getenv("JWT_SECRET"))
 	if len(secret) > 0 {
 		key = secret[0]
 	}
 	err := validateAndPublish(ctx, pool, runID, key)
-	if err != nil {
+	if err != nil && !transientDatabaseError(err) {
 		// Validation and transactional failures leave no publication side effects.
 		// Marking failed separately lets the scheduler re-enqueue the same frozen run.
+		// A transient database failure leaves the run written or validated
+		// instead, so the next tick validates the same writer payload again
+		// rather than buying a rewrite.
 		_, _ = pool.Exec(ctx, `UPDATE digest_runs SET status='failed'
 			WHERE id=$1 AND status NOT IN ('delivered')`, runID)
 	}
 	return err
+}
+
+// transientDatabaseError says whether a publication failure came from the
+// database being briefly unavailable or contended, not from the digest. Only
+// those are worth retrying unchanged: connection loss (08), transaction
+// rollbacks such as serialization failures and deadlocks (40), exhausted
+// resources (53), operator intervention such as a shutdown (57), and network
+// timeouts or a dropped connection (EOF). Everything else, including a
+// malformed payload, a query bug, or a protocol violation (08P01, which a
+// client bug reproduces on every retry), fails the run so the writer gets
+// another turn.
+func transientDatabaseError(err error) bool {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && len(pgErr.Code) >= 2 {
+		if pgErr.Code == "08P01" {
+			return false
+		}
+		switch pgErr.Code[:2] {
+		case "08", "40", "53", "57":
+			return true
+		}
+	}
+	if pgconn.Timeout(err) || pgconn.SafeToRetry(err) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, context.DeadlineExceeded)
 }
 
 // internalVocabulary matches pipeline state words as whole tokens. The customer
@@ -219,8 +254,8 @@ func containsDigit(value string) bool {
 
 // validateUnifiedWrittenCard checks one authored or cached card and, when it
 // refuses a CACHED one, retires exactly that cache row. Without this a copy the
-// validator rejects stays current and demotes its card to a receipt every day
-// forever; with it, tomorrow's run re-authors.
+// validator rejects stays current and holds its card back every day forever;
+// with it, tomorrow's run re-authors.
 func validateUnifiedWrittenCard(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -234,26 +269,34 @@ func validateUnifiedWrittenCard(
 	}
 	var infrastructureError unifiedInfrastructureError
 	if errors.As(err, &infrastructureError) {
-		// The savepoint is about to roll back; another statement on this
-		// transaction would only turn a degraded section into a failed run.
+		// The transaction is about to be abandoned; another statement on it
+		// would only fail again and hide the original error.
 		return validated, renderMode, err
 	}
-	// Keyed by the full primary key, never by group alone: a concurrent writer
-	// may already have retired this row and made a newer one current, and a
-	// late validator must not clobber that replacement.
-	if _, retireErr := tx.Exec(ctx, `UPDATE digest_card_copy SET invalidated_at=now()
+	if retireErr := retireRejectedCachedCard(ctx, tx, run, candidate); retireErr != nil {
+		return validated, renderMode, unifiedInfrastructureError{retireErr}
+	}
+	slog.Warn("rejected digest card cache retired", "diagnostic", "cache_rejected",
+		"error_group_id", candidate.ErrorGroupID, "error", err)
+	return validated, renderMode, err
+}
+
+// retireRejectedCachedCard invalidates the cache row a candidate was frozen
+// with. The caller guarantees candidate.CachedCard and SpellStartedAt are set.
+// Keyed by the full primary key, never by group alone: a concurrent writer may
+// already have retired this row and made a newer one current, and a late
+// validator must not clobber that replacement.
+func retireRejectedCachedCard(ctx context.Context, tx pgx.Tx, run validationRun, candidate Candidate) error {
+	if _, err := tx.Exec(ctx, `UPDATE digest_card_copy SET invalidated_at=now()
 		WHERE error_group_id=$1 AND spell_started_at=$2 AND authored_at=$3
 		  AND invalidated_at IS NULL
 		  AND EXISTS (SELECT 1 FROM error_groups g
 		    WHERE g.id=digest_card_copy.error_group_id AND g.project_id=$4)`,
 		candidate.ErrorGroupID, *candidate.SpellStartedAt,
-		candidate.CachedCard.AuthoredAt, run.ProjectID); retireErr != nil {
-		return validated, renderMode, unifiedInfrastructureError{
-			fmt.Errorf("retire rejected digest card cache for %s: %w", candidate.ErrorGroupID, retireErr)}
+		candidate.CachedCard.AuthoredAt, run.ProjectID); err != nil {
+		return fmt.Errorf("retire rejected digest card cache for %s: %w", candidate.ErrorGroupID, err)
 	}
-	slog.Warn("rejected digest card cache retired", "diagnostic", "cache_rejected",
-		"error_group_id", candidate.ErrorGroupID, "error", err)
-	return validated, renderMode, err
+	return nil
 }
 
 func checkUnifiedWrittenCard(
@@ -274,7 +317,7 @@ func checkUnifiedWrittenCard(
 	card.Action = stripInvisible(card.Action)
 	// The instruction line has exactly one correct value, so the model does not
 	// own it: overwrite rather than compare. Demoting a good card over wording
-	// would waste the authoring call and hide the incident behind a receipt.
+	// would waste the authoring call and hold the card back.
 	// This runs before every check below, so the stamped value is what gets
 	// length-checked, cached, and rendered.
 	if candidate.SpellStartedAt != nil && candidate.ValidAction != "" {
@@ -483,7 +526,6 @@ func candidateStillUnified(ctx context.Context, tx pgx.Tx, projectID string, fro
 		current.HasSavedDiff, current.FixAttempted = hasSavedDiff, fixAttempted
 		current.ValidAction = digestAction(status, hasSavedDiff, prURL, fixAttempted)
 		current.Outcome = onCardOutcome(status)
-		current.NotCardEligible = !onCardEligible(status, prURL, rootCause, hasSavedDiff, hasValidatedDiagnosis, fixAttempted)
 	} else {
 		var outcome, summary string
 		var decidedAt time.Time
@@ -535,6 +577,15 @@ type unifiedInfrastructureError struct{ err error }
 
 func (e unifiedInfrastructureError) Error() string { return e.err.Error() }
 func (e unifiedInfrastructureError) Unwrap() error { return e.err }
+
+// ticketStillOnCard says whether a frozen ticket candidate's live facts still
+// describe the card that was frozen: the same ticket is still on the card, and
+// neither its publication generation nor its evidence moved since the freeze.
+func ticketStillOnCard(frozen Candidate, live actionableCandidate) bool {
+	facts := live.TicketFacts
+	return facts != nil && facts.OnCard() && facts.TicketID == frozen.TicketID &&
+		facts.Generation == frozen.Generation && facts.EvidenceVersion == frozen.EvidenceVersion
+}
 
 type unifiedCandidateChangedError struct{ identity string }
 
@@ -631,34 +682,11 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string, s
 			byIdentity[candidate.EpisodeID] = candidate
 		}
 	}
-	unifiedSavepointOpen := false
-	unifiedDegraded := false
-	unifiedDeliveryAlert := ""
-	if run.Mode != UnifiedCardsOff {
-		if _, err := tx.Exec(ctx, `SAVEPOINT unified_card_section`); err != nil {
-			return fmt.Errorf("open unified card savepoint: %w", err)
-		}
-		unifiedSavepointOpen = true
-	}
-	rollbackUnified := func(cause error) error {
-		if !unifiedSavepointOpen || unifiedDegraded {
-			return nil
-		}
-		if _, err := tx.Exec(ctx, `ROLLBACK TO SAVEPOINT unified_card_section`); err != nil {
-			return fmt.Errorf("roll back unified card section after %v: %w", cause, err)
-		}
-		unifiedDegraded = true
-		unifiedDeliveryAlert = "Authored digest cards could not be finalized; showing receipts instead."
-		slog.Error("unified digest card section degraded", "run_id", runID,
-			"project_id", run.ProjectID, "error", cause)
-		return nil
-	}
 	accounted := make(map[string]string, len(candidates))
 	renderModes := make(map[string]string, len(candidates))
-	// Why an incident fell back to its receipt. The freeze already stamped
-	// "never_card_eligible" for candidates publishable() refused; these are the
-	// ones that were card-eligible and lost the card at validation.
-	receiptReasons := make(map[string]string, len(candidates))
+	// Why a card-eligible incident was held back: the validation error or the
+	// writer's own deferral reason. Stored as the ledger's details.held_reason.
+	heldReasons := make(map[string]string, len(candidates))
 	overflowReasons := make(map[string]string)
 	excludedReasons := make(map[string]string)
 	generated := make([]notify.GeneratedDigestCard, 0, len(payload.Included))
@@ -674,30 +702,24 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string, s
 		}
 		accounted[identity] = "included"
 		if run.Mode != UnifiedCardsOff {
-			if unifiedDegraded {
-				renderModes[identity] = "receipt_fallback"
-				receiptReasons[identity] = "card_section_degraded"
-				continue
-			}
 			validated, mode, validationErr := validateUnifiedWrittenCard(ctx, tx, run, card, candidate)
 			if validationErr != nil {
 				var infrastructureError unifiedInfrastructureError
 				if errors.As(validationErr, &infrastructureError) {
-					if err := rollbackUnified(validationErr); err != nil {
-						return err
-					}
+					// A database failure is not this card's fault, so it fails the
+					// whole attempt; ValidateAndPublish decides retry or failed.
+					return fmt.Errorf("validate digest card %s: %w", identity, validationErr)
 				}
-				slog.Warn("unified digest card fell back to receipt", "run_id", runID,
-					"error_group_id", candidate.ErrorGroupID, "mode", run.Mode, "error", validationErr)
+				slog.Warn("digest card held back", "diagnostic", "card_held_back", "run_id", runID,
+					"error_group_id", candidate.ErrorGroupID, "error", validationErr)
+				accounted[identity] = "deferred"
 				var changedError unifiedCandidateChangedError
 				if (candidate.SpellStartedAt == nil || candidate.TicketID != "") && errors.As(validationErr, &changedError) {
-					accounted[identity] = "deferred"
 					excludedReasons[identity] = reasonNotPublishable
-					delete(renderModes, identity)
 					continue
 				}
-				renderModes[identity] = "receipt_fallback"
-				receiptReasons[identity] = "card_validation_failed"
+				excludedReasons[identity] = reasonCardHeldBack
+				heldReasons[identity] = validationErr.Error()
 				continue
 			}
 			card = validated
@@ -824,18 +846,31 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string, s
 		if strings.TrimSpace(item.Reason) == "" {
 			return fmt.Errorf("deferred episode %s has no reason", item.EpisodeID)
 		}
-		if internalVocabulary.MatchString(item.Reason) {
-			return fmt.Errorf("internal vocabulary in deferred reason for episode %s", item.EpisodeID)
-		}
 		accounted[identity] = "deferred"
 		if run.Mode != UnifiedCardsOff {
-			renderModes[identity] = "receipt_fallback"
-			// The writer's own words for why this incident has no card. Once its
-			// receipt is admitted the run ledger flips the item back to
-			// "included" and drops the reason, so the freeze ledger is the only
-			// place a "card check: …" demotion is distinguishable from an
-			// incident nothing was ever going to write for.
-			receiptReasons[identity] = strings.TrimSpace(item.Reason)
+			excludedReasons[identity] = reasonCardHeldBack
+			heldReasons[identity] = strings.TrimSpace(item.Reason)
+			// A leaked pipeline word is the writer's fault in one sentence, not a
+			// reason to lose every sibling card; the ledger records the fact
+			// without storing the word.
+			if internalVocabulary.MatchString(item.Reason) {
+				heldReasons[identity] = "the writer's deferral reason used internal vocabulary"
+			}
+			// The worker re-grounds a cached card and defers it when that fails,
+			// so a rejected cache row can arrive here instead of through the card
+			// loop. Retire it the same way, or the incident stays held back until
+			// its fingerprint moves.
+			if candidate.CachedCard != nil && candidate.SpellStartedAt != nil {
+				if err := retireRejectedCachedCard(ctx, tx, run, candidate); err != nil {
+					return err
+				}
+				slog.Warn("deferred digest card cache retired", "diagnostic", "cache_rejected",
+					"error_group_id", candidate.ErrorGroupID, "reason", heldReasons[identity])
+			}
+			continue
+		}
+		if internalVocabulary.MatchString(item.Reason) {
+			return fmt.Errorf("internal vocabulary in deferred reason for episode %s", item.EpisodeID)
 		}
 	}
 	for _, candidate := range candidates {
@@ -843,24 +878,11 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string, s
 		if accounted[identity] == "" {
 			if run.Mode != UnifiedCardsOff {
 				accounted[identity] = "deferred"
-				renderModes[identity] = "receipt_fallback"
+				excludedReasons[identity] = reasonCardHeldBack
+				heldReasons[identity] = "the writer did not account for this incident"
 				continue
 			}
 			return fmt.Errorf("candidate %s was not accounted for", identity)
-		}
-	}
-	if unifiedDegraded {
-		kept := generated[:0]
-		for _, card := range generated {
-			if candidate, ok := byIdentity[card.IncidentID]; ok && candidate.SpellStartedAt == nil {
-				kept = append(kept, card)
-			}
-		}
-		generated = kept
-		for _, candidate := range candidates {
-			if candidate.SpellStartedAt != nil {
-				renderModes[candidateIdentity(candidate)] = "receipt_fallback"
-			}
 		}
 	}
 
@@ -874,291 +896,173 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string, s
 		return generated[i].Outcome == "needs_human" && generated[j].Outcome != "needs_human"
 	})
 	overflowCount := 0
-	// The cross-lane dedup set is built from the PRE-truncation card list: a
-	// card deferred past the render cap is re-admitted to tomorrow's frozen
-	// digest, and letting today's receipt lane also deliver it would show the
-	// same incident twice across two days while today's overflow count
-	// contradicts the receipts below it.
-	frozenIncidentIDs := make(map[string]bool, len(generated))
-	for _, card := range generated {
-		frozenIncidentIDs[card.IncidentID] = true
-	}
-	// Actionable receipts and their candidate ledger are one publication unit:
-	// ledger "included" plus this run's delivered status is the durable receipt
-	// publication record. Episode-keyed issue_publications remains owned by the
-	// frozen lane above. A savepoint keeps failures in this additive lane from
-	// suppressing otherwise valid frozen cards.
 	receiptItems := []notify.ReceiptItem(nil)
-	actionableBaseReceipts := []notify.ReceiptItem(nil)
 	receiptOverflow := 0
 	deliveryAlert := ""
-	if _, err := tx.Exec(ctx, `SAVEPOINT actionable_delivery`); err != nil {
-		return fmt.Errorf("open actionable delivery savepoint: %w", err)
-	}
-	var actionableErr error
 	var actionableEvaluatedAt time.Time
 	actionableByGroup := make(map[string]actionableCandidate)
-	if err := tx.QueryRow(ctx, `SELECT transaction_timestamp()`).Scan(&actionableEvaluatedAt); err != nil {
-		actionableErr = fmt.Errorf("load actionable evaluation clock: %w", err)
-	}
-	var actionableEval evaluation
-	if actionableErr == nil {
-		statusSQL := m1ActionableStatusSQL
-		if run.Mode == UnifiedCardsOn {
-			statusSQL = onCardStatusSQL
+	if run.Mode == UnifiedCardsOn {
+		if err := tx.QueryRow(ctx, `SELECT transaction_timestamp()`).Scan(&actionableEvaluatedAt); err != nil {
+			return fmt.Errorf("load actionable evaluation clock: %w", err)
 		}
-		actionableCandidates, err := loadActionableCandidatesForValidation(ctx, tx, run.ProjectID, statusSQL, run.WindowTo)
+		live, err := loadActionableCandidatesForValidation(ctx, tx, run.ProjectID, onCardStatusSQL, run.WindowTo)
 		if err != nil {
-			actionableErr = err
-		} else {
-			actionableByGroup = make(map[string]actionableCandidate, len(actionableCandidates))
-			for _, candidate := range actionableCandidates {
-				actionableByGroup[candidate.GroupID] = candidate
-			}
+			return fmt.Errorf("reload actionable digest candidates: %w", err)
 		}
-		if actionableErr == nil && run.Mode == UnifiedCardsOn {
-			actionableEval = evaluation{Excluded: map[string]string{}}
-			for _, frozen := range candidates {
-				identity := candidateIdentity(frozen)
-				if renderModes[identity] != "receipt_fallback" {
-					continue
-				}
-				// Only "stopped waiting" removes an incident here. A moved
-				// spell means the ASK changed since the freeze (migration 066
-				// resets the waiting age on every action-class change, so a
-				// minutes-long gap is enough) — the incident is still waiting,
-				// and its receipt is mechanical, built from the live row below.
-				live, ok := actionableByGroup[frozen.ErrorGroupID]
-				snoozed := ok && live.SnoozedUntil != nil && live.SnoozedUntil.After(actionableEvaluatedAt)
-				if !ok || snoozed || live.ActionableSince == nil || (frozen.TicketID != "" && (live.TicketFacts == nil || !live.TicketFacts.OnCard() || live.TicketFacts.Generation != frozen.Generation || live.TicketFacts.EvidenceVersion != frozen.EvidenceVersion)) {
-					accounted[identity] = "deferred"
-					delete(renderModes, identity)
-					reason := reasonNotPublishable
-					if snoozed {
-						reason = reasonSnoozed
-					} else if ok {
-						reason = reasonMissingWaitingAge
-					}
-					excludedReasons[identity] = reason
-					continue
-				}
-				if frozen.SpellStartedAt == nil || !live.ActionableSince.Equal(*frozen.SpellStartedAt) {
-					slog.Info("digest incident changed its ask between freeze and validation",
-						"diagnostic", "ask_changed_after_freeze",
-						"error_group_id", frozen.ErrorGroupID, "status", live.Status)
-				}
-				actionableEval.Included = append(actionableEval.Included, live)
-				actionableEval.Candidates = append(actionableEval.Candidates, live)
-			}
-		} else if actionableErr == nil {
-			actionableEval = evaluateActionable(actionableCandidates, frozenIncidentIDs, actionableEvaluatedAt)
+		for _, candidate := range live {
+			actionableByGroup[candidate.GroupID] = candidate
 		}
-	}
-	if actionableErr == nil {
-		// The replay link is decoration on a receipt. Nothing here may fail
-		// the digest: a lookup error, or a failure of the savepoint
-		// bookkeeping that isolates it, abandons link enrichment for the rest
-		// of the run and leaves every receipt intact and publishable.
-		dashboardURL := os.Getenv("DASHBOARD_URL")
-		for i := range actionableEval.Included {
-			candidate := &actionableEval.Included[i]
-			if candidate.TicketFacts != nil {
-				candidate.SessionURL = notify.BuildSessionURL(dashboardURL, candidate.TicketFacts.RepresentativeSessionID, 0)
+		// A held-back incident whose state moved since the freeze is ledgered as
+		// that move, not as a card failure: card_held_back means the incident
+		// is still waiting and still card-eligible, and only its card failed.
+		for identity, reason := range excludedReasons {
+			if reason != reasonCardHeldBack {
 				continue
 			}
-			if _, err := tx.Exec(ctx, `SAVEPOINT actionable_replay_lookup`); err != nil {
-				slog.Warn("actionable digest replay enrichment abandoned; receipts publish without links",
-					"project_id", run.ProjectID, "error", err)
-				break
+			frozen := byIdentity[identity]
+			current, ok := actionableByGroup[frozen.ErrorGroupID]
+			switch {
+			case !ok:
+				excludedReasons[identity] = reasonNotPublishable
+			case current.SnoozedUntil != nil && current.SnoozedUntil.After(actionableEvaluatedAt):
+				excludedReasons[identity] = reasonSnoozed
+			case current.ActionableSince == nil:
+				excludedReasons[identity] = reasonMissingWaitingAge
+			case frozen.TicketID != "" && !ticketStillOnCard(frozen, current):
+				excludedReasons[identity] = reasonNotPublishable
+			case !actionablePublishable(current):
+				excludedReasons[identity] = reasonNotPublishable
+			default:
+				continue
 			}
-			// Prefer a recording from the current spell; fall back to the
-			// incident's history when the spell is too young to have one
-			// (see watchableSessionAnySpell for why that is bounded).
-			replayFloor := time.Time{}
-			if candidate.ActionableSince != nil {
-				replayFloor = *candidate.ActionableSince
+			delete(heldReasons, identity)
+		}
+	} else {
+		// Actionable receipts and their candidate ledger are one publication unit:
+		// ledger "included" plus this run's delivered status is the durable receipt
+		// publication record. Episode-keyed issue_publications remains owned by the
+		// frozen lane above. A savepoint keeps failures in this additive lane from
+		// suppressing otherwise valid frozen cards.
+		//
+		// The cross-lane dedup set is built from the PRE-truncation card list: a
+		// card deferred past the render cap is re-admitted to tomorrow's frozen
+		// digest, and letting today's receipt lane also deliver it would show the
+		// same incident twice across two days while today's overflow count
+		// contradicts the receipts below it.
+		frozenIncidentIDs := make(map[string]bool, len(generated))
+		for _, card := range generated {
+			frozenIncidentIDs[card.IncidentID] = true
+		}
+		if _, err := tx.Exec(ctx, `SAVEPOINT actionable_delivery`); err != nil {
+			return fmt.Errorf("open actionable delivery savepoint: %w", err)
+		}
+		var actionableErr error
+		if err := tx.QueryRow(ctx, `SELECT transaction_timestamp()`).Scan(&actionableEvaluatedAt); err != nil {
+			actionableErr = fmt.Errorf("load actionable evaluation clock: %w", err)
+		}
+		var actionableEval evaluation
+		if actionableErr == nil {
+			actionableCandidates, err := loadActionableCandidatesForValidation(ctx, tx, run.ProjectID, m1ActionableStatusSQL, run.WindowTo)
+			if err != nil {
+				actionableErr = err
+			} else {
+				actionableEval = evaluateActionable(actionableCandidates, frozenIncidentIDs, actionableEvaluatedAt)
 			}
-			sessionID, anchorMs, ok, lookupErr := watchableSessionAnySpell(ctx, tx, candidate.GroupID, run.ProjectID, replayFloor)
-			if lookupErr != nil {
-				slog.Warn("actionable digest replay lookup failed; omitting the link", "group_id", candidate.GroupID, "project_id", run.ProjectID, "error", lookupErr)
-				if _, err := tx.Exec(ctx, `ROLLBACK TO SAVEPOINT actionable_replay_lookup`); err != nil {
-					// The transaction is no longer usable for enrichment;
-					// stop touching it and let the receipts lane proceed.
-					slog.Warn("actionable digest replay enrichment abandoned after rollback failure",
+		}
+		if actionableErr == nil {
+			// The replay link is decoration on a receipt. Nothing here may fail
+			// the digest: a lookup error, or a failure of the savepoint
+			// bookkeeping that isolates it, abandons link enrichment for the rest
+			// of the run and leaves every receipt intact and publishable.
+			dashboardURL := os.Getenv("DASHBOARD_URL")
+			for i := range actionableEval.Included {
+				candidate := &actionableEval.Included[i]
+				if candidate.TicketFacts != nil {
+					candidate.SessionURL = notify.BuildSessionURL(dashboardURL, candidate.TicketFacts.RepresentativeSessionID, 0)
+					continue
+				}
+				if _, err := tx.Exec(ctx, `SAVEPOINT actionable_replay_lookup`); err != nil {
+					slog.Warn("actionable digest replay enrichment abandoned; receipts publish without links",
 						"project_id", run.ProjectID, "error", err)
 					break
 				}
-			} else if ok {
-				candidate.SessionURL = notify.BuildSessionURL(dashboardURL, sessionID, anchorMs)
-			}
-			if _, err := tx.Exec(ctx, `RELEASE SAVEPOINT actionable_replay_lookup`); err != nil {
-				slog.Warn("actionable digest replay enrichment abandoned after release failure",
-					"project_id", run.ProjectID, "error", err)
-				break
-			}
-		}
-	}
-	if actionableErr == nil {
-		var err error
-		receiptItems, err = toReceiptItems(actionableEval.Included)
-		if err != nil {
-			actionableErr = fmt.Errorf("map actionable receipts: %w", err)
-		}
-		receiptOverflow = actionableEval.Overflow
-		// Whether this incident could ever earn an authored card is answered
-		// from the live row, not from the freeze. A diagnosis validated between
-		// the freeze and now makes the incident card-worthy, and reading the
-		// frozen flag compacted it to one line anyway, hiding the cause it had
-		// just acquired. OFF never stamps this: that lane's receipts are its
-		// product, not a fallback, and its output may not drift.
-		if run.Mode == UnifiedCardsOn {
-			for i := range receiptItems {
-				identity := receiptItems[i].IncidentID
-				live, ok := actionableByGroup[identity]
-				receiptItems[i].FallbackReason = liveFallbackReason(live, ok, receiptReasons[identity])
-			}
-		}
-		actionableBaseReceipts = append(actionableBaseReceipts, receiptItems...)
-		for _, item := range receiptItems {
-			if _, ok := byIdentity[item.IncidentID]; ok {
-				accounted[item.IncidentID] = "included"
-			}
-		}
-	}
-	if actionableErr == nil && run.Mode == UnifiedCardsOff {
-		if err := writeActionableLedger(ctx, tx, runID, actionableEval, actionableEvaluatedAt); err != nil {
-			actionableErr = err
-		}
-	}
-	if actionableErr == nil {
-		var err error
-		deliveryAlert, err = reconcileActionable(actionableEval)
-		if err != nil {
-			actionableErr = fmt.Errorf("digest reconciliation failed: %w", err)
-		}
-	}
-	if actionableErr != nil {
-		if ctx.Err() != nil {
-			return fmt.Errorf("evaluate actionable digest candidates: %w", ctx.Err())
-		}
-		slog.Error("actionable digest delivery degraded", "run_id", runID, "project_id", run.ProjectID, "error", actionableErr)
-		if _, err := tx.Exec(ctx, `ROLLBACK TO SAVEPOINT actionable_delivery`); err != nil {
-			return fmt.Errorf("roll back actionable delivery savepoint: %w", err)
-		}
-		receiptItems = nil
-		receiptOverflow = 0
-		if deliveryAlert == "" {
-			deliveryAlert = "Actionable findings could not be evaluated for this digest."
-		}
-	}
-	if _, err := tx.Exec(ctx, `RELEASE SAVEPOINT actionable_delivery`); err != nil {
-		return fmt.Errorf("release actionable delivery savepoint: %w", err)
-	}
-	if actionableErr != nil && run.Mode != UnifiedCardsOff {
-		if err := rollbackUnified(actionableErr); err != nil {
-			return err
-		}
-	}
-	rebuildUnifiedFallbacks := func() {
-		generated = generated[:0]
-		receiptItems = append(receiptItems[:0], actionableBaseReceipts...)
-		receipted := make(map[string]bool, len(receiptItems))
-		for _, item := range receiptItems {
-			receipted[item.IncidentID] = true
-		}
-		for _, candidate := range candidates {
-			identity := candidateIdentity(candidate)
-			if candidate.TicketID != "" {
-				live, ok := actionableByGroup[candidate.ErrorGroupID]
-				if actionableErr != nil || !ok || live.TicketFacts == nil || !live.TicketFacts.OnCard() || live.TicketFacts.Generation != candidate.Generation || live.TicketFacts.EvidenceVersion != candidate.EvidenceVersion {
-					accounted[identity] = "deferred"
-					delete(renderModes, identity)
-					excludedReasons[identity] = reasonNotPublishable
-					continue
+				// Prefer a recording from the current spell; fall back to the
+				// incident's history when the spell is too young to have one
+				// (see watchableSessionAnySpell for why that is bounded).
+				replayFloor := time.Time{}
+				if candidate.ActionableSince != nil {
+					replayFloor = *candidate.ActionableSince
 				}
-			}
-
-			// With no live state the liveness gate cannot be evaluated, and
-			// judging it against an empty map would drop every frozen incident:
-			// a delivery alert over an empty digest. The frozen snapshot carries
-			// title, counts, status and action, so it renders the receipt and
-			// the alert says the live check did not run.
-			if candidate.SpellStartedAt != nil && actionableErr == nil {
-				// Same rule as the gate above: a changed ask is still a
-				// waiting incident, so only leaving the set or a live snooze
-				// removes it.
-				live, ok := actionableByGroup[candidate.ErrorGroupID]
-				snoozed := ok && live.SnoozedUntil != nil && live.SnoozedUntil.After(actionableEvaluatedAt)
-				if !ok || snoozed || live.ActionableSince == nil {
-					accounted[identity] = "deferred"
-					delete(renderModes, identity)
-					reason := reasonNotPublishable
-					if snoozed {
-						reason = reasonSnoozed
-					} else if ok {
-						reason = reasonMissingWaitingAge
+				sessionID, anchorMs, ok, lookupErr := watchableSessionAnySpell(ctx, tx, candidate.GroupID, run.ProjectID, replayFloor)
+				if lookupErr != nil {
+					slog.Warn("actionable digest replay lookup failed; omitting the link", "group_id", candidate.GroupID, "project_id", run.ProjectID, "error", lookupErr)
+					if _, err := tx.Exec(ctx, `ROLLBACK TO SAVEPOINT actionable_replay_lookup`); err != nil {
+						// The transaction is no longer usable for enrichment;
+						// stop touching it and let the receipts lane proceed.
+						slog.Warn("actionable digest replay enrichment abandoned after rollback failure",
+							"project_id", run.ProjectID, "error", err)
+						break
 					}
-					excludedReasons[identity] = reason
-					continue
+				} else if ok {
+					candidate.SessionURL = notify.BuildSessionURL(dashboardURL, sessionID, anchorMs)
+				}
+				if _, err := tx.Exec(ctx, `RELEASE SAVEPOINT actionable_replay_lookup`); err != nil {
+					slog.Warn("actionable digest replay enrichment abandoned after release failure",
+						"project_id", run.ProjectID, "error", err)
+					break
 				}
 			}
-			renderModes[identity] = "receipt_fallback"
-			if !receipted[candidate.ErrorGroupID] {
-				// Same rule as the stamp above: live eligibility when the live
-				// rows loaded, and an un-compacted receipt when they did not.
-				live, haveLive := actionableByGroup[candidate.ErrorGroupID]
-				fallbackReason := liveFallbackReason(live, haveLive && actionableErr == nil, receiptReasons[identity])
-				item := receiptForUnifiedFallback(candidate, fallbackReason)
-				if candidate.TicketID != "" {
-					// The ticket gate above requires live evidence. Rebuild
-					// its receipt from that evidence even after cache/ledger
-					// degradation, rather than reviving frozen cause prose.
-					liveItems, mapErr := toReceiptItems([]actionableCandidate{live})
-					if mapErr != nil {
-						accounted[identity] = "deferred"
-						excludedReasons[identity] = reasonNotPublishable
-						delete(renderModes, identity)
-						continue
-					}
-					item = liveItems[0]
-					item.FallbackReason = fallbackReason
-					item.SessionURL = notify.BuildSessionURL(os.Getenv("DASHBOARD_URL"), live.TicketFacts.RepresentativeSessionID, 0)
-				}
-				receiptItems = append(receiptItems, item)
-				receipted[candidate.ErrorGroupID] = true
+		}
+		if actionableErr == nil {
+			var err error
+			receiptItems, err = toReceiptItems(actionableEval.Included)
+			if err != nil {
+				actionableErr = fmt.Errorf("map actionable receipts: %w", err)
 			}
-			accounted[identity] = "included"
+			receiptOverflow = actionableEval.Overflow
+			for _, item := range receiptItems {
+				if _, ok := byIdentity[item.IncidentID]; ok {
+					accounted[item.IncidentID] = "included"
+				}
+			}
 		}
-	}
-	if unifiedDegraded {
-		rebuildUnifiedFallbacks()
-		receiptOverflow = actionableEval.Overflow
-		deliveryAlert = unifiedDeliveryAlert
-	}
-	// The ON lane caps its candidate set at freeze and ledgers the remainder as
-	// capped_overflow. Nothing carried that count into the payload, so the
-	// renderer computed an overflow of zero and the capped incidents were
-	// invisible: no card, no receipt, and no "And N more" line. Read the count
-	// the freeze already recorded (validation-time exclusions are written after
-	// this point, so this reads exactly the frozen cap).
-	frozenOverflow := 0
-	if run.Mode == UnifiedCardsOn {
-		if err := tx.QueryRow(ctx, `SELECT count(*) FROM digest_run_candidate_evaluations
-			WHERE digest_run_id=$1 AND outcome='excluded' AND primary_reason_code=$2`,
-			runID, reasonCappedOverflow).Scan(&frozenOverflow); err != nil {
-			return fmt.Errorf("count frozen digest overflow: %w", err)
+		if actionableErr == nil {
+			if err := writeActionableLedger(ctx, tx, runID, actionableEval, actionableEvaluatedAt); err != nil {
+				actionableErr = err
+			}
 		}
-		overflowCount += frozenOverflow
+		if actionableErr == nil {
+			var err error
+			deliveryAlert, err = reconcileActionable(actionableEval)
+			if err != nil {
+				actionableErr = fmt.Errorf("digest reconciliation failed: %w", err)
+			}
+		}
+		if actionableErr != nil {
+			if ctx.Err() != nil {
+				return fmt.Errorf("evaluate actionable digest candidates: %w", ctx.Err())
+			}
+			slog.Error("actionable digest delivery degraded", "run_id", runID, "project_id", run.ProjectID, "error", actionableErr)
+			if _, err := tx.Exec(ctx, `ROLLBACK TO SAVEPOINT actionable_delivery`); err != nil {
+				return fmt.Errorf("roll back actionable delivery savepoint: %w", err)
+			}
+			receiptItems = nil
+			receiptOverflow = 0
+			if deliveryAlert == "" {
+				deliveryAlert = "Actionable findings could not be evaluated for this digest."
+			}
+		}
+		if _, err := tx.Exec(ctx, `RELEASE SAVEPOINT actionable_delivery`); err != nil {
+			return fmt.Errorf("release actionable delivery savepoint: %w", err)
+		}
 	}
 	baseOverflowCount, baseReceiptOverflow := overflowCount, receiptOverflow
-	capDropped := make(map[string]bool)
 	applyDeliveryCap := func() {
 		var dropped []string
 		generated, receiptItems, overflowCount, receiptOverflow, dropped = capDigestDelivery(
 			run.Mode, generated, receiptItems, baseOverflowCount, baseReceiptOverflow,
 		)
 		for _, identity := range dropped {
-			capDropped[identity] = true
 			if _, ok := byIdentity[identity]; ok {
 				accounted[identity] = "deferred"
 				delete(renderModes, identity)
@@ -1173,50 +1077,21 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string, s
 		}
 	}
 	applyDeliveryCap()
-	var unifiedLedgerErr error
-	if run.Mode != UnifiedCardsOff && !unifiedDegraded {
+	if run.Mode != UnifiedCardsOff {
 		for _, candidate := range candidates {
 			identity := candidateIdentity(candidate)
 			renderMode := renderModes[identity]
 			if renderMode == "" {
 				continue
 			}
-			query := `UPDATE digest_run_candidate_evaluations SET phase='validation',render_mode=$3,
-				details=details || jsonb_strip_nulls(jsonb_build_object(
-				  'validated_at',$4::text,'unified_cards_mode',$5::text,
-				  'receipt_reason',NULLIF($6::text,'')))
-				WHERE digest_run_id=$1 AND error_group_id=$2 AND outcome='included'`
-			if _, err := tx.Exec(ctx, query, runID, candidate.ErrorGroupID, renderMode,
-				actionableEvaluatedAt.Format(time.RFC3339Nano), run.Mode, receiptReasons[identity]); err != nil {
-				unifiedLedgerErr = fmt.Errorf("finalize unified ledger for %s: %w", identity, err)
-				break
+			if _, err := tx.Exec(ctx, `UPDATE digest_run_candidate_evaluations SET phase='validation',render_mode=$3,
+				details=details || jsonb_build_object('validated_at',$4::text,'unified_cards_mode',$5::text)
+				WHERE digest_run_id=$1 AND error_group_id=$2 AND outcome='included'`,
+				runID, candidate.ErrorGroupID, renderMode,
+				actionableEvaluatedAt.Format(time.RFC3339Nano), run.Mode); err != nil {
+				return fmt.Errorf("finalize unified ledger for %s: %w", identity, err)
 			}
 		}
-	}
-	if unifiedLedgerErr != nil {
-		if err := rollbackUnified(unifiedLedgerErr); err != nil {
-			return err
-		}
-		for identity := range capDropped {
-			delete(excludedReasons, identity)
-			delete(overflowReasons, identity)
-			if _, ok := byIdentity[identity]; ok {
-				accounted[identity] = "included"
-			}
-		}
-		capDropped = make(map[string]bool)
-		rebuildUnifiedFallbacks()
-		// The frozen cap still holds after a unified rollback: those incidents
-		// are absent from this message either way, so their count stays.
-		baseOverflowCount, baseReceiptOverflow = frozenOverflow, actionableEval.Overflow
-		applyDeliveryCap()
-		deliveryAlert = unifiedDeliveryAlert
-	}
-	if unifiedSavepointOpen {
-		if _, err := tx.Exec(ctx, `RELEASE SAVEPOINT unified_card_section`); err != nil {
-			return fmt.Errorf("release unified card savepoint: %w", err)
-		}
-		unifiedSavepointOpen = false
 	}
 	schemaVersion := 4
 	fresh := run.Mode == UnifiedCardsOn
@@ -1235,16 +1110,14 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string, s
 		}
 	}
 	if fresh {
-		currentAction := func(group, ticket string, generation int, action string, authored bool) (actionableCandidate, error) {
+		currentAction := func(group, action string) (actionableCandidate, error) {
 			frozen := byIdentity[group]
 			live, ok := actionableByGroup[group]
-			facts := live.TicketFacts
-			if !ok || facts == nil || !facts.OnCard() || facts.TicketID != ticket || facts.Generation != generation || facts.EvidenceVersion != frozen.EvidenceVersion || ticketDigestAction(facts.FixSubstate) != action {
+			if !ok || !ticketStillOnCard(frozen, live) || ticketDigestAction(live.TicketFacts.FixSubstate) != action {
 				return actionableCandidate{}, unifiedCandidateChangedError{identity: group}
 			}
-			// Authored prose must still match the freeze. Mechanical receipts
-			// were rebuilt from this live state, so refreshed prose is valid.
-			if authored && (facts.Steps != frozen.Steps || action != frozen.ValidAction || live.Title != frozen.Title || live.RootCause != frozen.RootCause) {
+			// Authored prose must still match the freeze.
+			if live.TicketFacts.Steps != frozen.Steps || action != frozen.ValidAction || live.Title != frozen.Title || live.RootCause != frozen.RootCause {
 				return actionableCandidate{}, unifiedCandidateChangedError{identity: group}
 			}
 			return live, nil
@@ -1278,7 +1151,7 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string, s
 		for _, card := range generated {
 			if card.TicketID != "" {
 				var live actionableCandidate
-				live, err = currentAction(card.IncidentID, card.TicketID, card.Generation, card.Action, true)
+				live, err = currentAction(card.IncidentID, card.Action)
 				if err != nil {
 					if excludeStaleAction(card.IncidentID, err) {
 						continue
@@ -1299,34 +1172,15 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string, s
 			keptGenerated = append(keptGenerated, card)
 		}
 		generated = keptGenerated
-		keptReceipts := receiptItems[:0]
-		for _, item := range receiptItems {
-			if item.TicketID != "" {
-				var live actionableCandidate
-				live, err = currentAction(item.IncidentID, item.TicketID, item.Generation, item.Action, false)
-				if err != nil {
-					if excludeStaleAction(item.IncidentID, err) {
-						continue
-					}
-					return err
-				}
-				if item.Action == "Create fix PR" {
-					item.ActionURL = signedFixURL(item.IncidentID, item.TicketID, item.Generation, live.TicketFacts.LatestAttemptID)
-				} else if item.Action == "Review PR" {
-					item.PRURL = live.PRURL
-				}
-			}
-			keptReceipts = append(keptReceipts, item)
-		}
-		receiptItems = keptReceipts
 	}
 
 	for identity, reason := range excludedReasons {
 		if _, err := tx.Exec(ctx, `UPDATE digest_run_candidate_evaluations
 			SET outcome='excluded',primary_reason_code=$3,phase='validation',
 			    render_mode=NULL,
-			    details=details || jsonb_build_object('validation_exclusion',$3::text)
-			WHERE digest_run_id=$1 AND error_group_id=$2`, runID, identity, reason); err != nil {
+			    details=details || jsonb_strip_nulls(jsonb_build_object(
+			      'validation_exclusion',$3::text,'held_reason',NULLIF($4::text,'')))
+			WHERE digest_run_id=$1 AND error_group_id=$2`, runID, identity, reason, heldReasons[identity]); err != nil {
 			return fmt.Errorf("store digest validation exclusion for %s: %w", identity, err)
 		}
 	}
@@ -1337,6 +1191,31 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string, s
 	deliveredReceipts := make(map[string]bool, len(receiptItems))
 	for _, item := range receiptItems {
 		deliveredReceipts[item.IncidentID] = true
+	}
+
+	if run.Mode == UnifiedCardsOn {
+		// A v5 digest shows what a reader can act on and nothing else.
+		overflowCount, receiptOverflow = 0, 0
+	}
+	// With no card to send there is no message. The run still finishes, with its
+	// ledger committed (so a rejected cached card stays retired) and its empty
+	// payload stored, so the read API and MCP report today's digest as empty
+	// instead of resurfacing yesterday's cards.
+	send := run.Mode != UnifiedCardsOn || len(generated) > 0
+	if !send {
+		if len(heldReasons) > 0 {
+			// Every card that could have shipped failed its checks. One day of
+			// this is a bad writer run; a streak is a broken card lane, and this
+			// line is the only place it shows outside the ledger.
+			slog.Warn("digest held back every card", "diagnostic", "digest_all_cards_held_back",
+				"run_id", runID, "project_id", run.ProjectID, "held_back", len(heldReasons))
+		} else {
+			slog.Info("digest has no card to send", "diagnostic", "digest_nothing_to_send",
+				"run_id", runID, "project_id", run.ProjectID)
+		}
+		// The merged-PR footer only accompanies cards; alone it would make the
+		// stored digest read as non-empty to the read API and MCP.
+		merged = nil
 	}
 
 	eventPayload := notify.EventPayload{
@@ -1373,9 +1252,16 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string, s
 	for identity, outcome := range accounted {
 		reason := ""
 		if outcome == "deferred" {
+			// Precedence: the writer's own deferral reason, then why validation
+			// held the card back, then the render cap.
 			reason = overflowReasons[identity]
+			if held := heldReasons[identity]; held != "" {
+				reason = held
+			}
 			for _, item := range payload.Deferred {
-				if cardIdentity(item.ErrorGroupID, item.EpisodeID) == identity {
+				// A reason carrying internal vocabulary already failed an OFF run;
+				// in ON its held reason above stands in for it.
+				if cardIdentity(item.ErrorGroupID, item.EpisodeID) == identity && !internalVocabulary.MatchString(item.Reason) {
 					reason = strings.TrimSpace(item.Reason)
 					break
 				}
@@ -1403,22 +1289,24 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string, s
 			}
 		}
 	}
-	var eventID string
-	if err := tx.QueryRow(ctx, `INSERT INTO outbound_events (project_id,event_type,dedup_key,payload)
-		VALUES ($1,'digest.daily',$2,$3::jsonb)
-		ON CONFLICT (project_id,dedup_key) DO UPDATE SET dedup_key=EXCLUDED.dedup_key
-		RETURNING id::text`, run.ProjectID, "digest.daily:"+run.ProjectID+":"+runID, eventJSON).Scan(&eventID); err != nil {
-		return fmt.Errorf("write digest outbox event: %w", err)
-	}
-	deliveries, err := tx.Exec(ctx, `INSERT INTO outbound_deliveries (event_id,destination_id)
-		SELECT $1,id FROM notification_destinations
-		 WHERE project_id=$2 AND enabled AND 'digest.daily'=ANY(event_types)
-		ON CONFLICT (event_id,destination_id) DO NOTHING`, eventID, run.ProjectID)
-	if err != nil {
-		return fmt.Errorf("write digest deliveries: %w", err)
-	}
-	if deliveries.RowsAffected() == 0 {
-		return errors.New("digest has no enabled destination")
+	if send {
+		var eventID string
+		if err := tx.QueryRow(ctx, `INSERT INTO outbound_events (project_id,event_type,dedup_key,payload)
+			VALUES ($1,'digest.daily',$2,$3::jsonb)
+			ON CONFLICT (project_id,dedup_key) DO UPDATE SET dedup_key=EXCLUDED.dedup_key
+			RETURNING id::text`, run.ProjectID, "digest.daily:"+run.ProjectID+":"+runID, eventJSON).Scan(&eventID); err != nil {
+			return fmt.Errorf("write digest outbox event: %w", err)
+		}
+		deliveries, err := tx.Exec(ctx, `INSERT INTO outbound_deliveries (event_id,destination_id)
+			SELECT $1,id FROM notification_destinations
+			 WHERE project_id=$2 AND enabled AND 'digest.daily'=ANY(event_types)
+			ON CONFLICT (event_id,destination_id) DO NOTHING`, eventID, run.ProjectID)
+		if err != nil {
+			return fmt.Errorf("write digest deliveries: %w", err)
+		}
+		if deliveries.RowsAffected() == 0 {
+			return errors.New("digest has no enabled destination")
+		}
 	}
 	if _, err := tx.Exec(ctx, `UPDATE digest_runs SET status='delivered',rendered_payload=$2::jsonb
 		WHERE id=$1`, runID, eventJSON); err != nil {
@@ -1428,87 +1316,6 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string, s
 		return fmt.Errorf("commit digest publication: %w", err)
 	}
 	return nil
-}
-
-// cardCheckReasonPrefix marks a deferral the writer produced by failing one
-// card's own factual checks. Its twin is CARD_CHECK_REASON_PREFIX in
-// packages/worker/src/digest-writer/job.ts; change both together.
-const cardCheckReasonPrefix = "card check: "
-
-// writerDemotedCard says whether the writer had a card for this incident and
-// threw it away over its own facts. Such a receipt always renders in full: it
-// records an authoring failure a reader should be able to see, unlike an
-// incident nothing was ever going to write for, which compacts to one line.
-func writerDemotedCard(reason string) bool {
-	return strings.HasPrefix(reason, cardCheckReasonPrefix)
-}
-
-// liveFallbackReason decides whether a receipt compacts to one line, from
-// today's incident state rather than the freeze's. Only an incident nothing
-// was ever going to write a card for compacts; everything else marks an
-// authoring failure a reader should see in full.
-//
-// An empty answer is the safe default, and it is what a caller with no live
-// row gets: an un-compacted receipt shows more than it needs to, while a
-// wrongly compacted one hides a cause the incident has.
-func liveFallbackReason(live actionableCandidate, haveLive bool, writerReason string) string {
-	if !haveLive || writerDemotedCard(writerReason) {
-		return ""
-	}
-	if actionablePublishable(live) {
-		return ""
-	}
-	return notify.ReceiptFallbackNeverEligible
-}
-
-// receiptForUnifiedFallback builds the receipt for a frozen candidate when the
-// authored-card section degraded. fallbackReason is decided by the caller from
-// today's eligibility, never from the frozen flag: the frozen flag is a
-// freeze-time signal for skipping a model call, and the freeze ledger keeps its
-// own historical record of it.
-func receiptForUnifiedFallback(candidate Candidate, fallbackReason string) notify.ReceiptItem {
-	state := "report_ready"
-	switch {
-	case candidate.SpellStartedAt != nil && candidate.Status != "":
-		// ON candidates carry their live status, so the receipt line is the same
-		// mechanical one prod renders today.
-		state = receiptState(candidate.Status, candidate.HasSavedDiff, candidate.FixAttempted)
-	case candidate.Outcome == "verified_fix" && candidate.PRURL != "":
-		state = "pr_open"
-	}
-	// Sanitized exactly like toReceiptItems and build.go: this item is
-	// persisted in digest_runs.rendered_payload and shipped in the outbox
-	// event, so the renderer cleaning prose again on the way out would not
-	// un-persist a leaked secret. HasSavedDiff is carried for the same reason
-	// its state is: the two constructors must emit the same item for one
-	// incident.
-	item := notify.ReceiptItem{
-		Kind: candidate.Kind, IncidentID: candidate.ErrorGroupID, AffectedUsers: candidate.AffectedUsers,
-		Title:           narrative.SanitizeExcerpt(candidate.Title, excerptMax),
-		OccurrenceCount: int64(candidate.OccurrenceCount), ReceiptState: state,
-		PRURL: candidate.PRURL, HasSavedDiff: candidate.HasSavedDiff,
-		HasValidatedDiagnosis: candidate.HasValidatedDiagnosis,
-		ActionableSince:       candidate.SpellStartedAt,
-	}
-	item.FallbackReason = fallbackReason
-	if candidate.TicketID != "" {
-		item.Copy = narrative.SanitizeExcerpt(candidate.RepresentativeNote, excerptMax)
-		item.TicketID = candidate.TicketID
-		item.Generation = candidate.Generation
-		item.LatestAttemptID = candidate.LatestAttemptID
-		item.Steps = candidate.Steps
-		item.VerifiedUsers = candidate.VerifiedUsers
-		item.VerifiedSessions = candidate.VerifiedSessions
-		item.Coverage = candidate.Coverage
-		item.Accounts = candidate.Accounts
-		item.Action = candidate.ValidAction
-		item.SessionURL = notify.BuildSessionURL(os.Getenv("DASHBOARD_URL"), candidate.RepresentativeSessionID, 0)
-	}
-	if candidate.HasValidatedDiagnosis {
-		item.RootCauseExcerpt = narrative.SanitizeExcerpt(candidate.RootCause, excerptMax)
-		item.MitigationExcerpt = narrative.SanitizeExcerpt(candidate.Mitigation, excerptMax)
-	}
-	return item
 }
 
 func loadValidationCandidates(ctx context.Context, tx pgx.Tx, projectID, runID string) ([]Candidate, error) {

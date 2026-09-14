@@ -1,5 +1,7 @@
 # Digest fixes: one action-only card lane
 
+> **Partly superseded 2026-09-14 (#496).** The digest now sends only cards that passed their checks. A card that fails validation, or that the writer defers, is held back and ledgered `card_held_back`; it never falls back to a mechanical receipt. An incident `publishable()` refuses is excluded at freeze as `not_publishable`. A database failure during validation leaves the run `written` for the scheduler to revalidate instead of degrading to receipts with a delivery alert. The v5 digest has no incident overflow line, and a day with no card sends no message. Requirements and paragraphs below that promise receipt fallback, never-eligible receipts, compact receipts, overflow lines, or "every waiting incident appears" describe the earlier contract.
+
 **Status:** approved design, pre-implementation. Companion plan: `docs/superpowers/plans/2026-08-28-unified-cards-fixes.md`. Supersedes the lane split and shadow mode in `docs/design/2026-08-27-unified-digest-cards.md`.
 
 ## Summary in plain words
