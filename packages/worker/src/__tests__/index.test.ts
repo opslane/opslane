@@ -17,6 +17,12 @@ const analysisDbClient = vi.hoisted(() => ({
 // (hasNoAppFrames) — that's the decision under test.
 vi.mock('../db.js', async () => ({
   LeaseLostError: class LeaseLostError extends Error {},
+  JobCompletedInTransaction: class JobCompletedInTransaction extends Error {
+    constructor(jobId: string) {
+      super(`Job ${jobId} completed in its finalizer transaction`);
+      this.name = 'JobCompletedInTransaction';
+    }
+  },
   getErrorGroup: vi.fn(),
   getErrorEvent: vi.fn(),
   getProject: vi.fn(),
@@ -1251,7 +1257,9 @@ describe('processFixJob — preserves writeup on failure (no revert/null)', () =
     vi.mocked(db.restoreDiagnosisAfterIncompleteFix).mockResolvedValue('restored');
     mockRunPipeline.mockResolvedValue(budgetExhausted());
 
-    await processFixJob(fixJob(), new AbortController().signal);
+    // The restore completed the job in its transaction, so the poller must not complete it again.
+    await expect(processFixJob(fixJob(), new AbortController().signal))
+      .rejects.toBeInstanceOf(db.JobCompletedInTransaction);
 
     expect(db.restoreDiagnosisAfterIncompleteFix).toHaveBeenCalledWith(fixJob(), { reason: budgetDecisionReason });
     expect(mockUpdateGroupStatus).not.toHaveBeenCalled();
@@ -1270,19 +1278,43 @@ describe('processFixJob — preserves writeup on failure (no revert/null)', () =
       },
     });
 
-    await processFixJob(fixJob(), new AbortController().signal);
+    await expect(processFixJob(fixJob(), new AbortController().signal))
+      .rejects.toBeInstanceOf(db.JobCompletedInTransaction);
 
     expect(db.restoreDiagnosisAfterIncompleteFix).toHaveBeenCalledWith(fixJob(), {
       reason: `${INCOMPLETE_REASON_MESSAGES.worker_runtime_error} Required action: ${DEFAULT_REMEDIATION.worker_runtime_error}`,
     });
     expect(mockUpdateGroupStatus).not.toHaveBeenCalled();
+    expect(db.recordFixTerminalDecision).not.toHaveBeenCalled();
+    expect(JSON.stringify(vi.mocked(db.restoreDiagnosisAfterIncompleteFix).mock.calls)).not.toContain('exploded');
   });
 
   it('writes nothing more when the group left fixing during the run', async () => {
     vi.mocked(db.restoreDiagnosisAfterIncompleteFix).mockResolvedValue('status_changed');
     mockRunPipeline.mockResolvedValue(budgetExhausted());
 
-    await processFixJob(fixJob(), new AbortController().signal);
+    await expect(processFixJob(fixJob(), new AbortController().signal))
+      .rejects.toBeInstanceOf(db.JobCompletedInTransaction);
+
+    expect(mockUpdateGroupStatus).not.toHaveBeenCalled();
+    expect(db.recordFixTerminalDecision).not.toHaveBeenCalled();
+  });
+
+  it('hands the in-transaction completion to the poller instead of terminalizing it', async () => {
+    vi.mocked(db.restoreDiagnosisAfterIncompleteFix).mockResolvedValue('restored');
+    mockRunPipeline.mockResolvedValue(budgetExhausted());
+
+    await expect(processJobInner(fixJob(), new AbortController().signal))
+      .rejects.toBeInstanceOf(db.JobCompletedInTransaction);
+
+    expect(mockUpdateGroupStatus).not.toHaveBeenCalled();
+  });
+
+  it('rethrows a lost lease from the restore without writing needs_human', async () => {
+    vi.mocked(db.restoreDiagnosisAfterIncompleteFix).mockRejectedValue(new db.LeaseLostError('Job lease lost for j1'));
+    mockRunPipeline.mockResolvedValue(budgetExhausted());
+
+    await expect(processJobInner(fixJob(), new AbortController().signal)).rejects.toThrow('lease lost');
 
     expect(mockUpdateGroupStatus).not.toHaveBeenCalled();
     expect(db.recordFixTerminalDecision).not.toHaveBeenCalled();

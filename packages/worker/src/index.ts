@@ -454,6 +454,8 @@ export async function processJobInner(job: ClaimedJob, signal: AbortSignal): Pro
       if (signal.aborted || message.includes('lease lost')) {
         throw err;
       }
+      // Not a failure: the finalizer already completed the job.
+      if (err instanceof db.JobCompletedInTransaction) throw err;
       if (errorJob.ticketId) throw err;
       if (err instanceof VerificationInfraError) {
         const finalAttempt = errorJob.attempts + 1 >= (errorJob.maxAttempts ?? 3);
@@ -1779,7 +1781,7 @@ export async function processFixJob(job: ClaimedJob & { errorGroupId: string }, 
 
       if (incomplete && !job.ticketId) {
         const restore = await db.restoreDiagnosisAfterIncompleteFix(job, { reason: decisionReason });
-        if (restore !== 'no_completed_diagnosis') {
+        if (restore === 'restored' || restore === 'status_changed') {
           jobsFailed++;
           lastJobAt = new Date().toISOString();
           logger.warn('Fix job incomplete: completed diagnosis kept', {
@@ -1788,7 +1790,8 @@ export async function processFixJob(job: ClaimedJob & { errorGroupId: string }, 
             reason_code: terminalReason.reason_code,
             restore,
           });
-          return;
+          // The restore completed the job in its own transaction.
+          throw new db.JobCompletedInTransaction(job.id);
         }
       }
 
