@@ -113,26 +113,54 @@ describe('setUser / clearUser', () => {
     });
   });
 
-  it('ignores IDs that are neither strings nor finite numbers', () => {
-    for (const id of [Number.NaN, Number.POSITIVE_INFINITY, null, undefined, {}, true]) {
+  it.each([
+    [-1, '-1'],
+    [Number.MAX_SAFE_INTEGER, '9007199254740991'],
+    [12345678901234567890n, '12345678901234567890'],
+  ])('sends integer id %s as %s', (input, expected) => {
+    setUser({ id: input });
+    expect(userOnNextPayload()?.id).toBe(expected);
+  });
+
+  it('ignores values that are not usable IDs', () => {
+    for (const id of [0, 0n, 1.5, Number.MAX_SAFE_INTEGER + 2, 1e21, Number.NaN, Number.POSITIVE_INFINITY, null, undefined, {}, true, '', 'undefined', 'null', 'x'.repeat(257)]) {
       setUser({ id } as never);
       expect(userOnNextPayload()).toBeUndefined();
     }
   });
 
-  it('drops an account whose ID is missing or invalid but keeps the user', () => {
-    setUser({ id: 'u-1', account: { id: '', name: 'Acme Corp' } });
+  it('keeps the account name when the account ID is missing or invalid', () => {
+    for (const id of [undefined, '', 1.5, Number.NaN, null, {}]) {
+      setUser({ id: 'u-1', account: { id, name: 'Acme Corp' } } as never);
+      expect(userOnNextPayload()).toEqual({
+        id: 'u-1',
+        email: undefined,
+        account_id: undefined,
+        account_name: 'Acme Corp',
+      });
+    }
+  });
 
-    expect(userOnNextPayload()).toEqual({
-      id: 'u-1',
-      email: undefined,
-      account_id: undefined,
-      account_name: undefined,
-    });
+  it('drops an email or account name that is not a string or is oversized', () => {
+    setUser({ id: 'u-1', email: 5, account: { id: 'a-1', name: { x: 1 } } } as never);
+    expect(userOnNextPayload()).toEqual({ id: 'u-1', email: undefined, account_id: 'a-1', account_name: undefined });
+
+    setUser({ id: 'u-1', email: `${'a'.repeat(511)}@x`, account: { id: 'a-1', name: 'n'.repeat(513) } });
+
+    expect(userOnNextPayload()).toEqual({ id: 'u-1', email: undefined, account_id: 'a-1', account_name: undefined });
+  });
+
+  it('reflects later changes to the identity object', () => {
+    const user: { id: string; email?: string } = { id: 'u-1' };
+    setUser(user);
+    user.email = 'alice@acme.com';
+
+    expect(userOnNextPayload()?.email).toBe('alice@acme.com');
   });
 
   it('does not throw when called without an identity', () => {
     expect(() => setUser(undefined as never)).not.toThrow();
+    expect(() => setUser(null as never)).not.toThrow();
     expect(userOnNextPayload()).toBeUndefined();
   });
 });

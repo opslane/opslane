@@ -62,4 +62,15 @@ describe('setUser session rotation', () => {
     setUser({ id: '42' });
     expect(getSessionId()).toBe(first);
   });
+
+  it('keeps the current user and session when a later call has no valid ID', () => {
+    setUser({ id: 'alice' });
+    const session = getSessionId();
+    const listener = vi.fn();
+    onIdentityChange(listener);
+    setUser({ id: Number.NaN } as never);
+    expect(getCurrentUser()?.id).toBe('alice');
+    expect(getSessionId()).toBe(session);
+    expect(listener).not.toHaveBeenCalled();
+  });
 });
