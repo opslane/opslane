@@ -24,7 +24,7 @@ import {
   recordJobUsage,
   resolveEvidenceEventId,
 } from './db.js';
-import { buildReason, reasonCodeForDecision, reproductionRemediation } from './reason-codes.js';
+import { buildReason, incompleteReason, isIncompleteReasonCode, reasonCodeForDecision, reproductionRemediation } from './reason-codes.js';
 import { logger, safeErrorMessage, setWorkerId } from './logger.js';
 import { fetchObject, getMinIOConfig, putFrameObject } from './minio-client.js';
 import { INVESTIGATION_MODEL, investigateError } from './investigate.js';
@@ -1767,12 +1767,36 @@ export async function processFixJob(job: ClaimedJob & { errorGroupId: string }, 
     } else {
       // Fix did not clear the precision floor (or failed) — terminate as needs_human,
       // preserving the full writeup (reason + confidence). root_cause is untouched.
-      const terminalReason = result.reason ?? buildReason('worker_runtime_error', 'Fix pipeline failed without a reason');
+      // An incomplete run (the agent stopped early, or the harness crashed) is the
+      // exception: it proves nothing about the diagnosis, so it writes fixed copy
+      // and, when its source diagnosis is a code_fix, returns the group to it.
+      const pipelineCode = result.reason?.reason_code;
+      const incomplete = isIncompleteReasonCode(pipelineCode) ? incompleteReason(pipelineCode) : null;
+      const terminalReason = incomplete
+        ?? result.reason
+        ?? buildReason('worker_runtime_error', 'Fix pipeline failed without a reason');
+      const decisionReason = `${terminalReason.reason_message} Required action: ${terminalReason.remediation}`;
+
+      if (incomplete && !job.ticketId) {
+        const restore = await db.restoreDiagnosisAfterIncompleteFix(job, { reason: decisionReason });
+        if (restore !== 'no_completed_diagnosis') {
+          jobsFailed++;
+          lastJobAt = new Date().toISOString();
+          logger.warn('Fix job incomplete: completed diagnosis kept', {
+            job_id: job.id,
+            duration_ms: durationMs,
+            reason_code: terminalReason.reason_code,
+            restore,
+          });
+          return;
+        }
+      }
+
       await db.recordFixTerminalDecision({
         lease: job,
         episodeId: job.episodeId ?? null,
         outcome: 'needs_human',
-        reason: `${terminalReason.reason_message} Required action: ${terminalReason.remediation}`,
+        reason: decisionReason,
         confidence: result.confidence ?? 'low',
       });
       await updateGroupStatus(job.errorGroupId, job.projectId, 'needs_human', {
@@ -1784,7 +1808,7 @@ export async function processFixJob(job: ClaimedJob & { errorGroupId: string }, 
       }, job);
       jobsFailed++;
       logger.warn('Fix job completed: needs_human (writeup preserved)', {
-        job_id: job.id, duration_ms: durationMs, reason_code: result.reason?.reason_code, confidence: result.confidence,
+        job_id: job.id, duration_ms: durationMs, reason_code: terminalReason.reason_code, confidence: result.confidence,
       });
     }
   } finally {
