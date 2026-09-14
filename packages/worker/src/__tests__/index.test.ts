@@ -62,6 +62,7 @@ vi.mock('../db.js', async () => ({
   finalizeDelivery: vi.fn(),
   recordJobUsage: vi.fn(),
   recordFixTerminalDecision: vi.fn(),
+  restoreDiagnosisAfterIncompleteFix: vi.fn(),
   recordInvestigatedCommit: vi.fn(),
   getGroupImpactBar: vi.fn(async () => ({ identifiedUsers: 1, recentAnonSessions: 0, eligible: true })),
   getFrictionGroupImpactBar: vi.fn(async () => ({ identifiedUsers: 5, recentAnonSessions: 0, eligible: true })),
@@ -223,6 +224,7 @@ const { getActiveTraceId } = await import('../tracing.js');
 const { logger } = await import('../logger.js');
 const billing = await import('../billing.js');
 const { emitUsageEvent } = await import('../usage-events.js');
+const { DEFAULT_REMEDIATION, INCOMPLETE_REASON_MESSAGES } = await import('../reason-codes.js');
 
 const mockGetErrorGroup = vi.mocked(db.getErrorGroup);
 const mockGetErrorEvent = vi.mocked(db.getErrorEvent);
@@ -1072,6 +1074,7 @@ describe('processFixJob — preserves writeup on failure (no revert/null)', () =
       outcome: 'needs_human',
       reason: expect.stringContaining('Required action:'),
     }));
+    expect(db.restoreDiagnosisAfterIncompleteFix).not.toHaveBeenCalled();
   });
 
   it('sets pr_created on a successful high-confidence fix', async () => {
@@ -1226,6 +1229,107 @@ describe('processFixJob — preserves writeup on failure (no revert/null)', () =
     expect(fetchMock.mock.calls[0]?.[1]).toEqual({ headers: { 'X-Internal-Token': 'secret' } });
     const pipelineInput = mockRunPipeline.mock.calls[0]?.[0];
     expect(pipelineInput?.visualAnalysis?.failureMoment).toContain('Save profile');
+  });
+
+  const chatter = 'The filesystem appears to be very slow. Let me try a simpler approach:';
+  const budgetDecisionReason =
+    `${INCOMPLETE_REASON_MESSAGES.budget_exhausted} Required action: ${DEFAULT_REMEDIATION.budget_exhausted}`;
+
+  function budgetExhausted() {
+    return {
+      status: 'needs_human' as const,
+      confidence: 'low' as const,
+      candidateDiff: 'diff --git a/partial.ts b/partial.ts',
+      reason: {
+        reason_code: 'budget_exhausted' as const,
+        reason_message: chatter,
+        remediation: 'Review the error manually — the agent could not complete within budget/turn limits',
+      },
+    };
+  }
+
+  it('keeps the completed diagnosis when the fix agent stops early', async () => {
+    vi.mocked(db.restoreDiagnosisAfterIncompleteFix).mockResolvedValue('restored');
+    mockRunPipeline.mockResolvedValue(budgetExhausted());
+
+    await processFixJob(fixJob(), new AbortController().signal);
+
+    expect(db.restoreDiagnosisAfterIncompleteFix).toHaveBeenCalledWith(fixJob(), { reason: budgetDecisionReason });
+    expect(mockUpdateGroupStatus).not.toHaveBeenCalled();
+    expect(db.recordFixTerminalDecision).not.toHaveBeenCalled();
+    expect(JSON.stringify(vi.mocked(db.restoreDiagnosisAfterIncompleteFix).mock.calls)).not.toContain('filesystem');
+  });
+
+  it('restores on a harness crash with fixed copy, not the exception text', async () => {
+    vi.mocked(db.restoreDiagnosisAfterIncompleteFix).mockResolvedValue('restored');
+    mockRunPipeline.mockResolvedValue({
+      status: 'needs_human',
+      reason: {
+        reason_code: 'worker_runtime_error',
+        reason_message: 'Agent harness error: git checkout exploded',
+        remediation: 'Review the error manually — the agent harness encountered an unexpected error',
+      },
+    });
+
+    await processFixJob(fixJob(), new AbortController().signal);
+
+    expect(db.restoreDiagnosisAfterIncompleteFix).toHaveBeenCalledWith(fixJob(), {
+      reason: `${INCOMPLETE_REASON_MESSAGES.worker_runtime_error} Required action: ${DEFAULT_REMEDIATION.worker_runtime_error}`,
+    });
+    expect(mockUpdateGroupStatus).not.toHaveBeenCalled();
+  });
+
+  it('writes nothing more when the group left fixing during the run', async () => {
+    vi.mocked(db.restoreDiagnosisAfterIncompleteFix).mockResolvedValue('status_changed');
+    mockRunPipeline.mockResolvedValue(budgetExhausted());
+
+    await processFixJob(fixJob(), new AbortController().signal);
+
+    expect(mockUpdateGroupStatus).not.toHaveBeenCalled();
+    expect(db.recordFixTerminalDecision).not.toHaveBeenCalled();
+  });
+
+  it('falls back to needs_human with fixed copy when no completed diagnosis exists', async () => {
+    vi.mocked(db.restoreDiagnosisAfterIncompleteFix).mockResolvedValue('no_completed_diagnosis');
+    mockRunPipeline.mockResolvedValue(budgetExhausted());
+
+    await processFixJob(fixJob(), new AbortController().signal);
+
+    expect(db.recordFixTerminalDecision).toHaveBeenCalledWith(expect.objectContaining({
+      outcome: 'needs_human',
+      reason: budgetDecisionReason,
+    }));
+    expect(mockUpdateGroupStatus).toHaveBeenCalledWith('g1', 'p1', 'needs_human', expect.objectContaining({
+      reason: {
+        reason_code: 'budget_exhausted',
+        reason_message: INCOMPLETE_REASON_MESSAGES.budget_exhausted,
+        remediation: DEFAULT_REMEDIATION.budget_exhausted,
+      },
+      terminalFixJobId: 'j1',
+    }), fixJob());
+  });
+
+  it('keeps the ticket attempt flow for ticket fix jobs, with fixed copy', async () => {
+    mockRunPipeline.mockResolvedValue(budgetExhausted());
+    const ticketJob = { ...fixJob(), ticketId: 'ticket-1', fixAttemptId: 'attempt-1', publicationGeneration: 1 };
+
+    await processFixJob(ticketJob, new AbortController().signal);
+
+    expect(db.restoreDiagnosisAfterIncompleteFix).not.toHaveBeenCalled();
+    expect(mockUpdateGroupStatus).toHaveBeenCalledWith('g1', 'p1', 'needs_human', expect.objectContaining({
+      reason: expect.objectContaining({ reason_message: INCOMPLETE_REASON_MESSAGES.budget_exhausted }),
+    }), ticketJob);
+  });
+
+  it('adopts a restored diagnosis when the same fix job is reclaimed', async () => {
+    mockGetErrorGroup.mockResolvedValue({
+      ...makeGroup({ id: 'g1', status: 'investigated' }),
+      terminal_fix_job_id: 'j1',
+    });
+
+    await processFixJob(fixJob(), new AbortController().signal);
+
+    expect(mockRunPipeline).not.toHaveBeenCalled();
   });
 });
 
