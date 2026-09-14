@@ -2,9 +2,13 @@ package db
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"github.com/jackc/pgx/v5"
+	"math"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -20,7 +24,15 @@ type TicketDigestFacts struct {
 	VerifiedUsers, VerifiedSessions                             int
 	Accounts, SignalIDs, ConfirmedNotes                         []string
 	RepresentativeSessionID, RepresentativeNote                 string
-	Coverage                                                    float64
+	// RepresentativeAttemptID is the representative session's finalized check
+	// attempt; RepresentativeSignalMs is that check's earliest verified signal
+	// time (0 when it verified none).
+	RepresentativeAttemptID string
+	RepresentativeSignalMs  int64
+	// RepresentativeAnchorMs is the absolute client-clock time the replay link
+	// seeks to. Only LoadTicketReplayAnchor sets it.
+	RepresentativeAnchorMs int64
+	Coverage               float64
 }
 
 func (f TicketDigestFacts) OnCard() bool {
@@ -48,15 +60,16 @@ func LoadTicketDigestFacts(ctx context.Context, q TicketEvidenceQuerier, project
 	if err != nil {
 		return nil, fmt.Errorf("load ticket digest state: %w", err)
 	}
-	rows, err := q.Query(ctx, `SELECT m.session_id,coalesce(m.end_user_id::text,''),coalesce(u.account_name,''),
- coalesce(verified.signal_ids,'{}'),a.note
+	rows, err := q.Query(ctx, `SELECT a.id::text,m.session_id,coalesce(m.end_user_id::text,''),coalesce(u.account_name,''),
+ coalesce(verified.signal_ids,'{}'),a.note,coalesce(verified.first_ms,0)
  FROM friction_tickets t JOIN friction_ticket_matches m ON m.ticket_id=t.id
  JOIN friction_checks c USING(ticket_id,session_id)
  JOIN friction_check_attempts a ON a.id=c.attempt_id AND a.ticket_id=t.id AND a.session_id=m.session_id
  JOIN friction_confirm_batches b ON b.id=a.batch_id AND b.status='finalized'
  LEFT JOIN end_users u ON u.id=m.end_user_id AND u.project_id=t.project_id
  CROSS JOIN LATERAL (
- SELECT array_agg(DISTINCT o.signal_id::text ORDER BY o.signal_id::text) AS signal_ids
+ SELECT array_agg(DISTINCT o.signal_id::text ORDER BY o.signal_id::text) AS signal_ids,
+ (extract(epoch FROM min(s.occurred_at))*1000)::bigint AS first_ms
  FROM friction_ticket_match_observations o JOIN friction_signals s ON s.id=o.signal_id
  WHERE o.ticket_id=t.id AND o.session_id=m.session_id AND a.signal_ids ? o.signal_id::text
  ) verified
@@ -70,13 +83,18 @@ func LoadTicketDigestFacts(ctx context.Context, q TicketEvidenceQuerier, project
 	defer rows.Close()
 	users, accounts, signals := map[string]bool{}, map[string]bool{}, map[string]bool{}
 	sessions := []string{}
+	attempts := []string{}
+	firstSignalMs := []int64{}
 	for rows.Next() {
-		var session, user, account, note string
+		var attempt, session, user, account, note string
 		var ids []string
-		if err := rows.Scan(&session, &user, &account, &ids, &note); err != nil {
+		var first int64
+		if err := rows.Scan(&attempt, &session, &user, &account, &ids, &note, &first); err != nil {
 			return nil, err
 		}
 		sessions = append(sessions, session)
+		attempts = append(attempts, attempt)
+		firstSignalMs = append(firstSignalMs, first)
 		f.ConfirmedNotes = append(f.ConfirmedNotes, note)
 		if user != "" {
 			users[user] = true
@@ -118,6 +136,92 @@ func LoadTicketDigestFacts(ctx context.Context, q TicketEvidenceQuerier, project
 		median := (len(sessions) - 1) / 2
 		f.RepresentativeSessionID = sessions[median]
 		f.RepresentativeNote = f.ConfirmedNotes[median]
+		f.RepresentativeAttemptID = attempts[median]
+		f.RepresentativeSignalMs = firstSignalMs[median]
 	}
 	return &f, nil
+}
+
+// LoadTicketReplayAnchor sets f.RepresentativeAnchorMs: the earliest timeline
+// line the representative session's finalized check cited, else its earliest
+// verified signal, else 0. Only digest links use it, so it is separate from
+// LoadTicketDigestFacts. The link is decoration: an attempt purged since the
+// facts were read, or malformed citations, fall back instead of failing.
+// The timeline is the one the check read: a narrative reaches status ok once
+// and its timeline is never rewritten.
+func LoadTicketReplayAnchor(ctx context.Context, q TicketEvidenceQuerier, projectID string, f *TicketDigestFacts) error {
+	if f == nil || f.RepresentativeAttemptID == "" {
+		return nil
+	}
+	f.RepresentativeAnchorMs = f.RepresentativeSignalMs
+	var evidenceLines []string
+	var timeline []byte
+	err := q.QueryRow(ctx, `SELECT ARRAY(SELECT e FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof(a.evidence_lines)='array' THEN a.evidence_lines ELSE '[]' END) e WHERE e IS NOT NULL),n.timeline
+ FROM friction_check_attempts a
+ JOIN friction_tickets t ON t.id=a.ticket_id AND t.project_id=$2
+ LEFT JOIN session_narratives n ON n.session_id=a.session_id AND n.project_id=t.project_id AND n.status='ok'
+ WHERE a.id=$1`, f.RepresentativeAttemptID, projectID).Scan(&evidenceLines, &timeline)
+	if err == pgx.ErrNoRows {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("load ticket replay anchor: %w", err)
+	}
+	if anchor, ok := timelineAnchorMs(evidenceLines, timeline); ok {
+		f.RepresentativeAnchorMs = anchor
+	}
+	return nil
+}
+
+var evidenceLineID = regexp.MustCompile(`^L(\d+)$`)
+
+// timelineAnchorMs resolves a confirmed check's cited timeline line IDs to the
+// absolute client-clock time of the earliest one. It is the Go twin of the
+// citation resolution in worker friction/confirm-job.ts loadRecording: keep the
+// 1-based L<n> IDs and the idle and untimed line skipping aligned.
+func timelineAnchorMs(evidenceLines []string, timeline []byte) (int64, bool) {
+	if len(timeline) == 0 {
+		return 0, false
+	}
+	var parsed struct {
+		StartTs *float64 `json:"startTs"`
+		Lines   []struct {
+			A *float64 `json:"a"`
+			K string   `json:"k"`
+		} `json:"lines"`
+	}
+	if err := json.Unmarshal(timeline, &parsed); err != nil || !validEpochMs(parsed.StartTs) {
+		return 0, false
+	}
+	start := int64(math.Round(*parsed.StartTs))
+	var best int64
+	found := false
+	for _, id := range evidenceLines {
+		match := evidenceLineID.FindStringSubmatch(id)
+		if match == nil {
+			continue
+		}
+		n, err := strconv.Atoi(match[1])
+		if err != nil || n < 1 || n > len(parsed.Lines) {
+			continue
+		}
+		line := parsed.Lines[n-1]
+		if line.K == "idle" || !validEpochMs(line.A) {
+			continue
+		}
+		ms := int64(math.Round(*line.A))
+		if !found || ms < best {
+			best, found = ms, true
+		}
+	}
+	if found && best < start {
+		best = start
+	}
+	return best, found
+}
+
+// validEpochMs accepts a positive millisecond timestamp that converts to int64
+// exactly; JSON numbers outside that range are malformed timeline data.
+func validEpochMs(value *float64) bool {
+	return value != nil && *value > 0 && *value <= 1<<53
 }
