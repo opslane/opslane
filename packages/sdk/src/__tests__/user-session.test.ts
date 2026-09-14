@@ -54,4 +54,12 @@ describe('setUser session rotation', () => {
     clearUser();
     expect(getCurrentUser()).toBeNull();
   });
+
+  it('treats a numeric ID and its string form as the same user', () => {
+    setUser({ id: 42 });
+    const first = getSessionId();
+    expect(getCurrentUser()?.id).toBe('42');
+    setUser({ id: '42' });
+    expect(getSessionId()).toBe(first);
+  });
 });

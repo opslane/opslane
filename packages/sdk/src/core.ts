@@ -14,12 +14,28 @@ let installed = false;
 // === B2B user identity ===
 
 interface UserIdentity {
+  id: string | number;
+  email?: string;
+  account?: { id: string | number; name?: string };
+}
+
+/** Identity as stored and sent: IDs are always strings, the type the server decodes. */
+interface StoredUserIdentity {
   id: string;
   email?: string;
   account?: { id: string; name?: string };
 }
 
-let currentUser: UserIdentity | null = null;
+let currentUser: StoredUserIdentity | null = null;
+
+// Apps often have numeric IDs (autoincrement keys, untyped JSON). The server
+// rejects a numeric id, which would silently drop the user and stop recording,
+// so accept finite numbers and send them as strings. Anything else is no ID.
+function toIdentifier(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  return '';
+}
 
 type IdentityListener = (newSessionID: string, previous: SessionProgress) => void;
 let identityListener: IdentityListener | null = null;
@@ -39,9 +55,17 @@ function rotateForIdentity(userId: string | null): void {
 }
 
 export function setUser(user: UserIdentity): void {
-  if (!user.id) return;
-  currentUser = user;
-  rotateForIdentity(user.id);
+  const id = toIdentifier(user?.id);
+  if (!id) return;
+  const accountId = toIdentifier(user.account?.id);
+  currentUser = {
+    id,
+    email: typeof user.email === 'string' ? user.email : undefined,
+    account: accountId
+      ? { id: accountId, name: typeof user.account?.name === 'string' ? user.account.name : undefined }
+      : undefined,
+  };
+  rotateForIdentity(id);
 }
 
 export function clearUser(): void {
@@ -49,12 +73,12 @@ export function clearUser(): void {
   rotateForIdentity(null);
 }
 
-export function getCurrentUser(): UserIdentity | null {
+export function getCurrentUser(): StoredUserIdentity | null {
   return currentUser;
 }
 
 /** Map UserIdentity to the wire-format user context object. */
-export function buildUserContext(user: UserIdentity): NonNullable<ErrorEventPayload['context']['user']> {
+export function buildUserContext(user: StoredUserIdentity): NonNullable<ErrorEventPayload['context']['user']> {
   return {
     id: user.id,
     email: user.email,
