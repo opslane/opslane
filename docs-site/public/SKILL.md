@@ -121,15 +121,15 @@ app.use(opslaneVuePlugin);
 
 **Plain**: call `init` before any other script runs.
 
-**Identify users.** Opslane can only say which person and customer hit an error if the app calls `setUser`. Find the app's client-side auth state: an auth provider, a session hook, or the store that holds the current user. Wire it up in browser code that runs after `init`:
+**Identify users.** Opslane can only say which person and customer hit an error if the app calls `setUser`. Find the app's auth state: an auth provider, a session hook, or the store that holds the current user. Call `setUser` and `clearUser` from an effect or watcher keyed on that state, never during render, in an effect cleanup, or on unmount. They may run before or after `init`.
 
 - While auth is still loading, do nothing.
-- When the settled state is signed in, call `setUser({ id, email, account: { id, name } })` from `@opslane/sdk`. This covers a fresh sign-in, a session restored on page load, and a different user signing in.
+- When the settled state is signed in, call `setUser({ id: String(user.id), account: { id: String(org.id) } })` from `@opslane/sdk`. This covers a fresh sign-in, a session restored on page load, and a different user signing in.
 - When the settled state is signed out, call `clearUser()`. This covers sign-out, and session expiry or logout in another tab when the app's auth state reflects them.
 
-In Next.js and other server-rendered apps, do this only in a client component. Never do it in server components, loaders, actions, route handlers, or middleware. `id` is the app's stable user ID, never a display name. `account` is the customer organization, workspace, or team the user is working in; omit it when the app has none. `email` and `account.name` are optional. Include them only when the app already shares that data with error-monitoring or analytics tools; otherwise send the IDs alone. Never log or print the user or session object. Every separately built bundle that calls `init` needs its own identification. If the app has no sign-in, skip this. When you add it, tell the user that user IDs, and emails if you sent them, now go to Opslane and belong in their privacy notice.
+IDs must be strings, so wrap numeric IDs in `String()`. `id` is the app's stable user ID, never an email, phone number, or name; if the browser has no stable user ID, skip identification. `account` is the customer organization, workspace, or team the user is working in; omit it when the app has none. Add `email` to the call, or `name` to `account`, only when the app already shares that data with error-monitoring or analytics tools, and behind the same consent check if that sharing has one. In Next.js and other server-rendered apps, call these only in a client component; a server component may pass the IDs to it as props. Never call them in server components, loaders, actions, route handlers, or middleware. Never log or print the user or session object. Every separately built bundle that calls `init` needs its own identification. If the app has no sign-in, skip this. When you add it, tell the user which fields now go to Opslane (user ID, account ID, and email or account name if you sent them) and that they belong in their privacy notice.
 
-If the site sets a Content-Security-Policy and you are not tunnelling, add `https://app.opslane.com` to `connect-src`. If a dev server was already running before the env file was written, restart it; public env vars are inlined at start. Then `opslane_progress install_sdk done "<framework>, setUser added"`, or `"<framework>, setUser already present"` when the app already identified users, or `"<framework>, no sign-in"` when the app has no sign-in.
+If the site sets a Content-Security-Policy and you are not tunnelling, add `https://app.opslane.com` to `connect-src`. If a dev server was already running before the env file was written, restart it; public env vars are inlined at start. Then `opslane_progress install_sdk done` with the note `"<framework>, setUser added"`, `"<framework>, setUser already present"`, `"<framework>, setUser skipped: <why>"`, or `"<framework>, no sign-in"`.
 
 ## 5. Verify with a real event
 
@@ -279,7 +279,7 @@ printf '%s' "$slug" | grep -Eq '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' || slug=""
 if [ "$pushed" = 1 ]; then
   if gh auth status >/dev/null 2>&1 && [ -n "$slug" ]; then
     # --repo pins the PR to origin itself; without it gh targets a fork's parent repository.
-    pr_url=$(gh pr create --repo "$slug" --head "$branch" --title "Add Opslane error monitoring" --body "Installs the Opslane SDK and source-map upload. The deploy needs the public key and environment variables described in the setup." 2>&1 | tail -1 || true)
+    pr_url=$(gh pr create --repo "$slug" --head "$branch" --title "Add Opslane error monitoring" --body "Installs the Opslane SDK, identifies the signed-in user where the app has sign-in, and sets up source-map upload. The deploy needs the public key and environment variables described in the setup." 2>&1 | tail -1 || true)
     case "$pr_url" in https://github.com/*) opslane_progress pull_request done "$pr_url"; echo "Opened $pr_url" ;; *) pr_fail "gh pr create: $pr_url" ;; esac
   else
     if [ -n "$slug" ]; then
