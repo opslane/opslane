@@ -394,6 +394,108 @@ export async function recordFixTerminalDecision(args: {
   if ((existing.rowCount ?? 0) === 0) throw new LeaseLostError(args.lease.id);
 }
 
+export type IncompleteFixOutcome = 'restored' | 'status_changed' | 'no_completed_diagnosis';
+
+/**
+ * A fix run that stopped before a result (turn or spend limit, failed model
+ * call, harness crash) proves nothing about the diagnosis it started from.
+ * Record it as its own `incomplete` decision and return the group to the state
+ * that diagnosis left it in — the one a human can trigger a fix from — instead
+ * of replacing the diagnosis with a terminal needs_human.
+ *
+ * The completed diagnosis is the one that authorized this fix: the newest
+ * decision of the job's source_job_id (the group's newest when the job has no
+ * source, matching loadDiagnosisDecisionForSource), never an incomplete run or
+ * a fix-verification row. Only code_fix restores: needs_human rows are also
+ * written for not_actionable verdicts. root_cause, candidate_diff, evidence,
+ * confidence and the reason fields are deliberately left as they are.
+ *
+ * terminal_fix_job_id is stamped so a reclaim of this same job adopts the
+ * restore instead of paying for the fix run again; the human fix endpoint
+ * clears it when a person retries.
+ */
+export async function restoreDiagnosisAfterIncompleteFix(
+  lease: JobLease & { errorGroupId: string },
+  args: { reason: string },
+): Promise<IncompleteFixOutcome> {
+  const client = await getPool().connect();
+  try {
+    await client.query('BEGIN');
+    const owned = await client.query<{ source_job_id: string | null; episode_id: string | null }>(
+      `SELECT source_job_id, episode_id FROM error_group_jobs
+        WHERE id = $1 AND worker_id = $2 AND lease_generation = $3::bigint
+          AND project_id = $4 AND error_group_id = $5
+          AND status = 'claimed' AND lease_expires_at > clock_timestamp()
+        FOR UPDATE`,
+      [lease.id, lease.workerId, lease.leaseGeneration, lease.projectId, lease.errorGroupId],
+    );
+    const job = owned.rows[0];
+    if (!job) throw new LeaseLostError(lease.id);
+
+    const group = await client.query<{ status: string }>(
+      `SELECT status FROM error_groups
+        WHERE id = $1 AND project_id = $2
+        FOR UPDATE`,
+      [lease.errorGroupId, lease.projectId],
+    );
+    const status = group.rows[0]?.status;
+    if (status === undefined) {
+      throw new Error(`Error group ${lease.errorGroupId} not found`);
+    }
+
+    const completed = await client.query<{ outcome: string }>(
+      `SELECT outcome FROM diagnosis_decisions
+        WHERE error_group_id = $1 AND project_id = $2
+          AND ($3::uuid IS NULL OR job_id = $3::uuid)
+          AND outcome <> 'incomplete'
+          AND model <> 'deterministic-fix-verification'
+        ORDER BY decided_at DESC, id DESC
+        LIMIT 1`,
+      [lease.errorGroupId, lease.projectId, job.source_job_id],
+    );
+    if (completed.rows[0]?.outcome !== 'code_fix') {
+      await client.query('COMMIT');
+      return 'no_completed_diagnosis';
+    }
+
+    await insertDiagnosisDecision(client, lease.errorGroupId, lease.projectId, {
+      outcome: 'incomplete',
+      decisionReason: args.reason,
+      diagnosis: null,
+      model: 'deterministic-fix-verification',
+      promptVersion: 'fix-terminal-v1',
+      jobId: lease.id,
+      episodeId: job.episode_id,
+      basis: 'local_defect',
+      confidence: 'low',
+      policyEligible: true,
+      policyBasis: null,
+    });
+
+    if (status !== 'fixing') {
+      await client.query('COMMIT');
+      return 'status_changed';
+    }
+
+    await client.query(
+      `UPDATE error_groups
+          SET status = (CASE WHEN kind = 'friction' THEN 'awaiting_approval'
+                             ELSE 'investigated' END)::error_group_status,
+              terminal_fix_job_id = $3,
+              updated_at = now()
+        WHERE id = $1 AND project_id = $2`,
+      [lease.errorGroupId, lease.projectId, lease.id],
+    );
+    await client.query('COMMIT');
+    return 'restored';
+  } catch (err: unknown) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 /** Record the commit a run actually checked out, on the job row, right after
  * checkout. Written under the live lease so a zombie worker cannot stamp a
  * commit onto a job another worker reclaimed. The diagnosis JSON also carries
