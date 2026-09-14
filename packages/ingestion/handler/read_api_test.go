@@ -18,6 +18,9 @@ func TestInboxStateVocabulary(t *testing.T) {
 		{"declined", "settled", "open_inquiry", "do_not_pursue", "", "new", "reviewed_not_pursuing"},
 		{"waiting", "settled", "open_inquiry", "wait_for_more_evidence", "", "new", "waiting_for_evidence"},
 		{"fix", "settled", "open_inquiry", "investigate", "verified_fix", "pr_created", "fix_ready"},
+		{"incomplete fix", "settled", "open_inquiry", "investigate", "incomplete", "investigated", "needs_you"},
+		{"fix decision", "settled", "open_inquiry", "investigate", "needs_human", "needs_human", "needs_you"},
+		{"code fix", "settled", "open_inquiry", "investigate", "code_fix", "fixing", "investigating"},
 		{"resolved", "settled", "open_inquiry", "investigate", "verified_fix", "resolved", "resolved"},
 	}
 	for _, test := range tests {
