@@ -45,4 +45,6 @@ Uploads require one private build-time variable, `OPSLANE_SOURCEMAP_KEY`: the
 key carries the Opslane server origin it was created for, so it configures both the
 credential and the destination. See the [source-map guide](../guides/source-maps.md).
 
-Related exports: `captureException(err)`, `setUser({ id })`, `clearUser()`, `destroy()`, `opslaneVuePlugin`, and (from `@opslane/sdk/react`) `OpslaneErrorBoundary` / `captureReactError`. The `@opslane/sdk/vite-plugin` export adds build identifiers to source maps and uploads them during production builds. See the [SDK README](../../packages/sdk/README.md).
+Related exports: `captureException(err)`, `setUser({ id, email, account: { id, name } })`, `clearUser()`, `destroy()`, `opslaneVuePlugin`, and (from `@opslane/sdk/react`) `OpslaneErrorBoundary` / `captureReactError`. The `@opslane/sdk/vite-plugin` export adds build identifiers to source maps and uploads them during production builds. See the [SDK README](../../packages/sdk/README.md).
+
+`setUser` accepts user and account IDs as strings, safe integers, or bigints and sends them as strings. Pass other large numbers as strings. A call without a valid user ID does nothing: an empty or oversized value, `0`, or the strings `undefined` and `null` do not count as IDs.

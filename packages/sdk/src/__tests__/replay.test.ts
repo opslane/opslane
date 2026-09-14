@@ -149,6 +149,15 @@ describe('continuous chunked recording', () => {
     expect(fetchMock.mock.invocationCallOrder[0]).toBeLessThan(rrwebState.record.mock.invocationCallOrder[0]);
   });
 
+  it('registers numeric user and account IDs as strings', async () => {
+    setUser({ id: 42, account: { id: 7, name: 'Acme' } });
+    await startEnabled();
+    const init = fetchMock.mock.calls.find(([url]) => String(url).includes('/api/v1/sessions/init'))!;
+    const body = JSON.parse((init[1] as RequestInit).body as string) as { user: Record<string, unknown> };
+    expect(body.user).toEqual({ id: '42', account_id: '7', account_name: 'Acme' });
+    clearUser();
+  });
+
   it('sends sdk identity on session init', async () => {
     fetchMock.mockResolvedValue({ ok: true, json: async () => ({}) });
 
