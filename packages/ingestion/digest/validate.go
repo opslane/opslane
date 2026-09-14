@@ -963,7 +963,7 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string, s
 		for i := range actionableEval.Included {
 			candidate := &actionableEval.Included[i]
 			if candidate.TicketFacts != nil {
-				candidate.SessionURL = notify.BuildSessionURL(dashboardURL, candidate.TicketFacts.RepresentativeSessionID, 0)
+				candidate.SessionURL = notify.BuildSessionURL(dashboardURL, candidate.TicketFacts.RepresentativeSessionID, candidate.TicketFacts.RepresentativeAnchorMs)
 				continue
 			}
 			if _, err := tx.Exec(ctx, `SAVEPOINT actionable_replay_lookup`); err != nil {
@@ -1122,7 +1122,7 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string, s
 					}
 					item = liveItems[0]
 					item.FallbackReason = fallbackReason
-					item.SessionURL = notify.BuildSessionURL(os.Getenv("DASHBOARD_URL"), live.TicketFacts.RepresentativeSessionID, 0)
+					item.SessionURL = notify.BuildSessionURL(os.Getenv("DASHBOARD_URL"), live.TicketFacts.RepresentativeSessionID, live.TicketFacts.RepresentativeAnchorMs)
 				}
 				receiptItems = append(receiptItems, item)
 				receipted[candidate.ErrorGroupID] = true
@@ -1502,7 +1502,7 @@ func receiptForUnifiedFallback(candidate Candidate, fallbackReason string) notif
 		item.Coverage = candidate.Coverage
 		item.Accounts = candidate.Accounts
 		item.Action = candidate.ValidAction
-		item.SessionURL = notify.BuildSessionURL(os.Getenv("DASHBOARD_URL"), candidate.RepresentativeSessionID, 0)
+		item.SessionURL = notify.BuildSessionURL(os.Getenv("DASHBOARD_URL"), candidate.ReplaySessionID, candidate.ReplayAnchorMs)
 	}
 	if candidate.HasValidatedDiagnosis {
 		item.RootCauseExcerpt = narrative.SanitizeExcerpt(candidate.RootCause, excerptMax)
