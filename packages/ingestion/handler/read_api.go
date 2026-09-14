@@ -358,7 +358,9 @@ func inboxState(identity, filterDecision, inquiryDecision, diagnosisOutcome, gro
 		return "waiting_for_evidence", "waiting for more evidence"
 	case inquiryDecision == "investigate" && diagnosisOutcome == "verified_fix":
 		return "fix_ready", "a change is verified and waiting for your review"
-	case inquiryDecision == "investigate" && diagnosisOutcome == "needs_human":
+	// An incomplete fix run keeps the completed diagnosis and waits for a
+	// person to retry the fix, so it reads the same as a fix that needs review.
+	case inquiryDecision == "investigate" && (diagnosisOutcome == "needs_human" || diagnosisOutcome == "incomplete"):
 		return "needs_you", "your input is needed to continue"
 	case inquiryDecision == "investigate" && diagnosisOutcome == "unable_to_establish_cause":
 		return "reviewed_not_pursuing", "we could not establish a cause"
