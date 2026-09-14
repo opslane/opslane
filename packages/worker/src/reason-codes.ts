@@ -116,3 +116,31 @@ export function buildReason(
     remediation: remediation ?? defaultRemediation,
   };
 }
+
+/**
+ * Fix-run reason codes that mean the run stopped before it produced a result:
+ * the agent loop ended without success (turn or spend limit, a failed model
+ * call), or the harness crashed. Such a run proves nothing about the diagnosis
+ * it started from, so it must not replace that diagnosis, and its message is
+ * fixed copy: at a turn limit the agent's last message is progress chatter
+ * ("Let me try a simpler approach:"), not a reason anyone can act on.
+ */
+export const INCOMPLETE_REASON_MESSAGES = {
+  budget_exhausted:
+    'The fix attempt stopped before it produced a result: it reached its turn or spend limit, or a model call failed.',
+  worker_runtime_error:
+    'The fix attempt stopped on an internal error before it produced a result.',
+} as const satisfies Partial<Record<ReasonCode, string>>;
+
+export type IncompleteReasonCode = keyof typeof INCOMPLETE_REASON_MESSAGES;
+
+export function isIncompleteReasonCode(
+  code: string | null | undefined,
+): code is IncompleteReasonCode {
+  return code != null && Object.prototype.hasOwnProperty.call(INCOMPLETE_REASON_MESSAGES, code);
+}
+
+/** The only reason an incomplete fix run may write. */
+export function incompleteReason(code: IncompleteReasonCode): NeedsHumanReason {
+  return buildReason(code, INCOMPLETE_REASON_MESSAGES[code]);
+}

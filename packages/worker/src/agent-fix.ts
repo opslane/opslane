@@ -15,7 +15,7 @@ import { trace } from '@opentelemetry/api';
 import type { CheckOutcome, ConfidenceLevel, Diagnosis, EvidenceRecord, NeedsHumanReason } from '@opslane/shared';
 import type { Platform } from './platform.js';
 import type { RuntimeInfo } from './runtime-info.js';
-import { buildReason, reasonCodeForDecision, reproductionRemediation } from './reason-codes.js';
+import { buildReason, incompleteReason, reasonCodeForDecision, reproductionRemediation } from './reason-codes.js';
 import { deriveOutcome } from './classify.js';
 import { adjudicationFromDecline, strings } from './diagnose-schema.js';
 import { loadDiagnosisDecisionForSource, recordJobUsage } from './db.js';
@@ -1209,14 +1209,16 @@ async function runAgentFixCore(input: AgentFixInput): Promise<AgentFixResult> {
         // Last tier — return failure
         if (!result?.success) {
           const retained = await retainWorkingDiff();
+          // At a turn limit the summary is the agent's last message, usually
+          // mid-task chatter. Keep it for operators; the reason is fixed copy.
+          logger.warn('Fix agent stopped before a result', {
+            model: tier.model,
+            summary: result?.summary ?? null,
+          });
           return {
             status: 'needs_human',
             ...(retained ?? {}),
-            reason: {
-              reason_code: 'budget_exhausted',
-              reason_message: result?.summary ?? 'Agent could not complete',
-              remediation: 'Review the error manually — the agent could not complete within budget/turn limits',
-            },
+            reason: incompleteReason('budget_exhausted'),
             evidence: evidence.record(),
             tokenUsage: totalTokenUsage,
           };
