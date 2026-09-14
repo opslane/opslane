@@ -109,6 +109,7 @@ import { runBuildGate } from '../harness/sandbox-repo.js';
 import { planTests, runSuite } from '../harness/test-runner.js';
 import { VerificationInfraError } from '../harness/errors.js';
 import { logger } from '../logger.js';
+import { INCOMPLETE_REASON_MESSAGES } from '../reason-codes.js';
 
 function makeAgentResult(overrides?: Partial<AgentCompletionResult>): AgentCompletionResult {
   return {
@@ -822,11 +823,15 @@ describe('runAgentFix', () => {
   });
 
   it('returns needs_human with budget_exhausted when budget exceeded', async () => {
-    vi.mocked(runAgentLoop).mockResolvedValue(makeAgentResult({ success: false, summary: 'Budget exceeded', turnCount: 5, toolCallCount: 10, tokenUsage: { input: 1000000, output: 500000, cacheRead: 0, cacheWrite: 0 } }));
+    const chatter = 'The filesystem appears to be very slow. Let me try a simpler approach:';
+    vi.mocked(runAgentLoop).mockResolvedValue(makeAgentResult({ success: false, summary: chatter, turnCount: 5, toolCallCount: 10, tokenUsage: { input: 1000000, output: 500000, cacheRead: 0, cacheWrite: 0 } }));
 
     const result = await runAgentFix(makeInput());
     expect(result.status).toBe('needs_human');
     expect(result.reason?.reason_code).toBe('budget_exhausted');
+    // The agent's last message is progress chatter, never a reason.
+    expect(result.reason?.reason_message).toBe(INCOMPLETE_REASON_MESSAGES.budget_exhausted);
+    expect(JSON.stringify(result.reason)).not.toContain('filesystem');
     // Haiku fails → escalate to Sonnet → also fails
     expect(runAgentLoop).toHaveBeenCalledTimes(2);
   });
