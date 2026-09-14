@@ -19,7 +19,7 @@ Paste this into your coding agent:
 Set up https://docs.opslane.com/INSTALL.md
 ```
 
-Your agent installs the SDK, verifies an error from your app, and configures source-map uploads. You approve the project in your browser and choose whether to connect GitHub, Slack, CI secrets, and MCP.
+Your agent installs the SDK, identifies signed-in users, verifies an error from your app, and configures source-map uploads. You approve the project in your browser and choose whether to connect GitHub, Slack, CI secrets, and MCP.
 
 For manual setup, follow the steps below.
 

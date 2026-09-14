@@ -121,7 +121,15 @@ app.use(opslaneVuePlugin);
 
 **Plain**: call `init` before any other script runs.
 
-If the site sets a Content-Security-Policy and you are not tunnelling, add `https://app.opslane.com` to `connect-src`. If a dev server was already running before the env file was written, restart it; public env vars are inlined at start. Then `opslane_progress install_sdk done "<framework>"`.
+**Identify users.** Opslane can only say which person and customer hit an error if the app calls `setUser`. Find the app's client-side auth state: an auth provider, a session hook, or the store that holds the current user. Wire it up in browser code that runs after `init`:
+
+- While auth is still loading, do nothing.
+- When the settled state is signed in, call `setUser({ id, email, account: { id, name } })` from `@opslane/sdk`. This covers a fresh sign-in, a session restored on page load, and a different user signing in.
+- When the settled state is signed out, call `clearUser()`. This covers sign-out, session expiry, and logout in another tab.
+
+In Next.js and other server-rendered apps, do this only in a client component. Never do it in server components, loaders, actions, route handlers, or middleware. `id` is the app's stable user ID, never a display name. `account` is the customer organization, workspace, or team the user is working in; omit it when the app has none. `email` and `account.name` are optional. Include them only when the app already shares that data with error-monitoring or analytics tools; otherwise send the IDs alone. Never log or print the user or session object. Every separately built bundle that calls `init` needs its own identification. If the app has no sign-in, skip this. When you add it, tell the user that user IDs, and emails if you sent them, now go to Opslane and belong in their privacy notice.
+
+If the site sets a Content-Security-Policy and you are not tunnelling, add `https://app.opslane.com` to `connect-src`. If a dev server was already running before the env file was written, restart it; public env vars are inlined at start. Then `opslane_progress install_sdk done "<framework>, setUser added"`, or `"<framework>, no sign-in"` when the app has no sign-in.
 
 ## 5. Verify with a real event
 
@@ -233,7 +241,7 @@ Then tell the user to add `source ~/.opslane/env` to their shell profile, and re
 
 Ask: "Create a new branch and open a PR?" Wait for yes. On no, or if this directory is not a git repository with an `origin` remote, run `opslane_progress pull_request skipped "<why>"` and go to step 11.
 
-Commit only files this runbook created or changed: the package manifest and lockfile, the init snippet or provider component, `next.config.*` or `vite.config.*`, the build script, `.gitignore`, and the file where the test button was removed. Never stage the env file or `.opslane-setup/`. A file that already appeared in `.opslane-setup/pre-status.txt` had the user's own uncommitted changes before setup: do not stage it; list it and ask the user to commit it. `git commit --only -- <files>` writes exactly the named paths and leaves anything the user had staged untouched. If the index had staged changes, say "I left your staged changes alone" once.
+Commit only files this runbook created or changed: the package manifest and lockfile, the init snippet or provider component, the file or files where `setUser` and `clearUser` were added, `next.config.*` or `vite.config.*`, the build script, `.gitignore`, and the file where the test button was removed. Never stage the env file or `.opslane-setup/`. A file that already appeared in `.opslane-setup/pre-status.txt` had the user's own uncommitted changes before setup: do not stage it; list it and ask the user to commit it. `git commit --only -- <files>` writes exactly the named paths and leaves anything the user had staged untouched. If the index had staged changes, say "I left your staged changes alone" once.
 
 ```bash
 export GIT_TERMINAL_PROMPT=0   # never hang a harness on a credential prompt
@@ -255,7 +263,7 @@ git diff --cached --quiet || echo "I left your staged changes alone."
 if [ "${#stage[@]}" -eq 0 ]; then pr_fail "nothing safe to stage"
 elif git checkout -b "$branch" \
      && git add -- "${stage[@]}" \
-     && git commit --only -m "Add Opslane error monitoring" -m "Installs @opslane/sdk, initializes it with the public ingest key from the environment, and uploads source maps on production builds. Set VITE_OPSLANE_API_KEY (or NEXT_PUBLIC_OPSLANE_API_KEY) and the environment variable in the deploy." -- "${stage[@]}" \
+     && git commit --only -m "Add Opslane error monitoring" -m "Installs @opslane/sdk, initializes it with the public ingest key from the environment, identifies the signed-in user where the app has sign-in, and uploads source maps on production builds. Set VITE_OPSLANE_API_KEY (or NEXT_PUBLIC_OPSLANE_API_KEY) and the environment variable in the deploy." -- "${stage[@]}" \
      && git push -u origin "$branch"; then pushed=1
 else pr_fail "git failed: see output above"; fi
 [ -n "$orig_branch" ] && git checkout -q "$orig_branch" 2>/dev/null || true   # leave the user where they were
