@@ -23,9 +23,6 @@ var ErrTokenReuse = errors.New("refresh token reuse detected")
 // that is not in the fix-triggerable state for its kind.
 var ErrNotInvestigated = errors.New("incident not in a fix-triggerable state")
 
-// ErrOrgOnboarded rejects onboarding setup for an org whose wizard already completed.
-var ErrOrgOnboarded = errors.New("org already onboarded")
-
 // ErrIdentityConflict indicates that a provider subject is already owned by a
 // different local user. Callers must fail closed rather than issue a session.
 var ErrIdentityConflict = errors.New("auth identity belongs to a different user")
@@ -838,78 +835,6 @@ func (q *Queries) ProvisionProject(
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("provision project: commit: %w", err)
-	}
-	return result, nil
-}
-
-// OnboardingProvision is the wizard's project bootstrap. It serializes setup
-// per org so concurrent retries cannot create duplicate first projects.
-func (q *Queries) OnboardingProvision(
-	ctx context.Context,
-	orgID, name string,
-	githubRepo *string,
-	idempotencyToken string,
-) (*ProjectProvisioning, error) {
-	tx, err := q.pool.Begin(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("onboarding provision: begin: %w", err)
-	}
-	defer tx.Rollback(ctx)
-
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('onboard-' || $1))`, orgID); err != nil {
-		return nil, fmt.Errorf("onboarding provision: lock: %w", err)
-	}
-
-	var onboardedAt *time.Time
-	if err := tx.QueryRow(ctx, `SELECT onboarded_at FROM orgs WHERE id = $1`, orgID).Scan(&onboardedAt); err != nil {
-		return nil, fmt.Errorf("onboarding provision: org lookup: %w", err)
-	}
-	if onboardedAt != nil {
-		return nil, ErrOrgOnboarded
-	}
-
-	var result *ProjectProvisioning
-	var existing Project
-	err = tx.QueryRow(ctx, `
-		SELECT id, org_id, name, github_repo, default_branch, friction_autonomy,
-		       pr_posture, default_environment_id, digest_timezone, created_at
-		FROM projects
-		WHERE org_id = $1
-		ORDER BY created_at DESC, id DESC
-		LIMIT 1`, orgID,
-	).Scan(
-		&existing.ID, &existing.OrgID, &existing.Name, &existing.GithubRepo,
-		&existing.DefaultBranch, &existing.FrictionAutonomy, &existing.PrPosture,
-		&existing.DefaultEnvironmentID, &existing.DigestTimezone, &existing.CreatedAt,
-	)
-	switch {
-	case err == nil:
-		environment, envErr := q.EnsureProjectDefaultEnvironmentTx(ctx, tx, existing.ID)
-		if envErr != nil {
-			return nil, fmt.Errorf("onboarding provision: %w", envErr)
-		}
-		key, keyErr := q.CreateProjectKeyTx(ctx, tx, existing.ID, ScopeIngest, "onboarding", nil, "")
-		if keyErr != nil {
-			return nil, fmt.Errorf("onboarding provision: %w", keyErr)
-		}
-		if existing.DefaultEnvironmentID == nil {
-			existing.DefaultEnvironmentID = &environment.ID
-		}
-		result = &ProjectProvisioning{Project: existing, Environment: *environment, APIKey: *key}
-	case errors.Is(err, pgx.ErrNoRows):
-		result, err = q.provisionProjectTx(ctx, tx, orgID, name, githubRepo, idempotencyToken)
-		if err != nil {
-			return nil, err
-		}
-	default:
-		return nil, fmt.Errorf("onboarding provision: project lookup: %w", err)
-	}
-
-	if err := RevokeExcessOnboardingKeysTx(ctx, tx, result.Project.ID); err != nil {
-		return nil, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("onboarding provision: commit: %w", err)
 	}
 	return result, nil
 }
@@ -4152,7 +4077,6 @@ func (q *Queries) HasEvents(ctx context.Context, projectID string) (bool, error)
 	return exists, nil
 }
 
-// LatestErrorGroupID returns the most recently active error group, or nil.
 // HasEventsSince reports whether the project received any event at or after
 // the given time. Agent sessions use it so attaching to an existing project
 // does not satisfy the first-event proof with history.
@@ -4168,6 +4092,26 @@ func (q *Queries) HasEventsSince(ctx context.Context, projectID string, since ti
 	return exists, nil
 }
 
+// OrgHasEvents reports whether any project in the org has received an error
+// event. Onboarding completion uses it so the first event counts whichever
+// project an agent attached.
+func (q *Queries) OrgHasEvents(ctx context.Context, orgID string) (bool, error) {
+	var exists bool
+	err := q.pool.QueryRow(ctx, `
+		SELECT EXISTS(
+			SELECT 1
+			FROM projects p
+			WHERE p.org_id = $1
+			  AND EXISTS(SELECT 1 FROM error_events e WHERE e.project_id = p.id)
+		)`, orgID,
+	).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("org has events: %w", err)
+	}
+	return exists, nil
+}
+
+// LatestErrorGroupID returns the most recently active error group, or nil.
 func (q *Queries) LatestErrorGroupID(ctx context.Context, projectID string) (*string, error) {
 	var id string
 	err := q.pool.QueryRow(ctx,
@@ -4183,7 +4127,7 @@ func (q *Queries) LatestErrorGroupID(ctx context.Context, projectID string) (*st
 	return &id, nil
 }
 
-// OrgOnboarded reports the stored wizard completion fact for an org.
+// OrgOnboarded reports the stored onboarding completion fact for an org.
 func (q *Queries) OrgOnboarded(ctx context.Context, orgID string) (bool, error) {
 	var onboardedAt *time.Time
 	if err := q.pool.QueryRow(ctx,
@@ -4234,24 +4178,10 @@ func (q *Queries) HasEnabledDigestDestination(ctx context.Context, projectID str
 
 // MarkOrgOnboarded records completion once; replays are no-ops.
 func (q *Queries) MarkOrgOnboarded(ctx context.Context, orgID string) error {
-	// Same advisory lock as OnboardingProvision: without it, complete can land
-	// between provision's onboarded check and its commit, letting a setup call
-	// return 201 on an org that just became onboarded.
-	tx, err := q.pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("mark onboarded: begin: %w", err)
-	}
-	defer tx.Rollback(ctx)
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('onboard-' || $1))`, orgID); err != nil {
-		return fmt.Errorf("mark onboarded: lock: %w", err)
-	}
-	if _, err := tx.Exec(ctx,
+	if _, err := q.pool.Exec(ctx,
 		`UPDATE orgs SET onboarded_at = now() WHERE id = $1 AND onboarded_at IS NULL`, orgID,
 	); err != nil {
 		return fmt.Errorf("mark onboarded: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("mark onboarded: commit: %w", err)
 	}
 	return nil
 }

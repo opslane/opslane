@@ -319,3 +319,23 @@ func TestAgentSessionRoutes_AllActionsRejectOtherTokensAndExpiredSessions(t *tes
 		}
 	}
 }
+
+func TestAgentSessionRoutes_CompleteAfterDashboardCompletedOnboarding(t *testing.T) {
+	a := approvedRig(t)
+	newer := createProjectForOnboarding(t, a.r, a.cookie.Value,
+		`{"name":"newer","idempotency_token":"agent-complete-newer"}`)
+	ingestTestEvent(t, a)
+	state, _ := readOnboardingState(t, a.r, a.cookie.Value)
+	if state.ProjectID == nil || *state.ProjectID != newer.Project.ID || !state.HasEvents {
+		t.Fatalf("onboarding must count the older session project's event: %+v", state)
+	}
+	if code, out := sessionCall(t, a, http.MethodGet, "state", "", a.token); code != http.StatusOK || out["has_events"] != true {
+		t.Fatalf("session event proof: %d %v", code, out)
+	}
+	if code, out := a.do(t, http.MethodPost, "/api/v1/onboarding/complete", `{}`, true); code != http.StatusOK || out["onboarding_complete"] != true {
+		t.Fatalf("dashboard complete: %d %v", code, out)
+	}
+	if code, out := sessionCall(t, a, http.MethodPost, "complete", "", a.token); code != http.StatusOK || out["onboarding_complete"] != true {
+		t.Fatalf("agent complete after the dashboard completed onboarding: %d %v", code, out)
+	}
+}
