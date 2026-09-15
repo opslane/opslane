@@ -23,9 +23,7 @@ Your agent installs the SDK, identifies signed-in users, verifies an error from 
 
 For manual setup, follow the steps below.
 
-Before you start, you need an ingest key for your project. The SDK accepts only keys beginning with `opslane_pk_`. See [API keys](guides/api-keys.md).
-
-The onboarding wizard puts this key directly in its setup snippet so you can send a test event immediately. The key ships in your bundle; move it to an environment variable before committing.
+Before you start, you need an ingest key for your project. The SDK accepts only keys beginning with `opslane_pk_`. See [API keys](guides/api-keys.md). The key ships in your bundle, so keep it in an environment variable rather than in committed code.
 
 > **Privacy:** session recording is on by default. Review [replay privacy and masking](guides/replay-privacy.md) before you deploy.
 

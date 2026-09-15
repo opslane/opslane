@@ -104,11 +104,11 @@ It was deliberately left alone by the issue-list polish plan, which is scoped da
 
 ---
 
-## Add tests for `safeUrl`'s four pre-existing call sites
+## Add tests for `safeUrl`'s three pre-existing call sites
 
-**What:** `safeUrl` in `packages/dashboard/src/utils.ts` had zero tests despite guarding four render sites that bind untrusted values to `href`. The issue-list polish plan adds tests for the function itself; this item covers the call sites.
+**What:** `safeUrl` in `packages/dashboard/src/utils.ts` had zero tests despite guarding three render sites that bind untrusted values to `href`. The issue-list polish plan adds tests for the function itself; this item covers the call sites.
 
-**Why:** `IncidentDetail.vue:406,422`, `AdminView.vue:324`, `IncidentConclusion.vue:20`, and `SetupWizard.vue:361` all bind a sanitized URL to an `href`. Nothing asserts that any of them actually calls the sanitizer. A future refactor could drop the call and no test would notice.
+**Why:** `IncidentDetail.vue:406,422`, `AdminView.vue:324`, and `IncidentConclusion.vue:20` all bind a sanitized URL to an `href`. Nothing asserts that any of them actually calls the sanitizer. A future refactor could drop the call and no test would notice.
 
 **Pros:**
 - Locks the sanitizer into the render path so it cannot be silently removed.
