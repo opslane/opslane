@@ -9,7 +9,14 @@
   <div id="player"></div>
   <script>
     let replayer = null;
-    window.initReplayer = (events) => {
+    const events = [];
+    // The recording arrives in bounded JSON batches; one huge evaluate
+    // argument ran a 2 GB worker out of memory.
+    window.appendReplayEvents = (json) => {
+      for (const event of JSON.parse(json)) events.push(event);
+      return events.length;
+    };
+    window.initReplayer = () => {
       replayer = new rrweb.Replayer(events, {
         root: document.getElementById('player'),
         skipInactive: false,

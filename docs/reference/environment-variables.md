@@ -118,17 +118,16 @@ The Opslane server reads **only** the `REPLAY_STORE_*` names; `MINIO_*` names ap
 | `FRICTION_FIRST_LOOK_MODEL` | no (`claude-sonnet-5`) | Strong review model for newly reported problems. |
 | `FRICTION_FIRST_LOOK_MAX_TOKENS` | no (16384) | Output token ceiling for the careful first look. The request timeout grows with it (20 ms per token, at least 120 seconds). Invalid values, or values outside 1024 to 32000, fall back to the default. |
 | `FRICTION_MATCH_MAX_CONCURRENT` | no (2) | Fleet-wide cap on running `friction_match` jobs. `0` pauses new matches. |
-| `FRICTION_CONFIRM_MODEL` | no (`claude-sonnet-5`) | Model for checking known problems against recordings and screenshots and deciding whether one fix covers two problems. |
+| `FRICTION_CONFIRM_MODEL` | no (`claude-sonnet-5`) | Model for checking known problems against recordings and screenshots and deciding whether one fix covers two problems. Recording checks keep the model's default thinking with a 16,000-token limit. |
 | `FRICTION_MAX_OPEN_FIX_PRS` | no (5) | Maximum open fix PRs per project for automatic fixes. Manual requests remain available. |
 | `FRICTION_FOLD_MIN_SIMILARITY` | no (0.75) | Embedding similarity floor for duplicate candidates at the publish gate; each candidate still needs a yes to the one-fix question before a fold. |
 | `FRICTION_INSIGHT_INVESTIGATE_USERS` | no (5) | Identified users whose confirmed recordings an insight (kind `ux_insight`) needs before it is investigated automatically. Defects are investigated on publication. Invalid values fall back to 5. |
-| `FRICTION_CONFIRM_DAILY_CAP` | no (2000) | Maximum recording checks per project per UTC day across all workers. Retries count again; finished checks resume without using more budget. `0` pauses checks until the limit is raised. |
+| `FRICTION_CONFIRM_DAILY_CAP` | no (2000) | Maximum recording checks per project per UTC day across all workers. A read's single retry uses no extra unit; job retries count again, and finished checks resume without using more budget. `0` pauses checks until the limit is raised. |
 | `FRICTION_CONFIRM_MAX_CONCURRENT` | no (1) | Fleet-wide cap on running `friction_confirm` jobs. `0` pauses confirmation and publication reconciliation. |
 | `NARRATIVE_API_KEY` | when session narratives are enabled | Model API key for session narratives and frame verification. Falls back to `ANTHROPIC_API_KEY`. Without either key, narrative reservations remain pending. |
-| `NARRATIVE_MODEL` | no (`claude-sonnet-5`) | Model used to write session narratives and verify findings against captured frames. |
+| `NARRATIVE_MODEL` | no (`claude-sonnet-5`) | Model used to write session narratives and verify findings against captured frames. Both use the model's default thinking (adaptive on Claude Sonnet 5); frame verification allows at least 16,000 output tokens so thinking cannot cut its answer off. |
 | `NARRATIVE_BASE_URL` | no (Anthropic default) | Alternate Anthropic-compatible endpoint for narrative and frame-verification calls. |
 | `NARRATIVE_MAX_TOKENS` | no (8192) | Maximum output tokens for a narrative call. Values below 1024 use the default. |
-| `NARRATIVE_REASONING` | no (`off`) | Set to `on` to enable a 4096-token thinking budget for narrative and frame-verification calls. |
 | `NARRATIVE_APP_CONTEXT` | no | Application details included in the session-narrative prompt. |
 | `NARRATIVE_DAILY_CAP` | no (2000) | Per-project daily cap on distinct sessions that may reserve narrative or frame-verification calls. |
 | `NARRATIVE_RENDER_BUDGET_MS` | no (60000) | Wall-clock limit for rendering one replay timeline before the model call. |

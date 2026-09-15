@@ -6,7 +6,7 @@ import { buildConfirmRequest, confirmRead, confirmRunOptions, type ConfirmPrompt
 import { buildOneFixRequest, oneFixRunOptions } from '../one-fix.js';
 import { recordedBundle, capturedRun } from '../../__tests__/helpers/run-log-memory-sink.js';
 
-const client = { modelName: 'claude-sonnet-5', settings: () => ({ model: 'claude-sonnet-5', maxTokens: 8192, reasoning: 'off' }), complete: async () => { throw new Error('unused'); } };
+const client = { modelName: 'claude-sonnet-5', settings: () => ({ model: 'claude-sonnet-5', maxTokens: 8192 }), complete: async () => { throw new Error('unused'); } };
 const ticket = { id: 't1', name: 'Save', control: 'Save button', what_happened: 'nothing', steps: '', screens_confirmed: ['/assets'], screens_proposed: [], kind: 'defect', embedding: [0.1, 0.2] };
 
 describe('friction run logs rebuild from persisted bundles', () => {
@@ -49,7 +49,8 @@ describe('friction run logs rebuild from persisted bundles', () => {
     const reply = { text: '{"outcome":"confirmed","evidenceLines":["L1"],"signalIds":[],"note":"n","costToUser":"none"}', inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, stopReason: 'end_turn' };
     const talking = { modelName: 'claude-sonnet-5', complete: async (args: { run: { noteRequest: (r: unknown) => void } }) => { args.run.noteRequest({}); return reply; } };
     expect(await confirmRead(talking as never, input, { add: () => undefined }, recorded.run)).toEqual({
-      invalid: 'Malformed confirmation or evidence outside the recording',
+      invalid: 'confirmed_without_signal',
+      stopReason: 'end_turn',
       payload: { outcome: 'confirmed', evidenceLines: ['L1'], signalIds: [], note: 'n', costToUser: 'none' },
     });
     expect(recorded.requests).toHaveLength(1);

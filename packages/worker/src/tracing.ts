@@ -29,6 +29,7 @@ import {
 } from './tracing-config.js';
 import { DiagThrottle, createDiagLogger, createRedactor } from './tracing-diag.js';
 import { tracePolicyFor } from './trace-policy.js';
+import { isJobCompletionSignal } from './job-signals.js';
 
 const SHUTDOWN_TIMEOUT_MS = 5000;
 const EXPORT_FAILURE_LIMIT = 50;
@@ -357,11 +358,18 @@ export async function withJobTrace<T>(
       span.setStatus({ code: SpanStatusCode.OK });
       return result;
     } catch (err) {
-      span.setStatus({
-        code: SpanStatusCode.ERROR,
-        message: err instanceof Error ? err.message : String(err),
-      });
-      span.recordException(err instanceof Error ? err : new Error(String(err)));
+      if (isJobCompletionSignal(err)) {
+        // The handler already completed or rescheduled its job; the throw only
+        // stops further work.
+        span.setStatus({ code: SpanStatusCode.OK });
+        span.setAttribute('job.completion_signal', err.name);
+      } else {
+        span.setStatus({
+          code: SpanStatusCode.ERROR,
+          message: err instanceof Error ? err.message : String(err),
+        });
+        span.recordException(err instanceof Error ? err : new Error(String(err)));
+      }
       throw err;
     } finally {
       span.end();

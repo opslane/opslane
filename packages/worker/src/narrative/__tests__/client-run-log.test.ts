@@ -17,7 +17,7 @@ describe('NarrativeClient run logging', () => {
     };
     Object.defineProperty(response, '_request_id', { value: 'req_9', enumerable: false });
     mocks.create.mockResolvedValue(response);
-    const client = new NarrativeClient({ model: 'claude-sonnet-5', apiKey: 'k', maxTokens: 8192, reasoning: 'on' });
+    const client = new NarrativeClient({ model: 'claude-sonnet-5', apiKey: 'k', maxTokens: 8192 });
     const recorded = capturedRun();
     await client.complete({ system: 's', user: 'u', run: recorded.run });
     await client.complete({ system: 's', user: 'u2', run: recorded.run });
@@ -27,7 +27,7 @@ describe('NarrativeClient run logging', () => {
       content: [{ type: 'thinking', text: '', redacted: true }, { type: 'text', text: '{"a":1}' }],
       stopReason: 'end_turn', usage: { input: 7, output: 3, cacheRead: 0, cacheWrite: 0 }, requestId: 'req_9',
     });
-    expect(client.settings()).toEqual({ model: 'claude-sonnet-5', maxTokens: 8192, reasoning: 'on', timeoutMs: 120000 });
+    expect(client.settings()).toEqual({ model: 'claude-sonnet-5', maxTokens: 8192, timeoutMs: 120000 });
   });
 });
 
@@ -36,7 +36,7 @@ it('preserves the narrative result when provider log metadata or handle methods 
   const response = { content: [{ type: 'text', text: '{}' }], stop_reason: 'end_turn', usage: { input_tokens: 7, output_tokens: 3 } };
   Object.defineProperty(response, '_request_id', { get: () => { throw new Error('metadata'); } });
   mocks.create.mockResolvedValue(response);
-  const client = new NarrativeClient({ model: 'm', apiKey: 'k', maxTokens: 1024, reasoning: 'off' });
+  const client = new NarrativeClient({ model: 'm', apiKey: 'k', maxTokens: 1024 });
   const captured = capturedRun();
   const run = { ...captured.run, noteRequest: () => { throw new Error('log request'); }, event: () => { throw new Error('log event'); } };
   await expect(client.complete({ system: 's', user: 'u', run })).resolves.toMatchObject({ text: '{}', inputTokens: 7, outputTokens: 3 });

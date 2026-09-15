@@ -22,6 +22,19 @@ export const MODEL_FRAME_BOX = { width: 720, height: 450 } as const;
  */
 export const DEFAULT_CAPTURE_VIEWPORT = { width: 1_440, height: 900 } as const;
 
+/** Chromium's renderer died while replaying. Counted apart from recordings
+ * that are missing, which are a data problem rather than a capture problem. */
+export class ReplayCrashedError extends Error {
+  override readonly name = 'ReplayCrashedError';
+}
+
+const BUDGET_EXCEEDED = 'frame capture wall-clock budget exceeded';
+
+export function isReplayCrash(error: unknown): boolean {
+  return error instanceof ReplayCrashedError
+    || (error instanceof Error && /\b(?:Target|Page) crashed\b/i.test(error.message));
+}
+
 export interface CapturedFrame {
   offsetMs: number;
   pair: 'a' | 'b';
@@ -89,6 +102,35 @@ function isPngWithin(candidate: Buffer, box: { width: number; height: number }):
   return width > 0 && height > 0 && width <= box.width && height <= box.height;
 }
 
+/**
+ * Largest serialized batch of replay events sent to the page in one call.
+ * Sending a whole recording (up to 20 MiB of JSON) in one page.evaluate
+ * briefly held several copies of it in the browser, pushed a 2 GB worker
+ * task past its memory limit and crashed the renderer (#511).
+ */
+export const REPLAY_BATCH_MAX_CHARS = 1_048_576;
+
+/** Yields JSON arrays of consecutive events, each at most `maxChars` long
+ * unless a single event is larger on its own. One batch string is alive at a time. */
+export function* replayEventBatches(
+  events: readonly unknown[],
+  maxChars = REPLAY_BATCH_MAX_CHARS,
+): Generator<string> {
+  let parts: string[] = [];
+  let size = 2;
+  for (const event of events) {
+    const json = JSON.stringify(event);
+    if (parts.length && size + json.length + 1 > maxChars) {
+      yield `[${parts.join(',')}]`;
+      parts = [];
+      size = 2;
+    }
+    parts.push(json);
+    size += json.length + (parts.length > 1 ? 1 : 0);
+  }
+  if (parts.length) yield `[${parts.join(',')}]`;
+}
+
 export async function captureFrames(
   envelopes: SessionChunkEnvelope[],
   offsetsMs: number[],
@@ -96,10 +138,12 @@ export async function captureFrames(
     viewport?: { width: number; height: number };
     wallClockBudgetMs?: number;
     maxOffsets?: number;
+    /** Tests only: override REPLAY_BATCH_MAX_CHARS. */
+    replayBatchMaxChars?: number;
   } = {},
 ): Promise<{ frames: CapturedFrame[]; assetsMissing: boolean }> {
   const viewport = opts.viewport ?? { ...DEFAULT_CAPTURE_VIEWPORT };
-  const deadline = Date.now() + (opts.wallClockBudgetMs ?? 120_000);
+  const budgetMs = opts.wallClockBudgetMs ?? 120_000;
   const offsets = offsetsMs.slice(0, opts.maxOffsets ?? 3);
   const harness = readFileSync(new URL('./harness.html', import.meta.url), 'utf8');
   const rrwebEntry = require.resolve('rrweb');
@@ -117,53 +161,102 @@ export async function captureFrames(
     server.once('error', reject);
     server.listen(0, '127.0.0.1', resolve);
   });
-  const address = server.address();
-  if (!address || typeof address === 'string') throw new Error('loopback server failed to bind');
-  const origin = `http://127.0.0.1:${address.port}`;
-
-  let browser: Browser | null = null;
+  // Declared through `as` so the assignment inside `work` does not leave the
+  // finally block narrowed to null.
+  let browser = null as Browser | null;
+  let crashed = false;
+  let closing = false;
   let assetsMissing = false;
+  let budgetTimer: NodeJS.Timeout | undefined;
   try {
-    browser = await chromium.launch();
-    const page = await browser.newPage({ viewport });
-    await page.route('**/*', async (route) => {
-      let requestOrigin = '';
-      try {
-        requestOrigin = new URL(route.request().url()).origin;
-      } catch {
-        // Invalid URLs are treated as external and aborted.
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('loopback server failed to bind');
+    const origin = `http://127.0.0.1:${address.port}`;
+    const work = (async () => {
+      const launched = await chromium.launch();
+      if (closing) {
+        // The budget ran out during launch; the finally block has already run.
+        await launched.close().catch(() => undefined);
+        throw new Error(BUDGET_EXCEEDED);
       }
-      if (requestOrigin === origin) {
-        await route.continue();
-        return;
+      browser = launched;
+      // A dead browser process surfaces as a generic "Target page, context or
+      // browser has been closed" error; only this event says it was unexpected.
+      launched.on('disconnected', () => { if (!closing) crashed = true; });
+      const page = await launched.newPage({ viewport });
+      page.on('crash', () => { crashed = true; });
+      await page.route('**/*', async (route) => {
+        let requestOrigin = '';
+        try {
+          requestOrigin = new URL(route.request().url()).origin;
+        } catch {
+          // Invalid URLs are treated as external and aborted.
+        }
+        if (requestOrigin === origin) {
+          await route.continue();
+          return;
+        }
+        const resourceType = route.request().resourceType();
+        if (['stylesheet', 'font', 'image'].includes(resourceType)) assetsMissing = true;
+        await route.abort();
+      });
+      await page.goto(`${origin}/`);
+      const events = envelopes.flatMap((envelope) => envelope.events);
+      for (const batch of replayEventBatches(events, opts.replayBatchMaxChars)) {
+        await page.evaluate((json) => {
+          return (window as unknown as { appendReplayEvents(json: string): number })
+            .appendReplayEvents(json);
+        }, batch);
       }
-      const resourceType = route.request().resourceType();
-      if (['stylesheet', 'font', 'image'].includes(resourceType)) assetsMissing = true;
-      await route.abort();
-    });
-    await page.goto(`${origin}/`);
-    const events = envelopes.flatMap((envelope) => envelope.events);
-    await page.evaluate((replayEvents) => {
-      return (window as unknown as { initReplayer(events: unknown[]): boolean })
-        .initReplayer(replayEvents);
-    }, events);
-    await page.waitForTimeout(1_500);
+      await page.evaluate(() => {
+        return (window as unknown as { initReplayer(): boolean }).initReplayer();
+      });
+      await page.waitForTimeout(1_500);
 
-    const frames: CapturedFrame[] = [];
-    for (const offsetMs of offsets) {
-      for (const [pair, additionalMs] of [['a', 0], ['b', 2_000]] as const) {
-        if (Date.now() > deadline) throw new Error('frame capture wall-clock budget exceeded');
-        await page.evaluate((seekMs) => {
-          return (window as unknown as { seekTo(ms: number): boolean }).seekTo(seekMs);
-        }, offsetMs + additionalMs);
-        await page.waitForTimeout(1_200);
-        const png = await page.screenshot();
-        frames.push({ offsetMs, pair, png, modelPng: await modelCopyOf(page, png) });
+      const frames: CapturedFrame[] = [];
+      for (const offsetMs of offsets) {
+        for (const [pair, additionalMs] of [['a', 0], ['b', 2_000]] as const) {
+          await page.evaluate((seekMs) => {
+            return (window as unknown as { seekTo(ms: number): boolean }).seekTo(seekMs);
+          }, offsetMs + additionalMs);
+          await page.waitForTimeout(1_200);
+          const png = await page.screenshot();
+          frames.push({ offsetMs, pair, png, modelPng: await modelCopyOf(page, png) });
+        }
       }
+      if (crashed) {
+        // Every screenshot was taken before the renderer died; only a resize was
+        // lost, and modelCopyOf already fell back to the full-size frame.
+        logger.warn('Replay renderer crashed after the last screenshot; keeping captured frames', { frames: frames.length });
+      }
+      return { frames, assetsMissing };
+    })();
+    // The budget bounds the whole browser phase, not only the gaps between
+    // screenshots: a renderer call that never settles would otherwise hang the
+    // job while the poller keeps renewing its lease.
+    const budget = new Promise<never>((_resolve, reject) => {
+      budgetTimer = setTimeout(() => reject(new Error(BUDGET_EXCEEDED)), budgetMs);
+    });
+    // The losing promise settles after the race; its rejection is expected.
+    work.catch(() => undefined);
+    budget.catch(() => undefined);
+    return await Promise.race([work, budget]);
+  } catch (error: unknown) {
+    if (crashed || isReplayCrash(error)) {
+      throw new ReplayCrashedError(
+        `replay renderer crashed: ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error },
+      );
     }
-    return { frames, assetsMissing };
+    throw error;
   } finally {
-    await browser?.close();
+    clearTimeout(budgetTimer);
+    closing = true;
+    await browser?.close().catch((error: unknown) => {
+      logger.warn('Replay browser close failed', { error: error instanceof Error ? error.message : String(error) });
+    });
+    // Chromium's keep-alive sockets would otherwise hold server.close open.
+    server.closeAllConnections();
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 }

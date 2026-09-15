@@ -661,10 +661,10 @@ describeDb('ticket store', () => {
       (await store.selectBatch(db, t, randomUUID()))!.manifest.map((m) => m.sessionId),
     ).toEqual([rs[3]!.sessionId]);
   });
-  it('increments unavailable retries only for a new staged attempt and makes the third permanent', async () => {
+  it('increments unavailable retries only for a new staged attempt, retries after 1, 6 and 24 hours, and makes the fourth permanent', async () => {
     const t = await ticket();
     const [r] = await matches(t, 1);
-    for (let i = 1; i <= 3; i++) {
+    for (let i = 1; i <= 4; i++) {
       const b = (await store.selectBatch(db, t, randomUUID()))!;
       const check = { ...r!, outcome: 'unavailable' as const, model: 'test' };
       await store.stageCheck(db, b.id, check);
@@ -676,8 +676,8 @@ describeDb('ticket store', () => {
         )
       ).rows[0];
       expect(retry.attempts).toBe(i);
-      expect(retry.hours).toBe([1, 6, 24][i - 1]);
-      expect(retry.permanent).toBe(i === 3);
+      expect(retry.hours).toBe([1, 6, 24, 24][i - 1]);
+      expect(retry.permanent).toBe(i === 4);
       await store.finalizeBatch(db, t, b.id);
       await db.query(
         `UPDATE friction_unavailable_retries SET retry_at=now()-interval '1 minute' WHERE ticket_id=$1`,

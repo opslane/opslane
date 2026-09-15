@@ -54,14 +54,69 @@ export function ticketSteps(lines: readonly string[]): string {
 export function noteLeaksProvenance(note: string): boolean {
   return PROVENANCE_IN_NOTE.test(note);
 }
+
+const OUTCOMES = ['confirmed', 'refuted', 'inconclusive'] as const satisfies readonly Exclude<CheckResult['outcome'], 'unavailable'>[];
+const COSTS = ['none', 'annoyance', 'lost_time', 'abandoned_task'] as const satisfies readonly NonNullable<CheckResult['costToUser']>[];
+
+export type ConfirmAnswer = Required<
+  Pick<CheckResult, 'outcome' | 'evidenceLines' | 'signalIds' | 'note' | 'costToUser'>
+>;
+export type ConfirmInvalidRule =
+  | 'truncated' | 'refusal' | 'shape' | 'duplicate_id' | 'unknown_line' | 'unknown_signal'
+  | 'empty_note' | 'note_mentions_provenance' | 'note_too_long'
+  | 'confirmed_without_signal' | 'confirmed_without_line';
 export type ConfirmResult =
-  | Required<
-      Pick<
-        CheckResult,
-        'outcome' | 'evidenceLines' | 'signalIds' | 'note' | 'costToUser'
-      >
-    >
-  | { invalid: string; payload?: unknown };
+  | ConfirmAnswer
+  /** payload is the rejected reply (parsed object or raw text) for run logs. */
+  | { invalid: ConfirmInvalidRule; stopReason: string; payload?: unknown };
+
+export type UnavailableReason =
+  | 'recording_missing' | 'replay_crashed' | 'capture_failed' | 'no_frames' | 'invalid_answer';
+/** Internal only: customer surfaces read confirmed notes, and finalizeBatch
+ * never turns an unavailable attempt into a check. The wording names why a
+ * recording could not be checked so reasons can be counted with
+ * `SELECT note,count(*) FROM friction_check_attempts WHERE outcome='unavailable' GROUP BY note`. */
+export const UNAVAILABLE_NOTES: Record<UnavailableReason, string> = {
+  recording_missing: 'Unavailable: recording missing or incomplete.',
+  replay_crashed: 'Unavailable: replay browser crashed.',
+  capture_failed: 'Unavailable: replay capture failed.',
+  no_frames: 'Unavailable: replay produced no frames.',
+  invalid_answer: 'Unavailable: confirmation answer failed validation.',
+};
+export function unavailableCheck(reason: UnavailableReason): ConfirmAnswer {
+  return { outcome: 'unavailable', evidenceLines: [], signalIds: [], note: UNAVAILABLE_NOTES[reason], costToUser: null };
+}
+
+const isStringList = (value: unknown): value is string[] =>
+  Array.isArray(value) && value.every((item) => typeof item === 'string');
+const isOneOf = <T extends string>(values: readonly T[], value: unknown): value is T =>
+  typeof value === 'string' && (values as readonly string[]).includes(value);
+
+export function validateConfirmation(
+  input: unknown,
+  lines: ReadonlySet<string>,
+  signals: ReadonlySet<string>,
+): ConfirmAnswer | { rule: ConfirmInvalidRule } {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return { rule: 'shape' };
+  const raw = input as Record<string, unknown>;
+  const { outcome, evidenceLines, signalIds, note, costToUser } = raw;
+  if (
+    !isOneOf(OUTCOMES, outcome) || !isStringList(evidenceLines) || !isStringList(signalIds) ||
+    typeof note !== 'string' || !isOneOf(COSTS, costToUser)
+  )
+    return { rule: 'shape' };
+  if (new Set(evidenceLines).size !== evidenceLines.length || new Set(signalIds).size !== signalIds.length)
+    return { rule: 'duplicate_id' };
+  if (evidenceLines.some((line) => !lines.has(line))) return { rule: 'unknown_line' };
+  if (signalIds.some((id) => !signals.has(id))) return { rule: 'unknown_signal' };
+  if (!note.trim()) return { rule: 'empty_note' };
+  if (noteLeaksProvenance(note)) return { rule: 'note_mentions_provenance' };
+  if (codePoints(note) > CONFIRM_NOTE_MAX_CODE_POINTS) return { rule: 'note_too_long' };
+  if (outcome === 'confirmed' && !signalIds.length) return { rule: 'confirmed_without_signal' };
+  if (outcome === 'confirmed' && !evidenceLines.length) return { rule: 'confirmed_without_line' };
+  return { outcome, evidenceLines, signalIds, note, costToUser };
+}
+
 export const evidenceBlock = (
   label: string,
   text: string,
@@ -102,60 +157,30 @@ export async function confirmRead(
   meter: ConfirmMeter,
   run: RunHandle,
 ): Promise<ConfirmResult> {
-  if (!input.framesOk || !input.frames.length)
-    return {
-      outcome: 'unavailable',
-      evidenceLines: [],
-      signalIds: [],
-      note: 'Replay frames unavailable.',
-      costToUser: null,
-    };
+  if (!input.framesOk || !input.frames.length) return unavailableCheck('no_frames');
   const timeline = input.timelineText.slice(0, CONFIRM_TIMELINE_MAX_CHARS);
-  const reply = await modelObject(client, {
+  const reply = await client.complete({
     ...buildConfirmRequest(confirmPromptInput(input)),
     images: input.frames.map((f) => ({ mediaType: 'image/png', base64: f.modelPng.toString('base64') })),
-  }, meter, run);
-  const raw = reply.value;
-  const strings = (v: unknown): v is string[] =>
-    Array.isArray(v) &&
-    v.every((x) => typeof x === 'string') &&
-    new Set(v).size === v.length;
-  const lines = new Set([...timeline.matchAll(/^(L\d+):/gm)].map((m) => m[1]));
-  const ids = new Set(input.signals.map((s) => s.id));
-  if (
-    !raw ||
-    typeof raw['outcome'] !== 'string' ||
-    !['confirmed', 'refuted', 'inconclusive'].includes(raw['outcome']) ||
-    !strings(raw['evidenceLines']) ||
-    raw['evidenceLines'].some((l) => !lines.has(l)) ||
-    !strings(raw['signalIds']) ||
-    raw['signalIds'].some((id) => !ids.has(id)) ||
-    typeof raw['note'] !== 'string' ||
-    !raw['note'].trim() ||
-    noteLeaksProvenance(raw['note']) ||
-    codePoints(raw['note']) > CONFIRM_NOTE_MAX_CODE_POINTS ||
-    typeof raw['costToUser'] !== 'string' ||
-    !['none', 'annoyance', 'lost_time', 'abandoned_task'].includes(
-      raw['costToUser'],
-    ) ||
-    (raw['outcome'] === 'confirmed' &&
-      (!raw['signalIds'].length || !raw['evidenceLines'].length))
-  )
-    return {
-      invalid: 'Malformed confirmation or evidence outside the recording',
-      payload: raw ?? reply.text,
-    };
-  return {
-    outcome: raw['outcome'] as 'confirmed' | 'refuted' | 'inconclusive',
-    evidenceLines: raw['evidenceLines'],
-    signalIds: raw['signalIds'],
-    note: raw['note'],
-    costToUser: raw['costToUser'] as
-      | 'none'
-      | 'annoyance'
-      | 'lost_time'
-      | 'abandoned_task',
-  };
+    run,
+  });
+  meter.add(client.modelName, {
+    input: reply.inputTokens, output: reply.outputTokens,
+    cacheRead: reply.cacheReadTokens, cacheWrite: reply.cacheWriteTokens,
+  });
+  const { stopReason } = reply;
+  // A cut-off reply can still hold a parsable prefix; never accept it.
+  if (stopReason === 'max_tokens') return { invalid: 'truncated', stopReason, payload: reply.text };
+  if (stopReason === 'refusal') return { invalid: 'refusal', stopReason, payload: reply.text };
+  let answer: unknown;
+  try {
+    answer = JSON.parse(extractJsonObject(reply.text));
+  } catch {
+    return { invalid: 'shape', stopReason, payload: reply.text };
+  }
+  const lines = new Set([...timeline.matchAll(/^(L\d+):/gm)].map((m) => m[1]!));
+  const checked = validateConfirmation(answer, lines, new Set(input.signals.map((s) => s.id)));
+  return 'rule' in checked ? { invalid: checked.rule, stopReason, payload: answer } : checked;
 }
 
 export interface ConfirmPromptInput {

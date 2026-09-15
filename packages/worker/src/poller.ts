@@ -9,6 +9,7 @@ import {
 } from './db.js';
 import { logger } from './logger.js';
 import { NonRetryableJobError } from './harness/errors.js';
+import { isJobCompletionSignal } from './job-signals.js';
 
 export interface Poller {
   start(): void;
@@ -207,7 +208,7 @@ export function createPoller(options: PollerOptions): Poller {
       });
       return 'completed';
     } catch (err: unknown) {
-      if (err instanceof Error && ['JobRescheduledError', 'JobCompletedInTransaction'].includes(err.name)) {
+      if (isJobCompletionSignal(err)) {
         logger.info(err.name === 'JobRescheduledError' ? 'Job rescheduled' : 'Job completed in transaction', { job_id: job.id });
         return 'completed';
       }

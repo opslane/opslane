@@ -92,9 +92,9 @@ describe('poller', () => {
     await poller.stop();
   });
 
-  it('does not complete or fail a job whose handler committed completion with its successor', async () => {
+  it.each(['JobCompletedInTransaction', 'JobRescheduledError'])('does not complete or fail a job whose handler threw %s', async (name) => {
     mockClaimJob.mockResolvedValueOnce(makeJob());
-    const completed = new Error('Committed'); completed.name = 'JobCompletedInTransaction';
+    const completed = new Error('Committed'); completed.name = name;
     const poller = createPoller({ intervalMs: 1000, leaseDurationMs: 30000, workerId: 'test-worker', processJob: async () => { throw completed; } });
     poller.start();
     await vi.advanceTimersByTimeAsync(0);

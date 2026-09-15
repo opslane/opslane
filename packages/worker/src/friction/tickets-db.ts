@@ -461,7 +461,7 @@ export async function stageCheck(db: TicketDb, batchId: string, r: CheckResult):
     SELECT ticket_id,session_id,1,now()+interval '1 hour',false FROM inserted WHERE outcome='unavailable'
     ON CONFLICT(ticket_id,session_id) DO UPDATE SET attempts=r.attempts+1,
       retry_at=now()+CASE WHEN r.attempts=0 THEN interval '1 hour' WHEN r.attempts=1 THEN interval '6 hours' ELSE interval '24 hours' END,
-      permanent=r.attempts+1>=3 RETURNING ticket_id
+      permanent=r.attempts+1>=4 RETURNING ticket_id
   ) SELECT id FROM inserted`,
     [
       batchId,

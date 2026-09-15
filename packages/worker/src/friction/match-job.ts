@@ -37,7 +37,7 @@ export function frictionMatchDepsFromEnv(): MatchJobDeps {
     maxTokens: number,
   ): MatchJobDeps['cheap'] => ({
     modelName,
-    settings: () => ({ model: modelName, maxTokens, reasoning: 'off', timeoutMs: modelTimeoutMs(maxTokens) }),
+    settings: () => ({ model: modelName, maxTokens, timeoutMs: modelTimeoutMs(maxTokens) }),
     complete: async (args) => {
       const apiKey =
         process.env['NARRATIVE_API_KEY'] || process.env['ANTHROPIC_API_KEY'];
@@ -50,7 +50,6 @@ export function frictionMatchDepsFromEnv(): MatchJobDeps {
         apiKey,
         maxTokens,
         timeoutMs: modelTimeoutMs(maxTokens),
-        reasoning: 'off',
         baseURL:
           process.env['NARRATIVE_BASE_URL'] ||
           process.env['ANTHROPIC_BASE_URL'] ||
