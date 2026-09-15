@@ -6,6 +6,7 @@ import type { AgentApproveInfo, AgentFacts } from '../../types/api';
 const api = vi.hoisted(() => ({
   getAgentApproveInfo: vi.fn(),
   getMe: vi.fn(),
+  completeOnboarding: vi.fn(),
   approveAgentSession: vi.fn(),
   denyAgentSession: vi.fn(),
 }));
@@ -208,6 +209,7 @@ describe('AgentApprove', () => {
     await w.get('[data-testid="agent-dashboard"]').trigger('click');
     await flushPromises();
     expect(api.getMe).toHaveBeenCalledTimes(1);
+    expect(api.completeOnboarding).not.toHaveBeenCalled();
     expect(routerPush).toHaveBeenCalledWith('/?project_id=p-b');
     expect(localStorage.getItem('opslane_project_id')).toBe('p-b');
     expect(localStorage.getItem('opslane_environment_id')).toBeNull();
@@ -234,24 +236,72 @@ describe('AgentApprove', () => {
     w.unmount();
   });
 
-  it('preserves the error destination while setup is pending, then rechecks before opening it', async () => {
-    localStorage.setItem('opslane_onboarding_complete', '1');
+  it('completes onboarding from the session event and keeps the destination when completion fails', async () => {
     api.getAgentApproveInfo.mockResolvedValue(pending({ status: 'app_reporting', project_id: 'p-b', facts: {
       ...emptyFacts, has_events: true, latest_error_group_url: 'http://x/issues/g-b',
     } }));
-    api.getMe.mockResolvedValueOnce({ onboarding_complete: false }).mockResolvedValue({ onboarding_complete: true });
+    api.getMe.mockResolvedValue({ onboarding_complete: false });
+    api.completeOnboarding.mockRejectedValueOnce(new Error('API 500')).mockResolvedValue({ onboarding_complete: true });
     const w = mount(AgentApprove, { global: { stubs: { RouterLink: true } } });
     await flushPromises();
     await w.get('[data-testid="agent-latest-issue"]').trigger('click');
     await flushPromises();
+    expect(api.completeOnboarding).toHaveBeenCalledTimes(1);
     expect(routerPush).not.toHaveBeenCalled();
     expect(localStorage.getItem('opslane_onboarding_complete')).toBeNull();
-    expect(w.text()).toContain('Your agent is still finishing setup');
+    expect(w.text()).toContain('API 500');
     await w.get('[data-testid="agent-navigation-retry"]').trigger('click');
     await flushPromises();
-    expect(api.getMe).toHaveBeenCalledTimes(2);
+    expect(api.completeOnboarding).toHaveBeenCalledTimes(2);
+    expect(localStorage.getItem('opslane_onboarding_complete')).toBe('1');
     expect(routerPush).toHaveBeenCalledWith('/issues/g-b?project_id=p-b');
     w.unmount();
+  });
+
+  it('keeps Open dashboard closed while the session has no event', async () => {
+    api.getAgentApproveInfo.mockResolvedValue(pending({ status: 'app_reporting', project_id: 'p-b', facts: emptyFacts }));
+    api.getMe.mockResolvedValue({ onboarding_complete: false });
+    const w = mount(AgentApprove, { global: { stubs: { RouterLink: true } } });
+    await flushPromises();
+    await w.get('[data-testid="agent-dashboard"]').trigger('click');
+    await flushPromises();
+    expect(api.completeOnboarding).not.toHaveBeenCalled();
+    expect(routerPush).not.toHaveBeenCalled();
+    expect(w.text()).toContain('Your agent is still finishing setup');
+    w.unmount();
+  });
+
+  it('opens the dashboard for a not-yet-onboarded org once the session has an event', async () => {
+    localStorage.setItem('opslane_project_id', 'p-a');
+    api.getAgentApproveInfo.mockResolvedValue(pending({ status: 'app_reporting', project_id: 'p-b', project_name: 'B', facts: { ...emptyFacts, has_events: true } }));
+    api.getMe.mockResolvedValue({ onboarding_complete: false });
+    api.completeOnboarding.mockResolvedValue({ onboarding_complete: true });
+    const w = mount(AgentApprove, { global: { stubs: { RouterLink: true } } });
+    await flushPromises();
+    await w.get('[data-testid="agent-dashboard"]').trigger('click');
+    await flushPromises();
+    expect(api.completeOnboarding).toHaveBeenCalledTimes(1);
+    expect(localStorage.getItem('opslane_onboarding_complete')).toBe('1');
+    expect(localStorage.getItem('opslane_project_id')).toBe('p-b');
+    expect(routerPush).toHaveBeenCalledWith('/?project_id=p-b');
+    w.unmount();
+  });
+
+  it('does not navigate when completion finishes after unmount', async () => {
+    api.getAgentApproveInfo.mockResolvedValue(pending({ status: 'app_reporting', project_id: 'p-b', facts: { ...emptyFacts, has_events: true } }));
+    api.getMe.mockResolvedValue({ onboarding_complete: false });
+    let finish: () => void = () => undefined;
+    api.completeOnboarding.mockImplementation(() => new Promise((resolve) => { finish = () => resolve({ onboarding_complete: true }); }));
+    const w = mount(AgentApprove, { global: { stubs: { RouterLink: true } } });
+    await flushPromises();
+    await w.get('[data-testid="agent-dashboard"]').trigger('click');
+    await flushPromises();
+    expect(api.completeOnboarding).toHaveBeenCalledTimes(1);
+    w.unmount();
+    finish();
+    await flushPromises();
+    expect(routerPush).not.toHaveBeenCalled();
+    expect(localStorage.getItem('opslane_onboarding_complete')).toBeNull();
   });
 
   it('does not navigate or update caches when the status check finishes after unmount', async () => {

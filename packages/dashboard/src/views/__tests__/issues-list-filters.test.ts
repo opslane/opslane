@@ -380,7 +380,7 @@ describe('IssuesList URL filters', () => {
     wrapper.unmount();
   });
 
-  it('renders the unfiltered empty state with its Setup guide action', async () => {
+  it('renders the unfiltered empty state with the agent setup prompt', async () => {
     mocks.route.query = { project_id: 'p1' };
     window.history.replaceState({}, '', '/?project_id=p1');
     mocks.listIncidents.mockResolvedValue([]);
@@ -389,7 +389,7 @@ describe('IssuesList URL filters', () => {
     await flushPromises();
 
     expect(wrapper.text()).toContain('No issues yet');
-    expect(wrapper.text()).toContain('Setup guide');
+    expect(wrapper.text()).toContain('Paste into your agent');
     expect(wrapper.find('table').exists()).toBe(false);
 
     wrapper.unmount();
@@ -404,7 +404,7 @@ describe('IssuesList URL filters', () => {
     await flushPromises();
 
     expect(wrapper.text()).toContain('No issues match these filters');
-    expect(wrapper.text()).not.toContain('Setup guide');
+    expect(wrapper.text()).not.toContain('Paste into your agent');
     await wrapper.get('button').trigger('click');
     await flushPromises();
 

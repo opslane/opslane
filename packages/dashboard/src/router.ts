@@ -5,7 +5,7 @@ import AuthCallback from './views/AuthCallback.vue';
 import IncidentDetail from './views/IncidentDetail.vue';
 import Login from './views/Login.vue';
 import ResetPassword from './views/ResetPassword.vue';
-import SetupWizard from './views/SetupWizard.vue';
+import Setup from './views/Setup.vue';
 import Settings from './views/Settings.vue';
 import AccountsList from './views/AccountsList.vue';
 import AccountDetail from './views/AccountDetail.vue';
@@ -22,7 +22,7 @@ export const routes: RouteRecordRaw[] = [
   { path: '/agent/approve/:id', name: 'agent-approve', component: AgentApprove },
   { path: '/agent/github/:id', name: 'agent-github-install', component: AgentGitHubInstall },
   { path: '/github/install', name: 'github-install', component: AgentGitHubInstall },
-  { path: '/setup', name: 'setup', component: SetupWizard },
+  { path: '/setup', name: 'setup', component: Setup },
   { path: '/', name: 'issues', component: IssuesList },
   { path: '/issues/:id', name: 'incident', component: IncidentDetail },
   // Preserve pre-rename bookmarks. Vue Router carries the query forward when
@@ -59,10 +59,10 @@ router.beforeEach((to) => {
     return { name: 'issues' };
   }
 
-	// The completion flag is a cache for the synchronous guard. SetupWizard
+	// The completion flag is a cache for the synchronous guard. Setup
 	// rechecks server state, so stale false costs one redirect and stale true is
 	// corrected on the next login. A missing project id alone must NOT bounce an
-	// onboarded session back to /setup: the wizard's push('/') would then loop
+	// onboarded session back to /setup: the setup page's push('/') would then loop
 	// against this guard whenever project restore lagged; App.vue's checkProject
 	// syncs the project id (and routes truly project-less orgs) after mount.
 	if (authed && routeNeedsProject(to.name)) {

@@ -10,7 +10,6 @@ import OnboardingBanners from '../OnboardingBanners.vue';
 
 const state = (githubConnected: boolean, slackConnected: boolean) => ({
   onboarding_complete: true,
-  next_step: 'done',
   project_id: 'p1',
   has_events: true,
   github_connected: githubConnected,

@@ -291,7 +291,7 @@ describe('SessionsList ledger', () => {
     await wrapper.findAll('button').find((button) => button.text() === 'Retry')!.trigger('click');
     await flushPromises();
     expect(wrapper.text()).toContain('No sessions recorded yet');
-    expect(wrapper.text()).toContain('Setup guide');
+    expect(wrapper.text()).toContain('Paste into your agent');
     expect(wrapper.text()).not.toContain('These sessions have no user attached');
 
     vi.mocked(listSessions).mockResolvedValueOnce(response([]));
