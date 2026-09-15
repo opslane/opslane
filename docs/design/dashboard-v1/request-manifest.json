@@ -230,20 +230,6 @@
       "redirect": "/login on failed refresh"
     },
     {
-      "method": "POST",
-      "path": "/api/v1/onboarding/setup",
-      "source": "api.ts:onboardingSetup",
-      "pollIntervalMs": null,
-      "redirect": "/login on failed refresh"
-    },
-    {
-      "method": "GET",
-      "path": "/api/v1/projects/{projectId}/event-count",
-      "source": "api.ts:getEventStatus",
-      "pollIntervalMs": 3000,
-      "redirect": "/login on failed refresh"
-    },
-    {
       "method": "GET",
       "path": "/api/v1/projects/{projectId}/github",
       "source": "api.ts:getGitHubConfig",
@@ -430,7 +416,7 @@
       "method": "GET",
       "path": "/api/v1/onboarding/state",
       "source": "api.ts:getOnboardingState",
-      "pollIntervalMs": null,
+      "pollIntervalMs": 3000,
       "redirect": "/login on failed refresh"
     },
     {

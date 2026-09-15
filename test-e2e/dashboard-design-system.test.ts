@@ -79,7 +79,7 @@ describe.skipIf(!browserAvailable)('dashboard deterministic Chromium smoke', () 
   });
 
   const routes: Array<{ path: string; identity: RegExp }> = [
-    { path: '/setup', identity: /Connect GitHub/i },
+    { path: '/setup', identity: /Set up Opslane with your coding agent/i },
     { path: '/', identity: /^Issues$/i },
     { path: '/issues/incident-1', identity: /Mock incident title/i },
     { path: '/accounts', identity: /Accounts/i },
