@@ -23,7 +23,7 @@ export GITHUB_TOKEN=github_pat_...
 docker compose up -d
 ```
 
-A token lets Opslane clone repositories, open pull requests, and read CI. It does not power dashboard sign-in or the GitHub App repo picker. During onboarding, enter the repository as `owner/repo`; Opslane verifies that `GITHUB_TOKEN` can reach it before saving the project setting. You can also attach a repository through the session-authenticated API:
+A token lets Opslane clone repositories, open pull requests, and read CI. It does not power dashboard sign-in or the GitHub App repo picker. Ask your coding agent to attach the repository as `owner/repo`; Opslane verifies that `GITHUB_TOKEN` can reach it before saving the project setting. You can also attach a repository through the session-authenticated API:
 
 ```bash
 PUT /api/v1/projects/{projectID}/github
@@ -31,7 +31,7 @@ PUT /api/v1/projects/{projectID}/github
 
 ## GitHub App mode
 
-Use a GitHub App to scope access to selected repositories and power dashboard sign-in. The onboarding wizard presents the App install link, waits for the installation, and then opens the repo picker. If a GitHub organization admin must approve the installation, choose **Do this later** and finish onboarding; the dashboard keeps a GitHub reminder visible until the installation and repository connection are complete.
+Use a GitHub App to scope access to selected repositories and power dashboard sign-in. Agent setup gives you the App install link and attaches the repository once the App can see it. If a GitHub organization admin must approve the installation, tell the agent to do it later; the dashboard keeps a GitHub reminder visible until the installation and repository connection are complete.
 
 On **hosted Opslane** the App already exists: Settings → GitHub → Install, pick your repositories, done.
 
@@ -74,7 +74,7 @@ It refuses to move an installation that is linked to a different organization, a
 
 ## Point a project at a repo
 
-Each project maps to one repository. In App mode, open project → Settings → GitHub and pick the repo. In PAT mode, enter `owner/repo` in the onboarding wizard or call the project GitHub endpoint. Opslane stores only the repo name and authenticates through your App or token each time it acts.
+Each project maps to one repository. In App mode, open project → Settings → GitHub and pick the repo. In PAT mode, let agent setup attach the repository or call the project GitHub endpoint. Opslane stores only the repo name and authenticates through your App or token each time it acts.
 
 ## What Opslane does with the access
 

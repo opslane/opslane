@@ -62,7 +62,7 @@ The agent's own completion is not changed. It still requires an unexpired, appro
 - `views/AgentApprove.vue`: Flow step 8.
 - `api.ts`: delete `onboardingSetup`, `OnboardingSetupResponse`, `getEventStatus`, `EventStatus`.
 - `types/api.ts`: delete `OnboardingState.next_step`.
-- Components and API functions the wizard used that other views still use stay: `RepoSelector` (Settings), `CodeBlock` (Settings, IncidentDetail), and the notification and GitHub API functions (Settings).
+- Components and API functions the wizard used that other views still use stay: `RepoSelector` (Settings), `CodeBlock` (IncidentDetail), and the notification and GitHub API functions (Settings).
 - Old `localStorage` keys `opslane_onboarding_key_<projectId>` are left alone. They hold a public ingest key and nothing reads them after this change.
 
 ### Ingestion

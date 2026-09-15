@@ -23,7 +23,7 @@ The ingest and source-map keys cannot read your data. The MCP key can read a pro
 
 ## The ingest key
 
-You get an ingest key when the project is created; it is shown once and can't be retrieved later. The onboarding wizard can create another ingest key when you resume on a different browser. The SDK refuses any key that doesn't start with `opslane_pk_`.
+You get an ingest key when the project is created; it is shown once and can't be retrieved later. Agent setup creates one for the project you approve. The SDK refuses any key that doesn't start with `opslane_pk_`.
 
 ```bash
 VITE_OPSLANE_API_KEY=opslane_pk_...

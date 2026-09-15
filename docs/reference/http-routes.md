@@ -84,9 +84,8 @@ Agent setup uses normal dashboard sign-in and an explicit approval. Approval cre
 | POST | `/api/v1/billing/portal` | Billing-enabled deployments: open the active org's billing portal (admin on cloud) |
 | GET | `/api/v1/admin/overview` | Operator-only cross-tenant monitoring overview, including best-effort progress through automated repository setup (404 unless allowlisted) |
 | GET | `/api/v1/admin/jobs` | Operator-only recent jobs (404 unless allowlisted) |
-| POST | `/api/v1/onboarding/setup` | Create or resume the first project and return a fresh ingest key |
-| GET | `/api/v1/onboarding/state` | Read server-derived onboarding facts and the next step |
-| POST | `/api/v1/onboarding/complete` | Mark onboarding complete after the project receives its first event; GitHub and Slack are optional (admin on cloud) |
+| GET | `/api/v1/onboarding/state` | Read server-derived onboarding facts: completion, the newest project, whether any project has an event, and GitHub and Slack connection |
+| POST | `/api/v1/onboarding/complete` | Mark onboarding complete after any project in the org receives its first event; GitHub and Slack are optional (admin on cloud) |
 | GET | `/api/v1/projects` | List projects |
 | POST | `/api/v1/projects` | Create project |
 | PATCH | `/api/v1/projects/{projectID}` | Update project settings. `friction_autonomy` (`ask_first` or `auto_fix`) controls automatic fixes for session-recording issues; the retired `auto_fix_ux` is accepted as a deprecated alias and stored as `auto_fix`; `pr_posture` controls whether unverified fixes may open as drafts. A same-project `default_environment_id` must be an explicit UUID string when present. |

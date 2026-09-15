@@ -4,7 +4,6 @@ covers:
   - packages/ingestion/handler/notifications.go
   - packages/ingestion/db/notifications.go
   - packages/dashboard/src/components/IntegrationsSettings.vue
-  - packages/dashboard/src/views/SetupWizard.vue
 description: Send issue alerts after Opslane decides what to do and send the daily summary to Slack with an incoming webhook.
 ---
 
@@ -27,7 +26,7 @@ Treat that URL as a secret: anyone holding it can post to your channel. Opslane 
 <!-- voice-ok: "Alert after triage" is the exact dashboard setting label and is defined here. -->
 Dashboard > **Settings** > **Integrations** > *Notification integrations*: add a destination, name it, and paste the webhook URL. Select which event types to receive; by default both issue alerts and daily digests are enabled. Choose **Alert after triage**, which waits until Opslane decides whether to fix the issue or hand it to a person. Use the test actions to confirm the channel wiring before relying on it.
 
-The onboarding wizard configures a daily digest safely: it creates the destination disabled, sends a test issue alert, and enables the destination only when Slack accepts the test. A failed test leaves the destination disabled, and retrying updates the same row. You can also choose **Do this later**; the dashboard keeps a Slack reminder visible until an enabled daily-digest destination exists.
+Agent setup can connect a daily digest the same way: it sends a test message and enables the digest only when Slack accepts it. If you skip that step, the dashboard keeps a Slack reminder visible until an enabled daily-digest destination exists.
 
 Or via the API (session-authenticated; an SDK API key cannot manage destinations):
 
