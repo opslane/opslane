@@ -39,13 +39,13 @@ paths = [
   # secret JSON fields in captured error text never reach the model prompt; a
   # token gitleaks ignores would prove nothing.
   '''packages/worker/src/__tests__/evidence-mask\.test\.ts''',
-  # The run-log scrubber tests assert a PEM private key block and an AWS-shaped
-  # access key id never reach stored agent run logs; the plan quotes the same
-  # synthetic test code. A token gitleaks ignores would prove nothing.
-  '''packages/worker/src/harness/__tests__/redact\.test\.ts''',
-  '''docs/superpowers/plans/2026-09-15-agent-run-logs\.md''',
 ]
 regexes = [
+  # The agent run logs plan quotes the scrubber test's synthetic private key
+  # body and AWS-shaped key id. The test itself assembles its PEM headers at
+  # runtime; only these exact values are allowed, not the files.
+  '''-----BEGIN RSA PRIVATE KEY-----\\nMIIEow\\nabc''',
+  '''AKIAABCDEFGHIJKLMNOP''',
   # Deterministic canary values planted by the keyless E2E lane's token-leak
   # scan (.github/workflows/ci.yml). Not secrets by construction.
   '''OPSLANE-E2E-CANARY-[a-z]+-[0-9a-f]+''',

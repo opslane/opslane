@@ -170,6 +170,7 @@ export async function prepareConfirmationTransition(
           if ('invalid' in attempt) {
             run.event({ type: 'validator_rejection', message: attempt.invalid, payload: attempt.payload ?? null });
             attempt = await judgeOneFix(client, ticket, neighbor, meter, run);
+            if ('invalid' in attempt) run.event({ type: 'validator_rejection', message: attempt.invalid, payload: attempt.payload ?? null });
           }
           return attempt;
         },

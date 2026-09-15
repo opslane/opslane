@@ -49,7 +49,7 @@ const PRIVATE_KEY_BLOCK = /-----BEGIN [A-Z ]{0,40}PRIVATE KEY-----(?:[\s\S]*?---
 const AWS_ACCESS_KEY_ID = /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g;
 // A password in any URL (postgres://user:pass@host, redis://:pass@host).
 const URL_PASSWORD = /(?<![A-Za-z0-9+.-])([A-Za-z][A-Za-z0-9+.-]{0,31}:\/\/)[^\s/@:]*:[^\s/@]+@/g;
-const IMAGE_DATA_URL = /(data:image\/[A-Za-z0-9.+-]{1,32};base64,)[A-Za-z0-9+/=]+/g;
+const IMAGE_DATA_URL = /(data:image\/[A-Za-z0-9.+-]{1,32};base64,\s*)[A-Za-z0-9+/=]+/g;
 
 /**
  * Scrub credential-shaped values: token prefixes, netrc credentials, registry
