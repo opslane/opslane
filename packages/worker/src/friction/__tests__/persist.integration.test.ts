@@ -71,6 +71,27 @@ describeDb('atomic observation persistence', () => {
     })));
   });
 
+  it('throws instead of returning another row when only the fingerprint collides', async () => {
+    const narrativeId = randomUUID();
+    const fingerprint = randomUUID().replaceAll('-', '');
+    const owner: ObservationSignalRow = {
+      signalType: 'other', fingerprint, observationId: 'owner', narrativeId, evidenceLines: ['L1'],
+      elementSelector: null, pageUrlNormalized: '/assets',
+      occurredAts: [Date.parse(session.started_at)], occurrenceCount: 1, what: 'owner',
+    };
+    await writeObservationSignals(client, session, [owner]);
+    // ON CONFLICT DO NOTHING absorbs the fingerprint key too; the lookup must refuse
+    // to report the other observation's row as this one.
+    await expect(writeObservationSignals(client, session, [
+      { ...owner, observationId: 'intruder', what: 'intruder' },
+    ])).rejects.toThrow(/intruder missing after insert/);
+    const stored = await client.query(
+      'SELECT observation_id FROM friction_signals WHERE session_id = $1 AND fingerprint = $2',
+      [session.id, fingerprint],
+    );
+    expect(stored.rows).toEqual([{ observation_id: 'owner' }]);
+  });
+
   it('writes stored v2 observations through the same atomic writer', async () => {
     const observations = [
       { id: 'v2-a', category: 'slow_response' as const, severity: 'high' as const,

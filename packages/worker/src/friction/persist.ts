@@ -32,7 +32,7 @@ export async function writeObservationSignals(
           adjudicated_at, observation_text, severity, observation_id, narrative_id, evidence_lines)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,to_timestamp($10 / 1000.0),$11::jsonb,$12,
                'accepted',now(),$13,$14,$15,$16,$17::jsonb)
-       ON CONFLICT (session_id, narrative_id, observation_id) WHERE observation_id IS NOT NULL DO NOTHING
+       ON CONFLICT DO NOTHING
        RETURNING id, observation_id`,
       [
         session.id,
@@ -54,7 +54,11 @@ export async function writeObservationSignals(
         JSON.stringify(row.evidenceLines),
       ],
     );
-    // A second statement sees a concurrent winner after INSERT has waited for it.
+    // No conflict target: buildSignalRows hashes session, narrative and observation into
+    // the fingerprint, so UNIQUE (session_id, fingerprint, rule_version) names the same row
+    // as the atomic index, and a racing writer can hit either one first. A second statement
+    // sees the concurrent winner after INSERT has waited for it; if a conflict came from a
+    // different row, the lookup below finds nothing and throws.
     const stored = result.rows[0] ?? (await client.query<{ id: string; observation_id: string }>(
       `SELECT id, observation_id FROM friction_signals
        WHERE session_id = $1 AND narrative_id = $2 AND observation_id = $3 AND project_id = $4`,
