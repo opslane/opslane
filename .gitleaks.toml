@@ -36,11 +36,9 @@ paths = [
   # would prove nothing.
   '''packages/ingestion/notify/slack_test\.go''',
   # The inquiry evidence masking tests assert Stripe-shaped keys, JWTs and
-  # secret JSON fields in captured error text never reach the model prompt;
-  # the implementation plan quotes those tests. A token gitleaks ignores would
-  # prove nothing.
+  # secret JSON fields in captured error text never reach the model prompt; a
+  # token gitleaks ignores would prove nothing.
   '''packages/worker/src/__tests__/evidence-mask\.test\.ts''',
-  '''docs/superpowers/plans/2026-09-15-inquiry-error-evidence\.md''',
 ]
 regexes = [
   # Deterministic canary values planted by the keyless E2E lane's token-leak
@@ -75,4 +73,10 @@ regexes = [
   # includes "_", so roughly half of all real keys contain one; this fixture
   # proves the parser splits on the first three separators only.
   '''a_b_c_deFGHIJKLMNOPQRSTUVWXYZ0123456789-_x''',
+  # The two synthetic masking fixtures the inquiry error-evidence plan quotes
+  # (docs/superpowers/plans/2026-09-15-inquiry-error-evidence.md): the jwt.io
+  # sample token and an alphabet-run Stripe key. Exact values only, so a real
+  # credential pasted into that plan is still caught.
+  '''eyJhbGciOiJIUzI1NiJ9\.eyJzdWIiOiIxMjM0NTY3ODkwIn0\.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U''',
+  '''sk_live_abcdefghijklmnop''',
 ]
