@@ -35,11 +35,14 @@ export MINIO_ENDPOINT="http://localhost:$OPSLANE_MINIO_HOST_PORT"
 export REPLAY_STORE_ENDPOINT="$MINIO_ENDPOINT" REPLAY_STORE_PUBLIC_ENDPOINT="$MINIO_ENDPOINT"
 export MINIO_ACCESS_KEY=minio MINIO_SECRET_KEY=minio12345 MINIO_BUCKET=opslane-replays
 export REPLAY_STORE_ACCESS_KEY=minio REPLAY_STORE_SECRET_KEY=minio12345 REPLAY_STORE_BUCKET=opslane-replays
-docker compose -p agentonly up -d postgres minio minio-setup
+docker compose -p agentonly up -d --wait postgres minio
+docker compose -p agentonly run --rm minio-setup
 MIGRATION_DIR=packages/ingestion/db/migrations ./scripts/run-migrations.sh
+export SCRATCH="${SCRATCH:-$(mktemp -d)}"   # use the session scratchpad when one exists
+mkdir -p "$SCRATCH/runbook"
 ```
 
-`psql` must be on `PATH` (`db/migrations_test.go` skips without it). If `run-migrations.sh` takes the directory differently, read its header and adapt; the requirement is a fully migrated database at `DATABASE_URL`.
+`psql` must be on `PATH` (`db/migrations_test.go` skips without it). `run-migrations.sh` applies every file in `MIGRATION_DIR` to `DATABASE_URL` in order. Run every command in this plan from the repository root; Go commands use a `(cd packages/ingestion && …)` subshell so the shell stays at the root.
 
 ---
 
@@ -167,7 +170,7 @@ func TestOrgHasEvents(t *testing.T) {
 
 - [ ] **Step 2: Run it to verify it fails**
 
-Run: `cd packages/ingestion && go test -count=1 ./db -run TestOrgHasEvents -v`
+Run: `(cd packages/ingestion && go test -count=1 ./db -run TestOrgHasEvents -v)`
 Expected: build failure `q.OrgHasEvents undefined`. If it prints `--- SKIP`, the environment block above is not exported; fix that before continuing.
 
 - [ ] **Step 3: Implement `OrgHasEvents`**
@@ -197,7 +200,7 @@ func (q *Queries) OrgHasEvents(ctx context.Context, orgID string) (bool, error) 
 
 - [ ] **Step 4: Run the db test to verify it passes**
 
-Run: `cd packages/ingestion && go test -count=1 ./db -run TestOrgHasEvents -v`
+Run: `(cd packages/ingestion && go test -count=1 ./db -run TestOrgHasEvents -v)`
 Expected: `--- PASS: TestOrgHasEvents`.
 
 - [ ] **Step 5: Add handler test helpers and migrate the GitHub coverage test**
@@ -386,7 +389,7 @@ func TestOnboardingCompleteCountsAnEventOnAnOlderProject(t *testing.T) {
 
 - [ ] **Step 7: Run the handler tests to verify the new cases fail**
 
-Run: `cd packages/ingestion && go test -count=1 ./handler -run 'TestOnboarding' -v`
+Run: `(cd packages/ingestion && go test -count=1 ./handler -run 'TestOnboarding' -v)`
 Expected: `TestOnboardingStateAndCompleteShareTheEventGate` FAILS on `state must not carry next_step`, and `TestOnboardingCompleteCountsAnEventOnAnOlderProject` FAILS on the state check (newest project has no events). `TestOnboardingSetupIdempotency` and `TestOnboardingState_GitHubConnectedRequiresRepoCoverage` pass.
 
 - [ ] **Step 8: Rewrite `onboarding_state.go`**
@@ -500,8 +503,8 @@ func (d *Dependencies) OnboardingComplete(w http.ResponseWriter, r *http.Request
 
 - [ ] **Step 9: Run the handler and db tests to verify they pass**
 
-Run: `cd packages/ingestion && go build ./... && go test -count=1 ./handler -run 'TestOnboarding|TestAgentSessionRoutes|TestAgentApprove' -v 2>&1 | grep -E '^(--- |=== RUN|ok|FAIL|PASS)' | grep -v '=== RUN'`
-Expected: every listed test `--- PASS`, no `--- SKIP`, final `ok`.
+Run: `(cd packages/ingestion && go build ./... && go test -count=1 -v ./db -run TestOrgHasEvents && go test -count=1 -v ./handler -run 'TestOnboarding|TestAgentSessionRoutes|TestAgentApprove')`
+Expected: the command exits 0. Read the whole output, including indented subtests: every test shows `--- PASS`, and there is no `--- SKIP` or `--- FAIL`.
 
 - [ ] **Step 10: Commit**
 
@@ -560,8 +563,8 @@ func TestAgentSessionRoutes_CompleteAfterDashboardCompletedOnboarding(t *testing
 
 - [ ] **Step 2: Run to verify the 404 assertion fails and the agent test passes**
 
-Run: `cd packages/ingestion && go test -count=1 ./handler -run 'TestOnboardingStateAndCompleteShareTheEventGate|TestAgentSessionRoutes_CompleteAfterDashboardCompletedOnboarding' -v`
-Expected: the state test FAILS with `retired onboarding setup route status=201`; the agent test PASSES (it pins behaviour this task must keep).
+Run: `(cd packages/ingestion && go test -count=1 ./handler -run 'TestOnboardingStateAndCompleteShareTheEventGate|TestAgentSessionRoutes_CompleteAfterDashboardCompletedOnboarding' -v)`
+Expected: the state test FAILS with `retired onboarding setup route status=409` (the org is already onboarded at that point, so the old handler answers 409); the agent test PASSES (it pins behaviour this task must keep).
 
 - [ ] **Step 3: Delete the route, handler, and query**
 
@@ -617,8 +620,8 @@ Expected: only the `retiredSetup` 404 assertion in `onboarding_state_test.go`.
 
 - [ ] **Step 5: Build and run the affected packages**
 
-Run: `cd packages/ingestion && go vet ./handler ./db && go build ./... && go test -count=1 ./handler -run 'TestOnboarding|TestAgentSessionRoutes|TestAgentApprove|TestRequireRoleIfCloud|TestProjectProvisioning|TestCreateProject' -v 2>&1 | grep -E '^(--- |ok|FAIL)'`
-Expected: all `--- PASS`, no `--- SKIP`, `ok`.
+Run: `(cd packages/ingestion && go vet ./handler ./db && go build ./... && go test -count=1 -v ./db -run TestOrgHasEvents && go test -count=1 -v ./handler -run 'TestOnboarding|TestAgentSessionRoutes|TestAgentApprove|TestRequireRoleIfCloud|TestCreateProjectEndpoint')`
+Expected: the command exits 0. Read the whole output: every test shows `--- PASS`, and there is no `--- SKIP` or `--- FAIL`.
 
 - [ ] **Step 6: Commit**
 
@@ -758,10 +761,16 @@ describe('Setup', () => {
       .mockResolvedValue({ ...waiting, project_id: 'p2', has_events: true });
     api.listProjects.mockResolvedValue([{ id: 'p1', name: 'old' }, { id: 'p2', name: 'web' }]);
     localStorage.setItem('opslane_environment_id', 'env-stale');
+    let finishComplete: () => void = () => undefined;
+    api.completeOnboarding.mockImplementationOnce(() => new Promise((resolve) => { finishComplete = () => resolve({ onboarding_complete: true }); }));
     const w = mount(Setup);
     await flushPromises();
     await advance();
     expect(api.completeOnboarding).toHaveBeenCalledTimes(1);
+    expect(status(w)).toContain('First event received. Opening your dashboard…');
+    expect(routerPush).not.toHaveBeenCalled();
+    finishComplete();
+    await flushPromises();
     expect(localStorage.getItem('opslane_onboarding_complete')).toBe('1');
     expect(localStorage.getItem('opslane_project_id')).toBe('p2');
     expect(localStorage.getItem('opslane_project_name')).toBe('web');
@@ -1167,8 +1176,8 @@ In `packages/dashboard/src/views/__tests__/issues-list-filters.test.ts`:
 
 - [ ] **Step 6: Run the dashboard suite and build**
 
-Run: `grep -rn "SetupWizard\|onboardingSetup\|getEventStatus\|EventStatus\|OnboardingSetupResponse\|next_step\|variant=\"wizard\"\|Setup guide" packages/dashboard/src`
-Expected: no output.
+Run: `grep -rn "SetupWizard\|onboardingSetup\|getEventStatus\|EventStatus\|OnboardingSetupResponse\|next_step\|variant=\"wizard\"" packages/dashboard/src` and `grep -rn "Setup guide" packages/dashboard/src --include=*.vue --include=*.ts --exclude=*.test.ts`
+Expected: no output from either. (The paste-box test deliberately asserts that `Setup guide` is absent, so tests are excluded from the second search.)
 
 Run: `pnpm --filter @opslane/dashboard test && pnpm --filter @opslane/dashboard build`
 Expected: all test files pass (including `setup.test.ts`, `router.test.ts`, `agent-paste-box.test.ts`, `onboarding-banners.test.ts`, `SessionsList.test.ts`, `issues-list-filters.test.ts`); `vue-tsc` reports no errors; `vite build` succeeds.
@@ -1246,6 +1255,22 @@ Replace the whole test `'preserves the error destination while setup is pending,
     w.unmount();
   });
 
+  it('opens the dashboard for a not-yet-onboarded org once the session has an event', async () => {
+    localStorage.setItem('opslane_project_id', 'p-a');
+    api.getAgentApproveInfo.mockResolvedValue(pending({ status: 'app_reporting', project_id: 'p-b', project_name: 'B', facts: { ...emptyFacts, has_events: true } }));
+    api.getMe.mockResolvedValue({ onboarding_complete: false });
+    api.completeOnboarding.mockResolvedValue({ onboarding_complete: true });
+    const w = mount(AgentApprove, { global: { stubs: { RouterLink: true } } });
+    await flushPromises();
+    await w.get('[data-testid="agent-dashboard"]').trigger('click');
+    await flushPromises();
+    expect(api.completeOnboarding).toHaveBeenCalledTimes(1);
+    expect(localStorage.getItem('opslane_onboarding_complete')).toBe('1');
+    expect(localStorage.getItem('opslane_project_id')).toBe('p-b');
+    expect(routerPush).toHaveBeenCalledWith('/?project_id=p-b');
+    w.unmount();
+  });
+
   it('does not navigate when completion finishes after unmount', async () => {
     api.getAgentApproveInfo.mockResolvedValue(pending({ status: 'app_reporting', project_id: 'p-b', facts: { ...emptyFacts, has_events: true } }));
     api.getMe.mockResolvedValue({ onboarding_complete: false });
@@ -1267,7 +1292,7 @@ Replace the whole test `'preserves the error destination while setup is pending,
 - [ ] **Step 2: Run to verify the new tests fail**
 
 Run: `pnpm --filter @opslane/dashboard exec vitest run src/views/__tests__/agent-approve.test.ts`
-Expected: `completes onboarding from the session event...` FAILS (`completeOnboarding` called 0 times) and `does not navigate when completion finishes after unmount` FAILS; the others pass.
+Expected: `completes onboarding from the session event...`, `opens the dashboard for a not-yet-onboarded org once the session has an event` and `does not navigate when completion finishes after unmount` FAIL (`completeOnboarding` is never called); the others pass.
 
 - [ ] **Step 3: Implement**
 
@@ -1364,8 +1389,8 @@ In `docs/design/dashboard-v1/request-manifest.json`, delete the two entries whos
 
 - [ ] **Step 3: Run the e2e dashboard suites**
 
-Run: `pnpm --filter @opslane/test-e2e exec vitest run dashboard-design-system.test.ts dashboard-projects.test.ts dashboard-environment-filter.test.ts`
-Expected: all pass, none skipped for `/setup`.
+Run: `pnpm --filter @opslane/test-e2e exec vitest run dashboard-design-system.test.ts`
+Expected: all pass, and `/setup has one main landmark and no page-level overflow` ran rather than being skipped. (`dashboard-projects.test.ts` and `dashboard-environment-filter.test.ts` only plant the completion flag; their browser tests are `it.skip` until Slice 4, so they are not evidence for this change.)
 
 Run: `CAPTURE_DASHBOARD_SCREENSHOTS=1 pnpm --filter @opslane/test-e2e exec vitest run dashboard-screenshots.test.ts`
 Expected: all captures pass including `captures setup-waiting-mock at 390x844`. The PNGs, `manifest.json`, and `index.html` it writes under `docs/design/dashboard-v1/screenshots/after/` are not tracked; do not commit them (`git status` must not list that directory as staged).
@@ -1455,9 +1480,7 @@ Proves AC13 and AC14. No code changes unless a gate fails; fix the cause in the 
 With the environment block exported and `psql` on `PATH`:
 
 ```bash
-cd packages/ingestion
-go build ./...
-go test -count=1 -json ./handler ./db > "$SCRATCH/go-test.jsonl"; echo "exit=$?"
+(cd packages/ingestion && go build ./... && go test -count=1 -json ./handler ./db) > "$SCRATCH/go-test.jsonl"; echo "exit=$?"
 python3 - "$SCRATCH/go-test.jsonl" <<'PY'
 import json, sys
 skips = [e for e in map(json.loads, open(sys.argv[1])) if e.get("Action") == "skip" and e.get("Test")]
@@ -1466,14 +1489,14 @@ print("skips:", len(skips))
 PY
 ```
 
-Expected: `exit=0` and `skips: 0`. (`$SCRATCH` is the session scratchpad directory. `go test ./db` can take over 10 minutes; use a 20-minute timeout and run it in the foreground. Do not run the worker test suite concurrently against the same database.)
+Expected: `exit=0` and `skips: 0`. (`$SCRATCH` comes from the environment block. `go test ./db` can take over 10 minutes; use a 20-minute timeout and run it in the foreground. Do not run the worker test suite concurrently against the same database.)
 
 - [ ] **Step 2: Dashboard, e2e, and repo gates**
 
 ```bash
 pnpm --filter @opslane/dashboard build
 pnpm --filter @opslane/dashboard test
-pnpm --filter @opslane/test-e2e exec vitest run dashboard-design-system.test.ts dashboard-projects.test.ts dashboard-environment-filter.test.ts
+pnpm --filter @opslane/test-e2e exec vitest run dashboard-design-system.test.ts
 CAPTURE_DASHBOARD_SCREENSHOTS=1 pnpm --filter @opslane/test-e2e exec vitest run dashboard-screenshots.test.ts
 pnpm test:repo
 ```
@@ -1482,18 +1505,18 @@ Expected: every command exits 0 with no skipped `/setup` smoke.
 
 - [ ] **Step 3: Live smoke on a local stack (AC14)**
 
-1. Build and start the stack with the exported ports: `docker compose -p agentonly up -d --build ingestion postgres minio minio-setup`, then wait for `curl -sf $INGESTION_URL/health`.
+Stay in the repository root. Record evidence while the flow runs: the `/setup` states are transient.
+
+1. Start the stack with the exported ports and wait for health: `docker compose -p agentonly up -d --build --wait ingestion`, then `curl -sf "$INGESTION_URL/health"`.
 2. Seed a fresh org and admin, and mint a session cookie (the local GitHub auth provider has no sign-up):
 
 ```bash
 EMAIL="agentonly-$(date +%s)@example.test"
-read ORG_ID USER_ID < <(psql "$DATABASE_URL" -tA -F' ' <<SQL | head -1
+read ORG_ID USER_ID < <(psql "$DATABASE_URL" -tA -F' ' -c "
 WITH o AS (INSERT INTO orgs (name) VALUES ('agent-only smoke') RETURNING id),
      u AS (INSERT INTO users (org_id, email, name, github_id, github_username, avatar_url)
            SELECT id, '$EMAIL', 'Smoke Admin', $(date +%s%N | cut -c1-15), 'smoke-admin', '' FROM o RETURNING id, org_id)
-SELECT org_id, id FROM u;
-SQL
-)
+SELECT org_id, id FROM u;" | head -1)
 psql "$DATABASE_URL" -c "INSERT INTO memberships (user_id, org_id, role) VALUES ('$USER_ID', '$ORG_ID', 'admin')"
 ACCESS=$(ORG_ID=$ORG_ID USER_ID=$USER_ID EMAIL=$EMAIL python3 - <<'PY'
 import base64, hashlib, hmac, json, os, time
@@ -1505,15 +1528,49 @@ sig = b64(hmac.new(b"opslane-dev-jwt-secret-key-minimum-32-bytes-long", f"{head}
 print(f"{head}.{body}.{sig}")
 PY
 )
+echo "org=$ORG_ID user=$USER_ID"
 ```
 
    If the `users` insert fails on a column, read `CreateUserGitHub` in `packages/ingestion/db/queries.go` and match its column list.
-3. Serve a runbook copy pointed at this stack: `sed "s#https://app.opslane.com#$INGESTION_URL#g" docs-site/public/INSTALL.md > "$SCRATCH/runbook/INSTALL.md"` and `python3 -m http.server 8399 --directory "$SCRATCH/runbook"` in the background (check first that 8399 is free; a stale runbook server on a reused port serves an old copy).
-4. In a Playwright browser (the `browse` skill or Playwright MCP): add cookie `__opslane_at=$ACCESS` for `localhost`, open `$INGESTION_URL/auth/complete`, then `$INGESTION_URL/setup`. Record: heading, prompt line, waiting status (AC1).
-5. Copy `test-fixtures/vue-app` to `$SCRATCH/vue-app`, `git init` it, and run from there:
-   `claude -p "Set up http://localhost:8399/INSTALL.md" --allowedTools "Bash,Read,Write,Edit"`
-   When it prints the approve link, open it in the same browser session and click **Approve**. Watch the `/setup` tab: it must show `Project ready` (AC3), then reach `/` on its own after the agent's test error arrives (AC4, AC14). Answer "later" to the agent's GitHub, Slack, source-map, MCP and PR questions.
-6. Record the evidence (screenshots of the three `/setup` states and the final dashboard URL, `SELECT onboarded_at FROM orgs WHERE id = '$ORG_ID'` showing a timestamp) in the session scratchpad, then tear down with `docker compose -p agentonly down`.
+3. Serve a runbook copy pointed at this stack. The hosted runbook tells the agent that the SDK's default endpoint is right, which is false for a local stack, so replace that sentence before replacing the origin:
+
+```bash
+python3 - "$INGESTION_URL" "$SCRATCH/runbook/INSTALL.md" <<'PY'
+import sys
+origin, out = sys.argv[1], sys.argv[2]
+text = open("docs-site/public/INSTALL.md").read()
+old = "The SDK already defaults to `https://app.opslane.com`, so no `endpoint` is needed outside the Next.js tunnel."
+assert old in text, "runbook endpoint sentence changed; update this smoke step"
+text = text.replace(old, f"This is a local test stack: pass `endpoint: '{origin}'` to `init`.")
+open(out, "w").write(text.replace("https://app.opslane.com", origin))
+PY
+ss -ltn | grep -q ':8399 ' && echo "port 8399 is taken; pick another" || (python3 -m http.server 8399 --directory "$SCRATCH/runbook" > "$SCRATCH/runbook.log" 2>&1 &)
+curl -sf http://localhost:8399/INSTALL.md | grep -c "$INGESTION_URL"
+```
+
+   Expected: a non-zero count.
+4. Scaffold a throwaway Vue app outside the repository (the `test-fixtures/vue-app` fixture depends on `workspace:*` and cannot install outside the workspace). The agent installs the published `@opslane/sdk` into it:
+
+```bash
+(cd "$SCRATCH" && npm create vite@latest smoke-app -- --template vue && cd smoke-app && npm install \
+  && git init -q && git add -A && git -c user.email=smoke@example.test -c user.name=smoke commit -qm init)
+```
+
+   If `create-vite` asks whether to install and start the app, answer no.
+5. Browser tab 1 (the `browse` skill or Playwright MCP): add cookie `__opslane_at=$ACCESS` for `localhost`, open `$INGESTION_URL/auth/complete`, then `$INGESTION_URL/setup`. Screenshot `$SCRATCH/setup-waiting.png` and confirm the heading, the prompt line and `Waiting for your agent` (AC1).
+6. Start the agent in the background. Give it a browser tool so it can click its own test button; without one the runbook stops to ask a human:
+
+```bash
+(cd "$SCRATCH/smoke-app" && claude -p "Set up http://localhost:8399/INSTALL.md" \
+  --mcp-config '{"mcpServers":{"playwright":{"command":"npx","args":["-y","@playwright/mcp@latest","--headless"]}}}' \
+  --allowedTools "Bash,Read,Write,Edit,mcp__playwright" \
+  --output-format stream-json --verbose > "$SCRATCH/agent.jsonl" 2>&1 &)
+```
+
+7. `claude -p` only prints its result at the end, so find the approve link in the database. Poll every 5 s until an id appears: `psql "$DATABASE_URL" -tA -c "SELECT id FROM agent_sessions WHERE status = 'pending' ORDER BY created_at DESC LIMIT 1"`. In browser tab 2 open `$INGESTION_URL/agent/approve/<id>`, keep **Create a new project**, and click **Approve**.
+8. On tab 1, without reloading: within 6 s the status reads `Project ready. Waiting for the first event from your app.` Screenshot `$SCRATCH/setup-project-ready.png` (AC3).
+9. Wait for the test error. Watch `$SCRATCH/agent.jsonl` for the agent's Playwright click; if the agent instead asks a human to click, open the dev-server URL it printed in tab 3 and click **Test Opslane**. Poll `psql "$DATABASE_URL" -tA -c "SELECT count(*) FROM error_events e JOIN projects p ON p.id = e.project_id WHERE p.org_id = '$ORG_ID'"`. Within 6 s of it turning non-zero, tab 1 is on `/` showing the issues list. Record tab 1's URL, `localStorage.opslane_onboarding_complete` (must be `1`) and `localStorage.opslane_project_id` (must be a project of `$ORG_ID`: check with `SELECT org_id FROM projects WHERE id = '<value>'`), and screenshot `$SCRATCH/dashboard.png` (AC4, AC14). Confirm `SELECT onboarded_at FROM orgs WHERE id = '$ORG_ID'` is not null.
+10. Let the agent finish; in `-p` mode it treats optional steps as later. Its final message in `agent.jsonl` should list `first_event: done`. Then stop the runbook server (`pkill -f "http.server 8399"`) and tear down with `docker compose -p agentonly down`.
 
 - [ ] **Step 4: Follow-up issues (ask first)**
 
@@ -1525,3 +1582,17 @@ gh issue create --title "Self-hosted /setup points at the hosted INSTALL.md" \
 gh issue create --title "No way to get an ingest key without a coding agent" \
   --body "After agent-only onboarding, /setup has no manual path, Settings is behind the onboarding guard, and Settings' key form offers only MCP and source-map scopes. Someone without a coding agent cannot onboard from the app."
 ```
+
+---
+
+## Review log
+
+**Codex round 1 (medium reasoning, plan split into three parts): 5 P1, 6 P2, all accepted.**
+- Compose startup raced migrations; now `up -d --wait postgres minio`, then a one-shot `minio-setup`.
+- Go verification pipelines hid failures behind `grep`; commands now run unfiltered in `(cd packages/ingestion && …)` subshells, and Task 1 Step 9 includes the db test.
+- Task 2 Step 2 predicted 201 for the retired route; the org is onboarded by then, so the old handler answers 409.
+- Task 3's leftover search matched the paste-box test's own negative assertion; tests are excluded from the `Setup guide` search.
+- The first-event status line was never asserted; the completion test now holds completion pending and checks it.
+- Task 4 lacked a successful **Open dashboard** case for a not-yet-onboarded org; added.
+- `dashboard-projects` and `dashboard-environment-filter` browser tests are `it.skip`; removed from the gates.
+- Live smoke: the fixture app depends on `workspace:*` and hardcodes `localhost:8082`, the runbook's "no endpoint needed" sentence is wrong locally, `$SCRATCH/runbook` was never created, `-p` hides the approve link until the end, and nothing clicked the test button. Rewritten: scaffolded Vite app, runbook sentence replaced, approve link read from `agent_sessions`, Playwright MCP for the agent, evidence captured during the flow.
