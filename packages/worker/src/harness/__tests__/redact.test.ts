@@ -7,6 +7,8 @@ import { scrubRunLogText, scrubSecrets, isSecretKey, scrubValue } from '../redac
 const SK_CANARY =
   'opslane_sk_mzxw6ytboi3damrrgi3tknzxgq_E2ESOURCEMAPSECRETAAAAAAAAAAAAAAAAAAAAAAAAA'
   + '_eyJ2IjoxLCJpYXQiOiIyMDI2LTA4LTA0VDAwOjAwOjAwWiIsInVybCI6Imh0dHBzOi8vaW5nZXN0Lm9wc2xhbmUuY29tIn0';
+// Assembled at runtime so the secret scan still flags any real key pasted into this file.
+const pemLine = (edge: 'BEGIN' | 'END', kind = '') => ['-----' + edge, `${kind}PRIVATE KEY-----`].join(' ');
 const SK_SECRET = 'E2ESOURCEMAPSECRETAAAAAAAAAAAAAAAAAAAAAAAAA';
 const SK_PAYLOAD = 'eyJ2IjoxLCJpYXQiOiIyMDI2LTA4LTA0VDAwOjAwOjAwWiIsInVybCI6Imh0dHBzOi8vaW5nZXN0Lm9wc2xhbmUuY29tIn0';
 
@@ -44,7 +46,7 @@ describe('scrubSecrets', () => {
 
 describe('run log secret scrubbing', () => {
   it('scans hostile input in linear time', () => {
-    const units = ['a-', 'a.', 'seg1.', 'a=', 'a:', '"a":"', '\\"a\\": \\"', "'a': '", 'Authorization: ', 'x://a:', 'data:image/png;base64,', '-----BEGIN PRIVATE KEY-----'];
+    const units = ['a-', 'a.', 'seg1.', 'a=', 'a:', '"a":"', '\\"a\\": \\"', "'a': '", 'Authorization: ', 'x://a:', 'data:image/png;base64,', pemLine('BEGIN')];
     for (const unit of units) {
       const input = unit.repeat(Math.ceil(200_000 / unit.length));
       const started = performance.now();
@@ -60,8 +62,9 @@ describe('run log secret scrubbing', () => {
     expect(scrubRunLogText('DATABASE_URL=postgres://opslane:hunter2pass@db:5432/x and redis://:pw123@r:6379'))
       .toBe('DATABASE_URL=postgres://***@db:5432/x and redis://***@r:6379');
     expect(scrubRunLogText('git://host:9418/o/r@v1 stays')).toBe('git://host:9418/o/r@v1 stays');
-    expect(scrubRunLogText('before\n-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA1234\nabcdef')).toBe('before\n[REDACTED PRIVATE KEY]');
+    expect(scrubRunLogText(`before\n${pemLine('BEGIN', 'RSA ')}\nMIIEpAIBAAKCAQEA1234\nabcdef`)).toBe('before\n[REDACTED PRIVATE KEY]');
     expect(scrubRunLogText('<img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==">')).toBe('<img src="data:image/png;base64,[image]">');
+    expect(scrubRunLogText('url(data:image/png;base64,\n  iVBORw0KGgo=)')).toBe('url(data:image/png;base64,\n  [image])');
     expect(scrubRunLogText('const imagePrefix = "data:image/";')).toBe('const imagePrefix = "data:image/";');
   });
 
@@ -75,7 +78,7 @@ describe('run log secret scrubbing', () => {
   });
 
   it('redacts PEM private keys and AWS access key ids', () => {
-    const pem = '-----BEGIN RSA PRIVATE KEY-----\nMIIEow\nabc\n-----END RSA PRIVATE KEY-----';
+    const pem = `${pemLine('BEGIN', 'RSA ')}\nMIIEow\nabc\n${pemLine('END', 'RSA ')}`;
     expect(scrubRunLogText(`key:\n${pem}\nafter`)).toBe('key:\n[REDACTED PRIVATE KEY]\nafter');
     expect(scrubRunLogText('id AKIAABCDEFGHIJKLMNOP end')).toBe('id [REDACTED] end');
   });

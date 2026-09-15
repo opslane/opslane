@@ -111,3 +111,26 @@ it('never persists image bytes hidden in arbitrary transcript payloads', () => {
   expect(result.jsonl).not.toContain('PRIVATE_IMAGE_BYTES');
   expect(result.jsonl.trim().split('\n')).toHaveLength(1);
 });
+
+describe('usage validation', () => {
+  const valid = { input: 10, output: 5, cacheRead: 1, cacheWrite: 0 };
+  const response = (usage: unknown) => ({ type: 'response', model: 'm', content: [], stopReason: 'end_turn', usage }) as never;
+
+  it('ignores response usage that is not finite non-negative counts', () => {
+    const logger = new RunLogger();
+    logger.add(response(valid));
+    for (const bad of [{ ...valid, input: Number.NaN }, { ...valid, output: -1 }, { ...valid, cacheRead: '3' }, { ...valid, thinking: Infinity }, null]) {
+      logger.add(response(bad));
+    }
+    expect(logger.usage()).toEqual({ m: valid });
+  });
+
+  it('keeps the previous totals when replacement totals are invalid', () => {
+    const logger = new RunLogger();
+    logger.add(response(valid));
+    logger.replaceUsage({ m: { ...valid, input: -5 } } as never);
+    expect(logger.usage()).toEqual({ m: valid });
+    logger.replaceUsage({ m: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4 } });
+    expect(logger.usage()).toEqual({ m: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4 } });
+  });
+});

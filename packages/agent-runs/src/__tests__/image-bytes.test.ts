@@ -11,5 +11,8 @@ describe('image byte rejection', () => {
 
   it('rejects an inline base64 image payload', () => {
     expect(() => parseTranscriptEvent(event('<img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUg">'))).toThrow(/image bytes/);
+    expect(() => parseTranscriptEvent(event('url(data:image/png;base64, iVBORw0KGgo)'))).toThrow(/image bytes/);
+    expect(() => parseTranscriptEvent(event('url(data:image/png;base64,\n  iVBORw0KGgo)'))).toThrow(/image bytes/);
+    expect(() => parseTranscriptEvent(event('url(data:image/png;base64, [image])'))).not.toThrow();
   });
 });
