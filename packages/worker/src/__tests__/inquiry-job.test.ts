@@ -244,6 +244,7 @@ describe('issue inquiry', () => {
     // Decision facts come before the long lists, so the cut cannot remove them.
     expect(prompt.indexOf('"affectedUnits"')).toBeLessThan(prompt.indexOf('"productContext"'));
     expect(prompt.indexOf('"relatedCandidates"')).toBeLessThan(prompt.indexOf('"productContext"'));
+    expect(prompt.indexOf('"error"')).toBeLessThan(prompt.indexOf('"relatedCandidates"'));
     expect(prompt).toContain('Error deleting Assets');
   });
 

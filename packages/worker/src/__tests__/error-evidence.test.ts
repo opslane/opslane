@@ -51,14 +51,14 @@ describe('buildErrorEvidence', () => {
   });
 
   it('never shows a value severed by the pre-bound slice', () => {
-    const preBound = MAX_ERROR_MESSAGE_CHARS * 4 + 256;
+    const preBound = 8_192;
     const message = `${'1'.repeat(preBound - 14)} jane.doe@acme.com trailing words`;
     const evidence = buildErrorEvidence(input({ errorMessage: message }));
     expect(evidence.message).toBe(`${MASKED_NUMBER} ${TRUNCATED}`);
   });
 
   it('masks a JSON secret whose closing quote the pre-bound slice removed', () => {
-    const message = `{"token":"top secret ${'word '.repeat(1_000)}"}`;
+    const message = `{"token":"top secret ${'word '.repeat(2_000)}"}`;
     const evidence = buildErrorEvidence(input({ errorMessage: message }));
     expect(evidence.message).toBe(`{"token":"${MASKED_TOKEN}"${TRUNCATED}`);
   });
@@ -141,6 +141,15 @@ describe('buildErrorEvidence', () => {
     const evidence = buildErrorEvidence(input({ errorMessage: `Error:${'{"field":"value"},'.repeat(200)}` }));
     expect(evidence.message.startsWith('Error:{"field":"value"}')).toBe(true);
     expect(evidence.message.endsWith(TRUNCATED)).toBe(true);
+  });
+
+  it('counts a very large stack without keeping more than 30 bounded lines', () => {
+    const stack = Array.from({ length: 100_000 }, (_, i) => `    at f${i} (app.js:1:1)`).join('\n');
+    const evidence = buildErrorEvidence(input({ stackTraceRaw: `${'x'.repeat(20_000)}\n${stack}` }));
+    expect(evidence.stack).toHaveLength(MAX_STACK_LINES);
+    expect(evidence.stack[0]!.length).toBeLessThanOrEqual(300);
+    expect(evidence.stack[0]!.endsWith(TRUNCATED)).toBe(true);
+    expect(evidence.stackLinesOmitted).toBe(100_001 - MAX_STACK_LINES);
   });
 
   it('keeps a null page URL null', () => {
