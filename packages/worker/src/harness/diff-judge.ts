@@ -1,11 +1,12 @@
-import { withRunLog } from '../run-logs/handle.js';
-import { loggedMessagesCreate, messageRequestDto, messagesClient } from '../run-logs/logged-messages.js';
-import type { RunContext } from '../run-logs/context.js';
 /**
  * Lightweight diff quality judge — runs after the agent produces a fix.
  * Uses Haiku to score scope, correctness, and preservation.
  * Used as the cascade trigger: if quality is poor, escalate to a stronger model.
  */
+
+import { withRunLog } from '../run-logs/handle.js';
+import { loggedMessagesCreate, messageRequestDto, messagesClient } from '../run-logs/logged-messages.js';
+import type { RunContext } from '../run-logs/context.js';
 import type Anthropic from '@anthropic-ai/sdk';
 import type { TokenUsage } from '../db.js';
 import { usageFromResponse } from '../metered.js';
@@ -111,7 +112,7 @@ export async function judgeDiff(
       phase: 'diff_judge',
       entryPoint: 'harness/diff-judge#judgeDiff',
       models: [JUDGE_MODEL],
-      settings: { model: JUDGE_MODEL, maxTokens: 1024, toolChoice: 'score_diff' },
+      settings: { model: params.model, maxTokens: params.max_tokens, toolChoice: 'score_diff' },
       structuredInput: input,
       request: messageRequestDto(params),
     },

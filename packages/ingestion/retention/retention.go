@@ -1,4 +1,5 @@
-// Package retention removes expired session recordings from storage and Postgres.
+// Package retention removes expired session recordings and agent run logs from
+// storage and Postgres.
 package retention
 
 import (
@@ -75,12 +76,23 @@ func (s *Sweeper) runPass(ctx context.Context) {
 	}
 }
 
-// RunOnce first tombstones expiry candidates, then purges sessions whose
-// pre-existing upload policies and scrub leases have expired.
+// RunOnce runs one retention pass: it tombstones expiry candidates, purges
+// sessions whose pre-existing upload policies and scrub leases have expired,
+// then deletes expired agent run log days. A failing session sweep does not
+// skip run log retention; errors from both are returned.
 func (s *Sweeper) RunOnce(ctx context.Context) (int, error) {
 	if s.Q == nil || s.MinIO == nil {
 		return 0, errors.New("retention dependencies are not configured")
 	}
+	deleted, sessionErr := s.sweepSessions(ctx)
+	days, runErr := s.sweepAgentRuns(ctx, time.Now())
+	if runErr == nil && days > 0 {
+		slog.Info("agent run log retention", "days_removed", days)
+	}
+	return deleted, errors.Join(sessionErr, runErr)
+}
+
+func (s *Sweeper) sweepSessions(ctx context.Context) (int, error) {
 	sessions, err := s.Q.SessionsToDelete(ctx, batchSize)
 	if err != nil {
 		return 0, err
@@ -110,11 +122,6 @@ func (s *Sweeper) RunOnce(ctx context.Context) (int, error) {
 	}
 	if err := s.sweepDeletedPrefixes(ctx); err != nil {
 		return deleted, err
-	}
-	if days, err := s.sweepAgentRuns(ctx, time.Now()); err != nil {
-		return deleted, err
-	} else if days > 0 {
-		slog.Info("agent run log retention", "days_removed", days)
 	}
 	return deleted, nil
 }
@@ -147,6 +154,12 @@ func (s *Sweeper) sweepDeletedPrefixes(ctx context.Context) error {
 
 const agentRunPrefix = "agent-runs/"
 
+// agentRunCutoff is the oldest UTC day kept. Days before it are older than the
+// retention plus one day, which absorbs worker/database clock skew.
+func agentRunCutoff(now time.Time, retentionDays int) time.Time {
+	return now.UTC().Truncate(24*time.Hour).AddDate(0, 0, -(retentionDays + 1))
+}
+
 func parseAgentRunDay(prefix string) (time.Time, bool) {
 	parts := strings.Split(strings.TrimSuffix(prefix, "/"), "/")
 	day, err := time.Parse("2006-01-02", parts[len(parts)-1])
@@ -162,9 +175,8 @@ func (s *Sweeper) sweepAgentRuns(ctx context.Context, now time.Time) (int, error
 		return 0, err
 	}
 	removed := 0
-	today := now.UTC().Truncate(24 * time.Hour)
 	for _, project := range projects {
-		cutoff := today.AddDate(0, 0, -(project.RetentionDays + 1))
+		cutoff := agentRunCutoff(now, project.RetentionDays)
 		prefixes, err := s.MinIO.ListPrefixes(ctx, agentRunPrefix+project.ProjectID+"/")
 		if err != nil {
 			slog.Error("list agent run days failed", "error", err, "project_id", project.ProjectID)

@@ -136,9 +136,13 @@ function parseImage(value: unknown, index: number): ImageRef {
   return image as unknown as ImageRef;
 }
 
+// An inline base64 image payload. Text that merely mentions the prefix, or a payload
+// the scrubber already replaced with [image], is ordinary content.
+const IMAGE_DATA_URL_PAYLOAD = /data:image\/[A-Za-z0-9.+-]{1,32};base64,(?!\[image\])[A-Za-z0-9+/]/i;
+
 /** Reject image byte representations, including those nested in request DTOs. */
 function rejectImageBytes(value: unknown, ancestors = new Set<object>()): void {
-  if (typeof value === 'string' && /data:image\//i.test(value)) {
+  if (typeof value === 'string' && IMAGE_DATA_URL_PAYLOAD.test(value)) {
     throw new Error('image bytes must be replaced with references');
   }
   if (typeof value !== 'object' || value === null) return;

@@ -1,6 +1,6 @@
 import { withRunLog, NOOP_RUN } from '../run-logs/handle.js';
 import { runContextFromJob, type RunContext } from '../run-logs/context.js';
-import { confirmRunOptions } from './confirm.js';
+import { CONFIRM_MAX_OFFSETS, confirmRunOptions } from './confirm.js';
 import { oneFixRunOptions } from './one-fix.js';
 import type pg from 'pg';
 import type { SessionChunkEnvelope } from '@opslane/shared';
@@ -473,7 +473,7 @@ export async function processFrictionConfirm(
         await check();
         try {
           frames = await deps.capture(recording.envelopes, recording.offsetsMs, {
-            maxOffsets: 4,
+            maxOffsets: CONFIRM_MAX_OFFSETS,
           });
         } catch (error) {
           signal.throwIfAborted();

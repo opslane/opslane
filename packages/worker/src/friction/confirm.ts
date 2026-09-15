@@ -36,6 +36,10 @@ export const PROVENANCE_IN_NOTE =
 export const TICKET_STEPS_MAX_CODE_POINTS = 600;
 /** One note becomes one line of steps, so it must leave room for others. */
 export const CONFIRM_NOTE_MAX_CODE_POINTS = 300;
+/** Timeline characters the confirmation model reads; cited line ids are checked against the same window. */
+export const CONFIRM_TIMELINE_MAX_CHARS = 65_536;
+/** Frames captured per confirmation read; run logs record the same capture setting. */
+export const CONFIRM_MAX_OFFSETS = 4;
 const codePoints = (text: string): number => [...text].length;
 /** Joins whole notes and stops before the next one would exceed the budget. */
 export function ticketSteps(lines: readonly string[]): string {
@@ -106,7 +110,7 @@ export async function confirmRead(
       note: 'Replay frames unavailable.',
       costToUser: null,
     };
-  const timeline = input.timelineText.slice(0, 65_536);
+  const timeline = input.timelineText.slice(0, CONFIRM_TIMELINE_MAX_CHARS);
   const reply = await modelObject(client, {
     ...buildConfirmRequest(confirmPromptInput(input)),
     images: input.frames.map((f) => ({ mediaType: 'image/png', base64: f.modelPng.toString('base64') })),
@@ -165,7 +169,7 @@ export interface ConfirmPromptInput {
 export function confirmPromptInput(input: ConfirmInput): ConfirmPromptInput {
   return {
     ticket: { name: input.ticket.name, control: input.ticket.control, what_happened: input.ticket.what_happened, kind: input.ticket.kind },
-    timelineText: input.timelineText.slice(0, 65_536),
+    timelineText: input.timelineText.slice(0, CONFIRM_TIMELINE_MAX_CHARS),
     signals: input.signals,
     frames: input.frames.map(({ offsetMs, pair }) => ({ offsetMs, pair })),
     assetsMissing: input.assetsMissing === true,
@@ -188,7 +192,7 @@ export function confirmRunOptions(args: {
     settings: completerSettings(args.client),
     structuredInput: prompt,
     request: buildConfirmRequest(prompt),
-    images: captureImageRefs(args.sessionId, args.input.frames, { maxOffsets: 4, offsetsMs: args.offsetsMs }),
+    images: captureImageRefs(args.sessionId, args.input.frames, { maxOffsets: CONFIRM_MAX_OFFSETS, offsetsMs: args.offsetsMs }),
   };
 }
 

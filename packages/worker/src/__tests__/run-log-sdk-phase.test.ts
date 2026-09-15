@@ -9,7 +9,7 @@ vi.mock('../harness/sdk-agent.js', async (importOriginal) => ({
   }),
 }));
 
-import type { ReadOnlyRunInput } from '../harness/sdk-agent.js';
+import { runReadOnlyAgentSdk, type ReadOnlyRunInput } from '../harness/sdk-agent.js';
 import { readOnlyStopToRunStop, runLoggedSdk, sdkRequestDto, sdkSettings } from '../run-logs/sdk-phase.js';
 import { setRunLogDepsForTests } from '../run-logs/handle.js';
 import { memoryRunLogDeps } from './helpers/run-log-memory-sink.js';
@@ -33,11 +33,21 @@ describe('runLoggedSdk', () => {
     runner.result = { stop: 'terminal', terminalInput: { answer: 'done' } };
     const brokenTool = { ...input.terminalTool };
     Object.defineProperty(brokenTool, 'description', { get: () => { throw new Error('bad descriptor'); } });
-    const result = await runLoggedSdk({
-      context, phase: 'test', entryPoint: 'test', structuredInput: {},
-      input: { ...input, terminalTool: brokenTool },
-    });
-    expect(result).toBe(runner.result);
+    const memory = memoryRunLogDeps();
+    setRunLogDepsForTests(memory.deps);
+    vi.mocked(runReadOnlyAgentSdk).mockClear();
+    try {
+      const result = await runLoggedSdk({
+        context, phase: 'test', entryPoint: 'test', structuredInput: {},
+        input: { ...input, terminalTool: brokenTool },
+      });
+      expect(result).toBe(runner.result);
+    } finally {
+      setRunLogDepsForTests(null);
+    }
+    expect(vi.mocked(runReadOnlyAgentSdk)).toHaveBeenCalledTimes(1);
+    expect(memory.started).toHaveLength(0);
+    expect(memory.objects.size).toBe(0);
   });
 
   it('writes the SDK request, effective settings including tool lists, and the mapped stop', async () => {

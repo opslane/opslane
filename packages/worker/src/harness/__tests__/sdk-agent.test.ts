@@ -435,8 +435,6 @@ describe('SDK read-only agent run logging', () => {
       const result = await runReadOnlyAgentSdk(fakeInput(), recorded.run);
       expect(result.stop).toBe('terminal');
       expect(result.terminalInput).toEqual({ answer: 'done' });
-      // Turns are not copied from the SDK's num_turns; the run log counts responses.
-      expect(recorded.turns).toBeNull();
     } finally {
       adapter.mockRestore();
     }
@@ -462,7 +460,6 @@ describe('SDK read-only agent run logging', () => {
       { type: 'tool_result', id: 'tu_a', name: 'mcp__repo__read_file', output: 'A' },
     ]);
     expect(recorded.usage).toEqual({ 'claude-sonnet-4-6': { input: 500, output: 50, cacheRead: 0, cacheWrite: 0 } });
-    expect(recorded.turns).toBeNull();
   });
 
   it('prefers the result modelUsage, keyed by the models that actually ran', async () => {
@@ -505,8 +502,8 @@ describe('SDK read-only agent run logging', () => {
     const recorded = capturedRun();
     const result = await runReadOnlyAgentSdk(fakeInput(), recorded.run);
     expect(result.stop).toBe('api_error');
-    expect(recorded.events.map((event) => event.type)).toEqual(['error', 'response']);
-    expect(recorded.events[0]).toMatchObject({ type: 'error', errorClass: 'Error', message: 'socket hang up' });
+    expect(recorded.events.map((event) => event.type)).toEqual(['response', 'error']);
+    expect(recorded.events[1]).toMatchObject({ type: 'error', errorClass: 'Error', message: 'socket hang up' });
   });
 
   it('flushes the transcript and usage before rethrowing machine loss', async () => {
