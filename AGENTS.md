@@ -26,7 +26,7 @@ Full repository gate:
 pnpm install --frozen-lockfile
 pnpm -r build
 pnpm test
-(cd packages/ingestion && go build ./... && go test ./...)
+(cd packages/ingestion && go build ./... && go test -p 1 -timeout 30m ./...)
 docker compose config --quiet
 ```
 
@@ -57,7 +57,7 @@ Two ways that gate reports success without having run:
   export REPLAY_STORE_ACCESS_KEY=minio REPLAY_STORE_SECRET_KEY=minio12345 REPLAY_STORE_BUCKET=opslane-replays
   ```
 
-  Re-run the block as a unit when you change a port; the URLs do not follow on their own. Unset ports keep 8082/5434/9012. Setting a port without its URL is the silent failure: Go DB tests fall back to the hardcoded `localhost:5434` DSN and `t.Skip` instead of failing. After a worktree smoke, confirm `go test ./...` reported **zero** skips — a storage misconfiguration reports `ok` while ~30 tests never run.
+  Re-run the block as a unit when you change a port; the URLs do not follow on their own. Unset ports keep 8082/5434/9012. Setting a port without its URL is the silent failure: Go DB tests fall back to the hardcoded `localhost:5434` DSN and `t.Skip` instead of failing. After a worktree smoke, confirm `go test -p 1 -timeout 30m ./...` reported **zero** skips — a storage misconfiguration reports `ok` while ~30 tests never run.
 
 ## Cross-cutting conventions
 

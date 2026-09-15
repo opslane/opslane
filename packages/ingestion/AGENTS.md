@@ -11,8 +11,8 @@ The ingestion service is the Go API and owns grouping, persistence, migrations, 
 
 ## Verification
 
-- Run `go build ./...` and `go test ./...` from `packages/ingestion`.
-- For focused database or handler work, run `go test ./db ./handler` while iterating.
+- Run `go build ./...` and `go test -p 1 -timeout 30m ./...` from `packages/ingestion`. Test packages share one database and some run sweepers that are not scoped to a project, so packages running in parallel corrupt each other's fixtures. The `db` package alone can exceed Go's default 10-minute timeout on a slower machine.
+- For focused database or handler work, run `go test -p 1 -timeout 30m ./db ./handler` while iterating.
 - Apply migration SQL to a disposable clean database and a representative existing database, then reapply it to verify idempotency.
 - Build the ingestion Compose image after Dockerfile changes.
 

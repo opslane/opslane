@@ -92,11 +92,16 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   go:
-    name: Go build and test
+    name: Go build and test (${{ matrix.shard }})
     needs: [changes]
     if: needs.changes.outputs.go == 'true'
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 15
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        # Each shard gets its own Postgres service; the test step below says why.
+        shard: [db, rest]
     services:
       postgres:
         image: pgvector/pgvector:pg16@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b
@@ -167,10 +172,25 @@ jobs:
         run: MIGRATION_DIR=packages/ingestion/db/migrations ./scripts/check-migration-reapply.sh
       - run: go build ./...
       - run: go vet ./...
+      # Packages share their shard's Postgres, and some run sweepers that are not
+      # scoped to a project (priority, retention) and rewrite other packages'
+      # fixtures, so no two packages may run at once against one database. The db
+      # package is by far the slowest, so it gets its own shard; every other package
+      # runs one at a time in the rest shard. -timeout is per package: 15m sits under
+      # the 20m job timeout, so a stuck package usually prints goroutine stacks
+      # before the job is killed.
       - name: Test (fails on unexpected skips)
+        env:
+          SHARD: ${{ matrix.shard }}
         run: |
           set -o pipefail
-          go test ./... -v -timeout 30m 2>&1 | tee /tmp/go-test.log
+          case "$SHARD" in
+            db) packages=./db ;;
+            rest) packages=$(go list ./... | grep -v '/packages/ingestion/db$') ;;
+            *) echo "unknown Go test shard: '$SHARD'" >&2; exit 1 ;;
+          esac
+          # $packages is unquoted on purpose: one import path per word.
+          go test -p 1 -v -timeout 15m $packages 2>&1 | tee /tmp/go-test.log
           ../../scripts/check-go-skips.mjs /tmp/go-test.log
 
   # Repo-wide static checks: docs drift/scope, action pinning, wire-fixture
