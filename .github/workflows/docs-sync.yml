@@ -21,7 +21,7 @@ jobs:
     if: >-
       github.event.pull_request.head.repo.fork == false &&
       !startsWith(github.event.pull_request.head.ref, 'claude/')
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     # Per-doc reasoning is sequential, so the ceiling scales with how many
     # covers: globs a branch hits. 15 minutes died at 11 matched docs.
     timeout-minutes: 40
@@ -125,7 +125,7 @@ jobs:
   validate:
     needs: plan
     if: needs.plan.result == 'success' && needs.plan.outputs.publish == '1'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     permissions:
       contents: read
@@ -180,7 +180,7 @@ jobs:
       needs.plan.result == 'success' &&
       needs.validate.result == 'success' &&
       needs.plan.outputs.publish == '1'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 10
     permissions:
       contents: write
