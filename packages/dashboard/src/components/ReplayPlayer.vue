@@ -30,6 +30,7 @@ let recordedHeight = 720;
 let resizeObserver: ResizeObserver | null = null;
 let appliedSignature = '';
 let pendingFrame: number | null = null;
+let initialSeek: ReturnType<typeof setTimeout> | null = null;
 
 function applyScale() {
   const el = containerRef.value;
@@ -91,8 +92,14 @@ function buildPlayer() {
   duration.value = Math.max(0, (metaTotal > 0 ? metaTotal : replayDurationMs(events)) / 1000);
 
   const seekMs = crashSeekMs(events, props.crashTimestamp);
-  r.pause(seekMs);
   currentTime.value = seekMs / 1000;
+  // rrweb's constructor applies the first Meta viewport on a 0ms timer. A seek
+  // made synchronously here would be overwritten by it, so a replay opened past a
+  // mid-session resize would lay out at the first recorded width. Seek after it.
+  initialSeek = setTimeout(() => {
+    initialSeek = null;
+    r.pause(seekMs);
+  }, 0);
 
   timer = setInterval(() => {
     const rp = replayer.value;
@@ -116,6 +123,10 @@ function destroyPlayer() {
   if (pendingFrame !== null) {
     cancelAnimationFrame(pendingFrame);
     pendingFrame = null;
+  }
+  if (initialSeek !== null) {
+    clearTimeout(initialSeek);
+    initialSeek = null;
   }
   appliedSignature = '';
   if (containerRef.value) {
@@ -236,7 +247,12 @@ watch(
   transform-origin: top left;
 }
 
+/* rrweb sizes the iframe to the recorded viewport through width/height
+   attributes. The dashboard's base reset caps iframes at max-width: 100%, which
+   would shrink it to the container, reflow the replayed app, and lose recorded
+   scroll positions. The wrapper transform above already does the fitting. */
 .replay-container :deep(iframe) {
   border: 0;
+  max-width: none;
 }
 </style>

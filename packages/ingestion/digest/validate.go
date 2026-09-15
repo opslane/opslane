@@ -978,7 +978,7 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string, s
 			for i := range actionableEval.Included {
 				candidate := &actionableEval.Included[i]
 				if candidate.TicketFacts != nil {
-					candidate.SessionURL = notify.BuildSessionURL(dashboardURL, candidate.TicketFacts.RepresentativeSessionID, 0)
+					candidate.SessionURL = notify.BuildSessionURL(dashboardURL, candidate.TicketFacts.RepresentativeSessionID, candidate.TicketFacts.RepresentativeAnchorMs)
 					continue
 				}
 				if _, err := tx.Exec(ctx, `SAVEPOINT actionable_replay_lookup`); err != nil {

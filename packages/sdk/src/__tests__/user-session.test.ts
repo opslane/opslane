@@ -54,4 +54,23 @@ describe('setUser session rotation', () => {
     clearUser();
     expect(getCurrentUser()).toBeNull();
   });
+
+  it('treats a numeric ID and its string form as the same user', () => {
+    setUser({ id: 42 });
+    const first = getSessionId();
+    expect(getCurrentUser()?.id).toBe('42');
+    setUser({ id: '42' });
+    expect(getSessionId()).toBe(first);
+  });
+
+  it('keeps the current user and session when a later call has no valid ID', () => {
+    setUser({ id: 'alice' });
+    const session = getSessionId();
+    const listener = vi.fn();
+    onIdentityChange(listener);
+    setUser({ id: Number.NaN } as never);
+    expect(getCurrentUser()?.id).toBe('alice');
+    expect(getSessionId()).toBe(session);
+    expect(listener).not.toHaveBeenCalled();
+  });
 });

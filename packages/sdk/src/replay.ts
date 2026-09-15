@@ -1,7 +1,7 @@
 import { EventType, type eventWithTime } from '@rrweb/types';
 import { _resetChunkUploadState, flushInline, uploadChunk } from './chunk-upload';
 import { getConfig } from './config';
-import { getCurrentUser, onIdentityChange } from './core';
+import { buildUserContext, getCurrentUser, onIdentityChange } from './core';
 import { gzipSupported } from './gzip';
 import { sdkFetch } from './network';
 import { ensureSessionID, nextChunkSeq, resetSessionId, rotateSessionIfIdle, touchSession, type SessionProgress } from './session.js';
@@ -155,12 +155,7 @@ async function sendSessionRegistration(sessionID: string): Promise<boolean> {
         sdk: { name: '@opslane/sdk', version: SDK_VERSION },
         release: config.release || undefined,
         environment: config.environment || undefined,
-        user: user ? {
-          id: user.id,
-          email: user.email,
-          account_id: user.account?.id,
-          account_name: user.account?.name,
-        } : null,
+        user: user ? buildUserContext(user) : null,
       }),
     });
     if (!response.ok) return false;

@@ -119,6 +119,15 @@ func TestKnownProblemDigestFreezeValidateAndMergedFooter(t *testing.T) {
 		t.Fatalf("cutoff facts=%+v err=%v", cutoffFacts, err)
 	}
 	run(`UPDATE friction_tickets SET cohort_cutoff=NULL WHERE id=$1`, ticket)
+	// The representative session's confirmed check cited the moment 14:31 in.
+	var repStartMs int64
+	if err := pool.QueryRow(ctx, `SELECT (extract(epoch FROM started_at)*1000)::bigint FROM sessions WHERE id=$1`, ticket+"-2").Scan(&repStartMs); err != nil {
+		t.Fatal(err)
+	}
+	wantAnchor := repStartMs + 871_000
+	repTimeline := fmt.Sprintf(`{"startTs":%d,"lines":[{"t":"open view","s":null,"r":"/view","a":%d},{"t":"click Apply","s":"#apply","r":"/view","a":%d},{"t":"nothing happens","s":null,"r":"/view","a":%d}]}`, repStartMs, repStartMs+1_000, wantAnchor, wantAnchor+3_000)
+	run(`INSERT INTO session_narratives(session_id,project_id,environment_id,status,narrative,timeline,prompt_version)VALUES($1,$2,$3,'ok','{}'::jsonb,$4::jsonb,1)`, ticket+"-2", p.ID, env, repTimeline)
+	run(`UPDATE friction_check_attempts SET evidence_lines='["L3","L2"]' WHERE ticket_id=$1 AND session_id=$2`, ticket, ticket+"-2")
 	at := time.Now()
 	runID, candidates, err := FreezeCandidates(ctx, pool, p.ID, at)
 	if err != nil {
@@ -130,6 +139,9 @@ func TestKnownProblemDigestFreezeValidateAndMergedFooter(t *testing.T) {
 	c := candidates[0]
 	if c.Coverage != .5 || c.VerifiedSessions != 4 || c.VerifiedUsers != 4 || strings.Join(c.Accounts, ",") != "Acme,Beta" || c.RepresentativeSessionID != ticket+"-2" || c.ValidAction != "Fix in progress" || c.EvidenceVersion != 4 {
 		t.Fatalf("candidate=%+v", c)
+	}
+	if c.ReplaySessionID != ticket+"-2" || c.ReplayAnchorMs != wantAnchor || c.ReplayAnchorMs < repStartMs {
+		t.Fatalf("ticket replay=%s@%d want %s@%d", c.ReplaySessionID, c.ReplayAnchorMs, ticket+"-2", wantAnchor)
 	}
 	// The same ticket as an insight: a later day's freeze has no candidate for
 	// it while it is still published, investigated and unfixed.
@@ -292,6 +304,15 @@ func testTicketDigestActionAfterAuthoringCycle(t *testing.T, mode string) {
 		check := insert(`INSERT INTO friction_check_attempts(batch_id,ticket_id,session_id,outcome,signal_ids,note,model)VALUES($1,$2,$3,'confirmed',jsonb_build_array($4::text),'Save ignores clicks.','test')RETURNING id`, batch, ticket, session, signal)
 		run(`INSERT INTO friction_checks(ticket_id,session_id,attempt_id,outcome)VALUES($1,$2,$3,'confirmed')`, ticket, session, check)
 	}
+	var repStartMs int64
+	if err := pool.QueryRow(ctx, `SELECT (extract(epoch FROM started_at)*1000)::bigint FROM sessions WHERE id=$1`, ticket+"-1").Scan(&repStartMs); err != nil {
+		t.Fatal(err)
+	}
+	wantAnchor := repStartMs + 871_000
+	run(`INSERT INTO session_narratives(session_id,project_id,environment_id,status,narrative,timeline,prompt_version)VALUES($1,$2,$3,'ok','{}'::jsonb,$4::jsonb,1)`,
+		ticket+"-1", project.ID, env, fmt.Sprintf(`{"startTs":%d,"lines":[{"t":"click Save","s":"#save","r":"/save","a":%d}]}`, repStartMs, wantAnchor))
+	run(`UPDATE friction_check_attempts SET evidence_lines='["L1"]' WHERE ticket_id=$1 AND session_id=$2`, ticket, ticket+"-1")
+	wantReplay := notify.BuildSessionURL("https://app.example", ticket+"-1", wantAnchor)
 	run(`UPDATE error_groups SET explained_signal_ids=(SELECT jsonb_agg(signal_id::text) FROM friction_ticket_match_observations WHERE ticket_id=$2) WHERE id=$1`, group, ticket)
 	if mode == "long_steps" {
 		run(`UPDATE friction_tickets SET steps=repeat('Click Save and wait. ',40) WHERE id=$1`, ticket)
@@ -329,6 +350,9 @@ func testTicketDigestActionAfterAuthoringCycle(t *testing.T, mode string) {
 		t.Fatalf("unrelated incident ledger = %s/%s, want excluded/%s", outcome, reason, reasonNotPublishable)
 	}
 	frozen := candidateByGroup(t, candidates, group)
+	if frozen.ReplayAnchorMs != wantAnchor {
+		t.Fatalf("frozen ticket anchor=%d want %d", frozen.ReplayAnchorMs, wantAnchor)
+	}
 	if frozen.LatestAttemptID != "" || frozen.ValidAction != wantAction {
 		t.Fatalf("ticket=%+v", frozen)
 	}
@@ -454,6 +478,9 @@ func testTicketDigestActionAfterAuthoringCycle(t *testing.T, mode string) {
 	if len(published.Digest.GeneratedCards) != 1 {
 		t.Fatalf("authored card was lost: %+v", published.Digest)
 	}
+	if published.Digest.GeneratedCards[0].ReplayURL != wantReplay {
+		t.Fatalf("ticket card replay=%q want %q", published.Digest.GeneratedCards[0].ReplayURL, wantReplay)
+	}
 	link, err := url.Parse(published.Digest.GeneratedCards[0].ActionURL)
 	if err != nil {
 		t.Fatal(err)
@@ -468,6 +495,11 @@ func testTicketDigestActionAfterAuthoringCycle(t *testing.T, mode string) {
 	body, _, err := notify.FormatSlack(published)
 	if err != nil {
 		t.Fatal(err)
+	}
+	// slackDigestLink renders <url|Replay>; JSON encoding escapes the angle
+	// brackets, so match the URL and its label.
+	if !strings.Contains(string(body), wantReplay+"|Replay") {
+		t.Fatalf("Slack body lost the anchored replay link %q: %s", wantReplay, body)
 	}
 	if !strings.Contains(string(body), link.Query().Get("fixIntent")) {
 		t.Fatalf("Slack altered signed intent: %s", body)

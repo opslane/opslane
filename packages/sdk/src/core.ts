@@ -14,12 +14,55 @@ let installed = false;
 // === B2B user identity ===
 
 interface UserIdentity {
-  id: string;
+  id: string | number | bigint;
   email?: string;
-  account?: { id: string; name?: string };
+  account?: { id: string | number | bigint; name?: string };
 }
 
+/** Identity as sent: IDs are strings, the type the server decodes. */
+interface StoredUserIdentity {
+  id: string;
+  email?: string;
+  account?: { id?: string; name?: string };
+}
+
+// Kept as the caller's object so later changes to it (an email loaded after
+// sign-in) still reach events; normalized each time it is read.
 let currentUser: UserIdentity | null = null;
+
+// The server decodes IDs as strings: a numeric id fails session registration
+// and drops the user from error events. Safe integers and bigints convert
+// exactly; larger numbers have already lost precision and fractions are not
+// IDs, so apps must pass those as strings. 0 stays "no ID" as it always was
+// (a common guest fallback), and so do the strings a String() call makes from
+// a missing value. Oversized values would push session registration past its
+// size limit and stop recording, so they are ignored too.
+const MAX_ID_LENGTH = 256;
+const MAX_TEXT_LENGTH = 512;
+
+function toIdentifier(value: unknown): string | undefined {
+  let id: string | undefined;
+  if (typeof value === 'string') id = value;
+  else if (typeof value === 'number' && Number.isSafeInteger(value) && value !== 0) id = String(value);
+  else if (typeof value === 'bigint' && value !== 0n) id = value.toString();
+  if (!id || id === 'undefined' || id === 'null' || id.length > MAX_ID_LENGTH) return undefined;
+  return id;
+}
+
+function toText(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length <= MAX_TEXT_LENGTH ? value : undefined;
+}
+
+function normalizeUser(user: UserIdentity | null | undefined): StoredUserIdentity | null {
+  const id = toIdentifier(user?.id);
+  if (!user || !id) return null;
+  const account = user.account;
+  return {
+    id,
+    email: toText(user.email),
+    account: account ? { id: toIdentifier(account.id), name: toText(account.name) } : undefined,
+  };
+}
 
 type IdentityListener = (newSessionID: string, previous: SessionProgress) => void;
 let identityListener: IdentityListener | null = null;
@@ -39,9 +82,14 @@ function rotateForIdentity(userId: string | null): void {
 }
 
 export function setUser(user: UserIdentity): void {
-  if (!user.id) return;
-  currentUser = user;
-  rotateForIdentity(user.id);
+  try {
+    const normalized = normalizeUser(user);
+    if (!normalized) return;
+    currentUser = user;
+    rotateForIdentity(normalized.id);
+  } catch {
+    // SDK must never throw into the customer's app.
+  }
 }
 
 export function clearUser(): void {
@@ -49,12 +97,16 @@ export function clearUser(): void {
   rotateForIdentity(null);
 }
 
-export function getCurrentUser(): UserIdentity | null {
-  return currentUser;
+export function getCurrentUser(): StoredUserIdentity | null {
+  try {
+    return normalizeUser(currentUser);
+  } catch {
+    return null;
+  }
 }
 
-/** Map UserIdentity to the wire-format user context object. */
-export function buildUserContext(user: UserIdentity): NonNullable<ErrorEventPayload['context']['user']> {
+/** Map a normalized identity to the wire-format user context object. */
+export function buildUserContext(user: StoredUserIdentity): NonNullable<ErrorEventPayload['context']['user']> {
   return {
     id: user.id,
     email: user.email,
@@ -78,8 +130,9 @@ export function buildPayload(
     user_agent:
       typeof navigator !== 'undefined' ? navigator.userAgent : '',
   };
-  if (currentUser) {
-    context.user = buildUserContext(currentUser);
+  const user = getCurrentUser();
+  if (user) {
+    context.user = buildUserContext(user);
   }
 
   const payload: ErrorEventPayload = {

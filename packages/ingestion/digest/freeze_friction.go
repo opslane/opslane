@@ -109,6 +109,7 @@ func selectOnCardCandidates(all []actionableCandidate, at time.Time) ([]Candidat
 			candidate.RepresentativeSessionID = f.RepresentativeSessionID
 			candidate.RepresentativeNote = f.RepresentativeNote
 			candidate.ReplaySessionID = f.RepresentativeSessionID
+			candidate.ReplayAnchorMs = f.RepresentativeAnchorMs
 			candidate.ConfirmedNotes = f.ConfirmedNotes
 			candidate.Coverage = f.Coverage
 			candidate.Why = source.RootCause

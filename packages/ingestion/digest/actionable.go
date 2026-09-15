@@ -262,6 +262,12 @@ func loadActionableCandidates(ctx context.Context, tx pgx.Tx, projectID string, 
 		if err != nil {
 			return nil, err
 		}
+		if facts != nil && facts.OnCard() {
+			// Only on-card tickets link a replay; the anchor costs a timeline read.
+			if err := ingestiondb.LoadTicketReplayAnchor(ctx, tx, projectID, facts); err != nil {
+				return nil, err
+			}
+		}
 		if facts != nil {
 			c := &candidates[i]
 			c.TicketFacts = facts
