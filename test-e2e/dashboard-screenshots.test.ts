@@ -57,7 +57,7 @@ describe.skipIf(!browserAvailable || !captureEnabled)('dashboard approved-fixtur
     { path: '/reset-password?token=mock-token', fixture: 'reset-password-mock', identity: /Choose a new password/i, harness: 'signed-out' },
     { path: '/auth/complete', fixture: 'auth-callback-loading-mock', identity: /Completing sign in/i, harness: 'callback' },
     { path: '/invite/accept?token=mock-token', fixture: 'invitation-accepted-mock', identity: /Organization invitation/i, harness: 'success' },
-    { path: '/setup', fixture: 'setup-github-mock', identity: /Connect GitHub/i, harness: 'success' },
+    { path: '/setup', fixture: 'setup-waiting-mock', identity: /Set up Opslane with your coding agent/i, harness: 'success' },
     { path: '/', fixture: 'activity-success-mock', identity: /^Issues$/i, harness: 'success' },
     { path: '/issues/incident-1', fixture: 'incident-pr-created-mock', identity: /Mock incident title/i, harness: 'success' },
     { path: '/accounts', fixture: 'accounts-success-mock', identity: /^Accounts$/i, harness: 'success' },
