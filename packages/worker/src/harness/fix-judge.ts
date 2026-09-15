@@ -12,6 +12,7 @@ import type { SandboxRuntime } from './sandbox-runtime.js';
 
 export const FIX_JUDGE_MODEL = process.env['FIX_JUDGE_MODEL'] ?? 'claude-sonnet-5';
 export const JUDGE_PROBE_BUDGET = 3;
+const JUDGE_MAX_TURNS = 6;
 
 export interface FixJudgeInput {
   runContext?: RunContext | null;
@@ -154,7 +155,7 @@ export async function judgeFixAttempt(input: FixJudgeInput): Promise<FixJudgeVer
       phase: 'judge',
       entryPoint: 'harness/fix-judge#judgeFixAttempt',
       models: [FIX_JUDGE_MODEL],
-      settings: { model: FIX_JUDGE_MODEL, maxTokens: 4096, maxTurns: 6, probeBudget: JUDGE_PROBE_BUDGET },
+      settings: { model: first.model, maxTokens: first.max_tokens, maxTurns: JUDGE_MAX_TURNS, probeBudget: JUDGE_PROBE_BUDGET },
       structuredInput: promptInput,
       request: messageRequestDto(first),
     },
@@ -162,7 +163,7 @@ export async function judgeFixAttempt(input: FixJudgeInput): Promise<FixJudgeVer
       const messages: Anthropic.MessageParam[] = [...first.messages];
       let malformedRetries = 0;
       try {
-        for (let turn = 0; turn < 6; turn++) {
+        for (let turn = 0; turn < JUDGE_MAX_TURNS; turn++) {
           const response = await loggedMessagesCreate(client, run, { ...first, messages }, { logRequest: false });
           usage.input += response.usage?.input_tokens ?? 0;
           usage.output += response.usage?.output_tokens ?? 0;

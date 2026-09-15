@@ -1,7 +1,3 @@
-import { createHash } from 'node:crypto';
-import { withRunLog } from './run-logs/handle.js';
-import { loggedMessagesCreate, messageRequestDto, messagesClient } from './run-logs/logged-messages.js';
-import type { RunContext } from './run-logs/context.js';
 /**
  * Visual analysis of replay screenshots using Claude vision.
  *
@@ -9,6 +5,10 @@ import type { RunContext } from './run-logs/context.js';
  * extracting what the user saw, the failure moment, and UX impact.
  */
 
+import { createHash } from 'node:crypto';
+import { withRunLog } from './run-logs/handle.js';
+import { loggedMessagesCreate, messageRequestDto, messagesClient } from './run-logs/logged-messages.js';
+import type { RunContext } from './run-logs/context.js';
 import type Anthropic from '@anthropic-ai/sdk';
 import type { VisualAnalysisOutput } from './harness/types.js';
 import { PhaseMeter, usageFromResponse } from './metered.js';
@@ -63,7 +63,7 @@ export async function runVisualAnalysis(
         phase: 'visual_analysis',
         entryPoint: 'visual-analysis#runVisualAnalysis',
         models: [VISUAL_ANALYSIS_MODEL],
-        settings: { model: VISUAL_ANALYSIS_MODEL, maxTokens: 1024 },
+        settings: { model: params.model, maxTokens: params.max_tokens },
         structuredInput: promptInput,
         request: messageRequestDto(params),
         images: promptInput.screenshots

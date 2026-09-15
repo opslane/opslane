@@ -7,6 +7,7 @@ import { createAnthropicModelPort, toolLoop, type ModelPricing } from '@opslane/
 import { createAnthropicClient } from '../anthropic-client.js';
 import { getToolSpanAttributes, traceSpan } from '../tracing.js';
 import type { AgentCompletionResult, AgentLoopConfig } from './types.js';
+import { AGENT_LOOP_MAX_TOKENS } from './model-limits.js';
 
 const DEFAULT_MODEL = 'claude-sonnet-4-6';
 
@@ -50,7 +51,7 @@ export async function runAgentLoop(
   const client = createAnthropicClient(config.apiKey);
   const model = config.model ?? DEFAULT_MODEL;
   const run = config.run ?? NOOP_RUN;
-  const port = loggedModelPort(createAnthropicModelPort(client, { maxTokens: 16384 }), run);
+  const port = loggedModelPort(createAnthropicModelPort(client, { maxTokens: AGENT_LOOP_MAX_TOKENS }), run);
 
   return toolLoop(port, {
     model,

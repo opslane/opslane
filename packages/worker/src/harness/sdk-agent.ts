@@ -488,6 +488,10 @@ export async function runReadOnlyAgentSdk(input: ReadOnlyRunInput, run: RunHandl
       if (costUsd > input.budgetUsd) { stop = 'budget'; break; }
     }
   } catch (error: unknown) {
+    // The response that preceded the failure is still pending; log it first so the transcript reads in order.
+    logSafely(() => {
+      for (const event of transcriber?.flush() ?? []) run.event(event);
+    });
     logSafely(() => run.event({ type: 'error', errorClass: error instanceof Error ? error.name : typeof error,
       message: error instanceof Error ? error.message : String(error),
       stack: error instanceof Error ? String(error.stack ?? '').split('\n').slice(1, 11).map((line) => line.trim()) : [],
@@ -518,8 +522,6 @@ export async function runReadOnlyAgentSdk(input: ReadOnlyRunInput, run: RunHandl
   logSafely(() => {
     const modelTotals = resultTotals?.usage;
     run.replaceUsage(modelTotals && Object.keys(modelTotals).length > 0 ? modelTotals : { [input.model]: usage });
-    // Turns come from the logged responses: the SDK's num_turns did not match model
-    // responses in real runs (18 for 5 requests).
   });
   if (state.fatal) throw state.fatal;
   const terminalInput = state.captured ?? (stop === 'api_error' ? null : state.rejectedSubmission);

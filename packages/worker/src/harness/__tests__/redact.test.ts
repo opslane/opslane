@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { scrubSecrets, isSecretKey, scrubValue } from '../redact.js';
+import { scrubRunLogText, scrubSecrets, isSecretKey, scrubValue } from '../redact.js';
 
 // vectors.valid[0].raw from test-fixtures/sourcemap-key/vectors.json: a full
 // endpoint-bearing sk. The key id is the frozen fixture id allowlisted in
@@ -29,6 +29,13 @@ describe('scrubSecrets', () => {
     expect(got).toBe('clone failed for [REDACTED]');
   });
 
+  it('redacts Opslane API keys but leaves code and prose that name secrets alone', () => {
+    expect(scrubSecrets('key opslane_ak_abc123DEF_456 end')).toBe('key [REDACTED] end');
+    for (const text of ['const apiKey = process.env.API_KEY;', 'headers: { Authorization: token }', 'refreshToken: undefined']) {
+      expect(scrubSecrets(text)).toBe(text);
+    }
+  });
+
   it('leaves clean text alone and does not truncate', () => {
     const long = 'a'.repeat(10_000);
     expect(scrubSecrets(long)).toBe(long);
@@ -36,6 +43,28 @@ describe('scrubSecrets', () => {
 });
 
 describe('run log secret scrubbing', () => {
+  it('scans hostile input in linear time', () => {
+    const units = ['a-', 'a.', 'seg1.', 'a=', 'a:', '"a":"', '\\"a\\": \\"', "'a': '", 'Authorization: ', 'x://a:', 'data:image/png;base64,', '-----BEGIN PRIVATE KEY-----'];
+    for (const unit of units) {
+      const input = unit.repeat(Math.ceil(200_000 / unit.length));
+      const started = performance.now();
+      scrubRunLogText(input);
+      scrubSecrets(input);
+      expect(performance.now() - started, unit).toBeLessThan(1_000);
+    }
+  });
+
+  it('redacts single-quoted secret keys, URL passwords, cut-off private keys and inline images', () => {
+    expect(scrubRunLogText("const cfg = {'api_key': 'opaque-value-123', 'name': 'kept'};"))
+      .toBe("const cfg = {'api_key': '[REDACTED]', 'name': 'kept'};");
+    expect(scrubRunLogText('DATABASE_URL=postgres://opslane:hunter2pass@db:5432/x and redis://:pw123@r:6379'))
+      .toBe('DATABASE_URL=postgres://***@db:5432/x and redis://***@r:6379');
+    expect(scrubRunLogText('git://host:9418/o/r@v1 stays')).toBe('git://host:9418/o/r@v1 stays');
+    expect(scrubRunLogText('before\n-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA1234\nabcdef')).toBe('before\n[REDACTED PRIVATE KEY]');
+    expect(scrubRunLogText('<img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==">')).toBe('<img src="data:image/png;base64,[image]">');
+    expect(scrubRunLogText('const imagePrefix = "data:image/";')).toBe('const imagePrefix = "data:image/";');
+  });
+
   it('classifies secret-bearing key names and leaves token counts alone', () => {
     for (const key of ['GITHUB_TOKEN', 'accessToken', 'client_secret', 'client_secret_value', 'password_hash', 'db_passwd', 'STRIPE_API_KEY', 'apiKey', 'private_key', 'Authorization', 'aws_credentials']) {
       expect(isSecretKey(key), key).toBe(true);
@@ -47,38 +76,38 @@ describe('run log secret scrubbing', () => {
 
   it('redacts PEM private keys and AWS access key ids', () => {
     const pem = '-----BEGIN RSA PRIVATE KEY-----\nMIIEow\nabc\n-----END RSA PRIVATE KEY-----';
-    expect(scrubSecrets(`key:\n${pem}\nafter`)).toBe('key:\n[REDACTED PRIVATE KEY]\nafter');
-    expect(scrubSecrets('id AKIAABCDEFGHIJKLMNOP end')).toBe('id [REDACTED] end');
+    expect(scrubRunLogText(`key:\n${pem}\nafter`)).toBe('key:\n[REDACTED PRIVATE KEY]\nafter');
+    expect(scrubRunLogText('id AKIAABCDEFGHIJKLMNOP end')).toBe('id [REDACTED] end');
   });
 
   it('redacts Authorization values of any scheme, including multi-word ones', () => {
-    expect(scrubSecrets('Authorization: Digest username="a", response="abc123"\nnext')).toBe('Authorization: [REDACTED]\nnext');
-    expect(scrubSecrets('authorization: Signature keyId="k",signature="s"')).toBe('authorization: [REDACTED]');
+    expect(scrubRunLogText('Authorization: Digest username="a", response="abc123"\nnext')).toBe('Authorization: [REDACTED]\nnext');
+    expect(scrubRunLogText('authorization: Signature keyId="k",signature="s"')).toBe('authorization: [REDACTED]');
   });
 
   it('replaces only the Authorization credential and keeps the rest of the line', () => {
-    expect(scrubSecrets('Authorization: Bearer abc.def-123 status=ok next')).toBe('Authorization: [REDACTED] status=ok next');
-    expect(scrubSecrets('authorization: Basic dXNlcjpwYXNz== then more')).toBe('authorization: [REDACTED] then more');
+    expect(scrubRunLogText('Authorization: Bearer abc.def-123 status=ok next')).toBe('Authorization: [REDACTED] status=ok next');
+    expect(scrubRunLogText('authorization: Basic dXNlcjpwYXNz== then more')).toBe('authorization: [REDACTED] then more');
     const reply = JSON.stringify({ narrative: 'Clicked Save. Authorization: Bearer tok123 status=unchanged', observations: [{ what: 'dead click' }] });
-    expect(JSON.parse(scrubSecrets(reply))).toEqual({
+    expect(JSON.parse(scrubRunLogText(reply))).toEqual({
       narrative: 'Clicked Save. Authorization: [REDACTED] status=unchanged',
       observations: [{ what: 'dead click' }],
     });
     const escaped = '{\\"h\\": \\"Authorization: Digest username=\\"a\\", response=\\"r1\\"\\", \\"n\\": 1}';
-    expect(scrubSecrets(escaped)).toBe('{\\"h\\": \\"Authorization: [REDACTED]\\", \\"n\\": 1}');
+    expect(scrubRunLogText(escaped)).toBe('{\\"h\\": \\"Authorization: [REDACTED]\\", \\"n\\": 1}');
   });
 
   it('redacts secret-named assignments in text', () => {
-    expect(scrubSecrets('GITHUB_TOKEN=ghx123 client_secret_value: abc password_hash=xyz max_tokens=16384'))
+    expect(scrubRunLogText('GITHUB_TOKEN=ghx123 client_secret_value: abc password_hash=xyz max_tokens=16384'))
       .toBe('GITHUB_TOKEN=[REDACTED] client_secret_value: [REDACTED] password_hash=[REDACTED] max_tokens=16384');
-    expect(scrubSecrets(`PASSWORD="two words" api_key='also two' note="kept here"`))
+    expect(scrubRunLogText(`PASSWORD="two words" api_key='also two' note="kept here"`))
       .toBe(`PASSWORD="[REDACTED]" api_key='[REDACTED]' note="kept here"`);
   });
 
   it('redacts secret-named JSON pairs, raw and escaped inside another string', () => {
-    expect(scrubSecrets('{"db_password": "hunter2", "client_secret":"s3", "input_tokens": 12}'))
+    expect(scrubRunLogText('{"db_password": "hunter2", "client_secret":"s3", "input_tokens": 12}'))
       .toBe('{"db_password": "[REDACTED]", "client_secret":"[REDACTED]", "input_tokens": 12}');
-    expect(scrubSecrets('{\\"db_password\\": \\"hunter2\\"}')).toBe('{\\"db_password\\": \\"[REDACTED]\\"}');
+    expect(scrubRunLogText('{\\"db_password\\": \\"hunter2\\"}')).toBe('{\\"db_password\\": \\"[REDACTED]\\"}');
   });
 
   it('scrubs structured values by key and by text, without mutating the input', () => {

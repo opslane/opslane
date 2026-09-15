@@ -37,7 +37,6 @@ export function capturedRun() {
     requests: [] as unknown[],
     counted: 0,
     usage: null as Record<string, RunUsage> | null,
-    turns: null as number | null,
   };
   const run: RunHandle = {
     runId: 'test-run',
@@ -45,7 +44,6 @@ export function capturedRun() {
     noteRequest: (request) => { state.counted++; state.requests.push(request); },
     event: (event) => { state.events.push(event); },
     replaceUsage: (totals) => { state.usage = totals; },
-    setTurns: (turns) => { state.turns = turns; },
   };
   return Object.assign(state, { run });
 }

@@ -1,5 +1,5 @@
 import { runLogFailureCounts } from './run-logs/sink.js';
-import { runLogsEnabled, defaultRunLogDeps } from './run-logs/handle.js';
+import { defaultRunLogDeps, MIN_LEASE_MS } from './run-logs/handle.js';
 import { runContextFromJob } from './run-logs/context.js';
 import { processFrictionReconcile, scheduleFrictionReconciliation } from './friction/reconcile-job.js';
 import { processTicketInvestigation, type TicketInvestigateJob } from './friction/investigate-ticket.js';
@@ -1851,10 +1851,10 @@ async function main(): Promise<void> {
   // Initialize tracing (no-op if LANGFUSE env vars unset).
   // Must complete before poller starts so Anthropic SDK is instrumented.
   await initTracing();
-  defaultRunLogDeps();
-  if (!runLogsEnabled()) {
-    logger.warn('Agent run logs are off: LEASE_DURATION_MS is below 60000');
-  } else if (!getMinIOConfig()) {
+  const runLogDeps = defaultRunLogDeps();
+  if (!runLogDeps.enabled) {
+    logger.warn(`Agent run logs are off: LEASE_DURATION_MS is below ${MIN_LEASE_MS}`);
+  } else if (!runLogDeps.sink) {
     logger.warn('Agent run logs are off: object storage is not configured');
   }
 

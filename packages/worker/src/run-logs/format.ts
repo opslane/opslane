@@ -12,6 +12,12 @@ export function parseTranscript(jsonl: string): TranscriptEvent[] {
   });
 }
 
+/** Show control characters from stored text as escapes, so a run log cannot drive the operator's terminal. */
+function terminalSafe(text: string): string {
+  // eslint-disable-next-line no-control-regex
+  return text.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
+}
+
 function clip(text: string, full: boolean, max: number): string {
   return full || text.length <= max ? text : `${text.slice(0, max)}\n  [truncated for display: ${text.length} chars, use --full]`;
 }
@@ -33,7 +39,7 @@ export function formatRunLog(
   lines.push('', '== transcript ==');
   if (events === null) {
     lines.push('No transcript: the run is unfinished or its transcript could not be written.');
-    return lines.join('\n');
+    return terminalSafe(lines.join('\n'));
   }
   let turn = 0;
   for (const event of events) {
@@ -72,5 +78,5 @@ export function formatRunLog(
         break;
     }
   }
-  return lines.join('\n');
+  return terminalSafe(lines.join('\n'));
 }

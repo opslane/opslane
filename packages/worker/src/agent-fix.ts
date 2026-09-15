@@ -5,6 +5,7 @@ import { loggedMessagesCreate, messageRequestDto, messagesClient } from './run-l
 import type Anthropic from '@anthropic-ai/sdk';
 import { SandboxUnavailableError, type SandboxRuntime } from './harness/sandbox-runtime.js';
 import { pricingFor, runAgentLoop } from './harness/agent-loop.js';
+import { AGENT_LOOP_MAX_TOKENS } from './harness/model-limits.js';
 import { createToolBridge } from './harness/tool-bridge.js';
 import { createDefaultMiddleware } from './harness/tool-middleware.js';
 import { extractStackTraceFiles, resolveTrackedFiles } from './harness/stack-trace-utils.js';
@@ -305,7 +306,7 @@ export async function generateFixNarrative(
       phase: 'fix_narrative',
       entryPoint: 'agent-fix#generateFixNarrative',
       models: [FIX_NARRATIVE_MODEL],
-      settings: { model: FIX_NARRATIVE_MODEL, maxTokens: 512, toolChoice: FIX_NARRATIVE_TOOL.name },
+      settings: { model: params.model, maxTokens: params.max_tokens, toolChoice: FIX_NARRATIVE_TOOL.name },
       structuredInput: promptInput,
       request: messageRequestDto(params),
     },
@@ -388,7 +389,7 @@ export function fixRunLogOptions(args: {
       phase: 'fix',
       entryPoint: 'agent-fix#runAgentFix',
       models: [args.tier.model],
-      settings: { model: args.tier.model, maxTurns: args.tier.maxTurns, budgetUsd: args.tier.budgetUsd ?? null, maxTokens: 16384 },
+      settings: { model: args.tier.model, maxTurns: args.tier.maxTurns, budgetUsd: args.tier.budgetUsd ?? null, maxTokens: AGENT_LOOP_MAX_TOKENS },
       structuredInput: args.structured,
       repository: { provider: 'github', fullName: args.githubRepo, commitSha: args.baseSha },
       request: {

@@ -15,7 +15,7 @@ import {
 } from '@opslane/agent-runs';
 import { pricingFor } from '../harness/agent-loop.js';
 import { MachineUnavailableError } from '../harness/errors.js';
-import { scrubSecrets, scrubValue } from '../harness/redact.js';
+import { scrubRunLogText, scrubValue } from '../harness/redact.js';
 import { logger, safeErrorMessage } from '../logger.js';
 import type { RunContext } from './context.js';
 import { countRunLogFailure, storageSink, type RunLogFailureKind, type RunLogSink } from './sink.js';
@@ -43,7 +43,6 @@ export interface RunHandle {
   event(event: LoggedEvent): void;
   /** Replace summed response usage with authoritative per-model totals. */
   replaceUsage(totals: Record<string, RunUsage>): void;
-  setTurns(turns: number): void;
 }
 
 export const NOOP_RUN: RunHandle = {
@@ -52,7 +51,6 @@ export const NOOP_RUN: RunHandle = {
   noteRequest: () => undefined,
   event: () => undefined,
   replaceUsage: () => undefined,
-  setTurns: () => undefined,
 };
 
 export interface OpenRunOptions {
@@ -104,7 +102,7 @@ function stopForError(error: unknown): RunStop {
 
 function errorClassOf(error: unknown): string {
   try {
-    return scrubSecrets(error instanceof Error ? String(error.name) : typeof error).slice(0, 200);
+    return scrubRunLogText(error instanceof Error ? String(error.name) : typeof error).slice(0, 200);
   } catch {
     return 'unknown';
   }
@@ -120,7 +118,7 @@ async function attempt(kind: RunLogFailureKind, runId: string, write: () => Prom
     return true;
   } catch (error: unknown) {
     countRunLogFailure(kind);
-    quietly(() => logger.warn('run log write failed', { kind, run_id: runId, error: scrubSecrets(safeErrorMessage(error)).slice(0, 500) }));
+    quietly(() => logger.warn('run log write failed', { kind, run_id: runId, error: scrubRunLogText(safeErrorMessage(error)).slice(0, 500) }));
     return false;
   }
 }
@@ -132,7 +130,6 @@ interface OpenRun {
   transcript: RunLogger;
   handle: RunHandle;
   requests: () => number;
-  turns: () => number | null;
 }
 
 /** Everything that can throw before the work starts. A failure here means the run is not logged. */
@@ -142,7 +139,6 @@ function openRun(options: OpenRunOptions, context: RunContext, deps: RunLogDeps)
   const objectPrefix = runObjectPrefix(context.projectId, runId, startedAt);
   const transcript = new RunLogger({ now: deps.now, scrub: scrubValue });
   let requests = 0;
-  let turns: number | null = null;
   const handle: RunHandle = {
     runId,
     countRequest: () => quietly(() => { requests++; }),
@@ -152,7 +148,6 @@ function openRun(options: OpenRunOptions, context: RunContext, deps: RunLogDeps)
     }),
     event: (event) => quietly(() => transcript.add(event)),
     replaceUsage: (totals) => quietly(() => transcript.replaceUsage(totals)),
-    setTurns: (count) => quietly(() => { turns = count; }),
   };
   const bundleBody = JSON.stringify(parseInputBundle(scrubValue({
     schemaVersion: RUN_LOG_SCHEMA_VERSION,
@@ -166,7 +161,7 @@ function openRun(options: OpenRunOptions, context: RunContext, deps: RunLogDeps)
     request: options.request,
     images: options.images ?? [],
   })));
-  return { open: { runId, objectPrefix, startedAt, transcript, handle, requests: () => requests, turns: () => turns }, bundleBody };
+  return { open: { runId, objectPrefix, startedAt, transcript, handle, requests: () => requests }, bundleBody };
 }
 
 /**
@@ -189,7 +184,7 @@ export async function withRunLog<T>(
       return { deps, context, sink, ...openRun(options, context, deps) };
     } catch (error: unknown) {
       countRunLogFailure('setup');
-      quietly(() => logger.warn('run log setup failed', { phase: scrubSecrets(options.phase), error: scrubSecrets(safeErrorMessage(error)).slice(0, 500) }));
+      quietly(() => logger.warn('run log setup failed', { phase: scrubRunLogText(options.phase), error: scrubRunLogText(safeErrorMessage(error)).slice(0, 500) }));
       return null;
     }
   })();
@@ -223,12 +218,12 @@ export async function withRunLog<T>(
   }) as StartedRow, ROW_DEADLINE_MS));
 
   let stop: RunStop = 'threw';
-  let failure: { thrown: true; value: unknown } | null = null;
+  let failure: { value: unknown } | null = null;
   let result: T | undefined;
   try {
     result = await work(open.handle);
   } catch (error: unknown) {
-    failure = { thrown: true, value: error };
+    failure = { value: error };
   }
 
   try {
@@ -238,7 +233,7 @@ export async function withRunLog<T>(
       quietly(() => open.transcript.add({
         type: 'error',
         errorClass: errorClassOf(value),
-        message: scrubSecrets(safeErrorMessage(value)).slice(0, 2_000),
+        message: scrubRunLogText(safeErrorMessage(value)).slice(0, 2_000),
         stack: value instanceof Error ? String(value.stack ?? '').split('\n').slice(1, 11).map((line) => line.trim()) : [],
       }));
     } else {
@@ -258,19 +253,21 @@ export async function withRunLog<T>(
     await attempt('finished_row', open.runId, async () => {
       const usage = open.transcript.usage();
       const costUsd = Object.entries(usage).reduce((total, [model, value]) => total + calculateCost(value, pricingFor(model)), 0);
-      await sink.insertFinished(scrubValue({
+      const row = scrubValue({
         runId: open.runId,
         stop,
         errorClass: failure ? errorClassOf(failure.value) : null,
-        errorDetail: failure ? scrubSecrets(safeErrorMessage(failure.value)).slice(0, 500) : null,
+        errorDetail: failure ? safeErrorMessage(failure.value) : null,
         modelRequests: Math.max(open.requests(), open.transcript.responseCount()),
-        turns: open.turns() ?? open.transcript.responseCount(),
+        turns: open.transcript.responseCount(),
         usage,
         costUsd,
         transcriptWritten,
         transcriptBytes,
         finishedAt: deps.now(),
-      }) as FinishedRow, ROW_DEADLINE_MS);
+      }) as FinishedRow;
+      // Cut after the scrub: scrubbing a half-cut redaction again would grow it past the column's 500 limit.
+      await sink.insertFinished({ ...row, errorDetail: row.errorDetail?.slice(0, 500) ?? null }, ROW_DEADLINE_MS);
     });
   } catch {
     countRunLogFailure('transcript');

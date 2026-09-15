@@ -65,9 +65,8 @@ describe('SdkStreamTranscriber', () => {
 });
 
 describe('sdkResultTotals', () => {
-  it('reads per-model usage and turns from a result message and ignores other messages', () => {
+  it('reads per-model usage from a result message and ignores other messages', () => {
     expect(sdkResultTotals(stream.at(-1))).toEqual({
-      numTurns: 2,
       usage: {
         'claude-sonnet-5': { input: 40, output: 17, cacheRead: 5, cacheWrite: 2 },
         'claude-haiku-4-5-20251001': { input: 7, output: 1, cacheRead: 0, cacheWrite: 0 },

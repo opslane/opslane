@@ -153,8 +153,8 @@ export class SdkStreamTranscriber {
   }
 }
 
-/** Authoritative per-model usage and turn count from an SDK result message; null for other messages. */
-export function sdkResultTotals(message: unknown): { usage: Record<string, RunUsage> | null; numTurns: number | null } | null {
+/** Authoritative per-model usage from an SDK result message; null for other messages. */
+export function sdkResultTotals(message: unknown): { usage: Record<string, RunUsage> | null } | null {
   const m = record(message);
   if (m['type'] !== 'result') return null;
   const modelUsage = m['modelUsage'];
@@ -169,7 +169,7 @@ export function sdkResultTotals(message: unknown): { usage: Record<string, RunUs
       }];
     }))
     : null;
-  return { usage, numTurns: typeof m['num_turns'] === 'number' ? m['num_turns'] : null };
+  return { usage };
 }
 
 export function modelResponseEvent(
