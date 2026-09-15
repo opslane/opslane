@@ -1,3 +1,6 @@
+import { runLogFailureCounts } from './run-logs/sink.js';
+import { runLogsEnabled, defaultRunLogDeps } from './run-logs/handle.js';
+import { runContextFromJob } from './run-logs/context.js';
 import { processFrictionReconcile, scheduleFrictionReconciliation } from './friction/reconcile-job.js';
 import { processTicketInvestigation, type TicketInvestigateJob } from './friction/investigate-ticket.js';
 import { processPrEventJob } from './friction/pr-events-job.js';
@@ -421,7 +424,7 @@ export async function processJobInner(job: ClaimedJob, signal: AbortSignal): Pro
     await writeDigest(job.runId, job.projectId, digestWriterDependencies({
       jobId: job.id,
       execution: job.attempts,
-    }));
+    }, runContextFromJob(job)));
     return;
   }
 
@@ -784,7 +787,7 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
       breadcrumbs: event?.breadcrumbs ?? '[]',
       sessionContext: investigationEvidenceContext(evidence),
       investigationBrief: job.guidance,
-    }, checkout.reader, investigatedCommit);
+    }, checkout.reader, investigatedCommit, runContextFromJob(job), project.github_repo);
     await recordJobUsage({
       jobId: job.id,
       execution: job.attempts,
@@ -1021,6 +1024,7 @@ export async function processFrictionInvestigateJob(
     if (job.publicationGeneration == null) throw new Error('Ticket investigation missing generation');
     await processTicketInvestigation(job as TicketInvestigateJob, group, signal, {
       apiKey, investigate: investigateFriction,
+      repositoryFullName: project.github_repo,
       checkout: () => createReadOnlyCheckout({repoUrl: buildRepoUrl(project.github_repo), githubToken}),
     });
     return;
@@ -1069,6 +1073,8 @@ export async function processFrictionInvestigateJob(
       sessionContext,
       narrativeObservation,
       investigatedCommit: checkout.headSha,
+      runContext: runContextFromJob(job, { sessionId: evidenceSessionID ?? null }),
+      repositoryFullName: project.github_repo,
     });
     await recordJobUsage({
       jobId: job.id,
@@ -1500,6 +1506,7 @@ export async function processFixJob(job: ClaimedJob & { errorGroupId: string }, 
 
   // Clone repo
   let repoDir: string;
+  let repoHeadSha: string;
   let defaultBranch: string;
   let cleanup: () => Promise<void>;
   try {
@@ -1510,6 +1517,7 @@ export async function processFixJob(job: ClaimedJob & { errorGroupId: string }, 
       commitSha: frozenEvidence?.frames.commitSha,
     });
     repoDir = cloneResult.repoDir;
+    repoHeadSha = cloneResult.headSha;
     defaultBranch = cloneResult.defaultBranch;
     cleanup = cloneResult.cleanup;
     await db.cacheProjectDefaultBranch(job.projectId, defaultBranch);
@@ -1583,11 +1591,13 @@ export async function processFixJob(job: ClaimedJob & { errorGroupId: string }, 
             return {
               base64: data.toString('base64'),
               contentType: a.content_type,
+              objectKey: a.object_key,
               kind: a.kind,
             };
           }),
         );
         visualOutput = await runVisualAnalysis({
+          runContext: runContextFromJob(job),
           screenshots,
           signals: mapDbSignals(replay?.replay_signals) ?? {},
           errorType: event?.error_type ?? 'Unknown',
@@ -1621,6 +1631,8 @@ export async function processFixJob(job: ClaimedJob & { errorGroupId: string }, 
       : null;
 
     const result = await runPipeline({
+      runContext: runContextFromJob(job),
+      repoHeadSha,
       platform,
       customerRuntime,
       jobId: job.id,
@@ -1839,6 +1851,12 @@ async function main(): Promise<void> {
   // Initialize tracing (no-op if LANGFUSE env vars unset).
   // Must complete before poller starts so Anthropic SDK is instrumented.
   await initTracing();
+  defaultRunLogDeps();
+  if (!runLogsEnabled()) {
+    logger.warn('Agent run logs are off: LEASE_DURATION_MS is below 60000');
+  } else if (!getMinIOConfig()) {
+    logger.warn('Agent run logs are off: object storage is not configured');
+  }
 
   // Start health HTTP server
   const healthServer = http.createServer((req, res) => {
@@ -1872,6 +1890,7 @@ async function main(): Promise<void> {
         // Never ages out: a job the worker has given up on stays here until an
         // operator does something about it.
         dead_letters_given_up: deadLetterCounts.givenUp,
+        run_log_failures: runLogFailureCounts(),
         queue_depth_sampled_at:
           queueSampleAt === null ? null : new Date(queueSampleAt).toISOString(),
         queue_sample_error: queueSampleError,

@@ -43,12 +43,14 @@ To stop recording for a whole project without redeploying, turn the project's re
 
 Recordings are deleted on a schedule you set, 30 days by default. Deletion removes both the stored recording and its database rows. A recording attached to an issue as evidence can last longer, but never more than 90 days.
 
+Opslane's agents also keep run logs, which can include text derived from a recording, such as a timeline of what the user did. Opslane deletes a run log using the same retention setting, counted from when the agent ran. Cleanup works on whole UTC days and allows an extra day for clock differences, so logs become eligible for deletion 31 to 32 days after a run under the default setting. Deletion happens on the next successful sweep. A run log created near the end of a recording's life can therefore outlive the recording by another retention period plus this cleanup delay.
+
 ## Tell your users
 
 Recording interactions may mean updating your privacy notice. This is a starting point; adapt it and have your own counsel review it:
 
-> We record how you interact with this application (pages viewed, clicks, and form interactions) to diagnose errors and fix problems you run into. Values you type into forms are masked before the recording leaves your browser. Recordings are deleted after 30 days.
+> We record how you interact with this application (pages viewed, clicks, and form interactions) to diagnose errors and fix problems you run into. Values you type into forms are masked before the recording leaves your browser. Recordings have a 30-day retention period. Diagnostic run logs have a separate 30-day retention period starting when the analysis runs, plus a short cleanup delay.
 
-Match the retention figure to your setting, and if you call `setUser`, disclose that recordings are linked to the signed-in user.
+Match the retention figures to your setting and cleanup schedule, and if you call `setUser`, disclose that recordings are linked to the signed-in user.
 
 See [Your data](../architecture/trust.md) for everything Opslane collects and where it goes.

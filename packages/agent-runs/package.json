@@ -1,0 +1,31 @@
+{
+  "name": "@opslane/agent-runs",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Provider-neutral run log schemas, logger and adapters for agent runs",
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "!dist/**/__tests__",
+    "!dist/**/*.test.*"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "typescript": "^5.4.0",
+    "vitest": "^3.2.0"
+  }
+}

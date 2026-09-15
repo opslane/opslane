@@ -1,3 +1,6 @@
+import { withRunLog, type OpenRunOptions } from '../run-logs/handle.js';
+import { runContextFromJob, type RunContext } from '../run-logs/context.js';
+import { completerSettings, type NarrativeCompleter } from './client.js';
 import type { SessionChunkEnvelope } from '@opslane/shared';
 import * as db from '../db.js';
 import type { ClaimedJob } from '../db.js';
@@ -67,7 +70,13 @@ export async function processNarration(
   const meter = new PhaseMeter({ jobId: job.id, execution: job.attempts, phase: 'narrate' });
   let response: Awaited<ReturnType<NarrativeClient['complete']>>;
   try {
-    response = await deps.client.complete(prompt);
+    response = await withRunLog(
+      narrateRunOptions(runContextFromJob(job, { sessionId: job.sessionId }), deps.client,
+        { appContext: deps.appContext, projectName: deps.projectName, timelineText: timeline.text }),
+      (run) => deps.client.complete({ ...prompt, run }),
+      (result) => result.stopReason === 'max_tokens' ? 'truncated'
+        : validateNarrative(result.text, timeline).ok ? 'completed' : 'invalid_output',
+    );
     // Cache counts as the provider reported them. Both narrative prompts sit
     // under Sonnet 5's minimum cacheable prefix, so these are zero today; the
     // ledger records the measurement rather than assuming it.
@@ -127,4 +136,20 @@ export async function processNarration(
   if (hasObservations) {
     await db.enqueueJob('session_verify_frames', job.projectId, job.sessionId);
   }
+}
+
+export function narrateRunOptions(
+  context: RunContext | null,
+  client: NarrativeCompleter,
+  structuredInput: Parameters<typeof buildNarrativePrompt>[0],
+): OpenRunOptions {
+  return {
+    context,
+    phase: 'narrate',
+    entryPoint: 'narrative/job#processNarration',
+    models: [client.modelName],
+    settings: completerSettings(client),
+    structuredInput,
+    request: buildNarrativePrompt(structuredInput),
+  };
 }

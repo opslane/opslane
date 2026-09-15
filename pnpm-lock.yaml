@@ -79,6 +79,18 @@ importers:
         specifier: ^3.2.0
         version: 3.2.7(@types/debug@4.1.13)(@types/node@26.4.0)(esbuild@0.28.2)(jiti@2.7.0)(jsdom@30.0.1)(terser@5.49.0)(tsx@4.23.12)(yaml@2.9.0)
 
+  packages/agent-runs:
+    devDependencies:
+      '@types/node':
+        specifier: ^26.2.0
+        version: 26.4.0
+      typescript:
+        specifier: ^5.4.0
+        version: 5.9.3
+      vitest:
+        specifier: ^3.2.0
+        version: 3.2.7(@types/debug@4.1.13)(@types/node@26.4.0)(esbuild@0.28.2)(jiti@2.7.0)(jsdom@30.0.1)(terser@5.49.0)(tsx@4.23.12)(yaml@2.9.0)
+
   packages/dashboard:
     dependencies:
       '@rrweb/types':
@@ -234,6 +246,9 @@ importers:
       '@opslane/agent-core':
         specifier: workspace:*
         version: link:../agent-core
+      '@opslane/agent-runs':
+        specifier: workspace:*
+        version: link:../agent-runs
       '@opslane/sdk':
         specifier: workspace:*
         version: link:../sdk

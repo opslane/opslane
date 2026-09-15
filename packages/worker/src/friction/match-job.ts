@@ -1,3 +1,7 @@
+import { withRunLog, type RunHandle, type OpenRunOptions } from '../run-logs/handle.js';
+import { runContextFromJob } from '../run-logs/context.js';
+import { matchPromptInput, matchRunOptions } from './match.js';
+import { firstLookPromptInput, firstLookRunOptions } from './first-look.js';
 import type pg from 'pg';
 import type { FrameVerification, SessionNarrative } from '@opslane/shared';
 import * as db from '../db.js';
@@ -8,7 +12,7 @@ import {
   ticketText,
 } from '../embeddings.js';
 import { PhaseMeter } from '../metered.js';
-import { NarrativeClient } from '../narrative/client.js';
+import { NarrativeClient, type NarrativeCompleter } from '../narrative/client.js';
 import {
   buildSignalRows,
   deriveNarrativeId,
@@ -22,8 +26,8 @@ import { writeObservationSignals } from './persist.js';
 import * as tickets from './tickets-db.js';
 
 export interface MatchJobDeps {
-  cheap: Pick<NarrativeClient, 'complete' | 'modelName'>;
-  strong: Pick<NarrativeClient, 'complete' | 'modelName'>;
+  cheap: NarrativeCompleter;
+  strong: NarrativeCompleter;
   embed?: typeof embedTexts;
 }
 /** Lazily construct providers so empty/completed narratives need no model key. */
@@ -33,6 +37,7 @@ export function frictionMatchDepsFromEnv(): MatchJobDeps {
     maxTokens: number,
   ): MatchJobDeps['cheap'] => ({
     modelName,
+    settings: () => ({ model: modelName, maxTokens, reasoning: 'off', timeoutMs: modelTimeoutMs(maxTokens) }),
     complete: async (args) => {
       const apiKey =
         process.env['NARRATIVE_API_KEY'] || process.env['ANTHROPIC_API_KEY'];
@@ -97,20 +102,31 @@ export function modelTimeoutMs(maxTokens: number): number {
 type MatchJob = db.ClaimedJob & { sessionId: string };
 type Decision = MatchedObservationDecision | FirstLookDecision;
 
-/** Invalid responses are retried once, before any decision state is persisted. */
+/** Invalid responses are retried once, before any decision state is persisted. Both attempts are one run. */
 async function validated<T>(
   phase: string,
-  call: () => Promise<{ decisions: T[] } | { invalid: string }>,
+  runOptions: OpenRunOptions,
+  call: (run: RunHandle) => Promise<{ decisions: T[] } | { invalid: string; payload?: unknown }>,
 ): Promise<T[]> {
-  let reason = '';
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const result = await call();
-    if ('decisions' in result) return result.decisions;
-    reason = result.invalid;
-  }
-  throw new Error(
-    `${phase}: invalid response after two attempts: ${reason.slice(0, 300)}`,
+  type Outcome = { ok: true; decisions: T[] } | { ok: false; reason: string };
+  const outcome = await withRunLog<Outcome>(
+    runOptions,
+    async (run) => {
+      let reason = '';
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const result = await call(run);
+        if ('decisions' in result) return { ok: true, decisions: result.decisions };
+        reason = result.invalid;
+        run.event({ type: 'validator_rejection', message: reason, payload: result.payload ?? null });
+      }
+      return { ok: false, reason };
+    },
+    (result) => (result.ok ? 'completed' : 'invalid_output'),
   );
+  if (!outcome.ok) {
+    throw new Error(`${phase}: invalid response after two attempts: ${outcome.reason.slice(0, 300)}`);
+  }
+  return outcome.decisions;
 }
 
 async function lockLease(client: pg.PoolClient, job: MatchJob): Promise<void> {
@@ -144,6 +160,7 @@ export async function processFrictionMatch(
   };
   const abortable = (client: MatchJobDeps['cheap']): MatchJobDeps['cheap'] => ({
     modelName: client.modelName,
+    settings: client.settings?.bind(client),
     complete: (args) => client.complete({ ...args, signal }),
   });
   await check();
@@ -280,17 +297,11 @@ export async function processFrictionMatch(
           .map((line, i) => `L${i + 1}: ${line.t}`)
           .join('\n'),
       };
-      const cheap = await validated('friction_match', async () => {
+      const cheapInput = { ...context, observations: surviving, candidates: [...candidates.values()] };
+      const cheapRun = matchRunOptions(runContextFromJob(job, { sessionId: job.sessionId }), deps.cheap, 'friction_match', matchPromptInput(cheapInput));
+      const cheap = await validated('friction_match', cheapRun, async (run) => {
         await check();
-        return matchObservations(
-          abortable(deps.cheap),
-          {
-            ...context,
-            observations: surviving,
-            candidates: [...candidates.values()],
-          },
-          cheapMeter,
-        );
+        return matchObservations(abortable(deps.cheap), cheapInput, cheapMeter, run);
       });
       const drafts = cheap.filter((d) => d.kind === 'draft');
       decisions = cheap.filter((d) => d.kind === 'matched');
@@ -307,13 +318,11 @@ export async function processFrictionMatch(
             ? await tickets.nearestTickets(pool, scope, vector)
             : await tickets.shortlistTickets(pool, scope, screens, null);
         }
-        const strong = await validated('friction_first_look', async () => {
+        const strongInput = { ...context, drafts, nearestPerDraft };
+        const strongRun = firstLookRunOptions(runContextFromJob(job, { sessionId: job.sessionId }), deps.strong, firstLookPromptInput(strongInput));
+        const strong = await validated('friction_first_look', strongRun, async (run) => {
           await check();
-          return firstLook(
-            abortable(deps.strong),
-            { ...context, drafts, nearestPerDraft },
-            strongMeter,
-          );
+          return firstLook(abortable(deps.strong), strongInput, strongMeter, run);
         });
         decisions.push(...strong);
         const creates = strong.filter((d) => d.kind === 'create');

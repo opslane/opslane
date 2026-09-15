@@ -1,3 +1,6 @@
+import type { RepositoryRef } from '@opslane/agent-runs';
+import { runContextFromJob, type RunContext } from '../run-logs/context.js';
+import { runLoggedSdk } from '../run-logs/sdk-phase.js';
 import { createHash } from 'node:crypto';
 import type { ClaimedJob, TokenUsage } from '../db.js';
 import * as db from '../db.js';
@@ -12,7 +15,6 @@ import {
   NO_VERIFICATION_EVIDENCE,
   toInfraError,
 } from '../harness/readonly-sandbox.js';
-import { runReadOnlyAgentSdk } from '../harness/sdk-agent.js';
 import { NonRetryableJobError } from '../harness/errors.js';
 import { deadLetterClassForStop, modelFailureError } from '../harness/model-failure-policy.js';
 import { buildRepoUrl } from '../repo-url.js';
@@ -87,11 +89,13 @@ export interface InquiryDependencies {
   prepareRepository: (
     job: ClaimedJob,
     signal: AbortSignal,
-  ) => Promise<{ reader: RepoReader; sandboxId: string; createdAt: number; cleanup: () => Promise<void> }>;
+  ) => Promise<{ headSha: string; repositoryFullName: string; reader: RepoReader; sandboxId: string; createdAt: number; cleanup: () => Promise<void> }>;
   askModel: (input: {
     evidence: EvidenceBundle;
     reader: RepoReader;
     signal: AbortSignal;
+    runContext?: RunContext | null;
+    repository?: RepositoryRef | null;
   }) => Promise<InquiryModelResult>;
   persist: (input: InquiryPersistInput) => Promise<boolean>;
   recordUsage: (input: {
@@ -149,7 +153,7 @@ export function buildInquiryPrompt(evidence: EvidenceBundle): string {
 async function prepareInquiryRepository(
   job: ClaimedJob,
   signal: AbortSignal,
-): Promise<{ reader: RepoReader; sandboxId: string; createdAt: number; cleanup: () => Promise<void> }> {
+): Promise<{ headSha: string; repositoryFullName: string; reader: RepoReader; sandboxId: string; createdAt: number; cleanup: () => Promise<void> }> {
   checkAbort(signal);
   const project = await db.getProject(job.projectId);
   if (!project) throw new Error(`Project ${job.projectId} not found`);
@@ -192,6 +196,8 @@ async function prepareInquiryRepository(
     await db.cacheProjectDefaultBranch(job.projectId, checkout.defaultBranch);
   }
   return {
+    headSha: checkout.headSha,
+    repositoryFullName: project.github_repo,
     reader: checkout.reader,
     // Carried so a dead machine is logged with the identity that names it.
     sandboxId: checkout.sandboxId,
@@ -216,6 +222,8 @@ export async function askInquiryModel(input: {
   evidence: EvidenceBundle;
   reader: RepoReader;
   signal: AbortSignal;
+  runContext?: RunContext | null;
+  repository?: RepositoryRef | null;
 }): Promise<InquiryModelResult> {
   checkAbort(input.signal);
   const apiKey = process.env['ANTHROPIC_API_KEY'];
@@ -229,16 +237,23 @@ export async function askInquiryModel(input: {
     'inquiry.prompt_version': INQUIRY_PROMPT_VERSION,
     'inquiry.model': INQUIRY_MODEL,
     'inquiry.affected_units': input.evidence.affectedUnits,
-  }, () => runReadOnlyAgentSdk({
-    apiKey,
-    model: INQUIRY_MODEL,
-    reader: input.reader,
-    maxTurns: 12,
-    budgetUsd: 0.35,
-    pricing: MODEL_PRICING[INQUIRY_MODEL] ?? DEFAULT_PRICING,
-    systemPrompt: SYSTEM_PROMPT,
-    firstMessage: buildInquiryPrompt(input.evidence),
-    terminalTool: inquiryDecisionTerminalTool(),
+  }, () => runLoggedSdk({
+    context: input.runContext ?? null,
+    phase: 'inquiry',
+    entryPoint: 'inquiry/job#askInquiryModel',
+    structuredInput: input.evidence,
+    repository: input.repository ?? null,
+    input: {
+      apiKey,
+      model: INQUIRY_MODEL,
+      reader: input.reader,
+      maxTurns: 12,
+      budgetUsd: 0.35,
+      pricing: MODEL_PRICING[INQUIRY_MODEL] ?? DEFAULT_PRICING,
+      systemPrompt: SYSTEM_PROMPT,
+      firstMessage: buildInquiryPrompt(input.evidence),
+      terminalTool: inquiryDecisionTerminalTool(),
+    },
   }));
   checkAbort(input.signal);
   if (result.stop !== 'terminal' || result.terminalInput === null) {
@@ -293,7 +308,7 @@ export async function runInquiry(
     checkAbort(signal);
     let modelResult;
     try {
-      modelResult = await dependencies.askModel({ evidence, reader: prepared.reader, signal });
+      modelResult = await dependencies.askModel({ evidence, reader: prepared.reader, signal, runContext: runContextFromJob(job), repository: { provider: 'github', fullName: prepared.repositoryFullName, commitSha: prepared.headSha } });
     } catch (err: unknown) {
       // The only scope holding both the machine identity and the failure.
       throw toInfraError(err, prepared, NO_VERIFICATION_EVIDENCE);

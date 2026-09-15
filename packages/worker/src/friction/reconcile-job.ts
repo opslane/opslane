@@ -1,3 +1,4 @@
+import { runContextFromJob } from '../run-logs/context.js';
 import type pg from 'pg';
 import * as db from '../db.js';
 import { PhaseMeter } from '../metered.js';
@@ -60,12 +61,14 @@ export async function processFrictionReconcile(
             null,
             {
               modelName: deps.client.modelName,
+              settings: deps.client.settings?.bind(deps.client),
               complete: async (args) => {
                 await check();
                 return deps.client.complete({ ...args, signal });
               },
             },
             meter,
+            runContextFromJob(job),
           )
         : null;
     const tx = await pool.connect();

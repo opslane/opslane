@@ -1631,7 +1631,10 @@ describe('digest_write dispatch', () => {
     };
 
     await expect(processJobInner(job, new AbortController().signal)).resolves.toBeUndefined();
-    expect(defaultDependencies).toHaveBeenCalledWith({ jobId: 'digest-write-1', execution: 0 });
+    expect(defaultDependencies).toHaveBeenCalledWith({ jobId: 'digest-write-1', execution: 0 }, {
+      jobId: job.id, jobType: 'digest_write', projectId: job.projectId, attempts: 0, leaseGeneration: '1',
+      errorGroupId: null, ticketId: null, episodeId: null, batchId: null, sessionId: null,
+    });
     expect(writeDigest).toHaveBeenCalledWith('run-1', 'proj-1', expect.anything());
   });
 

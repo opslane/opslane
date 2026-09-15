@@ -1,3 +1,5 @@
+import type { RunContext } from './run-logs/context.js';
+import { runLoggedSdk } from './run-logs/sdk-phase.js';
 import type { Adjudication, Diagnosis, DiagnosisOutcome, EvidenceCitation } from '@opslane/shared';
 import { deriveOutcome, type DerivedDecision } from './classify.js';
 import { parseAdjudication, submitDiagnosisTool } from './diagnose-schema.js';
@@ -7,7 +9,7 @@ import type { RepoReader } from './investigate-tools.js';
 import { logger } from './logger.js';
 import { fenced } from './prompt-fence.js';
 import type { Platform } from './platform.js';
-import { runReadOnlyAgentSdk, type ReadOnlyStop, type TokenUsage } from './harness/sdk-agent.js';
+import type { ReadOnlyStop, TokenUsage } from './harness/sdk-agent.js';
 import type { RuntimeInfo } from './runtime-info.js';
 import { traceSpan } from './tracing.js';
 import type { TriageResult } from './agent-fix.js';
@@ -275,6 +277,21 @@ function failed(
   };
 }
 
+/** The first request of an investigation, as a pure function of its input. */
+export function buildInvestigationPrompt(input: InvestigateInput, maxTurns: number): { systemPrompt: string; firstMessage: string } {
+  const stackFiles = extractStackTraceFiles(input.stackTrace, input.platform);
+  const hints = stackFiles.length > 0
+    ? `\n\nFiles named by the stack trace, as a starting point only: ${stackFiles.slice(0, 5).join(', ')}`
+    : '';
+  return {
+    systemPrompt: investigationSystemPrompt(input),
+    firstMessage:
+      `Diagnose this error, then call submit_diagnosis. You have about ${maxTurns} tool ` +
+      `calls. Spend them on the files that decide between your candidates, and submit what ` +
+      `the evidence supports rather than running out.${hints}`,
+  };
+}
+
 /**
  * One agent over one repository clone: enumerate the candidate causes and
  * submit the one the evidence supports. Routing is derived in code from the
@@ -286,14 +303,11 @@ export async function investigateError(
   input: InvestigateInput,
   reader: RepoReader,
   investigatedCommit = 'unknown',
+  runContext: RunContext | null = null,
+  repositoryFullName: string | null = null,
 ): Promise<InvestigationResult> {
   const pricing = MODEL_PRICING[INVESTIGATION_MODEL] ?? DEFAULT_PRICING;
   const spendCeilingUsd = Number(process.env['INVESTIGATION_BUDGET_USD'] ?? DEFAULT_SPEND_CEILING_USD);
-  const stackFiles = extractStackTraceFiles(input.stackTrace, input.platform);
-  const hints = stackFiles.length > 0
-    ? `\n\nFiles named by the stack trace, as a starting point only: ${stackFiles.slice(0, 5).join(', ')}`
-    : '';
-
   // The verbatim-quote check stays synchronous. Making it async would cascade
   // into deriveOutcome, whose resolvePath and quoteAt parameters are
   // synchronous, and deriveOutcome is also called from agent-fix.ts in the fix
@@ -442,22 +456,30 @@ export async function investigateError(
     return { ok: true };
   };
 
+  const prompt = buildInvestigationPrompt(input, MAX_TURNS);
   const run = await traceSpan('investigation.diagnose', { 'investigation.stage': 'diagnose' }, () =>
-    runReadOnlyAgentSdk({
-      apiKey,
-      model: INVESTIGATION_MODEL,
-      maxTurns: MAX_TURNS,
-      budgetUsd: spendCeilingUsd,
-      pricing,
-      systemPrompt: investigationSystemPrompt(input),
-      firstMessage:
-        `Diagnose this error, then call submit_diagnosis. You have about ${MAX_TURNS} tool ` +
-        `calls. Spend them on the files that decide between your candidates, and submit what ` +
-        `the evidence supports rather than running out.${hints}`,
-      terminalTool: submitDiagnosisTool(),
-      reader: recordingReader,
-      classification: { minFilesRead: 1 },
-      validateTerminal: validateSubmission,
+    runLoggedSdk({
+      context: runContext,
+      phase: 'investigation',
+      entryPoint: 'investigate#investigateError',
+      structuredInput: input,
+      repository: repositoryFullName && investigatedCommit !== 'unknown'
+        ? { provider: 'github', fullName: repositoryFullName, commitSha: investigatedCommit }
+        : null,
+      commitSha: investigatedCommit === 'unknown' ? null : investigatedCommit,
+      input: {
+        apiKey,
+        model: INVESTIGATION_MODEL,
+        maxTurns: MAX_TURNS,
+        budgetUsd: spendCeilingUsd,
+        pricing,
+        systemPrompt: prompt.systemPrompt,
+        firstMessage: prompt.firstMessage,
+        terminalTool: submitDiagnosisTool(),
+        reader: recordingReader,
+        classification: { minFilesRead: 1 },
+        validateTerminal: validateSubmission,
+      },
     }));
 
   const filesRead = run.filesRead;

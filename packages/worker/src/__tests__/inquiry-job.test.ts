@@ -5,7 +5,10 @@ import type { EvidenceBundle } from '../evidence/bundle.js';
 import { NonRetryableJobError } from '../harness/errors.js';
 
 const sdk = vi.hoisted(() => ({ run: vi.fn() }));
-vi.mock('../harness/sdk-agent.js', () => ({ runReadOnlyAgentSdk: sdk.run }));
+vi.mock('../harness/sdk-agent.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../harness/sdk-agent.js')>()),
+  runReadOnlyAgentSdk: sdk.run,
+}));
 
 import {
   askInquiryModel,
@@ -110,7 +113,7 @@ describe('issue inquiry', () => {
 
     const decision = await runInquiry(job, new AbortController().signal, {
       loadEvidence: async () => evidence,
-      prepareRepository: async () => ({
+      prepareRepository: async () => ({ headSha: 'abcdef1', repositoryFullName: 'acme/web',
         reader: { readFile: async () => '', grep: async () => '', list: async () => '', exists: async () => [] },
         sandboxId: 'sbx-test',
         createdAt: Date.now(),
@@ -145,7 +148,7 @@ describe('issue inquiry', () => {
     const persisted: unknown[] = [];
     const decision = await runInquiry(job, new AbortController().signal, {
       loadEvidence: async () => evidence,
-      prepareRepository: async () => ({
+      prepareRepository: async () => ({ headSha: 'abcdef1', repositoryFullName: 'acme/web',
         reader: { readFile: async () => '', grep: async () => '', list: async () => '', exists: async () => [] },
         sandboxId: 'sbx-test',
         createdAt: Date.now(),
@@ -172,7 +175,7 @@ describe('issue inquiry', () => {
     const persist = vi.fn(async () => true);
     await expect(runInquiry(job, new AbortController().signal, {
       loadEvidence: async () => evidence,
-      prepareRepository: async () => ({
+      prepareRepository: async () => ({ headSha: 'abcdef1', repositoryFullName: 'acme/web',
         reader: { readFile: async () => '', grep: async () => '', list: async () => '', exists: async () => [] },
         sandboxId: 'sbx-test',
         createdAt: Date.now(),

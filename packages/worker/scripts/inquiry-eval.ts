@@ -156,13 +156,16 @@ async function main(): Promise<void> {
       // host rather than renting a machine per case. The seam now hands back a
       // reader, because production reads inside a sandbox.
       prepareRepository: async () => ({
+        headSha: '',
+        repositoryFullName: '',
         reader: createHostReader(repoPath),
         sandboxId: 'local-eval',
         createdAt: Date.now(),
         cleanup: async () => undefined,
       }),
       askModel: async (input) => {
-        const result = await askInquiryModel(input);
+        // Local evaluation has no claimed job or production repository identity.
+        const result = await askInquiryModel({ ...input, runContext: null, repository: null });
         usage = result.usage;
         costUsd = result.costUsd;
         return result;

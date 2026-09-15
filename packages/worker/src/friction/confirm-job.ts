@@ -1,3 +1,7 @@
+import { withRunLog, NOOP_RUN } from '../run-logs/handle.js';
+import { runContextFromJob, type RunContext } from '../run-logs/context.js';
+import { confirmRunOptions } from './confirm.js';
+import { oneFixRunOptions } from './one-fix.js';
 import type pg from 'pg';
 import type { SessionChunkEnvelope } from '@opslane/shared';
 import * as db from '../db.js';
@@ -108,6 +112,7 @@ export async function prepareConfirmationTransition(
   batchId: string | null,
   client: ConfirmClient,
   meter: ConfirmMeter,
+  runContext: RunContext | null = null,
 ): Promise<TransitionPlan> {
   const incident = await store.liveIncident(database, ticket);
   const preview = await store.previewCohort(database, ticket, batchId);
@@ -152,9 +157,24 @@ export async function prepareConfirmationTransition(
   for (const neighbor of neighbors) {
     let oneFix = await store.latestGateDecision(database, ticket.id, neighbor.id);
     if (oneFix === null) {
-      let result = await judgeOneFix(client, ticket, neighbor, meter);
-      if ('invalid' in result)
-        result = await judgeOneFix(client, ticket, neighbor, meter);
+      const result = await withRunLog<{ oneFix: boolean; reason: string } | { invalid: string; payload?: unknown }>(
+        oneFixRunOptions({
+          context: runContext,
+          client,
+          phase: batchId ? `friction_confirm:${batchId}` : `friction_reconcile:${runContext?.jobId ?? 'none'}`,
+          a: ticket,
+          b: neighbor,
+        }),
+        async (run) => {
+          let attempt = await judgeOneFix(client, ticket, neighbor, meter, run);
+          if ('invalid' in attempt) {
+            run.event({ type: 'validator_rejection', message: attempt.invalid, payload: attempt.payload ?? null });
+            attempt = await judgeOneFix(client, ticket, neighbor, meter, run);
+          }
+          return attempt;
+        },
+        (attempt) => ('invalid' in attempt ? 'invalid_output' : 'completed'),
+      );
       if ('invalid' in result)
         throw new Error(`One-fix classification invalid: ${result.invalid}`);
       // Every one-fix answer is kept as a fact so a duplicate card can be traced
@@ -396,6 +416,7 @@ export async function processFrictionConfirm(
   };
   const client: ConfirmClient = {
     modelName: deps.client.modelName,
+    settings: deps.client.settings?.bind(deps.client),
     complete: async (args) => {
       await check();
       return deps.client.complete({ ...args, signal });
@@ -496,8 +517,29 @@ export async function processFrictionConfirm(
         assetsMissing: frames.assetsMissing,
         signals,
       };
-      result = await confirmRead(client, input, meter);
-      if ('invalid' in result) result = await confirmRead(client, input, meter);
+      if (input.framesOk && input.frames.length > 0) {
+        result = await withRunLog<ConfirmResult>(
+          confirmRunOptions({
+            context: runContextFromJob(job, { sessionId: member.sessionId, batchId: batch.id }),
+            client,
+            input,
+            sessionId: member.sessionId,
+            offsetsMs: recording?.offsetsMs ?? [],
+          }),
+          async (run) => {
+            let attempt = await confirmRead(client, input, meter, run);
+            if ('invalid' in attempt) {
+              run.event({ type: 'validator_rejection', message: attempt.invalid, payload: attempt.payload ?? null });
+              attempt = await confirmRead(client, input, meter, run);
+              if ('invalid' in attempt) run.event({ type: 'validator_rejection', message: attempt.invalid, payload: attempt.payload ?? null });
+            }
+            return attempt;
+          },
+          (attempt) => ('invalid' in attempt ? 'invalid_output' : 'completed'),
+        );
+      } else {
+        result = await confirmRead(client, input, meter, NOOP_RUN);
+      }
       if ('invalid' in result)
         throw new Error(`Confirmation invalid: ${result.invalid}`);
       const validResult = result;
@@ -528,6 +570,7 @@ export async function processFrictionConfirm(
       batch.id,
       client,
       meter,
+      runContextFromJob(job, { batchId: batch.id }),
     );
     await transaction(job, signal, async (tx) => {
       // This lock precedes every ticket lock in finalizers, including no-fold paths.
@@ -583,6 +626,7 @@ export function frictionConfirmDepsFromEnv(): ConfirmJobDeps {
   return {
     client: {
       modelName,
+      settings: () => ({ model: modelName, maxTokens: 8192, reasoning: 'off', timeoutMs: 120_000 }),
       complete: async (args) => {
         const apiKey =
           process.env['NARRATIVE_API_KEY'] || process.env['ANTHROPIC_API_KEY'];

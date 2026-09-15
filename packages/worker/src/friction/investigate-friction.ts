@@ -1,3 +1,6 @@
+import { createHash } from 'node:crypto';
+import type { RunContext } from '../run-logs/context.js';
+import { runLoggedSdk } from '../run-logs/sdk-phase.js';
 import type Anthropic from '@anthropic-ai/sdk';
 import type { EvidenceCitation } from '@opslane/shared';
 import type { ErrorGroupData } from '../db.js';
@@ -5,7 +8,7 @@ import { EVIDENCE_ARRAY_SCHEMA, parseEvidence, seal } from '../diagnose-schema.j
 import { DEFAULT_PRICING, MODEL_PRICING } from '../investigate.js';
 import { fenced } from '../prompt-fence.js';
 import type { RepoReader } from '../investigate-tools.js';
-import { runReadOnlyAgentSdk, type ReadOnlyRunResult } from '../harness/sdk-agent.js';
+import type { ReadOnlyRunResult } from '../harness/sdk-agent.js';
 import { validateVerdict } from '../verdict-validation.js';
 import type { FrictionEvidence } from './friction-evidence.js';
 import { CATEGORY_DEFINITIONS } from '../narrative/prompt.js';
@@ -40,6 +43,8 @@ export interface FrictionInvestigateInput {
     observationText: string;
     severity: 'low' | 'medium' | 'high';
   } | null;
+  runContext?: RunContext | null;
+  repositoryFullName?: string | null;
   investigatedCommit: string;
 }
 
@@ -164,13 +169,21 @@ function repositoryTree(tree: string): string {
 
 /** Ticket investigations carry a verified problem definition and no research
  * category; only legacy narrative-born incidents still carry categories. */
-function incidentGuide(input: FrictionInvestigateInput): string {
+function incidentGuide(input: FrictionPromptInput): string {
   return input.ticketDefinition
     ? 'The problem field is the verified problem definition: the control, what happened, and whether it is a defect or a UX insight. Every confirmed signal is a recording checked against that definition.'
     : `For narrative-born incidents, signalType is a semantic research category and observationText is the researcher's one-sentence account of what they saw. Interpret categories using these exact definitions:\n${CATEGORY_DEFINITIONS}`;
 }
 
-async function systemPrompt(input: FrictionInvestigateInput): Promise<string> {
+export type FrictionPromptInput = Omit<FrictionInvestigateInput, 'reader' | 'tree' | 'runContext' | 'repositoryFullName'>;
+
+export const FRICTION_FIRST_MESSAGE = 'Inspect the repository, then call classify_friction with your evidence-backed conclusion.';
+
+export function buildFrictionInvestigationPrompt(
+  input: FrictionPromptInput,
+  treeText: string,
+): { systemPrompt: string; firstMessage: string } {
+
   const evidence = input.evidence
     ? {
       signals: input.evidence.signals,
@@ -179,8 +192,8 @@ async function systemPrompt(input: FrictionInvestigateInput): Promise<string> {
       sessionContext: input.sessionContext,
     }
     : { signals: [], timeline: '', truncated: false, sessionContext: input.sessionContext };
-  const tree = repositoryTree(input.tree);
-  return `You investigate user-friction incidents using read-only repository tools.
+  const tree = repositoryTree(treeText);
+  const systemPrompt = `You investigate user-friction incidents using read-only repository tools.
 
 ${incidentGuide(input)}
 
@@ -210,6 +223,7 @@ ${fenced(JSON.stringify({ timeline: evidence.timeline.slice(0, 12000), sessionCo
 <untrusted_data>
 ${fenced(tree, 8208)}
 </untrusted_data>`;
+  return { systemPrompt, firstMessage: FRICTION_FIRST_MESSAGE };
 }
 
 function incomplete(
@@ -267,23 +281,44 @@ export async function investigateFriction(
     return knownMissing.has(key) ? null : key;
   };
 
-  const prompt = await systemPrompt(input);
+  const { reader: _reader, tree: _tree, runContext, repositoryFullName, ...promptInput } = input;
+  const prompt = buildFrictionInvestigationPrompt(promptInput, input.tree);
   const run = await traceSpan('friction.investigate', {
     'friction.model': FRICTION_INVESTIGATION_MODEL,
     'friction.max_turns': MAX_TURNS,
     'friction.budget_usd': BUDGET_USD,
-  }, () => runReadOnlyAgentSdk({
-    apiKey,
-    model: FRICTION_INVESTIGATION_MODEL,
-    maxTurns: MAX_TURNS,
-    budgetUsd: BUDGET_USD,
-    pricing: MODEL_PRICING[FRICTION_INVESTIGATION_MODEL] ?? DEFAULT_PRICING,
-    systemPrompt: prompt,
-    firstMessage: 'Inspect the repository, then call classify_friction with your evidence-backed conclusion.',
-    terminalTool: CLASSIFY_TOOL,
-    reader: recordingReader,
-    classification: { minFilesRead: 1 },
+  }, () => runLoggedSdk({
+    context: runContext ?? null,
+    phase: 'investigation',
+    entryPoint: 'friction/investigate-friction#investigateFriction',
+    structuredInput: {
+      ...promptInput,
+      tree: {
+        commitSha: input.investigatedCommit,
+        bytes: input.tree.length,
+        sha256: createHash('sha256').update(input.tree).digest('hex'),
+      },
+    },
+    repository: repositoryFullName
+      ? { provider: 'github', fullName: repositoryFullName, commitSha: input.investigatedCommit }
+      : null,
+    commitSha: input.investigatedCommit,
+    input: {
+      apiKey,
+      model: FRICTION_INVESTIGATION_MODEL,
+      maxTurns: MAX_TURNS,
+      budgetUsd: BUDGET_USD,
+      pricing: MODEL_PRICING[FRICTION_INVESTIGATION_MODEL] ?? DEFAULT_PRICING,
+      systemPrompt: prompt.systemPrompt,
+      firstMessage: prompt.firstMessage,
+      terminalTool: CLASSIFY_TOOL,
+      reader: recordingReader,
+      classification: { minFilesRead: 1 },
+    },
   }));
+  // The post-loop citation checks below can still reject a submitted verdict. That run is logged as
+  // terminal_tool; the rejection reason is in the job's decision row. In-loop resubmits are logged
+  // as validator_rejection events by the SDK runner.
 
   switch (run.stop) {
     case 'api_error':

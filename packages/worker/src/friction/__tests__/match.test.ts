@@ -1,3 +1,4 @@
+import { NOOP_RUN } from '../../run-logs/handle.js';
 import { describe, expect, it, vi } from 'vitest';
 import type { NarrativeModelResult } from '../../narrative/client.js';
 import type { TicketRow } from '../tickets-db.js';
@@ -72,7 +73,7 @@ describe('matchObservations', () => {
       } },
     ] })));
 
-    await expect(matchObservations(fixture.client, fixture.input, { add: fixture.add })).resolves.toEqual({
+    await expect(matchObservations(fixture.client, fixture.input, { add: fixture.add }, NOOP_RUN)).resolves.toEqual({
       decisions: [
         { kind: 'matched', observationId: 'obs-1', observationWhat: 'Save did nothing', ticketId: 'ticket-1' },
         { kind: 'draft', observationId: 'obs-2', observationWhat: 'Cancel closed the form without warning', draft: {
@@ -116,7 +117,7 @@ describe('matchObservations', () => {
     ] }],
   ])('rejects %s output without partial decisions', async (_name, payload) => {
     const fixture = setup(result(JSON.stringify(payload)));
-    const matched = await matchObservations(fixture.client, fixture.input, { add: fixture.add });
+    const matched = await matchObservations(fixture.client, fixture.input, { add: fixture.add }, NOOP_RUN);
     expect(matched).toHaveProperty('invalid');
     expect(matched).not.toHaveProperty('decisions');
   });
@@ -127,7 +128,7 @@ describe('matchObservations', () => {
     ['missing decisions', '{}'],
   ])('rejects %s and retains successful provider usage', async (_name, text, stopReason = 'end_turn') => {
     const fixture = setup(result(text, stopReason));
-    await expect(matchObservations(fixture.client, fixture.input, { add: fixture.add }))
+    await expect(matchObservations(fixture.client, fixture.input, { add: fixture.add }, NOOP_RUN))
       .resolves.toHaveProperty('invalid');
     expect(fixture.add).toHaveBeenCalledWith('claude-haiku-4-5-20251001', {
       input: 101, output: 23, cacheRead: 7, cacheWrite: 5,
@@ -149,7 +150,7 @@ describe('matchObservations', () => {
       steps: `steps ${attack}`, screens_confirmed: [`/ticket/${attack}`],
     })];
 
-    await matchObservations(fixture.client, fixture.input, { add: fixture.add });
+    await matchObservations(fixture.client, fixture.input, { add: fixture.add }, NOOP_RUN);
 
     const call = fixture.complete.mock.calls[0]?.[0] as { system: string; user: string };
     expect(call.system).toMatch(/enumerate every candidate/i);
@@ -173,7 +174,7 @@ describe('matchObservations', () => {
       what_happened: 'Submitting checkout never completes',
     }));
 
-    await expect(matchObservations(fixture.client, fixture.input, { add: fixture.add }))
+    await expect(matchObservations(fixture.client, fixture.input, { add: fixture.add }, NOOP_RUN))
       .resolves.toHaveProperty('decisions');
 
     const call = fixture.complete.mock.calls[0]?.[0] as { user: string };
@@ -186,7 +187,7 @@ describe('matchObservations', () => {
 
   it('returns no decisions without calling or billing the model when observations are empty', async () => {
     const fixture = setup(result('unused'));
-    const matched = await matchObservations(fixture.client, { ...fixture.input, observations: [] }, { add: fixture.add });
+    const matched = await matchObservations(fixture.client, { ...fixture.input, observations: [] }, { add: fixture.add }, NOOP_RUN);
     expect(matched).toEqual({ decisions: [] });
     expect(fixture.complete).not.toHaveBeenCalled();
     expect(fixture.add).not.toHaveBeenCalled();

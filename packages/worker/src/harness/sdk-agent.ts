@@ -1,3 +1,6 @@
+import { sdkResultTotals, SdkStreamTranscriber } from '@opslane/agent-runs';
+import { NOOP_RUN, type RunHandle } from '../run-logs/handle.js';
+import { countRunLogFailure } from '../run-logs/sink.js';
 import type Anthropic from '@anthropic-ai/sdk';
 import {
   createSdkMcpServer,
@@ -19,6 +22,11 @@ import { annotateActiveSpan } from '../tracing.js';
 import { scrubSecrets } from './redact.js';
 import { pricingFor } from './agent-loop.js';
 import { MachineUnavailableError } from './errors.js';
+
+/** Adapter failures must not change the SDK result or interrupt its stream. */
+function logSafely(work: () => void): void {
+  try { work(); } catch { countRunLogFailure('transcript'); }
+}
 
 export interface CommandRunner {
   run(command: string): Promise<{ stdout: string; exitCode: number }>;
@@ -140,6 +148,17 @@ const DENIED_BUILTIN_TOOLS = [
   'Glob', 'Grep', 'WebFetch', 'WebSearch', 'Task', 'TodoWrite', 'ToolSearch',
 ] as const;
 
+export const RUN_COMMAND_DESCRIPTION =
+  'Run one bounded shell command inside the isolated repository checkout. Use it to discover routes; read every cited file with read_file before submitting.';
+
+/** The effective SDK tool allow and deny lists; logged as run settings and passed to query(). */
+export function sdkToolLists(input: ReadOnlyRunInput): { allowedTools: string[]; disallowedTools: string[] } {
+  const names = ['read_file', 'search', 'list_files'];
+  if (input.commandRunner) names.push('run_command');
+  names.push(input.terminalTool.name);
+  return { allowedTools: names.map((name) => `mcp__repo__${name}`), disallowedTools: [...DENIED_BUILTIN_TOOLS] };
+}
+
 interface RunState {
   captured: Record<string, unknown> | null;
   fatal: unknown;
@@ -161,7 +180,7 @@ function schemaShape(schema: Anthropic.Tool.InputSchema): Record<string, z.ZodTy
   }));
 }
 
-function maxResubmits(input: ReadOnlyRunInput): number {
+export function sdkMaxResubmits(input: ReadOnlyRunInput): number {
   const raw = input.maxResubmits ?? 2;
   return Number.isFinite(raw) ? Math.min(Math.max(Math.trunc(raw), 0), 5) : 2;
 }
@@ -170,7 +189,7 @@ function isFatal(error: unknown): boolean {
   return error instanceof MachineUnavailableError;
 }
 
-function buildServer(input: ReadOnlyRunInput, state: RunState) {
+function buildServer(input: ReadOnlyRunInput, state: RunState, run: RunHandle) {
   const handle = async (
     name: 'read_file' | 'search' | 'list_files' | 'run_command',
     args: Record<string, unknown>,
@@ -204,7 +223,7 @@ function buildServer(input: ReadOnlyRunInput, state: RunState) {
   if (input.commandRunner) {
     tools.push(tool(
       'run_command',
-      'Run one bounded shell command inside the isolated repository checkout. Use it to discover routes; read every cited file with read_file before submitting.',
+      RUN_COMMAND_DESCRIPTION,
       { command: z.string() },
       (args) => handle('run_command', args),
     ));
@@ -221,9 +240,10 @@ function buildServer(input: ReadOnlyRunInput, state: RunState) {
       const verdict = evidenceMissing
         ? { ok: false as const, feedback: `Read at least ${input.classification!.minFilesRead} supporting file(s) with read_file before submitting.` }
         : await input.validateTerminal?.(submission, { filesRead: [...state.filesRead] }) ?? { ok: true as const };
-      if (!verdict.ok && state.resubmitsUsed < maxResubmits(input)) {
+      if (!verdict.ok && state.resubmitsUsed < sdkMaxResubmits(input)) {
         state.resubmitsUsed++;
         state.rejectedSubmission = submission;
+        logSafely(() => run.event({ type: 'validator_rejection', message: verdict.feedback, payload: submission }));
         return resultText(
           `Your submission was NOT recorded. ${verdict.feedback} Correct it and call ${input.terminalTool.name} again with the complete submission.`,
           true,
@@ -237,13 +257,11 @@ function buildServer(input: ReadOnlyRunInput, state: RunState) {
   return createSdkMcpServer({ name: 'repo', version: '1.0.0', tools, alwaysLoad: true });
 }
 
-export function buildQueryOptions(input: ReadOnlyRunInput, state?: RunState): Options {
+export function buildQueryOptions(input: ReadOnlyRunInput, state?: RunState, run: RunHandle = NOOP_RUN): Options {
   const runState = state ?? {
     captured: null, fatal: null, filesRead: new Set<string>(), rejectedSubmission: null, resubmitsUsed: 0,
   };
-  const names = ['read_file', 'search', 'list_files'];
-  if (input.commandRunner) names.push('run_command');
-  names.push(input.terminalTool.name);
+  const tools = sdkToolLists(input);
   return {
     model: input.model,
     // Headless jobs do not need a separate model call to name their session.
@@ -255,8 +273,8 @@ export function buildQueryOptions(input: ReadOnlyRunInput, state?: RunState): Op
     // an empty `tools` means. Repository content steers this model, so the
     // built-in shell and filesystem must be denied twice, not once.
     tools: [],
-    disallowedTools: [...DENIED_BUILTIN_TOOLS],
-    allowedTools: names.map((name) => `mcp__repo__${name}`),
+    disallowedTools: tools.disallowedTools,
+    allowedTools: tools.allowedTools,
     // The loop's own budget check only runs between messages, so it cannot
     // stop a single expensive turn, and the post-capture drain widens that
     // window further. This makes the ceiling the SDK's own: it ends the query
@@ -264,7 +282,7 @@ export function buildQueryOptions(input: ReadOnlyRunInput, state?: RunState): Op
     maxBudgetUsd: input.budgetUsd,
     permissionMode: 'dontAsk',
     settingSources: [],
-    mcpServers: { repo: buildServer(input, runState) },
+    mcpServers: { repo: buildServer(input, runState, run) },
     // Only what the subprocess needs. Spreading process.env handed a
     // prompt-injectable agent the worker's GITHUB_TOKEN, E2B_API_KEY,
     // ENCRYPTION_KEY, DATABASE_URL and Slack webhook, with the built-in tool
@@ -346,7 +364,7 @@ const MAX_DRAIN_AFTER_CAPTURE = 20;
 const MAX_DRAIN_AFTER_CAPTURE_MS = 30_000;
 
 /** Run the SDK loop on the worker while every repository tool executes remotely. */
-export async function runReadOnlyAgentSdk(input: ReadOnlyRunInput): Promise<ReadOnlyRunResult> {
+export async function runReadOnlyAgentSdk(input: ReadOnlyRunInput, run: RunHandle = NOOP_RUN): Promise<ReadOnlyRunResult> {
   if (input.maxTurns <= 0) {
     annotateActiveSpan({
       'agent.stop': input.classification ? 'no_evidence' : 'turns_exhausted',
@@ -380,10 +398,21 @@ export async function runReadOnlyAgentSdk(input: ReadOnlyRunInput): Promise<Read
   let resultUsageSeen = false;
   let drainedAfterCapture = 0;
   let drainDeadline: number | null = null;
-  const q = query({ prompt: input.firstMessage, options: buildQueryOptions(input, state) });
+  let transcriber: SdkStreamTranscriber | null = null;
+  logSafely(() => { transcriber = new SdkStreamTranscriber(); });
+  let resultTotals: ReturnType<typeof sdkResultTotals> = null;
+  logSafely(() => run.noteRequest(null));
+  const q = query({ prompt: input.firstMessage, options: buildQueryOptions(input, state, run) });
 
   try {
     for await (const message of q) {
+      logSafely(() => {
+        for (const event of transcriber?.push(message) ?? []) run.event(event);
+      });
+      logSafely(() => {
+        const totals = sdkResultTotals(message);
+        if (totals) resultTotals = totals;
+      });
       const next = usageFromMessage(message);
       if (next && message.type === 'assistant') {
         const id = message.message.id;
@@ -459,6 +488,10 @@ export async function runReadOnlyAgentSdk(input: ReadOnlyRunInput): Promise<Read
       if (costUsd > input.budgetUsd) { stop = 'budget'; break; }
     }
   } catch (error: unknown) {
+    logSafely(() => run.event({ type: 'error', errorClass: error instanceof Error ? error.name : typeof error,
+      message: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? String(error.stack ?? '').split('\n').slice(1, 11).map((line) => line.trim()) : [],
+    }));
     const detail = error instanceof Error ? error.message : String(error);
     if (state.fatal) {
       // The tool handler recorded the machine death; it wins below.
@@ -479,6 +512,15 @@ export async function runReadOnlyAgentSdk(input: ReadOnlyRunInput): Promise<Read
     try { await q.return?.(); } catch { /* best-effort subprocess cleanup */ }
   }
 
+  logSafely(() => {
+    for (const event of transcriber?.flush() ?? []) run.event(event);
+  });
+  logSafely(() => {
+    const modelTotals = resultTotals?.usage;
+    run.replaceUsage(modelTotals && Object.keys(modelTotals).length > 0 ? modelTotals : { [input.model]: usage });
+    // Turns come from the logged responses: the SDK's num_turns did not match model
+    // responses in real runs (18 for 5 requests).
+  });
   if (state.fatal) throw state.fatal;
   const terminalInput = state.captured ?? (stop === 'api_error' ? null : state.rejectedSubmission);
   if (terminalInput && stop !== 'api_error' && stop !== 'budget') stop = 'terminal';

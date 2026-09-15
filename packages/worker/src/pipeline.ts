@@ -1,3 +1,4 @@
+import type { RunContext } from './run-logs/context.js';
 import { createHash } from 'node:crypto';
 import type { Diagnosis, NeedsHumanReason, ConfidenceLevel, EvidenceRecord } from '@opslane/shared';
 import type { VisualAnalysisOutput } from './harness/types.js';
@@ -23,6 +24,8 @@ import { insertFixRunLedger } from './db.js';
 import { emitUsageEvent } from './usage-events.js';
 
 export interface PipelineInput {
+  runContext?: RunContext | null;
+  repoHeadSha?: string | null;
   platform?: Platform;
   customerRuntime?: RuntimeInfo | null;
   jobId: string;
@@ -117,6 +120,8 @@ export async function runPipeline(input: PipelineInput): Promise<PipelineResult>
   let fixResult;
   try {
     fixResult = await runAgentFix({
+    runContext: input.runContext,
+    repoHeadSha: input.repoHeadSha,
     errorGroupId: input.errorGroupId,
     projectId: input.projectId,
     title: input.title,
