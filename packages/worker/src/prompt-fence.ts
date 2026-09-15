@@ -15,10 +15,25 @@
  * through the public `POST /api/v1/events` contract.
  */
 
-/** Truncate, then neutralise any fence tag the text carries. */
+/**
+ * Truncate, then neutralise any fence tag the text carries, including
+ * whitespace, attribute and newline variants a model could still read as a tag.
+ *
+ *
+ * The tag is neutralised from its `<` through its name, so a variant with no
+ * `>` at all is covered too. The optional tail is short and stops at a quote
+ * or newline: an unbounded tail ran from `<untrusted_data` in one JSON field
+ * to a `>` in a later one, deleting the evidence in between.
+ * `\s*(?:\/\s*)?` rather than `\s*\/?\s*`: with no slash, the latter lets two
+ * whitespace runs split the same spaces every possible way, which is quadratic
+ * on a long run.
+ */
 export function fenced(text: string, max: number): string {
   const truncated = text.length > max ? `${text.slice(0, max)}... [truncated]` : text;
-  return truncated.replace(/<\/?untrusted_(data|user_data)>/gi, '[fence]');
+  return truncated.replace(
+    /<\s*(?:\/\s*)?untrusted[_-](?:user[_-])?data\b\s*[^<>"\n]{0,64}>?/gi,
+    '[fence]',
+  );
 }
 
 /**

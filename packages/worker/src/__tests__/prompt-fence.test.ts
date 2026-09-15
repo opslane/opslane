@@ -33,6 +33,34 @@ describe('fenced', () => {
   it('cannot be defeated by splitting a tag across the truncation boundary', () => {
     expect(fenced(`${'x'.repeat(8)}</untrusted_data>`, 10)).not.toContain('untrusted_data>');
   });
+
+  it('neutralises whitespace, attribute and newline variants of the tags', () => {
+    const out = fenced(
+      `a </untrusted_data > b < /untrusted_data> c </untrusted_data foo> d <untrusted_user_data\n> e </untrusted_data${' '.repeat(65)}>`,
+      500,
+    );
+    expect(out).toBe('a [fence] b [fence] c [fence] d [fence] e [fence]');
+  });
+
+  it('stays linear on long whitespace and unclosed tags', () => {
+    const started = Date.now();
+    fenced(`<${' '.repeat(500_000)}!`, 1_000_000);
+    fenced(`< /${' '.repeat(500_000)}`, 1_000_000);
+    fenced(`<untrusted_data${' '.repeat(50)}`.repeat(8_000), 1_000_000);
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+
+  it('neutralises a tag with no closing bracket without reaching into later fields', () => {
+    const json = JSON.stringify({ message: 'boom <untrusted_data', stack: ['at x'], crumb: 'div > button' }, null, 2);
+    const out = fenced(json, 10_000);
+    expect(out).toContain('"message": "boom [fence]"');
+    expect(out).toContain('"stack": [');
+    expect(out).toContain('"crumb": "div > button"');
+  });
+
+  it('neutralises hyphenated spellings of the tags', () => {
+    expect(fenced('a </untrusted-data> b <untrusted-user-data>', 500)).toBe('a [fence] b [fence]');
+  });
 });
 
 describe('escapeUntrustedLabel', () => {

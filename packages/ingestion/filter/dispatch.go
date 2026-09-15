@@ -20,7 +20,7 @@ const sweepAdvisoryLockKey int64 = 0x66696c746572
 // InquiryPromptVersion must match worker/inquiry.INQUIRY_PROMPT_VERSION. Go
 // owns queue admission; the worker owns the prompt and records the version it
 // actually used, so a mismatch is visible and drains through this sweep.
-const InquiryPromptVersion = 1
+const InquiryPromptVersion = 2
 
 // sweepBatchLimit bounds one tick's work so a fleet-wide backlog (a rule
 // version bump marks every open episode stale at once) drains across ticks

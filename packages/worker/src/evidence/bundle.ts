@@ -1,6 +1,8 @@
 import { getPool } from '../db.js';
 import type { EnvelopeV2 } from '../resolve/envelope.js';
 import { normalizePageUrl } from '../friction/urlnorm.js';
+import { buildErrorEvidence, type ErrorEvidence } from './error-evidence.js';
+import { maskText } from './mask.js';
 
 const MAX_FRAMES = 20;
 const MAX_FAILED_REQUESTS = 100;
@@ -73,6 +75,11 @@ export interface RelatedCandidate {
 }
 
 export interface EvidenceBundle {
+  /**
+   * The threshold anchor's error, bounded and masked. Null only in evaluation
+   * snapshots frozen before error text was part of the bundle.
+   */
+  error: ErrorEvidence | null;
   frames: ResolvedFrameEvidence;
   failedRequests: FailedRequestEvidence[];
   writeRollups: WriteRollupEvidence[];
@@ -97,6 +104,10 @@ interface AnchorRow {
   envelope: unknown;
   resolver_version: number | null;
   route_url: string | null;
+  error_type: string;
+  error_message: string;
+  stack_trace_raw: string;
+  breadcrumbs: unknown;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -156,7 +167,8 @@ export async function loadEvidence(projectId: string, episodeId: string): Promis
             e.commit_sha,
             CASE WHEN s.status <> 'deleting' THEN s.id END AS retained_session_id,
             r.status AS resolution_status, r.envelope, r.resolver_version,
-            e.context->>'url' AS route_url
+            e.context->>'url' AS route_url,
+            e.error_type, e.error_message, e.stack_trace_raw, e.breadcrumbs
        FROM issue_evidence_anchors a
        JOIN error_events e
          ON e.id=a.event_id AND e.project_id=a.project_id
@@ -348,6 +360,13 @@ export async function loadEvidence(projectId: string, episodeId: string): Promis
 
   const status = threshold.resolution_status ?? 'missing';
   return {
+    error: buildErrorEvidence({
+      errorType: threshold.error_type,
+      errorMessage: threshold.error_message,
+      stackTraceRaw: threshold.stack_trace_raw,
+      breadcrumbs: threshold.breadcrumbs,
+      pageUrl: threshold.route_url,
+    }),
     frames: {
       sourceEventId: threshold.event_id,
       status,
@@ -375,7 +394,9 @@ export async function loadEvidence(projectId: string, episodeId: string): Promis
     affectedUnits,
     relatedCandidates: relatedResult.rows.map((row) => ({
       issueId: row.issue_id,
-      title: row.title,
+      // A group title is its error type and message as captured, so it is
+      // masked like the error block.
+      title: maskText(row.title),
       route: row.route,
     })),
   };
