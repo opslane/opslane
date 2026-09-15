@@ -36,7 +36,7 @@ jobs:
   # a silent hole.
   changes:
     name: Classify changed files
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 5
     outputs:
       go: ${{ steps.classify.outputs.go }}
@@ -95,7 +95,7 @@ jobs:
     name: Go build and test
     needs: [changes]
     if: needs.changes.outputs.go == 'true'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     services:
       postgres:
@@ -181,7 +181,7 @@ jobs:
   # skip everything else on a docs-only or workflow-only PR.
   repo-checks:
     name: Repo-wide checks
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -211,7 +211,7 @@ jobs:
     name: JS build and test
     needs: [changes]
     if: needs.changes.outputs.js == 'true'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 20
     services:
       postgres:
@@ -252,7 +252,7 @@ jobs:
     name: Python SDK tests (${{ matrix.python-version }})
     needs: [changes]
     if: needs.changes.outputs.python == 'true'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 10
     strategy:
       fail-fast: false
@@ -285,7 +285,7 @@ jobs:
 
   compose:
     name: Compose validation
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -297,7 +297,7 @@ jobs:
     name: Keyless smoke E2E
     needs: [changes]
     if: needs.changes.outputs.e2e == 'true'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 30
     env:
       # Deterministic canaries planted where real secrets would live; the leak
@@ -518,7 +518,7 @@ jobs:
     name: Deterministic event-to-PR reliability
     needs: [changes]
     if: needs.changes.outputs.reliability == 'true'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -541,7 +541,7 @@ jobs:
 
   security:
     name: Secret scan
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -554,7 +554,7 @@ jobs:
           dir /repo --config /repo/.gitleaks.toml --no-banner --redact
   ci-ok:
     name: ci-ok
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 5
     needs: [changes, repo-checks, go, js, sdk-python, compose, e2e-keyless, reliability-system, security]
     if: always()
@@ -576,7 +576,7 @@ jobs:
   # manifest); the release workflow resolves digests from it at promotion.
   candidate-images:
     name: Publish candidate images
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 30
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: [ci-ok]
