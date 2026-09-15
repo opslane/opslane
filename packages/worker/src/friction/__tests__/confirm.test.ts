@@ -1,3 +1,4 @@
+import { NOOP_RUN } from '../../run-logs/handle.js';
 import { describe, expect, it, vi } from 'vitest';
 import {
   confirmRead,
@@ -49,7 +50,7 @@ describe('confirmation read', () => {
   it('returns a valid free-text JSON answer and asks for JSON with the recording as evidence', async () => {
     const client = textClient(response(valid));
     const meter = { add: vi.fn() };
-    expect(await confirmRead(client, readInput(), meter)).toEqual(valid);
+    expect(await confirmRead(client, readInput(), meter, NOOP_RUN)).toEqual(valid);
     const args = client.complete.mock.calls[0]![0];
     expect(args.system).toContain(
       'Return JSON only: {"outcome":"confirmed|refuted|inconclusive","evidenceLines":["L1"],"signalIds":["..."],"note":"...","costToUser":"none|annoyance|lost_time|abandoned_task"}.',
@@ -66,7 +67,7 @@ describe('confirmation read', () => {
       `Here is my answer:\n\`\`\`json\n${JSON.stringify(valid)}\n\`\`\``,
       `After reviewing: ${JSON.stringify(valid)} That is all.`,
     ])
-      expect(await confirmRead(textClient(textReply(text)), readInput(), { add: vi.fn() })).toEqual(valid);
+      expect(await confirmRead(textClient(textReply(text)), readInput(), { add: vi.fn() }, NOOP_RUN)).toEqual(valid);
   });
 
   it.each([
@@ -82,8 +83,8 @@ describe('confirmation read', () => {
     [{ ...valid, evidenceLines: [] }, 'confirmed_without_line'],
   ] as const)('rejects %j as %s', async (answer, rule) => {
     const meter = { add: vi.fn() };
-    expect(await confirmRead(textClient(response(answer)), readInput(), meter))
-      .toEqual({ invalid: rule, stopReason: 'end_turn' });
+    expect(await confirmRead(textClient(response(answer)), readInput(), meter, NOOP_RUN))
+      .toEqual({ invalid: rule, stopReason: 'end_turn', payload: answer });
     expect(meter.add).toHaveBeenCalledOnce();
   });
 
@@ -95,7 +96,7 @@ describe('confirmation read', () => {
     { outcome: ['confirmed'], costToUser: ['lost_time'], evidenceLines: [], signalIds: [] },
   ])('rejects non-string enum fields as shape before accepting evidence: %j', async (malformed) => {
     const meter = { add: vi.fn() };
-    expect(await confirmRead(textClient(response({ ...valid, ...malformed })), readInput(), meter))
+    expect(await confirmRead(textClient(response({ ...valid, ...malformed })), readInput(), meter, NOOP_RUN))
       .toMatchObject({ invalid: 'shape' });
     expect(meter.add).toHaveBeenCalledOnce();
   });
@@ -106,27 +107,27 @@ describe('confirmation read', () => {
     '{"outcome": confirmed}',
     '',
   ])('reports a reply with no parsable JSON object as shape: %j', async (text) => {
-    expect(await confirmRead(textClient(textReply(text)), readInput(), { add: vi.fn() }))
-      .toEqual({ invalid: 'shape', stopReason: 'end_turn' });
+    expect(await confirmRead(textClient(textReply(text)), readInput(), { add: vi.fn() }, NOOP_RUN))
+      .toEqual({ invalid: 'shape', stopReason: 'end_turn', payload: text });
   });
 
   it('measures the note in code points: 300 ASCII or 300 astral characters pass', async () => {
     for (const note of ['x'.repeat(300), '😀'.repeat(300)])
-      expect(await confirmRead(textClient(response({ ...valid, note })), readInput(), { add: vi.fn() }))
+      expect(await confirmRead(textClient(response({ ...valid, note })), readInput(), { add: vi.fn() }, NOOP_RUN))
         .toEqual({ ...valid, note });
-    expect(await confirmRead(textClient(response({ ...valid, note: '😀'.repeat(301) })), readInput(), { add: vi.fn() }))
+    expect(await confirmRead(textClient(response({ ...valid, note: '😀'.repeat(301) })), readInput(), { add: vi.fn() }, NOOP_RUN))
       .toMatchObject({ invalid: 'note_too_long' });
   });
 
   it('accepts a refutation that cites no signal', async () => {
     const refuted = { ...valid, outcome: 'refuted', signalIds: [], evidenceLines: [] };
-    expect(await confirmRead(textClient(response(refuted)), readInput(), { add: vi.fn() })).toEqual(refuted);
+    expect(await confirmRead(textClient(response(refuted)), readInput(), { add: vi.fn() }, NOOP_RUN)).toEqual(refuted);
   });
 
   it('rejects a reply cut off at the output limit even when its text parses', async () => {
     const meter = { add: vi.fn() };
-    expect(await confirmRead(textClient(response(valid, 'max_tokens')), readInput(), meter))
-      .toEqual({ invalid: 'truncated', stopReason: 'max_tokens' });
+    expect(await confirmRead(textClient(response(valid, 'max_tokens')), readInput(), meter, NOOP_RUN))
+      .toEqual({ invalid: 'truncated', stopReason: 'max_tokens', payload: JSON.stringify(valid) });
     expect(meter.add).toHaveBeenCalledOnce();
   });
 
@@ -135,15 +136,15 @@ describe('confirmation read', () => {
     ['even when valid-looking JSON came back', response(valid, 'refusal')],
   ])('reports a refusal %s as its own rule', async (_case, reply) => {
     const meter = { add: vi.fn() };
-    expect(await confirmRead(textClient(reply), readInput(), meter))
-      .toEqual({ invalid: 'refusal', stopReason: 'refusal' });
+    expect(await confirmRead(textClient(reply), readInput(), meter, NOOP_RUN))
+      .toEqual({ invalid: 'refusal', stopReason: 'refusal', payload: reply.text });
     expect(meter.add).toHaveBeenCalledOnce();
   });
 
   it('treats missing frames as unavailable without calling the model', async () => {
     const client = textClient();
     for (const [framesOk, frames] of [[false, []], [true, []], [false, [frame]]] as const)
-      expect(await confirmRead(client, readInput({ framesOk, frames: [...frames] }), { add: vi.fn() }))
+      expect(await confirmRead(client, readInput({ framesOk, frames: [...frames] }), { add: vi.fn() }, NOOP_RUN))
         .toEqual(unavailableCheck('no_frames'));
     expect(client.complete).not.toHaveBeenCalled();
   });
@@ -158,14 +159,14 @@ describe('confirmation read', () => {
       'Both timelines agree the save failed.',
     ]) {
       expect(
-        await confirmRead(textClient(response({ ...valid, note })), readInput({ timelineText: 'L1: Click' }), meter),
+        await confirmRead(textClient(response({ ...valid, note })), readInput({ timelineText: 'L1: Click' }), meter, NOOP_RUN),
       ).toMatchObject({ invalid: 'note_mentions_provenance' });
     }
     expect(
       await confirmRead(
         textClient(response({ ...valid, note: 'The user clicked Save and the form stayed unchanged with no message.' })),
         readInput({ timelineText: 'L1: Click' }),
-        meter,
+        meter, NOOP_RUN,
       ),
     ).toMatchObject({ outcome: 'confirmed', evidenceLines: ['L1'] });
   });
@@ -189,8 +190,8 @@ describe('confirmation read', () => {
     };
     const client = textClient(response(refuted), response(refuted));
     const base = { ticket, timelineText: 'L1: Click', frames: [frame], framesOk: true, signals: [] };
-    expect(await confirmRead(client, { ...base, assetsMissing: true }, meter)).toMatchObject({ outcome: 'refuted' });
-    expect(await confirmRead(client, base, meter)).toMatchObject({ outcome: 'refuted' });
+    expect(await confirmRead(client, { ...base, assetsMissing: true }, meter, NOOP_RUN)).toMatchObject({ outcome: 'refuted' });
+    expect(await confirmRead(client, base, meter, NOOP_RUN)).toMatchObject({ outcome: 'refuted' });
     const [withAssetsMissing, withAssets] = client.complete.mock.calls.map(([call]) => (call as { system: string }).system);
     expect(withAssetsMissing).toContain(`evidenceLines.${ASSETS_MISSING_SENTENCE} Return JSON only:`);
     expect(withAssets).not.toContain('external stylesheets');
@@ -208,12 +209,12 @@ describe('one fix classification', () => {
         ),
     };
     const meter = { add: vi.fn() };
-    expect(await judgeOneFix(client, ticket, ticket, meter)).toEqual({
+    expect(await judgeOneFix(client, ticket, ticket, meter, NOOP_RUN)).toEqual({
       oneFix: true,
       reason: 'Same failing handler',
     });
     client.complete.mockResolvedValue(response({ oneFix: 'yes', reason: '' }));
-    expect(await judgeOneFix(client, ticket, ticket, meter)).toHaveProperty(
+    expect(await judgeOneFix(client, ticket, ticket, meter, NOOP_RUN)).toHaveProperty(
       'invalid',
     );
     expect(meter.add).toHaveBeenCalledTimes(2);

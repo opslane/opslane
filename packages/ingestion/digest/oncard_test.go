@@ -96,14 +96,6 @@ func writeOnCardPayload(t *testing.T, pool *pgxpool.Pool, runID string, candidat
 	t.Helper()
 	payload := writtenDigestPayload{Included: []writtenDigestCard{}, Deferred: []deferredDigestItem{}}
 	for _, candidate := range candidates {
-		if candidate.NotCardEligible {
-			// What the writer does mechanically for a never-eligible candidate.
-			payload.Deferred = append(payload.Deferred, deferredDigestItem{
-				ErrorGroupID: candidate.ErrorGroupID,
-				Reason:       "no authored card is available for this incident",
-			})
-			continue
-		}
 		payload.Included = append(payload.Included, writtenDigestCard{
 			ErrorGroupID: candidate.ErrorGroupID, Title: "Saving is blocked",
 			Copy:   "People cannot save because the control never submits.",
@@ -160,8 +152,8 @@ func TestDigestActionIsExhaustive(t *testing.T) {
 }
 
 // TestFreezeOnCoversEveryStatusAndKind is R1 and R2 together: every waiting
-// incident freezes with its state-derived action, with an empty remediation
-// throughout, and publishable() only decides card versus receipt.
+// incident publishable() accepts freezes with its state-derived action, with an
+// empty remediation throughout, and one it refuses is ledgered not_publishable.
 func TestFreezeOnCoversEveryStatusAndKind(t *testing.T) {
 	for _, tc := range []struct {
 		name, kind, status string
@@ -170,7 +162,7 @@ func TestFreezeOnCoversEveryStatusAndKind(t *testing.T) {
 		validatedDiagnosis bool
 		terminalJobType    string
 		wantAction         string
-		wantNotEligible    bool
+		wantExcluded       bool
 	}{
 		{name: "error awaiting approval with diff", kind: "error", status: "awaiting_approval",
 			hasDiff: true, validatedDiagnosis: true, wantAction: "Approve the proposed fix."},
@@ -183,9 +175,8 @@ func TestFreezeOnCoversEveryStatusAndKind(t *testing.T) {
 		{name: "friction needs human with diff", kind: "friction", status: "needs_human",
 			hasDiff: true, wantAction: "Decide how to handle this."},
 		{name: "error needs human after a fix produced nothing", kind: "error", status: "needs_human",
-			terminalJobType: "error_fix", wantAction: "Decide how to handle this.", wantNotEligible: true},
-		{name: "error needs human without diagnosis", kind: "error", status: "needs_human",
-			wantAction: "Decide how to handle this.", wantNotEligible: true},
+			validatedDiagnosis: true, terminalJobType: "error_fix", wantAction: "Decide how to handle this."},
+		{name: "error needs human without diagnosis", kind: "error", status: "needs_human", wantExcluded: true},
 		// The dead-lettered-investigation reconciliation writes an investigation
 		// job id into the same column. It is not a fix attempt.
 		{name: "error needs human after a dead-lettered investigation", kind: "error", status: "needs_human",
@@ -194,8 +185,7 @@ func TestFreezeOnCoversEveryStatusAndKind(t *testing.T) {
 			prURL: "https://github.com/acme/shop/pull/7", wantAction: "Review the fix PR."},
 		{name: "friction pr draft with url", kind: "friction", status: "pr_draft",
 			prURL: "https://github.com/acme/shop/pull/8", wantAction: "Review the fix PR."},
-		{name: "error pr created without url", kind: "error", status: "pr_created",
-			wantAction: "Review the issue.", wantNotEligible: true},
+		{name: "error pr created without url", kind: "error", status: "pr_created", wantExcluded: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			now := time.Now().UTC().Truncate(time.Second)
@@ -208,9 +198,18 @@ func TestFreezeOnCoversEveryStatusAndKind(t *testing.T) {
 			if tc.terminalJobType != "" {
 				seedTerminalFixJob(t, pool, fixture.ProjectID, groupID, tc.terminalJobType)
 			}
-			_, candidates, err := FreezeCandidates(context.Background(), pool, fixture.ProjectID, now)
+			runID, candidates, err := FreezeCandidates(context.Background(), pool, fixture.ProjectID, now)
 			if err != nil {
 				t.Fatal(err)
+			}
+			if tc.wantExcluded {
+				if len(candidates) != 0 {
+					t.Fatalf("an incident publishable() refuses reached the digest: %+v", candidates)
+				}
+				if outcome, reason, _ := heldBackLedger(t, pool, runID, groupID); outcome != "excluded" || reason != reasonNotPublishable {
+					t.Fatalf("ledger = %s/%s, want excluded/%s", outcome, reason, reasonNotPublishable)
+				}
+				return
 			}
 			if len(candidates) != 1 || candidates[0].ErrorGroupID != groupID {
 				t.Fatalf("incident never reached the digest: %+v", candidates)
@@ -218,9 +217,6 @@ func TestFreezeOnCoversEveryStatusAndKind(t *testing.T) {
 			candidate := candidates[0]
 			if candidate.ValidAction != tc.wantAction {
 				t.Errorf("action = %q, want %q", candidate.ValidAction, tc.wantAction)
-			}
-			if candidate.NotCardEligible != tc.wantNotEligible {
-				t.Errorf("notCardEligible = %v, want %v", candidate.NotCardEligible, tc.wantNotEligible)
 			}
 			if candidate.SpellStartedAt == nil {
 				t.Error("no waiting age was frozen")
@@ -269,6 +265,10 @@ func TestValidateOnWritesNoPublicationsForAnyStatus(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	pool, fixture := onCardFixture(t, now)
 	ctx := context.Background()
+	// The PR cards link into the project repository, so every status earns a card.
+	if _, err := pool.Exec(ctx, `UPDATE projects SET github_repo='acme/shop' WHERE id=$1`, fixture.ProjectID); err != nil {
+		t.Fatal(err)
+	}
 	statuses := []struct {
 		status  string
 		hasDiff bool
@@ -316,10 +316,9 @@ func TestValidateOnWritesNoPublicationsForAnyStatus(t *testing.T) {
 		t.Fatalf("delivered ON run wrote %d publication rows", after-before)
 	}
 	payload := renderedEvent(t, pool, runID).Digest
-	delivered := len(payload.GeneratedCards) + len(payload.ReceiptItems)
-	if delivered != len(statuses) {
-		t.Fatalf("delivered %d of %d actionable incidents: cards=%+v receipts=%+v",
-			delivered, len(statuses), payload.GeneratedCards, payload.ReceiptItems)
+	if len(payload.GeneratedCards) != len(statuses) || len(payload.ReceiptItems) != 0 {
+		t.Fatalf("delivered %d cards for %d actionable incidents: cards=%+v receipts=%+v",
+			len(payload.GeneratedCards), len(statuses), payload.GeneratedCards, payload.ReceiptItems)
 	}
 }
 
@@ -397,7 +396,7 @@ func TestValidateOnPRCardRepeatsFromCache(t *testing.T) {
 	if err != nil || len(candidates) != 1 || candidates[0].ErrorGroupID != groupID {
 		t.Fatalf("freeze candidates=%+v err=%v", candidates, err)
 	}
-	if candidates[0].ValidAction != "Review the fix PR." || candidates[0].NotCardEligible {
+	if candidates[0].ValidAction != "Review the fix PR." {
 		t.Fatalf("PR candidate = %+v", candidates[0])
 	}
 	writeOnCardPayload(t, pool, runID, candidates)
@@ -448,145 +447,11 @@ func TestValidateOnPRCardRepeatsFromCache(t *testing.T) {
 	}
 }
 
-// A diagnosis validated between the freeze and validation makes the incident
-// card-worthy again. Compaction reads today's eligibility, so its receipt shows
-// the cause it just acquired instead of collapsing to one line.
-func TestValidateOnCompactionReadsTodaysEligibility(t *testing.T) {
-	now := time.Now().UTC().Truncate(time.Second)
-	pool, fixture := onCardFixture(t, now)
-	ctx := context.Background()
-	groupID := seedOnCardGroup(t, pool, fixture.ProjectID, fixture.EnvID, "friction", "awaiting_approval",
-		false, "", "The submit handler never fires.", now.Add(-time.Hour))
-
-	runID, candidates, err := FreezeCandidates(ctx, pool, fixture.ProjectID, now)
-	if err != nil || len(candidates) != 1 {
-		t.Fatalf("freeze candidates=%+v err=%v", candidates, err)
-	}
-	if !candidates[0].NotCardEligible {
-		t.Fatalf("candidate without a validated diagnosis was card-eligible: %+v", candidates[0])
-	}
-
-	// Overnight the diagnosis lands. Nothing re-freezes; the frozen snapshot
-	// still says no card was ever going to be written.
-	seedValidatedDiagnosis(t, pool, fixture.ProjectID, groupID, now)
-
-	writeOnCardPayload(t, pool, runID, candidates)
-	if err := ValidateAndPublish(ctx, pool, runID); err != nil {
-		t.Fatal(err)
-	}
-	payload := renderedEvent(t, pool, runID).Digest
-	if len(payload.ReceiptItems) != 1 {
-		t.Fatalf("newly diagnosed incident receipts=%+v", payload.ReceiptItems)
-	}
-	if got := payload.ReceiptItems[0].FallbackReason; got != "" {
-		t.Fatalf("receipt fallback reason = %q, want none: the incident is card-worthy today", got)
-	}
-	if payload.ReceiptItems[0].RootCauseExcerpt == "" {
-		t.Fatalf("full receipt carries no cause: %+v", payload.ReceiptItems[0])
-	}
-	body, _, err := notify.FormatSlack(renderedEvent(t, pool, runID))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(body), "Also waiting") {
-		t.Fatalf("a card-worthy incident was compacted to one line: %s", body)
-	}
-	if !strings.Contains(string(body), "The submit handler never fires.") {
-		t.Fatalf("compacted receipt hid the cause: %s", body)
-	}
-}
-
-// TestValidateOnNeverEligibleRendersReceiptWithoutAuthoring covers the
-// card-versus-receipt split: no card is authored, and the incident still ships.
-func TestValidateOnNeverEligibleRendersReceiptWithoutAuthoring(t *testing.T) {
-	for _, tc := range []struct {
-		name, kind, status string
-	}{
-		// publishable() refuses an authored card without a validated diagnosis.
-		{name: "no validated diagnosis", kind: "friction", status: "awaiting_approval"},
-		// A PR status with no URL is an inconsistent state. It still awaits a
-		// human, so it renders — as a receipt, with the "Review the issue."
-		// action and a diagnostic log.
-		{name: "pr status without a url", kind: "error", status: "pr_created"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			neverEligibleRendersReceipt(t, tc.kind, tc.status)
-		})
-	}
-}
-
-func neverEligibleRendersReceipt(t *testing.T, kind, status string) {
-	t.Helper()
-	now := time.Now().UTC().Truncate(time.Second)
-	pool, fixture := onCardFixture(t, now)
-	ctx := context.Background()
-	groupID := seedOnCardGroup(t, pool, fixture.ProjectID, fixture.EnvID, kind, status,
-		false, "", "", now.Add(-time.Hour))
-
-	runID, candidates, err := FreezeCandidates(ctx, pool, fixture.ProjectID, now)
-	if err != nil || len(candidates) != 1 {
-		t.Fatalf("freeze candidates=%+v err=%v", candidates, err)
-	}
-	if !candidates[0].NotCardEligible {
-		t.Fatalf("candidate without a validated diagnosis was card-eligible: %+v", candidates[0])
-	}
-	var freezeRenderMode, receiptReason string
-	if err := pool.QueryRow(ctx, `SELECT COALESCE(render_mode,''),COALESCE(details->>'receipt_reason','')
-		FROM digest_run_candidate_evaluations WHERE digest_run_id=$1 AND error_group_id=$2`,
-		runID, groupID).Scan(&freezeRenderMode, &receiptReason); err != nil {
-		t.Fatal(err)
-	}
-	if freezeRenderMode != "receipt_fallback" || receiptReason != "never_card_eligible" {
-		t.Fatalf("freeze ledger render=%q reason=%q", freezeRenderMode, receiptReason)
-	}
-
-	writeOnCardPayload(t, pool, runID, candidates)
-	if err := ValidateAndPublish(ctx, pool, runID); err != nil {
-		t.Fatal(err)
-	}
-	payload := renderedEvent(t, pool, runID).Digest
-	if len(payload.GeneratedCards) != 0 || len(payload.ReceiptItems) != 1 {
-		t.Fatalf("never-eligible incident cards=%+v receipts=%+v", payload.GeneratedCards, payload.ReceiptItems)
-	}
-	if payload.ReceiptItems[0].IncidentID != groupID {
-		t.Fatalf("receipt = %+v", payload.ReceiptItems[0])
-	}
-	// The freeze already knew no card would ever be written here, so the
-	// receipt carries that reason and the message spends one line on it.
-	if payload.ReceiptItems[0].FallbackReason != notify.ReceiptFallbackNeverEligible {
-		t.Fatalf("receipt fallback reason = %q, want %q",
-			payload.ReceiptItems[0].FallbackReason, notify.ReceiptFallbackNeverEligible)
-	}
-	body, _, err := notify.FormatSlack(renderedEvent(t, pool, runID))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(body), "Dead checkout control") || strings.Contains(string(body), "Also waiting") {
-		t.Fatalf("receipt did not use the single card template: %s", body)
-	}
-	if strings.Contains(string(body), "Fix attempt failed") || strings.Contains(string(body), "recording impact unavailable") {
-		t.Fatalf("never-eligible receipt still rendered its full card: %s", body)
-	}
-	var cacheRows int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM digest_card_copy WHERE error_group_id=$1`,
-		groupID).Scan(&cacheRows); err != nil {
-		t.Fatal(err)
-	}
-	if cacheRows != 0 {
-		t.Fatalf("never-eligible incident cached %d authored cards", cacheRows)
-	}
-	// Day two still shows it: nothing about being receipt-only removes it.
-	_, second, err := FreezeCandidates(ctx, pool, fixture.ProjectID, now.Add(24*time.Hour))
-	if err != nil || len(second) != 1 || second[0].ErrorGroupID != groupID {
-		t.Fatalf("receipt-only incident stopped repeating: %+v err=%v", second, err)
-	}
-}
-
-// TestFreezeOnCapsAtTheRendererLimitAndRendersOverflow: the ON lane's bound is
-// the renderer's real Slack constraint (notify.DigestV4CardCap), not the
-// receipts-era five, and every incident past it reaches the reader as the
-// overflow line instead of being invisible.
-func TestFreezeOnCapsAtTheRendererLimitAndRendersOverflow(t *testing.T) {
+// TestFreezeOnCapsAtTheRendererLimit: the ON lane's bound is the renderer's
+// real Slack constraint (notify.DigestV4CardCap), not the receipts-era five.
+// Every incident past it is ledgered capped_overflow and stays on the
+// dashboard; the message carries no overflow line.
+func TestFreezeOnCapsAtTheRendererLimit(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	pool, fixture := onCardFixture(t, now)
 	ctx := context.Background()
@@ -621,16 +486,16 @@ func TestFreezeOnCapsAtTheRendererLimitAndRendersOverflow(t *testing.T) {
 		t.Fatal(err)
 	}
 	payload := renderedEvent(t, pool, runID)
-	if payload.Digest.OverflowCount+payload.Digest.ReceiptOverflow != extra {
-		t.Fatalf("payload overflow = %d+%d, want %d", payload.Digest.OverflowCount,
-			payload.Digest.ReceiptOverflow, extra)
+	if payload.Digest.OverflowCount+payload.Digest.ReceiptOverflow != 0 {
+		t.Fatalf("payload overflow = %d+%d, want none", payload.Digest.OverflowCount,
+			payload.Digest.ReceiptOverflow)
 	}
 	body, _, err := notify.FormatSlack(payload)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(body), "And 3 more on the dashboard") {
-		t.Fatalf("Slack message has no overflow line: %s", body)
+	if strings.Contains(string(body), "more on the dashboard") {
+		t.Fatalf("Slack message has an overflow line: %s", body)
 	}
 	var rendered struct {
 		Blocks []json.RawMessage `json:"blocks"`
@@ -646,94 +511,9 @@ func TestFreezeOnCapsAtTheRendererLimitAndRendersOverflow(t *testing.T) {
 	}
 }
 
-// TestFreezeOnRanksCardEligibleIncidentsAboveReceiptOnlyOnes: the card lane's
-// scarce resource is an authored card, so an incident that can earn one wins a
-// slot over a higher-impact incident that can only ever render its mechanical
-// receipt. The receipt-only incident that loses the slot is still ledgered, so
-// it reaches the reader through the overflow line rather than vanishing.
-func TestFreezeOnRanksCardEligibleIncidentsAboveReceiptOnlyOnes(t *testing.T) {
-	now := time.Now().UTC().Truncate(time.Second)
-	pool, fixture := onCardFixture(t, now)
-	ctx := context.Background()
-
-	// Nine receipt-only incidents: needs_human, no saved diff and no validated
-	// diagnosis, so publishable() refuses each of them an authored card. They
-	// carry the whole impact range, and the oldest of them is the least
-	// impactful, so it takes the oldest-waiter slot in either ranking.
-	receiptOnly := make([]string, 0, notify.DigestV4CardCap)
-	for i := 0; i < notify.DigestV4CardCap; i++ {
-		groupID := seedOnCardGroup(t, pool, fixture.ProjectID, fixture.EnvID, "friction", "needs_human",
-			false, "", "", now.Add(-time.Duration(i+2)*time.Hour))
-		if _, err := pool.Exec(ctx, `UPDATE error_groups SET impact_visits=$2 WHERE id=$1`,
-			groupID, 100-i); err != nil {
-			t.Fatal(err)
-		}
-		receiptOnly = append(receiptOnly, groupID)
-	}
-	// One card-eligible incident: the least impactful and the most recently
-	// waiting, so pure impact ranking would cap it out of the digest entirely.
-	eligible := seedOnCardGroup(t, pool, fixture.ProjectID, fixture.EnvID, "friction", "needs_human",
-		false, "", "The checkout control does not submit.", now.Add(-time.Hour))
-	seedValidatedDiagnosis(t, pool, fixture.ProjectID, eligible, now.Add(-time.Hour))
-	if _, err := pool.Exec(ctx, `UPDATE error_groups SET impact_visits=1 WHERE id=$1`, eligible); err != nil {
-		t.Fatal(err)
-	}
-
-	runID, candidates, err := FreezeCandidates(ctx, pool, fixture.ProjectID, now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(candidates) != notify.DigestV4CardCap {
-		t.Fatalf("frozen candidates = %d, want the cap %d", len(candidates), notify.DigestV4CardCap)
-	}
-	frozen := make(map[string]Candidate, len(candidates))
-	for _, candidate := range candidates {
-		frozen[candidate.ErrorGroupID] = candidate
-	}
-	if _, ok := frozen[eligible]; !ok {
-		t.Fatalf("the card-eligible incident lost its slot to higher-impact receipt-only ones: %+v", candidates)
-	}
-	if frozen[eligible].NotCardEligible {
-		t.Fatalf("the diagnosed incident was frozen as receipt-only: %+v", frozen[eligible])
-	}
-
-	// Exactly one receipt-only incident lost the slot, and it is accounted for.
-	capped := make([]string, 0, 1)
-	for _, groupID := range receiptOnly {
-		if _, ok := frozen[groupID]; ok {
-			continue
-		}
-		var outcome, reason string
-		if err := pool.QueryRow(ctx, `SELECT outcome,primary_reason_code
-			FROM digest_run_candidate_evaluations WHERE digest_run_id=$1 AND error_group_id=$2`,
-			runID, groupID).Scan(&outcome, &reason); err != nil {
-			t.Fatalf("displaced incident %s has no ledger row: %v", groupID, err)
-		}
-		if outcome != "excluded" || reason != reasonCappedOverflow {
-			t.Fatalf("displaced incident %s ledger = %s/%s", groupID, outcome, reason)
-		}
-		capped = append(capped, groupID)
-	}
-	if len(capped) != 1 {
-		t.Fatalf("displaced %d receipt-only incidents, want 1: %v", len(capped), capped)
-	}
-
-	writeOnCardPayload(t, pool, runID, candidates)
-	if err := ValidateAndPublish(ctx, pool, runID); err != nil {
-		t.Fatal(err)
-	}
-	payload := renderedEvent(t, pool, runID).Digest
-	if len(payload.GeneratedCards) != 1 || payload.GeneratedCards[0].IncidentID != eligible {
-		t.Fatalf("authored cards = %+v, want only the eligible incident", payload.GeneratedCards)
-	}
-	if len(payload.ReceiptItems) != notify.DigestV4CardCap-1 {
-		t.Fatalf("receipts = %d, want %d", len(payload.ReceiptItems), notify.DigestV4CardCap-1)
-	}
-}
-
 // TestValidateOnRequiresACauseSentenceFromADiagnosedCard: the card exists to
-// answer "why", so a diagnosed incident whose card omits that sentence loses
-// its card and ships as a receipt. Only that card falls back; the run stands.
+// answer "why", so a diagnosed incident whose card omits that sentence is held
+// back. Only that card is held back; its sibling still ships.
 func TestValidateOnRequiresACauseSentenceFromADiagnosedCard(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	pool, fixture := onCardFixture(t, now)
@@ -750,11 +530,6 @@ func TestValidateOnRequiresACauseSentenceFromADiagnosedCard(t *testing.T) {
 	runID, candidates, err := FreezeCandidates(ctx, pool, fixture.ProjectID, now)
 	if err != nil || len(candidates) != 2 {
 		t.Fatalf("freeze candidates=%+v err=%v", candidates, err)
-	}
-	for _, candidate := range candidates {
-		if candidate.NotCardEligible {
-			t.Fatalf("candidate %s was refused a card: %+v", candidate.ErrorGroupID, candidate)
-		}
 	}
 	// Neither card carries a cause sentence.
 	payload := writtenDigestPayload{Deferred: []deferredDigestItem{}}
@@ -781,23 +556,19 @@ func TestValidateOnRequiresACauseSentenceFromADiagnosedCard(t *testing.T) {
 	if len(delivered.GeneratedCards) != 1 || delivered.GeneratedCards[0].IncidentID != causeless {
 		t.Fatalf("cards = %+v, want only the incident with no cause to explain", delivered.GeneratedCards)
 	}
-	if len(delivered.ReceiptItems) != 1 || delivered.ReceiptItems[0].IncidentID != diagnosed {
-		t.Fatalf("receipts = %+v, want the diagnosed card demoted", delivered.ReceiptItems)
+	if len(delivered.ReceiptItems) != 0 {
+		t.Fatalf("receipts = %+v, want none", delivered.ReceiptItems)
 	}
-	var reason string
-	if err := pool.QueryRow(ctx, `SELECT COALESCE(details->>'receipt_reason','')
-		FROM digest_run_candidate_evaluations WHERE digest_run_id=$1 AND error_group_id=$2`,
-		runID, diagnosed).Scan(&reason); err != nil {
-		t.Fatal(err)
-	}
-	if reason != "card_validation_failed" {
-		t.Fatalf("ledger receipt reason = %q, want card_validation_failed", reason)
+	outcome, reason, held := heldBackLedger(t, pool, runID, diagnosed)
+	if outcome != "excluded" || reason != reasonCardHeldBack || !strings.Contains(held, "carries no cause sentence") {
+		t.Fatalf("diagnosed card ledger = %s/%s/%q, want excluded/%s for its missing cause sentence",
+			outcome, reason, held, reasonCardHeldBack)
 	}
 }
 
 // The rule cuts both ways: the cause sentence answers to the stored cause and
 // nothing else, so a card that writes one for an incident with no stored cause
-// is asserting something nothing can check, and it loses its card.
+// is asserting something nothing can check, and it is held back.
 func TestValidateOnRefusesACauseSentenceWithoutAStoredCause(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	pool, fixture := onCardFixture(t, now)
@@ -827,12 +598,9 @@ func TestValidateOnRefusesACauseSentenceWithoutAStoredCause(t *testing.T) {
 	if err := ValidateAndPublish(ctx, pool, runID); err != nil {
 		t.Fatal(err)
 	}
-	delivered := renderedEvent(t, pool, runID).Digest
-	if len(delivered.GeneratedCards) != 0 {
-		t.Fatalf("cards = %+v, want the unchecked cause sentence demoted", delivered.GeneratedCards)
-	}
-	if len(delivered.ReceiptItems) != 1 || delivered.ReceiptItems[0].IncidentID != causeless {
-		t.Fatalf("receipts = %+v, want the causeless incident as a receipt", delivered.ReceiptItems)
+	assertHeldBack(t, pool, fixture.ProjectID, runID, causeless)
+	if _, _, held := heldBackLedger(t, pool, runID, causeless); !strings.Contains(held, "has no stored cause to answer to") {
+		t.Fatalf("causeless card held reason = %q, want its unchecked cause sentence", held)
 	}
 }
 
@@ -886,12 +654,13 @@ func TestValidateOnCachesAndRendersTheCauseSentence(t *testing.T) {
 	}
 }
 
-// TestValidateOnKeepsAnIncidentWhoseAskChangedAfterFreeze: migration 066 resets
+// TestValidateOnHoldsBackACardWhoseAskChangedAfterFreeze: migration 066 resets
 // actionable_since whenever the action class changes, so a normal minutes-long
-// gap between freeze and validate (a PR opening, a diff arriving) moved the
-// spell. Treating that like "left the actionable set" dropped a still-waiting
-// incident with no card, no receipt and no overflow credit.
-func TestValidateOnKeepsAnIncidentWhoseAskChangedAfterFreeze(t *testing.T) {
+// gap between freeze and validate (a PR opening, a diff arriving) moves the
+// spell. The frozen card describes an ask that no longer holds, so it does not
+// ship; the incident is still waiting, so its ledger says card_held_back rather
+// than that it left, and tomorrow's freeze picks up the new ask.
+func TestValidateOnHoldsBackACardWhoseAskChangedAfterFreeze(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	pool, fixture := onCardFixture(t, now)
 	ctx := context.Background()
@@ -922,34 +691,14 @@ func TestValidateOnKeepsAnIncidentWhoseAskChangedAfterFreeze(t *testing.T) {
 	if err := ValidateAndPublish(ctx, pool, runID); err != nil {
 		t.Fatal(err)
 	}
-	payload := renderedEvent(t, pool, runID).Digest
-	delivered := false
-	for _, item := range payload.ReceiptItems {
-		if item.IncidentID == groupID {
-			delivered = true
-			if item.ReceiptState != "pr_open" {
-				t.Errorf("receipt state = %q, want the live pr_open state", item.ReceiptState)
-			}
-		}
-	}
-	for _, card := range payload.GeneratedCards {
-		if card.IncidentID == groupID {
-			delivered = true
-		}
-	}
-	if !delivered && payload.OverflowCount+payload.ReceiptOverflow == 0 {
-		t.Fatalf("an incident that only changed its ask vanished: %+v", payload)
-	}
-	if !delivered {
-		t.Fatalf("incident was only counted as overflow, not rendered: %+v", payload)
-	}
+	assertHeldBack(t, pool, fixture.ProjectID, runID, groupID)
 }
 
 // TestFreezeOnSkipsAnActionableRowWithNoWaitingAge: an actionable row whose
 // actionable_since is NULL used to be frozen as a non-actionable candidate,
 // which sent validation down the episode path with an empty episode id. The
-// resulting uuid encode error is not pgx.ErrNoRows, so it degraded the entire
-// ON card section for one malformed row.
+// resulting uuid encode error is not pgx.ErrNoRows, so one malformed row cost
+// every card in the ON section.
 func TestFreezeOnSkipsAnActionableRowWithNoWaitingAge(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	pool, fixture := onCardFixture(t, now)
@@ -994,9 +743,100 @@ func TestFreezeOnSkipsAnActionableRowWithNoWaitingAge(t *testing.T) {
 	}
 	payload := renderedEvent(t, pool, runID).Digest
 	if len(payload.GeneratedCards) != 1 || payload.GeneratedCards[0].IncidentID != healthy {
-		t.Fatalf("one malformed row degraded the whole card section: %+v", payload)
+		t.Fatalf("one malformed row cost the healthy card: %+v", payload)
 	}
-	if payload.DeliveryAlert != "" {
-		t.Fatalf("section degraded with alert %q", payload.DeliveryAlert)
+	if events := digestOutboxEvents(t, pool, fixture.ProjectID, runID); events != 1 {
+		t.Fatalf("outbox events = %d, want 1 carrying the healthy card", events)
+	}
+}
+
+func TestFreezeOnExcludesIncidentsThatCannotEarnACard(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	pool, fixture := onCardFixture(t, now)
+	ctx := context.Background()
+	undiagnosed := seedOnCardGroup(t, pool, fixture.ProjectID, fixture.EnvID, "friction", "awaiting_approval",
+		false, "", "The submit handler is never wired to the control.", now.Add(-time.Hour))
+	prWithoutURL := seedOnCardGroup(t, pool, fixture.ProjectID, fixture.EnvID, "error", "pr_created",
+		false, "", "The save request never leaves the page.", now.Add(-2*time.Hour))
+	filler := seedOnCardGroup(t, pool, fixture.ProjectID, fixture.EnvID, "error", "awaiting_approval",
+		true, "", "TBD", now.Add(-3*time.Hour))
+	seedValidatedDiagnosis(t, pool, fixture.ProjectID, filler, now.Add(-time.Hour))
+	savedDiff := seedOnCardGroup(t, pool, fixture.ProjectID, fixture.EnvID, "error", "needs_human",
+		true, "", "The export request never leaves the page.", now.Add(-4*time.Hour))
+	prWithURL := seedOnCardGroup(t, pool, fixture.ProjectID, fixture.EnvID, "error", "pr_created",
+		false, "https://github.com/acme/shop/pull/7", "The import request never leaves the page.", now.Add(-5*time.Hour))
+	diagnosed := seedOnCardGroup(t, pool, fixture.ProjectID, fixture.EnvID, "error", "awaiting_approval",
+		true, "", "The save request never leaves the page.", now.Add(-6*time.Hour))
+	seedValidatedDiagnosis(t, pool, fixture.ProjectID, diagnosed, now.Add(-time.Hour))
+
+	runID, candidates, err := FreezeCandidates(ctx, pool, fixture.ProjectID, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frozen := map[string]bool{}
+	for _, candidate := range candidates {
+		frozen[candidate.ErrorGroupID] = true
+	}
+	// A saved diff or an open PR is something to act on even without a
+	// validated diagnosis; publishable() admits both.
+	if len(candidates) != 3 || !frozen[diagnosed] || !frozen[savedDiff] || !frozen[prWithURL] {
+		t.Fatalf("frozen candidates = %+v, want the diagnosed, saved-diff, and PR-with-URL incidents", candidates)
+	}
+	for _, groupID := range []string{undiagnosed, prWithoutURL, filler} {
+		if outcome, reason, _ := heldBackLedger(t, pool, runID, groupID); outcome != "excluded" || reason != reasonNotPublishable {
+			t.Fatalf("ledger for %s = %s/%s, want excluded/%s", groupID, outcome, reason, reasonNotPublishable)
+		}
+	}
+}
+
+func TestFreezeOnGivesErrorCandidatesTheirRootCauseAsWhy(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	pool, fixture := onCardFixture(t, now)
+	ctx := context.Background()
+	const rootCause = "The refresh call has no catch, so a rejected view refresh escapes."
+	groupID := seedOnCardGroup(t, pool, fixture.ProjectID, fixture.EnvID, "error", "awaiting_approval",
+		true, "", rootCause, now.Add(-time.Hour))
+	seedValidatedDiagnosis(t, pool, fixture.ProjectID, groupID, now.Add(-time.Hour))
+
+	_, candidates, err := FreezeCandidates(ctx, pool, fixture.ProjectID, now)
+	if err != nil || len(candidates) != 1 {
+		t.Fatalf("freeze candidates=%+v err=%v", candidates, err)
+	}
+	if candidates[0].Why != rootCause {
+		t.Fatalf("frozen why = %q, want the validated root cause %q", candidates[0].Why, rootCause)
+	}
+}
+
+func TestDigestErrorCardWithValidatedRootCauseShipsAWhyLine(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	pool, fixture := onCardFixture(t, now)
+	ctx := context.Background()
+	const rootCause = "The submit handler is never wired to the control."
+	groupID := seedOnCardGroup(t, pool, fixture.ProjectID, fixture.EnvID, "error", "awaiting_approval",
+		true, "", rootCause, now.Add(-time.Hour))
+	seedValidatedDiagnosis(t, pool, fixture.ProjectID, groupID, now.Add(-time.Hour))
+
+	runID, candidates, err := FreezeCandidates(ctx, pool, fixture.ProjectID, now)
+	if err != nil || len(candidates) != 1 {
+		t.Fatalf("freeze candidates=%+v err=%v", candidates, err)
+	}
+	if candidates[0].Why != rootCause {
+		t.Fatalf("frozen why = %q, want %q", candidates[0].Why, rootCause)
+	}
+	// Stub writer: the card a writer following the prompt returns for this candidate.
+	writeOnCardPayload(t, pool, runID, candidates)
+	if err := ValidateAndPublish(ctx, pool, runID); err != nil {
+		t.Fatal(err)
+	}
+	payload := renderedEvent(t, pool, runID)
+	if payload.Digest.SchemaVersion != 5 || len(payload.Digest.GeneratedCards) != 1 || payload.Digest.GeneratedCards[0].Why == "" {
+		t.Fatalf("published digest = %+v, want one v5 card with a why", payload.Digest)
+	}
+	body, _, err := notify.FormatSlack(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), "Why: The submit handler is never wired to the control.") {
+		t.Fatalf("Slack digest has no Why line: %s", body)
 	}
 }

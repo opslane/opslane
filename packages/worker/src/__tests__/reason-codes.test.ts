@@ -1,6 +1,14 @@
 import { describe, it, expect } from 'vitest';
 import type { PersistedDecision } from '../db.js';
-import { DEFAULT_REMEDIATION, buildReason, reasonCodeForDecision } from '../reason-codes.js';
+import {
+  DEFAULT_REMEDIATION,
+  INCOMPLETE_REASON_MESSAGES,
+  buildReason,
+  incompleteReason,
+  isIncompleteReasonCode,
+  reasonCodeForDecision,
+} from '../reason-codes.js';
+import type { IncompleteReasonCode } from '../reason-codes.js';
 
 // Compile-time exhaustiveness is enforced by the Record<ReasonCode, string> type;
 // this asserts message quality at runtime.
@@ -71,5 +79,43 @@ describe('reasonCodeForDecision cause kinds', () => {
 
   it('keeps a legacy row without causeKind mapped to unfixable_infra', () => {
     expect(reasonCodeForDecision(base)).toBe('unfixable_infra');
+  });
+});
+
+describe('incomplete fix reasons', () => {
+  it('has fixed copy for exactly the incomplete codes', () => {
+    expect(Object.keys(INCOMPLETE_REASON_MESSAGES).sort()).toEqual([
+      'budget_exhausted',
+      'worker_runtime_error',
+    ]);
+  });
+
+  it('builds every incomplete reason from fixed copy and the default remediation', () => {
+    for (const code of Object.keys(INCOMPLETE_REASON_MESSAGES) as IncompleteReasonCode[]) {
+      expect(incompleteReason(code)).toEqual({
+        reason_code: code,
+        reason_message: INCOMPLETE_REASON_MESSAGES[code],
+        remediation: DEFAULT_REMEDIATION[code],
+      });
+    }
+  });
+
+  it('pins the copy a reader sees', () => {
+    expect(incompleteReason('budget_exhausted').reason_message).toBe(
+      'The fix attempt stopped before it produced a result: it reached its turn or spend limit, or a model call failed.',
+    );
+    expect(incompleteReason('worker_runtime_error').reason_message).toBe(
+      'The fix attempt stopped on an internal error before it produced a result.',
+    );
+  });
+
+  it('recognizes only incomplete codes', () => {
+    expect(isIncompleteReasonCode('budget_exhausted')).toBe(true);
+    expect(isIncompleteReasonCode('worker_runtime_error')).toBe(true);
+    expect(isIncompleteReasonCode('verification_infra_error')).toBe(false);
+    expect(isIncompleteReasonCode('low_confidence_fix')).toBe(false);
+    expect(isIncompleteReasonCode('toString')).toBe(false);
+    expect(isIncompleteReasonCode(undefined)).toBe(false);
+    expect(isIncompleteReasonCode(null)).toBe(false);
   });
 });

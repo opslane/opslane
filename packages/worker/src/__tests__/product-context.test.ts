@@ -8,7 +8,10 @@ import { createHostReader } from '../harness/host-reader.js';
 import { NonRetryableJobError } from '../harness/errors.js';
 
 const sdk = vi.hoisted(() => ({ run: vi.fn() }));
-vi.mock('../harness/sdk-agent.js', () => ({ runReadOnlyAgentSdk: sdk.run }));
+vi.mock('../harness/sdk-agent.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../harness/sdk-agent.js')>()),
+  runReadOnlyAgentSdk: sdk.run,
+}));
 
 import {
   askModelForClaims,
@@ -232,7 +235,7 @@ describe('product context schema', () => {
     } satisfies ClaimedJob;
 
     await runProductContext(job, new AbortController().signal, {
-      prepare: async () => ({
+      prepare: async () => ({ repositoryFullName: 'acme/web',
         reader: createHostReader(repoPath), commandRunner, commitSha: 'commit-123', cleanup,
         routes: [{ route: '/internal/debug', clientRefs: [], serverRefs: [], declaredRequests: [] }],
       }),
@@ -273,7 +276,7 @@ describe('product context schema', () => {
     } satisfies ClaimedJob;
 
     await runProductContext(job, new AbortController().signal, {
-      prepare: async () => ({
+      prepare: async () => ({ repositoryFullName: 'acme/web',
         reader: createHostReader(repoPath), commandRunner,
         commitSha: 'commit-conflicts', cleanup: async () => undefined,
         routes: [

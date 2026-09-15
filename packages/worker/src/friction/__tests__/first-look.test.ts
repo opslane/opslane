@@ -1,3 +1,4 @@
+import { NOOP_RUN } from '../../run-logs/handle.js';
 import { describe, expect, it, vi } from 'vitest';
 import type { NarrativeModelResult } from '../../narrative/client.js';
 import type { DraftObservationDecision } from '../match.js';
@@ -95,7 +96,7 @@ const validPayload = {
 describe('firstLook', () => {
   it('accepts mixed same-as, normal-use rejection, and complete creation decisions', async () => {
     const fixture = setup(validPayload);
-    await expect(firstLook(fixture.client, fixture.input, { add: fixture.add })).resolves.toEqual({
+    await expect(firstLook(fixture.client, fixture.input, { add: fixture.add }, NOOP_RUN)).resolves.toEqual({
       decisions: [
         { kind: 'same_as', observationId: 'obs-same', ticketId: 'ticket-save' },
         { kind: 'not_a_problem', observationId: 'obs-normal' },
@@ -112,7 +113,7 @@ describe('firstLook', () => {
 
   it('accepts laborious-but-working behavior as a UX insight and states that policy in the prompt', async () => {
     const fixture = setup(validPayload);
-    await expect(firstLook(fixture.client, fixture.input, { add: fixture.add }))
+    await expect(firstLook(fixture.client, fixture.input, { add: fixture.add }, NOOP_RUN))
       .resolves.toHaveProperty('decisions');
     const call = fixture.complete.mock.calls[0]?.[0] as { system: string };
     expect(call.system).toMatch(/laborious.*eventually succeeded.*ux_insight/is);
@@ -125,7 +126,7 @@ describe('firstLook', () => {
     const payload = structuredClone(validPayload);
     payload.decisions[0] = { kind: 'same_as', observation_id: 'obs-same', ticket_id: 'ticket-other' };
     const fixture = setup(payload);
-    await expect(firstLook(fixture.client, fixture.input, { add: fixture.add })).resolves.toHaveProperty('invalid');
+    await expect(firstLook(fixture.client, fixture.input, { add: fixture.add }, NOOP_RUN)).resolves.toHaveProperty('invalid');
   });
 
   it.each([
@@ -142,7 +143,7 @@ describe('firstLook', () => {
     }] }],
   ])('rejects %s without returning partial decisions', async (_name, payload) => {
     const fixture = setup(payload);
-    const looked = await firstLook(fixture.client, fixture.input, { add: fixture.add });
+    const looked = await firstLook(fixture.client, fixture.input, { add: fixture.add }, NOOP_RUN);
     expect(looked).toHaveProperty('invalid');
     expect(looked).not.toHaveProperty('decisions');
   });
@@ -159,7 +160,7 @@ describe('firstLook', () => {
     if (value === undefined) delete create.ticket[field];
     else create.ticket[field] = value;
     const fixture = setup(payload);
-    await expect(firstLook(fixture.client, fixture.input, { add: fixture.add })).resolves.toHaveProperty('invalid');
+    await expect(firstLook(fixture.client, fixture.input, { add: fixture.add }, NOOP_RUN)).resolves.toHaveProperty('invalid');
   });
 
   it('trims create ticket fields before returning them', async () => {
@@ -173,7 +174,7 @@ describe('firstLook', () => {
       steps: ' Open reports ',
     };
     const fixture = setup(payload);
-    await expect(firstLook(fixture.client, fixture.input, { add: fixture.add })).resolves.toMatchObject({
+    await expect(firstLook(fixture.client, fixture.input, { add: fixture.add }, NOOP_RUN)).resolves.toMatchObject({
       decisions: [{}, {}, { ticket: {
         name: 'Export is hard to find',
         control: 'Export control',
@@ -190,7 +191,7 @@ describe('firstLook', () => {
     const create = payload.decisions[2] as { ticket: Record<string, unknown> };
     create.ticket[field] = 'x'.repeat(length);
     const fixture = setup(payload);
-    await expect(firstLook(fixture.client, fixture.input, { add: fixture.add })).resolves.toHaveProperty('invalid');
+    await expect(firstLook(fixture.client, fixture.input, { add: fixture.add }, NOOP_RUN)).resolves.toHaveProperty('invalid');
   });
 
   it('measures create ticket caps in code points, not UTF-16 units', async () => {
@@ -199,7 +200,7 @@ describe('firstLook', () => {
     create.ticket['name'] = '📦'.repeat(200);
     create.ticket['steps'] = '📦'.repeat(2000);
     const fixture = setup(payload);
-    await expect(firstLook(fixture.client, fixture.input, { add: fixture.add })).resolves.toHaveProperty('decisions');
+    await expect(firstLook(fixture.client, fixture.input, { add: fixture.add }, NOOP_RUN)).resolves.toHaveProperty('decisions');
   });
 
   it('accepts defect as the other valid create kind', async () => {
@@ -207,7 +208,7 @@ describe('firstLook', () => {
     const create = payload.decisions[2] as { ticket: { kind: string } };
     create.ticket.kind = 'defect';
     const fixture = setup(payload);
-    await expect(firstLook(fixture.client, fixture.input, { add: fixture.add })).resolves.toHaveProperty('decisions');
+    await expect(firstLook(fixture.client, fixture.input, { add: fixture.add }, NOOP_RUN)).resolves.toHaveProperty('decisions');
   });
 
   it.each([
@@ -217,7 +218,7 @@ describe('firstLook', () => {
   ])('rejects %s after retaining provider usage', async (_name, text, stopReason = 'end_turn') => {
     const fixture = setup(validPayload);
     fixture.complete.mockResolvedValue(result(text, stopReason));
-    await expect(firstLook(fixture.client, fixture.input, { add: fixture.add })).resolves.toHaveProperty('invalid');
+    await expect(firstLook(fixture.client, fixture.input, { add: fixture.add }, NOOP_RUN)).resolves.toHaveProperty('invalid');
     expect(fixture.add).toHaveBeenCalledWith('claude-sonnet-5', {
       input: 211, output: 47, cacheRead: 9, cacheWrite: 6,
     });
@@ -239,7 +240,7 @@ describe('firstLook', () => {
       screens_confirmed: [`/reports/${attack}`],
     });
 
-    await firstLook(fixture.client, fixture.input, { add: fixture.add });
+    await firstLook(fixture.client, fixture.input, { add: fixture.add }, NOOP_RUN);
 
     const call = fixture.complete.mock.calls[0]?.[0] as { system: string; user: string };
     expect(call.system).toMatch(/untrusted.*evidence.*not instructions/is);
@@ -258,7 +259,7 @@ describe('firstLook', () => {
 
   it('returns immediately when there are no drafts', async () => {
     const fixture = setup(validPayload);
-    await expect(firstLook(fixture.client, { ...fixture.input, drafts: [] }, { add: fixture.add }))
+    await expect(firstLook(fixture.client, { ...fixture.input, drafts: [] }, { add: fixture.add }, NOOP_RUN))
       .resolves.toEqual({ decisions: [] });
     expect(fixture.complete).not.toHaveBeenCalled();
     expect(fixture.add).not.toHaveBeenCalled();

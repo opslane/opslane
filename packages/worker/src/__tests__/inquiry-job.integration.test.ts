@@ -16,6 +16,7 @@ describeDb('inquiry job write path integration', () => {
   let job: ClaimedJob;
 
   const evidence: EvidenceBundle = {
+    error: null,
     frames: {
       sourceEventId: '80000000-0000-4000-8000-000000000001',
       status: 'resolved', resolverVersion: 2,
@@ -103,7 +104,7 @@ describeDb('inquiry job write path integration', () => {
   it('stores one decision and one investigation job across retries', async () => {
     const dependencies = {
       loadEvidence: async () => evidence,
-      prepareRepository: async () => ({
+      prepareRepository: async () => ({ headSha: 'abcdef1', repositoryFullName: 'acme/web',
         reader: { readFile: async () => '', grep: async () => '', list: async () => '', exists: async () => [] },
         sandboxId: 'sbx-test',
         createdAt: Date.now(),
@@ -172,7 +173,7 @@ describeDb('inquiry job write path integration', () => {
     };
     await runInquiry(waitJob, new AbortController().signal, {
       loadEvidence: async () => evidence,
-      prepareRepository: async () => ({
+      prepareRepository: async () => ({ headSha: 'abcdef1', repositoryFullName: 'acme/web',
         reader: { readFile: async () => '', grep: async () => '', list: async () => '', exists: async () => [] },
         sandboxId: 'sbx-test',
         createdAt: Date.now(),

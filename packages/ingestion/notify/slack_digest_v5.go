@@ -13,6 +13,7 @@ import (
 func formatSlackDigestV5(payload EventPayload) ([]byte, string, error) {
 	d := payload.Digest
 	cards := append([]GeneratedDigestCard(nil), d.GeneratedCards...)
+	// Receipts reach v5 only from outbox events written before #496; the ON lane no longer produces them.
 	for _, r := range d.ReceiptItems {
 		cardCopy := r.RootCauseExcerpt
 		why := ""
@@ -92,10 +93,6 @@ func formatSlackDigestV5(payload EventPayload) ([]byte, string, error) {
 		if target != "" {
 			blocks = append(blocks, map[string]any{"type": "actions", "elements": []map[string]any{digestButton("digest_action_"+strconv.Itoa(i), action, target, "primary")}})
 		}
-	}
-	overflow := max(d.OverflowCount+d.ReceiptOverflow, len(cards)-DigestV4CardCap)
-	if overflow > 0 {
-		blocks = append(blocks, digestContextBlock(fmt.Sprintf("And %d more on the dashboard", overflow)))
 	}
 	if len(d.MergedThisWeek) > 0 {
 		budget := 50 - len(blocks)

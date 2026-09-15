@@ -1,3 +1,7 @@
+import { withRunLog } from '../run-logs/handle.js';
+import { runContextFromJob, type RunContext } from '../run-logs/context.js';
+import { CONFIRM_MAX_OFFSETS, confirmRunOptions } from './confirm.js';
+import { oneFixRunOptions } from './one-fix.js';
 import type pg from 'pg';
 import type { SessionChunkEnvelope } from '@opslane/shared';
 import * as db from '../db.js';
@@ -15,6 +19,7 @@ import {
   type ConfirmClient,
   type ConfirmInvalidRule,
   type ConfirmMeter,
+  type ConfirmResult,
   type UnavailableReason,
 } from './confirm.js';
 import { judgeOneFix } from './one-fix.js';
@@ -113,6 +118,7 @@ export async function prepareConfirmationTransition(
   batchId: string | null,
   client: ConfirmClient,
   meter: ConfirmMeter,
+  runContext: RunContext | null = null,
 ): Promise<TransitionPlan> {
   const incident = await store.liveIncident(database, ticket);
   const preview = await store.previewCohort(database, ticket, batchId);
@@ -158,9 +164,25 @@ export async function prepareConfirmationTransition(
   for (const neighbor of neighbors) {
     let oneFix = await store.latestGateDecision(database, ticket.id, neighbor.id);
     if (oneFix === null) {
-      let result = await judgeOneFix(client, ticket, neighbor, meter);
-      if ('invalid' in result)
-        result = await judgeOneFix(client, ticket, neighbor, meter);
+      const result = await withRunLog<{ oneFix: boolean; reason: string } | { invalid: string; payload?: unknown }>(
+        oneFixRunOptions({
+          context: runContext,
+          client,
+          phase: batchId ? `friction_confirm:${batchId}` : `friction_reconcile:${runContext?.jobId ?? 'none'}`,
+          a: ticket,
+          b: neighbor,
+        }),
+        async (run) => {
+          let attempt = await judgeOneFix(client, ticket, neighbor, meter, run);
+          if ('invalid' in attempt) {
+            run.event({ type: 'validator_rejection', message: attempt.invalid, payload: attempt.payload ?? null });
+            attempt = await judgeOneFix(client, ticket, neighbor, meter, run);
+            if ('invalid' in attempt) run.event({ type: 'validator_rejection', message: attempt.invalid, payload: attempt.payload ?? null });
+          }
+          return attempt;
+        },
+        (attempt) => ('invalid' in attempt ? 'invalid_output' : 'completed'),
+      );
       if ('invalid' in result) {
         // Publishing past an unanswered gate could ship a duplicate, and
         // throwing dead-lettered the batch with its valid checks. An unjudged
@@ -416,6 +438,7 @@ export async function processFrictionConfirm(
   };
   const client: ConfirmClient = {
     modelName: deps.client.modelName,
+    settings: deps.client.settings?.bind(deps.client),
     complete: async (args) => {
       await check();
       return deps.client.complete({ ...args, signal });
@@ -473,7 +496,7 @@ export async function processFrictionConfirm(
         await check();
         try {
           frames = await deps.capture(recording.envelopes, recording.offsetsMs, {
-            maxOffsets: 4,
+            maxOffsets: CONFIRM_MAX_OFFSETS,
           });
           if (!frames.frames.length) unavailable = 'no_frames';
         } catch (error) {
@@ -527,15 +550,33 @@ export async function processFrictionConfirm(
       if (unavailable) {
         answer = unavailableCheck(unavailable);
       } else {
-        let result = await confirmRead(client, input, meter);
-        // One blind retry: the same request again. A refusal is not retried,
-        // since re-sending the request the model just declined is declined again.
-        if ('invalid' in result && result.invalid !== 'refusal') {
-          logger.warn('Confirmation answer invalid; retrying once', {
-            ...context, rule: result.invalid, stop_reason: result.stopReason,
-          });
-          result = await confirmRead(client, input, meter);
-        }
+        const result = await withRunLog<ConfirmResult>(
+          confirmRunOptions({
+            context: runContextFromJob(job, { sessionId: member.sessionId, batchId: batch.id }),
+            client,
+            input,
+            sessionId: member.sessionId,
+            offsetsMs: recording?.offsetsMs ?? [],
+          }),
+          async (run) => {
+            let attempt = await confirmRead(client, input, meter, run);
+            if ('invalid' in attempt) {
+              run.event({ type: 'validator_rejection', message: attempt.invalid, rule: attempt.invalid, payload: attempt.payload ?? null });
+              // One blind retry: the same request again. A refusal is not retried,
+              // since re-sending the request the model just declined is declined again.
+              if (attempt.invalid !== 'refusal') {
+                logger.warn('Confirmation answer invalid; retrying once', {
+                  ...context, rule: attempt.invalid, stop_reason: attempt.stopReason,
+                });
+                attempt = await confirmRead(client, input, meter, run);
+                if ('invalid' in attempt)
+                  run.event({ type: 'validator_rejection', message: attempt.invalid, rule: attempt.invalid, payload: attempt.payload ?? null });
+              }
+            }
+            return attempt;
+          },
+          (attempt) => ('invalid' in attempt ? 'invalid_output' : 'completed'),
+        );
         if ('invalid' in result) {
           // Throwing here dead-lettered the job and discarded every valid check
           // in its batch. Unavailable keeps them and retries this recording
@@ -582,6 +623,7 @@ export async function processFrictionConfirm(
       batch.id,
       client,
       meter,
+      runContextFromJob(job, { batchId: batch.id }),
     );
     await transaction(job, signal, async (tx) => {
       // This lock precedes every ticket lock in finalizers, including no-fold paths.
@@ -634,24 +676,30 @@ export async function processFrictionConfirm(
 export function frictionConfirmDepsFromEnv(): ConfirmJobDeps {
   const modelName = process.env['FRICTION_CONFIRM_MODEL'] || 'claude-sonnet-5';
   const cap = Number(process.env['FRICTION_CONFIRM_DAILY_CAP'] ?? 2000);
+  // Thinking stays at the model's default because disabling it lowered
+  // accuracy on labelled recordings (#511). Adaptive thinking spent the old
+  // 8,192-token limit on 22 confirmation answers; the larger limit removes
+  // the cut-offs, and the longer timeout covers the longer replies.
+  const maxTokens = 16_000;
+  const timeoutMs = 300_000;
   const provider = (): NarrativeClient => {
     const apiKey = process.env['NARRATIVE_API_KEY'] || process.env['ANTHROPIC_API_KEY'];
     if (!apiKey) throw new Error('Confirmation requires NARRATIVE_API_KEY or ANTHROPIC_API_KEY');
     return new NarrativeClient({
       model: modelName,
       apiKey,
-      // Thinking stays at the model's default because disabling it lowered
-      // accuracy on labelled recordings (#511). Adaptive thinking spent the old
-      // 8,192-token limit on 22 confirmation answers; the larger limit removes
-      // the cut-offs, and the longer timeout covers the longer replies.
-      maxTokens: 16_000,
-      timeoutMs: 300_000,
+      maxTokens,
+      timeoutMs,
       baseURL: process.env['NARRATIVE_BASE_URL'] || process.env['ANTHROPIC_BASE_URL'] || undefined,
     });
   };
   return {
     // Confirmation and the one-fix gate share these settings.
-    client: { modelName, complete: async (args) => provider().complete(args) },
+    client: {
+      modelName,
+      settings: () => ({ model: modelName, maxTokens, timeoutMs }),
+      complete: async (args) => provider().complete(args),
+    },
     dailyCap: Number.isSafeInteger(cap) && cap >= 0 ? cap : 2000,
     capture: captureFrames,
     loadRecording: async (sessionId, projectId, signalIds) => {

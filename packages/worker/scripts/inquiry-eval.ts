@@ -67,7 +67,10 @@ function loadCase(value: unknown, index: number): EvaluationCase {
     || typeof frames['sourceEventId'] !== 'string') {
     throw new Error(`fixture ${name} is not a bounded evidence bundle`);
   }
-  return { name, issueType, expected: expected as InquiryDecisionKind, notes, evidence: evidence as unknown as EvidenceBundle };
+  // The production set was frozen before error text joined the bundle. Its
+  // cases say so explicitly rather than carrying invented messages.
+  const bundle = { error: null, ...evidence } as unknown as EvidenceBundle;
+  return { name, issueType, expected: expected as InquiryDecisionKind, notes, evidence: bundle };
 }
 
 async function loadFixture(): Promise<EvaluationFixture> {
@@ -153,13 +156,16 @@ async function main(): Promise<void> {
       // host rather than renting a machine per case. The seam now hands back a
       // reader, because production reads inside a sandbox.
       prepareRepository: async () => ({
+        headSha: '',
+        repositoryFullName: '',
         reader: createHostReader(repoPath),
         sandboxId: 'local-eval',
         createdAt: Date.now(),
         cleanup: async () => undefined,
       }),
       askModel: async (input) => {
-        const result = await askInquiryModel(input);
+        // Local evaluation has no claimed job or production repository identity.
+        const result = await askInquiryModel({ ...input, runContext: null, repository: null });
         usage = result.usage;
         costUsd = result.costUsd;
         return result;

@@ -45,45 +45,38 @@ func validWrittenPayload(candidate Candidate) string {
 }
 
 // unifiedLedger reads the one accounting row every frozen incident owns.
-func unifiedLedger(t *testing.T, pool *pgxpool.Pool, runID, groupID string) (outcome, reason, renderMode, receiptReason string) {
+func unifiedLedger(t *testing.T, pool *pgxpool.Pool, runID, groupID string) (outcome, reason, renderMode, heldReason string) {
 	t.Helper()
 	if err := pool.QueryRow(context.Background(), `SELECT outcome,primary_reason_code,
-		COALESCE(render_mode,''),COALESCE(details->>'receipt_reason','')
+		COALESCE(render_mode,''),COALESCE(details->>'held_reason','')
 		FROM digest_run_candidate_evaluations WHERE digest_run_id=$1 AND error_group_id=$2`,
-		runID, groupID).Scan(&outcome, &reason, &renderMode, &receiptReason); err != nil {
+		runID, groupID).Scan(&outcome, &reason, &renderMode, &heldReason); err != nil {
 		t.Fatal(err)
 	}
-	return outcome, reason, renderMode, receiptReason
+	return outcome, reason, renderMode, heldReason
 }
 
-// assertFellBackToReceipt pins the unified lane's refusal shape: a card the
-// validator rejects costs that incident its card, never the whole digest, and
-// nothing the model wrote reaches the reader.
-func assertFellBackToReceipt(t *testing.T, pool *pgxpool.Pool, runID, groupID string) {
+// assertHeldBack pins the unified lane's refusal shape: a card the validator
+// rejects is held back, never the whole digest, and nothing the model wrote
+// reaches the reader.
+func assertHeldBack(t *testing.T, pool *pgxpool.Pool, projectID, runID, groupID string) {
 	t.Helper()
-	payload := renderedEvent(t, pool, runID).Digest
-	if len(payload.GeneratedCards) != 0 || len(payload.ReceiptItems) != 1 {
-		t.Fatalf("rejected card cards=%+v receipts=%+v", payload.GeneratedCards, payload.ReceiptItems)
-	}
-	if payload.ReceiptItems[0].IncidentID != groupID {
-		t.Fatalf("receipt = %+v, want incident %s", payload.ReceiptItems[0], groupID)
-	}
-	_, _, renderMode, receiptReason := unifiedLedger(t, pool, runID, groupID)
-	if renderMode != "receipt_fallback" || receiptReason != "card_validation_failed" {
-		t.Fatalf("ledger render=%q receipt_reason=%q", renderMode, receiptReason)
+	assertNothingSent(t, pool, projectID, runID)
+	if outcome, reason, _ := heldBackLedger(t, pool, runID, groupID); outcome != "excluded" || reason != reasonCardHeldBack {
+		t.Fatalf("ledger = %s/%s, want excluded/%s", outcome, reason, reasonCardHeldBack)
 	}
 }
 
 func TestValidateRejectsInventedLinks(t *testing.T) {
 	pool := testPool(t)
-	runID, _, candidate := seedWrittenFreezeRun(t, pool, func(candidate Candidate) string {
+	runID, projectID, candidate := seedWrittenFreezeRun(t, pool, func(candidate Candidate) string {
 		return fmt.Sprintf(`{"included":[{"errorGroupId":%q,"title":"Checkout is blocked","copy":"Checkout is blocked before payment.","action":%q,"label":%q,"prUrl":"https://github.com/other/repo/pull/1"}],"deferred":[]}`,
 			candidate.ErrorGroupID, candidate.ValidAction, candidate.Label)
 	})
 	if err := ValidateAndPublish(context.Background(), pool, runID); err != nil {
 		t.Fatal(err)
 	}
-	assertFellBackToReceipt(t, pool, runID, candidate.ErrorGroupID)
+	assertHeldBack(t, pool, projectID, runID, candidate.ErrorGroupID)
 	rendered, err := json.Marshal(renderedEvent(t, pool, runID))
 	if err != nil {
 		t.Fatal(err)
@@ -168,11 +161,11 @@ func TestFailedRunDoesNotAdvanceTheWindow(t *testing.T) {
 
 // TestValidateRejectsCandidateSupersededAfterFreeze: the frozen card describes
 // facts that moved before it could ship, so the authored copy is refused and the
-// incident falls back to a receipt built from its live row.
+// card is held back. The incident is still waiting, so it is not reclassified.
 func TestValidateRejectsCandidateSupersededAfterFreeze(t *testing.T) {
 	pool := testPool(t)
 	ctx := context.Background()
-	runID, _, candidate := seedWrittenFreezeRun(t, pool, validWrittenPayload)
+	runID, projectID, candidate := seedWrittenFreezeRun(t, pool, validWrittenPayload)
 	if _, err := pool.Exec(ctx, `UPDATE error_groups SET title='A different incident entirely'
 		WHERE id=$1`, candidate.ErrorGroupID); err != nil {
 		t.Fatal(err)
@@ -181,11 +174,7 @@ func TestValidateRejectsCandidateSupersededAfterFreeze(t *testing.T) {
 	if err := ValidateAndPublish(ctx, pool, runID); err != nil {
 		t.Fatal(err)
 	}
-	assertFellBackToReceipt(t, pool, runID, candidate.ErrorGroupID)
-	receipt := renderedEvent(t, pool, runID).Digest.ReceiptItems[0]
-	if receipt.Title != "A different incident entirely" {
-		t.Fatalf("receipt title = %q, want the live title", receipt.Title)
-	}
+	assertHeldBack(t, pool, projectID, runID, candidate.ErrorGroupID)
 }
 
 func TestValidatePublishesSchemaV5GroundedCard(t *testing.T) {
@@ -236,7 +225,7 @@ func TestValidatePublishesSchemaV5GroundedCard(t *testing.T) {
 }
 
 // The unified lane refuses a card the writer got wrong without failing the run:
-// the incident loses its authored copy and ships its mechanical receipt instead.
+// the card is held back and nothing ships in its place.
 func TestValidateRejectsUnsupportedOccurrenceAndTitleVocabulary(t *testing.T) {
 	tests := []struct {
 		name string
@@ -268,18 +257,18 @@ func TestValidateRejectsUnsupportedOccurrenceAndTitleVocabulary(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := testPool(t)
-			runID, _, candidate := seedWrittenFreezeRun(t, pool, tc.card)
+			runID, projectID, candidate := seedWrittenFreezeRun(t, pool, tc.card)
 			if err := ValidateAndPublish(context.Background(), pool, runID); err != nil {
 				t.Fatal(err)
 			}
-			assertFellBackToReceipt(t, pool, runID, candidate.ErrorGroupID)
+			assertHeldBack(t, pool, projectID, runID, candidate.ErrorGroupID)
 		})
 	}
 }
 
 // TestValidateGroundsNumbersInCardTitles: the title is the only prose field a
 // digit may legitimately reach — copy and action may carry no numeric glyph at
-// all (TestValidateUnifiedDigitSmuggleFallsBackPerCard) — so grounding is
+// all (TestValidateOnHoldingBackEveryCardSendsNothing) — so grounding is
 // pinned there: an invented number costs the card, a frozen fact does not.
 func TestValidateGroundsNumbersInCardTitles(t *testing.T) {
 	titleCard := func(title string) func(Candidate) string {
@@ -291,17 +280,17 @@ func TestValidateGroundsNumbersInCardTitles(t *testing.T) {
 
 	t.Run("invented", func(t *testing.T) {
 		pool := testPool(t)
-		runID, _, candidate := seedWrittenFreezeRun(t, pool, titleCard("Checkout is blocked for 99 people"))
+		runID, projectID, candidate := seedWrittenFreezeRun(t, pool, titleCard("Checkout is blocked for 99 people"))
 		if err := ValidateAndPublish(context.Background(), pool, runID); err != nil {
 			t.Fatal(err)
 		}
-		assertFellBackToReceipt(t, pool, runID, candidate.ErrorGroupID)
+		assertHeldBack(t, pool, projectID, runID, candidate.ErrorGroupID)
 	})
 
 	t.Run("customer count rejected even when present in a frozen fact", func(t *testing.T) {
 		pool := testPool(t)
 		var frozen Candidate
-		runID, _, candidate := seedWrittenFreezeRun(t, pool, func(candidate Candidate) string {
+		runID, projectID, candidate := seedWrittenFreezeRun(t, pool, func(candidate Candidate) string {
 			frozen = candidate
 			return titleCard(fmt.Sprintf("Checkout is blocked for %d people", candidate.OccurrenceCount))(candidate)
 		})
@@ -311,7 +300,7 @@ func TestValidateGroundsNumbersInCardTitles(t *testing.T) {
 		if err := ValidateAndPublish(context.Background(), pool, runID); err != nil {
 			t.Fatalf("grounded frozen number rejected: %v", err)
 		}
-		assertFellBackToReceipt(t, pool, runID, candidate.ErrorGroupID)
+		assertHeldBack(t, pool, projectID, runID, candidate.ErrorGroupID)
 	})
 }
 

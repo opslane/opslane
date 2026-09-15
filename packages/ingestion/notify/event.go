@@ -195,7 +195,8 @@ type ReceiptItem struct {
 }
 
 // ReceiptFallbackNeverEligible marks an incident publishable() refused an
-// authored card at freeze. The digest package stamps it; the renderer reads it.
+// authored card at freeze. It is stamped only on payloads written before #496;
+// the renderer still reads it for those outbox events.
 const ReceiptFallbackNeverEligible = "never_card_eligible"
 
 type DigestWindow struct {

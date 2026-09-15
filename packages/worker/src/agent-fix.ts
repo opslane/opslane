@@ -1,7 +1,11 @@
+import type { RunStop } from '@opslane/agent-runs';
+import type { RunContext } from './run-logs/context.js';
+import { withRunLog, type OpenRunOptions } from './run-logs/handle.js';
+import { loggedMessagesCreate, messageRequestDto, messagesClient } from './run-logs/logged-messages.js';
 import type Anthropic from '@anthropic-ai/sdk';
-import { createAnthropicClient } from './anthropic-client.js';
 import { SandboxUnavailableError, type SandboxRuntime } from './harness/sandbox-runtime.js';
 import { pricingFor, runAgentLoop } from './harness/agent-loop.js';
+import { AGENT_LOOP_MAX_TOKENS } from './harness/model-limits.js';
 import { createToolBridge } from './harness/tool-bridge.js';
 import { createDefaultMiddleware } from './harness/tool-middleware.js';
 import { extractStackTraceFiles, resolveTrackedFiles } from './harness/stack-trace-utils.js';
@@ -15,7 +19,7 @@ import { trace } from '@opentelemetry/api';
 import type { CheckOutcome, ConfidenceLevel, Diagnosis, EvidenceRecord, NeedsHumanReason } from '@opslane/shared';
 import type { Platform } from './platform.js';
 import type { RuntimeInfo } from './runtime-info.js';
-import { buildReason, reasonCodeForDecision, reproductionRemediation } from './reason-codes.js';
+import { buildReason, incompleteReason, reasonCodeForDecision, reproductionRemediation } from './reason-codes.js';
 import { deriveOutcome } from './classify.js';
 import { adjudicationFromDecline, strings } from './diagnose-schema.js';
 import { loadDiagnosisDecisionForSource, recordJobUsage } from './db.js';
@@ -82,6 +86,8 @@ function recordSandboxFailure(sandbox: SandboxRuntime, phase: string, errorClass
 }
 
 export interface AgentFixInput {
+  runContext?: RunContext | null;
+  repoHeadSha?: string | null;
   platform?: Platform;
   customerRuntime?: RuntimeInfo | null;
   errorGroupId: string;
@@ -224,19 +230,15 @@ export interface TriageResult {
   reason?: string;
 }
 
-async function generateFixNarrative(
-  apiKey: string,
-  input: AgentFixInput,
-  rootCause: string,
-  diff: string,
-  primaryFile?: string,
-): Promise<{ narrative: FixNarrative; usage: ReturnType<typeof usageFromResponse> }> {
-  const client = createAnthropicClient(apiKey);
-  const fallbackInput: NarrativeFallbackInput = {
-    errorType: input.errorType,
-    errorMessage: input.errorMessage,
-    primaryFile,
-  };
+export interface FixNarrativePromptInput {
+  errorType: string;
+  errorMessage: string;
+  rootCause: string;
+  diff: string;
+  visualAnalysis: AgentFixInput['visualAnalysis'];
+}
+
+export function buildFixNarrativeParams(input: FixNarrativePromptInput): Anthropic.MessageCreateParamsNonStreaming {
   const visualAnalysis = input.visualAnalysis
     ? [
         `What user saw: ${input.visualAnalysis.whatUserSaw}`,
@@ -263,7 +265,7 @@ ${fenced(input.errorMessage, MAX_ERROR_MESSAGE)}
 
 Root cause / fix agent summary:
 <untrusted_data>
-${fenced(rootCause, 1000)}
+${fenced(input.rootCause, 1000)}
 </untrusted_data>
 
 Visual analysis:
@@ -273,32 +275,141 @@ ${fenced(visualAnalysis, 1000)}
 
 Diff:
 <untrusted_data>
-${fenced(diff, 4000)}
+${fenced(input.diff, 4000)}
 </untrusted_data>`;
 
-  const response = await client.messages.create({
+  return {
     model: FIX_NARRATIVE_MODEL,
     max_tokens: 512,
     messages: [{ role: 'user', content: prompt }],
     tools: [FIX_NARRATIVE_TOOL],
     tool_choice: { type: 'tool', name: FIX_NARRATIVE_TOOL.name },
-  });
+  };
+}
 
+export async function generateFixNarrative(
+  apiKey: string,
+  input: AgentFixInput,
+  rootCause: string,
+  diff: string,
+  primaryFile?: string,
+): Promise<{ narrative: FixNarrative; usage: ReturnType<typeof usageFromResponse> }> {
+  const client = messagesClient(apiKey);
+  const fallbackInput: NarrativeFallbackInput = { errorType: input.errorType, errorMessage: input.errorMessage, primaryFile };
+  const promptInput: FixNarrativePromptInput = {
+    errorType: input.errorType, errorMessage: input.errorMessage, rootCause, diff, visualAnalysis: input.visualAnalysis,
+  };
+  const params = buildFixNarrativeParams(promptInput);
+  const response = await withRunLog(
+    {
+      context: input.runContext ?? null,
+      phase: 'fix_narrative',
+      entryPoint: 'agent-fix#generateFixNarrative',
+      models: [FIX_NARRATIVE_MODEL],
+      settings: { model: params.model, maxTokens: params.max_tokens, toolChoice: FIX_NARRATIVE_TOOL.name },
+      structuredInput: promptInput,
+      request: messageRequestDto(params),
+    },
+    (run) => loggedMessagesCreate(client, run, params),
+    (message) => (message.content.some((block) => block.type === 'tool_use' && block.name === FIX_NARRATIVE_TOOL.name)
+      ? 'completed'
+      : 'invalid_output'),
+  );
   const toolUse = response.content.find(
     (block) => block.type === 'tool_use' && block.name === FIX_NARRATIVE_TOOL.name,
   );
   return {
-    narrative: parseFixNarrative(
-      toolUse?.type === 'tool_use' ? toolUse.input : undefined,
-      fallbackInput,
-    ),
+    narrative: parseFixNarrative(toolUse?.type === 'tool_use' ? toolUse.input : undefined, fallbackInput),
     usage: usageFromResponse(response),
   };
 }
 
 
+export type FixPromptInput = Pick<AgentFixInput,
+  | 'platform' | 'customerRuntime' | 'errorType' | 'title' | 'errorMessage' | 'stackTrace' | 'environmentNames'
+  | 'environmentTotal' | 'resolvedStackTrace' | 'breadcrumbs' | 'context' | 'visualAnalysis' | 'investigation'>;
+
+/** The fields buildSystemPrompt reads. Never carries tokens, sandboxes or signals. */
+export function fixPromptInput(input: AgentFixInput): FixPromptInput {
+  return {
+    platform: input.platform,
+    customerRuntime: input.customerRuntime,
+    errorType: input.errorType,
+    title: input.title,
+    errorMessage: input.errorMessage,
+    stackTrace: input.stackTrace,
+    environmentNames: input.environmentNames,
+    environmentTotal: input.environmentTotal,
+    resolvedStackTrace: input.resolvedStackTrace,
+    breadcrumbs: input.breadcrumbs,
+    context: input.context,
+    visualAnalysis: input.visualAnalysis,
+    investigation: input.investigation,
+  };
+}
+
+export interface FixRunStructuredInput {
+  promptInput: FixPromptInput;
+  preloadedFiles: Array<{ path: string; content: string }>;
+  tierIndex: number;
+  attempt: number;
+  priorTierSummary: string | null;
+  lastTestOutput: string;
+}
+
+/** The first request of one fix tier attempt, as a pure function of its structured input. */
+export function buildFixRunRequest(structured: FixRunStructuredInput): { systemPrompt: string; userMessage: string } {
+  const baseMsg = structured.preloadedFiles.length > 0
+    ? 'The source files from the stack trace are already included in the system prompt. Analyze them to identify the root cause, then make the minimal fix. Do NOT re-read files you already have.'
+    : 'Please investigate and fix the error described in the system prompt. Start by reading files referenced in the stack trace.';
+  const priorContext = (structured.tierIndex > 0 && structured.priorTierSummary)
+    ? `\n\nA previous investigation attempt found the following:\n<untrusted_data>\n${structured.priorTierSummary}\n</untrusted_data>\n\nDo NOT repeat searches that were already tried. Build on what was found (or not found).`
+    : '';
+  return {
+    systemPrompt: buildSystemPrompt(structured.promptInput, structured.preloadedFiles),
+    userMessage: structured.attempt === 0
+      ? baseMsg + priorContext
+      : `Your previous fix attempt failed tests. Fix the issue:\n\n<untrusted_user_data>\n${structured.lastTestOutput}\n</untrusted_user_data>\n\nDo NOT repeat the same approach.`,
+  };
+}
+
+export function fixRunLogOptions(args: {
+  runContext: RunContext | null;
+  structured: FixRunStructuredInput;
+  tier: { model: string; maxTurns: number; budgetUsd?: number };
+  githubRepo: string;
+  baseSha: string;
+  tools: Array<{ name: string; description: string; inputSchema: Record<string, unknown> }>;
+}): { options: OpenRunOptions; firstRequest: { systemPrompt: string; userMessage: string } } {
+  const firstRequest = buildFixRunRequest(args.structured);
+  return {
+    firstRequest,
+    options: {
+      context: args.runContext,
+      phase: 'fix',
+      entryPoint: 'agent-fix#runAgentFix',
+      models: [args.tier.model],
+      settings: { model: args.tier.model, maxTurns: args.tier.maxTurns, budgetUsd: args.tier.budgetUsd ?? null, maxTokens: AGENT_LOOP_MAX_TOKENS },
+      structuredInput: args.structured,
+      repository: { provider: 'github', fullName: args.githubRepo, commitSha: args.baseSha },
+      request: {
+        ...firstRequest,
+        tools: args.tools.map((tool) => ({ name: tool.name, description: tool.description, inputSchema: tool.inputSchema })),
+      },
+    },
+  };
+}
+
+export function classifyFixLoop(result: AgentCompletionResult, maxTurns: number): RunStop {
+  if (result.success) return 'completed';
+  if (result.summary === 'Cancelled') return 'aborted';
+  if (result.turnCount >= maxTurns) return 'turns_exhausted';
+  if (/budget/i.test(result.summary)) return 'budget';
+  return 'api_error';
+}
+
 export function buildSystemPrompt(
-  input: AgentFixInput,
+  input: FixPromptInput,
   preloadedFiles?: Array<{ path: string; content: string }>,
 ): string {
   const sections: string[] = [];
@@ -542,7 +653,7 @@ async function runAgentFixCore(input: AgentFixInput): Promise<AgentFixResult> {
       };
 
       const investigation = await traceSpan('investigate', {}, () =>
-      investigateError(apiKey, triageInput, createHostReader(input.repoPath!)),
+      investigateError(apiKey, triageInput, createHostReader(input.repoPath!), input.repoHeadSha ?? 'unknown', input.runContext ?? null, input.githubRepo),
       );
 
       logger.info('Investigation result', {
@@ -832,7 +943,6 @@ async function runAgentFixCore(input: AgentFixInput): Promise<AgentFixResult> {
 
     const tools = createToolBridge(sandbox, agentState, platform);
     const middleware = createDefaultMiddleware(sandbox);
-    const systemPrompt = buildSystemPrompt(input, preloadedFiles);
 
     // Cumulative token usage across all model attempts
     const totalTokenUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
@@ -917,22 +1027,6 @@ async function runAgentFixCore(input: AgentFixInput): Promise<AgentFixResult> {
       let candidateDiff: { diff: string; affectedFiles: string[] } | null = null;
 
       while (attempt <= MAX_TEST_RETRIES) {
-        const baseMsg = preloadedFiles.length > 0
-          ? 'The source files from the stack trace are already included in the system prompt. Analyze them to identify the root cause, then make the minimal fix. Do NOT re-read files you already have.'
-          : 'Please investigate and fix the error described in the system prompt. Start by reading files referenced in the stack trace.';
-
-        // On escalation (tier > 0), pass the prior tier's summary so the stronger model
-        // doesn't repeat the same fruitless searches.
-        // Prior tier summary is LLM-generated text — wrap in <untrusted_data> for defense-in-depth
-        // since the original error message could exploit multi-turn prompt injection.
-        const priorContext = (tierIdx > 0 && priorTierSummary)
-          ? `\n\nA previous investigation attempt found the following:\n<untrusted_data>\n${priorTierSummary}\n</untrusted_data>\n\nDo NOT repeat searches that were already tried. Build on what was found (or not found).`
-          : '';
-
-        const userMsg = attempt === 0
-          ? baseMsg + priorContext
-          : `Your previous fix attempt failed tests. Fix the issue:\n\n<untrusted_user_data>\n${lastTestOutput}\n</untrusted_user_data>\n\nDo NOT repeat the same approach.`;
-
         // Reset state for test retry (keep token usage cumulative within this tier)
         if (attempt > 0) {
           agentState.turnCount = 0;
@@ -948,27 +1042,49 @@ async function runAgentFixCore(input: AgentFixInput): Promise<AgentFixResult> {
           agentState.reproductionImpossibleReason = undefined;
         }
 
+        const { options: runOptions, firstRequest } = fixRunLogOptions({
+          runContext: input.runContext ?? null,
+          structured: {
+            promptInput: fixPromptInput(input),
+            preloadedFiles,
+            tierIndex: tierIdx,
+            attempt,
+            priorTierSummary: priorTierSummary ?? null,
+            lastTestOutput,
+          },
+          tier,
+          githubRepo: input.githubRepo,
+          baseSha,
+          tools,
+        });
         result = await traceSpan(
           'agent-loop',
           { 'agent.max_turns': tier.maxTurns, ...(tier.budgetUsd != null ? { 'agent.budget_usd': tier.budgetUsd } : {}), 'agent.model': tier.model, 'agent.tier': tierIdx, 'agent.attempt': attempt },
-          () => runAgentLoop(
-            {
-              apiKey,
-              model: tier.model,
-              maxTurns: tier.maxTurns,
-              systemPrompt,
-              tools,
-              middleware,
-              externalState: agentState,
-              onEvent: (event) => {
-                if (event.type === 'error') {
-                  logger.warn('Agent event error', { code: event.code, message: event.message });
-                }
+          () => withRunLog(
+            runOptions,
+            (run) => runAgentLoop(
+              {
+                apiKey,
+                model: tier.model,
+                maxTurns: tier.maxTurns,
+                systemPrompt: firstRequest.systemPrompt,
+                tools,
+                middleware,
+                externalState: agentState,
+                onEvent: (event) => {
+                  if (event.type === 'error') {
+                    logger.warn('Agent event error', { code: event.code, message: event.message });
+                  }
+                },
+                abortSignal: input.abortSignal,
+                budgetUsd: tier.budgetUsd,
+                run,
               },
-              abortSignal: input.abortSignal,
-              budgetUsd: tier.budgetUsd,
-            },
-            userMsg,
+              firstRequest.userMessage,
+            ),
+            // Tool failures are returned as model-visible text; the sandbox latch
+            // is the authoritative signal that the machine was lost.
+            (loopResult) => sandbox?.unavailable ? 'machine_lost' : classifyFixLoop(loopResult, tier.maxTurns),
           ),
         );
 
@@ -1209,14 +1325,17 @@ async function runAgentFixCore(input: AgentFixInput): Promise<AgentFixResult> {
         // Last tier — return failure
         if (!result?.success) {
           const retained = await retainWorkingDiff();
+          // At a turn limit the summary is the agent's last message, usually
+          // mid-task chatter. Keep it for operators; the reason is fixed copy.
+          logger.warn('Fix agent stopped before a result', {
+            model: tier.model,
+            // The agent read customer code; never log its words unscrubbed or unbounded.
+            summary: result?.summary ? scrubSecrets(result.summary).slice(0, 500) : null,
+          });
           return {
             status: 'needs_human',
             ...(retained ?? {}),
-            reason: {
-              reason_code: 'budget_exhausted',
-              reason_message: result?.summary ?? 'Agent could not complete',
-              remediation: 'Review the error manually — the agent could not complete within budget/turn limits',
-            },
+            reason: incompleteReason('budget_exhausted'),
             evidence: evidence.record(),
             tokenUsage: totalTokenUsage,
           };
@@ -1297,7 +1416,7 @@ async function runAgentFixCore(input: AgentFixInput): Promise<AgentFixResult> {
             diff,
             stackTraceFiles,
             frictionEvidence: input.frictionEvidence,
-          }, (usage) => judgeMeter?.add(JUDGE_MODEL, usage)),
+          }, (usage) => judgeMeter?.add(JUDGE_MODEL, usage), input.runContext ?? null),
         );
 
         logger.info('Diff judge result', {
@@ -1390,6 +1509,7 @@ async function runAgentFixCore(input: AgentFixInput): Promise<AgentFixResult> {
           testSource: failFirst.declaredTestSource,
         });
         const verdict = await judgeFixAttempt({
+          runContext: input.runContext ?? null,
           apiKey,
           diagnosis: input.investigation?.diagnosis ?? null,
           diff,
@@ -1587,6 +1707,9 @@ async function runAgentFixCore(input: AgentFixInput): Promise<AgentFixResult> {
     }
     const rawMessage = err instanceof Error ? err.message : String(err);
     const message = rawMessage.replace(/https:\/\/[^@]+@/g, 'https://***@');
+    // The stored reason becomes fixed copy downstream, so this is the only
+    // place operators can see what broke.
+    logger.warn('Fix agent harness failed before a result', { error: scrubSecrets(message).slice(0, 500) });
     let retained: { diff: string; affectedFiles: string[] } | null = null;
     if (sandbox) {
       try {

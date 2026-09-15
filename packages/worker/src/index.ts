@@ -1,3 +1,6 @@
+import { runLogFailureCounts } from './run-logs/sink.js';
+import { defaultRunLogDeps, MIN_LEASE_MS } from './run-logs/handle.js';
+import { runContextFromJob } from './run-logs/context.js';
 import { processFrictionReconcile, scheduleFrictionReconciliation } from './friction/reconcile-job.js';
 import { processTicketInvestigation, type TicketInvestigateJob } from './friction/investigate-ticket.js';
 import { processPrEventJob } from './friction/pr-events-job.js';
@@ -24,7 +27,7 @@ import {
   recordJobUsage,
   resolveEvidenceEventId,
 } from './db.js';
-import { buildReason, reasonCodeForDecision, reproductionRemediation } from './reason-codes.js';
+import { buildReason, incompleteReason, isIncompleteReasonCode, reasonCodeForDecision, reproductionRemediation } from './reason-codes.js';
 import { logger, safeErrorMessage, setWorkerId } from './logger.js';
 import { fetchObject, getMinIOConfig, putFrameObject } from './minio-client.js';
 import { INVESTIGATION_MODEL, investigateError } from './investigate.js';
@@ -429,7 +432,7 @@ export async function processJobInner(job: ClaimedJob, signal: AbortSignal): Pro
     await writeDigest(job.runId, job.projectId, digestWriterDependencies({
       jobId: job.id,
       execution: job.attempts,
-    }));
+    }, runContextFromJob(job)));
     return;
   }
 
@@ -462,6 +465,8 @@ export async function processJobInner(job: ClaimedJob, signal: AbortSignal): Pro
       if (signal.aborted || message.includes('lease lost')) {
         throw err;
       }
+      // Not a failure: the finalizer already completed the job.
+      if (err instanceof db.JobCompletedInTransaction) throw err;
       if (errorJob.ticketId) throw err;
       if (err instanceof VerificationInfraError) {
         const finalAttempt = errorJob.attempts + 1 >= (errorJob.maxAttempts ?? 3);
@@ -792,7 +797,7 @@ export async function processInvestigateJob(job: ClaimedJob & { errorGroupId: st
       breadcrumbs: event?.breadcrumbs ?? '[]',
       sessionContext: investigationEvidenceContext(evidence),
       investigationBrief: job.guidance,
-    }, checkout.reader, investigatedCommit);
+    }, checkout.reader, investigatedCommit, runContextFromJob(job), project.github_repo);
     await recordJobUsage({
       jobId: job.id,
       execution: job.attempts,
@@ -1029,6 +1034,7 @@ export async function processFrictionInvestigateJob(
     if (job.publicationGeneration == null) throw new Error('Ticket investigation missing generation');
     await processTicketInvestigation(job as TicketInvestigateJob, group, signal, {
       apiKey, investigate: investigateFriction,
+      repositoryFullName: project.github_repo,
       checkout: () => createReadOnlyCheckout({repoUrl: buildRepoUrl(project.github_repo), githubToken}),
     });
     return;
@@ -1077,6 +1083,8 @@ export async function processFrictionInvestigateJob(
       sessionContext,
       narrativeObservation,
       investigatedCommit: checkout.headSha,
+      runContext: runContextFromJob(job, { sessionId: evidenceSessionID ?? null }),
+      repositoryFullName: project.github_repo,
     });
     await recordJobUsage({
       jobId: job.id,
@@ -1511,6 +1519,7 @@ export async function processFixJob(job: ClaimedJob & { errorGroupId: string }, 
 
   // Clone repo
   let repoDir: string;
+  let repoHeadSha: string;
   let defaultBranch: string;
   let cleanup: () => Promise<void>;
   try {
@@ -1521,6 +1530,7 @@ export async function processFixJob(job: ClaimedJob & { errorGroupId: string }, 
       commitSha: frozenEvidence?.frames.commitSha,
     });
     repoDir = cloneResult.repoDir;
+    repoHeadSha = cloneResult.headSha;
     defaultBranch = cloneResult.defaultBranch;
     cleanup = cloneResult.cleanup;
     await db.cacheProjectDefaultBranch(job.projectId, defaultBranch);
@@ -1594,11 +1604,13 @@ export async function processFixJob(job: ClaimedJob & { errorGroupId: string }, 
             return {
               base64: data.toString('base64'),
               contentType: a.content_type,
+              objectKey: a.object_key,
               kind: a.kind,
             };
           }),
         );
         visualOutput = await runVisualAnalysis({
+          runContext: runContextFromJob(job),
           screenshots,
           signals: mapDbSignals(replay?.replay_signals) ?? {},
           errorType: event?.error_type ?? 'Unknown',
@@ -1632,6 +1644,8 @@ export async function processFixJob(job: ClaimedJob & { errorGroupId: string }, 
       : null;
 
     const result = await runPipeline({
+      runContext: runContextFromJob(job),
+      repoHeadSha,
       platform,
       customerRuntime,
       jobId: job.id,
@@ -1778,12 +1792,37 @@ export async function processFixJob(job: ClaimedJob & { errorGroupId: string }, 
     } else {
       // Fix did not clear the precision floor (or failed) — terminate as needs_human,
       // preserving the full writeup (reason + confidence). root_cause is untouched.
-      const terminalReason = result.reason ?? buildReason('worker_runtime_error', 'Fix pipeline failed without a reason');
+      // An incomplete run (the agent stopped early, or the harness crashed) is the
+      // exception: it proves nothing about the diagnosis, so it writes fixed copy
+      // and, when its source diagnosis is a code_fix, returns the group to it.
+      const pipelineCode = result.reason?.reason_code;
+      const incomplete = isIncompleteReasonCode(pipelineCode) ? incompleteReason(pipelineCode) : null;
+      const terminalReason = incomplete
+        ?? result.reason
+        ?? buildReason('worker_runtime_error', 'Fix pipeline failed without a reason');
+      const decisionReason = `${terminalReason.reason_message} Required action: ${terminalReason.remediation}`;
+
+      if (incomplete && !job.ticketId) {
+        const restore = await db.restoreDiagnosisAfterIncompleteFix(job, { reason: decisionReason });
+        if (restore === 'restored' || restore === 'status_changed') {
+          jobsFailed++;
+          lastJobAt = new Date().toISOString();
+          logger.warn('Fix job incomplete: completed diagnosis kept', {
+            job_id: job.id,
+            duration_ms: durationMs,
+            reason_code: terminalReason.reason_code,
+            restore,
+          });
+          // The restore completed the job in its own transaction.
+          throw new db.JobCompletedInTransaction(job.id);
+        }
+      }
+
       await db.recordFixTerminalDecision({
         lease: job,
         episodeId: job.episodeId ?? null,
         outcome: 'needs_human',
-        reason: `${terminalReason.reason_message} Required action: ${terminalReason.remediation}`,
+        reason: decisionReason,
         confidence: result.confidence ?? 'low',
       });
       await updateGroupStatus(job.errorGroupId, job.projectId, 'needs_human', {
@@ -1795,7 +1834,7 @@ export async function processFixJob(job: ClaimedJob & { errorGroupId: string }, 
       }, job);
       jobsFailed++;
       logger.warn('Fix job completed: needs_human (writeup preserved)', {
-        job_id: job.id, duration_ms: durationMs, reason_code: result.reason?.reason_code, confidence: result.confidence,
+        job_id: job.id, duration_ms: durationMs, reason_code: terminalReason.reason_code, confidence: result.confidence,
       });
     }
   } finally {
@@ -1850,6 +1889,12 @@ async function main(): Promise<void> {
   // Initialize tracing (no-op if LANGFUSE env vars unset).
   // Must complete before poller starts so Anthropic SDK is instrumented.
   await initTracing();
+  const runLogDeps = defaultRunLogDeps();
+  if (!runLogDeps.enabled) {
+    logger.warn(`Agent run logs are off: LEASE_DURATION_MS is below ${MIN_LEASE_MS}`);
+  } else if (!runLogDeps.sink) {
+    logger.warn('Agent run logs are off: object storage is not configured');
+  }
 
   // Start health HTTP server
   const healthServer = http.createServer((req, res) => {
@@ -1883,6 +1928,7 @@ async function main(): Promise<void> {
         // Never ages out: a job the worker has given up on stays here until an
         // operator does something about it.
         dead_letters_given_up: deadLetterCounts.givenUp,
+        run_log_failures: runLogFailureCounts(),
         queue_depth_sampled_at:
           queueSampleAt === null ? null : new Date(queueSampleAt).toISOString(),
         queue_sample_error: queueSampleError,

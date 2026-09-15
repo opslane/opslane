@@ -1,0 +1,25 @@
+[
+  { "type": "system", "subtype": "init", "model": "claude-sonnet-5", "tools": ["mcp__weather__lookup_weather", "mcp__weather__lookup_time"] },
+  { "type": "assistant", "request_id": "req_1", "message": { "id": "msg_1", "model": "claude-sonnet-5", "stop_reason": null,
+    "usage": { "input_tokens": 10, "output_tokens": 1 },
+    "content": [{ "type": "redacted_thinking", "data": "opaque" }] } },
+  { "type": "assistant", "message": { "id": "msg_1", "model": "claude-sonnet-5", "stop_reason": null,
+    "usage": { "input_tokens": 10, "output_tokens": 4 },
+    "content": [{ "type": "tool_use", "id": "toolu_a", "name": "mcp__weather__lookup_weather", "input": { "city": "Lisbon" } }] } },
+  { "type": "assistant", "message": { "id": "msg_1", "model": "claude-sonnet-5", "stop_reason": "tool_use",
+    "usage": { "input_tokens": 10, "output_tokens": 9, "output_tokens_details": { "thinking_tokens": 3 } },
+    "content": [{ "type": "tool_use", "id": "toolu_b", "name": "mcp__weather__lookup_time", "input": { "city": "Lisbon" } }] } },
+  { "type": "user", "message": { "role": "user", "content": [
+    { "type": "tool_result", "tool_use_id": "toolu_b", "content": [{ "type": "text", "text": "14:05" }] },
+    { "type": "tool_result", "tool_use_id": "toolu_a", "content": [{ "type": "text", "text": "Sunny, 21C" }], "is_error": false }
+  ] } },
+  { "type": "assistant", "request_id": "req_2", "message": { "id": "msg_2", "model": "claude-sonnet-5", "stop_reason": "end_turn",
+    "usage": { "input_tokens": 30, "output_tokens": 8 },
+    "content": [{ "type": "text", "text": "Sunny, 21C at 14:05 in Lisbon." }] } },
+  { "type": "result", "subtype": "success", "is_error": false, "num_turns": 2,
+    "usage": { "input_tokens": 40, "output_tokens": 17 },
+    "modelUsage": {
+      "claude-sonnet-5": { "inputTokens": 40, "outputTokens": 17, "cacheReadInputTokens": 5, "cacheCreationInputTokens": 2, "webSearchRequests": 0, "costUSD": 0.0003, "contextWindow": 200000, "maxOutputTokens": 32000 },
+      "claude-haiku-4-5-20251001": { "inputTokens": 7, "outputTokens": 1, "cacheReadInputTokens": 0, "cacheCreationInputTokens": 0, "webSearchRequests": 0, "costUSD": 0.00001, "contextWindow": 200000, "maxOutputTokens": 8000 }
+    } }
+]

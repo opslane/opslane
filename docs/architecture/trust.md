@@ -3,6 +3,8 @@ covers:
   - packages/sdk/src/scrub.ts
   - packages/worker/src/repo-clone.ts
   - packages/ingestion/notify/slack.go
+  - packages/worker/src/run-logs/handle.ts
+  - packages/ingestion/retention/retention.go
 description: What Opslane collects, where it stays, and what each integration sends out.
 ---
 
@@ -34,3 +36,10 @@ Investigating and fixing bugs is the point, so in normal use Opslane does send t
 ## Recordings are the sensitive part
 
 Session recordings can capture what a user saw on the page. Form inputs are masked before they leave the browser, and you can mask or hide any other element. Recordings are stored privately and deleted on a schedule you set. See [replay privacy](../guides/replay-privacy.md) for how masking works and how to turn recording off.
+
+
+## Agent run logs
+
+When Opslane's agents investigate, confirm, or fix a problem, the worker keeps a run log in your own object storage. It holds the prompts, model replies, and full tool output, including code excerpts and text derived from session recordings. These logs help debug and improve the agents.
+
+The worker removes recognized secrets before writing a log, but this cannot catch every credential in your repository. A credential can still appear, just as it can appear in the code Opslane sends to Anthropic. Opslane deletes run logs by age, using your project's recording retention setting. See [replay privacy](../guides/replay-privacy.md#how-long-recordings-live).

@@ -1,4 +1,8 @@
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { createHostReader } from '../harness/host-reader.js';
 import { executeListFiles, executeReadFile, executeSearch, type RepoReader } from '../investigate-tools.js';
 
 function reader(over: Partial<RepoReader> = {}): RepoReader {
@@ -32,8 +36,41 @@ describe('executeReadFile', () => {
 });
 
 describe('executeSearch', () => {
+  it('asks grep for fixed-string matching', async () => {
+    let seen: string[] = [];
+    await executeSearch(reader({ grep: async (a) => { seen = a; return ''; } }), { pattern: 'a.c' });
+    expect(seen).toContain('-F');
+    expect(seen.indexOf('-F')).toBeLessThan(seen.indexOf('--'));
+    expect(seen.at(-2)).toBe('a.c');
+  });
+
+  it('rejects a multi-line pattern without searching', async () => {
+    let called = false;
+    const out = await executeSearch(
+      reader({ grep: async () => { called = true; return ''; } }),
+      { pattern: 'first\nsecond' },
+    );
+    expect(out).toBe('Error: "pattern" must be a single line of literal text');
+    expect(called).toBe(false);
+  });
+
+  it('matches regular-expression characters literally against a real checkout', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'literal-search-'));
+    try {
+      await writeFile(join(dir, 'a.ts'), "const abc = 1;\nconst dot = 'a.c';\nconst first = items[0;\n");
+      const repo = createHostReader(dir);
+      const dot = await executeSearch(repo, { pattern: 'a.c' });
+      expect(dot).toContain(":2:const dot = 'a.c';");
+      expect(dot).not.toContain('const abc');
+      expect(await executeSearch(repo, { pattern: 'items[0' })).toContain(':3:const first = items[0;');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it('keeps the no-match string', async () => {
-    expect(await executeSearch(reader({ grep: async () => '' }), { pattern: 'x' })).toBe('No matches found.');
+    expect(await executeSearch(reader({ grep: async () => '' }), { pattern: 'x' }))
+      .toBe('No matches found. The pattern is matched as literal text, not a regular expression.');
   });
   it('caps results at 50 and says how many more there were', async () => {
     const lines = Array.from({ length: 60 }, (_, i) => `a.ts:${i}:hit`).join('\n');

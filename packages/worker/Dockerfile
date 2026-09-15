@@ -12,6 +12,7 @@ WORKDIR /app
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
 COPY shared/package.json shared/
 COPY packages/agent-core/package.json packages/agent-core/
+COPY packages/agent-runs/package.json packages/agent-runs/
 COPY packages/sdk/package.json packages/sdk/
 COPY packages/worker/package.json packages/worker/
 
@@ -23,11 +24,13 @@ RUN pnpm --filter @opslane/worker exec playwright-core install --with-deps chrom
 
 COPY shared/ shared/
 COPY packages/agent-core/ packages/agent-core/
+COPY packages/agent-runs/ packages/agent-runs/
 COPY packages/sdk/ packages/sdk/
 COPY packages/worker/ packages/worker/
 
 RUN pnpm --filter @opslane/shared build && \
     pnpm --filter @opslane/agent-core build && \
+    pnpm --filter @opslane/agent-runs build && \
     pnpm --filter @opslane/sdk build && \
     pnpm --filter @opslane/worker build
 
@@ -44,4 +47,6 @@ RUN chmod -R a+rX /app/shared /app/packages && \
 USER opslane
 
 WORKDIR /app/packages/worker
+ARG OPSLANE_BUILD_SHA=unknown
+ENV OPSLANE_BUILD_SHA=$OPSLANE_BUILD_SHA
 CMD ["node", "dist/index.js"]

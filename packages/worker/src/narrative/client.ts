@@ -1,3 +1,7 @@
+import { modelResponseEvent, usageFromProvider } from '@opslane/agent-runs';
+import type { RunHandle } from '../run-logs/handle.js';
+import { countRunLogFailure } from '../run-logs/sink.js';
+import { messageRequestDto } from '../run-logs/logged-messages.js';
 import Anthropic from '@anthropic-ai/sdk';
 
 export interface NarrativeClientConfig {
@@ -50,6 +54,12 @@ export function extractJsonObject(text: string): string {
   return '';
 }
 
+export type NarrativeCompleter = Pick<NarrativeClient, 'complete' | 'modelName'> & { settings?: () => Record<string, unknown> };
+
+export function completerSettings(client: NarrativeCompleter): Record<string, unknown> {
+  return client.settings?.() ?? { model: client.modelName };
+}
+
 export class NarrativeClient {
   private readonly anthropic: Anthropic;
   private readonly config: NarrativeClientConfig;
@@ -65,7 +75,16 @@ export class NarrativeClient {
     });
   }
 
+  settings(): { model: string; maxTokens: number; timeoutMs: number } {
+    return {
+      model: this.config.model,
+      maxTokens: this.config.maxTokens,
+      timeoutMs: this.config.timeoutMs ?? 120_000,
+    };
+  }
+
   async complete(args: {
+    run: RunHandle;
     system: string;
     user: string;
     signal?: AbortSignal;
@@ -88,12 +107,23 @@ export class NarrativeClient {
     // Claude Sonnet 5), which spends the same max_tokens as the answer.
     // Disabling it lowered accuracy on labelled recordings (#511), and Sonnet 5
     // rejects budget_tokens with a 400.
-    const response = await this.anthropic.messages.create({
+    const params: Anthropic.MessageCreateParamsNonStreaming = {
       model: this.config.model,
       max_tokens: this.config.maxTokens,
       system: args.system,
       messages: [{ role: 'user', content }],
-    }, { signal: args.signal });
+    };
+    try { args.run.noteRequest(messageRequestDto(params)); } catch { countRunLogFailure('transcript'); }
+    const response = await this.anthropic.messages.create(params, { signal: args.signal });
+    try {
+      const requestId = (response as { _request_id?: unknown })._request_id;
+      args.run.event(modelResponseEvent(this.config.model, {
+        content: response.content,
+        usage: usageFromProvider(response.usage),
+        stopReason: response.stop_reason ?? null,
+        ...(typeof requestId === 'string' ? { requestId } : {}),
+      }));
+    } catch { countRunLogFailure('transcript'); }
     const text = response.content
       .filter((block): block is Anthropic.TextBlock => block.type === 'text')
       .map((block) => block.text)

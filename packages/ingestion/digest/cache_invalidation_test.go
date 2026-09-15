@@ -61,8 +61,7 @@ func echoCachedPayload(t *testing.T, pool *pgxpool.Pool, runID string, candidate
 }
 
 // TestValidateInvalidatesRejectedCachedRow is G5: without it a cached copy the
-// validator refuses stays current and demotes its card to a receipt every day,
-// forever.
+// validator refuses stays current and holds its card back every day, forever.
 func TestValidateInvalidatesRejectedCachedRow(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	pool, fixture, groupID := authorOneOnCardRun(t, now)
@@ -83,10 +82,7 @@ func TestValidateInvalidatesRejectedCachedRow(t *testing.T) {
 	if err := ValidateAndPublish(ctx, pool, secondRun); err != nil {
 		t.Fatal(err)
 	}
-	payload := renderedEvent(t, pool, secondRun).Digest
-	if len(payload.GeneratedCards) != 0 || len(payload.ReceiptItems) != 1 {
-		t.Fatalf("tampered cache still rendered a card: %+v", payload.GeneratedCards)
-	}
+	assertHeldBack(t, pool, fixture.ProjectID, secondRun, groupID)
 	var current int
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM digest_card_copy
 		WHERE error_group_id=$1 AND invalidated_at IS NULL`, groupID).Scan(&current); err != nil {
@@ -241,9 +237,7 @@ func TestValidateGroundsCachedCardTitleAgainstMovedCounts(t *testing.T) {
 			t.Fatalf("stale count in a cached title was delivered: %+v", card)
 		}
 	}
-	if len(payload.GeneratedCards) != 0 || len(payload.ReceiptItems) != 1 {
-		t.Fatalf("stale cached card was not demoted to its receipt: %+v", payload.GeneratedCards)
-	}
+	assertHeldBack(t, pool, fixture.ProjectID, secondRun, groupID)
 	var current int
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM digest_card_copy
 		WHERE error_group_id=$1 AND invalidated_at IS NULL`, groupID).Scan(&current); err != nil {
@@ -251,5 +245,46 @@ func TestValidateGroundsCachedCardTitleAgainstMovedCounts(t *testing.T) {
 	}
 	if current != 0 {
 		t.Fatalf("stale cached row is still current (%d rows); the title repeats forever", current)
+	}
+}
+
+// TestValidateRetiresACachedCardTheWriterDeferred: the worker re-grounds a
+// cached card before validation sees it, so a cached copy that fails there
+// arrives as a deferral rather than as a card. It is retired all the same, or
+// the incident stays held back until its fingerprint moves.
+func TestValidateRetiresACachedCardTheWriterDeferred(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	pool, fixture, groupID := authorOneOnCardRun(t, now)
+	ctx := context.Background()
+
+	secondRun, second, err := FreezeCandidates(ctx, pool, fixture.ProjectID, now.Add(24*time.Hour))
+	if err != nil || len(second) != 1 || second[0].CachedCard == nil {
+		t.Fatalf("second freeze candidates=%+v err=%v", second, err)
+	}
+	const reason = "card check: ungrounded number 987 in card for the incident"
+	encoded, err := json.Marshal(writtenDigestPayload{Deferred: []deferredDigestItem{{
+		ErrorGroupID: groupID, Reason: reason,
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE digest_runs
+		SET status='written',writer_payload=$2::jsonb WHERE id=$1`, secondRun, encoded); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateAndPublish(ctx, pool, secondRun); err != nil {
+		t.Fatal(err)
+	}
+	assertHeldBack(t, pool, fixture.ProjectID, secondRun, groupID)
+	if _, _, held := heldBackLedger(t, pool, secondRun, groupID); held != reason {
+		t.Fatalf("held reason = %q, want the writer's %q", held, reason)
+	}
+	var current int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM digest_card_copy
+		WHERE error_group_id=$1 AND invalidated_at IS NULL`, groupID).Scan(&current); err != nil {
+		t.Fatal(err)
+	}
+	if current != 0 {
+		t.Fatalf("deferred cached row is still current (%d rows); the card stays held back", current)
 	}
 }

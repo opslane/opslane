@@ -1,5 +1,7 @@
 # Unified digest cards: one writer, one template, both kinds
 
+> **Partly superseded 2026-09-14 (#496).** The digest now sends only cards that passed their checks. A card that fails validation, or that the writer defers, is held back and ledgered `card_held_back`; it never falls back to a mechanical receipt. An incident `publishable()` refuses is excluded at freeze as `not_publishable`. A database failure during validation leaves the run `written` for the scheduler to revalidate instead of degrading to receipts with a delivery alert. The v5 digest has no incident overflow line, and a day with no card sends no message. Requirements and paragraphs below that promise receipt fallback, never-eligible receipts, compact receipts, overflow lines, or "every waiting incident appears" describe the earlier contract.
+
 Status: implemented behind rollout flag; production rehearsal pending · 2026-08-27, amended 2026-08-28 · Owner: Abhishek Ray
 
 > **Amended 2026-08-28.** Verification run `.verify/runs/20260827-192819` found four
@@ -83,7 +85,7 @@ Non-goals:
 | R3 | Cached copy never fails grounding as live counts drift | Spike S2 (proven) + server-side digit rejection test |
 | R4 | A semantic change (diagnosis, action, status, diff) re-authors; a stale authored card is never delivered | Integration tests: fingerprint mismatch at freeze re-authors; mismatch at validate falls back to receipt |
 | R5 | ~~Actionable error cards repeat daily; FYI error cards stay one-shot; both transition directions behave~~ **Superseded 2026-08-28:** ON has no FYI lane. An incident appears if and only if it awaits a human action, and leaving that status set removes it. | Freeze tests: an incident that stops waiting stops appearing; an investigated incident produces no candidate at all |
-| R6 | Writer failure or budget exhaustion for one candidate never suppresses that incident | Integration test: mixed batch with one forced failure → receipt fallback, others authored |
+| R6 | ~~Writer failure or budget exhaustion for one candidate never suppresses that incident~~ **Superseded (#496):** held back, ledgered `card_held_back`. | TestValidateOnHoldingBackEveryCardSendsNothing, TestValidateOnHoldsBackOneCardAndSendsItsSibling |
 | R7 | Cached-only and empty days reach `delivered` with zero model calls | Integration test on the run lifecycle |
 | R8 | The freeze decision is durable: ledger written at freeze for every evaluated candidate, updated at validation | Integration test: ledger rows exist post-freeze, pre-validation |
 | R9 | Migration 065 applies and reapplies cleanly | Migration test on a disposable DB (table is empty in prod: S3) |

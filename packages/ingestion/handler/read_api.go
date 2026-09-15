@@ -360,6 +360,12 @@ func inboxState(identity, filterDecision, inquiryDecision, diagnosisOutcome, gro
 		return "fix_ready", "a change is verified and waiting for your review"
 	case inquiryDecision == "investigate" && diagnosisOutcome == "needs_human":
 		return "needs_you", "your input is needed to continue"
+	// An incomplete fix run keeps the completed diagnosis. It waits on a person
+	// only while the incident is back where a person can retry the fix; once a
+	// retry is running, the newest decision is still this row.
+	case inquiryDecision == "investigate" && diagnosisOutcome == "incomplete" &&
+		(groupStatus == "investigated" || groupStatus == "awaiting_approval"):
+		return "needs_you", "your input is needed to continue"
 	case inquiryDecision == "investigate" && diagnosisOutcome == "unable_to_establish_cause":
 		return "reviewed_not_pursuing", "we could not establish a cause"
 	case inquiryDecision == "investigate":

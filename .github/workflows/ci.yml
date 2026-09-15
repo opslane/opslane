@@ -601,7 +601,7 @@ jobs:
           IMAGE: ghcr.io/${{ github.repository_owner }}/opslane-${{ matrix.image }}
           TAG: main-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
-          docker build -f "packages/${{ matrix.image }}/Dockerfile" -t "$IMAGE:$TAG" .
+          docker build -f "packages/${{ matrix.image }}/Dockerfile" --build-arg OPSLANE_BUILD_SHA="${{ github.sha }}" -t "$IMAGE:$TAG" .
           docker push "$IMAGE:$TAG"
           digest=$(docker inspect --format '{{index .RepoDigests 0}}' "$IMAGE:$TAG")
           echo "Candidate pushed: $IMAGE:$TAG"

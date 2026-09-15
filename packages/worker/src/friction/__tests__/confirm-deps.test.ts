@@ -12,6 +12,7 @@ vi.mock('@anthropic-ai/sdk', () => ({
 const { frictionConfirmDepsFromEnv } = await import('../confirm-job.js');
 const { confirmRead } = await import('../confirm.js');
 const { judgeOneFix } = await import('../one-fix.js');
+const { NOOP_RUN } = await import('../../run-logs/handle.js');
 
 const ticket = { name: 'Save', control: 'Save', what_happened: 'An error appeared' };
 const frame = { offsetMs: 0, pair: 'a' as const, png: Buffer.from('png'), modelPng: Buffer.from('png') };
@@ -46,14 +47,14 @@ describe('frictionConfirmDepsFromEnv request settings', () => {
     }));
     const result = await confirmRead(frictionConfirmDepsFromEnv().client, {
       ticket, timelineText: 'L1: Click Save', frames: [frame], framesOk: true, signals: [],
-    }, { add: vi.fn() });
+    }, { add: vi.fn() }, NOOP_RUN);
     expect(result).toMatchObject({ outcome: 'refuted' });
     expectFreeTextRequest();
   });
 
   it('sends the one-fix gate with the same settings', async () => {
     create.mockResolvedValue(textReply({ oneFix: false, reason: 'Different controls.' }));
-    expect(await judgeOneFix(frictionConfirmDepsFromEnv().client, ticket, ticket, { add: vi.fn() }))
+    expect(await judgeOneFix(frictionConfirmDepsFromEnv().client, ticket, ticket, { add: vi.fn() }, NOOP_RUN))
       .toEqual({ oneFix: false, reason: 'Different controls.' });
     expectFreeTextRequest();
   });

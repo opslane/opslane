@@ -93,31 +93,27 @@ func cleanupActionableDiagnoses(t *testing.T, pool *pgxpool.Pool, projectID stri
 	})
 }
 
-// publishEmptyWrittenRun delivers a run whose writer authored nothing. Every
-// frozen incident is therefore unaccounted for by the payload, which is exactly
-// how the unified lane routes it to its mechanical receipt.
-func publishEmptyWrittenRun(t *testing.T, pool *pgxpool.Pool, projectID string, at time.Time) string {
+// publishWrittenRun freezes a run, writes the stub writer's card for every
+// frozen incident, and publishes it.
+func publishWrittenRun(t *testing.T, pool *pgxpool.Pool, projectID string, at time.Time) string {
 	t.Helper()
-	runID, _, err := FreezeCandidates(context.Background(), pool, projectID, at)
+	runID, candidates, err := FreezeCandidates(context.Background(), pool, projectID, at)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pool.Exec(context.Background(), `UPDATE digest_runs
-		SET status='written',writer_payload='{"included":[],"deferred":[]}'::jsonb WHERE id=$1`, runID); err != nil {
-		t.Fatal(err)
-	}
+	writeOnCardPayload(t, pool, runID, candidates)
 	if err := ValidateAndPublish(context.Background(), pool, runID); err != nil {
 		t.Fatal(err)
 	}
 	return runID
 }
 
-func receiptIDs(t *testing.T, pool *pgxpool.Pool, runID string) []string {
+func cardIDs(t *testing.T, pool *pgxpool.Pool, runID string) []string {
 	t.Helper()
 	payload := renderedEvent(t, pool, runID)
-	ids := make([]string, 0, len(payload.Digest.ReceiptItems))
-	for _, item := range payload.Digest.ReceiptItems {
-		ids = append(ids, item.IncidentID)
+	ids := make([]string, 0, len(payload.Digest.GeneratedCards))
+	for _, card := range payload.Digest.GeneratedCards {
+		ids = append(ids, card.IncidentID)
 	}
 	return ids
 }
@@ -151,12 +147,12 @@ func TestValidateRepeatsActionableItemUntilHumanActs(t *testing.T) {
 	quietBackgroundActionable(t, pool, fixture.ProjectID, groupID)
 	t.Setenv("DASHBOARD_URL", "https://app.example.com")
 
-	firstRun := publishEmptyWrittenRun(t, pool, fixture.ProjectID, now)
-	secondRun := publishEmptyWrittenRun(t, pool, fixture.ProjectID, now.Add(24*time.Hour))
+	firstRun := publishWrittenRun(t, pool, fixture.ProjectID, now)
+	secondRun := publishWrittenRun(t, pool, fixture.ProjectID, now.Add(24*time.Hour))
 	for name, runID := range map[string]string{"first": firstRun, "second": secondRun} {
-		ids := receiptIDs(t, pool, runID)
+		ids := cardIDs(t, pool, runID)
 		if len(ids) != 1 || ids[0] != groupID {
-			t.Fatalf("%s digest receipts = %v, want %s", name, ids, groupID)
+			t.Fatalf("%s digest cards = %v, want %s", name, ids, groupID)
 		}
 		var outcome, reason string
 		if err := pool.QueryRow(ctx, `SELECT outcome,primary_reason_code
@@ -169,24 +165,22 @@ func TestValidateRepeatsActionableItemUntilHumanActs(t *testing.T) {
 		}
 	}
 	firstPayload := renderedEvent(t, pool, firstRun)
-	if item := firstPayload.Digest.ReceiptItems[0]; item.ImpactClass != "blocked" || item.ImpactRecovered == nil || *item.ImpactRecovered != 4 || !strings.Contains(item.SessionURL, "https://app.example.com/sessions/actionable-replay-") {
-		t.Fatalf("actionable receipt omitted impact or replay: %+v", item)
+	if card := firstPayload.Digest.GeneratedCards[0]; card.ImpactVisits == nil || *card.ImpactVisits != 23 || card.ImpactRecovered == nil || *card.ImpactRecovered != 4 || !strings.Contains(card.ReplayURL, "https://app.example.com/sessions/actionable-replay-") {
+		t.Fatalf("actionable card omitted impact or replay: %+v", card)
 	}
 	slackBody, _, err := notify.FormatSlack(firstPayload)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(slackBody), "|Replay>") || !strings.Contains(string(slackBody), "Review issue") || strings.Contains(string(slackBody), "Needs you") {
+	if !strings.Contains(string(slackBody), "|Replay>") || !strings.Contains(string(slackBody), "Decide how to handle this.") || strings.Contains(string(slackBody), "Needs you") {
 		t.Fatalf("digest omitted its action or recording link: %s", slackBody)
 	}
 
 	if _, err := pool.Exec(ctx, `UPDATE error_groups SET snoozed_until=$2 WHERE id=$1`, groupID, now.Add(48*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	snoozedRun := publishEmptyWrittenRun(t, pool, fixture.ProjectID, now.Add(48*time.Hour))
-	if ids := receiptIDs(t, pool, snoozedRun); len(ids) != 0 {
-		t.Fatalf("snoozed digest receipts = %v", ids)
-	}
+	snoozedRun := publishWrittenRun(t, pool, fixture.ProjectID, now.Add(48*time.Hour))
+	assertNothingSent(t, pool, fixture.ProjectID, snoozedRun)
 	var reason string
 	if err := pool.QueryRow(ctx, `SELECT primary_reason_code FROM digest_run_candidate_evaluations
 		WHERE digest_run_id=$1 AND error_group_id=$2`, snoozedRun, groupID).Scan(&reason); err != nil {
@@ -199,7 +193,7 @@ func TestValidateRepeatsActionableItemUntilHumanActs(t *testing.T) {
 	if _, err := pool.Exec(ctx, `UPDATE error_groups SET status='resolved' WHERE id=$1`, groupID); err != nil {
 		t.Fatal(err)
 	}
-	resolvedRun := publishEmptyWrittenRun(t, pool, fixture.ProjectID, now.Add(72*time.Hour))
+	resolvedRun := publishWrittenRun(t, pool, fixture.ProjectID, now.Add(72*time.Hour))
 	var count int
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM digest_run_candidate_evaluations
 		WHERE digest_run_id=$1 AND error_group_id=$2`, resolvedRun, groupID).Scan(&count); err != nil {
@@ -210,39 +204,8 @@ func TestValidateRepeatsActionableItemUntilHumanActs(t *testing.T) {
 	}
 }
 
-// The receipts lane mirrors the card lane: a spell too young to have its own
-// covered recording still links the incident's older one.
-func TestActionableReceiptFallsBackToAPreSpellRecording(t *testing.T) {
-	pool := testPool(t)
-	ctx := context.Background()
-	now := time.Now().UTC().Truncate(time.Second)
-	fixture := seedDigestFixture(t, pool, now)
-	cleanupActionableDiagnoses(t, pool, fixture.ProjectID)
-	seedDestination(t, pool, fixture.ProjectID, []string{"digest.daily"})
-	groupID, episodeID := seedActionableGroup(t, pool, fixture.ProjectID, fixture.EnvID, "error", "awaiting_approval", now.Add(-3*time.Hour))
-	quietBackgroundActionable(t, pool, fixture.ProjectID, groupID)
-	sessionID := "prespell-receipt-" + uuid.NewString()
-	seedFreezeReplay(t, pool, fixture.ProjectID, fixture.EnvID, episodeID, sessionID, now.Add(-2*time.Hour))
-	if _, err := pool.Exec(ctx, `UPDATE error_groups SET actionable_since=$2 WHERE id=$1`,
-		groupID, now.Add(-time.Hour)); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("DASHBOARD_URL", "https://app.example.com")
-
-	runID := publishEmptyWrittenRun(t, pool, fixture.ProjectID, now)
-	payload := renderedEvent(t, pool, runID)
-	if len(payload.Digest.ReceiptItems) != 1 {
-		t.Fatalf("receipts = %+v, want one", payload.Digest.ReceiptItems)
-	}
-	if !strings.Contains(payload.Digest.ReceiptItems[0].SessionURL, sessionID) {
-		t.Fatalf("receipt session url = %q, want the pre-spell session %s",
-			payload.Digest.ReceiptItems[0].SessionURL, sessionID)
-	}
-}
-
 // An incident that shipped an authored card owes no second appearance as a
-// receipt: the receipt lane is built from the incidents whose card fell back,
-// and nothing else. Re-validating a delivered run must change none of that.
+// receipt, and re-validating a delivered run must change none of that.
 func TestValidateFrozenCardOwnsActionableDuplicateAndDeliveredRetryIsSafe(t *testing.T) {
 	pool := testPool(t)
 	ctx := context.Background()
@@ -269,8 +232,8 @@ func TestValidateFrozenCardOwnsActionableDuplicateAndDeliveredRetryIsSafe(t *tes
 	if err := ValidateAndPublish(ctx, pool, runID); err != nil {
 		t.Fatalf("delivered retry: %v", err)
 	}
-	if ids := receiptIDs(t, pool, runID); len(ids) != 0 {
-		t.Fatalf("duplicate actionable receipt rendered beside frozen card: %v", ids)
+	if receipts := renderedEvent(t, pool, runID).Digest.ReceiptItems; len(receipts) != 0 {
+		t.Fatalf("duplicate actionable receipt rendered beside frozen card: %+v", receipts)
 	}
 	cards := renderedEvent(t, pool, runID).Digest.GeneratedCards
 	if len(cards) != 1 || cards[0].IncidentID != groupID {

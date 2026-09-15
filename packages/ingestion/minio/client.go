@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/minio/minio-go/v7"
@@ -167,4 +168,19 @@ func (c *Client) RemovePrefix(ctx context.Context, prefix string) error {
 		}
 	}
 	return nil
+}
+
+// ListPrefixes returns the immediate child prefixes (each ending in "/") below
+// prefix. Retention uses it to find run-log day folders without trusting rows.
+func (c *Client) ListPrefixes(ctx context.Context, prefix string) ([]string, error) {
+	var out []string
+	for object := range c.mc.ListObjects(ctx, c.bucket, minio.ListObjectsOptions{Prefix: prefix, Recursive: false}) {
+		if object.Err != nil {
+			return nil, object.Err
+		}
+		if strings.HasSuffix(object.Key, "/") {
+			out = append(out, object.Key)
+		}
+	}
+	return out, nil
 }

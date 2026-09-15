@@ -1,3 +1,8 @@
+import { createHash } from 'node:crypto';
+import type { ImageRef } from '@opslane/agent-runs';
+import { withRunLog, type OpenRunOptions } from '../run-logs/handle.js';
+import { runContextFromJob, type RunContext } from '../run-logs/context.js';
+import { completerSettings, type NarrativeCompleter } from './client.js';
 import type {
   FrameVerification,
   NarrativeObservation,
@@ -269,11 +274,30 @@ export async function processFrameVerification(
   });
   let response: Awaited<ReturnType<NarrativeClient['complete']>>;
   try {
-    response = await deps.client.complete({
-      system: buildVerifyPrompt(),
-      user: `OBSERVATIONS_START\n${JSON.stringify(narrative.observations)}\nOBSERVATIONS_END\nTIMELINE_START\n${timeline.lines.map((line, index) => `L${index + 1} ${line.t}`).join('\n')}\nTIMELINE_END`,
-      images: captureResult.frames.map((frame) => ({ mediaType: 'image/png', base64: frame.modelPng.toString('base64') })),
-    });
+    const promptInput: VerifyPromptInput = {
+      observations: narrative.observations,
+      timelineLines: timeline.lines.map((line) => line.t),
+    };
+    const request = buildVerifyRequest(promptInput);
+    response = await withRunLog(
+      verifyRunOptions({
+        context: runContextFromJob(job, { sessionId: job.sessionId }),
+        client: deps.client,
+        promptInput,
+        sessionId: job.sessionId,
+        frames: captureResult.frames,
+        moments: selectMoments(narrative, timeline),
+      }),
+      (run) => deps.client.complete({
+        ...request,
+        images: captureResult.frames.map((frame) => ({ mediaType: 'image/png', base64: frame.modelPng.toString('base64') })),
+        run,
+      }),
+      (result) => {
+        if (result.stopReason === 'max_tokens') return 'truncated';
+        return validateVerification(result.text, narrative).ok ? 'completed' : 'invalid_output';
+      },
+    );
     // These were zeros until the narrative client started returning what the
     // provider reports, which is what the note here used to ask for. They are
     // still zero in practice: the verify prompt is under Sonnet 5's minimum
@@ -319,4 +343,47 @@ export async function processFrameVerification(
       claimed.narrativeId,
     ),
   });
+}
+
+export interface VerifyPromptInput {
+  observations: SessionNarrative['observations'];
+  timelineLines: string[];
+}
+
+export function buildVerifyRequest(input: VerifyPromptInput): { system: string; user: string } {
+  return {
+    system: buildVerifyPrompt(),
+    user: `OBSERVATIONS_START\n${JSON.stringify(input.observations)}\nOBSERVATIONS_END\nTIMELINE_START\n${input.timelineLines.map((line, index) => `L${index + 1} ${line}`).join('\n')}\nTIMELINE_END`,
+  };
+}
+
+export function verifyRunOptions(args: {
+  context: RunContext | null;
+  client: NarrativeCompleter;
+  promptInput: VerifyPromptInput;
+  sessionId: string;
+  frames: CapturedFrame[];
+  moments: number[];
+}): OpenRunOptions {
+  return {
+    context: args.context,
+    phase: 'verify',
+    entryPoint: 'narrative/verify#processFrameVerification',
+    models: [args.client.modelName],
+    settings: completerSettings(args.client),
+    structuredInput: args.promptInput,
+    request: buildVerifyRequest(args.promptInput),
+    images: captureImageRefs(args.sessionId, args.frames, { moments: args.moments }),
+  };
+}
+
+export function captureImageRefs(sessionId: string, frames: CapturedFrame[], captureSettings: Record<string, unknown>): ImageRef[] {
+  return frames.map((frame) => ({
+    kind: 'capture',
+    sessionId,
+    offsetMs: frame.offsetMs,
+    pair: frame.pair,
+    captureSettings,
+    sha256: createHash('sha256').update(frame.modelPng).digest('hex'),
+  }));
 }

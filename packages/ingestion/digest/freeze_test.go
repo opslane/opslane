@@ -294,8 +294,8 @@ func TestFreezeOnIncludesFrictionAndReusesValidatedCopy(t *testing.T) {
 				t.Fatalf("cache not frozen atomically: %+v", item.CachedCard)
 			}
 			// The cause sentence rides with the rest of the card. A cached card
-			// that lost it would fail its own validation the next day and demote
-			// the incident to a receipt forever.
+			// that lost it would fail its own validation the next day and hold
+			// the card back every day.
 			if item.CachedCard.Why != "The submit handler is never wired to the control." {
 				t.Fatalf("cached cause sentence did not survive the round trip: %+v", item.CachedCard)
 			}
@@ -313,7 +313,10 @@ func TestFreezeOnRepeatsActionableErrorPastLegacyWindows(t *testing.T) {
 	episodeID := seedFreezeEpisode(t, pool, f.ProjectID, f.EnvID, now.Add(-9*24*time.Hour), 1)
 	seedFreezeDiagnosis(t, pool, f.ProjectID, episodeID, "needs_human", now.Add(-9*24*time.Hour))
 	var groupID string
-	if err := pool.QueryRow(ctx, `UPDATE error_groups SET status='needs_human'
+	// A saved diff is something to act on, so publishable() admits the incident
+	// without a validated diagnosis.
+	if err := pool.QueryRow(ctx, `UPDATE error_groups SET status='needs_human',
+		candidate_diff='diff --git a/src/checkout.ts b/src/checkout.ts'
 		WHERE id=(SELECT canonical_issue_id FROM issue_episodes WHERE id=$1) RETURNING id::text`, episodeID).Scan(&groupID); err != nil {
 		t.Fatal(err)
 	}
@@ -385,7 +388,10 @@ func TestFreezeOnDropsIncidentThatStopsWaiting(t *testing.T) {
 	episodeID := seedFreezeEpisode(t, pool, f.ProjectID, f.EnvID, now.Add(-2*time.Hour), 1)
 	seedFreezeDiagnosis(t, pool, f.ProjectID, episodeID, "needs_human", now.Add(-time.Hour))
 	var groupID string
-	if err := pool.QueryRow(ctx, `UPDATE error_groups SET status='needs_human'
+	// A saved diff is something to act on, so publishable() admits the incident
+	// without a validated diagnosis.
+	if err := pool.QueryRow(ctx, `UPDATE error_groups SET status='needs_human',
+		candidate_diff='diff --git a/src/checkout.ts b/src/checkout.ts'
 		WHERE id=(SELECT canonical_issue_id FROM issue_episodes WHERE id=$1) RETURNING id::text`,
 		episodeID).Scan(&groupID); err != nil {
 		t.Fatal(err)
@@ -422,7 +428,10 @@ func TestFreezeOnAdmitsFYIToActionableTransitionDespitePublication(t *testing.T)
 	}
 	transitionAt := now.Add(23 * time.Hour)
 	var groupID string
-	if err := pool.QueryRow(ctx, `UPDATE error_groups SET status='needs_human',last_seen=$2
+	// A saved diff is something to act on, so publishable() admits the incident
+	// without a validated diagnosis.
+	if err := pool.QueryRow(ctx, `UPDATE error_groups SET status='needs_human',last_seen=$2,
+		candidate_diff='diff --git a/src/checkout.ts b/src/checkout.ts'
 		WHERE id=(SELECT canonical_issue_id FROM issue_episodes WHERE id=$1) RETURNING id::text`,
 		episodeID, transitionAt).Scan(&groupID); err != nil {
 		t.Fatal(err)
