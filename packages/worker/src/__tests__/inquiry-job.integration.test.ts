@@ -16,6 +16,7 @@ describeDb('inquiry job write path integration', () => {
   let job: ClaimedJob;
 
   const evidence: EvidenceBundle = {
+    error: null,
     frames: {
       sourceEventId: '80000000-0000-4000-8000-000000000001',
       status: 'resolved', resolverVersion: 2,

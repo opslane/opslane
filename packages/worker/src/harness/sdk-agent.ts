@@ -86,11 +86,11 @@ export function readOnlyTools(): Anthropic.Tool[] {
     },
     {
       name: 'search',
-      description: 'Search the repository with grep. Returns matching paths and line numbers.',
+      description: 'Search the repository for literal text with grep. The pattern is matched exactly, not as a regular expression. Returns matching paths and line numbers.',
       input_schema: {
         type: 'object',
         properties: {
-          pattern: { type: 'string', description: 'Basic regular expression.' },
+          pattern: { type: 'string', description: 'Literal text on a single line.' },
           include: { type: 'string', description: 'Optional file glob such as *.vue.' },
         },
         required: ['pattern'],

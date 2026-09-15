@@ -77,13 +77,20 @@ export async function executeReadFile(
   }
 }
 
-/** search tool: grep for patterns in the repo, excluding node_modules/.git/dist. */
+/**
+ * search tool: find literal text in the repo, excluding node_modules/.git/dist.
+ *
+ * Fixed strings, not regular expressions: the pattern is usually a piece of a
+ * captured error message, and `(`, `.`, `*` or `[` in it must match themselves.
+ */
 export async function executeSearch(
   reader: RepoReader,
   input: Record<string, unknown>,
 ): Promise<string> {
   const pattern = input['pattern'];
   if (typeof pattern !== 'string' || pattern.length === 0) return 'Error: "pattern" parameter is required';
+  // grep -F reads each line of the pattern as a separate alternative.
+  if (/[\r\n]/.test(pattern)) return 'Error: "pattern" must be a single line of literal text';
   const include = typeof input['include'] === 'string' ? input['include'] : undefined;
 
   // Build --include flags. Brace expansion (*.{ts,vue}) doesn't work without a
@@ -93,7 +100,7 @@ export async function executeSearch(
     ? ['--include', include]
     : defaultExtensions.flatMap((ext) => ['--include', ext]);
   const args = [
-    '-r', '-n', ...includeArgs,
+    '-r', '-n', '-F', ...includeArgs,
     ...grepExclusionArgs(),
     '-m', '5', // max 5 matches per file
     '--', pattern, '.',
@@ -102,7 +109,9 @@ export async function executeSearch(
   try {
     const stdout = await reader.grep(args);
     const lines = stdout.split('\n').filter(Boolean);
-    if (lines.length === 0) return 'No matches found.';
+    // Said on every miss: an agent used to regular expressions otherwise reads
+    // "no matches" as "the text is not there".
+    if (lines.length === 0) return 'No matches found. The pattern is matched as literal text, not a regular expression.';
     return lines.length > MAX_SEARCH_RESULTS
       ? `${lines.slice(0, MAX_SEARCH_RESULTS).join('\n')}\n... [${lines.length - MAX_SEARCH_RESULTS} more results]`
       : lines.join('\n');

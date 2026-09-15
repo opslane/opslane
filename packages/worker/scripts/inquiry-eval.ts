@@ -67,7 +67,10 @@ function loadCase(value: unknown, index: number): EvaluationCase {
     || typeof frames['sourceEventId'] !== 'string') {
     throw new Error(`fixture ${name} is not a bounded evidence bundle`);
   }
-  return { name, issueType, expected: expected as InquiryDecisionKind, notes, evidence: evidence as unknown as EvidenceBundle };
+  // The production set was frozen before error text joined the bundle. Its
+  // cases say so explicitly rather than carrying invented messages.
+  const bundle = { error: null, ...evidence } as unknown as EvidenceBundle;
+  return { name, issueType, expected: expected as InquiryDecisionKind, notes, evidence: bundle };
 }
 
 async function loadFixture(): Promise<EvaluationFixture> {

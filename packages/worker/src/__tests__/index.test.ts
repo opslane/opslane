@@ -267,6 +267,7 @@ function makeJob(): ClaimedJob & { errorGroupId: string } {
 
 function makeEvidence(sourceEventId = 'evt-1'): EvidenceBundle {
   return {
+    error: null,
     frames: {
       sourceEventId,
       status: 'resolved',
