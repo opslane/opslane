@@ -147,19 +147,22 @@ describeDb('confirmation job', () => {
           `INSERT INTO sessions(id,project_id,environment_id,started_at) VALUES($1,$2,$3,now())`,
           [sessionId, projectId, environmentId],
         );
-        const signalId = (
+        const signal = (
           await tx.query(
-            `INSERT INTO friction_signals(session_id,project_id,environment_id,signal_type,fingerprint,page_url_normalized,occurred_at,rule_version) VALUES($1,$2,$3,'other',$4,'/save',now(),1) RETURNING id`,
+            `INSERT INTO friction_signals(session_id,project_id,environment_id,signal_type,fingerprint,page_url_normalized,occurred_at,rule_version) VALUES($1,$2,$3,'other',$4,'/save',now(),1) RETURNING id,occurred_at::text`,
             [sessionId, projectId, environmentId, randomUUID()],
           )
-        ).rows[0].id as string;
+        ).rows[0];
+        const signalId = signal.id as string;
         await store.recordMatch(tx, {
           ticket: t,
           sessionId,
           endUserId: null,
           signalIds: [signalId],
           source: 'cheap',
-          occurredAt: new Date().toISOString(),
+          // Keep Postgres microseconds: a JS millisecond timestamp sorts before
+          // a cohort cutoff set within the same millisecond, dropping the match.
+          occurredAt: signal.occurred_at as string,
           screen: '/save',
         });
         await tx.query('COMMIT');
@@ -978,19 +981,20 @@ describeDb('confirmation job', () => {
           `INSERT INTO sessions(id,project_id,environment_id,end_user_id,started_at) VALUES($1,$2,$3,$4,now())`,
           [sessionId, projectId, environmentId, endUserId],
         );
-        const signalId = (
+        const signal = (
           await tx.query(
-            `INSERT INTO friction_signals(session_id,project_id,environment_id,end_user_id,signal_type,fingerprint,page_url_normalized,occurred_at,rule_version) VALUES($1,$2,$3,$4,'other',$5,'/export',now(),1) RETURNING id`,
+            `INSERT INTO friction_signals(session_id,project_id,environment_id,end_user_id,signal_type,fingerprint,page_url_normalized,occurred_at,rule_version) VALUES($1,$2,$3,$4,'other',$5,'/export',now(),1) RETURNING id,occurred_at::text`,
             [sessionId, projectId, environmentId, endUserId, randomUUID()],
           )
-        ).rows[0].id as string;
+        ).rows[0];
+        const signalId = signal.id as string;
         await store.recordMatch(tx, {
           ticket: t,
           sessionId,
           endUserId,
           signalIds: [signalId],
           source: 'cheap',
-          occurredAt: new Date().toISOString(),
+          occurredAt: signal.occurred_at as string,
           screen: '/export',
         });
         await tx.query('COMMIT');
