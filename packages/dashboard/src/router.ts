@@ -69,7 +69,7 @@ router.beforeEach((to) => {
 		const onboarded = localStorage.getItem('opslane_onboarding_complete') === '1';
 		// A project-qualified deep link (the ones an onboarding agent prints:
 		// issues_url, latest_error_group_url, github_connect_url) names a
-		// project the server already created, so the wizard has nothing to add.
+		// project the server already created, so setup has nothing to add.
 		const projectDeepLink = typeof to.query.project_id === 'string' && to.query.project_id !== '';
 		if (!onboarded && !projectDeepLink) {
 			return { name: 'setup' };
