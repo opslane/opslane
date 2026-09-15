@@ -10,6 +10,26 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-15-agent-only-onboarding-design.md` (revision 3). Read it before starting; acceptance criteria numbers (AC1–AC15) below refer to it.
 
+## Implementation status (2026-09-15)
+
+- [x] Tasks 1–2: org-wide event gate and removal of the wizard setup endpoint (`1238542`).
+- [x] Tasks 3–4: agent-only setup page and approve-page completion (`b202748`).
+- [x] Task 5: waiting-state browser mocks and request manifest (`a03a959`). All 14 browser smoke tests and 46 screenshot captures passed without skips.
+- [x] Task 6: documentation and stale comment cleanup (`5644304`, `4235fab`). `pnpm test:repo` passed.
+- [x] Live smoke: a headless agent installed the published SDK in a disposable Vue app; browser approval updated the waiting tab; its test error opened the dashboard automatically. The selected project belonged to the fresh org, both storage flags were set, and the agent's later completion request returned 200.
+- [x] Go gate: `go build ./...` and `go test -count=1 -timeout=20m -json ./...` passed: 2,025 tests including subtests, zero test skips (660 handler and 483 database tests).
+- [x] Workspace install/build and Node verification: dashboard 456 passed, SDK 410 passed in the Playwright container, worker 2,149 passed with 11 separately gated tests skipped (6 poller reliability, 5 live-provider). Remaining workspace suites and `pnpm test:repo` passed. The worker used a fresh database.
+- [x] Cleanup: stopped the runbook server and ran `docker compose -p agentonly down`; screenshots and logs remain outside tracked source.
+- [x] Follow-up issue drafts prepared and approval requested as required by Task 7, step 4. No issues filed without approval.
+
+Implementation notes:
+
+- The two ingestion tasks and the two dashboard tasks were committed together. The named Superpowers skills were unavailable, so the plan was executed directly.
+- Added coverage for a late account response, project-selection fallback, and an agent attached to an older project. The docs voice gate requires “creates” instead of “mints” in the API-key guide.
+- The docs snippet check needs workspace build outputs. Run `pnpm -r build` first. Unset `REPLAY_STORE_PUBLIC_ENDPOINT` for the Compose-port checker, which deliberately changes the MinIO port.
+- The host's `pnpm test` stopped at the SDK browser matrix because WebKit libraries were missing and sudo required a password. The full SDK suite passed in the existing `mcr.microsoft.com/playwright:v1.62.1-noble` container, including Chromium, Firefox, and WebKit; remaining workspace suites were verified separately.
+- Worker queue tests require a separate empty database: Go tests and the live smoke leave jobs that their global queue can claim. The worker suite passed after migrating a fresh database.
+
 ## Global Constraints
 
 - The prompt line is exactly `Set up https://docs.opslane.com/INSTALL.md` (unchanged; it lives in `AgentPasteBox.vue`).
