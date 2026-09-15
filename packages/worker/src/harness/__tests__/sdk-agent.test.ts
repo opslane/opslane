@@ -1,3 +1,4 @@
+import { SdkStreamTranscriber } from '@opslane/agent-runs';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { MachineUnavailableError } from '../errors.js';
 
@@ -5,9 +6,11 @@ type Handler = (args: Record<string, unknown>) => Promise<unknown>;
 interface FakeTool { name: string; handler: Handler }
 type Action =
   | { kind: 'call'; name: string; input: Record<string, unknown> }
-  | { kind: 'assistant'; id?: string; text?: string; usage?: Partial<typeof DEFAULT_USAGE>; stopReason?: 'max_tokens' }
-  | { kind: 'result'; subtype?: string; isError?: boolean; usage?: Partial<typeof DEFAULT_USAGE> }
+  | { kind: 'assistant'; id?: string; text?: string; usage?: Partial<typeof DEFAULT_USAGE>; stopReason?: 'max_tokens' | 'tool_use' | 'end_turn'; requestId?: string; toolUses?: Array<{ id: string; name: string; input: Record<string, unknown> }>; model?: string }
+  | { kind: 'user'; results: Array<{ id: string; text: string; isError?: boolean }> }
+  | { kind: 'result'; subtype?: string; isError?: boolean; usage?: Partial<typeof DEFAULT_USAGE>; modelUsage?: Record<string, unknown>; numTurns?: number }
   | { kind: 'throw'; error: unknown };
+
 
 const DEFAULT_USAGE = {
   input_tokens: 100,
@@ -41,28 +44,33 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
           await selected.handler(action.input);
         } else if (action.kind === 'assistant') {
           yield {
-            type: 'assistant', uuid: 'u', session_id: 's', parent_tool_use_id: null,
+            request_id: action.requestId, type: 'assistant', uuid: 'u', session_id: 's', parent_tool_use_id: null,
             message: {
-              id: action.id ?? crypto.randomUUID(), type: 'message', role: 'assistant', model: 'test-model',
-              content: action.text ? [{ type: 'text', text: action.text }] : [],
+              id: action.id ?? crypto.randomUUID(), type: 'message', role: 'assistant', model: action.model ?? 'test-model',
+              content: [...(action.text ? [{ type: 'text', text: action.text }] : []), ...(action.toolUses ?? []).map((use) => ({ type: 'tool_use', ...use }))],
               stop_reason: action.stopReason ?? null, stop_sequence: null,
               usage: { ...DEFAULT_USAGE, ...action.usage },
             },
+          };
+} else if (action.kind === 'user') {
+          yield {
+            type: 'user', session_id: 's', parent_tool_use_id: null,
+            message: { role: 'user', content: action.results.map((r) => ({ type: 'tool_result', tool_use_id: r.id, content: [{ type: 'text', text: r.text }], ...(r.isError ? { is_error: true } : {}) })) },
           };
         } else {
           yield action.subtype === 'success' || action.subtype === undefined
             ? {
                 type: 'result', subtype: 'success', is_error: action.isError ?? false,
                 result: action.isError ? 'failed' : 'done', api_error_status: action.isError ? 503 : null,
-                duration_ms: 1, duration_api_ms: 1, num_turns: 1, stop_reason: null,
-                total_cost_usd: 0, usage: { ...DEFAULT_USAGE, ...action.usage }, modelUsage: {}, permission_denials: [],
+                duration_ms: 1, duration_api_ms: 1, num_turns: action.numTurns ?? 1, stop_reason: null,
+                total_cost_usd: 0, usage: { ...DEFAULT_USAGE, ...action.usage }, modelUsage: action.modelUsage ?? {}, permission_denials: [],
                 uuid: 'r', session_id: 's',
               }
             : {
                 type: 'result', subtype: action.subtype, is_error: true,
                 errors: ['query failed'], duration_ms: 1, duration_api_ms: 1,
-                num_turns: 1, stop_reason: null, total_cost_usd: 0,
-                usage: { ...DEFAULT_USAGE, ...action.usage }, modelUsage: {}, permission_denials: [], uuid: 'r', session_id: 's',
+                num_turns: action.numTurns ?? 1, stop_reason: null, total_cost_usd: 0,
+                usage: { ...DEFAULT_USAGE, ...action.usage }, modelUsage: action.modelUsage ?? {}, permission_denials: [], uuid: 'r', session_id: 's',
               };
         }
       }
@@ -407,5 +415,107 @@ describe('the subprocess environment', () => {
     for (const builtin of ['Bash', 'Read', 'Write', 'Edit', 'WebFetch', 'ToolSearch']) {
       expect(denied).toContain(builtin);
     }
+  });
+});
+
+import { capturedRun } from '../../__tests__/helpers/run-log-memory-sink.js';
+
+describe('SDK read-only agent run logging', () => {
+  it('continues the SDK stream when a transcript adapter fails', async () => {
+    sdk.actions.push(
+      { kind: 'assistant', id: 'm1', text: 'done' },
+      { kind: 'call', name: 'submit', input: { answer: 'done' } },
+      { kind: 'result', numTurns: 2 },
+    );
+    const adapter = vi.spyOn(SdkStreamTranscriber.prototype, 'push').mockImplementationOnce(() => {
+      throw new Error('adapter failure');
+    });
+    try {
+      const recorded = capturedRun();
+      const result = await runReadOnlyAgentSdk(fakeInput(), recorded.run);
+      expect(result.stop).toBe('terminal');
+      expect(result.terminalInput).toEqual({ answer: 'done' });
+      // Turns are not copied from the SDK's num_turns; the run log counts responses.
+      expect(recorded.turns).toBeNull();
+    } finally {
+      adapter.mockRestore();
+    }
+  });
+
+  it('logs one response per message, tool results by id in arrival order, and fallback usage', async () => {
+    sdk.actions.push(
+      { kind: 'assistant', id: 'm1', requestId: 'req_1', toolUses: [{ id: 'tu_a', name: 'mcp__repo__read_file', input: { path: 'src/a.ts' } }] },
+      { kind: 'assistant', id: 'm1', stopReason: 'tool_use', toolUses: [{ id: 'tu_b', name: 'mcp__repo__read_file', input: { path: 'src/b.ts' } }] },
+      { kind: 'user', results: [{ id: 'tu_b', text: 'B' }, { id: 'tu_a', text: 'A' }] },
+      { kind: 'call', name: 'submit', input: { answer: 'done' } },
+      { kind: 'result', usage: { input_tokens: 500, output_tokens: 50 }, numTurns: 3 },
+    );
+    const recorded = capturedRun();
+    const result = await runReadOnlyAgentSdk(fakeInput(), recorded.run);
+
+    expect(result.stop).toBe('terminal');
+    expect(recorded.requests).toHaveLength(1);
+    expect(recorded.events.map((event) => event.type)).toEqual(['response', 'tool_call', 'tool_call', 'tool_result', 'tool_result', 'sdk_message']);
+    expect(recorded.events[0]).toMatchObject({ type: 'response', messageId: 'm1', requestId: 'req_1', stopReason: 'tool_use' });
+    expect(recorded.events.slice(3, 5)).toMatchObject([
+      { type: 'tool_result', id: 'tu_b', name: 'mcp__repo__read_file', output: 'B' },
+      { type: 'tool_result', id: 'tu_a', name: 'mcp__repo__read_file', output: 'A' },
+    ]);
+    expect(recorded.usage).toEqual({ 'claude-sonnet-4-6': { input: 500, output: 50, cacheRead: 0, cacheWrite: 0 } });
+    expect(recorded.turns).toBeNull();
+  });
+
+  it('prefers the result modelUsage, keyed by the models that actually ran', async () => {
+    sdk.actions.push(
+      { kind: 'assistant', id: 'm1', model: 'claude-sonnet-4-6-20260101', text: 'x' },
+      { kind: 'call', name: 'read_file', input: { path: 'src/a.ts' } },
+      { kind: 'call', name: 'submit', input: { answer: 'done' } },
+      { kind: 'result', modelUsage: {
+        'claude-sonnet-4-6-20260101': { inputTokens: 90, outputTokens: 9, cacheReadInputTokens: 1, cacheCreationInputTokens: 2 },
+        'claude-haiku-4-5-20251001': { inputTokens: 5, outputTokens: 1, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 },
+      } },
+    );
+    const recorded = capturedRun();
+    await runReadOnlyAgentSdk(fakeInput(), recorded.run);
+    expect(recorded.usage).toEqual({
+      'claude-sonnet-4-6-20260101': { input: 90, output: 9, cacheRead: 1, cacheWrite: 2 },
+      'claude-haiku-4-5-20251001': { input: 5, output: 1, cacheRead: 0, cacheWrite: 0 },
+    });
+  });
+
+  it('logs a rejected terminal submission as a validator rejection', async () => {
+    sdk.actions.push(
+      { kind: 'call', name: 'read_file', input: { path: 'src/a.ts' } },
+      { kind: 'call', name: 'submit', input: { answer: 'first' } },
+      { kind: 'call', name: 'submit', input: { answer: 'second' } },
+      { kind: 'result' },
+    );
+    const validateTerminal = vi.fn()
+      .mockReturnValueOnce({ ok: false, feedback: 'cite a file you read' })
+      .mockReturnValue({ ok: true });
+    const recorded = capturedRun();
+    await runReadOnlyAgentSdk(fakeInput({ validateTerminal }), recorded.run);
+    expect(recorded.events.find((event) => event.type === 'validator_rejection')).toEqual({
+      type: 'validator_rejection', message: 'cite a file you read', payload: { answer: 'first' },
+    });
+  });
+
+  it('logs the exception the runner converts into an api_error stop', async () => {
+    sdk.actions.push({ kind: 'assistant', id: 'm1', text: 'x' }, { kind: 'throw', error: new Error('socket hang up') });
+    const recorded = capturedRun();
+    const result = await runReadOnlyAgentSdk(fakeInput(), recorded.run);
+    expect(result.stop).toBe('api_error');
+    expect(recorded.events.map((event) => event.type)).toEqual(['error', 'response']);
+    expect(recorded.events[0]).toMatchObject({ type: 'error', errorClass: 'Error', message: 'socket hang up' });
+  });
+
+  it('flushes the transcript and usage before rethrowing machine loss', async () => {
+    sdk.actions.push({ kind: 'assistant', id: 'm1', text: 'x' }, { kind: 'call', name: 'read_file', input: { path: 'a' } });
+    const reader = fakeReader();
+    reader.readFile.mockRejectedValueOnce(new MachineUnavailableError('gone', 'gone'));
+    const recorded = capturedRun();
+    await expect(runReadOnlyAgentSdk(fakeInput({ reader }), recorded.run)).rejects.toThrow(MachineUnavailableError);
+    expect(recorded.events.some((event) => event.type === 'response')).toBe(true);
+    expect(recorded.usage).toEqual({ 'claude-sonnet-4-6': { input: 100, output: 20, cacheRead: 0, cacheWrite: 0 } });
   });
 });

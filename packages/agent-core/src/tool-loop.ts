@@ -56,6 +56,7 @@ export interface ToolMiddleware {
 
 export type AgentEvent =
   | { type: 'message'; content: string }
+  | { type: 'injected'; content: string }
   | { type: 'tool_call'; id: string; name: string; input: Record<string, unknown> }
   | { type: 'tool_result'; id: string; name: string; output: string; isError?: boolean }
   | { type: 'turn_start'; turnNumber: number }
@@ -158,6 +159,7 @@ export async function toolLoop(port: ModelPort, options: ToolLoopOptions): Promi
           role: 'user',
           content: [{ type: 'text', text: redact(check.inject) }],
         });
+        emit({ type: 'injected', content: redact(check.inject) });
         emit({ type: 'turn_end', turnNumber: state.turnCount, tokenUsage: { ...state.tokenUsage } });
         continue;
       }
@@ -314,6 +316,7 @@ function redactAssistantContent(
 
 function redactEvent(event: AgentEvent, redact: (text: string) => string): AgentEvent {
   switch (event.type) {
+    case 'injected':
     case 'message': return { ...event, content: redact(event.content) };
     case 'tool_call': return {
       ...event,

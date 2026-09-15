@@ -836,6 +836,7 @@ describeDb('confirmation job', () => {
         new AbortController().signal,
         {
           apiKey: 'test',
+          repositoryFullName: null,
           checkout: async () => ({
             reader: {
               readFile: async () => '',
@@ -2375,6 +2376,7 @@ describeDb('confirmation job', () => {
         new AbortController().signal,
         {
           apiKey: 'test',
+          repositoryFullName: null,
           checkout: async () => ({
             reader: { readFile: async () => '', grep: async () => '', list: async () => '', exists: async () => [] },
             tree: 'src/save.ts',

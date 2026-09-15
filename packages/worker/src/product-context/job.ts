@@ -1,3 +1,6 @@
+import type { RepositoryRef } from '@opslane/agent-runs';
+import { runContextFromJob, type RunContext } from '../run-logs/context.js';
+import { runLoggedSdk } from '../run-logs/sdk-phase.js';
 import type { ClaimedJob, TokenUsage } from '../db.js';
 import * as db from '../db.js';
 import { canonicalPattern } from '../friction/urlnorm.js';
@@ -5,7 +8,7 @@ import { fenced } from '../prompt-fence.js';
 import { getInstallationToken } from '../github-app.js';
 import { logger, safeErrorMessage } from '../logger.js';
 import type { RepoReader } from '../investigate-tools.js';
-import { runReadOnlyAgentSdk, type CommandRunner } from '../harness/sdk-agent.js';
+import type { CommandRunner } from '../harness/sdk-agent.js';
 import { createReadOnlyCheckout } from '../harness/readonly-sandbox.js';
 import { NonRetryableJobError } from '../harness/errors.js';
 import { deadLetterClassForStop, modelFailureError } from '../harness/model-failure-policy.js';
@@ -27,6 +30,7 @@ export interface DiscoveredRoute {
 }
 
 export interface PreparedProductContext {
+  repositoryFullName: string;
   reader: RepoReader;
   commandRunner: CommandRunner;
   commitSha: string;
@@ -61,6 +65,9 @@ export interface ProductContextDependencies {
     commandRunner: CommandRunner;
     routes: DiscoveredRoute[];
     signal: AbortSignal;
+    runContext?: RunContext | null;
+    repository?: RepositoryRef | null;
+    commitSha?: string | null;
   }) => Promise<{ raw: unknown; filesRead: string[]; usage: TokenUsage; costUsd: number }>;
   persist: (input: ProductContextWrite) => Promise<boolean>;
   countHumanRoutes: (projectId: string, patterns: string[]) => Promise<number>;
@@ -239,6 +246,7 @@ async function prepareProductContext(
     const { changedPaths } = pushMetadata(job.payload);
     const patterns = await db.listProductContextPatterns(job.projectId, checkout.headSha, changedPaths);
     return {
+      repositoryFullName: project.github_repo,
       reader: checkout.reader,
       commandRunner: checkout.commandRunner,
       commitSha: checkout.headSha,
@@ -269,6 +277,9 @@ export async function askModelForClaims(input: {
   commandRunner: CommandRunner;
   routes: DiscoveredRoute[];
   signal: AbortSignal;
+  runContext?: RunContext | null;
+  repository?: RepositoryRef | null;
+  commitSha?: string | null;
 }): Promise<{ raw: unknown; filesRead: string[]; usage: TokenUsage; costUsd: number }> {
   checkAbort(input.signal);
   const apiKey = process.env['ANTHROPIC_API_KEY'];
@@ -286,25 +297,33 @@ export async function askModelForClaims(input: {
     'product_context.model': PRODUCT_CONTEXT_MODEL,
     'product_context.max_turns': limits.maxTurns,
     'product_context.budget_usd': limits.budgetUsd,
-  }, () => runReadOnlyAgentSdk({
-    apiKey,
-    model: PRODUCT_CONTEXT_MODEL,
-    reader: input.reader,
-    commandRunner: input.commandRunner,
-    maxTurns: limits.maxTurns,
-    budgetUsd: limits.budgetUsd,
-    pricing: MODEL_PRICING[PRODUCT_CONTEXT_MODEL] ?? DEFAULT_PRICING,
-    systemPrompt: SYSTEM_PROMPT,
-    firstMessage: buildProductContextPrompt(input.routes),
-    terminalTool: routeClaimsTerminalTool(),
-    classification: { minFilesRead: 1 },
-    validateTerminal: async (raw, { filesRead }) => {
-      try {
-        await groundRouteClaims(input.reader, parseRouteClaims(raw), filesRead);
-        return { ok: true };
-      } catch (error: unknown) {
-        return { ok: false, feedback: error instanceof Error ? error.message : String(error) };
-      }
+  }, () => runLoggedSdk({
+    context: input.runContext ?? null,
+    phase: 'product_context',
+    entryPoint: 'product-context/job#askModelForClaims',
+    structuredInput: { routes: input.routes },
+    commitSha: input.commitSha ?? null,
+    repository: input.repository ?? null,
+    input: {
+      apiKey,
+      model: PRODUCT_CONTEXT_MODEL,
+      reader: input.reader,
+      commandRunner: input.commandRunner,
+      maxTurns: limits.maxTurns,
+      budgetUsd: limits.budgetUsd,
+      pricing: MODEL_PRICING[PRODUCT_CONTEXT_MODEL] ?? DEFAULT_PRICING,
+      systemPrompt: SYSTEM_PROMPT,
+      firstMessage: buildProductContextPrompt(input.routes),
+      terminalTool: routeClaimsTerminalTool(),
+      classification: { minFilesRead: 1 },
+      validateTerminal: async (raw, { filesRead }) => {
+        try {
+          await groundRouteClaims(input.reader, parseRouteClaims(raw), filesRead);
+          return { ok: true };
+        } catch (error: unknown) {
+          return { ok: false, feedback: error instanceof Error ? error.message : String(error) };
+        }
+      },
     },
   }));
   checkAbort(input.signal);
@@ -372,6 +391,9 @@ export async function runProductContext(
   try {
     checkAbort(signal);
     const result = await dependencies.askModel({
+      runContext: runContextFromJob(job),
+      commitSha: prepared.commitSha,
+      repository: { provider: 'github', fullName: prepared.repositoryFullName, commitSha: prepared.commitSha },
       reader: prepared.reader,
       commandRunner: prepared.commandRunner,
       routes: prepared.routes,

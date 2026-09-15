@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/opslane/opslane/packages/ingestion/db"
@@ -110,6 +111,11 @@ func (s *Sweeper) RunOnce(ctx context.Context) (int, error) {
 	if err := s.sweepDeletedPrefixes(ctx); err != nil {
 		return deleted, err
 	}
+	if days, err := s.sweepAgentRuns(ctx, time.Now()); err != nil {
+		return deleted, err
+	} else if days > 0 {
+		slog.Info("agent run log retention", "days_removed", days)
+	}
 	return deleted, nil
 }
 
@@ -137,4 +143,55 @@ func (s *Sweeper) sweepDeletedPrefixes(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+const agentRunPrefix = "agent-runs/"
+
+func parseAgentRunDay(prefix string) (time.Time, bool) {
+	parts := strings.Split(strings.TrimSuffix(prefix, "/"), "/")
+	day, err := time.Parse("2006-01-02", parts[len(parts)-1])
+	return day, err == nil
+}
+
+// sweepAgentRuns deletes agent run log day folders older than each project's
+// retention plus one day (worker clock skew), then their rows. Objects go
+// first: a failed removal leaves the rows for the next pass.
+func (s *Sweeper) sweepAgentRuns(ctx context.Context, now time.Time) (int, error) {
+	projects, err := s.Q.AgentRunRetentions(ctx)
+	if err != nil {
+		return 0, err
+	}
+	removed := 0
+	today := now.UTC().Truncate(24 * time.Hour)
+	for _, project := range projects {
+		cutoff := today.AddDate(0, 0, -(project.RetentionDays + 1))
+		prefixes, err := s.MinIO.ListPrefixes(ctx, agentRunPrefix+project.ProjectID+"/")
+		if err != nil {
+			slog.Error("list agent run days failed", "error", err, "project_id", project.ProjectID)
+			continue
+		}
+		allRemoved := true
+		for _, prefix := range prefixes {
+			day, ok := parseAgentRunDay(prefix)
+			if !ok || !day.Before(cutoff) {
+				continue
+			}
+			if err := s.MinIO.RemovePrefix(ctx, prefix); err != nil {
+				slog.Error("remove agent run day failed", "error", err, "prefix", prefix)
+				allRemoved = false
+				continue
+			}
+			if _, err := s.Q.DeleteAgentRunsRecordedBetween(ctx, project.ProjectID, day, day.AddDate(0, 0, 1)); err != nil {
+				slog.Error("delete agent run rows failed", "error", err, "prefix", prefix)
+				continue
+			}
+			removed++
+		}
+		if allRemoved {
+			if _, err := s.Q.DeleteAgentRunsRecordedBefore(ctx, project.ProjectID, cutoff); err != nil {
+				slog.Error("delete leftover agent run rows failed", "error", err, "project_id", project.ProjectID)
+			}
+		}
+	}
+	return removed, nil
 }

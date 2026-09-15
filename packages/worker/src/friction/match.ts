@@ -1,9 +1,12 @@
+import { completerSettings, type NarrativeCompleter } from '../narrative/client.js';
+import type { RunHandle, OpenRunOptions } from '../run-logs/handle.js';
+import type { RunContext } from '../run-logs/context.js';
 import type { PhaseMeter } from '../metered.js';
-import { extractJsonObject, type NarrativeClient } from '../narrative/client.js';
+import { extractJsonObject } from '../narrative/client.js';
 import { fenced } from '../prompt-fence.js';
 import type { TicketRow } from './tickets-db.js';
 
-type MatchClient = Pick<NarrativeClient, 'complete' | 'modelName'>;
+type MatchClient = NarrativeCompleter;
 type MatchMeter = Pick<PhaseMeter, 'add'>;
 
 /** One atomic narrative observation presented to cheap matching. */
@@ -45,7 +48,7 @@ export type ObservationMatchDecision = MatchedObservationDecision | DraftObserva
 /** Invalid model output is all-or-nothing so the caller can retry the pass. */
 export type MatchObservationsResult =
   | { decisions: ObservationMatchDecision[] }
-  | { invalid: string };
+  | { invalid: string; payload?: unknown };
 
 const MATCH_SYSTEM_PROMPT = `Match every supplied observation to an immutable known ticket or produce a draft for strong review.
 
@@ -145,32 +148,11 @@ export async function matchObservations(
   client: MatchClient,
   input: MatchObservationsInput,
   meter: MatchMeter,
+  run: RunHandle,
 ): Promise<MatchObservationsResult> {
   if (input.observations.length === 0) return { decisions: [] };
 
-  const observations = input.observations.map(({ id, what }) => ({ id, what }));
-  const candidates = input.candidates.map((candidate) => ({
-    id: candidate.id,
-    name: candidate.name,
-    control: candidate.control,
-    whatHappened: candidate.what_happened,
-    steps: candidate.steps,
-    screensConfirmed: candidate.screens_confirmed,
-    screensProposed: candidate.screens_proposed,
-  }));
-  const unbounded = Number.MAX_SAFE_INTEGER;
-  const block = (name: string, value: string, max = unbounded): string =>
-    `${name}_START\n<untrusted_data>\n${fenced(value, max)}\n</untrusted_data>\n${name}_END`;
-  const response = await client.complete({
-    system: MATCH_SYSTEM_PROMPT,
-    user: [
-      block('PROJECT', input.projectName),
-      block('SCREENS', JSON.stringify(input.screens)),
-      block('TIMELINE', input.timelineText, 65_536),
-      block('OBSERVATIONS', JSON.stringify(observations)),
-      block('CANDIDATES', JSON.stringify(candidates)),
-    ].join('\n'),
-  });
+  const response = await client.complete({ ...buildMatchRequest(matchPromptInput(input)), run });
   meter.add(client.modelName, {
     input: response.inputTokens,
     output: response.outputTokens,
@@ -178,14 +160,68 @@ export async function matchObservations(
     cacheWrite: response.cacheWriteTokens,
   });
 
-  if (response.stopReason === 'max_tokens') return invalid('model response was truncated');
+  const rejected = (reason: string, payload: unknown): MatchObservationsResult => ({ invalid: reason, payload });
+  if (response.stopReason === 'max_tokens') return rejected('model response was truncated', response.text);
   const extracted = extractJsonObject(response.text);
-  if (!extracted) return invalid('no complete JSON object in response');
+  if (!extracted) return rejected('no complete JSON object in response', response.text);
   let parsed: unknown;
   try {
     parsed = JSON.parse(extracted);
   } catch {
-    return invalid('invalid JSON response');
+    return rejected('invalid JSON response', response.text);
   }
-  return validateDecisions(parsed, input.observations, new Set(input.candidates.map(({ id }) => id)));
+  const result = validateDecisions(parsed, input.observations, new Set(input.candidates.map(({ id }) => id)));
+  return 'invalid' in result ? { ...result, payload: parsed } : result;
+}
+
+export interface MatchPromptInput {
+  projectName: string;
+  screens: string[];
+  timelineText: string;
+  observations: Array<{ id: string; what: string }>;
+  candidates: Array<{
+    id: string; name: string; control: string; whatHappened: string; steps: string | null;
+    screensConfirmed: string[]; screensProposed: string[];
+  }>;
+}
+
+export function matchPromptInput(input: MatchObservationsInput): MatchPromptInput {
+  return {
+    projectName: input.projectName,
+    screens: input.screens,
+    timelineText: input.timelineText,
+    observations: input.observations.map(({ id, what }) => ({ id, what })),
+    candidates: input.candidates.map((candidate) => ({
+      id: candidate.id,
+      name: candidate.name,
+      control: candidate.control,
+      whatHappened: candidate.what_happened,
+      steps: candidate.steps,
+      screensConfirmed: candidate.screens_confirmed,
+      screensProposed: candidate.screens_proposed,
+    })),
+  };
+}
+
+export function matchRunOptions(context: RunContext | null, client: NarrativeCompleter, phase: string, prompt: MatchPromptInput): OpenRunOptions {
+  return {
+    context, phase, entryPoint: 'friction/match#matchObservations', models: [client.modelName],
+    settings: completerSettings(client), structuredInput: prompt, request: buildMatchRequest(prompt),
+  };
+}
+
+export function buildMatchRequest(input: MatchPromptInput): { system: string; user: string } {
+  const unbounded = Number.MAX_SAFE_INTEGER;
+  const block = (name: string, value: string, max = unbounded): string =>
+    `${name}_START\n<untrusted_data>\n${fenced(value, max)}\n</untrusted_data>\n${name}_END`;
+  return {
+    system: MATCH_SYSTEM_PROMPT,
+    user: [
+      block('PROJECT', input.projectName),
+      block('SCREENS', JSON.stringify(input.screens)),
+      block('TIMELINE', input.timelineText, 65_536),
+      block('OBSERVATIONS', JSON.stringify(input.observations)),
+      block('CANDIDATES', JSON.stringify(input.candidates)),
+    ].join('\n'),
+  };
 }

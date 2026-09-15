@@ -83,6 +83,31 @@ A named stage of a job that spends model tokens (e.g. investigation, fix,
 judge, narrative). Enumerated in worker code, stored as plain text — a new
 phase must not require a migration.
 
+**Run**:
+One attempt by a job execution to get a usable answer from a phase's model
+entry point. A retry controller that re-asks on invalid output belongs to the
+same run; a job retry, fix tier, or fix test retry starts a new one.
+
+**Run log**:
+What the worker stores about one run: an input bundle and a transcript in object
+storage, indexed by `agent_run_started` and `agent_run_finished`. Deleted by age
+on the project's recording retention.
+_Avoid_: "recording" (that means a session replay), "trace" (Langfuse's)
+
+**Input bundle**:
+The part of a run log needed to rebuild the run's first request: the prompt
+builder's structured input, effective settings, repository and image references,
+and a canonical copy of the request.
+
+**Transcript**:
+The part of a run log after the first request: model responses, full tool
+results, re-asks, validator rejections, errors, and the stop.
+
+**Logged gateway**:
+One of the four places worker code reaches a model (the Agent SDK runner, the
+agent-core model port decorator, `loggedMessagesCreate`, `NarrativeClient`).
+Each writes run logs; a guard test keeps model access inside them.
+
 **Outcome score**:
 A measurement pushed onto a job's Langfuse trace: the diagnosis outcome and
 confidence at decision time, and the PR outcome (merged/closed) later via

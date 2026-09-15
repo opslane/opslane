@@ -272,7 +272,7 @@ describeLive('known problems — real recording pipeline', () => {
     expect(source).toContain('function deadClick');
     await runJob(p, investigation, () => p.investigate.processTicketInvestigation({ ...investigation,
       ticketId, errorGroupId: groupId, publicationGeneration: 1 }, group, signal, {
-      apiKey: 'e2e', checkout: async () => ({ headSha: 'a'.repeat(40), tree: SOURCE_FILE, close: async () => {},
+      apiKey: 'e2e', repositoryFullName: 'opslane/defender-test-fixture', checkout: async () => ({ headSha: 'a'.repeat(40), tree: SOURCE_FILE, close: async () => {},
         reader: { readFile: async path => { if (path !== SOURCE_FILE) throw new Error('unknown fixture path'); return source; },
           grep: async () => source, list: async () => SOURCE_FILE, exists: async paths => paths.filter(path => path === SOURCE_FILE) } }),
       investigate: async (_key, input) => {

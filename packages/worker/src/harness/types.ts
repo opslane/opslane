@@ -60,6 +60,7 @@ export type AgentEventHandler = (event: AgentHarnessEvent) => void;
 
 export type AgentHarnessEvent =
   | { type: 'message'; content: string }
+  | { type: 'injected'; content: string }
   | { type: 'tool_call'; id: string; name: string; input: Record<string, unknown> }
   | { type: 'tool_result'; id: string; name: string; output: string; isError?: boolean }
   | { type: 'turn_start'; turnNumber: number }
@@ -68,6 +69,7 @@ export type AgentHarnessEvent =
   | { type: 'error'; code: string; message: string };
 
 export interface AgentLoopConfig {
+  run?: import('../run-logs/handle.js').RunHandle;
   apiKey: string;
   model?: string;
   maxTurns: number;

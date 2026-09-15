@@ -1,3 +1,4 @@
+import { runContextFromJob } from '../run-logs/context.js';
 import type pg from 'pg';
 import * as db from '../db.js';
 import * as store from './tickets-db.js';
@@ -201,6 +202,7 @@ export async function finishInvestigation(
   return done && coverage >= CAUSE_COVERAGE_MIN;
 }
 export interface TicketInvestigationDeps {
+  repositoryFullName: string | null;
   checkout(): Promise<
     Pick<ReadOnlyCheckout, 'reader' | 'tree' | 'headSha' | 'close'>
   >;
@@ -251,6 +253,8 @@ export async function processTicketInvestigation(
       snapshot.signalIds,
     );
     const result = await deps.investigate(deps.apiKey, {
+      runContext: runContextFromJob(job),
+      repositoryFullName: deps.repositoryFullName,
       group,
       evidence,
       confirmedSignalIds: snapshot.signalIds,

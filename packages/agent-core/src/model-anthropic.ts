@@ -60,6 +60,9 @@ export function createAnthropicModelPort(
           cacheWriteTokens: response.usage.cache_creation_input_tokens ?? 0,
         },
         stopReason: response.stop_reason,
+        ...(typeof (response as { _request_id?: unknown })._request_id === 'string'
+          ? { requestId: (response as unknown as { _request_id: string })._request_id }
+          : {}),
       };
     },
   };

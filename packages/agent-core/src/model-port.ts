@@ -61,6 +61,7 @@ export interface ModelResponse {
   content: Array<TextPart | ToolUsePart>;
   usage: ModelUsage;
   stopReason: string | null;
+  requestId?: string;
 }
 
 export interface ModelPort {

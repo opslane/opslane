@@ -69,3 +69,19 @@ export async function putFrameObject(
     ContentType: 'image/png',
   }));
 }
+
+/** Write one object. The signal aborts the upload, so a deadline cannot leak a late write. */
+export async function putObject(
+  objectKey: string,
+  body: string | Buffer,
+  contentType: string,
+  config: MinIOConfig,
+  signal?: AbortSignal,
+): Promise<void> {
+  await getS3Client(config).send(new PutObjectCommand({
+    Bucket: config.bucket,
+    Key: objectKey,
+    Body: body,
+    ContentType: contentType,
+  }), signal ? { abortSignal: signal } : {});
+}

@@ -1,3 +1,4 @@
+import { NOOP_RUN } from '../../run-logs/handle.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { extractJsonObject, narrativeClientFromEnv, NarrativeClient } from '../client.js';
 
@@ -16,7 +17,7 @@ describe('NarrativeClient.complete', () => {
     create.mockResolvedValue({ content: [{ type: 'text', text: '{}' }], stop_reason: 'end_turn',
       usage: { input_tokens: 20, output_tokens: 10, ...cacheUsage } });
     const client = new NarrativeClient({ model: 'claude-sonnet-5', apiKey: 'test-key', maxTokens: 8192, reasoning: 'off' });
-    expect(await client.complete({ system: 'instructions', user: 'timeline' })).toEqual({
+    expect(await client.complete({ run: NOOP_RUN, system: 'instructions', user: 'timeline' })).toEqual({
       text: '{}', stopReason: 'end_turn', inputTokens: 20, outputTokens: 10,
       cacheReadTokens: read, cacheWriteTokens: write,
     });
@@ -26,7 +27,7 @@ describe('NarrativeClient.complete', () => {
     create.mockResolvedValue({content:[],usage:{},stop_reason:'end_turn'});
     const client = new NarrativeClient({model:'claude-sonnet-5',apiKey:'test',maxTokens:8192,reasoning:'off'});
     const signal = new AbortController().signal;
-    await client.complete({system:'instructions',user:'evidence',signal});
+    await client.complete({ run: NOOP_RUN,system:'instructions',user:'evidence',signal});
     expect(create.mock.calls[0]?.[1]).toEqual({signal});
   });
 
@@ -41,7 +42,7 @@ describe('NarrativeClient.complete', () => {
     create.mockResolvedValue({ content: [{ type: 'text', text: '{}' }], stop_reason: 'end_turn',
       usage: { input_tokens: 20, output_tokens: 10 } });
     const client = new NarrativeClient({ model: 'claude-sonnet-5', apiKey: 'test-key', maxTokens: 8192, reasoning: 'off' });
-    await client.complete({ system: 'instructions', user: 'timeline' });
+    await client.complete({ run: NOOP_RUN, system: 'instructions', user: 'timeline' });
     expect(JSON.stringify(create.mock.calls[0]?.[0])).not.toContain('cache_control');
   });
 });

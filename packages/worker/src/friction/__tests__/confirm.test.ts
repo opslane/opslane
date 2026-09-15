@@ -1,3 +1,4 @@
+import { NOOP_RUN } from '../../run-logs/handle.js';
 import { describe, expect, it, vi } from 'vitest';
 import { confirmRead, PROVENANCE_IN_NOTE, ticketSteps } from '../confirm.js';
 import { judgeOneFix } from '../one-fix.js';
@@ -44,7 +45,7 @@ describe('confirmation read', () => {
           framesOk: true,
           signals: [{ id: 's1', what: 'Error' }],
         },
-        meter,
+        meter, NOOP_RUN
       ),
     ).toEqual(valid);
     expect(meter.add).toHaveBeenCalledOnce();
@@ -61,7 +62,7 @@ describe('confirmation read', () => {
           framesOk: true,
           signals: [{ id: 's1', what: 'Error' }],
         },
-        meter,
+        meter, NOOP_RUN
       ),
     ).toHaveProperty('invalid');
   });
@@ -82,7 +83,7 @@ describe('confirmation read', () => {
         }),
       };
       expect(
-        await confirmRead(client, { ticket, timelineText: 'L1: Click', frames: [frame], framesOk: true, signals: [{ id: 's1', what: 'Error' }] }, meter),
+        await confirmRead(client, { ticket, timelineText: 'L1: Click', frames: [frame], framesOk: true, signals: [{ id: 's1', what: 'Error' }] }, meter, NOOP_RUN),
       ).toHaveProperty('invalid');
     }
     const plain = {
@@ -93,7 +94,7 @@ describe('confirmation read', () => {
       }),
     };
     expect(
-      await confirmRead(plain, { ticket, timelineText: 'L1: Click', frames: [frame], framesOk: true, signals: [{ id: 's1', what: 'Error' }] }, meter),
+      await confirmRead(plain, { ticket, timelineText: 'L1: Click', frames: [frame], framesOk: true, signals: [{ id: 's1', what: 'Error' }] }, meter, NOOP_RUN),
     ).toMatchObject({ outcome: 'confirmed', evidenceLines: ['L1'] });
   });
   it('shares one provenance pattern with the Go digest validator', () => {
@@ -107,7 +108,7 @@ describe('confirmation read', () => {
       confirmRead(
         { modelName: 'test', complete: vi.fn().mockResolvedValue(response({ ...valid, note })) },
         { ticket, timelineText: 'L1: Click Save', frames: [frame], framesOk: true, signals: [{ id: 's1', what: 'Error' }] },
-        { add: vi.fn() },
+        { add: vi.fn() }, NOOP_RUN
       );
     expect(await read('a'.repeat(301))).toHaveProperty('invalid');
     expect(await read('a'.repeat(300))).toMatchObject({ outcome: 'confirmed' });
@@ -129,7 +130,7 @@ describe('confirmation read', () => {
         inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, stopReason: 'end_turn',
       }),
     };
-    const result = await confirmRead(client, { ticket, timelineText: 'L1: Click', frames: [frame], framesOk: true, assetsMissing: true, signals: [] }, meter);
+    const result = await confirmRead(client, { ticket, timelineText: 'L1: Click', frames: [frame], framesOk: true, assetsMissing: true, signals: [] }, meter, NOOP_RUN);
     expect(result).toMatchObject({ outcome: 'refuted' });
     const call = client.complete.mock.calls[0]![0] as { system: string };
     expect(call.system).toMatch(/external stylesheets, fonts or images/);
@@ -151,7 +152,7 @@ describe('confirmation read', () => {
             framesOk,
             signals: [],
           },
-          { add: vi.fn() },
+          { add: vi.fn() }, NOOP_RUN
         ),
       ).toMatchObject({ outcome: 'unavailable' });
     expect(client.complete).not.toHaveBeenCalled();
@@ -174,7 +175,7 @@ describe('confirmation read', () => {
           framesOk: true,
           signals: [{ id: 's1', what: 'Error' }],
         },
-        meter,
+        meter, NOOP_RUN
       ),
     ).toHaveProperty('invalid');
     expect(meter.add).toHaveBeenCalledOnce();
@@ -210,7 +211,7 @@ describe('confirmation read', () => {
             framesOk: true,
             signals: [{ id: 's1', what: 'Error' }],
           },
-          meter,
+          meter, NOOP_RUN
         ),
       ).toHaveProperty('invalid');
       expect(meter.add).toHaveBeenCalledOnce();
@@ -236,7 +237,7 @@ describe('confirmation read', () => {
             framesOk: true,
             signals: [{ id: 's1', what: 'Error' }],
           },
-          { add: vi.fn() },
+          { add: vi.fn() }, NOOP_RUN
         ),
       ).toHaveProperty('invalid');
     }
@@ -253,12 +254,12 @@ describe('one fix classification', () => {
         ),
     };
     const meter = { add: vi.fn() };
-    expect(await judgeOneFix(client, ticket, ticket, meter)).toEqual({
+    expect(await judgeOneFix(client, ticket, ticket, meter, NOOP_RUN)).toEqual({
       oneFix: true,
       reason: 'Same failing handler',
     });
     client.complete.mockResolvedValue(response({ oneFix: 'yes', reason: '' }));
-    expect(await judgeOneFix(client, ticket, ticket, meter)).toHaveProperty(
+    expect(await judgeOneFix(client, ticket, ticket, meter, NOOP_RUN)).toHaveProperty(
       'invalid',
     );
     expect(meter.add).toHaveBeenCalledTimes(2);
