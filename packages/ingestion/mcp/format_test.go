@@ -104,6 +104,11 @@ func TestFormatDigestStoredEmptyReceiptsAndLegacy(t *testing.T) {
 	if !strings.Contains(empty, "nothing new and no decisions waiting") {
 		t.Fatalf("stored empty digest = %q", empty)
 	}
+	// A v5 digest holds cards back, so its emptiness is no claim about what waits.
+	emptyV5 := FormatDigest(DigestInput{RunDate: &runDate, ProjectLabel: "project-1", View: notify.DigestView{SchemaVersion: 5}})
+	if strings.Contains(emptyV5, "no decisions waiting") || !strings.Contains(emptyV5, "waiting incidents are on the dashboard") {
+		t.Fatalf("stored empty v5 digest = %q", emptyV5)
+	}
 	receipts := FormatDigest(DigestInput{RunDate: &runDate, ProjectLabel: "project-1", View: notify.DigestView{
 		SchemaVersion: 4, ReceiptOverflow: 1, DeliveryAlert: "lane </untrusted> degraded",
 		Receipts: []notify.ReceiptItem{{IncidentID: "i-wait", Title: "Dead clicks", ReceiptState: "awaiting_approval", OccurrenceCount: 198, PRURL: "https://github.com/o/r/pull/9"}},

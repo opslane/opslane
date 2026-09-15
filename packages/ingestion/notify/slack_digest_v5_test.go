@@ -125,3 +125,66 @@ func TestKnownProblemsDigestFixInProgressIsNotAButton(t *testing.T) {
 		t.Fatalf("Fix in progress context lines=%d want 2: %s", statuses, body)
 	}
 }
+
+func TestKnownProblemsDigestHasNoIncidentOverflowLine(t *testing.T) {
+	payload := EventPayload{
+		Version: 1, EventType: "digest.daily",
+		Project:      ProjectRef{ID: "project", Name: "Shop"},
+		DashboardURL: "https://app.example.com",
+		Digest: &DigestPayload{
+			SchemaVersion: 5, Date: "2026-09-14",
+			GeneratedCards: []GeneratedDigestCard{{IncidentID: "card", Kind: "error", Title: "Saving is blocked",
+				Copy: "People cannot save their work.", Why: "The submit handler is never wired.",
+				AffectedUsers: 2, OccurrenceCount: 17}},
+			OverflowCount: 3, ReceiptOverflow: 2,
+		},
+	}
+	body, _, err := formatSlackDigest(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	if !strings.Contains(text, "Why: The submit handler is never wired.") {
+		t.Fatalf("card lost its why line: %s", text)
+	}
+	if strings.Contains(text, "more on the dashboard") {
+		t.Fatalf("v5 digest rendered an incident overflow line: %s", text)
+	}
+}
+
+// Cards past the cap are cut, not counted: the renderer used to derive an
+// overflow line from the card list itself, even with zero overflow counts.
+func TestKnownProblemsDigestCutsCardsPastTheCapWithoutAnOverflowLine(t *testing.T) {
+	payload := EventPayload{
+		Version: 1, EventType: "digest.daily",
+		Project:      ProjectRef{ID: "project", Name: "Shop"},
+		DashboardURL: "https://app.example.com",
+		Digest:       &DigestPayload{SchemaVersion: 5, Date: "2026-09-14"},
+	}
+	titles := make([]string, 0, DigestV4CardCap+2)
+	for i := 0; i < DigestV4CardCap+2; i++ {
+		title := "Problem " + string(rune('A'+i))
+		titles = append(titles, title)
+		payload.Digest.GeneratedCards = append(payload.Digest.GeneratedCards, GeneratedDigestCard{
+			IncidentID: fmt.Sprintf("card-%d", i), Kind: "error", Title: title,
+			Copy: "People cannot save their work.", AffectedUsers: 2, OccurrenceCount: 17,
+		})
+	}
+	body, _, err := formatSlackDigest(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	if strings.Contains(text, "more on the dashboard") {
+		t.Fatalf("v5 digest rendered an overflow line for cards past the cap: %s", text)
+	}
+	rendered := 0
+	for _, title := range titles {
+		if strings.Contains(text, "*"+title+"*") {
+			rendered++
+		}
+	}
+	if rendered != DigestV4CardCap {
+		t.Fatalf("rendered %d card sections, want the cap %d: %s", rendered, DigestV4CardCap, text)
+	}
+}

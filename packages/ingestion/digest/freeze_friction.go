@@ -12,11 +12,11 @@ import (
 	"github.com/opslane/opslane/packages/ingestion/notify"
 )
 
-// selectOnCardCandidates is the ON lane, and the only one. Every incident that
-// awaits a human action becomes a candidate; nothing but a snooze or the cap
-// can remove it. publishable() decides whether it gets an authored card or its
-// mechanical receipt (NotCardEligible), never whether it appears at all — that
-// split is what closes the "actionable error vanished" defect.
+// selectOnCardCandidates is the ON lane, and the only one. Every waiting
+// incident that publishable() accepts becomes a candidate, and one it refuses is
+// ledgered not_publishable: the digest carries only incidents a reader can act
+// on, and the rest stay on the dashboard. Past that, nothing removes an incident
+// except a snooze, a missing waiting age, or the cap.
 //
 // The returned map holds the ledger reason for every candidate that did not
 // make the cut, so the freeze ledger accounts for all of them.
@@ -44,15 +44,20 @@ func selectOnCardCandidates(all []actionableCandidate, at time.Time) ([]Candidat
 			excluded[source.GroupID] = reasonMissingWaitingAge
 			continue
 		}
+		if !actionablePublishable(source) {
+			// Nothing a reader can act on yet: no validated cause, no PR to
+			// open. It stays on the dashboard and never reaches the digest.
+			excluded[source.GroupID] = reasonNotPublishable
+			continue
+		}
 		eligible = append(eligible, source)
 	}
 	// The ON lane's bound is the renderer's real Slack-block constraint, not the
 	// OFF receipts lane's product-era five: capping lower would hide waiting
-	// incidents the message has room for. Its ranking is eligibility first: the
-	// cap rations authored cards, so a diagnosed incident that can earn one is
-	// worth more of that budget than a louder incident that can only ever render
-	// a mechanical receipt.
-	selected, _ := selectOnCardEligibleFirst(eligible, notify.DigestV4CardCap)
+	// incidents the message has room for. Every eligible incident can earn a
+	// card, so the renderer's cap ranks by impact and still reserves a slot for
+	// the oldest waiting incident.
+	selected, _ := selectActionable(eligible, notify.DigestV4CardCap)
 	picked := make(map[string]bool, len(selected))
 	for _, source := range selected {
 		picked[source.GroupID] = true
@@ -92,7 +97,6 @@ func selectOnCardCandidates(all []actionableCandidate, at time.Time) ([]Candidat
 			Accounts: source.Accounts, LastSeen: source.LastSeen, RoutePurpose: source.RoutePurpose,
 			DecidedAt: decidedAt, ValidAction: action, SpellStartedAt: source.ActionableSince,
 			HasValidatedDiagnosis: source.HasValidatedDiagnosis, Label: "new",
-			NotCardEligible: !actionablePublishable(source),
 		}
 		if f := source.TicketFacts; f != nil {
 			candidate.LatestAttemptID = f.LatestAttemptID
@@ -112,6 +116,12 @@ func selectOnCardCandidates(all []actionableCandidate, at time.Time) ([]Candidat
 			candidate.FixSubstate = f.FixSubstate
 			candidate.HasValidatedDiagnosis = true
 			candidate.ValidAction = ticketDigestAction(f.FixSubstate)
+		}
+		if source.TicketFacts == nil {
+			// The writer writes why only from a supplied why. A non-ticket
+			// incident's cause is its root cause, the same source the worker's
+			// grounding and checkUnifiedWrittenCard check the sentence against.
+			candidate.Why = source.RootCause
 		}
 		if source.ObservationQuote != "" {
 			candidate.FrictionCategory = source.SignalType
@@ -156,10 +166,9 @@ func attachCachedCard(ctx context.Context, tx pgx.Tx, projectID string, candidat
 
 // writeUnifiedFreezeLedger records one row per considered incident. In ON every
 // candidate is accounted for: included, or excluded with the reason
-// selectOnCardCandidates assigned. A candidate that can never earn an authored
-// card is stamped receipt_fallback here, at freeze, so no model call is spent
-// on it — and its ledger reason distinguishes that from a card that failed
-// validation later.
+// selectOnCardCandidates assigned. An incident that can never earn an authored
+// card is excluded here as not_publishable, so its ledger reason distinguishes
+// it from a card held back at validation later.
 func writeUnifiedFreezeLedger(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -191,7 +200,6 @@ func writeUnifiedFreezeLedger(
 	fingerprints := make([]string, 0, count)
 	spells := make([]*time.Time, 0, count)
 	cacheHits := make([]*bool, 0, count)
-	renderModes := make([]*string, 0, count)
 	for _, source := range sorted {
 		candidate, included := selectedByID[source.GroupID]
 		outcome, reason := "excluded", excluded[source.GroupID]
@@ -206,12 +214,6 @@ func writeUnifiedFreezeLedger(
 		detailValues := map[string]any{
 			"evaluated_at": evaluatedAt.Format(time.RFC3339Nano),
 			"kind":         source.Kind, "status": source.Status, "unified_cards_mode": mode,
-		}
-		var renderMode *string
-		if included && candidate.NotCardEligible {
-			fallback := "receipt_fallback"
-			renderMode = &fallback
-			detailValues["receipt_reason"] = "never_card_eligible"
 		}
 		details, err := json.Marshal(detailValues)
 		if err != nil {
@@ -232,22 +234,21 @@ func writeUnifiedFreezeLedger(
 		fingerprints = append(fingerprints, fingerprint)
 		spells = append(spells, spell)
 		cacheHits = append(cacheHits, cacheHit)
-		renderModes = append(renderModes, renderMode)
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO digest_run_candidate_evaluations
 		(digest_run_id,error_group_id,outcome,primary_reason_code,details,
-		 input_fingerprint,spell_started_at,cache_hit,phase,render_mode)
+		 input_fingerprint,spell_started_at,cache_hit,phase)
 		SELECT $1,ids.value::uuid,($3::text[])[ids.ordinality],
 		       ($4::text[])[ids.ordinality],(($5::text[])[ids.ordinality])::jsonb,
 		       NULLIF(($6::text[])[ids.ordinality],''),($7::timestamptz[])[ids.ordinality],
-		       ($8::boolean[])[ids.ordinality],'freeze',($9::text[])[ids.ordinality]
+		       ($8::boolean[])[ids.ordinality],'freeze'
 		  FROM unnest($2::text[]) WITH ORDINALITY AS ids(value,ordinality)
 		ON CONFLICT (digest_run_id,error_group_id) DO UPDATE SET
 		 outcome=EXCLUDED.outcome,primary_reason_code=EXCLUDED.primary_reason_code,
 		 details=EXCLUDED.details,input_fingerprint=EXCLUDED.input_fingerprint,
 		 spell_started_at=EXCLUDED.spell_started_at,cache_hit=EXCLUDED.cache_hit,
-		 phase='freeze',render_mode=EXCLUDED.render_mode`,
-		runID, groupIDs, outcomes, reasons, detailsList, fingerprints, spells, cacheHits, renderModes); err != nil {
+		 phase='freeze'`,
+		runID, groupIDs, outcomes, reasons, detailsList, fingerprints, spells, cacheHits); err != nil {
 		return fmt.Errorf("write unified freeze ledger: %w", err)
 	}
 	return nil
