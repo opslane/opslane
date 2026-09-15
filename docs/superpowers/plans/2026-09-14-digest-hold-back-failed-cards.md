@@ -6,7 +6,7 @@
 
 **Architecture:** Freeze stops admitting incidents that `publishable()` refuses, and it gives error candidates an explicit `why`. Validation holds back every card that fails its checks or that the writer deferred, ledgering it as excluded with reason `card_held_back` instead of building a receipt. A database failure returns a retryable error, which leaves the run `written`, so the scheduler revalidates the same writer payload on its next tick. A run with no card to send finishes `delivered`, storing its zero-card payload, and writes no outbox event, so no Slack message goes out. The v5 Slack renderer drops the incident overflow line. The worker prompt tells the model to write `why` whenever one is supplied.
 
-**Tech Stack:** Go 1.24 + pgx (`packages/ingestion`); Node 22 + TypeScript + Vitest (`packages/worker`).
+**Tech Stack:** Go 1.25 + pgx (`packages/ingestion`); Node 22 + TypeScript + Vitest (`packages/worker`).
 
 **Spec:** GitHub issue #496, plus the decisions below from a grilling session with the maintainer on 2026-09-14. They override the issue's options and its acceptance criteria.
 

@@ -176,13 +176,14 @@ func ValidateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string, s
 // rollbacks such as serialization failures and deadlocks (40), exhausted
 // resources (53), operator intervention such as a shutdown (57), and network
 // timeouts or a dropped connection (EOF). Everything else, including a
-// malformed payload, a query bug, or a protocol violation (08P01, which a
-// client bug reproduces on every retry), fails the run so the writer gets
-// another turn.
+// malformed payload, a query bug, a protocol violation (08P01, which a
+// client bug reproduces on every retry), or a canceled query (57014, which a
+// statement timeout reproduces on every retry), fails the run so the writer
+// gets another turn.
 func transientDatabaseError(err error) bool {
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && len(pgErr.Code) >= 2 {
-		if pgErr.Code == "08P01" {
+		if pgErr.Code == "08P01" || pgErr.Code == "57014" {
 			return false
 		}
 		switch pgErr.Code[:2] {

@@ -24,6 +24,7 @@ func TestTransientDatabaseErrorClassification(t *testing.T) {
 		{name: "protocol violation reproduces on retry", err: &pgconn.PgError{Code: "08P01"}, want: false},
 		{name: "too many connections", err: &pgconn.PgError{Code: "53300"}, want: true},
 		{name: "admin shutdown", err: &pgconn.PgError{Code: "57P01"}, want: true},
+		{name: "statement timeout repeats on every retry", err: &pgconn.PgError{Code: "57014"}, want: false},
 		{name: "dropped connection at commit", err: fmt.Errorf("commit digest publication: %w", io.EOF), want: true},
 		{name: "truncated response", err: io.ErrUnexpectedEOF, want: true},
 		{name: "deadline", err: context.DeadlineExceeded, want: true},
