@@ -15,7 +15,7 @@ describe('NarrativeClient.complete', () => {
   ])('preserves cache accounting from provider usage %j', async (cacheUsage, read, write) => {
     create.mockResolvedValue({ content: [{ type: 'text', text: '{}' }], stop_reason: 'end_turn',
       usage: { input_tokens: 20, output_tokens: 10, ...cacheUsage } });
-    const client = new NarrativeClient({ model: 'claude-sonnet-5', apiKey: 'test-key', maxTokens: 8192, reasoning: 'off' });
+    const client = new NarrativeClient({ model: 'claude-sonnet-5', apiKey: 'test-key', maxTokens: 8192 });
     expect(await client.complete({ system: 'instructions', user: 'timeline' })).toEqual({
       text: '{}', stopReason: 'end_turn', inputTokens: 20, outputTokens: 10,
       cacheReadTokens: read, cacheWriteTokens: write,
@@ -24,7 +24,7 @@ describe('NarrativeClient.complete', () => {
 
   it('forwards job cancellation to the provider', async () => {
     create.mockResolvedValue({content:[],usage:{},stop_reason:'end_turn'});
-    const client = new NarrativeClient({model:'claude-sonnet-5',apiKey:'test',maxTokens:8192,reasoning:'off'});
+    const client = new NarrativeClient({model:'claude-sonnet-5',apiKey:'test',maxTokens:8192});
     const signal = new AbortController().signal;
     await client.complete({system:'instructions',user:'evidence',signal});
     expect(create.mock.calls[0]?.[1]).toEqual({signal});
@@ -40,7 +40,7 @@ describe('NarrativeClient.complete', () => {
   it('sends no cache_control, so the counts above are zero against the real API', async () => {
     create.mockResolvedValue({ content: [{ type: 'text', text: '{}' }], stop_reason: 'end_turn',
       usage: { input_tokens: 20, output_tokens: 10 } });
-    const client = new NarrativeClient({ model: 'claude-sonnet-5', apiKey: 'test-key', maxTokens: 8192, reasoning: 'off' });
+    const client = new NarrativeClient({ model: 'claude-sonnet-5', apiKey: 'test-key', maxTokens: 8192 });
     await client.complete({ system: 'instructions', user: 'timeline' });
     expect(JSON.stringify(create.mock.calls[0]?.[0])).not.toContain('cache_control');
   });
@@ -68,5 +68,28 @@ describe('narrativeClientFromEnv', () => {
     vi.stubEnv('NARRATIVE_API_KEY','');
     vi.stubEnv('ANTHROPIC_API_KEY','test-key');
     expect(narrativeClientFromEnv()).toBeInstanceOf(NarrativeClient);
+  });
+
+  it('ignores the removed NARRATIVE_REASONING switch and sends no thinking field or thinking budget', async () => {
+    vi.stubEnv('ANTHROPIC_API_KEY', 'test-key');
+    vi.stubEnv('NARRATIVE_REASONING', 'on');
+    create.mockResolvedValue({ content: [], usage: {}, stop_reason: 'end_turn' });
+    await narrativeClientFromEnv()!.complete({ system: 's', user: 'u' });
+    const body = create.mock.calls.at(-1)![0] as Record<string, unknown>;
+    expect(body).not.toHaveProperty('thinking');
+    expect(body['max_tokens']).toBe(8192);
+    expect(JSON.stringify(body)).not.toContain('budget_tokens');
+  });
+
+  it('raises the output limit to a caller minimum without lowering a larger configured one', async () => {
+    vi.stubEnv('ANTHROPIC_API_KEY', 'test-key');
+    create.mockResolvedValue({ content: [], usage: {}, stop_reason: 'end_turn' });
+    await narrativeClientFromEnv({ minMaxTokens: 16_000 })!.complete({ system: 's', user: 'u' });
+    const raised = create.mock.calls.at(-1)![0] as Record<string, unknown>;
+    expect(raised['max_tokens']).toBe(16_000);
+    expect(raised).not.toHaveProperty('thinking');
+    vi.stubEnv('NARRATIVE_MAX_TOKENS', '20000');
+    await narrativeClientFromEnv({ minMaxTokens: 16_000 })!.complete({ system: 's', user: 'u' });
+    expect((create.mock.calls.at(-1)![0] as Record<string, unknown>)['max_tokens']).toBe(20_000);
   });
 });

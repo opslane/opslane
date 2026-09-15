@@ -45,7 +45,6 @@ export function frictionMatchDepsFromEnv(): MatchJobDeps {
         apiKey,
         maxTokens,
         timeoutMs: modelTimeoutMs(maxTokens),
-        reasoning: 'off',
         baseURL:
           process.env['NARRATIVE_BASE_URL'] ||
           process.env['ANTHROPIC_BASE_URL'] ||

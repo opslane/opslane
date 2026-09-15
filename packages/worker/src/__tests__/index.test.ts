@@ -205,7 +205,7 @@ const { cloneRepo } = await import('../repo-clone.js');
 const { createReadOnlyCheckout } = await import('../harness/readonly-sandbox.js');
 const { runPipeline } = await import('../pipeline.js');
 const { investigateError } = await import('../investigate.js');
-const { mapDbSignals, processJobInner, processInvestigateJob, processFixJob, processSessionAnalysisJob } = await import('../index.js');
+const { mapDbSignals, processJob, processJobInner, jobCounters, processInvestigateJob, processFixJob, processSessionAnalysisJob, processSessionNarrateJob, processSessionVerifyFramesJob } = await import('../index.js');
 const { gatherFrictionEvidence } = await import('../friction/friction-evidence.js');
 const { investigateFriction } = await import('../friction/investigate-friction.js');
 const { readChunksBounded } = await import('../friction/chunk-reader.js');
@@ -1760,5 +1760,36 @@ describe('session_analysis handler', () => {
     expect(db.setSessionAnalysisStatus).toHaveBeenLastCalledWith(
       'session-1', 'proj-1', 'analysis_failed', undefined, job,
     );
+  });
+});
+
+describe('processJob failed-job counter', () => {
+  it.each(['JobCompletedInTransaction', 'JobRescheduledError'])('counts a job that threw %s as processed, not failed, and counts real failures as failed', async (name) => {
+    const { withJobTrace } = await import('../tracing.js');
+    vi.mocked(withJobTrace).mockImplementation((_job, fn) => fn());
+    const { processFrictionReconcile } = await import('../friction/reconcile-job.js');
+    const job = { ...makeJob(), jobType: 'friction_reconcile' as const, errorGroupId: null, ticketId: 'ticket-1' };
+    const before = jobCounters();
+
+    vi.mocked(processFrictionReconcile).mockRejectedValueOnce(
+      Object.assign(new Error('finished'), { name }),
+    );
+    await expect(processJob(job, new AbortController().signal)).rejects.toMatchObject({ name });
+    expect(jobCounters()).toEqual({ processed: before.processed + 1, failed: before.failed });
+
+    vi.mocked(processFrictionReconcile).mockRejectedValueOnce(new Error('boom'));
+    await expect(processJob(job, new AbortController().signal)).rejects.toThrow('boom');
+    expect(jobCounters()).toEqual({ processed: before.processed + 1, failed: before.failed + 1 });
+  });
+});
+
+describe('narrative client output limit per call site', () => {
+  it('builds the frame verification client with at least 16,000 output tokens and narration with the configured limit', async () => {
+    const { narrativeClientFromEnv } = await import('../narrative/client.js');
+    const job = { ...makeJob(), errorGroupId: null, sessionId: 'session-1' };
+    await processSessionNarrateJob(job as never, new AbortController().signal);
+    expect(narrativeClientFromEnv).toHaveBeenLastCalledWith();
+    await processSessionVerifyFramesJob(job as never, new AbortController().signal).catch(() => undefined);
+    expect(narrativeClientFromEnv).toHaveBeenLastCalledWith({ minMaxTokens: 16_000 });
   });
 });

@@ -148,7 +148,7 @@ describeLive('known problems — real recording pipeline', () => {
     const address = server.address();
     if (!address || typeof address === 'string') throw new Error('model stub failed to bind');
     narrativeClient = new p.client.NarrativeClient({ model: 'e2e-stub', apiKey: 'e2e',
-      baseURL: `http://127.0.0.1:${address.port}`, maxTokens: 2048, reasoning: 'off' });
+      baseURL: `http://127.0.0.1:${address.port}`, maxTokens: 2048 });
   }, 60_000);
 
   afterAll(async () => {

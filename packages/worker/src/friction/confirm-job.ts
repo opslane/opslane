@@ -4,15 +4,18 @@ import * as db from '../db.js';
 import { NarrativeClient } from '../narrative/client.js';
 import type { CompactTimeline } from '../narrative/emit.js';
 import { readChunksBounded } from './chunk-reader.js';
-import { captureFrames } from '../narrative/frames/capture.js';
+import { captureFrames, isReplayCrash } from '../narrative/frames/capture.js';
 import { PhaseMeter } from '../metered.js';
 import { logger, safeErrorMessage } from '../logger.js';
 import {
   confirmRead,
   ticketSteps,
+  unavailableCheck,
+  type ConfirmAnswer,
   type ConfirmClient,
+  type ConfirmInvalidRule,
   type ConfirmMeter,
-  type ConfirmResult,
+  type UnavailableReason,
 } from './confirm.js';
 import { judgeOneFix } from './one-fix.js';
 import * as store from './tickets-db.js';
@@ -49,6 +52,8 @@ export interface TransitionPlan {
   targetId: string | null;
   /** The one-fix gate answered for every planned neighbor. */
   judged: boolean;
+  /** The gate answered invalidly twice; the deferral spends a fold retry. */
+  gateInvalid: boolean;
 }
 /** Production transition table, shared with reconciliation and property tests. */
 export function confirmationTransition(
@@ -126,6 +131,7 @@ export async function prepareConfirmationTransition(
     neighbors: null,
     targetId: null,
     judged: false,
+    gateInvalid: false,
   };
   // Plan neighbors for every classifiable status, not only when the preview
   // passes: the locked cohort can pass when the preview did not, and a missing
@@ -155,8 +161,18 @@ export async function prepareConfirmationTransition(
       let result = await judgeOneFix(client, ticket, neighbor, meter);
       if ('invalid' in result)
         result = await judgeOneFix(client, ticket, neighbor, meter);
-      if ('invalid' in result)
-        throw new Error(`One-fix classification invalid: ${result.invalid}`);
+      if ('invalid' in result) {
+        // Publishing past an unanswered gate could ship a duplicate, and
+        // throwing dead-lettered the batch with its valid checks. An unjudged
+        // plan makes applyConfirmationTransition ask reconciliation instead.
+        logger.warn('One-fix classification invalid after retry; deferring publication to reconciliation', {
+          ticket_id: ticket.id, candidate_id: neighbor.id, reason: result.invalid,
+        });
+        plan.judged = false;
+        plan.gateInvalid = true;
+        plan.targetId = null;
+        return plan;
+      }
       // Every one-fix answer is kept as a fact so a duplicate card can be traced
       // to the question that let it through, not guessed at afterwards.
       await store.recordGateDecision(database, {
@@ -211,9 +227,13 @@ export async function applyConfirmationTransition(
       }
       // The preview missed the bar, so the gate was never asked about these
       // candidates. Replan from the passing cohort instead of publishing past them.
+      // A gate that answered invalidly spends a fold retry, so FOLD_RETRY_LIMIT
+      // bounds reconciliation instead of billing two gate calls every tick.
       if (!plan.judged && snapshot.length) {
         await tx.query(
-          `UPDATE friction_tickets SET reconcile_needed=true WHERE id=$1`,
+          plan.gateInvalid
+            ? `UPDATE friction_tickets SET reconcile_needed=true,fold_retries=fold_retries+1 WHERE id=$1`
+            : `UPDATE friction_tickets SET reconcile_needed=true WHERE id=$1`,
           [ticket.id],
         );
         return;
@@ -414,7 +434,7 @@ export async function processFrictionConfirm(
       if (staged.has(member.sessionId)) continue;
       await check();
       if (!(await store.batchIntact(pool, batch))) break;
-      let result: ConfirmResult;
+      let unavailable: UnavailableReason | null = null;
       let frames: Awaited<ReturnType<typeof captureFrames>> = {
         frames: [],
         assetsMissing: true,
@@ -447,6 +467,7 @@ export async function processFrictionConfirm(
           { ...context, error: safeErrorMessage(error) },
         );
         if (!missing) throw error;
+        unavailable = 'recording_missing';
       }
       if (recording) {
         await check();
@@ -454,11 +475,14 @@ export async function processFrictionConfirm(
           frames = await deps.capture(recording.envelopes, recording.offsetsMs, {
             maxOffsets: 4,
           });
+          if (!frames.frames.length) unavailable = 'no_frames';
         } catch (error) {
           signal.throwIfAborted();
           if (error instanceof db.LeaseLostError) throw error;
+          unavailable = isReplayCrash(error) ? 'replay_crashed' : 'capture_failed';
           logger.warn('Replay capture failed for confirmation', {
             ...context,
+            unavailable_reason: unavailable,
             error: safeErrorMessage(error),
           });
         }
@@ -466,8 +490,9 @@ export async function processFrictionConfirm(
       // The daily budget counts strong-model reads. A capture that produced no
       // frames is staged as unavailable without a model call, so it must not
       // consume a unit; reserving before capture let 94 unavailable attempts
-      // exhaust a day's budget in a production replay.
-      if (frames.frames.length > 0) {
+      // exhaust a day's budget in a production replay. One unit covers the read
+      // and its single retry.
+      if (!unavailable) {
         const budget = await transaction(job, signal, (tx) =>
           store.reserveConfirmationBudget(tx, job.projectId, deps.dailyCap),
         );
@@ -496,17 +521,46 @@ export async function processFrictionConfirm(
         assetsMissing: frames.assetsMissing,
         signals,
       };
-      result = await confirmRead(client, input, meter);
-      if ('invalid' in result) result = await confirmRead(client, input, meter);
-      if ('invalid' in result)
-        throw new Error(`Confirmation invalid: ${result.invalid}`);
-      const validResult = result;
+      let answer: ConfirmAnswer;
+      let rule: ConfirmInvalidRule | undefined;
+      let stopReason: string | undefined;
+      if (unavailable) {
+        answer = unavailableCheck(unavailable);
+      } else {
+        let result = await confirmRead(client, input, meter);
+        // One blind retry: the same request again. A refusal is not retried,
+        // since re-sending the request the model just declined is declined again.
+        if ('invalid' in result && result.invalid !== 'refusal') {
+          logger.warn('Confirmation answer invalid; retrying once', {
+            ...context, rule: result.invalid, stop_reason: result.stopReason,
+          });
+          result = await confirmRead(client, input, meter);
+        }
+        if ('invalid' in result) {
+          // Throwing here dead-lettered the job and discarded every valid check
+          // in its batch. Unavailable keeps them and retries this recording
+          // after 1, 6 and 24 hours; it never counts toward the publish bar.
+          unavailable = 'invalid_answer';
+          rule = result.invalid;
+          stopReason = result.stopReason;
+          answer = unavailableCheck(unavailable);
+        } else {
+          answer = result;
+        }
+      }
+      // Every unavailable check logs its reason here (D3), including captures
+      // that already warned with their error.
+      if (unavailable)
+        logger.warn('Confirmation check staged unavailable', {
+          ...context, unavailable_reason: unavailable,
+          ...(rule ? { rule } : {}), ...(stopReason ? { stop_reason: stopReason } : {}),
+        });
       const intact = await transaction(job, signal, async (tx) => {
         // Lock the ticket before checking the manifest to serialize with purges.
         await store.getTicket(tx, job.projectId, job.ticketId, true);
         if (!(await store.batchIntact(tx, batch))) return false;
         await store.stageCheck(tx, batch.id, {
-          ...validResult,
+          ...answer,
           sessionId: member.sessionId,
           framesOk: input.framesOk,
           frameManifest: frames.frames.map(({ offsetMs, pair }) => ({
@@ -580,28 +634,24 @@ export async function processFrictionConfirm(
 export function frictionConfirmDepsFromEnv(): ConfirmJobDeps {
   const modelName = process.env['FRICTION_CONFIRM_MODEL'] || 'claude-sonnet-5';
   const cap = Number(process.env['FRICTION_CONFIRM_DAILY_CAP'] ?? 2000);
+  const provider = (): NarrativeClient => {
+    const apiKey = process.env['NARRATIVE_API_KEY'] || process.env['ANTHROPIC_API_KEY'];
+    if (!apiKey) throw new Error('Confirmation requires NARRATIVE_API_KEY or ANTHROPIC_API_KEY');
+    return new NarrativeClient({
+      model: modelName,
+      apiKey,
+      // Thinking stays at the model's default because disabling it lowered
+      // accuracy on labelled recordings (#511). Adaptive thinking spent the old
+      // 8,192-token limit on 22 confirmation answers; the larger limit removes
+      // the cut-offs, and the longer timeout covers the longer replies.
+      maxTokens: 16_000,
+      timeoutMs: 300_000,
+      baseURL: process.env['NARRATIVE_BASE_URL'] || process.env['ANTHROPIC_BASE_URL'] || undefined,
+    });
+  };
   return {
-    client: {
-      modelName,
-      complete: async (args) => {
-        const apiKey =
-          process.env['NARRATIVE_API_KEY'] || process.env['ANTHROPIC_API_KEY'];
-        if (!apiKey)
-          throw new Error(
-            'Confirmation requires NARRATIVE_API_KEY or ANTHROPIC_API_KEY',
-          );
-        return new NarrativeClient({
-          model: modelName,
-          apiKey,
-          maxTokens: 8192,
-          reasoning: 'off',
-          baseURL:
-            process.env['NARRATIVE_BASE_URL'] ||
-            process.env['ANTHROPIC_BASE_URL'] ||
-            undefined,
-        }).complete(args);
-      },
-    },
+    // Confirmation and the one-fix gate share these settings.
+    client: { modelName, complete: async (args) => provider().complete(args) },
     dailyCap: Number.isSafeInteger(cap) && cap >= 0 ? cap : 2000,
     capture: captureFrames,
     loadRecording: async (sessionId, projectId, signalIds) => {

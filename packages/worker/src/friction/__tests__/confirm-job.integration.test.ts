@@ -32,10 +32,13 @@ import {
   prepareConfirmationTransition,
   applyConfirmationTransition,
   frictionConfirmDepsFromEnv,
+  FOLD_RETRY_LIMIT,
   RecordingUnavailableError,
   type ConfirmJobDeps,
   type TransitionPlan,
 } from '../confirm-job.js';
+import { UNAVAILABLE_NOTES } from '../confirm.js';
+import { ReplayCrashedError } from '../../narrative/frames/capture.js';
 import { purgeDiagnosisDecisions } from '../../__tests__/purge-diagnosis-decisions.js';
 import { purgeJobUsage } from '../../__tests__/purge-job-usage.js';
 const describeDb = process.env['DATABASE_URL'] ? describe : describe.skip;
@@ -193,6 +196,11 @@ describeDb('confirmation job', () => {
       client: {
         modelName: 'test',
         complete: async ({ user }) => {
+          if (user.includes('PROBLEM_A_START'))
+            return {
+              text: JSON.stringify({ oneFix: false, reason: 'Different controls.' }),
+              inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0, stopReason: 'end_turn',
+            };
           const id = /"id":"([a-f0-9-]{36})"/.exec(user)![1];
           return {
             text: JSON.stringify({
@@ -1453,12 +1461,15 @@ describeDb('confirmation job', () => {
       (await pool.query(`SELECT outcome FROM friction_check_attempts WHERE ticket_id=$1 ORDER BY outcome`, [t.id])).rows,
     ).toEqual([{ outcome: 'confirmed' }, { outcome: 'unavailable' }]);
   });
-  it('stages unavailable capture failures and schedules only the due retry', async () => {
+  it.each([
+    ['a capture failure', () => new Error('Replay unavailable'), UNAVAILABLE_NOTES.capture_failed],
+    ['a replay crash', () => new ReplayCrashedError('replay renderer crashed: Target crashed'), UNAVAILABLE_NOTES.replay_crashed],
+  ])('stages %s as unavailable with its reason and schedules only the due retry', async (_case, failure, note) => {
     const t = await ticket();
     await matches(t, 3);
     const dependencies = deps([]);
     dependencies.capture = async () => {
-      throw new Error('Replay unavailable');
+      throw failure();
     };
     await expect(
       processFrictionConfirm(
@@ -1471,6 +1482,14 @@ describeDb('confirmation job', () => {
       counted: 0,
       confirmed: 0,
     });
+    expect(
+      (
+        await pool.query(
+          'SELECT outcome,note FROM friction_check_attempts WHERE ticket_id=$1',
+          [t.id],
+        )
+      ).rows,
+    ).toEqual(Array.from({ length: 3 }, () => ({ outcome: 'unavailable', note })));
     expect(
       (
         await pool.query(
@@ -1945,10 +1964,10 @@ describeDb('confirmation job', () => {
     const job = await claim(t);
     const dependencies = deps([]);
     const complete = dependencies.client.complete;
-    let calls = 0;
+    const requests: unknown[] = [];
     dependencies.client.complete = async (args) => {
-      calls++;
-      if (calls === 1)
+      requests.push(args);
+      if (requests.length === 1)
         return {
           text: JSON.stringify({
             outcome: ['confirmed'],
@@ -1968,7 +1987,9 @@ describeDb('confirmation job', () => {
     await expect(
       processFrictionConfirm(job, dependencies, new AbortController().signal),
     ).rejects.toMatchObject({ name: 'JobCompletedInTransaction' });
-    expect(calls).toBe(4);
+    expect(requests).toHaveLength(4);
+    // The retry is blind: the same request again, with no rejected answer replayed.
+    expect(requests[1]).toEqual(requests[0]);
     expect((await store.cohortStats(pool, t)).confirmed).toBe(3);
     expect(
       (
@@ -1989,43 +2010,139 @@ describeDb('confirmation job', () => {
       ).rows,
     ).toEqual([{ input_tokens: 40 }]);
   });
-  it('meters invalid attempts but never stages them and propagates cancellation', async () => {
+  it('stages an answer still invalid after one blind retry as unavailable, retries it after an hour, and never counts it', async () => {
+    const t = await ticket();
+    await matches(t, 3);
+    const job = await claim(t);
+    const budgetUsed = async () => (await pool.query<{ used: number }>(
+      `SELECT coalesce(sum(used),0)::int AS used FROM friction_confirmation_budget WHERE project_id=$1`, [projectId])).rows[0]!.used;
+    const usedBefore = await budgetUsed();
+    const dependencies = deps([]);
+    let calls = 0;
+    dependencies.client.complete = async () => {
+      calls++;
+      return { text: JSON.stringify({ outcome: 'confirmed', evidenceLines: ['L1'], signalIds: [], note: 'Click Save; error appears.', costToUser: 'lost_time' }),
+        inputTokens: 7, outputTokens: 3, cacheReadTokens: 0, cacheWriteTokens: 0, stopReason: 'end_turn' };
+    };
+    const warn = vi.spyOn(logger, 'warn');
+    try {
+      await expect(processFrictionConfirm(job, dependencies, new AbortController().signal))
+        .rejects.toMatchObject({ name: 'JobCompletedInTransaction' });
+      expect(warn).toHaveBeenCalledWith(
+        'Confirmation check staged unavailable',
+        expect.objectContaining({ unavailable_reason: 'invalid_answer', rule: 'confirmed_without_signal' }),
+      );
+    } finally {
+      warn.mockRestore();
+    }
+    expect(calls).toBe(6);
+    const attempts = await pool.query(
+      `SELECT outcome,note FROM friction_check_attempts WHERE ticket_id=$1`, [t.id]);
+    expect(attempts.rows).toEqual(Array.from({ length: 3 }, () => ({
+      outcome: 'unavailable', note: UNAVAILABLE_NOTES.invalid_answer })));
+    expect((await pool.query(`SELECT status FROM friction_confirm_batches WHERE ticket_id=$1`, [t.id])).rows)
+      .toEqual([{ status: 'finalized' }]);
+    const retries = await pool.query<{ attempts: number; permanent: boolean; due_in_minutes: number }>(
+      `SELECT attempts,permanent,round(extract(epoch FROM retry_at-now())/60)::int AS due_in_minutes
+       FROM friction_unavailable_retries WHERE ticket_id=$1`, [t.id]);
+    expect(retries.rows).toHaveLength(3);
+    for (const row of retries.rows) {
+      expect(row).toMatchObject({ attempts: 1, permanent: false });
+      expect(row.due_in_minutes).toBeGreaterThanOrEqual(58);
+      expect(row.due_in_minutes).toBeLessThanOrEqual(60);
+    }
+    expect(await store.cohortStats(pool, t)).toMatchObject({ counted: 0, confirmed: 0 });
+    // D1: one budget unit per recording read; both calls of each read are metered.
+    expect(await budgetUsed()).toBe(usedBefore + 3);
+    expect((await pool.query(
+      `SELECT input_tokens::int, output_tokens::int FROM job_usage WHERE job_id=$1`, [job.id])).rows)
+      .toEqual([{ input_tokens: 42, output_tokens: 18 }]);
+  });
+
+  it('stages a refusal as unavailable after one call per recording, without a retry', async () => {
+    const t = await ticket();
+    await matches(t, 3);
+    const dependencies = deps([]);
+    let calls = 0;
+    dependencies.client.complete = async () => {
+      calls++;
+      return { text: '', inputTokens: 7, outputTokens: 3,
+        cacheReadTokens: 0, cacheWriteTokens: 0, stopReason: 'refusal' };
+    };
+    const warn = vi.spyOn(logger, 'warn');
+    try {
+      await expect(processFrictionConfirm(await claim(t), dependencies, new AbortController().signal))
+        .rejects.toMatchObject({ name: 'JobCompletedInTransaction' });
+      expect(warn).not.toHaveBeenCalledWith('Confirmation answer invalid; retrying once', expect.anything());
+      expect(warn).toHaveBeenCalledWith(
+        'Confirmation check staged unavailable',
+        expect.objectContaining({ unavailable_reason: 'invalid_answer', rule: 'refusal', stop_reason: 'refusal' }),
+      );
+    } finally {
+      warn.mockRestore();
+    }
+    expect(calls).toBe(3);
+    expect((await pool.query('SELECT outcome,note FROM friction_check_attempts WHERE ticket_id=$1', [t.id])).rows)
+      .toEqual(Array.from({ length: 3 }, () => ({ outcome: 'unavailable', note: UNAVAILABLE_NOTES.invalid_answer })));
+  });
+
+  it('stages a capture with no frames as unavailable without a model call or a budget unit', async () => {
+    const t = await ticket();
+    await matches(t, 3);
+    const budgetUsed = async () => (await pool.query<{ used: number }>(
+      `SELECT coalesce(sum(used),0)::int AS used FROM friction_confirmation_budget WHERE project_id=$1`, [projectId])).rows[0]!.used;
+    const usedBefore = await budgetUsed();
+    const dependencies = deps([]);
+    const complete = vi.fn(dependencies.client.complete);
+    dependencies.client.complete = complete;
+    dependencies.capture = async () => ({ frames: [], assetsMissing: false });
+    await expect(processFrictionConfirm(await claim(t), dependencies, new AbortController().signal))
+      .rejects.toMatchObject({ name: 'JobCompletedInTransaction' });
+    expect((await pool.query('SELECT outcome,note FROM friction_check_attempts WHERE ticket_id=$1', [t.id])).rows)
+      .toEqual(Array.from({ length: 3 }, () => ({ outcome: 'unavailable', note: UNAVAILABLE_NOTES.no_frames })));
+    expect(await budgetUsed()).toBe(usedBefore);
+    expect(complete).not.toHaveBeenCalled();
+  });
+
+  it('keeps the valid checks of a batch when one recording stays invalid', async () => {
     const t = await ticket();
     await matches(t, 3);
     const job = await claim(t);
     const dependencies = deps([]);
-    dependencies.client.complete = async () => ({
-      text: '{}',
-      inputTokens: 7,
-      outputTokens: 3,
-      cacheReadTokens: 0,
-      cacheWriteTokens: 0,
-      stopReason: 'end_turn',
-    });
-    await expect(
-      processFrictionConfirm(job, dependencies, new AbortController().signal),
-    ).rejects.toThrow('Confirmation invalid');
-    expect(
-      (
-        await pool.query(
-          'SELECT id FROM friction_check_attempts WHERE ticket_id=$1',
-          [t.id],
-        )
-      ).rows,
-    ).toEqual([]);
-    expect(
-      (
-        await pool.query(
-          'SELECT input_tokens::int FROM job_usage WHERE job_id=$1',
-          [job.id],
-        )
-      ).rows,
-    ).toEqual([{ input_tokens: 14 }]);
+    const answer = dependencies.client.complete;
+    let calls = 0;
+    dependencies.client.complete = async (args) => {
+      calls++;
+      const reply = await answer(args);
+      // Calls 2 and 3 are the second recording's read and its retry; both cite no signal.
+      return calls === 2 || calls === 3
+        ? { ...reply, text: JSON.stringify({ ...(JSON.parse(reply.text) as Record<string, unknown>), signalIds: [] }) }
+        : reply;
+    };
+    await expect(processFrictionConfirm(job, dependencies, new AbortController().signal))
+      .rejects.toMatchObject({ name: 'JobCompletedInTransaction' });
+    expect((await pool.query(
+      `SELECT outcome,count(*)::int AS n FROM friction_check_attempts WHERE ticket_id=$1 GROUP BY outcome ORDER BY outcome`,
+      [t.id])).rows).toEqual([{ outcome: 'confirmed', n: 2 }, { outcome: 'unavailable', n: 1 }]);
+    expect(await store.cohortStats(pool, t)).toMatchObject({ counted: 2, confirmed: 2 });
+  });
+
+  it('propagates cancellation during a confirmation read without a retry or a staged check', async () => {
+    const t = await ticket();
+    await matches(t, 3);
+    const job = await claim(t);
+    const dependencies = deps([]);
     const controller = new AbortController();
-    controller.abort(new Error('Canceled by user'));
-    await expect(
-      processFrictionConfirm(job, dependencies, controller.signal),
-    ).rejects.toThrow('Canceled by user');
+    let calls = 0;
+    dependencies.client.complete = async ({ signal }) => {
+      calls++;
+      controller.abort(new Error('Canceled by user'));
+      signal?.throwIfAborted();
+      throw new Error('the job wrapper must forward its abort signal');
+    };
+    await expect(processFrictionConfirm(job, dependencies, controller.signal)).rejects.toThrow('Canceled by user');
+    expect(calls).toBe(1);
+    expect((await pool.query('SELECT id FROM friction_check_attempts WHERE ticket_id=$1', [t.id])).rows).toEqual([]);
   });
   async function finalizeConfirmed(
     t: store.TicketRow,
@@ -2144,22 +2261,65 @@ describeDb('confirmation job', () => {
       ).rows,
     ).toEqual([{ candidate_id: neighbor.id, one_fix: true }]);
   });
+  it('leaves the plan unjudged when the one-fix gate answers invalidly twice, so reconciliation decides instead of the batch failing', async () => {
+    const neighbor = await publish(await ticket());
+    await embed(neighbor);
+    const source = await ticket();
+    await embed(source);
+    await finalizeConfirmed(source, await matches(source, 3));
+    const client = {
+      modelName: 'test',
+      complete: vi.fn(async () => ({
+        text: 'not json', inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, stopReason: 'end_turn',
+      })),
+    };
+    const plan = await prepareConfirmationTransition(
+      pool, (await store.getTicket(pool, projectId, source.id))!, null, client, { add() {} },
+    );
+    expect(client.complete).toHaveBeenCalledTimes(2);
+    expect(plan).toMatchObject({
+      judged: false, gateInvalid: true, targetId: null, neighbors: [{ id: neighbor.id, similarity: expect.any(Number) }],
+    });
+    await applyLocked(source.id, plan);
+    expect((await store.getTicket(pool, projectId, source.id))!).toMatchObject({
+      status: 'tracking', fold_retries: 1, reconcile_needed: true,
+    });
+    expect((await pool.query('SELECT 1 FROM friction_gate_decisions WHERE ticket_id=$1', [source.id])).rowCount).toBe(0);
+  });
+  it('stops asking an always-invalid one-fix gate once fold retries are spent, then publishes without it', async () => {
+    const neighbor = await publish(await ticket());
+    await embed(neighbor);
+    const source = await ticket();
+    await embed(source);
+    await finalizeConfirmed(source, await matches(source, 3));
+    const client = {
+      modelName: 'test',
+      complete: vi.fn(async () => ({
+        text: 'not json', inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, stopReason: 'end_turn',
+      })),
+    };
+    // Each reconciliation pass plans then applies; two more than the limit
+    // proves the loop ends instead of billing two gate calls every tick.
+    for (let pass = 0; pass < FOLD_RETRY_LIMIT + 2; pass++) {
+      const plan = await prepareConfirmationTransition(
+        pool, (await store.getTicket(pool, projectId, source.id))!, null, client, { add() {} },
+      );
+      await applyLocked(source.id, plan);
+    }
+    expect(client.complete).toHaveBeenCalledTimes(2 * FOLD_RETRY_LIMIT);
+    expect((await store.getTicket(pool, projectId, source.id))!).toMatchObject({
+      status: 'published', reconcile_needed: false,
+    });
+  });
   it('discards the staging batch of a dead-lettered confirmation so reconciliation recovers the ticket', async () => {
     const t = await ticket();
     await matches(t, 3);
     const job = await claim(t);
     const dependencies = deps([]);
-    dependencies.client.complete = async () => ({
-      text: 'not json',
-      inputTokens: 1,
-      outputTokens: 1,
-      cacheReadTokens: 0,
-      cacheWriteTokens: 0,
-      stopReason: 'end_turn',
-    });
-    await expect(
-      processFrictionConfirm(job, dependencies, new AbortController().signal),
-    ).rejects.toThrow('Confirmation invalid');
+    // Invalid answers no longer dead-letter a batch; an infrastructure failure still does.
+    dependencies.loadRecording = async () => { throw new Error('storage unavailable'); };
+    await expect(processFrictionConfirm(job, dependencies, new AbortController().signal))
+      .rejects.toThrow('storage unavailable');
     const batchId = (
       await pool.query('SELECT batch_id FROM error_group_jobs WHERE id=$1', [
         job.id,
@@ -2167,7 +2327,7 @@ describeDb('confirmation job', () => {
     ).rows[0].batch_id as string;
     expect(batchId).toBeTruthy();
     expect(
-      await db.failJob(job.id, job.workerId, job.leaseGeneration, 'Confirmation invalid', {
+      await db.failJob(job.id, job.workerId, job.leaseGeneration, 'storage unavailable', {
         exhaust: true,
       }),
     ).toBe(true);
@@ -2239,6 +2399,16 @@ describeDb('confirmation job', () => {
         )
       ).rows,
     ).toEqual(Array.from({ length: 3 }, () => ({ attempts: 1, permanent: false })));
+    expect(
+      (
+        await pool.query(
+          'SELECT outcome,note FROM friction_check_attempts WHERE ticket_id=$1',
+          [t.id],
+        )
+      ).rows,
+    ).toEqual(
+      Array.from({ length: 3 }, () => ({ outcome: 'unavailable', note: UNAVAILABLE_NOTES.recording_missing })),
+    );
     await expect(
       frictionConfirmDepsFromEnv().loadRecording(randomUUID(), projectId, []),
     ).rejects.toBeInstanceOf(RecordingUnavailableError);

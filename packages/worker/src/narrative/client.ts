@@ -5,7 +5,6 @@ export interface NarrativeClientConfig {
   baseURL?: string;
   apiKey: string;
   maxTokens: number;
-  reasoning: 'on' | 'off';
   /** Request timeout; long outputs need more than the 120 s default. */
   timeoutMs?: number;
 }
@@ -85,14 +84,13 @@ export class NarrativeClient {
           })),
         ]
       : args.user;
+    // No thinking field: each model uses its default thinking (adaptive on
+    // Claude Sonnet 5), which spends the same max_tokens as the answer.
+    // Disabling it lowered accuracy on labelled recordings (#511), and Sonnet 5
+    // rejects budget_tokens with a 400.
     const response = await this.anthropic.messages.create({
       model: this.config.model,
-      max_tokens: this.config.reasoning === 'on'
-        ? this.config.maxTokens + 4_096
-        : this.config.maxTokens,
-      ...(this.config.reasoning === 'on'
-        ? { thinking: { type: 'enabled' as const, budget_tokens: 4_096 } }
-        : {}),
+      max_tokens: this.config.maxTokens,
       system: args.system,
       messages: [{ role: 'user', content }],
     }, { signal: args.signal });
@@ -112,15 +110,20 @@ export class NarrativeClient {
   }
 }
 
-export function narrativeClientFromEnv(): NarrativeClient | null {
+export function narrativeClientFromEnv(
+  options: { minMaxTokens?: number } = {},
+): NarrativeClient | null {
   const apiKey = process.env['NARRATIVE_API_KEY'] || process.env['ANTHROPIC_API_KEY'];
   if (!apiKey) return null;
   const parsedMax = Number(process.env['NARRATIVE_MAX_TOKENS']);
+  const configured = Number.isFinite(parsedMax) && parsedMax >= 1_024 ? Math.floor(parsedMax) : 8_192;
+  const maxTokens = Math.max(configured, options.minMaxTokens ?? 0);
   return new NarrativeClient({
     model: process.env['NARRATIVE_MODEL'] ?? 'claude-sonnet-5',
     baseURL: process.env['NARRATIVE_BASE_URL'] || undefined,
     apiKey,
-    maxTokens: Number.isFinite(parsedMax) && parsedMax >= 1_024 ? Math.floor(parsedMax) : 8_192,
-    reasoning: process.env['NARRATIVE_REASONING'] === 'on' ? 'on' : 'off',
+    maxTokens,
+    // A long thinking-plus-answer reply outlasts the SDK's 120 s default.
+    ...(maxTokens > 8_192 ? { timeoutMs: 300_000 } : {}),
   });
 }

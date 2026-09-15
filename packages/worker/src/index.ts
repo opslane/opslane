@@ -47,6 +47,7 @@ import {
   buildLangfuseTraceUrl,
   getTracingExportHealth,
 } from './tracing.js';
+import { isJobCompletionSignal } from './job-signals.js';
 import { runVisualAnalysis, type VisualAnalysisOutput } from './visual-analysis.js';
 import {
   buildReplayEvidenceFromRecording,
@@ -308,15 +309,22 @@ async function resolvedFramesForEvent(
     ?? framesFromEnvelope(event.stack_trace_resolved);
 }
 
+/** Health counters, exported for tests. */
+export function jobCounters(): { processed: number; failed: number } {
+  return { processed: jobsProcessed, failed: jobsFailed };
+}
+
 export async function processJob(job: ClaimedJob, signal: AbortSignal): Promise<void> {
   jobsInFlight += 1;
   try {
     await withJobTrace(job, () => processJobInner(job, signal));
   } catch (err: unknown) {
     // One seam for every thrown failure, so /health's jobs_failed agrees with
-    // the dead letters the poller records instead of only the branches that
-    // used to terminalize inline.
-    jobsFailed++;
+    // the dead letters the poller records. A completion signal is not a
+    // failure: the handler durably completed or rescheduled its own job and
+    // the poller records it as completed, so it counts as processed.
+    if (isJobCompletionSignal(err)) jobsProcessed++;
+    else jobsFailed++;
     lastJobAt = new Date().toISOString();
     throw err;
   } finally {
@@ -1239,7 +1247,10 @@ export async function processSessionVerifyFramesJob(
   job: ClaimedJob & { sessionId: string },
   signal: AbortSignal,
 ): Promise<void> {
-  const client = narrativeClientFromEnv();
+  // Adaptive thinking used the whole 8,192-token limit on one call in ten
+  // (#511). Disabling it removed the cut-offs but made grades lenient on
+  // labelled recordings, so verification keeps thinking and gets more room.
+  const client = narrativeClientFromEnv({ minMaxTokens: 16_000 });
   const storage = getMinIOConfig();
   await processFrameVerification(job, {
     client: client as NonNullable<typeof client>,
