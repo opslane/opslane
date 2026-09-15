@@ -347,7 +347,7 @@ export async function startDashboardMockHarness(
         localStorage.setItem('opslane_authed', '1');
         // The router's onboarding guard treats this cached flag as session
         // state; a planted authed session without it bounces every page to
-        // /setup (the wizard itself re-checks the server).
+        // /setup (the setup page itself re-checks the server).
         localStorage.setItem('opslane_onboarding_complete', '1');
       }
       if (seed.projectId) localStorage.setItem('opslane_project_id', seed.projectId);
