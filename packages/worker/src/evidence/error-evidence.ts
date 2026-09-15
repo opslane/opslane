@@ -53,15 +53,22 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
+ * Every field is masked over this window before it is cut to its budget. Far
+ * wider than any budget, so a credential crossing the window edge would have
+ * to be thousands of characters long to reach the kept text.
+ */
+const MASK_WINDOW = 8_192;
+
+/**
  * Mask, then cut to the field budget, marker included.
  *
- * A hostile field is first sliced to a few times its budget so masking work
- * stays bounded, and the value that slice went through is dropped: a severed
- * email no longer matches its pattern. Masking runs before the final cut for
- * the same reason.
+ * A hostile field is first sliced to the mask window so masking work stays
+ * bounded, and the value that slice went through is dropped: a severed email
+ * no longer matches its pattern. Masking runs before the final cut for the
+ * same reason.
  */
 function bounded(text: string, max: number, mask: (value: string) => string = maskText): string {
-  const preBound = max * 4 + 256;
+  const preBound = MASK_WINDOW;
   const cut = text.length > preBound;
   const masked = mask(cut ? dropCutToken(text.slice(0, preBound)) : text);
   if (!cut && masked.length <= max) return masked;
@@ -98,19 +105,54 @@ function breadcrumb(raw: Record<string, unknown>): BreadcrumbEvidence {
   };
 }
 
+/**
+ * The first non-blank stack lines and a count of the rest, found by scanning
+ * for newlines. An event can carry a stack of up to a megabyte, and splitting
+ * it would copy every line only to keep thirty.
+ */
+function firstStackLines(raw: string): { kept: string[]; total: number } {
+  const kept: string[] = [];
+  let total = 0;
+  let start = 0;
+  while (start <= raw.length) {
+    const newline = raw.indexOf('\n', start);
+    const end = newline === -1 ? raw.length : newline;
+    if (raw.slice(start, Math.min(end, start + MASK_WINDOW)).trim() !== '') {
+      total += 1;
+      // One character past the window, so bounded() still marks the cut.
+      if (kept.length < MAX_STACK_LINES) kept.push(raw.slice(start, Math.min(end, start + MASK_WINDOW + 1)));
+    }
+    if (newline === -1) break;
+    start = newline + 1;
+  }
+  return { kept, total };
+}
+
+/** The last breadcrumb objects, oldest first, and how many objects came before them. */
+function lastBreadcrumbs(raw: unknown): { recent: Record<string, unknown>[]; total: number } {
+  if (!Array.isArray(raw)) return { recent: [], total: 0 };
+  const recent: Record<string, unknown>[] = [];
+  let total = 0;
+  for (let index = raw.length - 1; index >= 0; index -= 1) {
+    const crumb: unknown = raw[index];
+    if (!isRecord(crumb)) continue;
+    total += 1;
+    if (recent.length < MAX_BREADCRUMBS) recent.unshift(crumb);
+  }
+  return { recent, total };
+}
+
 /** Bound and mask one captured error event for a model prompt. */
 export function buildErrorEvidence(input: ErrorEventText): ErrorEvidence {
-  const lines = input.stackTraceRaw.split('\n').filter((line) => line.trim() !== '');
-  const kept = lines.slice(0, MAX_STACK_LINES);
-  const crumbs = Array.isArray(input.breadcrumbs) ? input.breadcrumbs.filter(isRecord) : [];
-  const recent = crumbs.slice(-MAX_BREADCRUMBS);
+  const stack = firstStackLines(input.stackTraceRaw);
+  const crumbs = lastBreadcrumbs(input.breadcrumbs);
   return {
     type: bounded(input.errorType, MAX_ERROR_TYPE_CHARS),
     message: bounded(input.errorMessage, MAX_ERROR_MESSAGE_CHARS),
-    stack: kept.map((line) => bounded(line.trimEnd(), MAX_STACK_LINE_CHARS, maskStackLine)),
-    stackLinesOmitted: lines.length - kept.length,
-    breadcrumbs: recent.map(breadcrumb),
-    breadcrumbsOmitted: crumbs.length - recent.length,
+    stack: stack.kept.map((line) => bounded(line.trimEnd(), MAX_STACK_LINE_CHARS, maskStackLine)),
+    stackLinesOmitted: stack.total - stack.kept.length,
+    breadcrumbs: crumbs.recent.map(breadcrumb),
+    breadcrumbsOmitted: crumbs.total - crumbs.recent.length,
     pageUrl: input.pageUrl === null
       ? null
       : clip(maskPageUrl(input.pageUrl.slice(0, MAX_PAGE_URL_INPUT)), MAX_PAGE_URL_CHARS),

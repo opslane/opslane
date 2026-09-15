@@ -136,12 +136,12 @@ function productUnderstandingVersion(evidence: EvidenceBundle): number | null {
 export const INQUIRY_EVIDENCE_MAX_CHARS = 150_000;
 
 export function buildInquiryPrompt(evidence: EvidenceBundle): string {
-  // Small decision facts first and the long lists last, so a backstop cut
-  // removes list tails rather than the affected units or related candidates.
+  // Small decision facts and the error first, the variable-length lists last,
+  // so a backstop cut removes list tails rather than what the decision rests on.
   const {
-    affectedUnits, availability, relatedCandidates, error, frames, replayPointers, ...lists
+    affectedUnits, availability, error, relatedCandidates, frames, replayPointers, ...lists
   } = evidence;
-  const ordered = { affectedUnits, availability, relatedCandidates, error, frames, replayPointers, ...lists };
+  const ordered = { affectedUnits, availability, error, relatedCandidates, frames, replayPointers, ...lists };
   const body = fenced(JSON.stringify(ordered, null, 2), INQUIRY_EVIDENCE_MAX_CHARS);
   return `Review only this bounded production evidence.\n\n<untrusted_data>\n${body}\n</untrusted_data>`;
 }
