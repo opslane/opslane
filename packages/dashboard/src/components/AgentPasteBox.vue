@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import CopyButton from './CopyButton.vue';
 
-withDefaults(defineProps<{ variant?: 'wizard' | 'empty' }>(), { variant: 'empty' });
 const line = 'Set up https://docs.opslane.com/INSTALL.md';
 </script>
 
@@ -14,7 +13,5 @@ const line = 'Set up https://docs.opslane.com/INSTALL.md';
       <span class="flex-1 truncate" data-testid="agent-paste-line">{{ line }}</span>
       <CopyButton :text="line" />
     </div>
-    <p v-if="variant === 'wizard'" class="mt-3 text-xs text-muted"><slot name="manual">Prefer to do it by hand? The snippet is below.</slot></p>
-    <p v-else class="mt-3 text-xs text-muted">Prefer the manual setup? <router-link to="/setup" class="text-accent hover:underline">Setup guide</router-link></p>
   </div>
 </template>

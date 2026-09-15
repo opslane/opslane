@@ -235,17 +235,6 @@ export interface ProjectProvisioningResponse {
   api_key: APIKeyCreated;
 }
 
-export interface OnboardingSetupResponse {
-  project: Project;
-  environment: Environment;
-  api_key: APIKeyCreated;
-}
-
-export interface EventStatus {
-  has_events: boolean;
-  latest_error_group_id: string | null;
-}
-
 // === Project D: replay ===
 export interface ReplayRecording {
   events: unknown[];
@@ -587,26 +576,12 @@ export function testNotificationDestination(
   );
 }
 
-export function onboardingSetup(
-  projectName: string,
-  idempotencyToken: string,
-): Promise<OnboardingSetupResponse> {
-  return postJSON<OnboardingSetupResponse>('/onboarding/setup', {
-    project_name: projectName,
-    idempotency_token: idempotencyToken,
-  });
-}
-
 export function getOnboardingState(): Promise<OnboardingState> {
   return fetchJSON<OnboardingState>('/onboarding/state');
 }
 
 export function completeOnboarding(): Promise<{ onboarding_complete: boolean }> {
   return postJSON<{ onboarding_complete: boolean }>('/onboarding/complete', {});
-}
-
-export function getEventStatus(projectId: string): Promise<EventStatus> {
-  return fetchJSON<EventStatus>(`/projects/${projectId}/event-count`);
 }
 
 export function getGitHubConfig(projectId: string): Promise<GitHubConfig> {

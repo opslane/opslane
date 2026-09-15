@@ -426,7 +426,6 @@ export interface GitHubRepo {
 
 export interface OnboardingState {
 	onboarding_complete: boolean;
-	next_step: 'create_project' | 'install_sdk' | 'connect_github' | 'connect_slack' | 'done';
 	project_id: string | null;
 	has_events: boolean;
 	github_connected: boolean;

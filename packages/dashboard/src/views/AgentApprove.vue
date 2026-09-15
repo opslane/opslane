@@ -47,7 +47,7 @@ export function deriveChecklist(info: AgentApproveInfo) {
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
-import { approveAgentSession, denyAgentSession, getAgentApproveInfo, getMe } from '../api';
+import { approveAgentSession, completeOnboarding, denyAgentSession, getAgentApproveInfo, getMe } from '../api';
 import Button from '../components/ui/Button.vue';
 import { GITHUB_PR_URL_OPTIONS, safeUrl } from '../utils';
 import { applyProjectSelection } from '../components/project-switcher';
@@ -159,8 +159,14 @@ async function openDestination(destination: string): Promise<void> {
     if (!mounted) return;
     if (!me.onboarding_complete) {
       localStorage.removeItem('opslane_onboarding_complete');
-      navigationMessage.value = 'Your agent is still finishing setup. Stay here, then check again to open this page.';
-      return;
+      if (!info.value?.facts?.has_events) {
+        navigationMessage.value = 'Your agent is still finishing setup. Stay here, then check again to open this page.';
+        return;
+      }
+      // The first event is onboarding's only gate. Waiting for the agent's
+      // last runbook step would keep the user out of a ready dashboard.
+      await completeOnboarding();
+      if (!mounted) return;
     }
     localStorage.setItem('opslane_onboarding_complete', '1');
     const name = info.value?.projects.find((project) => project.id === boundProjectId.value)?.name
