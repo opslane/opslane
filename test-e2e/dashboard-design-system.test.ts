@@ -127,7 +127,9 @@ describe.skipIf(!browserAvailable)('dashboard deterministic Chromium smoke', () 
       .toBe(1);
 
     const table = harness.page.getByRole('table', { name: 'Recorded sessions' });
-    expect(await table.locator('tbody tr').count()).toBe(4);
+    // The heading renders before the session list request resolves, so wait
+    // for the rows instead of counting them once.
+    await expect.poll(async () => table.locator('tbody tr').count()).toBe(4);
     expect(await table.getByText('3 errors', { exact: true }).count()).toBeGreaterThan(0);
     expect(await table.getByText('2 rage clicks', { exact: true }).count()).toBeGreaterThan(0);
     expect(await table.getByText('Queued', { exact: true }).count()).toBeGreaterThan(0);
