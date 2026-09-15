@@ -35,6 +35,12 @@ paths = [
   # is masked before it reaches a webhook payload; a token gitleaks ignores
   # would prove nothing.
   '''packages/ingestion/notify/slack_test\.go''',
+  # The inquiry evidence masking tests assert Stripe-shaped keys, JWTs and
+  # secret JSON fields in captured error text never reach the model prompt;
+  # the implementation plan quotes those tests. A token gitleaks ignores would
+  # prove nothing.
+  '''packages/worker/src/__tests__/evidence-mask\.test\.ts''',
+  '''docs/superpowers/plans/2026-09-15-inquiry-error-evidence\.md''',
 ]
 regexes = [
   # Deterministic canary values planted by the keyless E2E lane's token-leak
