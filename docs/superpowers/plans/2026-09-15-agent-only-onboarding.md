@@ -839,6 +839,20 @@ describe('Setup', () => {
     w.unmount();
   });
 
+  it('keeps members on their own screen when loading projects fails', async () => {
+    api.getMe.mockResolvedValue({ active_role: 'member' });
+    api.getOnboardingState.mockResolvedValue({ ...waiting, onboarding_complete: true, project_id: 'p1', has_events: true });
+    api.listProjects.mockRejectedValueOnce(new Error('API 500'));
+    const w = mount(Setup);
+    await flushPromises();
+    expect(w.get('[data-testid="setup-member"]').text()).toContain('Could not load your projects.');
+    expect(w.find('[data-testid="agent-paste-line"]').exists()).toBe(false);
+    await w.get('[data-testid="setup-retry-enter"]').trigger('click');
+    await flushPromises();
+    expect(routerPush).toHaveBeenCalledWith('/');
+    w.unmount();
+  });
+
   it.each([
     ['rejects', () => { api.listProjects.mockRejectedValueOnce(new Error('API 500')); }],
     ['is empty', () => { api.listProjects.mockResolvedValueOnce([]); }],
@@ -924,7 +938,7 @@ const state = ref<OnboardingState | null>(null);
 const stateFailed = ref(false);
 const completeError = ref('');
 
-let isMember = false;
+const member = ref(false);
 let polling = false;
 let timer: ReturnType<typeof setTimeout> | undefined;
 // Bumped on unmount and on every user retry. An awaited call whose
@@ -960,7 +974,7 @@ async function loadAccount(): Promise<void> {
   try {
     const me = await getMe();
     if (gen !== generation) return;
-    isMember = me.active_role === 'member';
+    member.value = me.active_role === 'member';
   } catch {
     // An expired session never reaches here: the API client refreshes or
     // redirects to /login first.
@@ -981,7 +995,7 @@ async function poll(): Promise<void> {
   } catch {
     if (gen !== generation || !polling) return;
     stateFailed.value = true;
-    if (phase.value === 'loading') phase.value = isMember ? 'member' : 'setup';
+    if (phase.value === 'loading') phase.value = member.value ? 'member' : 'setup';
     schedulePoll();
     return;
   }
@@ -993,7 +1007,7 @@ async function poll(): Promise<void> {
     await enter();
     return;
   }
-  if (isMember) {
+  if (member.value) {
     phase.value = 'member';
     schedulePoll();
     return;
@@ -1078,9 +1092,13 @@ onUnmounted(() => {
       <Button data-testid="setup-retry-account" variant="primary" @click="retryAccount">Try again</Button>
     </div>
 
-    <div v-else-if="phase === 'member'" class="max-w-lg rounded-lg border border-border bg-surface p-8 text-center" data-testid="setup-member">
+    <div v-else-if="member" class="max-w-lg rounded-lg border border-border bg-surface p-8 text-center" data-testid="setup-member">
       <h1 class="text-2xl font-semibold text-text">Ask an organization admin to finish setup</h1>
       <p class="mt-3 text-sm text-muted">An admin sets up Opslane with a coding agent. This page opens your dashboard when they finish.</p>
+      <div v-if="phase === 'enter_error'" class="mt-6 space-y-3" role="alert">
+        <p class="text-sm text-danger">Could not load your projects.</p>
+        <Button data-testid="setup-retry-enter" variant="primary" @click="retryEnter">Try again</Button>
+      </div>
     </div>
 
     <div v-else class="w-full max-w-lg">
@@ -1410,7 +1428,7 @@ git commit -m "test(e2e): smoke the agent setup page instead of the wizard's Git
 **Files:**
 - Modify: `docs/install.md:28`
 - Modify: `docs/guides/api-keys.md:26`
-- Modify: `docs/guides/github-app.md:34,77`
+- Modify: `docs/guides/github-app.md:26,34,77`
 - Modify: `docs/guides/slack-notifications.md:7,30`
 - Modify: `docs/reference/http-routes.md:87-89`
 - Modify: `TODOS.md:108,111`
@@ -1429,6 +1447,11 @@ and the blank line after it. Then change the preceding paragraph to end with one
 `The onboarding wizard can create another ingest key when you resume on a different browser.`
 with
 `Agent setup mints one for the project you approve.`
+
+`docs/guides/github-app.md:26`: replace
+`During onboarding, enter the repository as `owner/repo`; Opslane verifies that `GITHUB_TOKEN` can reach it before saving the project setting.`
+with
+`Ask your coding agent to attach the repository as `owner/repo`; Opslane verifies that `GITHUB_TOKEN` can reach it before saving the project setting.`
 
 `docs/guides/github-app.md:34`: replace the sentence pair
 `The onboarding wizard presents the App install link, waits for the installation, and then opens the repo picker. If a GitHub organization admin must approve the installation, choose **Do this later** and finish onboarding; the dashboard keeps a GitHub reminder visible until the installation and repository connection are complete.`
@@ -1451,7 +1474,7 @@ Spec correction: in `docs/superpowers/specs/2026-09-15-agent-only-onboarding-des
 
 - [ ] **Step 2: Check for leftovers and run the docs gates**
 
-Run: `grep -rn -i "onboarding wizard\|setup wizard\|SetupWizard\|onboarding/setup\|Do this later" docs README.md TODOS.md --include=*.md | grep -v "^docs/plans/\|^docs/design/\|^docs/research/\|^docs/superpowers/"`
+Run: `grep -rn -i "onboarding wizard\|setup wizard\|SetupWizard\|onboarding/setup\|Do this later\|During onboarding" docs README.md TODOS.md --include=*.md | grep -v "^docs/plans/\|^docs/design/\|^docs/research/\|^docs/superpowers/"`
 Expected: no output.
 
 Run: `pnpm test:repo`
@@ -1480,7 +1503,7 @@ Proves AC13 and AC14. No code changes unless a gate fails; fix the cause in the 
 With the environment block exported and `psql` on `PATH`:
 
 ```bash
-(cd packages/ingestion && go build ./... && go test -count=1 -json ./handler ./db) > "$SCRATCH/go-test.jsonl"; echo "exit=$?"
+(cd packages/ingestion && go build ./... && go test -count=1 -timeout=20m -json ./handler ./db) > "$SCRATCH/go-test.jsonl"; echo "exit=$?"
 python3 - "$SCRATCH/go-test.jsonl" <<'PY'
 import json, sys
 skips = [e for e in map(json.loads, open(sys.argv[1])) if e.get("Action") == "skip" and e.get("Test")]
@@ -1489,7 +1512,7 @@ print("skips:", len(skips))
 PY
 ```
 
-Expected: `exit=0` and `skips: 0`. (`$SCRATCH` comes from the environment block. `go test ./db` can take over 10 minutes; use a 20-minute timeout and run it in the foreground. Do not run the worker test suite concurrently against the same database.)
+Expected: `exit=0` and `skips: 0`. (`$SCRATCH` comes from the environment block. `go test ./db` can take over 10 minutes; the `-timeout=20m` flag covers the test binary; give the shell call an outer timeout of at least 25 minutes and run it in the foreground. Do not run the worker test suite concurrently against the same database.)
 
 - [ ] **Step 2: Dashboard, e2e, and repo gates**
 
@@ -1544,8 +1567,11 @@ assert old in text, "runbook endpoint sentence changed; update this smoke step"
 text = text.replace(old, f"This is a local test stack: pass `endpoint: '{origin}'` to `init`.")
 open(out, "w").write(text.replace("https://app.opslane.com", origin))
 PY
-ss -ltn | grep -q ':8399 ' && echo "port 8399 is taken; pick another" || (python3 -m http.server 8399 --directory "$SCRATCH/runbook" > "$SCRATCH/runbook.log" 2>&1 &)
-curl -sf http://localhost:8399/INSTALL.md | grep -c "$INGESTION_URL"
+RUNBOOK_PORT=$(python3 -c "import socket; s = socket.socket(); s.bind(('127.0.0.1', 0)); print(s.getsockname()[1]); s.close()")
+python3 -m http.server "$RUNBOOK_PORT" --directory "$SCRATCH/runbook" > "$SCRATCH/runbook.log" 2>&1 &
+RUNBOOK_PID=$!
+for _ in $(seq 1 20); do curl -sf "http://localhost:$RUNBOOK_PORT/INSTALL.md" > /dev/null && break; sleep 0.5; done
+curl -sf "http://localhost:$RUNBOOK_PORT/INSTALL.md" | grep -c "$INGESTION_URL"
 ```
 
    Expected: a non-zero count.
@@ -1561,16 +1587,16 @@ curl -sf http://localhost:8399/INSTALL.md | grep -c "$INGESTION_URL"
 6. Start the agent in the background. Give it a browser tool so it can click its own test button; without one the runbook stops to ask a human:
 
 ```bash
-(cd "$SCRATCH/smoke-app" && claude -p "Set up http://localhost:8399/INSTALL.md" \
+(cd "$SCRATCH/smoke-app" && claude -p "Set up http://localhost:$RUNBOOK_PORT/INSTALL.md" \
   --mcp-config '{"mcpServers":{"playwright":{"command":"npx","args":["-y","@playwright/mcp@latest","--headless"]}}}' \
   --allowedTools "Bash,Read,Write,Edit,mcp__playwright" \
   --output-format stream-json --verbose > "$SCRATCH/agent.jsonl" 2>&1 &)
 ```
 
-7. `claude -p` only prints its result at the end, so find the approve link in the database. Poll every 5 s until an id appears: `psql "$DATABASE_URL" -tA -c "SELECT id FROM agent_sessions WHERE status = 'pending' ORDER BY created_at DESC LIMIT 1"`. In browser tab 2 open `$INGESTION_URL/agent/approve/<id>`, keep **Create a new project**, and click **Approve**.
+7. `claude -p` only prints its result at the end, so read this run's session id from the file the runbook writes. Poll every 5 s until `$SCRATCH/smoke-app/.opslane-setup/register.json` exists, then print only the id: `python3 -c "import json, sys; print(json.load(open(sys.argv[1]))['poll_id'])" "$SCRATCH/smoke-app/.opslane-setup/register.json"`. Never print the whole file; it holds the poll token. In browser tab 2 open `$INGESTION_URL/agent/approve/<poll_id>`, keep **Create a new project**, and click **Approve**.
 8. On tab 1, without reloading: within 6 s the status reads `Project ready. Waiting for the first event from your app.` Screenshot `$SCRATCH/setup-project-ready.png` (AC3).
 9. Wait for the test error. Watch `$SCRATCH/agent.jsonl` for the agent's Playwright click; if the agent instead asks a human to click, open the dev-server URL it printed in tab 3 and click **Test Opslane**. Poll `psql "$DATABASE_URL" -tA -c "SELECT count(*) FROM error_events e JOIN projects p ON p.id = e.project_id WHERE p.org_id = '$ORG_ID'"`. Within 6 s of it turning non-zero, tab 1 is on `/` showing the issues list. Record tab 1's URL, `localStorage.opslane_onboarding_complete` (must be `1`) and `localStorage.opslane_project_id` (must be a project of `$ORG_ID`: check with `SELECT org_id FROM projects WHERE id = '<value>'`), and screenshot `$SCRATCH/dashboard.png` (AC4, AC14). Confirm `SELECT onboarded_at FROM orgs WHERE id = '$ORG_ID'` is not null.
-10. Let the agent finish; in `-p` mode it treats optional steps as later. Its final message in `agent.jsonl` should list `first_event: done`. Then stop the runbook server (`pkill -f "http.server 8399"`) and tear down with `docker compose -p agentonly down`.
+10. Let the agent finish; in `-p` mode it treats optional steps as later. Its final message in `agent.jsonl` should list `first_event: done`. Then stop the runbook server (`kill "$RUNBOOK_PID"`) and tear down with `docker compose -p agentonly down`.
 
 - [ ] **Step 4: Follow-up issues (ask first)**
 
@@ -1596,3 +1622,10 @@ gh issue create --title "No way to get an ingest key without a coding agent" \
 - Task 4 lacked a successful **Open dashboard** case for a not-yet-onboarded org; added.
 - `dashboard-projects` and `dashboard-environment-filter` browser tests are `it.skip`; removed from the gates.
 - Live smoke: the fixture app depends on `workspace:*` and hardcodes `localhost:8082`, the runbook's "no endpoint needed" sentence is wrong locally, `$SCRATCH/runbook` was never created, `-p` hides the approve link until the end, and nothing clicked the test button. Rewritten: scaffolded Vite app, runbook sentence replaced, approve link read from `agent_sessions`, Playwright MCP for the agent, evidence captured during the flow.
+
+**Codex round 2 (medium reasoning, three parts): all round-1 fixes confirmed; 2 P1, 3 P2, all accepted.**
+- The Go gate lacked `-timeout=20m`, so the db suite would hit Go's 10-minute default.
+- `docs/guides/github-app.md:26` still told PAT users to enter the repository "during onboarding"; added to Task 6 and to the leftover search.
+- Members hitting a project-list failure saw the admin prompt; the member screen now owns its retry, with a test.
+- The runbook server check raced startup on a fixed port; it now takes a free port, waits for it, and kills its own pid.
+- The approve step picked the newest pending session globally; it now reads this run's `poll_id` from `.opslane-setup/register.json`.
