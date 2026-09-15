@@ -22,10 +22,11 @@ export const MASKED_OMITTED = '[omitted]';
 /** Backstop only; callers bound each field far below this. */
 const MAX_MASK_INPUT = 8_192;
 /**
- * The longest trailing value dropCutToken removes. A field with no whitespace
- * near the cut keeps everything before this, rather than vanishing whole.
+ * Characters that end a value: whitespace and the punctuation around values in
+ * JSON, URLs, query strings and key=value text. `@` and `.` are not here, so a
+ * cut never keeps the local part of an email.
  */
-const MAX_CUT_TOKEN = 256;
+const VALUE_DELIMITER = /[\s"'`,;()<>{}[\]=:?&#]/;
 
 // Only the escapes that can hide a masked shape: `jane%40acme.com`,
 // `access%5Ftoken=`. Decoding everything would rewrite ordinary message text.
@@ -97,15 +98,17 @@ function decodeMaskRelevantEscapes(text: string): string {
 /**
  * After a length cut, drop the value the cut went through. A severed email or
  * key no longer matches its pattern, so masking it would show half of it.
+ * The whole severed value goes, however long: `https://user:` followed by part
+ * of a credential has no `@` left to match. A text with no delimiter at all is
+ * one value, and nothing of it is kept.
  * A backward scan, not `/\S+$/`: that regex rescans the run from every start
  * and is quadratic on a long run ending in whitespace.
  */
 export function dropCutToken(text: string): string {
-  const floor = Math.max(0, text.length - MAX_CUT_TOKEN);
-  for (let end = text.length; end > floor; end -= 1) {
-    if (/\s/.test(text.charAt(end - 1))) return text.slice(0, end);
+  for (let end = text.length; end > 0; end -= 1) {
+    if (VALUE_DELIMITER.test(text.charAt(end - 1))) return text.slice(0, end);
   }
-  return text.slice(0, floor);
+  return '';
 }
 
 /** Mask emails, credentials, long mixed tokens and runs of six or more digits. */

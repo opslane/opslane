@@ -99,7 +99,7 @@ describe('maskText', () => {
   });
 
   it('processes at most 8192 characters and drops a token cut at that boundary', () => {
-    expect(maskText('a'.repeat(100_000))).toBe('a'.repeat(8192 - 256));
+    expect(maskText('a'.repeat(100_000))).toBe('');
     const words = maskText('word '.repeat(5_000));
     expect(words.length).toBeLessThanOrEqual(8192);
     expect(words.endsWith('word ')).toBe(true);
@@ -112,8 +112,16 @@ describe('dropCutToken', () => {
     expect(dropCutToken('whole words ')).toBe('whole words ');
   });
 
-  it('removes at most 256 characters from text with no whitespace', () => {
-    expect(dropCutToken('x'.repeat(1_000))).toBe('x'.repeat(744));
+  it('removes the whole severed value, however long, and keeps what precedes its delimiter', () => {
+    expect(dropCutToken('x'.repeat(1_000))).toBe('');
+    expect(dropCutToken('{"a":"b","token":"abc123')).toBe('{"a":"b","token":"');
+  });
+
+  it('never keeps part of a URL credential the cut went through', () => {
+    const line = `at load (https://deploy:${'s3cr3tV4lu3'.repeat(1_000)}@git.example.com/app.js:1:2)`;
+    const masked = maskText(line);
+    expect(masked).not.toContain('s3cr3t');
+    expect(masked).toBe('at load (https://deploy:');
   });
 
   it('stays linear on long runs that end in whitespace', () => {
