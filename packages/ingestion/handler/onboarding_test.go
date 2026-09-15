@@ -58,69 +58,42 @@ func mustDecodeOnboarding(t *testing.T, body io.Reader, out any) {
 	}
 }
 
-func TestOnboardingSetupIdempotency(t *testing.T) {
-	deps, pool := testDeps(t)
-	deps.JWTSecret = []byte(authTestJWTSecret)
-	deps.AuthProvider = cloudAuthStub{}
-	router := handler.NewRouterWithPool(deps, pool)
-	orgID, cred := seedTenantNoProject(t, deps.Queries)
-	t.Cleanup(func() { cleanupTenantHandler(t, pool, orgID) })
+type onboardingCreatedProject struct {
+	Project struct {
+		ID string `json:"id"`
+	} `json:"project"`
+	APIKey struct {
+		RawKey string `json:"raw_key"`
+	} `json:"api_key"`
+}
 
-	body := `{"project_name":"web","idempotency_token":"tok-1"}`
-	first := onboardingHTTP(t, router, http.MethodPost, "/api/v1/onboarding/setup", cred, body)
-	if first.Code != http.StatusCreated {
-		t.Fatalf("first create: got %d body=%s", first.Code, first.Body.String())
+// createProjectForOnboarding creates a project the way Settings does. The
+// endpoint requires an idempotency token, so every body must carry one.
+func createProjectForOnboarding(t *testing.T, router http.Handler, token, body string) onboardingCreatedProject {
+	t.Helper()
+	response := onboardingHTTP(t, router, http.MethodPost, "/api/v1/projects", token, body)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("create project: got %d body=%s", response.Code, response.Body.String())
 	}
-	second := onboardingHTTP(t, router, http.MethodPost, "/api/v1/onboarding/setup", cred, body)
-	if second.Code != http.StatusCreated {
-		t.Fatalf("replay: got %d body=%s", second.Code, second.Body.String())
-	}
-	var a, b struct {
-		Project struct {
-			ID string `json:"id"`
-		} `json:"project"`
-		APIKey struct {
-			RawKey string `json:"raw_key"`
-		} `json:"api_key"`
-	}
-	mustDecodeOnboarding(t, first.Body, &a)
-	mustDecodeOnboarding(t, second.Body, &b)
-	if a.Project.ID != b.Project.ID {
-		t.Fatal("replay created a second project")
-	}
-	if a.APIKey.RawKey == b.APIKey.RawKey || a.APIKey.RawKey == "" {
-		t.Fatal("expected two distinct working keys")
-	}
+	var created onboardingCreatedProject
+	mustDecodeOnboarding(t, response.Body, &created)
+	return created
+}
 
-	third := onboardingHTTP(t, router, http.MethodPost, "/api/v1/onboarding/setup", cred,
-		`{"project_name":"other","idempotency_token":"tok-2"}`)
-	if third.Code != http.StatusCreated {
-		t.Fatalf("different-token call: got %d body=%s", third.Code, third.Body.String())
-	}
-	var c struct {
-		Project struct {
-			ID string `json:"id"`
-		} `json:"project"`
-	}
-	mustDecodeOnboarding(t, third.Body, &c)
-	if c.Project.ID != a.Project.ID {
-		t.Fatal("has-project rule violated: new project created")
-	}
-
-	orgID2, cred2 := seedTenantNoProject(t, deps.Queries)
-	t.Cleanup(func() { cleanupTenantHandler(t, pool, orgID2) })
-	legacy := onboardingHTTP(t, router, http.MethodPost, "/api/v1/onboarding/setup", cred2,
-		`{"project_name":"legacy","github_repo":"acme/web"}`)
-	if legacy.Code != http.StatusCreated {
-		t.Fatalf("legacy shape: got %d body=%s", legacy.Code, legacy.Body.String())
-	}
-
-	if _, err := pool.Exec(context.Background(), `UPDATE orgs SET onboarded_at = now() WHERE id = $1`, orgID); err != nil {
-		t.Fatal(err)
-	}
-	fourth := onboardingHTTP(t, router, http.MethodPost, "/api/v1/onboarding/setup", cred, body)
-	if fourth.Code != http.StatusConflict {
-		t.Fatalf("onboarded org: got %d, want 409", fourth.Code)
+func ingestOnboardingEvent(t *testing.T, router http.Handler, rawKey string) {
+	t.Helper()
+	body := `{
+		"timestamp":"2026-08-26T00:00:00Z",
+		"error":{"type":"Error","message":"onboarding event","stack":"at onboarding.js:1:1"},
+		"breadcrumbs":[],"context":{"url":"https://example.test"},"sdk_version":"0.1.0"
+	}`
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/events", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-API-Key", rawKey)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("event: got %d body=%s", response.Code, response.Body.String())
 	}
 }
 
@@ -133,11 +106,8 @@ func TestOnboardingState_GitHubConnectedRequiresRepoCoverage(t *testing.T) {
 	orgID, cred := seedTenantNoProject(t, deps.Queries)
 	t.Cleanup(func() { cleanupTenantHandler(t, pool, orgID) })
 
-	setup := onboardingHTTP(t, router, http.MethodPost, "/api/v1/onboarding/setup", cred,
-		`{"project_name":"web","github_repo":"acme/web"}`)
-	if setup.Code != http.StatusCreated {
-		t.Fatalf("setup: got %d body=%s", setup.Code, setup.Body.String())
-	}
+	createProjectForOnboarding(t, router, cred,
+		`{"name":"web","github_repo":"acme/web","idempotency_token":"coverage-test"}`)
 
 	installationID := time.Now().UnixNano()
 	if _, err := pool.Exec(context.Background(),

@@ -12,12 +12,25 @@ import (
 
 type onboardingStateResponse struct {
 	OnboardingComplete bool    `json:"onboarding_complete"`
-	NextStep           string  `json:"next_step"`
 	ProjectID          *string `json:"project_id"`
 	HasEvents          bool    `json:"has_events"`
 	GitHubConnected    bool    `json:"github_connected"`
 	GitHubMode         string  `json:"github_mode"`
 	SlackConnected     bool    `json:"slack_connected"`
+}
+
+func readOnboardingState(t *testing.T, router http.Handler, token string) (onboardingStateResponse, string) {
+	t.Helper()
+	response := onboardingHTTP(t, router, http.MethodGet, "/api/v1/onboarding/state", token, "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("state status=%d body=%s", response.Code, response.Body.String())
+	}
+	raw := response.Body.String()
+	var state onboardingStateResponse
+	if err := json.NewDecoder(strings.NewReader(raw)).Decode(&state); err != nil {
+		t.Fatal(err)
+	}
+	return state, raw
 }
 
 func TestOnboardingStateAndCompleteShareTheEventGate(t *testing.T) {
@@ -32,39 +45,17 @@ func TestOnboardingStateAndCompleteShareTheEventGate(t *testing.T) {
 		t.Helper()
 		return onboardingHTTP(t, router, method, path, token, body)
 	}
-	readState := func() onboardingStateResponse {
-		t.Helper()
-		response := request(http.MethodGet, "/api/v1/onboarding/state", "")
-		if response.Code != http.StatusOK {
-			t.Fatalf("state status=%d body=%s", response.Code, response.Body.String())
-		}
-		var state onboardingStateResponse
-		if err := json.NewDecoder(response.Body).Decode(&state); err != nil {
-			t.Fatal(err)
-		}
-		return state
-	}
 
-	if state := readState(); state.NextStep != "create_project" || state.ProjectID != nil {
+	state, raw := readOnboardingState(t, router, token)
+	if state.ProjectID != nil || state.HasEvents || state.OnboardingComplete {
 		t.Fatalf("fresh state=%+v", state)
 	}
-	setup := request(http.MethodPost, "/api/v1/onboarding/setup",
-		`{"project_name":"web","idempotency_token":"state-test"}`)
-	if setup.Code != http.StatusCreated {
-		t.Fatalf("setup status=%d body=%s", setup.Code, setup.Body.String())
+	if strings.Contains(raw, "next_step") {
+		t.Fatalf("state must not carry next_step: %s", raw)
 	}
-	var provisioned struct {
-		Project struct {
-			ID string `json:"id"`
-		} `json:"project"`
-		APIKey struct {
-			RawKey string `json:"raw_key"`
-		} `json:"api_key"`
-	}
-	if err := json.NewDecoder(setup.Body).Decode(&provisioned); err != nil {
-		t.Fatal(err)
-	}
-	if state := readState(); state.NextStep != "install_sdk" || state.HasEvents {
+
+	created := createProjectForOnboarding(t, router, token, `{"name":"web","idempotency_token":"state-test"}`)
+	if state, _ := readOnboardingState(t, router, token); state.ProjectID == nil || *state.ProjectID != created.Project.ID || state.HasEvents {
 		t.Fatalf("pre-event state=%+v", state)
 	}
 	blocked := request(http.MethodPost, "/api/v1/onboarding/complete", `{}`)
@@ -73,20 +64,8 @@ func TestOnboardingStateAndCompleteShareTheEventGate(t *testing.T) {
 		t.Fatalf("blocked complete status=%d body=%s", blocked.Code, blocked.Body.String())
 	}
 
-	eventBody := `{
-		"timestamp":"2026-08-26T00:00:00Z",
-		"error":{"type":"Error","message":"onboarding event","stack":"at onboarding.js:1:1"},
-		"breadcrumbs":[],"context":{"url":"https://example.test"},"sdk_version":"0.1.0"
-	}`
-	eventRequest := httptest.NewRequest(http.MethodPost, "/api/v1/events", strings.NewReader(eventBody))
-	eventRequest.Header.Set("Content-Type", "application/json")
-	eventRequest.Header.Set("X-API-Key", provisioned.APIKey.RawKey)
-	eventResponse := httptest.NewRecorder()
-	router.ServeHTTP(eventResponse, eventRequest)
-	if eventResponse.Code != http.StatusAccepted {
-		t.Fatalf("event status=%d body=%s", eventResponse.Code, eventResponse.Body.String())
-	}
-	if state := readState(); state.NextStep != "connect_github" || !state.HasEvents {
+	ingestOnboardingEvent(t, router, created.APIKey.RawKey)
+	if state, _ := readOnboardingState(t, router, token); !state.HasEvents || state.OnboardingComplete {
 		t.Fatalf("post-event state=%+v", state)
 	}
 
@@ -94,8 +73,7 @@ func TestOnboardingStateAndCompleteShareTheEventGate(t *testing.T) {
 	if completed.Code != http.StatusOK || !strings.Contains(completed.Body.String(), `"onboarding_complete":true`) {
 		t.Fatalf("complete status=%d body=%s", completed.Code, completed.Body.String())
 	}
-	state := readState()
-	if !state.OnboardingComplete || state.NextStep != "done" {
+	if state, _ := readOnboardingState(t, router, token); !state.OnboardingComplete || !state.HasEvents {
 		t.Fatalf("completed state=%+v", state)
 	}
 	me := request(http.MethodGet, "/api/v1/auth/me", "")
@@ -106,8 +84,34 @@ func TestOnboardingStateAndCompleteShareTheEventGate(t *testing.T) {
 	if second.Code != http.StatusOK {
 		t.Fatalf("second complete status=%d body=%s", second.Code, second.Body.String())
 	}
-	retiredSetupPR := request(http.MethodPost, "/api/v1/projects/"+provisioned.Project.ID+"/setup-pr", `{}`)
+	retiredSetupPR := request(http.MethodPost, "/api/v1/projects/"+created.Project.ID+"/setup-pr", `{}`)
 	if retiredSetupPR.Code != http.StatusNotFound {
 		t.Fatalf("retired setup-pr route status=%d body=%s", retiredSetupPR.Code, retiredSetupPR.Body.String())
+	}
+	retiredSetup := request(http.MethodPost, "/api/v1/onboarding/setup", `{"project_name":"web","idempotency_token":"retired"}`)
+	if retiredSetup.Code != http.StatusNotFound {
+		t.Fatalf("retired onboarding setup route status=%d body=%s", retiredSetup.Code, retiredSetup.Body.String())
+	}
+}
+
+func TestOnboardingCompleteCountsAnEventOnAnOlderProject(t *testing.T) {
+	deps, pool := testDeps(t)
+	deps.JWTSecret = []byte(authTestJWTSecret)
+	deps.AuthProvider = cloudAuthStub{}
+	router := handler.NewRouterWithPool(deps, pool)
+	orgID, token := seedTenantNoProject(t, deps.Queries)
+	t.Cleanup(func() { cleanupTenantHandler(t, pool, orgID) })
+
+	older := createProjectForOnboarding(t, router, token, `{"name":"older","idempotency_token":"older-project"}`)
+	newer := createProjectForOnboarding(t, router, token, `{"name":"newer","idempotency_token":"newer-project"}`)
+	ingestOnboardingEvent(t, router, older.APIKey.RawKey)
+
+	state, _ := readOnboardingState(t, router, token)
+	if state.ProjectID == nil || *state.ProjectID != newer.Project.ID || !state.HasEvents {
+		t.Fatalf("state must name the newest project and count the older project's event: %+v", state)
+	}
+	completed := onboardingHTTP(t, router, http.MethodPost, "/api/v1/onboarding/complete", token, `{}`)
+	if completed.Code != http.StatusOK {
+		t.Fatalf("complete status=%d body=%s", completed.Code, completed.Body.String())
 	}
 }

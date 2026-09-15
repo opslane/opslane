@@ -1047,11 +1047,22 @@ func (d *Dependencies) ListAccountIncidents(w http.ResponseWriter, r *http.Reque
 
 // === Onboarding CRUD endpoints ===
 
+// projectCreateLimiter caps project creation per client IP.
+var projectCreateLimiter = newRateLimiter(5) // 5/min
+
+// environmentJSON is the JSON representation of an environment.
+type environmentJSON struct {
+	ID        string `json:"id"`
+	ProjectID string `json:"project_id"`
+	Name      string `json:"name"`
+	CreatedAt string `json:"created_at"`
+}
+
 // CreateProjectEndpoint creates a new project for the authenticated user's org.
 // POST /api/v1/projects
 func (d *Dependencies) CreateProjectEndpoint(w http.ResponseWriter, r *http.Request) {
 	ip := clientIP(r)
-	if !onboardingLimiter.allow(ip) {
+	if !projectCreateLimiter.allow(ip) {
 		writeJSONError(w, http.StatusTooManyRequests, "too many requests, try again later")
 		return
 	}
