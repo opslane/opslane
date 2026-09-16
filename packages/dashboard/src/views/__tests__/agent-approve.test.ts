@@ -271,6 +271,20 @@ describe('AgentApprove', () => {
     w.unmount();
   });
 
+  it('sends a member to their admin instead of calling the admin-only completion', async () => {
+    api.getAgentApproveInfo.mockResolvedValue(pending({ status: 'app_reporting', project_id: 'p-b', facts: { ...emptyFacts, has_events: true } }));
+    api.getMe.mockResolvedValue({ onboarding_complete: false, active_role: 'member' });
+    const w = mount(AgentApprove, { global: { stubs: { RouterLink: true } } });
+    await flushPromises();
+    await w.get('[data-testid="agent-dashboard"]').trigger('click');
+    await flushPromises();
+    expect(api.completeOnboarding).not.toHaveBeenCalled();
+    expect(routerPush).not.toHaveBeenCalled();
+    expect(localStorage.getItem('opslane_onboarding_complete')).toBeNull();
+    expect(w.text()).toContain('An organization admin needs to finish setup');
+    w.unmount();
+  });
+
   it('opens the dashboard for a not-yet-onboarded org once the session has an event', async () => {
     localStorage.setItem('opslane_project_id', 'p-a');
     api.getAgentApproveInfo.mockResolvedValue(pending({ status: 'app_reporting', project_id: 'p-b', project_name: 'B', facts: { ...emptyFacts, has_events: true } }));

@@ -163,6 +163,13 @@ async function openDestination(destination: string): Promise<void> {
         navigationMessage.value = 'Your agent is still finishing setup. Stay here, then check again to open this page.';
         return;
       }
+      // Completion is admin-only on cloud and the server fails closed on any
+      // role it does not know, so anything but admin/owner waits here rather
+      // than collecting a raw 403. Setup.vue makes the same distinction.
+      if (me.active_role !== undefined && me.active_role !== 'admin' && me.active_role !== 'owner') {
+        navigationMessage.value = 'An organization admin needs to finish setup. Check again once they have.';
+        return;
+      }
       // The first event is onboarding's only gate. Waiting for the agent's
       // last runbook step would keep the user out of a ready dashboard.
       await completeOnboarding();

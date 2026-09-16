@@ -105,6 +105,7 @@ func TestRequireRoleIfCloudAndProvisioningRoutes(t *testing.T) {
 		method string
 		path   string
 	}{
+		{http.MethodPost, "/api/v1/onboarding/complete"},
 		{http.MethodPost, "/api/v1/projects"},
 		{http.MethodPatch, "/api/v1/projects/" + project.ID},
 	} {

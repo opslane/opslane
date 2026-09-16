@@ -1,6 +1,7 @@
 package handler_test
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -91,6 +92,31 @@ func TestOnboardingStateAndCompleteShareTheEventGate(t *testing.T) {
 	retiredSetup := request(http.MethodPost, "/api/v1/onboarding/setup", `{"project_name":"web","idempotency_token":"retired"}`)
 	if retiredSetup.Code != http.StatusNotFound {
 		t.Fatalf("retired onboarding setup route status=%d body=%s", retiredSetup.Code, retiredSetup.Body.String())
+	}
+}
+
+// An org can be onboarded with no project (a backfilled org, or one whose
+// projects were removed). The setup page waits on exactly this state instead of
+// redirecting, so the response shape it reads is pinned here.
+func TestOnboardingStateForAnOnboardedOrgWithNoProject(t *testing.T) {
+	deps, pool := testDeps(t)
+	deps.JWTSecret = []byte(authTestJWTSecret)
+	deps.AuthProvider = cloudAuthStub{}
+	router := handler.NewRouterWithPool(deps, pool)
+	orgID, token := seedTenantNoProject(t, deps.Queries)
+	t.Cleanup(func() { cleanupTenantHandler(t, pool, orgID) })
+
+	if _, err := pool.Exec(context.Background(),
+		`UPDATE orgs SET onboarded_at = now() WHERE id = $1`, orgID); err != nil {
+		t.Fatal(err)
+	}
+
+	state, raw := readOnboardingState(t, router, token)
+	if !state.OnboardingComplete || state.ProjectID != nil || state.HasEvents {
+		t.Fatalf("onboarded org with no project: %+v", state)
+	}
+	if strings.Contains(raw, "next_step") {
+		t.Fatalf("state must not carry next_step: %s", raw)
 	}
 }
 
