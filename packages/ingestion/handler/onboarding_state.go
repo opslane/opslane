@@ -26,11 +26,11 @@ func (d *Dependencies) evaluateOnboarding(r *http.Request, orgID string) (onboar
 	}
 	state.OnboardingComplete = onboarded
 
+	// A failed lookup is never answered as "no project". The setup page waits on
+	// a project-less org instead of redirecting, so swallowing this error would
+	// leave it polling forever with nothing on screen to say anything is wrong.
 	projectID, repo, err := d.Queries.NewestProjectIDAndRepo(r.Context(), orgID)
 	if err != nil {
-		if onboarded {
-			return state, nil
-		}
 		return state, err
 	}
 	state.ProjectID = projectID
@@ -62,9 +62,13 @@ func (d *Dependencies) evaluateOnboarding(r *http.Request, orgID string) (onboar
 		return state, err
 	}
 	state.GitHubConnected = d.optionalGitHubConnected(r, orgID, repo)
-	state.SlackConnected, err = d.Queries.HasEnabledDigestDestination(r.Context(), *projectID)
-	if err != nil {
-		return state, err
+	// Slack is optional before completion too: degrade to "connected" (no nag)
+	// as the onboarded branch does, rather than failing the poll the setup page
+	// depends on to notice the first event.
+	if connected, optionalErr := d.Queries.HasEnabledDigestDestination(r.Context(), *projectID); optionalErr == nil {
+		state.SlackConnected = connected
+	} else {
+		state.SlackConnected = true
 	}
 	return state, nil
 }
