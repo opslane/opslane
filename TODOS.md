@@ -108,14 +108,14 @@ It was deliberately left alone by the issue-list polish plan, which is scoped da
 
 **What:** `safeUrl` in `packages/dashboard/src/utils.ts` had zero tests despite guarding three render sites that bind untrusted values to `href`. The issue-list polish plan adds tests for the function itself; this item covers the call sites.
 
-**Why:** `IncidentDetail.vue:406,422`, `AdminView.vue:324`, and `IncidentConclusion.vue:20` all bind a sanitized URL to an `href`. Nothing asserts that any of them actually calls the sanitizer. A future refactor could drop the call and no test would notice.
+**Why:** the Trace link in `IncidentDetail.vue:799-803` and both `AdminView.vue:45-46` links (`traceHref` and `prHref`) bind a sanitized URL to an `href`. Nothing asserts that any of them actually calls the sanitizer. A future refactor could drop the call and no test would notice.
 
 **Pros:**
 - Locks the sanitizer into the render path so it cannot be silently removed.
 - Cheap: each is a mount-and-assert-href test in an existing test style.
 
 **Cons:**
-- Four more component tests to maintain, in files otherwise unrelated to the issue list.
+- Three more component tests to maintain, in files otherwise unrelated to the issue list.
 
 **Context:** Found during `/plan-eng-review` on 2026-07-22. PR 1 of the issue-list polish plan hardens `safeUrl` and adds unit tests for the function, plus a regression test proving `http:` trace URLs still pass (self-hosted Langfuse via `LANGFUSE_BASE_URL`, `docker-compose.yml:119`). The call-site tests were scoped out to keep PR 1 focused.
 
