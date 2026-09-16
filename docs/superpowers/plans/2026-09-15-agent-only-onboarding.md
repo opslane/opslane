@@ -6,7 +6,7 @@
 
 **Architecture:** The Go ingestion service loses `POST /api/v1/onboarding/setup` and its provisioning query, and its onboarding event gate becomes org-wide through a new `db.OrgHasEvents`. The Vue dashboard replaces `SetupWizard.vue` with a small polling page (`Setup.vue`) and teaches the agent approve page to complete onboarding from the session's event. Tests, the e2e mock harness, and docs follow.
 
-**Tech Stack:** Go 1.24 (chi, pgx), Vue 3 `<script setup>` + TypeScript, Vitest + @vue/test-utils (jsdom), Playwright-backed e2e harness in `test-e2e`.
+**Tech Stack:** Go 1.25 (chi, pgx), Vue 3 `<script setup>` + TypeScript, Vitest + @vue/test-utils (jsdom), Playwright-backed e2e harness in `test-e2e`.
 
 **Spec:** `docs/superpowers/specs/2026-09-15-agent-only-onboarding-design.md` (revision 3). Read it before starting; acceptance criteria numbers (AC1–AC15) below refer to it.
 
