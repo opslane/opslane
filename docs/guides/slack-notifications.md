@@ -26,8 +26,6 @@ Treat that URL as a secret: anyone holding it can post to your channel. Opslane 
 <!-- voice-ok: "Alert after triage" is the exact dashboard setting label and is defined here. -->
 Dashboard > **Settings** > **Integrations** > *Notification integrations*: add a destination, name it, and paste the webhook URL. Select which event types to receive; by default both issue alerts and daily digests are enabled. Choose **Alert after triage**, which waits until Opslane decides whether to fix the issue or hand it to a person. Use the test actions to confirm the channel wiring before relying on it.
 
-Agent setup can connect a daily digest the same way: it sends a test message and enables the digest only when Slack accepts it. If you skip that step, the dashboard keeps a Slack reminder visible until an enabled daily-digest destination exists.
-
 Or via the API (session-authenticated; an SDK API key cannot manage destinations):
 
 ```bash
