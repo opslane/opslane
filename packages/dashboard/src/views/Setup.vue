@@ -53,7 +53,10 @@ async function loadAccount(): Promise<void> {
   try {
     const me = await getMe();
     if (gen !== generation) return;
-    member.value = me.active_role === 'member';
+    // Completion is admin-only on cloud and the server fails closed on any role
+    // it does not know, so only admin and owner may call it. Self-hosted reports
+    // no role at all, and there everyone may complete.
+    member.value = me.active_role !== undefined && me.active_role !== 'admin' && me.active_role !== 'owner';
   } catch {
     // An expired session never reaches here: the API client refreshes or
     // redirects to /login first.

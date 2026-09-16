@@ -173,8 +173,10 @@ describe('Setup', () => {
     w.unmount();
   });
 
-  it('shows members the ask-an-admin screen, never completes, and enters once the org is ready', async () => {
-    api.getMe.mockResolvedValue({ active_role: 'member' });
+  // 'viewer' stands in for any role added later: the server fails closed on
+  // roles it does not know, so the page must not try to complete for them.
+  it.each(['member', 'viewer'])('shows %s the ask-an-admin screen, never completes, and enters once the org is ready', async (role) => {
+    api.getMe.mockResolvedValue({ active_role: role });
     api.getOnboardingState
       .mockResolvedValueOnce({ ...waiting, project_id: 'p1', has_events: true })
       .mockResolvedValue({ ...waiting, onboarding_complete: true, project_id: 'p1', has_events: true });
@@ -247,10 +249,14 @@ describe('Setup', () => {
     if (which === 'projects') api.listProjects.mockImplementationOnce(() => deferred([{ id: 'p1', name: 'web' }]));
     const w = mount(Setup);
     await flushPromises();
+    const stateCallsAtUnmount = api.getOnboardingState.mock.calls.length;
     w.unmount();
     release();
     await flushPromises();
     await vi.advanceTimersByTimeAsync(10_000);
+    // A leaked timer would keep polling here even though the generation guard
+    // stops it writing anything, so assert the request count went flat.
+    expect(api.getOnboardingState.mock.calls.length).toBe(stateCallsAtUnmount);
     expect(localStorage.getItem('opslane_onboarding_complete')).toBeNull();
     expect(localStorage.getItem('opslane_project_id')).toBeNull();
     expect(localStorage.getItem('opslane_project_name')).toBeNull();
