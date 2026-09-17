@@ -1,5 +1,8 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import { processScoreSyncJob, syncScoresForPrOutcome } from '../score-sync.js';
+import {
+  parseMaxTraceWaitAttempts,
+  processScoreSyncJob,
+  syncScoresForPrOutcome,
+} from '../score-sync.js';
 import type { ClaimedJob } from '../db.js';
 
 vi.mock('../db.js', () => ({ getPool: vi.fn() }));
@@ -157,6 +160,101 @@ describe('processScoreSyncJob', () => {
     vi.mocked(getPool).mockReturnValue({ query } as never);
 
     await expect(processScoreSyncJob(baseJob)).rejects.toThrow('no trace_url yet');
+  });
+
+  it('drops cleanly without dead-lettering when fix job finished before tracing was configured', async () => {
+    enableTracing();
+    const query = vi.fn().mockResolvedValue({
+      rows: [
+        {
+          trace_url: null,
+          status: 'completed',
+          created_at: '2026-07-28T10:00:00Z',
+          updated_at: '2026-07-28T10:30:00Z',
+        },
+      ],
+    });
+    vi.mocked(getPool).mockReturnValue({ query } as never);
+
+    await expect(processScoreSyncJob(baseJob)).resolves.toBeUndefined();
+    expect(pushScore).not.toHaveBeenCalled();
+  });
+
+  it('drops cleanly and completes without dead-lettering after bounded retries', async () => {
+    enableTracing();
+    const query = vi.fn().mockResolvedValue({
+      rows: [
+        {
+          trace_url: null,
+          status: 'completed',
+          created_at: '2026-08-15T10:00:00Z',
+          updated_at: '2026-08-15T10:30:00Z',
+        },
+      ],
+    });
+    vi.mocked(getPool).mockReturnValue({ query } as never);
+
+    await expect(
+      processScoreSyncJob({ ...baseJob, attempts: 3 }),
+    ).resolves.toBeUndefined();
+    expect(pushScore).not.toHaveBeenCalled();
+  });
+
+  it('keeps retrying within the bound when trace_url is not yet written for recent job', async () => {
+    enableTracing();
+    const query = vi.fn().mockResolvedValue({
+      rows: [
+        {
+          trace_url: null,
+          status: 'claimed',
+          created_at: '2026-08-15T10:00:00Z',
+          updated_at: '2026-08-15T10:01:00Z',
+        },
+      ],
+    });
+    vi.mocked(getPool).mockReturnValue({ query } as never);
+
+    await expect(
+      processScoreSyncJob({ ...baseJob, attempts: 1 }),
+    ).rejects.toThrow('no trace_url yet');
+  });
+
+  it('keeps retrying within the bound when trace_url is not yet written even for pre-tracing claimed in-flight job', async () => {
+    enableTracing();
+    const query = vi.fn().mockResolvedValue({
+      rows: [
+        {
+          trace_url: null,
+          status: 'claimed',
+          created_at: '2026-07-28T10:00:00Z',
+          updated_at: '2026-07-28T10:01:00Z',
+        },
+      ],
+    });
+    vi.mocked(getPool).mockReturnValue({ query } as never);
+
+    await expect(
+      processScoreSyncJob({ ...baseJob, attempts: 1 }),
+    ).rejects.toThrow('no trace_url yet');
+  });
+
+  it('propagates database error when loading fix job', async () => {
+    enableTracing();
+    const query = vi.fn().mockRejectedValue(new Error('db connection lost'));
+    vi.mocked(getPool).mockReturnValue({ query } as never);
+
+    await expect(processScoreSyncJob(baseJob)).rejects.toThrow('db connection lost');
+  });
+
+  it('parses SCORE_SYNC_MAX_TRACE_WAIT_ATTEMPTS accepting only positive finite integers', () => {
+    expect(parseMaxTraceWaitAttempts('5')).toBe(5);
+    expect(parseMaxTraceWaitAttempts('1')).toBe(1);
+    expect(parseMaxTraceWaitAttempts('0')).toBe(3);
+    expect(parseMaxTraceWaitAttempts('-2')).toBe(3);
+    expect(parseMaxTraceWaitAttempts('abc')).toBe(3);
+    expect(parseMaxTraceWaitAttempts('3.5')).toBe(3);
+    expect(parseMaxTraceWaitAttempts('Infinity')).toBe(3);
+    expect(parseMaxTraceWaitAttempts(undefined)).toBe(3);
   });
 
   it('drops a malformed payload without querying or pushing', async () => {
