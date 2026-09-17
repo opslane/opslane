@@ -159,6 +159,63 @@ describe('processScoreSyncJob', () => {
     await expect(processScoreSyncJob(baseJob)).rejects.toThrow('no trace_url yet');
   });
 
+  it('drops cleanly without dead-lettering when fix job finished before tracing was configured', async () => {
+    enableTracing();
+    const query = vi.fn().mockResolvedValue({
+      rows: [
+        {
+          trace_url: null,
+          status: 'completed',
+          created_at: '2026-07-28T10:00:00Z',
+          updated_at: '2026-07-28T10:30:00Z',
+        },
+      ],
+    });
+    vi.mocked(getPool).mockReturnValue({ query } as never);
+
+    await expect(processScoreSyncJob(baseJob)).resolves.toBeUndefined();
+    expect(pushScore).not.toHaveBeenCalled();
+  });
+
+  it('drops cleanly and completes without dead-lettering after bounded retries', async () => {
+    enableTracing();
+    const query = vi.fn().mockResolvedValue({
+      rows: [
+        {
+          trace_url: null,
+          status: 'completed',
+          created_at: '2026-08-15T10:00:00Z',
+          updated_at: '2026-08-15T10:30:00Z',
+        },
+      ],
+    });
+    vi.mocked(getPool).mockReturnValue({ query } as never);
+
+    await expect(
+      processScoreSyncJob({ ...baseJob, attempts: 3 }),
+    ).resolves.toBeUndefined();
+    expect(pushScore).not.toHaveBeenCalled();
+  });
+
+  it('keeps retrying within the bound when trace_url is not yet written for recent job', async () => {
+    enableTracing();
+    const query = vi.fn().mockResolvedValue({
+      rows: [
+        {
+          trace_url: null,
+          status: 'claimed',
+          created_at: '2026-08-15T10:00:00Z',
+          updated_at: '2026-08-15T10:01:00Z',
+        },
+      ],
+    });
+    vi.mocked(getPool).mockReturnValue({ query } as never);
+
+    await expect(
+      processScoreSyncJob({ ...baseJob, attempts: 1 }),
+    ).rejects.toThrow('no trace_url yet');
+  });
+
   it('drops a malformed payload without querying or pushing', async () => {
     enableTracing();
     await expect(processScoreSyncJob({
