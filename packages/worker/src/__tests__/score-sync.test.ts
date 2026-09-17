@@ -1,5 +1,8 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import { processScoreSyncJob, syncScoresForPrOutcome } from '../score-sync.js';
+import {
+  parseMaxTraceWaitAttempts,
+  processScoreSyncJob,
+  syncScoresForPrOutcome,
+} from '../score-sync.js';
 import type { ClaimedJob } from '../db.js';
 
 vi.mock('../db.js', () => ({ getPool: vi.fn() }));
@@ -214,6 +217,44 @@ describe('processScoreSyncJob', () => {
     await expect(
       processScoreSyncJob({ ...baseJob, attempts: 1 }),
     ).rejects.toThrow('no trace_url yet');
+  });
+
+  it('keeps retrying within the bound when trace_url is not yet written even for pre-tracing claimed in-flight job', async () => {
+    enableTracing();
+    const query = vi.fn().mockResolvedValue({
+      rows: [
+        {
+          trace_url: null,
+          status: 'claimed',
+          created_at: '2026-07-28T10:00:00Z',
+          updated_at: '2026-07-28T10:01:00Z',
+        },
+      ],
+    });
+    vi.mocked(getPool).mockReturnValue({ query } as never);
+
+    await expect(
+      processScoreSyncJob({ ...baseJob, attempts: 1 }),
+    ).rejects.toThrow('no trace_url yet');
+  });
+
+  it('propagates database error when loading fix job', async () => {
+    enableTracing();
+    const query = vi.fn().mockRejectedValue(new Error('db connection lost'));
+    vi.mocked(getPool).mockReturnValue({ query } as never);
+
+    await expect(processScoreSyncJob(baseJob)).rejects.toThrow('db connection lost');
+  });
+
+  it('parses SCORE_SYNC_MAX_TRACE_WAIT_ATTEMPTS accepting only positive finite integers', () => {
+    expect(parseMaxTraceWaitAttempts('5')).toBe(5);
+    expect(parseMaxTraceWaitAttempts('1')).toBe(1);
+    expect(parseMaxTraceWaitAttempts('0')).toBe(3);
+    expect(parseMaxTraceWaitAttempts('-2')).toBe(3);
+    expect(parseMaxTraceWaitAttempts('abc')).toBe(3);
+    expect(parseMaxTraceWaitAttempts('3.5')).toBe(3);
+    expect(parseMaxTraceWaitAttempts('Infinity')).toBe(3);
+    expect(parseMaxTraceWaitAttempts(undefined)).toBe(3);
   });
 
   it('drops a malformed payload without querying or pushing', async () => {

@@ -88,6 +88,17 @@ async function loadTraceUrlFromDb(fixJobId: string, projectId: string): Promise<
   return fixJob?.traceUrl ?? null;
 }
 
+export const TERMINAL_JOB_STATUSES = new Set(['completed', 'failed', 'dead_letter']);
+
+export function parseMaxTraceWaitAttempts(envVal: string | undefined): number {
+  if (!envVal) return MAX_TRACE_WAIT_ATTEMPTS;
+  const parsed = Number(envVal);
+  if (Number.isInteger(parsed) && parsed > 0) {
+    return parsed;
+  }
+  return MAX_TRACE_WAIT_ATTEMPTS;
+}
+
 export async function processScoreSyncJob(job: ClaimedJob): Promise<void> {
   const config = resolveTracingConfig(process.env);
   if (config.status === 'disabled') {
@@ -118,6 +129,13 @@ export async function processScoreSyncJob(job: ClaimedJob): Promise<void> {
     logger.warn('score_sync: malformed payload, dropping', { job_id: job.id });
     return;
   }
+
+  let loadedFixJob: FixJobRecord | null = null;
+  const loadTrace = async (fId: string, pId: string): Promise<string | null> => {
+    loadedFixJob = await loadFixJobFromDb(fId, pId);
+    return loadedFixJob?.traceUrl ?? null;
+  };
+
   try {
     await syncScoresForPrOutcome(
       {
@@ -127,7 +145,7 @@ export async function processScoreSyncJob(job: ClaimedJob): Promise<void> {
         deliveryId,
         ...(typeof occurredAt === 'string' ? { occurredAt } : {}),
       },
-      { loadTraceUrl: loadTraceUrlFromDb, push: pushScore },
+      { loadTraceUrl: loadTrace, push: pushScore },
     );
   } catch (err: unknown) {
     if (err instanceof Error && err.message.includes('no trace_url yet')) {
@@ -143,21 +161,23 @@ export async function processScoreSyncJob(job: ClaimedJob): Promise<void> {
       }
 
       // If the fix job finished before tracing was configured, it will never get a trace URL.
-      // Stop retrying immediately, log once, and complete the job.
-      const fixJob = await loadFixJobFromDb(fixJobId, job.projectId).catch(() => null);
-      const fixJobTimestamp =
-        fixJob?.updatedAt ?? fixJob?.createdAt ?? (typeof occurredAt === 'string' ? occurredAt : null);
-      if (fixJobTimestamp && new Date(fixJobTimestamp) < TRACING_CONFIGURED_AT) {
-        logger.warn(
-          'score_sync: fix job finished before tracing was configured, dropping score',
-          { job_id: job.id, fix_job_id: fixJobId },
-        );
-        return;
+      // Only jobs with a recognized terminal status are considered finished.
+      // In-flight jobs (e.g. 'claimed' or 'pending') might still be writing a trace URL.
+      if (loadedFixJob?.status && TERMINAL_JOB_STATUSES.has(loadedFixJob.status)) {
+        const terminalTimestamp = loadedFixJob.updatedAt ?? loadedFixJob.createdAt;
+        if (terminalTimestamp && new Date(terminalTimestamp) < TRACING_CONFIGURED_AT) {
+          logger.warn(
+            'score_sync: fix job finished before tracing was configured, dropping score',
+            { job_id: job.id, fix_job_id: fixJobId },
+          );
+          return;
+        }
       }
 
       // Stop retrying after a bounded time/attempts so the job completes without dead-lettering.
-      const maxWaitAttempts =
-        Number(process.env['SCORE_SYNC_MAX_TRACE_WAIT_ATTEMPTS']) || MAX_TRACE_WAIT_ATTEMPTS;
+      const maxWaitAttempts = parseMaxTraceWaitAttempts(
+        process.env['SCORE_SYNC_MAX_TRACE_WAIT_ATTEMPTS'],
+      );
       if (job.attempts >= maxWaitAttempts) {
         logger.warn(
           'score_sync: trace_url wait bound reached, dropping score without dead-lettering',
