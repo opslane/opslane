@@ -312,7 +312,7 @@ func testTicketDigestActionAfterAuthoringCycle(t *testing.T, mode string) {
 	run(`INSERT INTO session_narratives(session_id,project_id,environment_id,status,narrative,timeline,prompt_version)VALUES($1,$2,$3,'ok','{}'::jsonb,$4::jsonb,1)`,
 		ticket+"-1", project.ID, env, fmt.Sprintf(`{"startTs":%d,"lines":[{"t":"click Save","s":"#save","r":"/save","a":%d}]}`, repStartMs, wantAnchor))
 	run(`UPDATE friction_check_attempts SET evidence_lines='["L1"]' WHERE ticket_id=$1 AND session_id=$2`, ticket, ticket+"-1")
-	wantReplay := notify.BuildSessionURL("https://app.example", ticket+"-1", wantAnchor)
+	wantReplay := notify.BuildSessionURL("https://app.example", ticket+"-1", project.ID, wantAnchor)
 	run(`UPDATE error_groups SET explained_signal_ids=(SELECT jsonb_agg(signal_id::text) FROM friction_ticket_match_observations WHERE ticket_id=$2) WHERE id=$1`, group, ticket)
 	if mode == "long_steps" {
 		run(`UPDATE friction_tickets SET steps=repeat('Click Save and wait. ',40) WHERE id=$1`, ticket)
