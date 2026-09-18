@@ -1,7 +1,7 @@
 import { runLogFailureCounts } from './run-logs/sink.js';
 import { defaultRunLogDeps, MIN_LEASE_MS } from './run-logs/handle.js';
 import { runContextFromJob } from './run-logs/context.js';
-import { processFrictionReconcile, scheduleFrictionReconciliation } from './friction/reconcile-job.js';
+import { processFrictionReconcile, scheduleFrictionReconciliation, reconcileDilutedCoverage } from './friction/reconcile-job.js';
 import { processTicketInvestigation, type TicketInvestigateJob } from './friction/investigate-ticket.js';
 import { processPrEventJob } from './friction/pr-events-job.js';
 import { assertFixAttemptCurrent, recordAttemptPr, attemptFailed, transaction as ticketTransaction, lockJob as lockTicketJob } from './friction/fix-attempts.js';
@@ -2024,6 +2024,9 @@ async function main(): Promise<void> {
   const frictionReconcileTimer = setInterval(() => {
     scheduleFrictionReconciliation().catch((err: unknown) => {
       logger.error('Friction reconciliation scheduler error', { error: err instanceof Error ? err.message : String(err) });
+    });
+    reconcileDilutedCoverage().catch((err: unknown) => {
+      logger.error('Diluted cause coverage reconciliation error', { error: err instanceof Error ? err.message : String(err) });
     });
   }, 15 * 60_000);
 

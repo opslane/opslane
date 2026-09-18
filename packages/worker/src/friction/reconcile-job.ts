@@ -8,6 +8,7 @@ import {
   prepareConfirmationTransition,
   confirmationSnapshotCurrent,
 } from './confirm-job.js';
+import { CAUSE_COVERAGE_MIN, causeCoverage } from './fix-attempts.js';
 import * as store from './tickets-db.js';
 
 type ReconcileJob = db.ClaimedJob & { ticketId: string };
@@ -21,6 +22,85 @@ export async function scheduleFrictionReconciliation(): Promise<number> {
     WHERE reconcile_needed AND status NOT IN ('merged','archived')
     ON CONFLICT DO NOTHING RETURNING id`);
   return result.rowCount ?? 0;
+}
+/** Re-investigate published incidents whose cause coverage fell below half as
+ *  explained recordings aged out of the seven-day window without new evidence
+ *  arriving. Runs on the same periodic timer as scheduleFrictionReconciliation.
+ *
+ *  For each candidate the function acquires the ticket publication lock, re-reads
+ *  current evidence, and calls enqueueTicketInvestigation (which enforces the
+ *  per-generation cap and pending/claimed deduplication). */
+export async function reconcileDilutedCoverage(): Promise<number> {
+  if (store.publicationPaused()) return 0;
+  const pool = db.getPool();
+  // Find published incidents where the investigation finished, no fix is in
+  // flight, and no investigation is already pending or claimed.
+  const candidates = await pool.query<{
+    ticket_id: string;
+    project_id: string;
+  }>(`SELECT DISTINCT t.id AS ticket_id, t.project_id
+      FROM friction_tickets t
+      JOIN error_groups g ON g.ticket_id = t.id
+        AND g.publication_generation = t.live_generation
+      WHERE t.status = 'published'
+        AND g.status <> 'archived'
+        AND g.investigation_status = 'done'
+        AND g.fix_substate = 'none'
+        AND NOT EXISTS (
+          SELECT 1 FROM error_group_jobs j
+          WHERE j.error_group_id = g.id
+            AND j.job_type = 'investigate'
+            AND j.status IN ('pending', 'claimed')
+        )`);
+  let queued = 0;
+  for (const row of candidates.rows) {
+    const tx = await pool.connect();
+    try {
+      await tx.query('BEGIN');
+      await store.lockTicketPublication(tx, row.project_id, row.ticket_id);
+      const ticket = await store.getTicket(tx, row.project_id, row.ticket_id, true);
+      if (!ticket || ticket.status !== 'published') {
+        await tx.query('ROLLBACK');
+        continue;
+      }
+      const incident = await store.liveIncident(tx, ticket);
+      if (
+        !incident ||
+        incident.fix_substate !== 'none' ||
+        incident.investigation_status !== 'done'
+      ) {
+        await tx.query('ROLLBACK');
+        continue;
+      }
+      const recent = await store.verifiedEvidence(tx, ticket);
+      // Empty window: no evidence to investigate — skip silently.
+      if (recent.signalIds.length === 0) {
+        await tx.query('ROLLBACK');
+        continue;
+      }
+      const coverage = causeCoverage(
+        incident.explained_signal_ids ?? [],
+        recent.signalIds,
+      );
+      if (coverage >= CAUSE_COVERAGE_MIN) {
+        await tx.query('ROLLBACK');
+        continue;
+      }
+      if (!store.investigationAllowed(ticket, recent.users)) {
+        await tx.query('ROLLBACK');
+        continue;
+      }
+      if (await store.enqueueTicketInvestigation(tx, ticket, incident.id)) {
+        queued++;
+      }
+      await tx.query('COMMIT');
+    } catch {
+      await tx.query('ROLLBACK');
+    } finally {
+      tx.release();
+    }
+  }
+  return queued;
 }
 async function lockLease(tx: pg.PoolClient, job: ReconcileJob): Promise<void> {
   const r = await tx.query(
