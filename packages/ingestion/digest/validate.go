@@ -725,7 +725,7 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string, s
 			}
 			card = validated
 			renderModes[identity] = mode
-			replayURL := notify.BuildSessionURL(os.Getenv("DASHBOARD_URL"), candidate.ReplaySessionID, candidate.ReplayAnchorMs)
+			replayURL := notify.BuildSessionURL(os.Getenv("DASHBOARD_URL"), candidate.ReplaySessionID, run.ProjectID, candidate.ReplayAnchorMs)
 			generated = append(generated, notify.GeneratedDigestCard{
 				EpisodeID: candidate.EpisodeID, IncidentID: candidate.ErrorGroupID, Kind: candidate.Kind,
 				TicketID: candidate.TicketID, Generation: candidate.Generation, Steps: strings.TrimSpace(card.Steps), VerifiedUsers: candidate.VerifiedUsers, VerifiedSessions: candidate.VerifiedSessions, Coverage: candidate.Coverage,
@@ -814,7 +814,7 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string, s
 		if title == "" {
 			title = truncateRunes(stripInvisible(candidate.Title), 80)
 		}
-		replayURL := notify.BuildSessionURL(os.Getenv("DASHBOARD_URL"), candidate.ReplaySessionID, candidate.ReplayAnchorMs)
+		replayURL := notify.BuildSessionURL(os.Getenv("DASHBOARD_URL"), candidate.ReplaySessionID, run.ProjectID, candidate.ReplayAnchorMs)
 		if replayURL == "" && candidate.ReplaySessionID != "" {
 			// The URL is baked into the outbox event, so a misconfigured (empty
 			// or loopback) DASHBOARD_URL silently drops every Watch replay
@@ -979,7 +979,7 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string, s
 			for i := range actionableEval.Included {
 				candidate := &actionableEval.Included[i]
 				if candidate.TicketFacts != nil {
-					candidate.SessionURL = notify.BuildSessionURL(dashboardURL, candidate.TicketFacts.RepresentativeSessionID, candidate.TicketFacts.RepresentativeAnchorMs)
+					candidate.SessionURL = notify.BuildSessionURL(dashboardURL, candidate.TicketFacts.RepresentativeSessionID, run.ProjectID, candidate.TicketFacts.RepresentativeAnchorMs)
 					continue
 				}
 				if _, err := tx.Exec(ctx, `SAVEPOINT actionable_replay_lookup`); err != nil {
@@ -1005,7 +1005,7 @@ func validateAndPublish(ctx context.Context, pool *pgxpool.Pool, runID string, s
 						break
 					}
 				} else if ok {
-					candidate.SessionURL = notify.BuildSessionURL(dashboardURL, sessionID, anchorMs)
+					candidate.SessionURL = notify.BuildSessionURL(dashboardURL, sessionID, run.ProjectID, anchorMs)
 				}
 				if _, err := tx.Exec(ctx, `RELEASE SAVEPOINT actionable_replay_lookup`); err != nil {
 					slog.Warn("actionable digest replay enrichment abandoned after release failure",

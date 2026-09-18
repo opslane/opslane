@@ -32,7 +32,7 @@ func BuildIncidentURL(dashboardURL, errorGroupID, projectID string) string {
 // BuildSessionURL builds a reader-facing replay URL from explicit HTTP(S)
 // configuration. Invalid, credentialed, loopback, or fragment-bearing bases
 // are rejected.
-func BuildSessionURL(dashboardURL, sessionID string, anchorMs int64) string {
+func BuildSessionURL(dashboardURL, sessionID, projectID string, anchorMs int64) string {
 	if strings.TrimSpace(sessionID) == "" {
 		return ""
 	}
@@ -49,6 +49,9 @@ func BuildSessionURL(dashboardURL, sessionID string, anchorMs int64) string {
 	base.Path = basePath + "/sessions/" + sessionID
 	base.RawPath = escapedBasePath + "/sessions/" + url.PathEscape(sessionID)
 	query := url.Values{}
+	if trimmedProject := strings.TrimSpace(projectID); trimmedProject != "" {
+		query.Set("project_id", trimmedProject)
+	}
 	query.Set("t", strconv.FormatInt(anchorMs, 10))
 	base.RawQuery = query.Encode()
 	return base.String()
