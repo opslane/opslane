@@ -120,7 +120,7 @@ describeDb('confirmation job', () => {
     await pool.query('DELETE FROM orgs WHERE id=$1', [orgId]);
   });
   afterAll(() => db.closePool());
-  const ticket = async () => {
+  const ticket = async (overrides: Partial<store.NewTicket> = {}) => {
     const tx = await pool.connect();
     try {
       return await store.createTicket(tx, {
@@ -131,6 +131,7 @@ describeDb('confirmation job', () => {
         what_happened: 'Error appeared',
         kind: 'defect',
         steps: 'Unverified draft',
+        ...overrides,
       });
     } finally {
       tx.release();
@@ -2314,6 +2315,124 @@ describeDb('confirmation job', () => {
     expect(client.complete).toHaveBeenCalledTimes(2 * FOLD_RETRY_LIMIT);
     expect((await store.getTicket(pool, projectId, source.id))!).toMatchObject({
       status: 'published', reconcile_needed: false,
+    });
+  });
+  it('folds three tickets with different names but the same quoted error text into one when embeddings sit below fold floor', async () => {
+    const errorText = '"Fill in the required fields to continue: Name, Asset Type"';
+    const target = await publish(
+      await ticket({
+        name: "Update button shows spurious 'required fields' validation error on asset edit form",
+        what_happened: `Shows error ${errorText} on save`,
+        control: 'Update',
+      }),
+    );
+    await embed(target, 1.0);
+
+    const second = await ticket({
+      name: "Create button shows contradictory 'required fields' error alongside immediate 'Asset created'",
+      what_happened: `Shows false message ${errorText} during create`,
+      control: 'Create',
+    });
+    // Similarity 0.593 sits well below fold floor (0.75)
+    await embed(second, 0.593);
+    await finalizeConfirmed(second, await matches(second, 3));
+
+    const third = await ticket({
+      name: 'Form validation reveals required fields sequentially after submission attempts',
+      what_happened: `Validation displays ${errorText} sequentially`,
+      control: 'Form',
+    });
+    // Similarity 0.630 sits well below fold floor (0.75)
+    await embed(third, 0.630);
+    await finalizeConfirmed(third, await matches(third, 3));
+
+    const client = oneFixClient(true);
+
+    // Second ticket's publication transition retrieves target via shared quoted text despite low similarity
+    const plan2 = await prepareConfirmationTransition(
+      pool,
+      (await store.getTicket(pool, projectId, second.id))!,
+      null,
+      client,
+      { add() {} },
+    );
+    expect(plan2.neighbors).toEqual([
+      { id: target.id, similarity: expect.any(Number) },
+    ]);
+    expect(plan2.targetId).toBe(target.id);
+    await applyLocked(second.id, plan2);
+
+    expect((await store.getTicket(pool, projectId, second.id))!).toMatchObject({
+      status: 'merged',
+      merged_into: target.id,
+    });
+
+    // Third ticket's publication transition also retrieves target and folds
+    const plan3 = await prepareConfirmationTransition(
+      pool,
+      (await store.getTicket(pool, projectId, third.id))!,
+      null,
+      client,
+      { add() {} },
+    );
+    expect(plan3.neighbors).toEqual([
+      { id: target.id, similarity: expect.any(Number) },
+    ]);
+    expect(plan3.targetId).toBe(target.id);
+    await applyLocked(third.id, plan3);
+
+    expect((await store.getTicket(pool, projectId, third.id))!).toMatchObject({
+      status: 'merged',
+      merged_into: target.id,
+    });
+
+    // Verify one-fix gate decisions were recorded for both pairs
+    const decisions = (
+      await pool.query(
+        'SELECT ticket_id, candidate_id, one_fix FROM friction_gate_decisions WHERE candidate_id=$1 ORDER BY decided_at',
+        [target.id],
+      )
+    ).rows;
+    expect(decisions).toEqual([
+      { ticket_id: second.id, candidate_id: target.id, one_fix: true },
+      { ticket_id: third.id, candidate_id: target.id, one_fix: true },
+    ]);
+  });
+  it('does not force-compare tickets that share only a generic quoted UI string like Loading', async () => {
+    const published = await publish(
+      await ticket({
+        name: 'Slow save button',
+        what_happened: 'Save button still says "Loading"',
+        control: 'Save',
+      }),
+    );
+    await embed(published, 1.0);
+
+    const candidate = await ticket({
+      name: 'Search delay spinner',
+      what_happened: 'Search spinner displays "Loading"',
+      control: 'Search',
+    });
+    // Similarity 0.60 sits below the 0.75 floor
+    await embed(candidate, 0.60);
+    await finalizeConfirmed(candidate, await matches(candidate, 3));
+
+    const client = oneFixClient(true);
+    const plan = await prepareConfirmationTransition(
+      pool,
+      (await store.getTicket(pool, projectId, candidate.id))!,
+      null,
+      client,
+      { add() {} },
+    );
+    // Generic "Loading" must NOT trigger candidate retrieval
+    expect(plan.neighbors).toEqual([]);
+    expect(client.complete).not.toHaveBeenCalled();
+
+    await applyLocked(candidate.id, plan);
+    expect((await store.getTicket(pool, projectId, candidate.id))!).toMatchObject({
+      status: 'published',
+      merged_into: null,
     });
   });
   it('discards the staging batch of a dead-lettered confirmation so reconciliation recovers the ticket', async () => {

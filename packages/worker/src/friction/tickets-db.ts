@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import type pg from 'pg';
 import { enqueueJobTx } from '../db.js';
 import { EMBEDDING_DIMS, EMBEDDING_MODEL } from '../embeddings.js';
+import { extractNonGenericQuotedStrings } from './quoted-ui.js';
 
 export type TicketDb = Pick<pg.Pool, 'query'> | Pick<pg.PoolClient, 'query'>;
 export interface TicketScope {
@@ -911,25 +912,93 @@ export async function enqueueTicketInvestigation(
   );
   return true;
 }
+export async function ticketConfirmedTexts(
+  db: TicketDb,
+  ticket: TicketRow,
+): Promise<string[]> {
+  const texts: string[] = [ticket.what_happened, ticket.name];
+  const r = await db.query<{ text: string }>(
+    `SELECT a.note AS text
+     FROM friction_checks c JOIN friction_check_attempts a ON a.id=c.attempt_id
+     WHERE c.ticket_id=$1 AND c.outcome='confirmed' AND a.note IS NOT NULL AND a.note <> ''
+     UNION ALL
+     SELECT a.note AS text
+     FROM friction_check_attempts a JOIN friction_confirm_batches b ON b.id=a.batch_id
+     WHERE a.ticket_id=$1 AND b.status='staging' AND a.outcome='confirmed' AND a.note IS NOT NULL AND a.note <> ''
+     UNION ALL
+     SELECT f.observation_text AS text
+     FROM friction_ticket_match_observations o JOIN friction_signals f ON f.id=o.signal_id
+     WHERE o.ticket_id=$1 AND f.observation_text IS NOT NULL AND f.observation_text <> ''`,
+    [ticket.id],
+  );
+  for (const row of r.rows) {
+    if (row.text) texts.push(row.text);
+  }
+  return texts;
+}
+
 export async function publishedNeighbors(
   db: TicketDb,
   ticket: TicketRow,
 ): Promise<(TicketRow & { similarity: number })[]> {
-  if (!ticket.embedding || ticket.embedding_model !== EMBEDDING_MODEL)
+  const texts = await ticketConfirmedTexts(db, ticket);
+  const specificQuotes = extractNonGenericQuotedStrings(texts);
+
+  const hasEmbedding = Boolean(ticket.embedding && ticket.embedding_model === EMBEDDING_MODEL);
+  if (!hasEmbedding && specificQuotes.size === 0)
     return [];
-  const r = await db.query<RawTicket & { similarity: number }>(
-    `SELECT ${ticketColumns},1-(t.embedding <=> $4::vector) AS similarity
+
+  const quotePatterns = [...specificQuotes].map((q) => `%${q}%`);
+
+  const r = await db.query<RawTicket & { similarity: number; shared_quote: boolean }>(
+    `SELECT ${ticketColumns},
+      CASE WHEN t.embedding IS NOT NULL AND $4::vector IS NOT NULL AND t.embedding_model=$5
+           THEN 1-(t.embedding <=> $4::vector)
+           ELSE 0
+      END AS similarity,
+      (
+        $7::text[] IS NOT NULL AND array_length($7::text[], 1) > 0 AND (
+          t.what_happened ILIKE ANY($7::text[])
+          OR t.name ILIKE ANY($7::text[])
+          OR EXISTS (
+            SELECT 1 FROM friction_checks c JOIN friction_check_attempts a ON a.id=c.attempt_id
+            WHERE c.ticket_id=t.id AND c.outcome='confirmed' AND a.note ILIKE ANY($7::text[])
+          )
+          OR EXISTS (
+            SELECT 1 FROM friction_ticket_match_observations o JOIN friction_signals f ON f.id=o.signal_id
+            WHERE o.ticket_id=t.id AND f.observation_text ILIKE ANY($7::text[])
+          )
+        )
+      ) AS shared_quote
     FROM friction_tickets t JOIN error_groups g ON g.ticket_id=t.id AND g.publication_generation=t.live_generation
     WHERE t.project_id=$1 AND t.environment_id=$2 AND t.id<>$3 AND t.status='published' AND g.status<>'archived'
-      AND g.fix_substate IS DISTINCT FROM 'resolved' AND t.embedding_model=$5 AND t.embedding IS NOT NULL
-      AND 1-(t.embedding <=> $4::vector)>=$6 ORDER BY similarity DESC,t.id LIMIT 10`,
+      AND g.fix_substate IS DISTINCT FROM 'resolved'
+      AND (
+        ($8::boolean = true AND t.embedding_model=$5 AND t.embedding IS NOT NULL AND 1-(t.embedding <=> $4::vector)>=$6)
+        OR (
+          $7::text[] IS NOT NULL AND array_length($7::text[], 1) > 0 AND (
+            t.what_happened ILIKE ANY($7::text[])
+            OR t.name ILIKE ANY($7::text[])
+            OR EXISTS (
+              SELECT 1 FROM friction_checks c JOIN friction_check_attempts a ON a.id=c.attempt_id
+              WHERE c.ticket_id=t.id AND c.outcome='confirmed' AND a.note ILIKE ANY($7::text[])
+            )
+            OR EXISTS (
+              SELECT 1 FROM friction_ticket_match_observations o JOIN friction_signals f ON f.id=o.signal_id
+              WHERE o.ticket_id=t.id AND f.observation_text ILIKE ANY($7::text[])
+            )
+          )
+        )
+      ) ORDER BY shared_quote DESC, similarity DESC, t.id LIMIT 10`,
     [
       ticket.project_id,
       ticket.environment_id,
       ticket.id,
-      vectorValue(ticket.embedding),
+      hasEmbedding ? vectorValue(ticket.embedding!) : null,
       EMBEDDING_MODEL,
       foldMinSimilarity(),
+      quotePatterns.length > 0 ? quotePatterns : null,
+      hasEmbedding,
     ],
   );
   return r.rows.map((r) => ({ ...decodeTicket(r), similarity: r.similarity }));
