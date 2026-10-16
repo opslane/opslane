@@ -5,7 +5,11 @@ import {
   patchXHR,
   unpatchXHR,
   sdkFetch,
+  trackRequest,
+  requestStarted,
+  requestEnded,
 } from '../network';
+import { setTelemetrySink, type TelemetryEvent } from '../telemetry';
 import { clearBreadcrumbs, getBreadcrumbs } from '../breadcrumbs';
 import { loadConfig, resetConfig } from '../config';
 import { TEST_PK } from './test-keys';
@@ -385,3 +389,247 @@ describe('xhr timing capture', () => {
     expect(snapshotNetworkTimings()).toHaveLength(0);
   });
 });
+
+describe('generic request-timing hooks (issue #465)', () => {
+  let telemetryEvents: TelemetryEvent[];
+
+  beforeEach(() => {
+    clearBreadcrumbs();
+    clearNetworkTimings();
+    resetConfig();
+    loadConfig({
+      endpoint: 'https://ingest.example.com',
+      apiKey: TEST_PK,
+    });
+    telemetryEvents = [];
+    setTelemetrySink((ev) => telemetryEvents.push(ev));
+  });
+
+  afterEach(() => {
+    setTelemetrySink(null);
+    clearBreadcrumbs();
+    clearNetworkTimings();
+    resetConfig();
+  });
+
+  describe('trackRequest', () => {
+    it('records telemetry, timing, and breadcrumb for Response-returning operations', async () => {
+      const mockResponse = new Response('ok', { status: 201 });
+      const result = await trackRequest(
+        { method: 'POST', url: 'https://api.example.com/custom-rpc' },
+        async () => mockResponse
+      );
+
+      expect(result).toBe(mockResponse);
+
+      const startEvent = telemetryEvents.find((e) => e.kind === 'request_start');
+      const endEvent = telemetryEvents.find((e) => e.kind === 'request_end');
+
+      expect(startEvent).toMatchObject({
+        kind: 'request_start',
+        method: 'POST',
+        url: 'https://api.example.com/custom-rpc',
+      });
+      expect(endEvent).toMatchObject({
+        kind: 'request_end',
+        requestId: (startEvent as { requestId: string }).requestId,
+        status: 201,
+      });
+
+      const crumbs = getBreadcrumbs();
+      expect(crumbs).toHaveLength(1);
+      expect(crumbs[0]).toMatchObject({
+        type: 'fetch',
+        category: 'fetch',
+        message: 'POST https://api.example.com/custom-rpc',
+        level: 'info',
+        data: {
+          method: 'POST',
+          url: 'https://api.example.com/custom-rpc',
+          status_code: 201,
+        },
+      });
+
+      const timings = snapshotNetworkTimings();
+      expect(timings).toHaveLength(1);
+      expect(timings[0].outcome).toBe('ok');
+      expect(timings[0].status).toBe(201);
+    });
+
+    it('defaults status to 200 and ignores non-HTTP domain status like { status: 1 }', async () => {
+      const result = await trackRequest(
+        { method: 'GET', url: 'https://api.example.com/items' },
+        async () => ({ status: 1, items: ['item1'] })
+      );
+
+      expect(result).toEqual({ status: 1, items: ['item1'] });
+
+      const endEvent = telemetryEvents.find((e) => e.kind === 'request_end');
+      expect(endEvent).toMatchObject({
+        kind: 'request_end',
+        status: 200,
+      });
+
+      const timings = snapshotNetworkTimings();
+      expect(timings[0].status).toBe(200);
+      expect(timings[0].outcome).toBe('ok');
+    });
+
+    it('extracts status using custom getStatus option', async () => {
+      const result = await trackRequest(
+        { method: 'POST', url: 'https://api.example.com/forge' },
+        async () => ({ customCode: 204 }),
+        { getStatus: (res) => res.customCode }
+      );
+
+      expect(result).toEqual({ customCode: 204 });
+
+      const endEvent = telemetryEvents.find((e) => e.kind === 'request_end');
+      expect(endEvent).toMatchObject({
+        kind: 'request_end',
+        status: 204,
+      });
+
+      const timings = snapshotNetworkTimings();
+      expect(timings[0].status).toBe(204);
+    });
+
+    it('records telemetry, timing, and error breadcrumb and rethrows when run throws', async () => {
+      const err = new Error('Bridge timeout');
+      err.name = 'TimeoutError';
+
+      await expect(
+        trackRequest(
+          { method: 'PUT', url: 'https://api.example.com/save' },
+          async () => {
+            throw err;
+          }
+        )
+      ).rejects.toThrow('Bridge timeout');
+
+      const startEvent = telemetryEvents.find((e) => e.kind === 'request_start');
+      const endEvent = telemetryEvents.find((e) => e.kind === 'request_end');
+
+      expect(startEvent).toMatchObject({
+        kind: 'request_start',
+        method: 'PUT',
+        url: 'https://api.example.com/save',
+      });
+      expect(endEvent).toMatchObject({
+        kind: 'request_end',
+        requestId: (startEvent as { requestId: string }).requestId,
+        status: 0,
+      });
+
+      const crumbs = getBreadcrumbs();
+      expect(crumbs).toHaveLength(1);
+      expect(crumbs[0]).toMatchObject({
+        type: 'fetch',
+        level: 'error',
+        message: 'PUT https://api.example.com/save',
+        data: {
+          method: 'PUT',
+          url: 'https://api.example.com/save',
+          error: 'Bridge timeout',
+        },
+      });
+
+      const timings = snapshotNetworkTimings();
+      expect(timings).toHaveLength(1);
+      expect(timings[0].outcome).toBe('timeout');
+    });
+
+    it('ignores SDK ingest endpoint URLs and emits no telemetry', async () => {
+      const result = await trackRequest(
+        { method: 'POST', url: 'https://ingest.example.com/api/v1/events' },
+        async () => 'sdk-response'
+      );
+
+      expect(result).toBe('sdk-response');
+      expect(telemetryEvents).toHaveLength(0);
+      expect(getBreadcrumbs()).toHaveLength(0);
+      expect(snapshotNetworkTimings()).toHaveLength(0);
+    });
+  });
+
+  describe('requestStarted & requestEnded', () => {
+    it('supports two-call pattern with explicit status code', () => {
+      const handle = requestStarted({
+        method: 'delete',
+        url: 'https://api.example.com/resource/42',
+      });
+
+      expect(handle.ignored).toBe(false);
+      expect(handle.method).toBe('DELETE');
+      expect(handle.requestId).toMatch(/^m_\d+$/);
+
+      expect(telemetryEvents).toHaveLength(1);
+      expect(telemetryEvents[0]).toMatchObject({
+        kind: 'request_start',
+        requestId: handle.requestId,
+        method: 'DELETE',
+        url: 'https://api.example.com/resource/42',
+      });
+
+      requestEnded(handle, { status: 404 });
+
+      expect(telemetryEvents).toHaveLength(2);
+      expect(telemetryEvents[1]).toMatchObject({
+        kind: 'request_end',
+        requestId: handle.requestId,
+        status: 404,
+      });
+
+      const crumbs = getBreadcrumbs();
+      expect(crumbs).toHaveLength(1);
+      expect(crumbs[0].level).toBe('warning');
+      expect(crumbs[0].data?.status_code).toBe(404);
+
+      const timings = snapshotNetworkTimings();
+      expect(timings).toHaveLength(1);
+      expect(timings[0].outcome).toBe('http_error');
+      expect(timings[0].status).toBe(404);
+    });
+
+    it('supports two-call pattern with error result', () => {
+      const handle = requestStarted({
+        method: 'GET',
+        url: 'https://api.example.com/network-fail',
+      });
+
+      requestEnded(handle, { error: new TypeError('Failed to fetch') });
+
+      expect(telemetryEvents).toHaveLength(2);
+      expect(telemetryEvents[1]).toMatchObject({
+        kind: 'request_end',
+        requestId: handle.requestId,
+        status: 0,
+      });
+
+      const crumbs = getBreadcrumbs();
+      expect(crumbs).toHaveLength(1);
+      expect(crumbs[0].level).toBe('error');
+
+      const timings = snapshotNetworkTimings();
+      expect(timings[0].outcome).toBe('network_error');
+    });
+
+    it('ignores SDK endpoint in requestStarted and no-ops on requestEnded', () => {
+      const handle = requestStarted({
+        method: 'POST',
+        url: 'https://ingest.example.com/api/v1/sessions',
+      });
+
+      expect(handle.ignored).toBe(true);
+      expect(handle.requestId).toBe('');
+      expect(telemetryEvents).toHaveLength(0);
+
+      requestEnded(handle, { status: 200 });
+
+      expect(telemetryEvents).toHaveLength(0);
+      expect(getBreadcrumbs()).toHaveLength(0);
+      expect(snapshotNetworkTimings()).toHaveLength(0);
+    });
+  });
+});
+
