@@ -240,7 +240,7 @@ Sentry.init({
 Both Opslane and other error trackers listen for uncaught exceptions and unhandled promise rejections. To avoid duplicate reports:
 
 - In a forwarder hook like `beforeSend`, inspect `mechanism.handled` to skip unhandled errors, leaving global listeners to report them once.
-- Opslane's `init()` includes `errorThrottleMs` (default `1000`), which drops duplicate reports of the same error within that interval.
+- Opslane's `init()` includes `errorThrottleMs` (default `1000`), which throttles repeated `captureException` calls when the error type, message, and stack match. This window ensures Opslane records only one report even if multiple listeners fire for the same event.
 
 ## Upload source maps
 
