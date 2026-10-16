@@ -122,6 +122,39 @@ setUser({ id: 'user-123' });
 clearUser();
 ```
 
+### Forwarding from another error tracker (e.g. Sentry)
+
+If your app already reports caught exceptions to Sentry or another tracker, call Opslane's `captureException` in the same error handler:
+
+```ts
+import { captureException as opslaneCapture } from '@opslane/sdk';
+import * as Sentry from '@sentry/browser';
+
+try {
+  await fetchUserData();
+} catch (err) {
+  Sentry.captureException(err);
+  opslaneCapture(err);
+}
+```
+
+To forward handled exceptions centrally, use Sentry's `beforeSend` hook:
+
+```ts
+Sentry.init({
+  dsn: 'https://examplePublicKey@o0.ingest.sentry.io/0',
+  beforeSend(event, hint) {
+    const isUnhandled = event.exception?.values?.some((val) => val.mechanism?.handled === false);
+    if (!isUnhandled && hint?.originalException) {
+      opslaneCapture(hint.originalException);
+    }
+    return event;
+  },
+});
+```
+
+See [send errors from another tracker](../../docs/install.md#send-errors-from-another-tracker) for details on avoiding duplicate reports.
+
 ## Privacy defaults
 
 - **Session recording is on by default since 1.0.0** (`replay.enabled` defaults to `true`); opt out with `replay: { enabled: false }`.

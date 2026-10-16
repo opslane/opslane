@@ -195,6 +195,53 @@ clearUser(); // on logout
 
 Throw real `Error` objects rather than strings. A string throw arrives with no stack frames, and Opslane classifies it as `unfixable_no_app_frames` ([reason codes](reference/reason-codes.md)).
 
+### Send errors from another tracker
+
+If your app reports handled errors to another error tracker such as Sentry, call Opslane's `captureException` in the same error handler so Opslane receives those errors too:
+
+```ts
+import { captureException as opslaneCapture } from '@opslane/sdk';
+import * as Sentry from '@sentry/browser';
+
+try {
+  await fetchUserData();
+} catch (err) {
+  Sentry.captureException(err);
+  opslaneCapture(err);
+}
+```
+
+Opslane intentionally does not monkey-patch other error trackers' APIs. Automatic patching breaks with script load order and library version upgrades, and it conflicts with vendor-specific consent management.
+
+#### Sentry beforeSend hook
+
+To forward handled errors from one central place rather than updating every call site, forward them through Sentry's `beforeSend` hook:
+
+```ts
+import * as Sentry from '@sentry/browser';
+import { captureException as opslaneCapture } from '@opslane/sdk';
+
+Sentry.init({
+  dsn: 'https://examplePublicKey@o0.ingest.sentry.io/0',
+  beforeSend(event, hint) {
+    // Forward only handled errors explicitly sent to Sentry.captureException.
+    // Unhandled errors are already caught by window.onerror and unhandledrejection handlers.
+    const isUnhandled = event.exception?.values?.some((val) => val.mechanism?.handled === false);
+    if (!isUnhandled && hint?.originalException) {
+      opslaneCapture(hint.originalException);
+    }
+    return event;
+  },
+});
+```
+
+#### Avoiding duplicate reports
+
+Both Opslane and other error trackers listen for uncaught exceptions and unhandled promise rejections. To avoid duplicate reports:
+
+- In a forwarder hook like `beforeSend`, inspect `mechanism.handled` to skip unhandled errors, leaving global listeners to report them once.
+- Opslane's `init()` includes `errorThrottleMs` (default `1000`), which drops duplicate reports of the same error within that interval.
+
 ## Upload source maps
 
 Production stacks point at minified bundles until you upload source maps. For Vite, add the `opslane()` plugin and set `OPSLANE_SOURCEMAP_KEY`; see [source maps](guides/source-maps.md). For Next.js and other bundlers, run `opslane-sourcemaps` after the production build, as described in the same guide.
