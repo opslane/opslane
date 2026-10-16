@@ -141,6 +141,9 @@ try {
 To forward handled exceptions centrally, use Sentry's `beforeSend` hook:
 
 ```ts
+import * as Sentry from '@sentry/browser';
+import { captureException as opslaneCapture } from '@opslane/sdk';
+
 Sentry.init({
   dsn: 'https://examplePublicKey@o0.ingest.sentry.io/0',
   beforeSend(event, hint) {
