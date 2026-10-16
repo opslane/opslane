@@ -170,6 +170,14 @@
           "classification": "fragment"
         },
         {
+          "language": "ts",
+          "classification": "fragment"
+        },
+        {
+          "language": "ts",
+          "classification": "fragment"
+        },
+        {
           "language": "html",
           "classification": "fragment"
         }
