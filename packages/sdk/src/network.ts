@@ -470,17 +470,31 @@ export function requestEnded(
   }
 }
 
+export interface TrackRequestOptions<T> {
+  getStatus?: (result: T) => number;
+}
+
 export async function trackRequest<T>(
   info: { method: string; url: string },
-  run: () => Promise<T>
+  run: () => Promise<T>,
+  options?: TrackRequestOptions<T>
 ): Promise<T> {
   const handle = requestStarted(info);
   try {
     const result = await run();
-    const status =
-      typeof result === 'object' && result !== null && typeof (result as unknown as { status?: unknown }).status === 'number'
-        ? (result as unknown as { status: number }).status
-        : 200;
+    let status = 200;
+    if (options?.getStatus) {
+      try {
+        const extracted = options.getStatus(result);
+        if (typeof extracted === 'number' && extracted >= 100 && extracted <= 599) {
+          status = extracted;
+        }
+      } catch {
+        // SDK must never throw
+      }
+    } else if (typeof Response !== 'undefined' && result instanceof Response) {
+      status = result.status;
+    }
     requestEnded(handle, { status });
     return result;
   } catch (error: unknown) {

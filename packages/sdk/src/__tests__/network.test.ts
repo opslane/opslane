@@ -413,15 +413,14 @@ describe('generic request-timing hooks (issue #465)', () => {
   });
 
   describe('trackRequest', () => {
-    it('records telemetry, timing, and breadcrumb for successful async operations', async () => {
+    it('records telemetry, timing, and breadcrumb for Response-returning operations', async () => {
+      const mockResponse = new Response('ok', { status: 201 });
       const result = await trackRequest(
         { method: 'POST', url: 'https://api.example.com/custom-rpc' },
-        async () => {
-          return { data: 'ok', status: 201 };
-        }
+        async () => mockResponse
       );
 
-      expect(result).toEqual({ data: 'ok', status: 201 });
+      expect(result).toBe(mockResponse);
 
       const startEvent = telemetryEvents.find((e) => e.kind === 'request_start');
       const endEvent = telemetryEvents.find((e) => e.kind === 'request_end');
@@ -457,13 +456,13 @@ describe('generic request-timing hooks (issue #465)', () => {
       expect(timings[0].status).toBe(201);
     });
 
-    it('defaults status to 200 when return value has no status property', async () => {
+    it('defaults status to 200 and ignores non-HTTP domain status like { status: 1 }', async () => {
       const result = await trackRequest(
         { method: 'GET', url: 'https://api.example.com/items' },
-        async () => ['item1', 'item2']
+        async () => ({ status: 1, items: ['item1'] })
       );
 
-      expect(result).toEqual(['item1', 'item2']);
+      expect(result).toEqual({ status: 1, items: ['item1'] });
 
       const endEvent = telemetryEvents.find((e) => e.kind === 'request_end');
       expect(endEvent).toMatchObject({
@@ -474,6 +473,25 @@ describe('generic request-timing hooks (issue #465)', () => {
       const timings = snapshotNetworkTimings();
       expect(timings[0].status).toBe(200);
       expect(timings[0].outcome).toBe('ok');
+    });
+
+    it('extracts status using custom getStatus option', async () => {
+      const result = await trackRequest(
+        { method: 'POST', url: 'https://api.example.com/forge' },
+        async () => ({ customCode: 204 }),
+        { getStatus: (res) => res.customCode }
+      );
+
+      expect(result).toEqual({ customCode: 204 });
+
+      const endEvent = telemetryEvents.find((e) => e.kind === 'request_end');
+      expect(endEvent).toMatchObject({
+        kind: 'request_end',
+        status: 204,
+      });
+
+      const timings = snapshotNetworkTimings();
+      expect(timings[0].status).toBe(204);
     });
 
     it('records telemetry, timing, and error breadcrumb and rethrows when run throws', async () => {

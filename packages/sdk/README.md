@@ -129,9 +129,17 @@ Apps communicating through custom bridges (such as Atlassian Forge `@forge/bridg
 ```ts
 import { trackRequest } from '@opslane/sdk';
 
+// Automatically extracts response.status for Response objects, or defaults to 200:
 const result = await trackRequest({ method: 'POST', url: '/api/resource' }, () => {
   return invokeRemote('/api/resource', options);
 });
+
+// Or pass an explicit getStatus extractor for custom bridge payloads:
+const custom = await trackRequest(
+  { method: 'POST', url: '/api/resource' },
+  () => invokeRemote('/api/resource', options),
+  { getStatus: (res) => res.statusCode }
+);
 ```
 
 For callers that cannot wrap a promise, the two-call form `requestStarted` and `requestEnded` is also available:

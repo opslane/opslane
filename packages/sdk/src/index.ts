@@ -11,6 +11,7 @@ import {
   requestStarted,
   requestEnded,
   type RequestHandle,
+  type TrackRequestOptions,
 } from './network';
 import { startTransport, stopTransport } from './transport';
 import { clearBreadcrumbs } from './breadcrumbs';
@@ -22,7 +23,7 @@ import { clearNetworkTimings } from './network-timing';
 export { opslaneVuePlugin } from './vue';
 export type { SdkInitOptions } from './config';
 export { captureException, setUser, clearUser, trackRequest, requestStarted, requestEnded };
-export type { RequestHandle };
+export type { RequestHandle, TrackRequestOptions };
 
 let initialized = false;
 
