@@ -122,6 +122,33 @@ setUser({ id: 'user-123' });
 clearUser();
 ```
 
+### Custom request timing (bridges and RPCs)
+
+Apps communicating through custom bridges (such as Atlassian Forge `@forge/bridge` `invokeRemote`) that bypass standard `fetch` and `XMLHttpRequest` can report request timing using `trackRequest`:
+
+```ts
+import { trackRequest } from '@opslane/sdk';
+
+const result = await trackRequest({ method: 'POST', url: '/api/resource' }, () => {
+  return invokeRemote('/api/resource', options);
+});
+```
+
+For callers that cannot wrap a promise, the two-call form `requestStarted` and `requestEnded` is also available:
+
+```ts
+import { requestStarted, requestEnded } from '@opslane/sdk';
+
+const handle = requestStarted({ method: 'GET', url: '/api/resource' });
+try {
+  const result = await doCustomCall();
+  requestEnded(handle, { status: 200 });
+} catch (error) {
+  requestEnded(handle, { error });
+  throw error;
+}
+```
+
 ## Privacy defaults
 
 - **Session recording is on by default since 1.0.0** (`replay.enabled` defaults to `true`); opt out with `replay: { enabled: false }`.

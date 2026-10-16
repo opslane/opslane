@@ -308,3 +308,184 @@ export function unpatchXHR(): void {
     originalXHRSend = null;
   }
 }
+
+// -- Generic request timing hooks --
+
+export interface RequestHandle {
+  readonly requestId: string;
+  readonly method: string;
+  readonly url: string;
+  readonly timingHandle: number;
+  readonly ignored: boolean;
+}
+
+export type RequestResult =
+  | { status: number; error?: never }
+  | { error: unknown; status?: never }
+  | { status?: number; error?: unknown };
+
+export function requestStarted(info: { method: string; url: string }): RequestHandle {
+  try {
+    const method = (info?.method || 'GET').toUpperCase();
+    const url = String(info?.url || '');
+
+    if (isSdkEndpoint(url)) {
+      return {
+        requestId: '',
+        method,
+        url,
+        timingHandle: -1,
+        ignored: true,
+      };
+    }
+
+    const requestId = nextRequestId('m');
+    emitTelemetry({
+      kind: 'request_start',
+      requestId,
+      clickId: currentClickId(),
+      method,
+      url,
+      at: Date.now(),
+    });
+
+    let timingHandle = -1;
+    try {
+      timingHandle = startTiming('fetch', method, url);
+    } catch {
+      // SDK must never throw
+    }
+
+    return {
+      requestId,
+      method,
+      url,
+      timingHandle,
+      ignored: false,
+    };
+  } catch {
+    // SDK must never throw into app code
+    return {
+      requestId: '',
+      method: (info?.method || 'GET').toUpperCase(),
+      url: String(info?.url || ''),
+      timingHandle: -1,
+      ignored: true,
+    };
+  }
+}
+
+export function requestEnded(
+  handle: RequestHandle,
+  result: { status?: number; error?: unknown }
+): void {
+  try {
+    if (!handle || handle.ignored) return;
+
+    const hasError = 'error' in result && result.error !== undefined;
+    const at = Date.now();
+
+    if (hasError) {
+      const error = result.error;
+      const status = typeof result.status === 'number' ? result.status : 0;
+      emitTelemetry({
+        kind: 'request_end',
+        requestId: handle.requestId,
+        status,
+        at,
+      });
+
+      try {
+        const name =
+          typeof error === 'object' && error !== null && typeof (error as { name?: unknown }).name === 'string'
+            ? (error as { name: string }).name
+            : '';
+        finalizeTiming(
+          handle.timingHandle,
+          name === 'TimeoutError' ? 'timeout' : name === 'AbortError' ? 'abort' : 'network_error',
+        );
+      } catch {
+        // SDK must never throw
+      }
+
+      try {
+        const crumb: Breadcrumb = {
+          type: 'fetch',
+          timestamp: new Date().toISOString(),
+          category: 'fetch',
+          message: `${handle.method} ${handle.url}`,
+          level: 'error',
+          data: {
+            method: handle.method,
+            url: handle.url,
+            error: error instanceof Error ? error.message : String(error),
+          },
+        };
+        addBreadcrumb(crumb);
+      } catch {
+        // SDK must never throw
+      }
+    } else {
+      const status = typeof result.status === 'number' ? result.status : 200;
+
+      try {
+        markHeaders(handle.timingHandle);
+        const storableStatus = status >= 100 && status <= 599;
+        finalizeTiming(
+          handle.timingHandle,
+          status >= 400 ? 'http_error' : 'ok',
+          storableStatus ? status : undefined,
+        );
+      } catch {
+        // SDK must never throw
+      }
+
+      emitTelemetry({
+        kind: 'request_end',
+        requestId: handle.requestId,
+        status,
+        at,
+      });
+
+      try {
+        const crumb: Breadcrumb = {
+          type: 'fetch',
+          timestamp: new Date().toISOString(),
+          category: 'fetch',
+          message: `${handle.method} ${handle.url}`,
+          level: status >= 400 ? 'warning' : 'info',
+          data: {
+            method: handle.method,
+            url: handle.url,
+            status_code: status,
+          },
+        };
+        addBreadcrumb(crumb);
+      } catch {
+        // SDK must never throw
+      }
+    }
+  } catch {
+    // SDK must never throw
+  }
+}
+
+export async function trackRequest<T>(
+  info: { method: string; url: string },
+  run: () => Promise<T>
+): Promise<T> {
+  const handle = requestStarted(info);
+  try {
+    const result = await run();
+    const status =
+      typeof result === 'object' && result !== null && typeof (result as unknown as { status?: unknown }).status === 'number'
+        ? (result as unknown as { status: number }).status
+        : 200;
+    requestEnded(handle, { status });
+    return result;
+  } catch (error: unknown) {
+    requestEnded(handle, { error });
+    throw error;
+  }
+}
+

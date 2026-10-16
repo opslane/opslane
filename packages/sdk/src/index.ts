@@ -2,7 +2,16 @@ import type { SdkInitOptions } from './config';
 import { InvalidApiKeyError, loadConfig, resetConfig } from './config';
 import { captureException, installGlobalHandlers, onIdentityChange, uninstallGlobalHandlers, setUser, clearUser } from './core';
 import { patchConsole, unpatchConsole } from './console';
-import { patchFetch, unpatchFetch, patchXHR, unpatchXHR } from './network';
+import {
+  patchFetch,
+  unpatchFetch,
+  patchXHR,
+  unpatchXHR,
+  trackRequest,
+  requestStarted,
+  requestEnded,
+  type RequestHandle,
+} from './network';
 import { startTransport, stopTransport } from './transport';
 import { clearBreadcrumbs } from './breadcrumbs';
 import { registerSession, resetSessionRegistrations, startReplayCapture, stopReplayCapture } from './replay';
@@ -12,7 +21,8 @@ import { clearNetworkTimings } from './network-timing';
 
 export { opslaneVuePlugin } from './vue';
 export type { SdkInitOptions } from './config';
-export { captureException, setUser, clearUser };
+export { captureException, setUser, clearUser, trackRequest, requestStarted, requestEnded };
+export type { RequestHandle };
 
 let initialized = false;
 
@@ -78,6 +88,9 @@ export const OpslaneSDK = {
   captureException,
   setUser,
   clearUser,
+  trackRequest,
+  requestStarted,
+  requestEnded,
 };
 
 // Alias for shorter import: import { Opslane } from '@opslane/sdk'

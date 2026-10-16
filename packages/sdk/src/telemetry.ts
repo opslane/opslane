@@ -32,7 +32,7 @@ function nextId(prefix: string): string {
   return `${prefix}_${counter}`;
 }
 
-export function nextRequestId(prefix: 'f' | 'x'): string {
+export function nextRequestId(prefix: 'f' | 'x' | 'm' = 'm'): string {
   return nextId(prefix);
 }
 
