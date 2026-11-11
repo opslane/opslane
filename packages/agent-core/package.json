@@ -25,12 +25,12 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@ai-sdk/openai-compatible": "3.0.35",
+    "@ai-sdk/openai-compatible": "3.0.87",
     "@anthropic-ai/sdk": "0.120.0",
-    "ai": "7.0.77"
+    "ai": "7.0.165"
   },
   "devDependencies": {
-    "@types/node": "^26.2.0",
+    "@types/node": "^26.6.6",
     "typescript": "^5.4.0",
     "vitest": "^3.2.0"
   },
